@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.pem
+*.key
+# Task 6 step 6 mints e2e/fixtures/signed/{public.pem,signing.pem} as CHECKED-IN
+# test fixtures that Tasks 7, 13 and 14 read by path. Without this un-ignore,
+# `git add -A` never stages them and a fresh CI checkout fails on a missing file.
+!/e2e/fixtures/signed/*.pem
+/e2e/compose/.data
+/third_party/*.tar.gz
+!/third_party/.gitkeep
+.env.local
+.demo/

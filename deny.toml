@@ -1,0 +1,19 @@
+[licenses]
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+# Global Constraint 2: the OSO library must never enter the workspace graph.
+deny = [{ name = "kafka-backup-core" }]
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+ignore = [
+  # serde_yaml 0.9 resolves to 0.9.34+deprecated, which is archived
+  # (RUSTSEC-2024-0370). Kept for v0.1: the drill spec and both rendered engine
+  # documents are YAML and no alternative was evaluated. Revisit before v0.2 —
+  # the same sentence appears in docs/stability.md's non-contracts section.
+  { id = "RUSTSEC-2024-0370", reason = "tracked; see docs/stability.md" },
+]

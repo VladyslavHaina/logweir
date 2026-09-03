@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "xtask", "e2e"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/logweir/logweir"
+
+[workspace.dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+insta = { version = "1", features = ["json", "yaml"] }
+schemars = { version = "0.8", features = ["chrono"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` backs serde_json::Map with an IndexMap, so an embedded
+# serde_json::Value round-trips its keys in READ order. That is required by
+# Task 3's engine_subreport handling and by det_json.rs's stated contract.
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+ureq = { version = "2", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+sha2 = "0.10"
+thiserror = "1"
