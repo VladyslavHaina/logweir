@@ -1,0 +1,72 @@
+{
+  "backup_id": "backup-0.21-test",
+  "created_at": 1620000000000,
+  "source_cluster_id": "cluster-a",
+  "source_brokers": ["broker1:9092"],
+  "compression": "zstd",
+  "topics": [
+    {
+      "name": "orders",
+      "original_partition_count": 2,
+      "source_replication_factor": 3,
+      "configurations": { "retention.ms": "604800000" },
+      "partitions": [
+        {
+          "partition_id": 0,
+          "segments": [
+            {
+              "key": "orders/0/00000000000000000000.seg",
+              "start_offset": 0,
+              "end_offset": 99,
+              "start_timestamp": 1620000000000,
+              "end_timestamp": 1620000001000,
+              "record_count": 100,
+              "uncompressed_size": 2048,
+              "compressed_size": 1024,
+              "sha256": "abc123def4560000000000000000000000000000000000000000000000",
+              "uploaded_at": 1620000002000
+            }
+          ],
+          "gaps": [
+            {
+              "start_offset": 100,
+              "end_offset": 105,
+              "reason": "offset_out_of_range",
+              "detected_at": 1620000003000
+            }
+          ],
+          "pruned": [
+            {
+              "start_offset": 200,
+              "end_offset": 249,
+              "segments": 1,
+              "bytes": 512,
+              "pruned_at": 1620000005000,
+              "cutoff_timestamp": 1620000000000,
+              "reason": "retention"
+            }
+          ]
+        },
+        {
+          "partition_id": 1,
+          "segments": [
+            {
+              "key": "orders/1/00000000000000000000.seg",
+              "start_offset": 0,
+              "end_offset": 49,
+              "start_timestamp": 1620000000000,
+              "end_timestamp": 1620000001000,
+              "record_count": 50,
+              "uncompressed_size": 1024,
+              "compressed_size": 512,
+              "sha256": "789xyz00011100000000000000000000000000000000000000000000000",
+              "uploaded_at": 1620000002500
+            }
+          ],
+          "gaps": [],
+          "pruned": []
+        }
+      ]
+    }
+  ]
+}

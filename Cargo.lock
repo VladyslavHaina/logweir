@@ -584,6 +584,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "logweir-engine-oso"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "logweir-evidence"
 version = "0.1.0"
 dependencies = [

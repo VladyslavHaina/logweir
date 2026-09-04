@@ -1,0 +1,56 @@
+{
+  "backup_id": "backup-2026-08-30T02:00:00Z",
+  "valid": false,
+  "errors": [
+    "partition orders-2 is missing segment data required for offset recovery"
+  ],
+  "warnings": [],
+  "segments_to_process": 4,
+  "records_to_restore": 400,
+  "bytes_to_restore": 40960,
+  "time_range": [1620000000000, 1620000010000],
+  "topics_to_restore": [
+    {
+      "source_topic": "orders",
+      "target_topic": "orders",
+      "partitions": []
+    }
+  ],
+  "consumer_offset_actions": [],
+  "header_preflight": {
+    "backup_id": "backup-2026-08-30T02:00:00Z",
+    "generated_at": "2026-08-30T02:05:00Z",
+    "mode": "full",
+    "offset_recovery_requested": true,
+    "scan_performed": true,
+    "partitions": [
+      {
+        "topic": "orders",
+        "partition": 2,
+        "state": "data_missing",
+        "segments_selected": 3,
+        "segments_scanned": 1,
+        "segments_missing": 2,
+        "segments_corrupt": 0,
+        "segments_unreadable": 0,
+        "segments_legacy_format": 0,
+        "manifest_record_count": 300,
+        "records_scanned": 100,
+        "records_with_offset_header": 100,
+        "records_with_timestamp_header": 100,
+        "records_with_source_cluster_header": 100,
+        "records_with_required_headers": 100,
+        "problems": [
+          "segment orders/2/00000000000000000100.seg missing from storage"
+        ]
+      }
+    ],
+    "consumer_group_snapshot": null,
+    "records_scanned_total": 100,
+    "passed": false,
+    "errors": [
+      "partition orders-2 is missing segment data required for offset recovery"
+    ],
+    "warnings": []
+  }
+}

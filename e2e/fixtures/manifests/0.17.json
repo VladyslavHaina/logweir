@@ -1,0 +1,49 @@
+{
+  "backup_id": "backup-0.17-test",
+  "created_at": 1600000000000,
+  "source_cluster_id": "cluster-a",
+  "source_brokers": ["broker1:9092"],
+  "compression": "zstd",
+  "topics": [
+    {
+      "name": "orders",
+      "original_partition_count": 2,
+      "source_replication_factor": 3,
+      "configurations": {},
+      "partitions": [
+        {
+          "partition_id": 0,
+          "segments": [
+            {
+              "key": "orders/0/00000000000000000000.seg",
+              "start_offset": 0,
+              "end_offset": 99,
+              "start_timestamp": 1600000000000,
+              "end_timestamp": 1600000001000,
+              "record_count": 100,
+              "uncompressed_size": 2048,
+              "compressed_size": 1024
+            }
+          ],
+          "gaps": []
+        },
+        {
+          "partition_id": 1,
+          "segments": [
+            {
+              "key": "orders/1/00000000000000000000.seg",
+              "start_offset": 0,
+              "end_offset": 49,
+              "start_timestamp": 1600000000000,
+              "end_timestamp": 1600000001000,
+              "record_count": 50,
+              "uncompressed_size": 1024,
+              "compressed_size": 512
+            }
+          ],
+          "gaps": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "backup_id": "backup-2026-08-30T02:00:00Z",
+  "captured_at": 1756519200000,
+  "groups": [
+    { "group_id": "orders-consumer", "state": "Stable", "offsets": [] },
+    { "group_id": "payments-consumer", "state": "Empty", "offsets": [] }
+  ],
+  "a_future_field": { "x": 1 }
+}
