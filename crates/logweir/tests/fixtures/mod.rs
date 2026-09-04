@@ -5,8 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use logweir::drill::phase2_target::{TargetState, TopicState};
-// UNCOMMENT IN TASK 20 — phase8_score::Timeline
-// use logweir::drill::phase8_score::Timeline;
+use logweir::drill::phase8_score::Timeline;
 use logweir_core::engine::*;
 use logweir_core::outcome::*;
 use logweir_core::scorecard::*;
@@ -308,19 +307,21 @@ pub fn matching_pair_with_mismatch(
 
 // ---------------------------------------------------------------- scoring
 
-// UNCOMMENT IN TASK 20 — phase8_score::Timeline
-// /// requested 09:00:00, approval_validated 09:00:30, restore 09:02:00..09:05:34,
-// /// phase 5 duration 212s, verified 09:09:02.
-// pub fn timeline() -> Timeline {
-//     Timeline {
-//         requested_at: ts("2026-09-03T09:00:00Z"),
-//         approval_validated_at: ts("2026-09-03T09:00:30Z"),
-//         restore_started_at: ts("2026-09-03T09:02:00Z"),
-//         restore_finished_at: ts("2026-09-03T09:05:34Z"),
-//         phase5_duration_ms: 212_000,
-//         verified_at: ts("2026-09-03T09:09:02Z"),
-//     }
-// }
+/// requested 09:00:00, approval_validated 09:00:30, restore 09:02:00..09:05:34,
+/// phase 5 duration 212s, verified 09:09:02.
+///
+/// All six fields per `task-20-addendum.md` ruling A1 — `phase5_duration_ms`
+/// must be `212_000` for `rto_excluding_preflight_seconds == 512 - 212 == 300`.
+pub fn timeline() -> Timeline {
+    Timeline {
+        requested_at: ts("2026-09-03T09:00:00Z"),
+        approval_validated_at: ts("2026-09-03T09:00:30Z"),
+        restore_started_at: ts("2026-09-03T09:02:00Z"),
+        restore_finished_at: ts("2026-09-03T09:05:34Z"),
+        phase5_duration_ms: 212_000,
+        verified_at: ts("2026-09-03T09:09:02Z"),
+    }
+}
 
 pub fn measured(rto: u64, excl: u64, rpo: i64) -> Measured {
     Measured {
@@ -442,39 +443,48 @@ fn base_verify_outcome() -> logweir::drill::phase7_verify::VerifyOutcome {
 
 // ---------------------------------------------------------------- storage + keys
 
-/// Records every put so `a_signing_failure_exits_4_and_uploads_nothing` can
-/// assert the bucket was never touched.
+/// An in-memory `Store` whose actual contents are readable, so
+/// `a_signing_failure_exits_4_and_uploads_nothing` can assert the bucket was
+/// never touched.
+///
+/// `puts()` LISTS THE BUCKET rather than replaying intercepted calls, and
+/// `Deref` hands the real `&Store` to `phase8_score::run` / `phase9_teardown::
+/// persist` (whose signatures take `&Store`, exactly as the brief specifies).
+/// The alternative — a wrapper that records calls and delegates — could not
+/// intercept anything here, because `run` receives the inner `&Store` and
+/// calls it directly; a recorded list would then be empty no matter how many
+/// objects were uploaded, and every "nothing was uploaded" assertion would
+/// pass vacuously. Listing the bucket is also the stronger claim: it observes
+/// what is actually stored, not what was attempted.
 pub struct RecordingStore {
     pub inner: logweir_engine_oso::storage::Store,
-    pub put_keys: std::sync::Mutex<Vec<String>>,
 }
 
 impl RecordingStore {
+    /// Every key actually present under `logweir/`, sorted.
     pub fn puts(&self) -> Vec<String> {
-        self.put_keys.lock().unwrap().clone()
+        self.inner
+            .list_keys("logweir/")
+            .expect("listing an in-memory store cannot fail")
     }
-    pub fn put_create_only(
-        &self,
-        key: &str,
-        bytes: &[u8],
-    ) -> Result<logweir_engine_oso::storage::PutOutcome, logweir_engine_oso::storage::StoreError>
-    {
-        self.put_keys.lock().unwrap().push(key.to_string());
-        self.inner.put_create_only(key, bytes)
+}
+
+impl std::ops::Deref for RecordingStore {
+    type Target = logweir_engine_oso::storage::Store;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 pub fn recording_store() -> RecordingStore {
     RecordingStore {
         inner: logweir_engine_oso::storage::Store::in_memory("logweir"),
-        put_keys: Default::default(),
     }
 }
 
 pub fn store_without_conditional_put() -> RecordingStore {
     RecordingStore {
         inner: logweir_engine_oso::storage::Store::in_memory_without_conditional_put("logweir"),
-        put_keys: Default::default(),
     }
 }
 

@@ -55,6 +55,16 @@ pub struct PutOutcome {
     pub create_only_enforced: bool,
 }
 
+/// What a provider actually reported about an object's WORM retention. Only
+/// ever constructed from a readback — never inferred from bucket settings, and
+/// never defaulted — so `evidence.immutable` in a signed scorecard can be
+/// `true` only when a provider said so (spec §6 C3).
+#[derive(Debug, Clone)]
+pub struct LockInfo {
+    pub immutable: bool,
+    pub retain_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// The ONLY key root Logweir may write under (Global Constraint 6). Fixed in
 /// code, never taken from a spec, so `put_create_only`'s guard cannot be
 /// widened by an adopter's configuration.
@@ -250,9 +260,15 @@ impl Store {
         })
     }
 
-    /// Every key under `prefix` ending `/manifest.json` — exactly what the CLI's
-    /// `list` scans (GT-10).
-    pub fn list_manifest_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
+    /// Every key under `prefix`, sorted, with no filter of any kind. Added for
+    /// Task 20 phase 8, which reads the engine's own validation report out of
+    /// the per-run prefix Logweir itself set in `validation.yaml`:
+    /// `list_manifest_keys` cannot serve that read because its
+    /// `/manifest.json` filter would return nothing there.
+    ///
+    /// Sorted so a caller taking `keys[0]` gets a deterministic answer rather
+    /// than whatever order the backend happened to stream.
+    pub fn list_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
         use futures::StreamExt as _;
         let rt = &self.rt;
         rt.block_on(async {
@@ -260,13 +276,40 @@ impl Store {
             let mut st = self.inner.list(Some(&OPath::from(prefix)));
             while let Some(m) = st.next().await {
                 let m = m.map_err(|e| EngineError::Operational(e.to_string()))?;
-                let k = m.location.to_string();
-                if k.ends_with("/manifest.json") {
-                    out.push(k);
-                }
+                out.push(m.location.to_string());
             }
+            out.sort();
             Ok(out)
         })
+    }
+
+    /// Every key under `prefix` ending `/manifest.json` — exactly what the CLI's
+    /// `list` scans (GT-10). Expressed as `list_keys` plus the filter, so the
+    /// two can never disagree about what "under this prefix" means.
+    pub fn list_manifest_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
+        Ok(self
+            .list_keys(prefix)?
+            .into_iter()
+            .filter(|k| k.ends_with("/manifest.json"))
+            .collect())
+    }
+
+    /// The provider's Object Lock state for `key`, or `None` when the backend
+    /// exposes no such readback.
+    ///
+    /// `object_store` 0.14 — the crate, version and feature set Global
+    /// Constraint 9 fixes — models no Object Lock / WORM retention API at all,
+    /// on any of its `aws`/`azure`/`gcp`/`http` backends. So this returns
+    /// `None` on every backend Logweir can currently build, and phase 8
+    /// therefore publishes `evidence.immutable: false`. That is the point:
+    /// spec §6 C3 allows `immutable: true` ONLY after a provider readback, so
+    /// the absence of a readback must produce an honest `false` rather than an
+    /// optimistic guess derived from the bucket's configuration or the
+    /// adopter's say-so. If a future object_store exposes the readback, this
+    /// method is the one place that changes.
+    pub fn object_lock_readback(&self, key: &str) -> Option<LockInfo> {
+        let _ = key;
+        None
     }
 
     pub fn list_manifests(&self, loc: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
