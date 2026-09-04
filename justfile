@@ -6,6 +6,7 @@ fmt:
 lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/check-no-oso.sh
 
 test:
     cargo test --workspace
