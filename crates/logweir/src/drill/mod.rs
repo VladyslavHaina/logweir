@@ -22,4 +22,21 @@ pub enum DrillError {
     Kafka(#[from] logweir_kafka::reader::KafkaError),
     #[error("engine: {0}")]
     Engine(#[from] logweir_core::engine::EngineError),
+    /// A drill RESULT, not an operational failure (Task 18 fix round 1,
+    /// review finding F1): the restore subprocess ran, exited 0, the target
+    /// cluster was read successfully for every selected destination topic,
+    /// and every partition was still at end offset <= 0. That is a
+    /// positively established fact ABOUT the archive — the backup does not
+    /// actually restore — so it must NOT be routed like `Operational` (exit
+    /// 1, no artifact). It mirrors phase 5's `Verdict::Block`: the
+    /// orchestrator (Task 21a) must catch this variant at the phase-6 call
+    /// site, BEFORE the generic `record(...)?` short-circuit, build and sign
+    /// a scorecard from it, and return `DrillError::NotPass(Box::new(signed))`
+    /// so it reaches ExitCode::DrillNotPass (2). See `task-21a-addendum.md`
+    /// ruling A8 for the required orchestrator wiring. If this variant ever
+    /// reaches `impl From<DrillError> for ExitCode` unhandled (or handled by
+    /// a catch-all that maps it to `Operational`), that is the exact defect
+    /// this comment exists to prevent.
+    #[error("drill-not-pass: {0}")]
+    RestoreNoOp(String),
 }
