@@ -1,7 +1,7 @@
 use crate::fingerprint::record_fingerprint;
 use std::collections::BTreeMap;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum KafkaError {
     #[error("kafka: {0}")]
     Client(String),
@@ -31,6 +31,40 @@ pub enum KafkaError {
 pub struct TopicMeta {
     pub name: String,
     pub partitions: i32,
+    /// `Some(<message>)` when the broker's metadata for this specific topic
+    /// carried an error (absent, not authorized, or a transient state such
+    /// as leader election just after `create_topics`) — `partitions` is `0`
+    /// and not meaningful in that case.
+    ///
+    /// `list_topics` never drops an entry for this reason: a topic mid-
+    /// election disappearing from the list would make a later completeness
+    /// check ("this scratch cluster holds nothing but my drill topics")
+    /// wrongly conclude the cluster is emptier than it actually is. A caller
+    /// that specifically wants "confirmed healthy and present" — the
+    /// phase-0 marker-topic guard, for one — checks `error.is_none()`
+    /// itself rather than relying on absence from this list to mean that.
+    pub error: Option<String>,
+}
+
+impl TopicMeta {
+    /// A topic whose metadata was read successfully.
+    pub fn new(name: impl Into<String>, partitions: i32) -> Self {
+        Self {
+            name: name.into(),
+            partitions,
+            error: None,
+        }
+    }
+
+    /// A topic whose metadata carried an error — still reported, never
+    /// dropped. `partitions` is `0` and not meaningful.
+    pub fn errored(name: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            partitions: 0,
+            error: Some(error.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

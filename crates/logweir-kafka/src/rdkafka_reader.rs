@@ -93,10 +93,32 @@ impl RdKafkaReader {
     /// only deletion, the sole destructive path in the whole product. A
     /// reader that never calls this can still read everything; it can
     /// delete nothing.
-    #[must_use]
-    pub fn with_scratch_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.scratch_prefix = Some(prefix.into());
-        self
+    ///
+    /// `prefix` need not end in a separator: `with_scratch_prefix("logweir")`
+    /// permits `logweir-prod-orders` exactly as readily as any of a drill's
+    /// own scratch topics. This builder cannot know the operator's naming
+    /// scheme, so pass the FULL rendered prefix including its trailing
+    /// delimiter (e.g. `"drill-20260903-"`, not `"drill"`).
+    ///
+    /// Rejects an empty, whitespace-only, or shorter-than-3-character
+    /// prefix. `""` would make `str::starts_with` unconditionally true —
+    /// every name, including a production topic, would pass the namespace
+    /// check while the reader still reports as properly scoped, which
+    /// defeats this guard's entire purpose. There is no Kafka-side floor for
+    /// what counts as "long enough"; three characters is this crate's own,
+    /// deliberately conservative minimum, chosen only to refuse the
+    /// degenerate cases (`""`, `" "`, a stray single character) rather than
+    /// to certify any particular prefix as well-chosen — the caller's own
+    /// per-run rendered value is what actually authors the truth.
+    pub fn with_scratch_prefix(mut self, prefix: impl Into<String>) -> Result<Self, KafkaError> {
+        let prefix = prefix.into();
+        if prefix.trim().chars().count() < 3 {
+            return Err(KafkaError::Client(format!(
+                "with_scratch_prefix: {prefix:?} is too short to serve as a scratch-topic namespace (must be at least 3 non-whitespace characters) — an empty or near-empty prefix would make str::starts_with match everything, deleting anything a caller asks for"
+            )));
+        }
+        self.scratch_prefix = Some(prefix);
+        Ok(self)
     }
 
     /// Maps a per-topic Kafka error code to the distinction a caller needs —
@@ -134,25 +156,30 @@ impl ClusterReader for RdKafkaReader {
             .consumer
             .fetch_metadata(None, T)
             .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        // The contract, made to agree with `end_offsets` below rather than
+        // silently disagree with it: a per-topic metadata error is never
+        // dropped. `end_offsets` targets ONE named topic and its return
+        // shape (`Vec<(i32, i64)>`) has no room for a status, so it
+        // surfaces the error as `Err`. `list_topics` targets ALL topics at
+        // once and dropping an errored entry here would be worse than
+        // `end_offsets` failing: `LeaderNotAvailable`/`ReplicaNotAvailable`
+        // are ordinary TRANSIENT states during topic creation or leader
+        // election, so silently excluding such a topic would make a later
+        // completeness check ("this scratch cluster holds nothing but my
+        // drill topics") wrongly conclude the cluster is emptier than it
+        // is. So every topic is always present in this list; a caller that
+        // specifically wants "confirmed healthy and present" — the phase-0
+        // marker-topic guard, for one — checks `TopicMeta::error.is_none()`
+        // itself rather than relying on the entry's absence to mean that.
         Ok(md
             .topics()
             .iter()
-            // A topic entry carrying a metadata error (absent, or the
-            // principal may not describe it) is excluded rather than
-            // reported with zero partitions — a real topic always has at
-            // least one partition, so "present with zero partitions" is
-            // never a healthy state to report silently
-            // [VERIFIED rdkafka-0.36.2/src/metadata.rs:97's `MetadataTopic::
-            // error`, called out in `end_offsets`/`classify_topic_error`
-            // below]. This also closes a guard bypass: the phase-0 marker-
-            // topic check (`logweir.scratch` must be present) previously
-            // could not tell "present" from "present but undescribable"
-            // because both left a same-named, zero-partition entry in this
-            // list.
-            .filter(|t| t.error().is_none())
-            .map(|t| TopicMeta {
-                name: t.name().to_string(),
-                partitions: t.partitions().len() as i32,
+            .map(|t| match t.error() {
+                None => TopicMeta::new(t.name(), t.partitions().len() as i32),
+                Some(err) => TopicMeta::errored(
+                    t.name(),
+                    Self::classify_topic_error(t.name(), err.into()).to_string(),
+                ),
             })
             .collect())
     }
@@ -255,14 +282,32 @@ impl ClusterReader for RdKafkaReader {
         // inferred from an error) — means the common short-read case never
         // needs the error path at all; the `PartitionEOF` match below is now
         // a defensive fallback for the rarer case where the watermark shifts
-        // between the `end_offsets` call and the poll loop (e.g. concurrent
-        // retention).
-        let hi = self
-            .end_offsets(topic)?
-            .into_iter()
-            .find(|(p, _)| *p == partition)
-            .map(|(_, hi)| hi)
-            .ok_or_else(|| KafkaError::TopicNotFound(format!("{topic}:{partition}")))?;
+        // between this call and the poll loop (e.g. concurrent retention).
+        //
+        // A single `fetch_watermarks(topic, partition, ..)` call, not
+        // `end_offsets(topic)`: `end_offsets` does one `fetch_metadata` PLUS
+        // one blocking `fetch_watermarks` per partition of the whole topic,
+        // then this call would have discarded every result but the one
+        // partition it asked for. A drill phase reading a P-partition topic
+        // partition-by-partition would have driven P metadata fetches and
+        // P² ListOffsets round trips for information a single call already
+        // provides directly.
+        //
+        // The error from this single-partition call cannot distinguish "the
+        // topic does not exist" from "the topic exists but this partition
+        // index does not" — Kafka's own wire protocol returns the identical
+        // `UNKNOWN_TOPIC_OR_PARTITION` code for both, so there is no basis
+        // to call this `KafkaError::TopicNotFound` (whose payload is a bare
+        // topic name everywhere else it's constructed, and whose own doc
+        // says the TOPIC does not exist — not "this specific
+        // topic:partition combination could not be resolved, cause
+        // unknown"). A generic `Client` error naming both coordinates is the
+        // honest option here, not a new variant whose semantics would need
+        // the same qualification.
+        let (_lo, hi) = self
+            .consumer
+            .fetch_watermarks(topic, partition, T)
+            .map_err(|e| KafkaError::Client(format!("{topic}:{partition}: {e}")))?;
         if from >= hi {
             return Ok(Vec::new());
         }
@@ -508,5 +553,48 @@ mod tests {
             super::RdKafkaReader::classify_topic_error("t", Code::UnknownMemberId),
             KafkaError::Client(_)
         ));
+    }
+
+    #[test]
+    fn with_scratch_prefix_rejects_an_empty_prefix_at_construction_not_at_delete_time() {
+        // `connect` does not dial anything synchronously — librdkafka's
+        // client creation validates config and starts background IO
+        // threads, it does not block waiting for a broker — so this needs
+        // no broker to prove `with_scratch_prefix("")` is refused at THIS
+        // call, before any `delete_topics` call could ever see it. This is
+        // the regression test for the hole the previous fix round left
+        // open: `with_scratch_prefix("")` used to store `Some("")`, and
+        // `"anything".starts_with("")` is unconditionally true, so every
+        // name — including a production topic — would have passed the
+        // namespace check while the reader still reported as properly
+        // scoped.
+        //
+        // `with_scratch_prefix` consumes `self`, so each case below needs
+        // its own freshly connected reader rather than reusing one across
+        // assertions (connecting is local and broker-free either way, per
+        // the doc comment above).
+        fn reader() -> super::RdKafkaReader {
+            super::RdKafkaReader::connect(
+                &["127.0.0.1:1".to_string()],
+                crate::reader::AuthConfig::Plaintext,
+            )
+            .expect("connect() only builds local client state; it does not dial the broker")
+        }
+        assert!(reader().with_scratch_prefix("").is_err());
+        assert!(reader().with_scratch_prefix("  ").is_err());
+        assert!(
+            reader().with_scratch_prefix("dr").is_err(),
+            "2 chars is below the 3-char floor"
+        );
+    }
+
+    #[test]
+    fn with_scratch_prefix_accepts_a_realistic_operator_rendered_prefix() {
+        let reader = super::RdKafkaReader::connect(
+            &["127.0.0.1:1".to_string()],
+            crate::reader::AuthConfig::Plaintext,
+        )
+        .unwrap();
+        assert!(reader.with_scratch_prefix("drill-20260903-").is_ok());
     }
 }

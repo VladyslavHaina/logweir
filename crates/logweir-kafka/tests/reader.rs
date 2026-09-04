@@ -1,31 +1,62 @@
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 
 /// A hand-written fake proves the ORCHESTRATOR's contract without a broker,
-/// which is what keeps Tasks 14-20 testable on a laptop with no compose stack.
+/// which is what keeps Tasks 14-20 testable on a laptop with no compose
+/// stack — and, per Task 10's post-review fix round, without letting those
+/// phase tests only ever exercise the "everything is healthy" path. A real
+/// `RdKafkaReader` can return `KafkaError::TopicNotFound`,
+/// `KafkaError::NotAuthorized` and `KafkaError::Unreachable` from every one
+/// of these methods; a mock that can never produce them would let a phase
+/// test go green against a contract the real implementation cannot actually
+/// uphold.
 struct FakeReader {
     cluster_id: String,
     topics: Vec<TopicMeta>,
+    /// When set, every method below returns this error instead of its
+    /// normal behaviour — the single knob a phase test uses to exercise
+    /// `TopicNotFound`/`NotAuthorized`/`Unreachable` end to end, with no
+    /// broker required to produce any of the three.
+    inject: Option<KafkaError>,
 }
 
 impl ClusterReader for FakeReader {
     fn cluster_id(&self) -> Result<String, KafkaError> {
+        if let Some(e) = &self.inject {
+            return Err(e.clone());
+        }
         Ok(self.cluster_id.clone())
     }
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        if let Some(e) = &self.inject {
+            return Err(e.clone());
+        }
         Ok(self.topics.clone())
     }
     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(self
-            .topics
+        if let Some(e) = &self.inject {
+            return Err(e.clone());
+        }
+        self.topics
             .iter()
             .find(|t| t.name == topic)
-            .map(|t| (0..t.partitions).map(|p| (p, 0i64)).collect())
-            .unwrap_or_default())
+            .map(|t| Ok((0..t.partitions).map(|p| (p, 0i64)).collect()))
+            // An unknown topic is an ERROR here, matching `RdKafkaReader`:
+            // `Ok(vec![])` would be indistinguishable from a healthy empty
+            // topic, which cannot exist in real Kafka (every topic has at
+            // least one partition). The pre-fix-round version of this fake
+            // returned `Ok(vec![])` via `.unwrap_or_default()` — precisely
+            // the state Task 10's fix round declared impossible in the real
+            // implementation, which would have let Tasks 16-21 write and
+            // pass phase tests against a contract nothing real upholds.
+            .unwrap_or_else(|| Err(KafkaError::TopicNotFound(topic.to_string())))
     }
     fn topic_configs(
         &self,
         _topic: &str,
     ) -> Result<std::collections::BTreeMap<String, String>, KafkaError> {
+        if let Some(e) = &self.inject {
+            return Err(e.clone());
+        }
         Ok(Default::default())
     }
     fn consume_range(
@@ -35,6 +66,9 @@ impl ClusterReader for FakeReader {
         _from: i64,
         _max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        if let Some(e) = &self.inject {
+            return Err(e.clone());
+        }
         Ok(vec![])
     }
 }
@@ -43,10 +77,8 @@ impl ClusterReader for FakeReader {
 fn the_trait_is_object_safe_so_the_orchestrator_can_hold_a_dyn() {
     let r: Box<dyn ClusterReader> = Box::new(FakeReader {
         cluster_id: "MkU3OEVBNTcwNTJENDM2Qk".into(),
-        topics: vec![TopicMeta {
-            name: "logweir.scratch".into(),
-            partitions: 1,
-        }],
+        topics: vec![TopicMeta::new("logweir.scratch", 1)],
+        inject: None,
     });
     assert_eq!(r.cluster_id().unwrap(), "MkU3OEVBNTcwNTJENDM2Qk");
     assert!(r
@@ -54,6 +86,46 @@ fn the_trait_is_object_safe_so_the_orchestrator_can_hold_a_dyn() {
         .unwrap()
         .iter()
         .any(|t| t.name == "logweir.scratch"));
+}
+
+#[test]
+fn end_offsets_for_an_unknown_topic_is_an_error_not_an_empty_ok() {
+    // The exact gap the post-review fix round found and closed: this used
+    // to return `Ok(vec![])`, matching a real, healthy, zero-partition
+    // topic — a state that cannot exist on a real cluster. A drill phase
+    // that only ever exercised the fake here would never be forced to
+    // handle `RdKafkaReader::end_offsets`'s real `TopicNotFound` return.
+    let r = FakeReader {
+        cluster_id: "c1".into(),
+        topics: vec![TopicMeta::new("logweir.scratch", 1)],
+        inject: None,
+    };
+    let err = r.end_offsets("does-not-exist").unwrap_err();
+    assert!(matches!(err, KafkaError::TopicNotFound(t) if t == "does-not-exist"));
+}
+
+#[test]
+fn the_fake_can_be_configured_to_return_each_new_error_variant() {
+    // Proves the mock five later tasks (16-21) test drill phases against
+    // can actually produce every error `RdKafkaReader` can — so a phase
+    // that only handles the happy path fails its own tests here, before it
+    // ever reaches a real broker.
+    for err in [
+        KafkaError::TopicNotFound("orders".into()),
+        KafkaError::NotAuthorized("orders".into()),
+        KafkaError::Unreachable("no broker answered within 20s".into()),
+    ] {
+        let r = FakeReader {
+            cluster_id: "c1".into(),
+            topics: vec![],
+            inject: Some(err.clone()),
+        };
+        assert!(r.cluster_id().is_err());
+        assert!(r.list_topics().is_err());
+        assert!(r.end_offsets("orders").is_err());
+        assert!(r.topic_configs("orders").is_err());
+        assert!(r.consume_range("orders", 0, 0, 1).is_err());
+    }
 }
 
 /// Phase 9 (Task 20) drives teardown through this trait, so it must be testable
