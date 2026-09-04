@@ -36,3 +36,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  sync-upstream:
+    runs-on: ubuntu-latest
+    env:
+      # The single place the upstream SOURCE pin lives. Global Constraint 8 pins v0.1
+      # to engine v0.21.0. The engine BINARY is pinned by digest, in
+      # third_party/kafka-backup-binary.digest (Global Constraint 7); this tag pins only
+      # the read-only source checkout the vendored structs are compared against.
+      UPSTREAM_TAG: v0.21.0
+    steps:
+      - uses: actions/checkout@v4
+      # Upstream's own repository, checked out read-only to READ its struct definitions.
+      # Permitted by global ruling GR6: Global Constraint 14 forbids Logweir PUBLISHING
+      # under the osodevops/ namespace, not referencing upstream's published source.
+      - uses: actions/checkout@v4
+        with:
+          repository: osodevops/kafka-backup
+          ref: ${{ env.UPSTREAM_TAG }}
+          path: upstream/kafka-backup
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask sync-upstream --tag "$UPSTREAM_TAG" --upstream upstream/kafka-backup
