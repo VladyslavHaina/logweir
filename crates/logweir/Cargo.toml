@@ -14,10 +14,23 @@ name = "logweir"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
+chrono.workspace = true
 clap.workspace = true
 logweir-core = { path = "../logweir-core" }
+logweir-engine-oso = { path = "../logweir-engine-oso" }
 logweir-evidence = { path = "../logweir-evidence" }
+logweir-kafka = { path = "../logweir-kafka" }
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
+logweir-engine-oso = { path = "../logweir-engine-oso" }
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+serde_json.workspace = true
 tempfile = "3"

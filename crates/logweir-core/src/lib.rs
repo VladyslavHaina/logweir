@@ -7,10 +7,12 @@ pub const FORMAT_VERSION: &str = "1.0.0";
 
 pub mod det_json;
 pub mod engine;
+pub mod guard;
 pub mod ids;
 pub mod outcome;
 pub mod schema;
 pub mod scorecard;
+pub mod spec;
 
 #[cfg(test)]
 mod tests {

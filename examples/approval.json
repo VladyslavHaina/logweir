@@ -1,0 +1,6 @@
+{
+  "approver": "sre-oncall@example.com",
+  "ticket": "CHG-40881",
+  "plan_hash": "sha256:c7f01c1db714362828f49a96587510819db58bec3e776068314d0770605f5b5c",
+  "approved_at": "2026-09-02T17:40:00Z"
+}

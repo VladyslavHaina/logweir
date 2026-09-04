@@ -1,0 +1,42 @@
+# logweir drill spec. Run:
+#   logweir drill run --spec drill.yaml --approval approval.json \
+#     --approver-key approver.pem --allowed-clusters allowed-clusters.json \
+#     --signing-key signer.pem
+source:
+  storage:
+    backend: s3
+    bucket: kafka-backups
+    prefix: basic-demo
+    region: us-east-1
+    endpoint: http://localhost:9000
+    path_style: true
+    allow_http: true
+  backup: latestCompleted
+  topics: [orders, payments]
+
+target:
+  bootstrap_servers: [localhost:9092]
+  marker_topic: logweir.scratch
+  topic_mapping_prefix: "drill-"
+  default_replication_factor: 1
+  teardown: delete
+
+sample:
+  window_start: "2026-08-29T00:00:00Z"
+  window_end:   "2026-08-30T02:00:00Z"
+  records_per_partition: 25
+  anchor: random
+
+objectives:
+  rto_seconds: 900
+  rpo_seconds: 300
+  pass_rate: 1.0
+
+evidence:
+  backend: s3
+  bucket: logweir-evidence
+  prefix: logweir
+  region: us-east-1
+  endpoint: http://localhost:9000
+  path_style: true
+  allow_http: true
