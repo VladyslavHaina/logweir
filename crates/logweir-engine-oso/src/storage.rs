@@ -16,6 +16,16 @@ use std::sync::Arc;
 pub enum StoreError {
     #[error("object already exists at {0} — refusing to overwrite evidence")]
     AlreadyExists(String),
+    /// Distinguished from `Io` so a caller can tell "definitely absent" from
+    /// "could not tell" (permission denied, a timeout, a truncated read, a
+    /// transient network error). Task 12 fix: `describe()`'s sibling
+    /// consumer-groups-snapshot read used to collapse every `get` failure
+    /// into `None` ("no snapshot"), which reported a 403 or a dropped
+    /// connection identically to genuine absence — a positive claim
+    /// (`consumer_group_snapshot_sha256: None`) the store never actually
+    /// established, which then flows into the signed scorecard.
+    #[error("object not found at {0}")]
+    NotFound(String),
     #[error("storage: {0}")]
     Io(String),
     #[error("unsupported storage backend `{0}`")]
@@ -213,19 +223,29 @@ impl Store {
         )
     }
 
-    pub fn get(&self, key: &str) -> Result<(Vec<u8>, Option<String>), EngineError> {
+    /// Returns `StoreError::NotFound` specifically when the object genuinely
+    /// does not exist, distinct from every other failure mode (`Io`) — see
+    /// `StoreError::NotFound`'s doc comment for why the distinction exists.
+    /// `EngineError: From<StoreError>` makes every existing `?`-based caller
+    /// of this method (which all want a plain operational failure) unaffected
+    /// by this signature; `describe()`'s sibling-snapshot read is the one
+    /// caller that inspects the variant directly.
+    pub fn get(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
         let rt = &self.rt;
         rt.block_on(async {
             let r = self
                 .inner
                 .get(&OPath::from(key))
                 .await
-                .map_err(|e| EngineError::Operational(format!("{key}: {e}")))?;
+                .map_err(|e| match e {
+                    object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
+                    other => StoreError::Io(format!("{key}: {other}")),
+                })?;
             let vid = r.meta.version.clone();
             let b = r
                 .bytes()
                 .await
-                .map_err(|e| EngineError::Operational(format!("{key}: {e}")))?;
+                .map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
             Ok((b.to_vec(), vid))
         })
     }
@@ -300,10 +320,15 @@ impl Store {
         }
     }
 
-    /// The Interfaces-block method Task 12's `fingerprints()` calls. Resolves
-    /// `topic`/`partition` against every manifest under this store's prefix and
-    /// returns the segment keys whose [start_timestamp, end_timestamp] overlaps
-    /// `window`, delegating the overlap test to `segment_keys_from`.
+    /// Resolves `topic`/`partition` against ONE manifest's body and returns
+    /// its (qualified key, start_timestamp, end_timestamp) triples,
+    /// unfiltered by any time window. Shared by `segment_keys_for` (scans
+    /// every manifest under the prefix — kept for callers that genuinely want
+    /// every backup set, none as of this crate) and `segment_keys_for_set`
+    /// (reads exactly the one manifest a caller names — what
+    /// `OsoCliEngine::fingerprints` uses, per the Task 12 fix that closed the
+    /// cross-set merging hole: two backup sets sharing a topic/partition with
+    /// an overlapping window used to merge silently here).
     ///
     /// Parsed as `serde_json::Value` rather than `crate::vendored::manifest::
     /// BackupManifest`: Task 12b executes BEFORE Task 12, so the vendored types
@@ -313,6 +338,63 @@ impl Store {
     /// `key` is manifest-relative (see `qualify`) and is qualified into this
     /// store's key space before being returned, so the caller can `get` it
     /// directly.
+    fn segments_in_manifest(
+        &self,
+        manifest_key: &str,
+        topic: &str,
+        partition: i32,
+    ) -> Result<Vec<(String, i64, i64)>, EngineError> {
+        let mut segs: Vec<(String, i64, i64)> = Vec::new();
+        let (bytes, _) = self.get(manifest_key)?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| EngineError::Operational(format!("{manifest_key}: {e}")))?;
+        let topics = v
+            .get("topics")
+            .and_then(|t| t.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        for t in topics {
+            if t.get("name").and_then(|n| n.as_str()) != Some(topic) {
+                continue;
+            }
+            let parts = t
+                .get("partitions")
+                .and_then(|p| p.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+            for p in parts {
+                if p.get("partition_id").and_then(|i| i.as_i64()) != Some(partition as i64) {
+                    continue;
+                }
+                let ss = p
+                    .get("segments")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[]);
+                for s in ss {
+                    let (Some(k), Some(t0), Some(t1)) = (
+                        s.get("key").and_then(|k| k.as_str()),
+                        s.get("start_timestamp").and_then(|x| x.as_i64()),
+                        s.get("end_timestamp").and_then(|x| x.as_i64()),
+                    ) else {
+                        return Err(EngineError::Operational(format!(
+                            "{manifest_key}: segment entry missing key/start_timestamp/end_timestamp"
+                        )));
+                    };
+                    segs.push((self.qualify(k), t0, t1));
+                }
+            }
+        }
+        Ok(segs)
+    }
+
+    /// The Interfaces-block method from Task 12b's brief. Resolves
+    /// `topic`/`partition` against EVERY manifest under this store's prefix.
+    /// No caller in this workspace uses this anymore as of the Task 12 fix
+    /// (see `segment_keys_for_set`) — kept because it is part of Task 12b's
+    /// committed, tested Interfaces contract, and a future caller that
+    /// genuinely wants a cross-set view (e.g. an archive-wide audit) has a
+    /// real use for it. `OsoCliEngine::fingerprints` MUST NOT call this one.
     pub fn segment_keys_for(
         &self,
         topic: &str,
@@ -321,47 +403,28 @@ impl Store {
     ) -> Result<Vec<String>, EngineError> {
         let mut segs: Vec<(String, i64, i64)> = Vec::new();
         for mk in self.list_manifest_keys(&self.prefix)? {
-            let (bytes, _) = self.get(&mk)?;
-            let v: serde_json::Value = serde_json::from_slice(&bytes)
-                .map_err(|e| EngineError::Operational(format!("{mk}: {e}")))?;
-            let topics = v
-                .get("topics")
-                .and_then(|t| t.as_array())
-                .map(|a| a.as_slice())
-                .unwrap_or(&[]);
-            for t in topics {
-                if t.get("name").and_then(|n| n.as_str()) != Some(topic) {
-                    continue;
-                }
-                let parts = t
-                    .get("partitions")
-                    .and_then(|p| p.as_array())
-                    .map(|a| a.as_slice())
-                    .unwrap_or(&[]);
-                for p in parts {
-                    if p.get("partition_id").and_then(|i| i.as_i64()) != Some(partition as i64) {
-                        continue;
-                    }
-                    let ss = p
-                        .get("segments")
-                        .and_then(|s| s.as_array())
-                        .map(|a| a.as_slice())
-                        .unwrap_or(&[]);
-                    for s in ss {
-                        let (Some(k), Some(t0), Some(t1)) = (
-                            s.get("key").and_then(|k| k.as_str()),
-                            s.get("start_timestamp").and_then(|x| x.as_i64()),
-                            s.get("end_timestamp").and_then(|x| x.as_i64()),
-                        ) else {
-                            return Err(EngineError::Operational(format!(
-                                "{mk}: segment entry missing key/start_timestamp/end_timestamp"
-                            )));
-                        };
-                        segs.push((self.qualify(k), t0, t1));
-                    }
-                }
-            }
+            segs.extend(self.segments_in_manifest(&mk, topic, partition)?);
         }
+        let mut out = self.segment_keys_from(&segs, window);
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Task 12 fix (post-review): the set-scoped sibling of `segment_keys_for`.
+    /// Reads exactly the ONE manifest named by `manifest_key` — never lists or
+    /// touches any other manifest under this store's prefix — so two backup
+    /// sets sharing a topic/partition with an overlapping window can no
+    /// longer merge: `fingerprints()` calls this, passing
+    /// `sel.set.manifest_key`, instead of `segment_keys_for`.
+    pub fn segment_keys_for_set(
+        &self,
+        manifest_key: &str,
+        topic: &str,
+        partition: i32,
+        window: (i64, i64),
+    ) -> Result<Vec<String>, EngineError> {
+        let segs = self.segments_in_manifest(manifest_key, topic, partition)?;
         let mut out = self.segment_keys_from(&segs, window);
         out.sort();
         out.dedup();

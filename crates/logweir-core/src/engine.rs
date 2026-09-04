@@ -184,9 +184,27 @@ pub struct RestoreFacts {
 
 #[derive(Debug, Clone)]
 pub struct SampleSelection {
+    /// Which backup set's segments to sample. Without this, a `Store` whose
+    /// prefix covers more than one backup set (the ordinary case for an
+    /// incremental chain, a re-run, or a daily-plus-hourly archive) cannot
+    /// tell `fingerprints()` which manifest's segments to read: two sets
+    /// sharing a topic/partition with an overlapping window would otherwise
+    /// merge silently, making the archive side a strict SUPERSET of what a
+    /// real restore populated — extra fingerprints read as a mismatch, so a
+    /// healthy restore fails a drill that actually succeeded. Added per
+    /// controller authorization after Task 12's review (see
+    /// task-12-fix-report.md): no drill phase consumed this type yet, so this
+    /// was the cheapest point at which to add it.
+    pub set: BackupSetRef,
     pub topic: String,
     pub partition: i32,
     pub anchor: String, // head | tail | random
+    /// A CAP on how many fingerprints `fingerprints()` returns, not a promise
+    /// of exactly this many: fewer than `count` matching records in the
+    /// window is not an error. Bounding this is what keeps the scorecard's
+    /// "N samples, anchor X" claim (both are scorecard fields) true of what
+    /// actually ran, and keeps memory bounded against a window that spans far
+    /// more records than were ever meant to be sampled.
     pub count: usize,
     pub window: (i64, i64),
 }

@@ -314,6 +314,52 @@ fn the_archive_is_read_through_a_store_that_cannot_physically_put() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fix 3 (post-review): `describe()`'s sibling-snapshot read used to
+/// collapse EVERY `get` failure into `None` ("no snapshot"), so a permission
+/// error, a timeout, or a truncated read was recorded identically to genuine
+/// absence — `consumer_group_snapshot_sha256: None` then flows into the
+/// signed scorecard as a positive claim the store never actually
+/// established. This constructs a sibling file that EXISTS but cannot be
+/// read (mode 000) and asserts `describe()` propagates the failure rather
+/// than reporting `None`.
+///
+/// Assumes a non-root test runner: root bypasses Unix permission bits
+/// entirely, which would make the constructed failure never actually occur
+/// and this assertion vacuous. True for `cargo test` in this environment and
+/// for ordinary (non-containerized-as-root) CI runners.
+#[test]
+#[cfg(unix)]
+fn describe_reports_an_error_when_the_snapshot_sibling_is_unreadable_not_none() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = unique_dir("unreadable-snapshot");
+    let manifest = r#"{"backup_id":"u1","created_at":0,"topics":[]}"#;
+    std::fs::create_dir_all(dir.join("u1")).unwrap();
+    std::fs::write(dir.join("u1/manifest.json"), manifest).unwrap();
+    let sibling = dir.join("u1/consumer-groups-snapshot.json");
+    std::fs::write(&sibling, b"{}").unwrap();
+    std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let store = Store::read_only_from_url(&loc).unwrap();
+    let engine = engine_with("../../e2e/fixtures/fake-engine-clean.sh", store);
+
+    let set = BackupSetRef {
+        backup_id: "u1".into(),
+        manifest_key: "u1/manifest.json".into(),
+    };
+    let err = engine.describe(&set).unwrap_err();
+    // Confirms this propagated through StoreError::Io (Display: "storage:
+    // {0}"), not a coincidental failure elsewhere in describe() (e.g. the
+    // primary manifest read, which must have already succeeded for this
+    // point to be reached at all).
+    assert!(err.to_string().contains("storage:"), "{err}");
+
+    // Restore permissions so the temp dir can be cleaned up.
+    std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn fingerprints_decodes_segments_in_the_window_and_sorts_by_offset() {
     let dir = unique_dir("fp");
@@ -323,8 +369,11 @@ fn fingerprints_decodes_segments_in_the_window_and_sorts_by_offset() {
     let engine = engine_with("../../e2e/fixtures/fake-engine-clean.sh", store);
 
     // none.kbak carries 5 records at timestamps 1_756_425_600_000..=...004
-    // (offsets 100..104); this window keeps only 101, 102, 103.
+    // (offsets 100..104); this window keeps only 101, 102, 103. count (10)
+    // exceeds what is available, so the anchor choice does not matter here —
+    // see the dedicated head/tail/random tests below for that.
     let sel = SampleSelection {
+        set: b1_ref(),
         topic: "orders".into(),
         partition: 0,
         anchor: "head".into(),
@@ -351,15 +400,28 @@ fn fingerprints_decodes_segments_in_the_window_and_sorts_by_offset() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Documents, with a real failing-in-spirit reproduction, the cross-set
-/// merging risk called out in task-12-report.md: `SampleSelection` carries no
-/// backup-set id, and `Store::segment_keys_for` (Task 12b) resolves
-/// topic/partition against EVERY manifest under the store's prefix. Two
-/// backup sets sharing a topic/partition with overlapping windows have their
-/// segments merged with no way, at this trait boundary, to tell them apart.
+fn b1_ref() -> BackupSetRef {
+    BackupSetRef {
+        backup_id: "b1".into(),
+        manifest_key: "b1/manifest.json".into(),
+    }
+}
+
+/// Fix (post-review): the ambiguity `task-12-report.md` documented — two
+/// backup sets sharing a topic/partition with an overlapping window used to
+/// merge their segments in `fingerprints()`, with no way at the trait
+/// boundary to tell them apart. That made the archive side a strict
+/// SUPERSET of what a real restore populated: a healthy restore reads as a
+/// mismatch (extra fingerprints), which is a false FAIL on a signed
+/// attestation — the worst direction for this product. `SampleSelection` now
+/// carries `set: BackupSetRef`, and `fingerprints()` resolves against exactly
+/// that one manifest (`Store::segment_keys_for_set`). This test is the
+/// SAME two-backup-set setup as before the fix, with the SAME assertion
+/// inverted: 5, not 10 — b3's segments, though they match topic/partition/
+/// window, are no longer visible when the request names b1.
 #[test]
-fn fingerprints_merges_segments_across_backup_sets_sharing_a_topic_and_partition() {
-    let dir = unique_dir("fp-merge");
+fn fingerprints_are_scoped_to_the_requested_set_not_merged_across_sets() {
+    let dir = unique_dir("fp-scoped");
     // b1: orders/0, offsets 100..104 (none.kbak).
     let b1_manifest = format!(
         r#"{{"backup_id":"b1","created_at":0,"topics":[{{"name":"orders","partitions":[{{"partition_id":0,"segments":[
@@ -374,7 +436,9 @@ fn fingerprints_merges_segments_across_backup_sets_sharing_a_topic_and_partition
 
     // b3: SAME topic/partition, overlapping window, a DIFFERENT segment file
     // (zstd.kbak, which decodes to the identical 5 offsets/timestamps —
-    // different compression, same logical records).
+    // different compression, same logical records). Still present in the
+    // archive; the point of this test is that it must NOT be visible when
+    // the request names b1.
     const ZSTD_RELATIVE: &str = "b3/topics/orders/partition=0/segment-00000000000000000100.bin";
     let b3_manifest = format!(
         r#"{{"backup_id":"b3","created_at":0,"topics":[{{"name":"orders","partitions":[{{"partition_id":0,"segments":[
@@ -392,6 +456,7 @@ fn fingerprints_merges_segments_across_backup_sets_sharing_a_topic_and_partition
     let engine = engine_with("../../e2e/fixtures/fake-engine-clean.sh", store);
 
     let sel = SampleSelection {
+        set: b1_ref(),
         topic: "orders".into(),
         partition: 0,
         anchor: "head".into(),
@@ -399,11 +464,301 @@ fn fingerprints_merges_segments_across_backup_sets_sharing_a_topic_and_partition
         window: (1_756_425_600_000, 1_756_425_600_004),
     };
     let fps = engine.fingerprints(&sel).unwrap();
-    // 10, not 5: b1's and b3's segments both matched "orders"/0 with an
-    // overlapping window and were merged into one result set, exactly the
-    // ambiguity flagged in the report — a caller cannot tell from `fps` alone
-    // which backup set each fingerprint came from.
-    assert_eq!(fps.len(), 10);
+    // 5, not 10: b3's segments matched topic/partition/window too, under the
+    // pre-fix behaviour, but the request named b1's manifest specifically.
+    assert_eq!(fps.len(), 5);
+    assert_eq!(
+        fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        vec![100, 101, 102, 103, 104]
+    );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Hand-rolls a minimal, valid KBAK v1 segment (compression=none, no
+/// headers) matching the exact byte layout `kbak.rs` decodes — see its own
+/// SOURCE comment for the format. Local to this test file because proving
+/// `fingerprints()` reads from the CORRECT backup set (not merely returns the
+/// right COUNT) needs two segments that share offsets/timestamps but differ
+/// in content, which none of the checked-in `.kbak` fixtures do (they exist
+/// to prove decoding, not cross-set identity).
+fn make_kbak_segment(records: &[(i64, i64, &[u8], &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for &(offset, timestamp, key, value) in records {
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&timestamp.to_le_bytes());
+        rec.extend_from_slice(&offset.to_le_bytes());
+        rec.extend_from_slice(&(key.len() as i32).to_le_bytes());
+        rec.extend_from_slice(key);
+        rec.extend_from_slice(&(value.len() as i32).to_le_bytes());
+        rec.extend_from_slice(value);
+        rec.extend_from_slice(&0u16.to_le_bytes()); // header_count = 0
+        let total_len = rec.len() as u32;
+        body.extend_from_slice(&total_len.to_le_bytes());
+        body.extend_from_slice(&rec);
+    }
+    let start_offset = records.first().map(|r| r.0).unwrap_or(0);
+    let end_offset = records.last().map(|r| r.0).unwrap_or(0);
+    let mut out = Vec::new();
+    out.extend_from_slice(b"KBAK");
+    out.push(1u8); // version
+    out.push(0u8); // compression: none
+    out.extend_from_slice(&[0u8, 0u8]); // reserved
+    out.extend_from_slice(&(records.len() as u64).to_le_bytes());
+    out.extend_from_slice(&start_offset.to_le_bytes());
+    out.extend_from_slice(&end_offset.to_le_bytes());
+    assert_eq!(out.len(), 32, "HEADER_SIZE is 32");
+    out.extend_from_slice(&body);
+    let crc = crc32fast::hash(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(b"BKAE");
+    out
+}
+
+/// The test the coordinator asked for directly: two backup sets carrying the
+/// SAME offsets (200, 201) with DIFFERENT bytes. Proves `fingerprints()`
+/// returns the requested set's OWN content, not merely a same-sized result —
+/// scoping by manifest key, not by a coincidental record count.
+#[test]
+fn fingerprints_come_from_the_requested_set_when_two_sets_share_offsets_with_different_bytes() {
+    let dir = unique_dir("fp-identity");
+    const SEG_A: &str = "ba/topics/orders/partition=0/segment-00000000000000000200.bin";
+    const SEG_B: &str = "bb/topics/orders/partition=0/segment-00000000000000000200.bin";
+    let manifest_for = |backup_id: &str, key: &str| {
+        format!(
+            r#"{{"backup_id":"{backup_id}","created_at":0,"topics":[{{"name":"orders","partitions":[{{"partition_id":0,"segments":[
+        {{"key":"{key}","start_offset":200,"end_offset":201,"start_timestamp":200,"end_timestamp":201,"record_count":2}}
+        ]}}]}}]}}"#
+        )
+    };
+
+    std::fs::create_dir_all(dir.join("ba")).unwrap();
+    std::fs::write(dir.join("ba/manifest.json"), manifest_for("ba", SEG_A)).unwrap();
+    let seg_a_path = dir.join(SEG_A);
+    std::fs::create_dir_all(seg_a_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &seg_a_path,
+        make_kbak_segment(&[(200, 200, b"kA0", b"vA0"), (201, 201, b"kA1", b"vA1")]),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.join("bb")).unwrap();
+    std::fs::write(dir.join("bb/manifest.json"), manifest_for("bb", SEG_B)).unwrap();
+    let seg_b_path = dir.join(SEG_B);
+    std::fs::create_dir_all(seg_b_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &seg_b_path,
+        make_kbak_segment(&[(200, 200, b"kB0", b"vB0"), (201, 201, b"kB1", b"vB1")]),
+    )
+    .unwrap();
+
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let store = Store::read_only_from_url(&loc).unwrap();
+    let engine = engine_with("../../e2e/fixtures/fake-engine-clean.sh", store);
+
+    let sel_a = SampleSelection {
+        set: BackupSetRef {
+            backup_id: "ba".into(),
+            manifest_key: "ba/manifest.json".into(),
+        },
+        topic: "orders".into(),
+        partition: 0,
+        anchor: "head".into(),
+        count: 10,
+        window: (200, 201),
+    };
+    let sel_b = SampleSelection {
+        set: BackupSetRef {
+            backup_id: "bb".into(),
+            manifest_key: "bb/manifest.json".into(),
+        },
+        ..sel_a.clone()
+    };
+
+    let fps_a = engine.fingerprints(&sel_a).unwrap();
+    let fps_b = engine.fingerprints(&sel_b).unwrap();
+    assert_eq!(
+        fps_a.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
+    assert_eq!(
+        fps_b.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        vec![200, 201]
+    );
+
+    let expected_a0 =
+        logweir_kafka::fingerprint::record_fingerprint(Some(b"kA0"), Some(b"vA0"), &[], 200);
+    let expected_b0 =
+        logweir_kafka::fingerprint::record_fingerprint(Some(b"kB0"), Some(b"vB0"), &[], 200);
+    assert_eq!(fps_a[0].sha256, expected_a0);
+    assert_eq!(fps_b[0].sha256, expected_b0);
+    assert_ne!(
+        fps_a[0].sha256, fps_b[0].sha256,
+        "same offset, different bytes, must fingerprint differently"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- anchor / count semantics (Fix 2: previously read by nothing) ---
+
+/// Builds a small, self-contained archive: topic "orders", partition 0, ONE
+/// backup set ("hc" — "head/count"), 6 records at offsets 300..305 with
+/// distinguishable content, so head/tail/random selections are each
+/// unambiguous by offset.
+fn seed_anchor_archive(dir: &std::path::Path) -> BackupSetRef {
+    const SEG: &str = "hc/topics/orders/partition=0/segment-00000000000000000300.bin";
+    let manifest = format!(
+        r#"{{"backup_id":"hc","created_at":0,"topics":[{{"name":"orders","partitions":[{{"partition_id":0,"segments":[
+        {{"key":"{SEG}","start_offset":300,"end_offset":305,"start_timestamp":300,"end_timestamp":305,"record_count":6}}
+        ]}}]}}]}}"#
+    );
+    std::fs::create_dir_all(dir.join("hc")).unwrap();
+    std::fs::write(dir.join("hc/manifest.json"), manifest).unwrap();
+    let seg_path = dir.join(SEG);
+    std::fs::create_dir_all(seg_path.parent().unwrap()).unwrap();
+    let records: Vec<(i64, i64, &[u8], &[u8])> = (0..6)
+        .map(|i| {
+            let n = 300 + i;
+            (
+                n,
+                n,
+                KEYS[i as usize].as_bytes(),
+                VALUES[i as usize].as_bytes(),
+            )
+        })
+        .collect();
+    std::fs::write(&seg_path, make_kbak_segment(&records)).unwrap();
+    BackupSetRef {
+        backup_id: "hc".into(),
+        manifest_key: "hc/manifest.json".into(),
+    }
+}
+const KEYS: [&str; 6] = ["k0", "k1", "k2", "k3", "k4", "k5"];
+const VALUES: [&str; 6] = ["v0", "v1", "v2", "v3", "v4", "v5"];
+
+fn anchor_sel(set: BackupSetRef, anchor: &str, count: usize) -> SampleSelection {
+    SampleSelection {
+        set,
+        topic: "orders".into(),
+        partition: 0,
+        anchor: anchor.into(),
+        count,
+        window: (300, 305),
+    }
+}
+
+#[test]
+fn head_anchor_returns_the_earliest_count_records() {
+    let dir = unique_dir("anchor-head");
+    let set = seed_anchor_archive(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let fps = engine.fingerprints(&anchor_sel(set, "head", 3)).unwrap();
+    assert_eq!(
+        fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        vec![300, 301, 302]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tail_anchor_returns_the_latest_count_records() {
+    let dir = unique_dir("anchor-tail");
+    let set = seed_anchor_archive(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let fps = engine.fingerprints(&anchor_sel(set, "tail", 3)).unwrap();
+    assert_eq!(
+        fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        vec![303, 304, 305]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// "random" is a deterministic, evenly-spaced sample across the full sorted
+/// set (see `select_sample`'s doc comment in engine.rs for why): the first
+/// and last picks are always the earliest and latest available record
+/// (`idx(0) == 0` and `idx(count-1) == n-1` by construction), which is the
+/// property that matters — the sample spans the whole window rather than
+/// clustering at one end — not that it lands on any particular offset in
+/// between. 6 records, count 3: idx = i*5/2 for i in 0,1,2 -> 0, 2, 5.
+#[test]
+fn random_anchor_returns_a_bounded_evenly_spaced_sample() {
+    let dir = unique_dir("anchor-random");
+    let set = seed_anchor_archive(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let fps = engine.fingerprints(&anchor_sel(set, "random", 3)).unwrap();
+    let offsets: Vec<i64> = fps.iter().map(|f| f.offset).collect();
+    assert_eq!(offsets, vec![300, 302, 305]);
+    assert_eq!(
+        *offsets.first().unwrap(),
+        300,
+        "must include the earliest record"
+    );
+    assert_eq!(
+        *offsets.last().unwrap(),
+        305,
+        "must include the latest record"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn count_zero_returns_no_fingerprints() {
+    let dir = unique_dir("anchor-zero");
+    let set = seed_anchor_archive(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let fps = engine.fingerprints(&anchor_sel(set, "head", 0)).unwrap();
+    assert!(fps.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `count` bigger than what is available is not an error — every matching
+/// record comes back, regardless of anchor.
+#[test]
+fn count_larger_than_available_returns_everything() {
+    let dir = unique_dir("anchor-large-count");
+    let set = seed_anchor_archive(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let fps = engine.fingerprints(&anchor_sel(set, "tail", 1000)).unwrap();
+    assert_eq!(fps.len(), 6);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `anchor` is entirely Logweir-internal (never engine-reported), so an
+/// unrecognised value is a bug in the caller, not degraded data — and a
+/// scorecard cannot honestly claim an anchor that was never applied.
+#[test]
+fn an_unknown_anchor_is_an_operational_error() {
+    let dir = unique_dir("anchor-unknown");
+    let set = seed_anchor_archive(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let err = engine
+        .fingerprints(&anchor_sel(set, "bogus", 3))
+        .unwrap_err();
+    assert!(err.to_string().contains("bogus"));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -12,14 +12,12 @@ pub struct OsoCliEngine {
     workdir: PathBuf,
     /// Reads the archive: `list_backup_sets`, `describe` and `fingerprints`
     /// all go through this handle and only ever call `Store::get` /
-    /// `list_manifests` / `segment_keys_for` — never `put_create_only`.
+    /// `list_manifests` / `segment_keys_for_set` — never `put_create_only`.
     /// Nothing in this file writes evidence, so the caller should construct
     /// this engine with `Store::read_only_from_url` over the OSO archive
     /// location: `Store::from_url`'s `LOGWEIR_ROOT` guard (Global Constraint
     /// 6) would otherwise refuse to build a handle over the archive prefix at
-    /// all, since the archive is never under `logweir/`. See the module-level
-    /// note below and the "cross-set merging" note on `fingerprints` for what
-    /// this store's SCOPE means for that method.
+    /// all, since the archive is never under `logweir/`.
     store: crate::storage::Store,
 }
 
@@ -104,6 +102,14 @@ impl DataEngine for OsoCliEngine {
             // handle. v0.1 records that it EXISTS and what it hashes to; it
             // never restores offsets (spec §2 non-goals), so nothing else is
             // read out of it. Absent is normal, not an error.
+            // Task 12 fix: `Err(_) => None` used to map EVERY read failure —
+            // a 403, a timeout, a truncated read, genuine absence — onto the
+            // same `None`, so `consumer_group_snapshot_sha256: None` then
+            // flowed into the signed scorecard as a positive claim ("this
+            // artefact was never uploaded") the store never actually
+            // established. Only `StoreError::NotFound` means that; every
+            // other error propagates as `Operational`, matching the
+            // malformed-snapshot arm just below it, which already propagated.
             consumer_group_snapshot_sha256: {
                 let sibling = set
                     .manifest_key
@@ -119,7 +125,8 @@ impl DataEngine for OsoCliEngine {
                                 .map_err(|e| EngineError::Operational(format!("{sibling}: {e}")))?;
                         Some(logweir_core::ids::sha256_prefixed(&b))
                     }
-                    Err(_) => None,
+                    Err(crate::storage::StoreError::NotFound(_)) => None,
+                    Err(other) => return Err(other.into()),
                 }
             },
             topics: m
@@ -294,13 +301,26 @@ impl DataEngine for OsoCliEngine {
             &mut |stream, line| obs.engine_line(stream, line),
         )?;
         let finished_at = chrono::Utc::now();
-        self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
+        // Fix (post-review): exit code checked BEFORE the dropped-key check,
+        // not after. With the order reversed, a run that both dropped a key
+        // we rendered AND failed would return only the dropped-key error —
+        // losing the exit code and stderr, which are the more actionable,
+        // primary evidence for an outright failure. A run that dropped a key
+        // but otherwise EXITED 0 still gets the dropped-key error, from the
+        // `assert_no_dropped_logweir_key` call below.
+        //
+        // Fix (post-review): stdout is now included too, not just stderr —
+        // by this crate's own finding (see subprocess.rs), the engine's log
+        // lines (including a dropped-key warning, on the real binary) go to
+        // stdout, so a failure message carrying only stderr can omit the very
+        // line that explains the failure.
         if run.exit_code != 0 {
             return Err(EngineError::Operational(format!(
-                "kafka-backup restore exited {}: {}",
-                run.exit_code, run.stderr
+                "kafka-backup restore exited {}\nstdout: {}\nstderr: {}",
+                run.exit_code, run.stdout, run.stderr
             )));
         }
+        self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
         // `restore` has no --format and writes no report file; the exit code
         // is its only machine-readable signal, so every timing here is OURS.
         Ok(RestoreFacts {
@@ -312,30 +332,29 @@ impl DataEngine for OsoCliEngine {
     }
 
     fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        // KNOWN LIMITATION, carried forward rather than silently built on
-        // (see task report "cross-set merging" section): `SampleSelection`
-        // (logweir-core, Task 8a — not this task's file) carries no backup-set
-        // id, and `Store::segment_keys_for` (Task 12b) resolves topic/partition
-        // against EVERY manifest under this store's prefix. If two backup sets
-        // share a topic/partition with overlapping windows, their segments
-        // merge here with no way — at this trait boundary — to tell them
-        // apart. Fixing it needs either a `set` field on `SampleSelection` or a
-        // `Store` scoped to one backup set's own sub-prefix; both are changes
-        // to code outside this task's Files list (logweir-core's trait, or the
-        // as-yet-unwritten wiring that constructs this engine per drill run)
-        // and are left for whichever later task owns that call site.
-        let mut out = Vec::new();
-        for key in self
-            .store
-            .segment_keys_for(&sel.topic, sel.partition, sel.window)?
-        {
+        // Fix (post-review): scoped to `sel.set.manifest_key` via
+        // `segment_keys_for_set`, NOT the broad `segment_keys_for` — the
+        // latter resolves topic/partition against EVERY manifest under the
+        // store's prefix, so two backup sets sharing a topic/partition with
+        // an overlapping window would merge here, making the archive side a
+        // strict superset of what a real restore populated. That reads as a
+        // mismatch and fails a drill that actually succeeded — the worst
+        // direction for a product whose deliverable is a signed attestation.
+        // See `SampleSelection::set`'s doc comment (logweir-core).
+        let mut all = Vec::new();
+        for key in self.store.segment_keys_for_set(
+            &sel.set.manifest_key,
+            &sel.topic,
+            sel.partition,
+            sel.window,
+        )? {
             let (bytes, _) = self.store.get(&key)?;
             for r in crate::kbak::decode_segment(&bytes)? {
                 // Err(Unsupported) propagates
                 if r.timestamp < sel.window.0 || r.timestamp > sel.window.1 {
                     continue;
                 }
-                out.push(RecordFingerprint {
+                all.push(RecordFingerprint {
                     topic: sel.topic.clone(),
                     partition: sel.partition,
                     offset: r.offset,
@@ -348,7 +367,76 @@ impl DataEngine for OsoCliEngine {
                 });
             }
         }
-        out.sort_by_key(|f| f.offset);
-        Ok(out)
+        all.sort_by_key(|f| f.offset);
+        select_sample(all, &sel.anchor, sel.count)
+    }
+}
+
+/// Fix (post-review): `anchor` and `count` used to be read by nothing, so
+/// `fingerprints()` returned every matching record in the window regardless
+/// of what the caller (and the scorecard, which also records both fields —
+/// see `SampleSpec` in the Task 14 drill spec) asked for. A scorecard stating
+/// "head, 25 samples" while the comparison actually ran over every record in
+/// the window is a signed document describing a sample nobody took; on a
+/// real archive's volumes it is also an unbounded-memory read. `count` is a
+/// CAP (fewer matching records than `count` is not an error), never a promise
+/// of exactly that many.
+///
+/// `anchor` semantics chosen here (undocumented beyond "head | tail | random"
+/// at the type's own definition, and the Task 14 brief's "rotating across
+/// runs is the adopter's job" — which sets policy across MULTIPLE drill runs,
+/// not what a single call does):
+/// - `"head"`: the first `count` records by offset (lowest/earliest) in the
+///   window — Kafka's own convention for "head of the log".
+/// - `"tail"`: the last `count` records by offset (highest/latest).
+/// - `"random"`: a DETERMINISTIC, evenly-spaced ("systematic") sample across
+///   the full sorted set, not a seeded or unseeded RNG draw. Chosen over true
+///   randomness because the scorecard's audit trail is the concrete list of
+///   `RecordFingerprint`s it embeds, not a formula to regenerate them — an
+///   auditor verifies the offsets actually recorded, never re-derives which
+///   ones "should" have been picked — so genuine non-determinism buys nothing
+///   an evenly-spaced deterministic sample does not, while costing a new `rand`
+///   dependency and, more importantly, testability: this function's tests
+///   assert exact selections, which a true RNG draw cannot do.
+///
+/// Any other value is a bug in the caller (this field is entirely
+/// Logweir-internal, never engine-reported) and is reported as such rather
+/// than silently defaulting — a scorecard cannot honestly claim an anchor
+/// that was never actually applied.
+fn select_sample(
+    sorted: Vec<RecordFingerprint>,
+    anchor: &str,
+    count: usize,
+) -> Result<Vec<RecordFingerprint>, EngineError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if sorted.len() <= count {
+        return Ok(sorted);
+    }
+    match anchor {
+        "head" => Ok(sorted.into_iter().take(count).collect()),
+        "tail" => {
+            let start = sorted.len() - count;
+            Ok(sorted.into_iter().skip(start).collect())
+        }
+        "random" => {
+            let n = sorted.len();
+            let mut out: Vec<RecordFingerprint> = Vec::with_capacity(count);
+            for i in 0..count {
+                let idx = i * (n - 1) / (count - 1).max(1);
+                out.push(sorted[idx].clone());
+            }
+            // Defensive, not load-bearing under the current n > count
+            // guarantee (see the early return above): guards against a
+            // repeated index if the stride between two adjacent `i` values
+            // ever floors to the same integer, so `count` is honoured as a
+            // cap even if that arithmetic assumption is ever violated.
+            out.dedup_by_key(|f| f.offset);
+            Ok(out)
+        }
+        other => Err(EngineError::Operational(format!(
+            "unknown sample anchor `{other}`; expected `head`, `tail`, or `random`"
+        ))),
     }
 }
