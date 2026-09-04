@@ -9,13 +9,16 @@
 //! and produces NO unknown-key warning list, so a key we get wrong here is
 //! dropped SILENTLY (spec §7.2(b)). The stdout+stderr readback of Task 12 does not
 //! cover this document.
-use crate::render_restore::render_storage_block;
+use crate::render_restore::{render_storage_block, yaml_scalar};
 use logweir_core::engine::RestorePlan;
 
 pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str("# Rendered by logweir. Do not edit.\n");
-    s.push_str(&format!("backup_id: \"{}\"\n\n", plan.set.backup_id));
+    s.push_str(&format!(
+        "backup_id: {}\n\n",
+        yaml_scalar(&plan.set.backup_id)
+    ));
 
     // Same per-variant rendering as render_restore.rs, and for the same reason:
     // `StorageBackendConfig` is internally tagged with incompatible required
@@ -26,7 +29,7 @@ pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> S
 
     s.push_str("target:\n  bootstrap_servers:\n");
     for b in &plan.target_bootstrap {
-        s.push_str(&format!("    - {b}\n"));
+        s.push_str(&format!("    - {}\n", yaml_scalar(b)));
     }
     s.push('\n');
 
@@ -40,13 +43,16 @@ pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> S
     // `storage.prefix` EXPLICITLY rather than by default, because listing this
     // per-run prefix is the ONLY specified way to retrieve the report: the run
     // mints its report id internally and never prints it machine-readably
-    // (spec §6 C4).
+    // (spec §6 C4). `run_id` is escaped as part of the WHOLE composed value —
+    // not interpolated raw into an otherwise-unescaped line — so a `run_id`
+    // containing a newline or colon cannot split this into two lines either.
+    let evidence_prefix = format!("logweir/{run_id}/engine-validation");
     s.push_str("evidence:\n  formats:\n    - json\n  storage:\n");
-    s.push_str(&format!("    prefix: logweir/{run_id}/engine-validation\n"));
+    s.push_str(&format!("    prefix: {}\n", yaml_scalar(&evidence_prefix)));
     s.push_str("    retention_days: 2555\n");
 
     if let Some(t) = triggered_by {
-        s.push_str(&format!("\ntriggered_by: \"{t}\"\n"));
+        s.push_str(&format!("\ntriggered_by: {}\n", yaml_scalar(t)));
     }
     s
 }

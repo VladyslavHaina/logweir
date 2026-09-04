@@ -1,6 +1,6 @@
 ---
 source: crates/logweir-engine-oso/tests/render.rs
-expression: "render_validation::render(&plan(), \"01J9X2QK7C4V0R8YB3ZP6MTS5A\",\nSome(\"KPMG Q3\"))"
+expression: "render_validation::render(&plan(), \"01J9X2QK7C4V0R8YB3ZP6MTS5A\", None)"
 ---
 # Rendered by logweir. Do not edit.
 backup_id: "backup-2026-08-30T02:00:00Z"
@@ -32,5 +32,3 @@ evidence:
   storage:
     prefix: "logweir/01J9X2QK7C4V0R8YB3ZP6MTS5A/engine-validation"
     retention_days: 2555
-
-triggered_by: "KPMG Q3"
