@@ -50,6 +50,31 @@ fn a_backend_without_conditional_put_reports_create_only_enforced_false() {
     assert!(!out.create_only_enforced);
 }
 
+// Review FIX 4: the conditional_put=true path's AlreadyExists case
+// (`a_create_only_put_onto_an_existing_key_is_already_exists` above) is
+// produced by object_store's own `put_opts`, which never runs when
+// `conditional_put` is false — so it left the HEAD-then-PUT fallback's OWN
+// AlreadyExists branch (src/storage.rs, inside `put_create_only`, right after
+// the conditional_put block) completely uncovered. This proves that branch:
+// a second put to the same key in fallback mode is refused, not silently
+// overwritten. The gap this does NOT close — a TOCTOU window between the
+// HEAD and the PUT on a genuinely concurrent writer — is inherent to
+// HEAD-then-PUT and is exactly what `create_only_enforced: false` on the
+// first outcome exists to flag to anything building a scorecard from it;
+// see the fix report for why no further field was added.
+#[test]
+fn a_second_put_in_fallback_mode_is_refused_not_overwritten() {
+    let s = Store::in_memory_without_conditional_put("logweir");
+    let first = s.put_create_only("logweir/drills/a.json", b"{}").unwrap();
+    assert!(!first.create_only_enforced);
+    match s.put_create_only("logweir/drills/a.json", b"{\"x\":1}") {
+        Err(StoreError::AlreadyExists(k)) => assert!(k.contains("a.json")),
+        other => panic!("a second fallback put must be AlreadyExists, got {other:?}"),
+    }
+    // and the first bytes are still there — never clobbered
+    assert_eq!(s.get("logweir/drills/a.json").unwrap().0, b"{}");
+}
+
 // A2: renamed from `segment_keys_for_filters_by_the_time_window` — this test
 // covers the pure helper `segment_keys_from`, not the manifest-resolving
 // `segment_keys_for` the Interfaces block promises to Task 12.
@@ -82,21 +107,45 @@ fn fifty_sequential_puts_share_one_runtime() {
     assert_eq!(s.get("logweir/k49").unwrap().0, b"x");
 }
 
-// A2: the Interfaces-block method Task 12's `fingerprints()` actually calls —
-// resolves topic/partition against a manifest and delegates the overlap test
-// to `segment_keys_from`.
+// A2, corrected after review FIX 1: the Interfaces-block method Task 12's
+// `fingerprints()` actually calls — resolves topic/partition against a
+// manifest and delegates the overlap test to `segment_keys_from`.
+//
+// The manifest body below uses upstream's REAL prefix-relative key form —
+// `{backup_id}/topics/{topic}/partition={n}/segment-{offset:020}.bin{ext}`
+// [VERIFIED U/kafka-backup/crates/kafka-backup-core/src/backup/engine.rs:
+// 1436-1442] — never the fully-qualified form this test used to seed, which
+// let `segment_keys_for` return the manifest's relative key unqualified and
+// still pass. `s.get(&got[0])` below is the regression guard: it proves the
+// returned key is one `get` can actually resolve, not merely a string that
+// looks right.
 #[test]
 fn segment_keys_for_resolves_topic_partition_against_the_manifest() {
-    let s = Store::in_memory("logweir/");
+    let s = Store::in_memory("logweir");
     let manifest = br#"{"topics":[{"name":"orders","partitions":[{"partition_id":0,"segments":[
-        {"key":"logweir/sets/b1/orders-0/000.kbak","start_timestamp":0,"end_timestamp":10},
-        {"key":"logweir/sets/b1/orders-0/001.kbak","start_timestamp":100,"end_timestamp":200}]}]}]}"#;
-    s.put_create_only("logweir/sets/b1/manifest.json", manifest)
+        {"key":"b1/topics/orders/partition=0/segment-00000000000000000000.bin.zst","start_timestamp":0,"end_timestamp":10},
+        {"key":"b1/topics/orders/partition=0/segment-00000000000000000100.bin.zst","start_timestamp":100,"end_timestamp":200}]}]}]}"#;
+    s.put_create_only("logweir/b1/manifest.json", manifest)
         .unwrap();
+    // The bytes actually live at the FULLY QUALIFIED key — `prefix` ("logweir")
+    // plus the manifest's relative key — exactly as `S3Backend::full_path`
+    // would place them on a real backend.
+    s.put_create_only(
+        "logweir/b1/topics/orders/partition=0/segment-00000000000000000100.bin.zst",
+        b"segment-bytes",
+    )
+    .unwrap();
+
+    let got = s.segment_keys_for("orders", 0, (50, 300)).unwrap();
     assert_eq!(
-        s.segment_keys_for("orders", 0, (50, 300)).unwrap(),
-        vec!["logweir/sets/b1/orders-0/001.kbak".to_string()]
+        got,
+        vec![
+            "logweir/b1/topics/orders/partition=0/segment-00000000000000000100.bin.zst".to_string()
+        ]
     );
+    // Proves the returned key resolves, not just that it string-matches.
+    assert_eq!(s.get(&got[0]).unwrap().0, b"segment-bytes");
+
     assert!(s
         .segment_keys_for("payments", 0, (50, 300))
         .unwrap()

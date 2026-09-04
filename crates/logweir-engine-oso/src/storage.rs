@@ -273,6 +273,33 @@ impl Store {
             .collect()
     }
 
+    /// Qualifies a manifest-relative key into the fully-qualified key
+    /// `get`/`list_manifest_keys` operate on.
+    ///
+    /// Upstream stores every key a manifest carries — `manifest_key` itself
+    /// (`{backup_id}/manifest.json` [VERIFIED
+    /// U/kafka-backup/crates/kafka-backup-core/src/backup/engine.rs:1599]) and
+    /// every segment key (`{backup_id}/topics/{topic}/partition={n}/
+    /// segment-{offset:020}.bin{ext}` [VERIFIED .../backup/engine.rs:1436-1442])
+    /// — RELATIVE to the configured prefix, prepending that prefix only at the
+    /// storage boundary (`S3Backend::full_path` [VERIFIED
+    /// .../storage/s3.rs:101-104]: `format!("{}/{}", prefix.trim_end_matches('/'),
+    /// key)`). `list_manifest_keys` and `get` in THIS file already operate in
+    /// the fully-qualified space — the `prefix` handed to `object_store::list`
+    /// IS the search root — so a key read out of a manifest BODY must be
+    /// qualified the same way before `get` can resolve it. Fixed after a
+    /// review found `segment_keys_for` passing the manifest's relative key
+    /// straight through: a real archive at `s3://bucket` with a non-empty
+    /// `prefix` would have every returned segment key 404 in `get`, reporting
+    /// a present backup's segments as missing.
+    fn qualify(&self, relative_key: &str) -> String {
+        if self.prefix.is_empty() {
+            relative_key.to_string()
+        } else {
+            format!("{}/{}", self.prefix.trim_end_matches('/'), relative_key)
+        }
+    }
+
     /// The Interfaces-block method Task 12's `fingerprints()` calls. Resolves
     /// `topic`/`partition` against every manifest under this store's prefix and
     /// returns the segment keys whose [start_timestamp, end_timestamp] overlaps
@@ -282,7 +309,10 @@ impl Store {
     /// BackupManifest`: Task 12b executes BEFORE Task 12, so the vendored types
     /// do not exist yet. The three field paths read here — topics[].name,
     /// .partitions[].partition_id, .segments[].{key,start_timestamp,
-    /// end_timestamp} — are the same ones Task 12's `describe()` maps.
+    /// end_timestamp} — are the same ones Task 12's `describe()` maps. Each
+    /// `key` is manifest-relative (see `qualify`) and is qualified into this
+    /// store's key space before being returned, so the caller can `get` it
+    /// directly.
     pub fn segment_keys_for(
         &self,
         topic: &str,
@@ -327,7 +357,7 @@ impl Store {
                                 "{mk}: segment entry missing key/start_timestamp/end_timestamp"
                             )));
                         };
-                        segs.push((k.to_string(), t0, t1));
+                        segs.push((self.qualify(k), t0, t1));
                     }
                 }
             }
@@ -383,7 +413,25 @@ impl Store {
                     }
                     // The backend does not implement conditional put. Fall
                     // through to HEAD-then-PUT and RECORD that we did.
-                    Err(object_store::Error::NotSupported { .. }) => {}
+                    //
+                    // Two distinct object_store variants mean this, not one:
+                    // `NotSupported` is what a backend that never implements
+                    // conditional put at all would return (object_store 0.14.1
+                    // only actually produces it for copy-if-not-exists
+                    // [VERIFIED object_store-0.14.1/src/aws/mod.rs:399]).
+                    // `NotImplemented` is what `AmazonS3` ACTUALLY returns for
+                    // `PutMode::Create` when `AWS_CONDITIONAL_PUT=disabled` (or
+                    // the equivalent builder config) — reachable through
+                    // `AmazonS3Builder::from_env()` on a real S3-compatible
+                    // endpoint [VERIFIED
+                    // object_store-0.14.1/src/aws/mod.rs:186-192]. Without this
+                    // arm the put fails closed with `StoreError::Io` instead of
+                    // falling back — safe, but it means
+                    // `create_only_enforced: false` could only ever be
+                    // observed against the in-memory test double, never
+                    // against the real backend this fallback exists for.
+                    Err(object_store::Error::NotSupported { .. })
+                    | Err(object_store::Error::NotImplemented { .. }) => {}
                     Err(e) => return Err(StoreError::Io(e.to_string())),
                 }
             }

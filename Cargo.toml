@@ -1,36 +1,45 @@
-# `Cargo.lock` carries deliberate `cargo update -p <pkg> --precise <version>`
-# pins below the newest resolvable version, none of them reflected in any
+# `Cargo.lock` carries six `cargo update -p <pkg> --precise <version>` pins
+# below the newest resolvable version, none of them reflected in any
 # `[dependencies]`/`[workspace.dependencies]` entry here (they are all
-# TRANSITIVE). All six were pinned while this workspace's toolchain
-# (`rust-toolchain.toml`, CI's `dtolnay/rust-toolchain@1.82.0`) was rustc
-# 1.82.0, which could not parse Rust edition 2024 and enforced an MSRV floor on
-# every crate it builds. A bare `cargo update` must never be run — it would
-# float every one of these back to a version that will not build on the
-# lowest toolchain this workspace still needs to support:
-#   indexmap  2.13.1              (later releases move to edition2024)
-#   wasip2    1.0.0+wasi-0.2.4    (later releases move to edition2024)
-#   base64ct  1.7.3               (later releases move to edition2024)
-#   zeroize   1.8.2               (later releases move to edition2024)
-#   clap      4.5.40              (later releases move to edition2024)
-#   jobserver 0.1.34              (0.1.35 declares rust-version = "1.85";
-#                                  pulled in transitively by `cc`, via
-#                                  `zstd-sys`'s build script, once Task 9
-#                                  added `zstd` as a dependency)
+# TRANSITIVE):
+#   indexmap  2.13.1
+#   wasip2    1.0.0+wasi-0.2.4
+#   base64ct  1.7.3
+#   zeroize   1.8.2
+#   clap      4.5.40
+#   jobserver 0.1.34
 # The first five predate Task 9 (see task-1-report.md in the SDD tracking
 # directory for how each was found); `jobserver` was added by Task 9's own
-# fix pass.
+# fix pass. All six were pinned against rustc 1.82.0 (this workspace's
+# toolchain at the time): their newest-at-the-time releases either declared
+# `edition = "2024"`, which 1.82.0 could not parse at all, or (`jobserver`
+# 0.1.35) an explicit `rust-version = "1.85"` above the 1.82 floor.
 #
-# Task 12b (addendum ruling A5) bumped the toolchain pin itself from 1.82.0 to
-# 1.89.0 — object_store 0.14's aws+azure+gcp+http dependency tree requires
+# STATUS AS OF THE 1.89.0 MSRV BUMP (Task 12b, addendum ruling A5 — see
+# below): **none of these six pins are load-bearing anymore.** Each was
+# individually floated to its newest version and `cargo check --workspace`
+# run against it, one at a time, then reverted; all six now build cleanly on
+# 1.89.0 — the edition2024 and 1.85-floor reasons above have both evaporated
+# at the current toolchain. They are left pinned here regardless: letting
+# all six float at once is a separate lockfile-hygiene decision (re-verify
+# each individually, update this comment, drop the ones that no longer need
+# a precise pin) that no task has taken on, so `Cargo.lock` keeps the exact
+# versions above until that cleanup happens. A bare `cargo update` must
+# still never be run without that re-verification — it would float these
+# (and everything else) in one uncontrolled step.
+#
+# Task 12b (addendum ruling A5) bumped the toolchain pin itself from 1.82.0
+# to 1.89.0 — object_store 0.14's aws+azure+gcp+http dependency tree requires
 # edition2024 (stable since 1.85) AND, once that resolved, `crc-fast` /
 # `icu_*` / `idna_adapter` report an MSRV floor as high as 1.89. Global
 # Constraint 9 fixes the object_store crate, version and feature set, so per
-# A5 the toolchain is what yields, never object_store. This did NOT remove
-# any of the six pins above: none of them needed a precise pin to resolve
-# under object_store's tree (all six still hold, unchanged, on 1.89.0), and
-# re-evaluating whether 1.89.0 lets any of them float free of their pin is
-# out of this task's scope. If a new dependency drags in another edition2024
-# or MSRV-floor crate, pin it the same way and add it to this list.
+# A5 the toolchain is what yields, never object_store.
+#
+# If a new dependency drags in another edition2024 or MSRV-floor crate above
+# whatever this workspace's toolchain is AT THE TIME, pin it the same way and
+# add it to the list above, noting the toolchain version it was pinned
+# against so a future MSRV bump can re-check it the same way this comment
+# just did.
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask", "e2e"]
