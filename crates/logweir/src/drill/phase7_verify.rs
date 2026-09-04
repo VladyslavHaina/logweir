@@ -547,6 +547,17 @@ fn roll_up(verdicts: &[SelectionVerdict]) -> Integrity {
     // "pass_rate_measured set implies level == byte-fingerprint", and keeps
     // a zero denominator null rather than NaN (`to_deterministic_json`
     // refuses non-finite floats).
+    // NOTE for anyone mutating this line (Task 19 round 3, third pass): its
+    // value is only ever CONSULTED when no selection was downgraded, because
+    // the `level == ByteFingerprint` conjunct below short-circuits first and
+    // `level` is `ConsumeOnly` whenever any selection carries a `downgrade`.
+    // A mutant that makes this predicate skip downgraded selections — or that
+    // makes `records_conclusive` auto-true for them — is therefore
+    // PROVABLY EQUIVALENT, not an untested gap: on the only inputs that can
+    // reach the `&&`'s right-hand side, no selection is downgraded and the
+    // two forms coincide. That equivalence rests on the ordering of this
+    // conjunction, so if the `level` guard is ever moved, weakened or
+    // reordered, this predicate becomes observable and needs its own test.
     let whole_sample_reconciled = verdicts.iter().all(SelectionVerdict::records_conclusive);
     let pass_rate_measured =
         if level == IntegrityLevel::ByteFingerprint && whole_sample_reconciled && sampled > 0 {
@@ -1499,6 +1510,148 @@ mod tests {
             },
         )]);
         assert_eq!(failed.result, IntegrityResult::Fail);
+    }
+
+    /// Task 19 fix round 3, third pass (coordinator's surviving mutant M3).
+    /// The mutant was
+    ///
+    /// ```text
+    /// - verdicts.iter().any(SelectionVerdict::failed)
+    /// + verdicts.iter().filter(|v| v.downgrade.is_none()).any(SelectionVerdict::failed)
+    /// ```
+    ///
+    /// and it changed nothing any test observed. Sized honestly, it is NOT a
+    /// fifth false-pass door: `Evidence`'s three variants are mutually
+    /// exclusive, so a `Failed` selection is never `Verified`,
+    /// `all(fully_verified)` still fails, and the result degrades to
+    /// `Partial`. `Pass` stays unreachable and the chokepoint holds.
+    ///
+    /// What it exposed is the LANE ASYMMETRY round 3 exists to close,
+    /// surviving in the one direction nobody probed: "a `Failed` selection
+    /// produces `Fail` no matter which lane it is on" was never asserted for
+    /// a DOWNGRADED selection. Under the mutant, a consume-only selection
+    /// examined and found WRONG reports `Partial` — "we could not fully check
+    /// this" — instead of `Fail` — "we checked, and it is wrong". Those say
+    /// materially different things to an auditor, and reporting the second as
+    /// the first understates a real, demonstrated failure.
+    ///
+    /// Both lanes of a downgraded selection are covered here, and they are
+    /// NOT equally reachable — worth stating, because the difference is the
+    /// reason this gap matters in production rather than only in theory:
+    ///
+    /// - The SEGMENT lane is genuinely reachable. `verdict_for_selection`
+    ///   calls `segment_evidence` BEFORE it matches on the archive mode, so
+    ///   it runs on every lane, and it can return `Failed` (a sha256 mismatch
+    ///   against the manifest). A pre-0.21 / KBAK-level-1 archive whose
+    ///   segment bytes do not match its own manifest is exactly that case,
+    ///   and it is pinned end to end by `verify_phase.rs`'s
+    ///   `a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_partial`.
+    /// - The RECORD lane is currently unreachable: the `Unsupported` arm of
+    ///   `verdict_for_selection` constructs only `Verified` and `Unverified`,
+    ///   never `Failed`, because consume-only asserts nothing about record
+    ///   contents and so cannot find them wrong. It is asserted anyway, as a
+    ///   property of `roll_up` rather than of today's callers — `roll_up` is
+    ///   the chokepoint, and a chokepoint that is only correct for the inputs
+    ///   its present callers happen to produce is not a chokepoint.
+    #[test]
+    fn a_failed_selection_reports_fail_on_every_lane_including_a_downgraded_one() {
+        // Reachable: the segment lane failed on a downgraded selection.
+        let mut segment_failed = verdict(
+            "orders/0",
+            Evidence::Failed {
+                why: "segment sha256 mismatch against the manifest".into(),
+            },
+            Evidence::Verified { checked: 10 },
+        );
+        segment_failed.downgrade = Some("kbak level below the gate".into());
+        segment_failed.reconciled = None;
+        let integrity = roll_up(&[segment_failed]);
+        assert_eq!(
+            integrity.result,
+            IntegrityResult::Fail,
+            "a downgraded selection that was EXAMINED AND FOUND WRONG is a Fail, not a \
+             Partial; `Partial` would tell an auditor the drill could not check this, which \
+             is the opposite of what happened — got {integrity:?}"
+        );
+        assert_eq!(integrity.level, IntegrityLevel::ConsumeOnly);
+
+        // Defensive: the record lane failed on a downgraded selection.
+        let mut record_failed = verdict(
+            "orders/0",
+            Evidence::Verified { checked: 1 },
+            Evidence::Failed {
+                why: "records did not reconcile".into(),
+            },
+        );
+        record_failed.downgrade = Some("kbak level below the gate".into());
+        record_failed.reconciled = None;
+        assert_eq!(roll_up(&[record_failed]).result, IntegrityResult::Fail);
+
+        // And a failed DOWNGRADED selection still outranks a healthy sibling,
+        // so the whole-drill verdict cannot be rescued by averaging.
+        let mut mixed = verdict(
+            "orders/0",
+            Evidence::Failed {
+                why: "segment sha256 mismatch against the manifest".into(),
+            },
+            Evidence::Verified { checked: 10 },
+        );
+        mixed.downgrade = Some("kbak level below the gate".into());
+        mixed.reconciled = None;
+        let integrity = roll_up(&[
+            mixed,
+            verdict(
+                "payments/0",
+                Evidence::Verified { checked: 1 },
+                Evidence::Verified { checked: 10 },
+            ),
+        ]);
+        assert_eq!(integrity.result, IntegrityResult::Fail);
+    }
+
+    /// The signed sample counters key on `reconciled.is_some()` and on
+    /// NOTHING else — the rule `roll_up`'s own comment and the module doc both
+    /// state ("they aggregate over EXACTLY the selections whose records were
+    /// reconciled against archive fingerprints").
+    ///
+    /// Found while auditing siblings of the coordinator's M3: slipping a
+    /// `.filter(|v| v.downgrade.is_none())` in front of the counters' own
+    /// `filter_map(|v| v.reconciled)` changed nothing any test observed. That
+    /// mutant is equivalent TODAY, but only by a coupling to a different
+    /// function: `verdict_for_selection`'s `Unsupported` arm happens to pass
+    /// `reconciled = None`, so `downgrade.is_some()` currently implies
+    /// `reconciled.is_none()`. It is not equivalent by any logic inside
+    /// `roll_up`. Should a future lane ever downgrade a selection while still
+    /// reconciling part of it, the mutated form would silently drop real
+    /// reconciliations out of counters Task 20 SIGNS, under-reporting
+    /// `records_sampled` while `partial_reason` still named the selection —
+    /// a signed document disagreeing with itself.
+    ///
+    /// So the documented rule is pinned as stated, on the axis it is stated
+    /// on, rather than left resting on a neighbour's current behaviour.
+    #[test]
+    fn the_signed_counters_key_on_reconciled_alone_never_on_the_downgrade_flag() {
+        // Deliberately NOT a shape `verdict_for_selection` builds today: a
+        // downgraded selection that nonetheless carries reconciliation
+        // counts. `roll_up` is the chokepoint, and its contract must hold for
+        // the inputs it DECLARES, not merely for the ones today's single
+        // caller happens to produce.
+        let mut downgraded_but_reconciled = verdict(
+            "orders/0",
+            Evidence::Verified { checked: 1 },
+            Evidence::Verified { checked: 10 },
+        );
+        downgraded_but_reconciled.downgrade = Some("kbak level below the gate".into());
+        downgraded_but_reconciled.reconciled = Some((7, 5));
+
+        let integrity = roll_up(&[downgraded_but_reconciled]);
+        assert_eq!(
+            integrity.records_sampled, 7,
+            "a selection carrying reconciliation counts contributes them to the signed \
+             counters; the downgrade flag governs the LEVEL, never what was counted"
+        );
+        assert_eq!(integrity.records_sampled_matching, 5);
+        assert_eq!(integrity.mismatches, 2);
     }
 
     /// `roll_up` must not branch on `level`: a consume-only selection reaches

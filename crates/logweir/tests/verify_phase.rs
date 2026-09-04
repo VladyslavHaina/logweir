@@ -2628,3 +2628,80 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
         .expect("partial must carry a reason")
         .contains("before 0.21"));
 }
+
+/// Task 19 fix round 3, third pass — the REACHABLE half of the coordinator's
+/// surviving mutant M3, driven through the full `run`.
+///
+/// `verdict_for_selection` calls `segment_evidence` BEFORE it matches on the
+/// archive mode, so the segment sha256 check runs on every lane — including
+/// consume-only. A pre-0.21 / KBAK-level-1 archive whose segment bytes do not
+/// match its own manifest is therefore a real production path on which a
+/// DOWNGRADED selection is `Evidence::Failed`.
+///
+/// The records here reconcile perfectly and the target returns everything the
+/// manifest claims, so the record lane is `Verified` and the `Fail` is
+/// attributable to the segment lane alone. Under M3 — which filtered
+/// downgraded selections out of `roll_up`'s `any(failed)` — this reported
+/// `Partial` ("the drill could not fully check this") for an archive the
+/// drill HAD checked and found corrupt. Partial and Fail are not
+/// interchangeable in a signed document.
+#[test]
+fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_partial() {
+    let (store, _real_sha) = store_with_matching_segment();
+    // The manifest claims a sha256 the stored segment bytes do not hash to.
+    let facts = facts_with_segment(&format!("sha256:{}", "0".repeat(64)));
+    let (_, cons) = fixtures::matching_pair(50);
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [(
+            "orders/0".to_string(),
+            Err("kbak level 1 (pre-0.21)".to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let reader = MapReader {
+        topics: [target("drill-orders", vec![(0, 50)], cons)]
+            .into_iter()
+            .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+    )
+    .expect("a corrupt archive segment is a DRILL RESULT, never an Err");
+
+    assert_eq!(
+        out.integrity.result,
+        IntegrityResult::Fail,
+        "the segment sha256 did not match the manifest — the drill EXAMINED this archive and \
+         found it wrong. Reporting that as Partial would tell an auditor the opposite: that \
+         the drill could not check it. Got {:?}",
+        out.integrity
+    );
+    assert_eq!(
+        out.integrity.level,
+        IntegrityLevel::ConsumeOnly,
+        "the archive is still unsupported, so the LEVEL is still the weakest claim available \
+         — a downgraded lane may weaken the claim, never the verdict"
+    );
+    // The record lane was healthy: 50 records back, all the manifest claims.
+    // So the Fail is attributable to the segment lane alone.
+    assert_eq!(out.records_restored, 50);
+    let reason = out
+        .integrity
+        .partial_reason
+        .expect("the failure and the downgrade must both be named");
+    assert!(reason.contains("orders/0"), "{reason:?}");
+    assert!(
+        reason.contains("sha256 mismatch"),
+        "the reason must say the archive was found WRONG, not merely unchecked: {reason:?}"
+    );
+}
