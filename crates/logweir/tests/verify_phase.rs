@@ -571,8 +571,21 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
 /// An unsupported KBAK level, driven through the FULL `run` (not just the
 /// fixture constructor Step 1 already tests): the drill still consumes and
 /// reports `records_restored`, but samples nothing and the pass rate stays
-/// null. Also proves `consume_all` still runs (and still applies the
-/// mapping) on the consume-only branch.
+/// null. Also proves `verdict_for_selection` still consumes (and still
+/// applies the mapping) on the consume-only branch.
+///
+/// Task 19 fix round 3: `partial_reason` is now asserted by CONTAINMENT, not
+/// equality. Round 2 emitted the engine's bare reason ("kbak level below the
+/// gate") as the whole string; round 3 prefixes every reason with the
+/// selection it belongs to, because a whole-backup-set reason is exactly what
+/// let one selection's downgrade speak for every other one (the fifth
+/// reproduction). The engine's own words are still carried through verbatim —
+/// that part of the premise is unchanged and is still asserted.
+///
+/// The result assertion is NEW and is the fourth door's headline: this drill
+/// reaches `Pass` only because the target actually gave back at least the 50
+/// records the manifest claims for this selection. Consume-only is a weaker
+/// CLAIM (`level` says so, and `pass_rate` stays null), never a weaker CHECK.
 #[test]
 fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
     let (store, sha) = store_with_matching_segment();
@@ -619,8 +632,25 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
     assert_eq!(out.pass_rate(), None);
     assert_eq!(out.records_restored, 50);
     assert_eq!(
-        out.integrity.partial_reason.as_deref(),
-        Some("kbak level below the gate")
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "the target gave back all 50 records the manifest claims, which is the whole of the \
+         consume-only claim — got {:?}",
+        out.integrity
+    );
+    let reason = out
+        .integrity
+        .partial_reason
+        .as_deref()
+        .expect("the downgrade must be named, even on a pass");
+    assert!(
+        reason.contains("kbak level below the gate"),
+        "the engine's own reason must reach the signed document verbatim: {reason:?}"
+    );
+    assert!(
+        reason.contains("orders/0"),
+        "the downgrade must name the selection it applies to, never the whole backup set: \
+         {reason:?}"
     );
 }
 
@@ -648,16 +678,18 @@ fn run_rejects_a_verify_request_with_zero_sample_selections() {
     assert!(err.to_string().contains("zero sample selections"));
 }
 
-/// THE topic-rename mapping test for `consume_all`. `MapReader` registers the
-/// ARCHIVE-side name "orders" as present but EMPTY, and the mapped TARGET-side
-/// name "drill-orders" with the real, matching records. If `consume_all` ever
+/// THE topic-rename mapping test for `verdict_for_selection`. `MapReader`
+/// registers the ARCHIVE-side name "orders" as present but EMPTY, and the
+/// mapped TARGET-side name "drill-orders" with the real, matching records.
+/// If `verdict_for_selection` ever
 /// read `sel.topic` ("orders") directly instead of `mapping[&sel.topic]`
 /// ("drill-orders"), the canary would see 50 archive fingerprints against 0
 /// consumed records — every one reported "absent from the target" — and this
 /// assertion would fail. This is where the mapping is applied for the canary
-/// comparison: `crates/logweir/src/drill/phase7_verify.rs`'s `consume_all`.
+/// comparison: `crates/logweir/src/drill/phase7_verify.rs`'s
+/// `verdict_for_selection`, via its `mapped_topic` call.
 #[test]
-fn consume_all_reads_the_mapped_target_topic_never_the_archive_name() {
+fn verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name() {
     let (store, sha) = store_with_matching_segment();
     let facts = facts_with_segment(&sha);
     let (archive, cons) = fixtures::matching_pair(50);
@@ -919,7 +951,7 @@ fn distinct_matching_pair(tag: &str, n: usize) -> (Vec<RecordFingerprint>, Vec<C
     (arch, cons)
 }
 
-/// Proves `probe_archive_mode`, `consume_and_reconcile` and
+/// Proves `probe_archive_modes`, `verdict_for_selection` and
 /// `classify_parity_all` all aggregate ACROSS every entry in
 /// `sel`/`mapping` rather than only the first — a mutant that stopped after
 /// the first selection, or that folded `classify_parity` over only one
@@ -1059,8 +1091,8 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
     let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
 
     assert_eq!(out.integrity.result, IntegrityResult::Pass);
-    // 25 + 25: wrong (25) if either `probe_archive_mode` or
-    // `consume_and_reconcile` ever stopped after the first selection.
+    // 25 + 25: wrong (25) if either `probe_archive_modes` or `run`'s own
+    // per-selection verdict loop ever stopped after the first selection.
     assert_eq!(out.integrity.records_sampled, 50);
     assert_eq!(out.integrity.records_sampled_matching, 50);
     assert_eq!(out.records_restored, 50);
@@ -1440,9 +1472,87 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         IntegrityResult::Partial,
         "zero sampled records must never report Pass, and is a different case from ConsumeOnly"
     );
-    assert!(out.integrity.partial_reason.is_some());
+    // Task 19 fix round 3: the reason is asserted by CONTENT, not merely
+    // `is_some()`. "Compared nothing" and "compared less than claimed" are
+    // different findings that an auditor must be able to tell apart in the
+    // signed document, and a bare `is_some()` let a mutant collapsing the
+    // zero case into the short-sample wording survive with nothing red.
+    assert!(
+        out.integrity
+            .partial_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("zero archive fingerprints")),
+        "the reason must say the comparison sampled NOTHING, not merely that something was \
+         wrong: {:?}",
+        out.integrity.partial_reason
+    );
     assert_eq!(out.integrity.records_sampled, 0);
     assert_eq!(out.pass_rate(), None);
+}
+
+/// The consume-only lane's own SHORT case — the counterpart to
+/// `a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_successful_sample`,
+/// which exercises the byte-fingerprint lane only.
+///
+/// Found by mutation: dropping `records_restored >= claimed` from the
+/// consume-only lane's positive predicate left every test in this suite
+/// green, because nothing drove a consume-only selection to a read-back that
+/// was non-empty but SHORT. That is "compared less than claimed" reaching
+/// `Pass` on a lane — the fourth door's exact shape, one guard over. The
+/// manifest claims 50 records for this selection and the target hands back 5.
+#[test]
+fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_successful_sample() {
+    let (store, sha) = store_with_matching_segment();
+    let facts = facts_with_segment(&sha); // one segment, record_count 50
+    let (_, mut cons) = fixtures::matching_pair(50);
+    cons.truncate(5); // 90% of the claimed records never came back
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [(
+            "orders/0".to_string(),
+            Err("kbak level 1 (pre-0.21)".to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let reader = MapReader {
+        topics: [target("drill-orders", vec![(0, 5)], cons)]
+            .into_iter()
+            .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(), // count 50
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+    )
+    .expect("an under-delivering target is a DRILL RESULT, never an Err");
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "5 records back against a manifest claim of 50 leaves 45 unaccounted for; \
+         consume-only is a weaker CLAIM, never a weaker CHECK — got {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    assert_eq!(out.integrity.level, IntegrityLevel::ConsumeOnly);
+    assert_eq!(out.records_restored, 5);
+    let reason = out
+        .integrity
+        .partial_reason
+        .expect("partial must carry a reason");
+    assert!(reason.contains("orders/0"), "{reason:?}");
+    assert!(
+        reason.contains("gave back 5 records") && reason.contains("claims 50"),
+        "the reason must name BOTH the shortfall and the claim, so an auditor can size it: \
+         {reason:?}"
+    );
 }
 
 /// Review finding r13 (surviving mutant): the per-partition consume cap.
@@ -1482,7 +1592,7 @@ impl ClusterReader for SpyReader {
 }
 
 #[test]
-fn consume_and_reconcile_caps_the_read_at_the_selections_own_count() {
+fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
     let (store, sha) = store_with_matching_segment();
     let facts = facts_with_segment(&sha);
     // 40 records actually available on the target...
@@ -1526,7 +1636,7 @@ fn consume_and_reconcile_caps_the_read_at_the_selections_own_count() {
     assert_eq!(
         seen.first().copied(),
         Some(7),
-        "consume_and_reconcile's own consume_range call must use the SELECTION's own count \
+        "verdict_for_selection's own consume_range call must use the SELECTION's own count \
          (7), not the target's actual size (40) or an unbounded cap: saw {seen:?}"
     );
     assert!(
@@ -1810,4 +1920,711 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
     assert_eq!(out.integrity.records_sampled_matching, 20);
     assert_eq!(out.integrity.mismatches, 0);
     assert_eq!(out.pass_rate(), Some(1.0));
+}
+
+// ===========================================================================
+// Task 19 fix round 3 — THE FIVE REPRODUCTIONS.
+//
+// Five independent reviewers each produced an EXECUTED reproduction of the
+// same critical defect: phase 7 signing `Pass` over a restore it had not
+// actually checked. Rounds 1 and 2 each closed the lane their own defect was
+// found in and left another open. These five tests are the regression suite
+// for that defect, one named test per reproduction, each driven through the
+// FULL `run` (never through a helper in isolation) because every one of the
+// four shipped doors was in `run`'s own wiring rather than in a leaf.
+//
+// Each test states the OLD (broken) observation in its doc comment and
+// asserts the new one, so a future reader can tell at a glance what the test
+// is defending and what it looked like when it was wrong.
+
+/// A `DataEngine` answering per SELECTION (`"topic/partition"`), able to hand
+/// back either real fingerprints or `EngineError::Unsupported` — the mixed
+/// case `VerifyEngine` (one answer for the whole run) and `MultiTopicEngine`
+/// (fingerprints only, never `Unsupported`) between them cannot express, and
+/// the case reproductions 1, 2, 3 and 5 all turn on.
+struct LaneEngine {
+    facts: BackupSetFacts,
+    /// `Ok(fingerprints)`, or `Err(reason)` rendered as
+    /// `EngineError::Unsupported(reason)` — a pre-0.21 archive or a KBAK
+    /// level-1 segment, which is a NORMAL production condition.
+    by_selection: BTreeMap<String, Result<Vec<RecordFingerprint>, String>>,
+}
+
+impl DataEngine for LaneEngine {
+    fn id(&self) -> EngineId {
+        EngineId {
+            id: "fake".into(),
+            version: "v0.0.0".into(),
+            digest: format!("sha256:{}", "0".repeat(64)),
+        }
+    }
+    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+        Ok(vec![])
+    }
+    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+        Ok(self.facts.clone())
+    }
+    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
+        Err(EngineError::Operational("not used by this fixture".into()))
+    }
+    fn restore(
+        &self,
+        _: &RestorePlan,
+        _: &mut dyn PhaseObserver,
+    ) -> Result<RestoreFacts, EngineError> {
+        Err(EngineError::Operational("not used by this fixture".into()))
+    }
+    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+        match self
+            .by_selection
+            .get(&format!("{}/{}", s.topic, s.partition))
+        {
+            Some(Ok(fp)) => Ok(fp.clone()),
+            Some(Err(reason)) => Err(EngineError::Unsupported(reason.clone())),
+            None => Ok(vec![]),
+        }
+    }
+    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
+        Ok(EngineRun { exit_code: 0 })
+    }
+}
+
+/// Two topics ("orders", "payments"), one partition each, one in-window
+/// segment each whose manifest sha256 is the REAL hash of the bytes put into
+/// the returned `Store`, and whose `record_count` is `records_each`.
+///
+/// Both selections' SEGMENT lane therefore reaches `Evidence::Verified` on
+/// its own merits, which is the point: every assertion in the reproductions
+/// below is then attributable to the RECORD lane alone. A test whose segment
+/// lane was incidentally unverified would report `Partial` for the wrong
+/// reason and would keep reporting it after the record-lane fix was reverted.
+fn two_topic_facts_and_store(
+    records_each: i64,
+) -> (BackupSetFacts, logweir_engine_oso::storage::Store) {
+    let store = logweir_engine_oso::storage::Store::in_memory("logweir");
+    let mut topics = Vec::new();
+    for name in ["orders", "payments"] {
+        let key = format!("logweir/seg-{name}-r3.kbak");
+        let bytes = format!("segment payload for {name}, round 3 reproductions").into_bytes();
+        store.put_create_only(&key, &bytes).unwrap();
+        topics.push(TopicFacts {
+            name: name.into(),
+            original_partition_count: Some(1),
+            source_replication_factor: Some(3),
+            configurations: fixtures::source_configs(&[("cleanup.policy", "compact")]),
+            partitions: vec![PartitionFacts {
+                partition_id: 0,
+                segments: vec![SegmentFacts {
+                    key,
+                    start_offset: 0,
+                    end_offset: records_each - 1,
+                    start_timestamp: WINDOW.0,
+                    end_timestamp: WINDOW.1,
+                    record_count: records_each,
+                    sha256: logweir_core::ids::sha256_prefixed(&bytes),
+                    uploaded_at: WINDOW.1,
+                }],
+                gaps: vec![],
+                pruned: vec![],
+            }],
+        });
+    }
+    let facts = BackupSetFacts {
+        backup_id: "backup-verify-test".into(),
+        created_at: fixtures::ts("2026-09-03T09:00:00Z"),
+        source_cluster_id: Some("SRC0000000000000000000".into()),
+        manifest_sha256: "sha256:0".into(),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics,
+    };
+    (facts, store)
+}
+
+fn two_topic_mapping() -> BTreeMap<String, String> {
+    [
+        ("orders".to_string(), "drill-orders".to_string()),
+        ("payments".to_string(), "drill-payments".to_string()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn sel_for(topic: &str, partition: i32, count: usize) -> SampleSelection {
+    SampleSelection {
+        set: BackupSetRef {
+            backup_id: "backup-verify-test".into(),
+            manifest_key: "backup-verify-test/manifest.json".into(),
+        },
+        topic: topic.into(),
+        partition,
+        anchor: "head".into(),
+        count,
+        window: WINDOW,
+    }
+}
+
+fn target(
+    name: &str,
+    end_offsets: Vec<(i32, i64)>,
+    records: Vec<ConsumedRecord>,
+) -> (String, TopicData) {
+    (
+        name.to_string(),
+        TopicData {
+            end_offsets,
+            configs: fixtures::target_configs(&[("cleanup.policy", "delete")]),
+            records,
+        },
+    )
+}
+
+fn two_topic_plan() -> RestorePlan {
+    let mut plan = plan_orders_to_drill_orders();
+    plan.topic_mapping = two_topic_mapping();
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// REPRODUCTION 1 — one of two topics restored to ZERO records, on a legacy
+// archive.
+//
+// OLD OBSERVATION (the fourth door, shipped):
+//     level=ConsumeOnly result=Pass sampled=0 records_restored=25
+//
+// Both zero-record guards lived inside the `ByteFingerprint` arm, so the
+// `ConsumeOnly` lane had no zero-record guard of ANY kind: `result` was
+// initialised to `Pass` and nothing in that lane could move it. The trigger —
+// a pre-0.21 archive or a KBAK level-1 segment — is a NORMAL production
+// condition the code treated as a routine downgrade, so this signed a
+// successful restore drill over a topic that restored nothing at all.
+//
+// NOW: the obligation is not written in the lane. `verdict_for_selection`'s
+// consume-only arm must construct `Evidence` exactly as the byte-fingerprint
+// arm does, and "the target partition gave back zero records" is
+// `Unverified`, which `roll_up` refuses to fold into a `Pass`.
+
+/// Reproduction 1. A legacy archive downgrades BOTH selections to
+/// consume-only; `payments` restored healthily, `orders` restored to zero.
+/// The drill must not report `Pass`, and must name `orders/0`.
+#[test]
+fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_lane() {
+    let (facts, store) = two_topic_facts_and_store(25);
+    let (_, cons_payments) = distinct_matching_pair("payments", 25);
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [
+            (
+                "orders/0".to_string(),
+                Err("kbak level 1 (pre-0.21)".to_string()),
+            ),
+            (
+                "payments/0".to_string(),
+                Err("kbak level 1 (pre-0.21)".to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let reader = MapReader {
+        topics: [
+            // Never restored: the topic exists, and it is empty.
+            target("drill-orders", vec![(0, 0)], vec![]),
+            target("drill-payments", vec![(0, 25)], cons_payments),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
+        &two_topic_mapping(),
+        &two_topic_plan(),
+    )
+    .expect("an un-restored topic is a DRILL RESULT (exit 2, signed), never an Err (exit 1)");
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "a topic restored to ZERO records must never reach Pass, on any lane — got {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    assert_eq!(out.integrity.level, IntegrityLevel::ConsumeOnly);
+    // The old observation's exact numbers, now attached to a verdict that is
+    // not a pass: `sampled = 0` because the consume-only lane reconciles
+    // nothing, and `records_restored = 25` from the healthy sibling alone.
+    assert_eq!(out.integrity.records_sampled, 0);
+    assert_eq!(out.records_restored, 25);
+    assert_eq!(out.pass_rate(), None);
+    let reason = out
+        .integrity
+        .partial_reason
+        .expect("partial must carry a reason");
+    assert!(
+        reason.contains("orders/0"),
+        "the reason must name the partition that gave back nothing: {reason:?}"
+    );
+    assert!(
+        reason.contains("zero records"),
+        "the reason must say what was wrong, not merely that something was: {reason:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// REPRODUCTION 2 — `orders` restored 100% CORRUPT and `payments` not restored
+// at all.
+//
+// OLD OBSERVATION: Pass, records_restored=50.
+//
+// `compare()` pooled every selection's records into one offset-keyed map.
+// `ConsumedRecord` carries no topic field and every Kafka partition starts at
+// offset 0, so one topic's records satisfied ANOTHER topic's archive lookups
+// by coincidence of matching offsets. Two independently broken topics
+// reconciled against each other into a clean pass.
+//
+// NOW: `compare()` is called from `verdict_for_selection`, which is handed ONE
+// selection, so it cannot see two selections' data at once even by accident.
+// Both defects are detected, separately, and both are `Failed` — "examined,
+// and found wrong", which outranks every other verdict.
+
+/// Reproduction 2. Corruption and absence are each detected on their own
+/// merits and neither can be papered over by the other.
+#[test]
+fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_against_it() {
+    let (facts, store) = two_topic_facts_and_store(25);
+
+    // `fixtures::matching_pair` builds byte-IDENTICAL `k{i}`/`v{i}` records
+    // regardless of the topic it is called for (the fingerprint folds in no
+    // topic name), and both partitions start at offset 0 — deliberately, so
+    // that a pooled `compare()` COULD satisfy one topic's archive from the
+    // other's records. That is what makes this test discriminate the pooled
+    // implementation from the per-selection one, exactly as
+    // `a_topic_restored_to_zero_records_...` documents for its own case.
+    let (archive_orders, mut cons_orders) = fixtures::matching_pair(25);
+    let (archive_payments, _cons_payments_never_restored) = fixtures::matching_pair(25);
+    // 100% corrupt: every restored value differs from what the archive
+    // fingerprint was computed over.
+    for (i, r) in cons_orders.iter_mut().enumerate() {
+        r.value = Some(format!("corrupt-{i}").into_bytes());
+    }
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [
+            ("orders/0".to_string(), Ok(archive_orders)),
+            ("payments/0".to_string(), Ok(archive_payments)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let reader = MapReader {
+        topics: [
+            target("drill-orders", vec![(0, 25)], cons_orders),
+            // Not restored at all.
+            target("drill-payments", vec![(0, 0)], vec![]),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
+        &two_topic_mapping(),
+        &two_topic_plan(),
+    )
+    .expect("a failed reconciliation is a DRILL RESULT, never an Err");
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "a 100%-corrupt topic and an un-restored topic must never reconcile into a pass — \
+         got {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Fail);
+    assert_eq!(out.integrity.records_sampled, 50);
+    assert_eq!(
+        out.integrity.records_sampled_matching, 0,
+        "not one of the 50 archive fingerprints has an honest counterpart on the target; a \
+         non-zero count here means one topic was matched against the other's records"
+    );
+    assert_eq!(out.integrity.mismatches, 50);
+    assert_eq!(out.pass_rate(), Some(0.0));
+    // Only `orders` gave anything back at all.
+    assert_eq!(out.records_restored, 25);
+}
+
+// ---------------------------------------------------------------------------
+// REPRODUCTION 3 — ZERO records consumed from a sampled partition.
+//
+// OLD OBSERVATION: Pass, records_restored=0.
+//
+// The purest form of the fourth door: the drill consumed nothing whatsoever
+// from the partition it sampled, and still signed a pass. `result` began at
+// `Pass` on the consume-only lane and nothing wrote to it.
+//
+// NOW: `Pass` is COMPUTED from positive evidence, never initialised. There is
+// no `result` variable in `run` to forget to move.
+
+/// Reproduction 3. The sampled partition gives back nothing, while a
+/// DIFFERENT partition of the same target topic holds data — so the drill has
+/// an honest `newest_restored_ts_ms` to report and cannot be dismissed as
+/// "the whole target was empty". The sample still proved nothing.
+#[test]
+fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
+    let (store, sha) = store_with_matching_segment();
+    let facts = facts_with_segment(&sha);
+    // Partition 1 of the SAME target topic was restored; partition 0 — the
+    // one this drill actually sampled — was not.
+    let (_, cons_p1) = distinct_pair_for_partition(1, 5);
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [(
+            "orders/0".to_string(),
+            Err("kbak level 1 (pre-0.21)".to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let reader = MapReader {
+        topics: [target("drill-orders", vec![(0, 0), (1, 5)], cons_p1)]
+            .into_iter()
+            .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+    )
+    .expect("a partition that gave back nothing is a DRILL RESULT, never an Err");
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "the sampled partition returned zero records; nothing was verified — got {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    assert_eq!(out.records_restored, 0);
+    assert_eq!(out.pass_rate(), None);
+    assert!(out
+        .integrity
+        .partial_reason
+        .expect("partial must carry a reason")
+        .contains("orders/0"));
+    // A healthy sibling PARTITION is still measured for the RPO — the drill
+    // reports what it honestly saw, it simply does not call it a pass.
+    assert_eq!(out.newest_restored_ts_ms, MATCHING_PAIR_BASE_TS + 4);
+}
+
+// ---------------------------------------------------------------------------
+// REPRODUCTION 4 — a SHORT archive fingerprint list over a 96%-lossy
+// partition.
+//
+// OLD OBSERVATION:
+//     level=ByteFingerprint result=Pass sampled=26 matching=26 pass_rate=Some(1.0)
+//
+// The archive returned 1 fingerprint where the manifest claims 25. Every
+// guard asked "did we compare zero?", none asked "did we compare LESS than we
+// claim to have?" — so 24 unexamined records read as a smaller successful
+// sample, and `Some(1.0)` was signed over a partition that had lost 96% of
+// its data.
+//
+// NOW: short IS unverified. What came back is held against
+// `min(sel.count, Σ record_count)` — both already-signed figures — and
+// `pass_rate_measured` is a ratio over the WHOLE sample or it is null.
+
+/// Reproduction 4. A short sample is coverage the drill did not obtain, not a
+/// smaller successful sample; and no `Some(1.0)` may sit beside it.
+#[test]
+fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_successful_sample() {
+    let (facts, store) = two_topic_facts_and_store(25);
+
+    // `orders` lost 96% of its records: the manifest claims 25 in this
+    // window, the archive can offer exactly 1, and the target holds that 1.
+    let (mut archive_orders, mut cons_orders) = distinct_matching_pair("orders", 25);
+    archive_orders.truncate(1);
+    cons_orders.truncate(1);
+    let (archive_payments, cons_payments) = distinct_matching_pair("payments", 25);
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [
+            ("orders/0".to_string(), Ok(archive_orders)),
+            ("payments/0".to_string(), Ok(archive_payments)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let reader = MapReader {
+        topics: [
+            target("drill-orders", vec![(0, 1)], cons_orders),
+            target("drill-payments", vec![(0, 25)], cons_payments),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
+        &two_topic_mapping(),
+        &two_topic_plan(),
+    )
+    .expect("an under-delivering archive is a DRILL RESULT, never an Err");
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "1 fingerprint against a manifest claim of 25 leaves 24 records unexamined — {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    // The old observation's exact counters are still reported honestly — 26
+    // records really were compared and really did match. What may NOT be
+    // published beside them is a whole-sample pass rate.
+    assert_eq!(out.integrity.records_sampled, 26);
+    assert_eq!(out.integrity.records_sampled_matching, 26);
+    assert_eq!(
+        out.pass_rate(),
+        None,
+        "Some(1.0) over a 96%-lossy partition is the exact false assurance the fourth door \
+         signed; a rate is a ratio over the WHOLE sample or it is null"
+    );
+    let reason = out
+        .integrity
+        .partial_reason
+        .expect("partial must carry a reason");
+    assert!(reason.contains("orders/0"), "{reason:?}");
+    assert!(
+        reason.contains("25"),
+        "the reason must name what the manifest claimed, so an auditor can see the size of \
+         the shortfall: {reason:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// REPRODUCTION 5 — one selection's `Unsupported` archive silently ERASED the
+// byte-level claim for every other selection.
+//
+// OLD OBSERVATION: `probe_archive_mode` returned a single `ConsumeOnly` for
+// the whole backup set on the FIRST `Unsupported`, discarding every
+// fingerprint set it had already collected. One legacy partition therefore
+// (a) threw away a sibling's genuinely-established byte-level reconciliation,
+// and (b) moved the entire run onto the lane that had no zero-record guard —
+// which is how reproduction 1 became reachable in the first place.
+//
+// NOW: the mode is PER SELECTION. A legacy segment downgrades only its own
+// partition; `level` still reports the WEAKEST claim any selection could
+// support (a drill containing a legacy segment cannot honestly tell an
+// auditor "byte-fingerprint" for the restore as a whole), but the counters
+// and `partial_reason` preserve what was genuinely established.
+
+/// Reproduction 5. A downgrade names itself and costs the drill its
+/// whole-run LEVEL; it does not cost a sibling selection its CHECK.
+#[test]
+fn one_selections_unsupported_archive_never_erases_another_selections_byte_level_claim() {
+    let (facts, store) = two_topic_facts_and_store(25);
+    let (_, cons_orders) = distinct_matching_pair("orders", 25);
+    let (archive_payments, cons_payments) = distinct_matching_pair("payments", 25);
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [
+            // A legacy segment in ONE partition.
+            (
+                "orders/0".to_string(),
+                Err("kbak level 1 (pre-0.21)".to_string()),
+            ),
+            ("payments/0".to_string(), Ok(archive_payments)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let reader = MapReader {
+        topics: [
+            target("drill-orders", vec![(0, 25)], cons_orders),
+            target("drill-payments", vec![(0, 25)], cons_payments),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
+        &two_topic_mapping(),
+        &two_topic_plan(),
+    )
+    .unwrap();
+
+    // Both selections produced positive evidence — `orders` at the only
+    // strength its archive permits, `payments` at full byte level — so the
+    // drill passes, at the weaker of the two claims.
+    assert_eq!(out.integrity.result, IntegrityResult::Pass);
+    assert_eq!(
+        out.integrity.level,
+        IntegrityLevel::ConsumeOnly,
+        "`level` reports the WEAKEST claim any selection could support, never the strongest"
+    );
+    assert_eq!(
+        out.integrity.records_sampled, 25,
+        "payments' 25 genuine reconciliations must SURVIVE orders' downgrade; the old \
+         `probe_archive_mode` discarded them and reported 0"
+    );
+    assert_eq!(out.integrity.records_sampled_matching, 25);
+    assert_eq!(out.records_restored, 50);
+    assert_eq!(
+        out.pass_rate(),
+        None,
+        "the level is not byte-fingerprint, so a measured rate would violate the scorecard's \
+         own invariant"
+    );
+    let reason = out
+        .integrity
+        .partial_reason
+        .expect("the downgrade must be named");
+    assert!(
+        reason.contains("orders/0") && reason.contains("kbak level 1"),
+        "the downgrade must name the selection it applies to, and carry the engine's own \
+         reason: {reason:?}"
+    );
+    assert!(
+        reason.contains("payments/0"),
+        "the selection whose byte-level claim WAS established must be named, so the downgrade \
+         cannot erase it from the signed document: {reason:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round 3's two deliberate severity changes, pinned at `run`'s own call site.
+// Both were `DrillError::Operational` (exit 1, NO signed artifact) before this
+// round and are drill results (exit 2, signed scorecard) now — see
+// `verdict_for_selection`'s "Severity" doc paragraph. A test that only
+// asserted "not a Pass" would keep passing if either reverted to an `Err`, so
+// each asserts `Ok` explicitly.
+
+/// A `(topic, partition, window)` the plan names but no archive segment
+/// matches. The archive holding no segment in this window is a positively
+/// established fact ABOUT THE ARCHIVE, so it is reported in a signed document
+/// naming the exact partition — strictly more use to an auditor than exit 1
+/// and no document at all.
+#[test]
+fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operational_error() {
+    let (store, sha) = store_with_matching_segment();
+    let facts = facts_with_segment(&sha);
+    let (archive, cons) = fixtures::matching_pair(50);
+
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    let reader = MapReader {
+        topics: [target("drill-orders", vec![(0, 50)], cons)]
+            .into_iter()
+            .collect(),
+    };
+    // `facts_with_segment`'s only segment spans WINDOW; this selection asks
+    // for a window that overlaps none of it.
+    let mut sel = sel_orders();
+    sel[0].window = (WINDOW.1 + 1, WINDOW.1 + 2);
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+    )
+    .expect(
+        "round 3: an archive holding no segment in the window is a DRILL RESULT (exit 2, \
+             signed), not an Operational error (exit 1, nothing signed)",
+    );
+
+    assert_ne!(out.integrity.result, IntegrityResult::Pass);
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    let reason = out
+        .integrity
+        .partial_reason
+        .expect("partial must carry a reason");
+    assert!(reason.contains("orders/0"), "{reason:?}");
+    assert!(reason.contains("no archive segment matches"), "{reason:?}");
+}
+
+/// A segment written before 0.21 carries an EMPTY sha256 and cannot be
+/// checked. Round 2 skipped it with a logged note and let the run report
+/// `Pass` anyway — the module doc claimed such segments were "never counted
+/// as a pass", and nothing in the code made that true. A skip is coverage the
+/// drill did not obtain.
+#[test]
+fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
+    let (store, _sha) = store_with_matching_segment();
+    // The manifest carries no sha256 for this segment at all.
+    let facts = facts_with_segment("");
+    let (archive, cons) = fixtures::matching_pair(50);
+
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    let reader = MapReader {
+        topics: [target("drill-orders", vec![(0, 50)], cons)]
+            .into_iter()
+            .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+    )
+    .unwrap();
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "the record lane reconciled perfectly, but the SEGMENT lane checked nothing — a \
+         selection needs positive evidence on BOTH lanes: {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    assert!(out
+        .integrity
+        .partial_reason
+        .expect("partial must carry a reason")
+        .contains("before 0.21"));
 }
