@@ -9,6 +9,19 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+logweir-core = { path = "../logweir-core" }
+byteorder = "1"
+crc32fast = "1"
+zstd = "0.13"
+# Matches the WRITER exactly: upstream compresses with lz4_flex 0.13's
+# `compress_prepend_size` [VERIFIED U/kafka-backup/Cargo.toml:37,
+# U/kafka-backup/crates/kafka-backup-core/src/compression.rs:85-87]. A decoder
+# must not float a major-equivalent range away from the encoder it reads.
+lz4_flex = "0.13"
+# `default-features = false` keeps the `client` feature off for THIS crate's own
+# per-package build: `cargo build -p logweir-engine-oso` needs no C toolchain, so
+# logweir-engine-oso never pulls rdkafka and needs no C toolchain to build.
+logweir-kafka = { path = "../logweir-kafka", default-features = false }
 
 [features]
 default = []

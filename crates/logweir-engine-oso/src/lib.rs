@@ -6,4 +6,5 @@
 //! struct that mirrors a pinned upstream shape, so an upstream release can
 //! break parsing but never the build. See `scripts/check-no-oso.sh`.
 
+pub mod kbak;
 pub mod vendored;
