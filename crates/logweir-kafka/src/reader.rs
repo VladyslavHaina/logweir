@@ -7,6 +7,24 @@ pub enum KafkaError {
     Client(String),
     #[error("timeout after {0:?}")]
     Timeout(std::time::Duration),
+    /// The named topic does not exist on the target cluster (broker code
+    /// `UnknownTopicOrPartition`, verified against rdkafka-sys
+    /// 4.10.0+2.12.1's error table — see `rdkafka_reader.rs`'s
+    /// `classify_topic_error`).
+    #[error("topic not found: {0}")]
+    TopicNotFound(String),
+    /// The authenticated principal may not describe/read the named topic
+    /// (broker code `TopicAuthorizationFailed`), distinguished from
+    /// `TopicNotFound` so a caller does not send an operator chasing a
+    /// permissions problem down the "topic is missing" path or vice versa.
+    #[error("not authorized: {0}")]
+    NotAuthorized(String),
+    /// No broker answered within the call's own budget. Distinct from
+    /// `TopicNotFound`/`NotAuthorized`: nothing about the topic's existence
+    /// or the principal's rights is known either way — the call simply
+    /// never got an answer.
+    #[error("unreachable: {0}")]
+    Unreachable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +57,7 @@ impl ConsumedRecord {
 /// v0.1 ships PLAINTEXT and SASL/SCRAM over TLS. OAUTHBEARER and MSK IAM
 /// arrive in SP4 through `crate::token::TokenProvider`; there is no AWS
 /// dependency in this crate in v0.1 (Global Constraint 1).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum AuthConfig {
     Plaintext,
     ScramSha512 {
@@ -49,6 +67,29 @@ pub enum AuthConfig {
     },
     /// SP4. Constructing this in v0.1 returns KafkaError::Client.
     Token(std::sync::Arc<dyn crate::token::TokenProvider>),
+}
+
+// Manual `Debug`, not `#[derive]`: a derived impl would print `password`
+// verbatim, and `AuthConfig` reaches `{:?}` far too easily to trust — a
+// tracing field, an error context, a config dump — for a derive to be safe
+// here. Every other field is left exactly as a derive would render it.
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthConfig::Plaintext => write!(f, "Plaintext"),
+            AuthConfig::ScramSha512 {
+                username,
+                password: _,
+                tls,
+            } => f
+                .debug_struct("ScramSha512")
+                .field("username", username)
+                .field("password", &"***")
+                .field("tls", tls)
+                .finish(),
+            AuthConfig::Token(provider) => f.debug_tuple("Token").field(provider).finish(),
+        }
+    }
 }
 
 /// Phase 9's teardown seam, kept in `logweir-kafka` so `crates/logweir` never
