@@ -6,6 +6,7 @@ pub mod phase2_target;
 pub mod phase3_diff;
 pub mod phase4_sample;
 pub mod phase5_preflight;
+pub mod phase6_restore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DrillError {

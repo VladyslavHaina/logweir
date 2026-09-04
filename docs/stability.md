@@ -18,3 +18,10 @@
   `block-buffer`), is only supported starting rustc 1.85; several other
   transitive dependencies (`crc-fast`, the `icu_*` crates, `idna_adapter`,
   pulled in through `reqwest`) then raise the floor further to 1.89.
+
+### A crashed restore is not resumable in v0.1
+
+The rendered `restore.checkpoint_state` path is **pod-local and is never uploaded**. If the
+restore process dies mid-run, there is no checkpoint to resume from: the drill re-runs from
+phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
+imply resumability, and Logweir does not offer it in v0.1.
