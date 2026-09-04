@@ -19,8 +19,11 @@ zstd = "0.13"
 # must not float a major-equivalent range away from the encoder it reads.
 lz4_flex = "0.13"
 # `default-features = false` keeps the `client` feature off for THIS crate's own
-# per-package build: `cargo build -p logweir-engine-oso` needs no C toolchain, so
-# logweir-engine-oso never pulls rdkafka and needs no C toolchain to build.
+# per-package build, so logweir-engine-oso never pulls rdkafka (a much heavier
+# native dependency than libzstd) or needs rdkafka's C toolchain/library to
+# build. `zstd` above DOES need a C compiler — it builds libzstd from C via
+# `zstd-sys`/`cc` — so this crate is not C-toolchain-free overall; only the
+# rdkafka half of that claim holds.
 logweir-kafka = { path = "../logweir-kafka", default-features = false }
 
 [features]

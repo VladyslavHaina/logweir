@@ -1,3 +1,24 @@
+# `Cargo.lock` carries deliberate `cargo update -p <pkg> --precise <version>`
+# pins below the newest resolvable version, none of them reflected in any
+# `[dependencies]`/`[workspace.dependencies]` entry here (they are all
+# TRANSITIVE). All exist because this workspace's pinned toolchain
+# (`rust-toolchain.toml`, CI's `dtolnay/rust-toolchain@1.82.0`) is rustc
+# 1.82.0, which cannot parse Rust edition 2024 and enforces an MSRV floor on
+# every crate it builds. A bare `cargo update` must never be run — it would
+# float every one of these back to a version that will not build:
+#   indexmap  2.13.1              (later releases move to edition2024)
+#   wasip2    1.0.0+wasi-0.2.4    (later releases move to edition2024)
+#   base64ct  1.7.3               (later releases move to edition2024)
+#   zeroize   1.8.2               (later releases move to edition2024)
+#   clap      4.5.40              (later releases move to edition2024)
+#   jobserver 0.1.34              (0.1.35 declares rust-version = "1.85";
+#                                  pulled in transitively by `cc`, via
+#                                  `zstd-sys`'s build script, once Task 9
+#                                  added `zstd` as a dependency)
+# The first five predate Task 9 (see task-1-report.md in the SDD tracking
+# directory for how each was found); `jobserver` was added by Task 9's own
+# fix pass. If a new dependency drags in another edition2024 or MSRV-floor
+# crate, pin it the same way and add it to this list.
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask", "e2e"]
