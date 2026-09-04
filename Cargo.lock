@@ -1319,6 +1319,7 @@ name = "logweir-engine-oso"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "chrono",
  "crc32fast",
  "futures",
  "insta",

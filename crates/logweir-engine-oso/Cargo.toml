@@ -9,6 +9,10 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# `DateTime::from_timestamp_millis` (describe()'s manifest.created_at) and
+# `Utc::now()` (restore()'s OWN start/finish timing — `restore` prints no
+# report file, see engine.rs).
+chrono.workspace = true
 logweir-core = { path = "../logweir-core" }
 byteorder = "1"
 crc32fast = "1"
