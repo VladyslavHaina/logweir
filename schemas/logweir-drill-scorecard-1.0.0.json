@@ -1,0 +1,696 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-drill-scorecard-1.0.0.json",
+  "title": "Scorecard",
+  "type": "object",
+  "required": [
+    "approval",
+    "engine",
+    "evidence",
+    "format_version",
+    "integrity",
+    "last_phase_completed",
+    "measured",
+    "objectives",
+    "outcome",
+    "phases",
+    "requested_at",
+    "run_id",
+    "sample",
+    "source",
+    "target",
+    "target_diff",
+    "topic_parity"
+  ],
+  "properties": {
+    "approval": {
+      "$ref": "#/definitions/ApprovalInfo"
+    },
+    "approval_validated_at": {
+      "default": null,
+      "type": "string",
+      "format": "date-time",
+      "nullable": true
+    },
+    "engine": {
+      "$ref": "#/definitions/EngineInfo"
+    },
+    "engine_subreport": {
+      "default": null,
+      "allOf": [
+        {
+          "$ref": "#/definitions/EngineSubreport"
+        }
+      ],
+      "nullable": true
+    },
+    "evidence": {
+      "$ref": "#/definitions/EvidenceInfo"
+    },
+    "format_version": {
+      "type": "string"
+    },
+    "integrity": {
+      "$ref": "#/definitions/Integrity"
+    },
+    "last_phase_completed": {
+      "description": "Highest phase INDEX completed. v0.1 implements ELEVEN phase slots, -1 through 9 (Global Constraint 18, panel decision D1, 2026-09-03). -1 is the source-side capture phase; a value below it is impossible because the phase-0 admission guard refusing yields exit code 3 with last_phase_completed = -1 (spec §6.1).",
+      "type": "integer",
+      "format": "int8"
+    },
+    "measured": {
+      "$ref": "#/definitions/Measured"
+    },
+    "objectives": {
+      "$ref": "#/definitions/Objectives"
+    },
+    "outcome": {
+      "$ref": "#/definitions/Outcome"
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PhaseRecord"
+      }
+    },
+    "redactions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Redaction"
+      }
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "sample": {
+      "$ref": "#/definitions/SampleInfo"
+    },
+    "source": {
+      "$ref": "#/definitions/SourceInfo"
+    },
+    "target": {
+      "$ref": "#/definitions/TargetInfo"
+    },
+    "target_diff": {
+      "$ref": "#/definitions/TargetDiffSummary"
+    },
+    "topic_parity": {
+      "$ref": "#/definitions/TopicParity"
+    },
+    "triggered_by": {
+      "default": null,
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "definitions": {
+    "ApprovalInfo": {
+      "type": "object",
+      "required": [
+        "approved_at",
+        "approver",
+        "key_id",
+        "plan_hash",
+        "self_attested",
+        "ticket"
+      ],
+      "properties": {
+        "approved_at": {
+          "description": "The human's OUT-OF-BAND timestamp. Explicitly NOT an input to any measured field in v0.1 (spec §9.3 phase 8).",
+          "type": "string",
+          "format": "date-time"
+        },
+        "approver": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        },
+        "plan_hash": {
+          "type": "string"
+        },
+        "self_attested": {
+          "description": "true when the approval key equals the signing key. Labelled, never refused (spec §10).",
+          "type": "boolean"
+        },
+        "ticket": {
+          "type": "string"
+        }
+      }
+    },
+    "EngineInfo": {
+      "type": "object",
+      "required": [
+        "digest",
+        "execution",
+        "id",
+        "levers",
+        "matrix_verdict",
+        "version"
+      ],
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "execution": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "levers": {
+          "$ref": "#/definitions/Levers"
+        },
+        "matrix_verdict": {
+          "$ref": "#/definitions/MatrixVerdict"
+        },
+        "matrix_verdict_reason": {
+          "description": "REQUIRED when `matrix_verdict` is `fail`; null otherwise. Enforced by `validate_invariants`.",
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "EngineSubreport": {
+      "type": "object",
+      "required": [
+        "body_b64",
+        "body_sha256",
+        "caveat",
+        "retained_verbatim",
+        "retrieved_from"
+      ],
+      "properties": {
+        "body_b64": {
+          "description": "The engine's evidence report as the EXACT bytes read from the bucket, base64 (RFC 4648 standard alphabet, padded).\n\nNOT a parsed `serde_json::Value`. OSO's envelope \"covers the exact, complete stored report bytes. No canonicalization is performed at verification time\" and \"no JSON parsing, re-serialization, or canonicalization influences the digest or signature check\" [VERIFIED U/kafka-backup/crates/kafka-backup-core/src/evidence/envelope.rs:5,254]. Re-emitting a parsed value through `to_deterministic_json`'s two-space `PrettyFormatter` would change whitespace, escaping and number formatting, so the digest OSO signed would no longer match and the SP1c exit criterion (\"the embedded engine sub-report round-trips through OSO's own `validation evidence-verify`\") could never be ticked.",
+          "type": "string"
+        },
+        "body_sha256": {
+          "description": "`sha256:<hex>` of the DECODED bytes, so an auditor can re-check the binding without base64-decoding anything.",
+          "type": "string"
+        },
+        "caveat": {
+          "type": "string"
+        },
+        "retained_verbatim": {
+          "type": "boolean"
+        },
+        "retrieved_from": {
+          "type": "string"
+        }
+      }
+    },
+    "EvidenceInfo": {
+      "type": "object",
+      "required": [
+        "create_only_enforced",
+        "immutable"
+      ],
+      "properties": {
+        "create_only_enforced": {
+          "description": "false when the backend lacks conditional put (spec §11).",
+          "type": "boolean"
+        },
+        "immutable": {
+          "description": "ONLY after a provider readback; else false (spec §6 C3).",
+          "type": "boolean"
+        },
+        "retain_until": {
+          "default": null,
+          "type": "string",
+          "format": "date-time",
+          "nullable": true
+        },
+        "version_id": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "Integrity": {
+      "type": "object",
+      "required": [
+        "level",
+        "mismatches",
+        "records_sampled",
+        "records_sampled_matching",
+        "result"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "#/definitions/IntegrityLevel"
+        },
+        "mismatches": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "partial_reason": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "pass_rate_measured": {
+          "description": "MEASURED `records_sampled_matching / records_sampled`. Null when `level` is not `byte-fingerprint`. The REQUESTED rate stays in `objectives.pass_rate`, so an auditor can read both the ask and the result off one document.",
+          "default": null,
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "records_sampled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "records_sampled_matching": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "restoredPrincipalCouldConsume": {
+          "description": "SP3 only; null, never false, when not attempted. The wire name is camelCase because spec §6.1 and §14 SP3 both cite the path `integrity.restoredPrincipalCouldConsume`, and `format_version` freezes at 1.0.0 in this task — renaming later would be a MAJOR bump.",
+          "default": null,
+          "type": "boolean",
+          "nullable": true
+        },
+        "result": {
+          "$ref": "#/definitions/IntegrityResult"
+        }
+      }
+    },
+    "IntegrityLevel": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "not-attempted"
+          ]
+        },
+        {
+          "description": "sha256(key‖value‖headers‖timestamp) reconciled per record.",
+          "type": "string",
+          "enum": [
+            "byte-fingerprint"
+          ]
+        },
+        {
+          "description": "The KBAK decoder returned Err(Unsupported); records were consumed but not reconciled against archive bytes (spec §11).",
+          "type": "string",
+          "enum": [
+            "consume-only"
+          ]
+        }
+      ]
+    },
+    "IntegrityResult": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        {
+          "description": "The compacted-topic / non-reconcilable-record case. NOT a pass.",
+          "type": "string",
+          "enum": [
+            "partial"
+          ]
+        }
+      ]
+    },
+    "LeverState": {
+      "description": "Per-run readback of an engine lever (spec §9.3 phase 5, §7.2(a)).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "honoured",
+            "ignored"
+          ]
+        },
+        {
+          "description": "`dry_run_check_segments` is not observable from DryRunReport; its only per-run readback is the absence of an unknown-key warning.",
+          "type": "string",
+          "enum": [
+            "unknown-not-observable"
+          ]
+        }
+      ]
+    },
+    "Levers": {
+      "type": "object",
+      "required": [
+        "dry_run_check_segments",
+        "header_preflight"
+      ],
+      "properties": {
+        "dry_run_check_segments": {
+          "$ref": "#/definitions/LeverState"
+        },
+        "header_preflight": {
+          "$ref": "#/definitions/LeverState"
+        },
+        "unknown_key_warnings": {
+          "description": "Every path the engine logged as `Ignoring unknown config key <path>`. A match on a Logweir-rendered key aborts the run (spec §7.2(a)).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "MatrixVerdict": {
+      "description": "Copied from this engine tag's engine-matrix row; never re-derived per run. Every variant serialises as a FLAT kebab-case string, so the field's schema is a plain enum and the auditor's ~20-line Python verifier never has to handle `string | object`. The reason for a `fail` lives in `EngineInfo.matrix_verdict_reason`, mirroring the `integrity.result`/`partial_reason` pair.",
+      "type": "string",
+      "enum": [
+        "pass",
+        "pass-degraded",
+        "fail",
+        "fail-lever-not-honoured",
+        "unsupported-lever-absent"
+      ]
+    },
+    "Measured": {
+      "type": "object",
+      "properties": {
+        "rpo_seconds": {
+          "description": "ARCHIVE COVERAGE GAP at the requested recovery point — NOT source-relative data loss.",
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "rpo_source_relative_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "rpo_source_relative_unmeasured_reason": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        },
+        "rto_excluding_preflight_seconds": {
+          "description": "THE value compared against objectives.rto_seconds (spec §9.3 phase 8).",
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "rto_requested_to_verified_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "rto_restore_only_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "rto_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        }
+      }
+    },
+    "Objectives": {
+      "type": "object",
+      "properties": {
+        "met": {
+          "description": "false when ANY non-null objective is missed; null when pass_rate is null.",
+          "default": null,
+          "type": "boolean",
+          "nullable": true
+        },
+        "pass_rate": {
+          "default": null,
+          "type": "number",
+          "format": "double",
+          "nullable": true
+        },
+        "rpo_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "rto_seconds": {
+          "default": null,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        }
+      }
+    },
+    "Outcome": {
+      "description": "Spec §6.1. `drift` is deliberately NOT a v0.1 value — v0.1 collects no metadata. It returns as a minor bump when SP2 ships.",
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail-objective",
+        "fail-integrity",
+        "preflight-failed"
+      ]
+    },
+    "PhaseRecord": {
+      "type": "object",
+      "required": [
+        "at",
+        "duration_ms",
+        "name",
+        "outcome",
+        "phase"
+      ],
+      "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "integer",
+          "format": "int8"
+        }
+      }
+    },
+    "Redaction": {
+      "type": "object",
+      "required": [
+        "path",
+        "present",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "description": "A JSON pointer into THIS scorecard — never a missing field.",
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "SampleInfo": {
+      "type": "object",
+      "required": [
+        "anchor",
+        "coverage_note",
+        "partitions",
+        "records_expected",
+        "records_restored",
+        "topics",
+        "window_end",
+        "window_start"
+      ],
+      "properties": {
+        "anchor": {
+          "type": "string"
+        },
+        "coverage_note": {
+          "type": "string"
+        },
+        "partitions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "records_expected": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "records_restored": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "topics": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "SourceInfo": {
+      "type": "object",
+      "required": [
+        "backup_id",
+        "captured_by_logweir",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "backup_id": {
+          "type": "string"
+        },
+        "captured_by_logweir": {
+          "description": "true ONLY under `--from-cluster`. `--from-cluster` is in v0.1 scope (Global Constraint 18 / docs/adr/0007-from-cluster-in-v0.1.md); its execution path lands in a follow-up task, so nothing in the main task line yet sets this true. The invariant below is live regardless.",
+          "type": "boolean"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "manifest_version_id": {
+          "default": null,
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "TargetDiffSummary": {
+      "description": "The published sink for phase 3 — the phase no shipped artifact performs. Without this block the diff would be computed and discarded, and the §4 positioning claim would rest on a value that reaches no reader.",
+      "type": "object",
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "collisions": {
+          "description": "Mapped target topics that already existed AND already held records.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "level": {
+          "description": "\"full\" in v0.1. Becomes \"shallow\" only if spec §15 cut 0d is ever taken.",
+          "type": "string"
+        },
+        "would_create": {
+          "description": "(mapped target topic, partition count the restore created).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer",
+                "format": "int32"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      }
+    },
+    "TargetInfo": {
+      "type": "object",
+      "required": [
+        "cluster_id",
+        "marker_topic",
+        "topic_mapping_entries",
+        "topic_mapping_prefix",
+        "topic_mapping_sha256"
+      ],
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "marker_topic": {
+          "description": "The v0.1 segregation proof, verified over the logweir-kafka client: cluster_id ∈ allowedClusterIds AND this topic exists (spec §9.3 phase 0).",
+          "type": "string"
+        },
+        "topic_mapping_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "topic_mapping_prefix": {
+          "type": "string"
+        },
+        "topic_mapping_sha256": {
+          "description": "sha256 over the rendered restore.yaml topic_mapping block, so an auditor can re-derive exactly what was written.",
+          "type": "string"
+        }
+      }
+    },
+    "TopicParity": {
+      "type": "object",
+      "required": [
+        "intentionally_deviated",
+        "unexpected_divergence"
+      ],
+      "properties": {
+        "intentionally_deviated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unexpected_divergence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -14,6 +14,9 @@ test:
 golden:
     INSTA_UPDATE=always cargo test --workspace
 
+schema:
+    cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
+
 # Bring the compose stack up, seed topics, produce, back up. See Task 21.
 e2e-up:
     docker compose -f e2e/compose/docker-compose.yml up -d

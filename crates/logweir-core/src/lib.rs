@@ -8,6 +8,7 @@ pub const FORMAT_VERSION: &str = "1.0.0";
 pub mod det_json;
 pub mod ids;
 pub mod outcome;
+pub mod schema;
 pub mod scorecard;
 
 #[cfg(test)]

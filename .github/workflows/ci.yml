@@ -18,6 +18,10 @@ jobs:
       - run: cargo test --workspace
       - name: pure-layer linkage guard (Global Constraint 2)
         run: ./scripts/check-no-oso.sh
+      - name: schema drift
+        run: |
+          cargo run -p logweir-core --example emit_schema > /tmp/schema.json
+          diff -u schemas/logweir-drill-scorecard-1.0.0.json /tmp/schema.json
   deny:
     runs-on: ubuntu-24.04
     steps:
