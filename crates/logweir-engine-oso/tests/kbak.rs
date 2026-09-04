@@ -25,10 +25,11 @@ fn header_magic_and_version_are_checked() {
 fn uncompressed_segment_decodes_every_record() {
     let bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
     let recs = decode_segment(&bytes).unwrap();
-    // 4, not 3: record 3 is dedicated to the null-key/null-value/null-header
-    // coverage added alongside the other Task 9 fixes (see
-    // `a_null_key_a_null_value_and_a_null_header_value_all_decode_as_none`).
-    assert_eq!(recs.len(), 4);
+    // 5, not 3: record 3 is dedicated to the null-key/null-value/null-header
+    // coverage (see `a_null_key_a_null_value_and_a_null_header_value_all_decode_as_none`)
+    // and record 4 to its empty-but-present counterpart (see
+    // `a_null_field_and_its_empty_counterpart_decode_distinctly_at_every_position`).
+    assert_eq!(recs.len(), 5);
     assert_eq!(recs[0].offset, 100);
     assert_eq!(recs[0].key.as_deref(), Some(&b"k0"[..]));
     assert_eq!(recs[2].headers[0].0, "x-original-offset");
@@ -289,6 +290,53 @@ fn a_null_key_a_null_value_and_a_null_header_value_all_decode_as_none() {
     // this is what None is being distinguished FROM.
     assert!(recs[0].key.is_some());
     assert!(recs[0].value.is_some());
+}
+
+/// The other half of FIX 4 (second review round): the null case above must
+/// also be contrasted against its EMPTY counterpart, not only against a real
+/// non-empty value — `key_len = 0` and `key_len = -1` are different bytes on
+/// the wire, and conflating "absent" with "empty" is exactly the property
+/// upstream regressed on in issue #155. Record 4 (added alongside record 3,
+/// not replacing it) carries a zero-length but PRESENT key, value, and
+/// header value. This asserts, at each of the three positions, that record 3
+/// decodes as `None` while record 4 decodes as `Some` of an empty `Vec`.
+#[test]
+fn a_null_field_and_its_empty_counterpart_decode_distinctly_at_every_position() {
+    let bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
+    let recs = decode_segment(&bytes).unwrap();
+    let null_rec = &recs[3];
+    let empty_rec = &recs[4];
+
+    // Position 1: key. `key_len == -1` vs `key_len == 0`.
+    assert_eq!(null_rec.key, None, "null key must be None");
+    assert_eq!(
+        empty_rec.key,
+        Some(Vec::new()),
+        "empty key must be Some(empty), not None"
+    );
+
+    // Position 2: value. `value_len == -1` vs `value_len == 0`.
+    assert_eq!(null_rec.value, None, "null value must be None");
+    assert_eq!(
+        empty_rec.value,
+        Some(Vec::new()),
+        "empty value must be Some(empty), not None"
+    );
+
+    // Position 3: header value. The header KEY is never optional in this
+    // format — only its value is — so both records carry exactly one header,
+    // differing only in that header's value.
+    assert_eq!(null_rec.headers[0].0, "x-null-header");
+    assert_eq!(
+        null_rec.headers[0].1, None,
+        "null header value must be None"
+    );
+    assert_eq!(empty_rec.headers[0].0, "x-empty-header");
+    assert_eq!(
+        empty_rec.headers[0].1,
+        Some(Vec::new()),
+        "empty header value must be Some(empty), not None"
+    );
 }
 
 /// FIX 5 (review of Task 9): upstream writes `x-original-offset` and

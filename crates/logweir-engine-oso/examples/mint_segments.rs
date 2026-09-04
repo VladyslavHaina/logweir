@@ -103,10 +103,25 @@ fn main() {
         None,
         &[("x-null-header", None)],
     ));
+    // A fifth record, alongside the null one rather than replacing it: a
+    // zero-length but PRESENT key, value and header value (`Some(b"")`).
+    // `key_len = 0` and `key_len = -1` are different bytes on the wire, and
+    // this is exactly the distinction upstream regressed on in issue #155 —
+    // a null-only fixture proves `len < 0 -> None` decodes, but says nothing
+    // about `len == 0 -> Some(vec![])` decoding to a *different*, non-null
+    // value. Record 3 (null) and record 4 (empty) are asserted against each
+    // other, position by position, in `..._distinguishes_null_from_empty`.
+    recs.push(record(
+        104,
+        1_756_425_600_004,
+        Some(b""),
+        Some(b""),
+        &[("x-empty-header", Some(b""))],
+    ));
     for (name, c) in [("none", 0u8), ("zstd", 1), ("lz4", 2)] {
         std::fs::write(
             format!("e2e/fixtures/segments/{name}.kbak"),
-            segment(c, &recs, 100, 103),
+            segment(c, &recs, 100, 104),
         )
         .unwrap();
     }
@@ -115,5 +130,5 @@ fn main() {
         br#"[{"offset":100,"timestamp":1,"key":"azA=","value":"djA="}]"#, // harness-only: JSON fixture field name, not a kafka-backup CLI subcommand
     )
     .unwrap();
-    println!("minted 3 .kbak fixtures (4 records each) and legacy.json");
+    println!("minted 3 .kbak fixtures (5 records each) and legacy.json");
 }
