@@ -424,7 +424,12 @@ pub struct ApprovalFixture {
     pub approval: PathBuf,
     pub approver_pub: PathBuf,
     pub other_pub: PathBuf,
-    pub approver_key_id: String,
+    /// The scorecard-signing key `phase1_approval::verify` compares the
+    /// approver's key against, as an ACTUAL `VerifyingKey` — never a
+    /// caller-supplied string (Task 15 fix round 1, review finding F2). Equal
+    /// to the approver's own key in `approval_self`'s fixture, a distinct
+    /// generated key otherwise.
+    pub signing_key: logweir_evidence::keys::VerifyingKey,
     pub before: DateTime<Utc>,
     _dir: tempfile::TempDir,
 }
@@ -468,12 +473,24 @@ fn approval_fixture(self_attested: bool) -> ApprovalFixture {
     let other_pub = dir.path().join("other.pub.pem");
     write_pub(&SigningKey::generate_p256(), &other_pub);
 
+    // The self-attested case's signing key must be the SAME key as the
+    // approver's (both loaded from signing.pem) so the comparison inside
+    // `verify` is a genuine equality, not a coincidence of two calls to
+    // `generate_p256`. The non-self-attested case's signing key is an
+    // independently generated key, distinct from both `approver` and
+    // `other_pub`'s key.
+    let signing_key = if self_attested {
+        approver.verifying_key()
+    } else {
+        SigningKey::generate_p256().verifying_key()
+    };
+
     ApprovalFixture {
         spec_text,
         approval,
         approver_pub,
         other_pub,
-        approver_key_id: approver.key_id(),
+        signing_key,
         before: Utc::now(),
         _dir: dir,
     }
