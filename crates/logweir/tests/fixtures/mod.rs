@@ -429,42 +429,55 @@ pub struct ApprovalFixture {
     _dir: tempfile::TempDir,
 }
 
-// UNCOMMENT IN TASK 15 — phase1_approval::PAYLOAD_TYPE_APPROVAL
-// (applies to the `PAYLOAD_TYPE_APPROVAL` line inside `approval_fixture`)
-// fn approval_fixture(self_attested: bool) -> ApprovalFixture {
-//     use logweir_evidence::{keys::SigningKey, sign::sign_detached};
-//     let dir = tempfile::tempdir().unwrap();
-//     let spec_text = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
-//     let doc = serde_json::json!({
-//         "approver": "sre-oncall@example.com",
-//         "ticket": "CHG-40881",
-//         "plan_hash": logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
-//         "approved_at": "2026-09-02T17:40:00Z",
-//     });
-//     let bytes = serde_json::to_vec_pretty(&doc).unwrap();
-//     let approval = dir.path().join("approval.json");
-//     std::fs::write(&approval, &bytes).unwrap();
-//
-//     let approver = if self_attested {
-//         SigningKey::from_pem_file(std::path::Path::new("../../e2e/fixtures/signed/signing.pem")).unwrap()
-//     } else {
-//         SigningKey::generate_p256()
-//     };
-//     let side = sign_detached(&approver,
-//         logweir::drill::phase1_approval::PAYLOAD_TYPE_APPROVAL, &bytes).unwrap();
-//     std::fs::write(approval.with_extension("sig"), serde_json::to_vec(&side).unwrap()).unwrap();
-//
-//     let approver_pub = dir.path().join("approver.pub.pem");
-//     write_pub(&approver, &approver_pub);
-//     let other_pub = dir.path().join("other.pub.pem");
-//     write_pub(&SigningKey::generate_p256(), &other_pub);
-//
-//     ApprovalFixture {
-//         spec_text, approval, approver_pub, other_pub,
-//         approver_key_id: approver.key_id(),
-//         before: Utc::now(), _dir: dir,
-//     }
-// }
+fn approval_fixture(self_attested: bool) -> ApprovalFixture {
+    use logweir_evidence::{keys::SigningKey, sign::sign_detached};
+    let dir = tempfile::tempdir().unwrap();
+    let spec_text = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    let doc = serde_json::json!({
+        "approver": "sre-oncall@example.com",
+        "ticket": "CHG-40881",
+        "plan_hash": logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+        "approved_at": "2026-09-02T17:40:00Z",
+    });
+    let bytes = serde_json::to_vec_pretty(&doc).unwrap();
+    let approval = dir.path().join("approval.json");
+    std::fs::write(&approval, &bytes).unwrap();
+
+    let approver = if self_attested {
+        SigningKey::from_pem_file(std::path::Path::new(
+            "../../e2e/fixtures/signed/signing.pem",
+        ))
+        .unwrap()
+    } else {
+        SigningKey::generate_p256()
+    };
+    let side = sign_detached(
+        &approver,
+        logweir::drill::phase1_approval::PAYLOAD_TYPE_APPROVAL,
+        &bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        approval.with_extension("sig"),
+        serde_json::to_vec(&side).unwrap(),
+    )
+    .unwrap();
+
+    let approver_pub = dir.path().join("approver.pub.pem");
+    write_pub(&approver, &approver_pub);
+    let other_pub = dir.path().join("other.pub.pem");
+    write_pub(&SigningKey::generate_p256(), &other_pub);
+
+    ApprovalFixture {
+        spec_text,
+        approval,
+        approver_pub,
+        other_pub,
+        approver_key_id: approver.key_id(),
+        before: Utc::now(),
+        _dir: dir,
+    }
+}
 
 fn write_pub(k: &logweir_evidence::keys::SigningKey, to: &std::path::Path) {
     use p256::pkcs8::EncodePublicKey;
@@ -478,11 +491,14 @@ fn write_pub(k: &logweir_evidence::keys::SigningKey, to: &std::path::Path) {
     }
 }
 
-// UNCOMMENT IN TASK 15 — phase1_approval::PAYLOAD_TYPE_APPROVAL (via approval_fixture)
-// /// Approver key != signing key.
-// pub fn approval_ok() -> ApprovalFixture { approval_fixture(false) }
-// /// Approver key == the signing key in e2e/fixtures/signed/signing.pem.
-// pub fn approval_self() -> ApprovalFixture { approval_fixture(true) }
+/// Approver key != signing key.
+pub fn approval_ok() -> ApprovalFixture {
+    approval_fixture(false)
+}
+/// Approver key == the signing key in e2e/fixtures/signed/signing.pem.
+pub fn approval_self() -> ApprovalFixture {
+    approval_fixture(true)
+}
 
 // ---------------------------------------------------------------- engine doubles
 

@@ -1,6 +1,7 @@
 //! The eleven-phase orchestrator (-1..=9). Phase -1 ships in v0.1 — Global Constraint 18 (reversed 2026-09-03) and
 //! docs/adr/0007-from-cluster-in-v0.1.md.
 pub mod phase0_admit;
+pub mod phase1_approval;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DrillError {
