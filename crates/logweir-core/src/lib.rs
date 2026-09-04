@@ -5,6 +5,11 @@
 /// fields only; a major changes an identity rule.
 pub const FORMAT_VERSION: &str = "1.0.0";
 
+pub mod det_json;
+pub mod ids;
+pub mod outcome;
+pub mod scorecard;
+
 #[cfg(test)]
 mod tests {
     #[test]
