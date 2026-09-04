@@ -108,6 +108,22 @@ pub struct PhaseRecord {
     pub at: DateTime<Utc>,
     pub outcome: String,
     pub duration_ms: u64,
+    /// Free-form evidence attached to this phase record. Currently populated
+    /// only on phase 5 (`crate::drill::phase5_preflight`), which carries each
+    /// `Finding`'s tag/detail here so a `preflight-failed` scorecard states
+    /// *why* the drill was refused, not just that it was — without this
+    /// field the adjudication's reasoning had nowhere in the signed document
+    /// to land. `skip_serializing_if` (matching `TargetDiffSummary::absent`,
+    /// Task 16 fix round 1) so a document signed before this field existed
+    /// keeps round-tripping byte-for-byte when it has nothing to report.
+    ///
+    /// This reverses `task-3-addendum.md` A2 ("do not add a `notes` field to
+    /// `PhaseRecord`"), on controller authority, in Task 17 fix round 1: that
+    /// ruling predates `task-21a-brief.md:259`, which writes `p.notes = …`
+    /// against this exact struct, so leaving the field out only delayed the
+    /// same `E0560` to Task 21a.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

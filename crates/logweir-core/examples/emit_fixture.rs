@@ -65,6 +65,12 @@ fn main() {
             at: t("2026-09-03T09:00:00Z"),
             outcome: "admitted".into(),
             duration_ms: 41,
+            // Empty, not `vec!["...".into()]`: this field is
+            // `skip_serializing_if`-omitted when empty specifically so this
+            // checked-in, signed fixture's bytes (and therefore its
+            // signature) are unaffected by the field's addition in Task 17
+            // fix round 1 — see `PhaseRecord::notes`'s doc comment.
+            notes: vec![],
         }],
         measured: Measured {
             rto_seconds: Some(512),

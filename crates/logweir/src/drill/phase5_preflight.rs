@@ -11,6 +11,24 @@
 //! phase 8 (score + sign + upload) and returns `ExitCode::DrillNotPass` (2).
 //! It never reaches phase 6. Exit 1 here would produce no artifact, and this
 //! signed document is the NIS2 IR 4.2.3 evidence (spec §11, Global Constraint 11).
+//!
+//! `PhaseRecord.notes: Vec<String>` (`logweir_core::scorecard::PhaseRecord`)
+//! is what the paragraph above writes `Finding`s into. It did not exist when
+//! this module was first shipped — Task 17 fix round 1 added it, reversing
+//! `task-3-addendum.md` A2 on controller authority, specifically so this
+//! contract would be true rather than aspirational. If you are reading this
+//! and the field is gone again, this contract is broken; do not re-route
+//! findings into `phases[5].outcome` without updating this comment.
+//!
+//! On `Verdict::Block` the `warnings` vector is DISCARDED, not carried
+//! anywhere — `adjudicate` returns `Block { findings }` only, so any
+//! header-coverage advisories collected before a blocking finding fired never
+//! reach the caller, and therefore never reach the signed scorecard. This is
+//! as specified (the brief's Step 3 body, verbatim) and is not a bug: it
+//! means a blocking run's `notes` never mention `Partial`/`Missing` header
+//! coverage, only the grounds that actually blocked it. A caller wanting
+//! warnings preserved on a blocking run would need `adjudicate`'s signature
+//! changed; Task 17 does not do that.
 
 use logweir_core::engine::{CoverageState, PreflightReport};
 
