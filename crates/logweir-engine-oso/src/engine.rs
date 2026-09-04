@@ -341,6 +341,14 @@ impl DataEngine for OsoCliEngine {
         // mismatch and fails a drill that actually succeeded — the worst
         // direction for a product whose deliverable is a signed attestation.
         // See `SampleSelection::set`'s doc comment (logweir-core).
+        //
+        // Fix (post-review, second round): `count == 0` returns before
+        // touching storage at all — no listing, no reads, no decoding —
+        // rather than building and discarding a full buffer, for every
+        // anchor.
+        if sel.count == 0 {
+            return Ok(Vec::new());
+        }
         let mut all = Vec::new();
         for key in self.store.segment_keys_for_set(
             &sel.set.manifest_key,
@@ -365,6 +373,31 @@ impl DataEngine for OsoCliEngine {
                         r.timestamp,
                     ),
                 });
+            }
+            // Fix (post-review, second round): `head` bounds the READ, not
+            // only the output — `count`'s doc comment (logweir-core) used to
+            // claim this for every anchor, when only `head` can actually do
+            // it. `tail` and `random` both need the window's full extent
+            // before they can choose (the latest `count` records, or a span
+            // across all of them), so they must keep traversing regardless
+            // of how much `all` already holds.
+            //
+            // Safe to stop here for `head` specifically because
+            // `segment_keys_for_set` returns keys SORTED (lexicographically,
+            // via `Vec::sort` in storage.rs) and the real key format
+            // zero-pads the segment's start offset to a fixed width
+            // (`segment-{offset:020}.bin{ext}`, storage.rs's `qualify` doc) —
+            // for a FIXED topic/partition (already the case here; every key
+            // in this loop shares that prefix), lexicographic order over
+            // these keys IS ascending start-offset order. So once `all`
+            // holds `count` in-window records after fully decoding a
+            // segment, every segment left in the iterator has a start offset
+            // at or above the one just processed and cannot contain a
+            // record earlier than what has already been collected — reading
+            // it could only add records `select_sample`'s `"head"` branch
+            // would discard anyway.
+            if sel.anchor == "head" && all.len() >= sel.count {
+                break;
             }
         }
         all.sort_by_key(|f| f.offset);
@@ -408,6 +441,10 @@ fn select_sample(
     anchor: &str,
     count: usize,
 ) -> Result<Vec<RecordFingerprint>, EngineError> {
+    // Backstop, not the primary path: `fingerprints()` already returns before
+    // reading anything when `sel.count == 0`, so `sorted` is always empty
+    // here in practice too. Kept in case a future caller reaches this
+    // function some other way.
     if count == 0 {
         return Ok(Vec::new());
     }

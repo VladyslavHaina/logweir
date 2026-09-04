@@ -201,10 +201,22 @@ pub struct SampleSelection {
     pub anchor: String, // head | tail | random
     /// A CAP on how many fingerprints `fingerprints()` returns, not a promise
     /// of exactly this many: fewer than `count` matching records in the
-    /// window is not an error. Bounding this is what keeps the scorecard's
-    /// "N samples, anchor X" claim (both are scorecard fields) true of what
-    /// actually ran, and keeps memory bounded against a window that spans far
-    /// more records than were ever meant to be sampled.
+    /// window is not an error. What this bounds differs BY ANCHOR — an
+    /// earlier version of this comment claimed a memory guarantee the code
+    /// did not actually provide for every anchor, which is corrected here:
+    /// - `"head"`: bounds the READ, not only the output.
+    ///   `OsoCliEngine::fingerprints` stops decoding further segments once
+    ///   `count` in-window records are in hand, because the earliest records
+    ///   are already known once seen — no segment processed later (higher
+    ///   start offset) can contain an earlier one.
+    /// - `"tail"` and `"random"`: bound only the OUTPUT, not the read. Both
+    ///   need the window's full extent before they can choose (the latest
+    ///   `count` records, or an evenly-spaced span across all of them), so
+    ///   every segment in the window is decoded and buffered regardless of
+    ///   `count`; only what is RETURNED is trimmed.
+    ///
+    /// `count == 0` is bounded for every anchor: `fingerprints()` returns
+    /// immediately, before reading anything.
     pub count: usize,
     pub window: (i64, i64),
 }

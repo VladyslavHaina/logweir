@@ -762,3 +762,90 @@ fn an_unknown_anchor_is_an_operational_error() {
     assert!(err.to_string().contains("bogus"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Builds a backup set with TWO segments in the manifest, both matching the
+/// query window: `hs/.../segment-...400.bin` (offsets 400-402, WRITTEN to
+/// disk) and `hs/.../segment-...500.bin` (offsets 500-502, deliberately
+/// **never written** — no file exists at that path at all). Segment keys are
+/// zero-padded by start offset, so the 400 segment sorts before the 500 one
+/// in `segment_keys_for_set`'s (lexicographically sorted) output — exactly
+/// the ordering `OsoCliEngine::fingerprints`'s `head` short-circuit relies on.
+fn seed_two_segment_archive_with_a_missing_later_segment(dir: &std::path::Path) -> BackupSetRef {
+    const SEG_A: &str = "hs/topics/orders/partition=0/segment-00000000000000000400.bin";
+    const SEG_B: &str = "hs/topics/orders/partition=0/segment-00000000000000000500.bin";
+    let manifest = format!(
+        r#"{{"backup_id":"hs","created_at":0,"topics":[{{"name":"orders","partitions":[{{"partition_id":0,"segments":[
+        {{"key":"{SEG_A}","start_offset":400,"end_offset":402,"start_timestamp":400,"end_timestamp":402,"record_count":3}},
+        {{"key":"{SEG_B}","start_offset":500,"end_offset":502,"start_timestamp":500,"end_timestamp":502,"record_count":3}}
+        ]}}]}}]}}"#
+    );
+    std::fs::create_dir_all(dir.join("hs")).unwrap();
+    std::fs::write(dir.join("hs/manifest.json"), manifest).unwrap();
+
+    let seg_a_path = dir.join(SEG_A);
+    std::fs::create_dir_all(seg_a_path.parent().unwrap()).unwrap();
+    let records: Vec<(i64, i64, &[u8], &[u8])> = vec![
+        (400, 400, b"ka0", b"va0"),
+        (401, 401, b"ka1", b"va1"),
+        (402, 402, b"ka2", b"va2"),
+    ];
+    std::fs::write(&seg_a_path, make_kbak_segment(&records)).unwrap();
+    // SEG_B is intentionally never written: its directory is not even
+    // created. A traversal that reaches it fails with StoreError::NotFound.
+
+    BackupSetRef {
+        backup_id: "hs".into(),
+        manifest_key: "hs/manifest.json".into(),
+    }
+}
+
+/// The "honest form" the coordinator asked for: not a re-check of output
+/// length (which a full traversal that happens to produce the right count
+/// would also pass), but a fixture where reading the segment `head` is
+/// supposed to skip would ITSELF fail — proving the skip actually happened,
+/// not merely that the answer came out right.
+///
+/// `count: 3` is satisfied entirely by the first (400-402) segment, so
+/// `head` must never attempt the second (500-502) segment, which does not
+/// exist on disk. `tail`, run against the IDENTICAL fixture, must traverse
+/// the whole window to find the latest records and therefore DOES reach the
+/// missing segment — its `Err` is the control that proves the missing
+/// segment was genuinely reachable (matched topic/partition/window, was
+/// really in `head`'s path), not irrelevant for some unrelated reason.
+#[test]
+fn head_short_circuits_before_reading_a_later_unneeded_segment() {
+    let dir = unique_dir("head-short-circuit");
+    let set = seed_two_segment_archive_with_a_missing_later_segment(&dir);
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let window_sel = |anchor: &str| SampleSelection {
+        set: set.clone(),
+        topic: "orders".into(),
+        partition: 0,
+        anchor: anchor.into(),
+        count: 3,
+        window: (400, 502),
+    };
+
+    // head: satisfied by the first segment alone; must not touch the second.
+    let fps = engine.fingerprints(&window_sel("head")).unwrap();
+    assert_eq!(
+        fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        vec![400, 401, 402]
+    );
+
+    // Control: tail, same fixture, same window — must traverse both segments
+    // to know which are the LATEST 3 records, reaches the missing one, fails.
+    // This is what proves segment B was genuinely in `head`'s path too, not
+    // excluded by topic/partition/window for some other reason.
+    let err = engine.fingerprints(&window_sel("tail")).unwrap_err();
+    assert!(
+        err.to_string().contains("segment-00000000000000000500.bin"),
+        "{err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
