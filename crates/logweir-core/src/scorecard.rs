@@ -261,6 +261,25 @@ impl Scorecard {
                 "integrity.result is 'partial' but partial_reason is null".into(),
             ));
         }
+        // The format's only two float fields. `serde_json::to_value` turns a
+        // non-finite f64 into `Value::Null` before `det_json`'s own walk ever
+        // sees it (see `det_json.rs`'s module doc comment), so finiteness has
+        // to be enforced here, on the typed field, where the error can still
+        // name which field was bad.
+        if let Some(pass_rate) = self.objectives.pass_rate {
+            if !pass_rate.is_finite() {
+                return Err(InvariantError(
+                    "objectives.pass_rate is not finite (NaN or +/-Inf)".into(),
+                ));
+            }
+        }
+        if let Some(pass_rate_measured) = self.integrity.pass_rate_measured {
+            if !pass_rate_measured.is_finite() {
+                return Err(InvariantError(
+                    "integrity.pass_rate_measured is not finite (NaN or +/-Inf)".into(),
+                ));
+            }
+        }
         // Global Constraint 18(a): captured_by_logweir is a biconditional.
         // true  => last_phase_completed >= -1, a measured source-relative RPO,
         //          and NO unmeasured reason.
@@ -334,5 +353,242 @@ impl Scorecard {
             return Err(InvariantError("last_phase_completed outside -1..=9".into()));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct coverage of `Scorecard::validate_invariants`'s per-arm behaviour.
+    //! `crates/logweir-core/tests/scorecard_golden.rs` is frozen at exactly
+    //! four tests (addendum ruling A1), so this coverage lives here instead.
+    //! Every test asserts the SPECIFIC error message, not a bare `is_err()`,
+    //! so deleting or merging an arm makes exactly one test fail.
+    use super::*;
+
+    /// A scorecard that satisfies every invariant `validate_invariants` checks.
+    /// `captured_by_logweir` is false (the false-branch of Global Constraint
+    /// 18(a)), matching what v0.1 ever actually produces. Each test below
+    /// clones this and overrides only the field(s) needed to trip one arm.
+    fn valid_scorecard() -> Scorecard {
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        Scorecard {
+            format_version: crate::FORMAT_VERSION.to_string(),
+            run_id: "01J9X2QK7C4V0R8YB3ZP6MTS5A".into(),
+            outcome: Outcome::Pass,
+            last_phase_completed: 9,
+            requested_at: t("2026-09-03T09:00:00Z"),
+            approval_validated_at: None,
+            triggered_by: None,
+            engine: EngineInfo {
+                id: "oso-cli".into(),
+                version: "v0.21.0".into(),
+                digest: "sha256:0".into(),
+                execution: "subprocess".into(),
+                levers: Levers {
+                    header_preflight: LeverState::Honoured,
+                    dry_run_check_segments: LeverState::UnknownNotObservable,
+                    unknown_key_warnings: vec![],
+                },
+                matrix_verdict: MatrixVerdict::Pass,
+                matrix_verdict_reason: None,
+            },
+            source: SourceInfo {
+                backup_id: "backup-1".into(),
+                manifest_sha256: "sha256:0".into(),
+                manifest_version_id: None,
+                captured_by_logweir: false,
+            },
+            target: TargetInfo {
+                cluster_id: "cluster-1".into(),
+                marker_topic: "logweir.scratch".into(),
+                topic_mapping_prefix: "drill-".into(),
+                topic_mapping_sha256: "sha256:0".into(),
+                topic_mapping_entries: 1,
+            },
+            approval: ApprovalInfo {
+                approver: "sre-oncall@example.com".into(),
+                ticket: "CHG-1".into(),
+                plan_hash: "sha256:0".into(),
+                approved_at: t("2026-09-02T17:40:00Z"),
+                key_id: "a".repeat(64),
+                self_attested: false,
+            },
+            phases: vec![],
+            measured: Measured {
+                rto_seconds: None,
+                rto_requested_to_verified_seconds: None,
+                rto_restore_only_seconds: None,
+                rto_excluding_preflight_seconds: None,
+                rpo_seconds: None,
+                rpo_source_relative_seconds: None,
+                rpo_source_relative_unmeasured_reason: Some(
+                    "source cluster never contacted".into(),
+                ),
+            },
+            objectives: Objectives {
+                rto_seconds: None,
+                rpo_seconds: None,
+                pass_rate: None,
+                met: None,
+            },
+            sample: SampleInfo {
+                window_start: t("2026-08-29T00:00:00Z"),
+                window_end: t("2026-08-30T02:00:00Z"),
+                topics: 1,
+                partitions: 1,
+                records_expected: 0,
+                records_restored: 0,
+                anchor: "head".into(),
+                coverage_note: "no capture gap overlaps the sampled window".into(),
+            },
+            target_diff: TargetDiffSummary {
+                collisions: vec![],
+                would_create: vec![],
+                level: "full".into(),
+            },
+            integrity: Integrity {
+                level: IntegrityLevel::ByteFingerprint,
+                result: IntegrityResult::Pass,
+                partial_reason: None,
+                records_sampled: 0,
+                records_sampled_matching: 0,
+                mismatches: 0,
+                pass_rate_measured: None,
+                restored_principal_could_consume: None,
+            },
+            topic_parity: TopicParity {
+                intentionally_deviated: vec![],
+                unexpected_divergence: vec![],
+            },
+            engine_subreport: None,
+            evidence: EvidenceInfo {
+                version_id: None,
+                retain_until: None,
+                immutable: false,
+                create_only_enforced: true,
+            },
+            redactions: vec![],
+        }
+    }
+
+    #[test]
+    fn baseline_is_valid() {
+        valid_scorecard()
+            .validate_invariants()
+            .expect("the test baseline itself must satisfy every invariant");
+    }
+
+    // --- Global Constraint 18(a), true branch -----------------------------
+
+    #[test]
+    fn captured_by_logweir_true_rejects_last_phase_completed_below_neg1() {
+        let mut sc = valid_scorecard();
+        sc.source.captured_by_logweir = true;
+        sc.last_phase_completed = -2;
+        // Needed so the true-branch's OTHER checks would pass if reached —
+        // isolates the failure to the last_phase_completed arm specifically.
+        sc.measured.rpo_source_relative_seconds = Some(0);
+        sc.measured.rpo_source_relative_unmeasured_reason = None;
+        let err = sc
+            .validate_invariants()
+            .expect_err("last_phase_completed below -1 must be rejected");
+        assert_eq!(
+            err.0,
+            "source.captured_by_logweir is true but last_phase_completed is below -1"
+        );
+    }
+
+    #[test]
+    fn captured_by_logweir_true_requires_measured_source_relative_rpo() {
+        let mut sc = valid_scorecard();
+        sc.source.captured_by_logweir = true;
+        sc.last_phase_completed = 9;
+        sc.measured.rpo_source_relative_seconds = None;
+        sc.measured.rpo_source_relative_unmeasured_reason = None;
+        let err = sc.validate_invariants().expect_err(
+            "a null rpo_source_relative_seconds must be rejected when captured_by_logweir is true",
+        );
+        assert_eq!(
+            err.0,
+            "source.captured_by_logweir is true but rpo_source_relative_seconds is null"
+        );
+    }
+
+    #[test]
+    fn captured_by_logweir_true_rejects_a_lingering_unmeasured_reason() {
+        let mut sc = valid_scorecard();
+        sc.source.captured_by_logweir = true;
+        sc.last_phase_completed = 9;
+        sc.measured.rpo_source_relative_seconds = Some(0);
+        sc.measured.rpo_source_relative_unmeasured_reason = Some("stale reason".into());
+        let err = sc.validate_invariants().expect_err(
+            "a non-null unmeasured reason must be rejected when captured_by_logweir is true",
+        );
+        assert_eq!(
+            err.0,
+            "source.captured_by_logweir is true but an unmeasured reason is present"
+        );
+    }
+
+    // --- Global Constraint 18(a), false branch ------------------------------
+
+    #[test]
+    fn captured_by_logweir_false_rejects_a_source_relative_rpo() {
+        let mut sc = valid_scorecard();
+        sc.source.captured_by_logweir = false;
+        sc.measured.rpo_source_relative_seconds = Some(0);
+        // Left as Some(...) so, if the seconds arm were deleted, the reason
+        // arm below would not incidentally catch this case too.
+        sc.measured.rpo_source_relative_unmeasured_reason =
+            Some("source cluster never contacted".into());
+        let err = sc
+            .validate_invariants()
+            .expect_err("a source-relative RPO with the source never contacted must be rejected");
+        assert_eq!(
+            err.0,
+            "rpo_source_relative_seconds is set but the source was never contacted"
+        );
+    }
+
+    #[test]
+    fn captured_by_logweir_false_requires_an_unmeasured_reason() {
+        let mut sc = valid_scorecard();
+        sc.source.captured_by_logweir = false;
+        sc.measured.rpo_source_relative_seconds = None;
+        sc.measured.rpo_source_relative_unmeasured_reason = None;
+        let err = sc.validate_invariants().expect_err(
+            "a null unmeasured reason must be rejected when captured_by_logweir is false",
+        );
+        assert_eq!(
+            err.0,
+            "source.captured_by_logweir is false but rpo_source_relative_unmeasured_reason is null"
+        );
+    }
+
+    // --- Finiteness of the format's two float fields ------------------------
+
+    #[test]
+    fn objectives_pass_rate_must_be_finite() {
+        let mut sc = valid_scorecard();
+        sc.objectives.pass_rate = Some(f64::NAN);
+        let err = sc.validate_invariants().expect_err(
+            "a NaN objectives.pass_rate must be rejected before it can be signed as a bare null",
+        );
+        assert_eq!(err.0, "objectives.pass_rate is not finite (NaN or +/-Inf)");
+    }
+
+    #[test]
+    fn integrity_pass_rate_measured_must_be_finite() {
+        let mut sc = valid_scorecard();
+        // records_sampled_matching / records_sampled with records_sampled == 0
+        // is exactly the reachable trigger: a drill that samples zero records.
+        sc.integrity.pass_rate_measured = Some(f64::NAN);
+        let err = sc.validate_invariants().expect_err(
+            "a NaN integrity.pass_rate_measured must be rejected before it can be signed as a bare null",
+        );
+        assert_eq!(
+            err.0,
+            "integrity.pass_rate_measured is not finite (NaN or +/-Inf)"
+        );
     }
 }
