@@ -53,7 +53,15 @@ fn validation_run_defaults_to_an_operational_refusal_not_a_fabricated_pass() {
         },
         target_bootstrap: vec!["broker:9092".into()],
         topic_mapping: Default::default(),
-        time_window: (chrono::Utc::now(), chrono::Utc::now()),
+        // A fixed timestamp, not `Utc::now()` — Task 19 fix round 1, review
+        // finding F14: `logweir-core` is otherwise clock-free by convention
+        // (Global Constraint 1 governs the library; this is a test, but there
+        // is no reason to be the one place that reaches for the clock when a
+        // fixed value is exactly as good here).
+        time_window: (
+            "2026-08-29T00:00:00Z".parse().unwrap(),
+            "2026-08-30T02:00:00Z".parse().unwrap(),
+        ),
         default_replication_factor: 1,
         checkpoint_state: "/tmp/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

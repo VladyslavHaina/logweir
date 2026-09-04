@@ -4,6 +4,32 @@
 //! consume-and-reconcile, per-record fingerprints (not watermark counts),
 //! and (d) topic-config parity against what phase 6 deliberately altered.
 //!
+//! ## Reconciling PER SELECTION, never pooled (Task 19 fix round 1, review
+//! finding F1 — CRITICAL)
+//!
+//! `compare()` keys its lookup on the bare record offset alone — deliberately:
+//! every Kafka partition starts at offset 0, and a restored topic's offsets
+//! need not start where the source's did, so matching by (topic, partition,
+//! offset) all at once is not simpler, it is just as offset-collision-prone
+//! UNLESS every call to `compare()` is scoped to exactly one partition. The
+//! first version of this file called `compare()` ONCE over every selection's
+//! archive fingerprints and every selection's consumed records, flattened
+//! into two pooled lists. Because `ConsumedRecord` carries no topic field
+//! and every partition starts at offset 0, records from DIFFERENT topics or
+//! DIFFERENT partitions collided in that one shared lookup table — an
+//! entirely un-restored topic could reconcile against a DIFFERENT topic's
+//! records and sign a byte-fingerprint `Pass` over data that was never
+//! restored (demonstrated against the shipped code in the review; see
+//! `verify_phase.rs`'s
+//! `a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_healthy_topic`).
+//!
+//! The fix: `consume_and_reconcile` (below) calls `compare()` ONCE PER
+//! SELECTION — never once over everything — and sums the per-selection
+//! results. Each selection names exactly one (topic, partition), so its own
+//! `compare()` call can never see another selection's records, making a
+//! cross-partition or cross-topic collision structurally impossible rather
+//! than merely untested.
+//!
 //! ## Exit-code routing (contract for the future orchestrator)
 //!
 //! Mirrors `phase5_preflight`'s documented contract exactly: `run` below
@@ -12,11 +38,13 @@
 //! carried home inside `VerifyOutcome.integrity.{result,partial_reason}`,
 //! never as an `Err`. The orchestrator (Task 21a, not implemented here) reads
 //! `integrity.result`. `Pass` becomes `Outcome::Pass` (subject to the other
-//! phases' verdicts). `Partial` is NOT a pass — a compacted topic
-//! legitimately holds fewer records than the archive — but still lands at
-//! exit 2 with a signed scorecard: the reconciliation ran and reported
-//! honestly. `Fail` becomes `Outcome::FailIntegrity`, exit 2, signed
-//! scorecard.
+//! phases' verdicts). `Partial` is NOT a pass — either a byte-fingerprint
+//! comparison that sampled zero records (this file's own reachable path, see
+//! "Partial" below) or, in principle, a compacted topic that legitimately
+//! holds fewer records than the archive (see the caveat below: v0.1 cannot
+//! yet distinguish that case from real corruption, so it is NOT a separate
+//! reachable path here) — but still lands at exit 2 with a signed scorecard.
+//! `Fail` becomes `Outcome::FailIntegrity`, exit 2, signed scorecard.
 //!
 //! `run` returns `Err(DrillError::Operational(..))` ONLY when the check
 //! genuinely could not be performed at all (an empty sample selection, a
@@ -24,6 +52,33 @@
 //! came back negative. If this file is ever found routing a negative
 //! comparison result through `Err`, or an `Err` here through anything but
 //! exit 1, that is the exact defect this comment exists to prevent.
+//!
+//! ## `IntegrityResult::Partial` — one reachable path, one declared gap
+//! (Task 19 fix round 1, review findings F2/F3)
+//!
+//! A byte-fingerprint comparison that samples ZERO records (`sampled == 0`
+//! after `consume_and_reconcile`) is now reported as `Partial`, never `Pass`
+//! — "compared nothing" must not read as success. Reachable in production:
+//! `sample.records_per_partition: 0` used to reach `SampleSelection.count`
+//! with nothing rejecting it (closed at the source too — see
+//! `phase4_sample::run`'s own guard — but this file no longer trusts that as
+//! the only line of defence). Pinned by `verify_phase.rs`'s
+//! `a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass`.
+//!
+//! The brief's OTHER named `Partial` scenario — a compacted topic that
+//! legitimately holds fewer records than the archive (spec §9.3) — is
+//! DELIBERATELY NOT given a reachable path in `run` by this fix round.
+//! Distinguishing "compaction removed this record on purpose" from "the
+//! restore or the archive lost it" would require cross-referencing a
+//! specific mismatch against `topic_parity`'s `cleanup.policy=compact` flag,
+//! which this phase does not attempt. A compacted topic today is honestly
+//! reported via the SAME path a real mismatch takes (`Fail`, with the
+//! specific offsets logged, `partial_reason: None`) — a known limitation,
+//! not a defect, and out of this fix round's scope to resolve algorithmically.
+//! `fixtures::verify_outcome_for_compacted_topic` (used by
+//! `a_compacted_topic_is_partial_with_a_reason`) remains a SHAPE test only,
+//! pinning the struct literal Task 20/21 consume — it does not, and cannot
+//! yet, describe a path `run` itself takes.
 //!
 //! ## The topic-rename mapping ("the known issue")
 //!
@@ -34,9 +89,9 @@
 //! via `mapping` BEFORE talking to the target cluster, and each is pinned by
 //! a named test.
 //!
-//! First, `consume_all` calls `reader.consume_range(mapping[&sel.topic],
-//! ...)`, never `reader.consume_range(&sel.topic, ...)` — proven by
-//! `verify_phase.rs`'s
+//! First, `consume_and_reconcile` (via `mapped_topic`) calls
+//! `reader.consume_range(mapping[&sel.topic], ...)`, never
+//! `reader.consume_range(&sel.topic, ...)` — proven by `verify_phase.rs`'s
 //! `consume_all_reads_the_mapped_target_topic_never_the_archive_name`.
 //! Second, `classify_parity_all` calls `reader.topic_configs(mapping[&src])`
 //! and `reader.end_offsets(mapping[&src])`, never the source name — proven
@@ -199,7 +254,7 @@ pub fn classify_parity(
 /// inherent method cannot be added to it from here. A free function reading
 /// `sampled_segments(facts, sel)` is functionally identical and changes
 /// nothing this task is not already scoped to change; the same substitution
-/// applies to `fingerprints_for` below.
+/// applies to `probe_archive_mode` below.
 ///
 /// Errors — rather than silently returning an empty `Vec` — when `sel` is
 /// non-empty but matches ZERO segments: an empty result here would make the
@@ -238,62 +293,115 @@ fn sampled_segments<'a>(
     Ok(out)
 }
 
-/// Aggregates `DataEngine::fingerprints` across every selection into one flat
-/// archive-side set. A free function, not `engine.fingerprints_for(sel)` — see
-/// `sampled_segments`'s doc comment for why a method call became a function
-/// call: `DataEngine` is defined in `logweir-core`, out of this task's file
-/// scope, and `fingerprints_for` (plural selections) is not itself in that
-/// trait (only the existing per-selection `fingerprints` is).
+/// The archive side's support level, determined ONCE across every selection
+/// — never re-probed per partition — because an unsupported KBAK level is a
+/// fact about the whole backup set's FORMAT (`EngineError::Unsupported`'s own
+/// doc comment), not about one partition. The FIRST `Unsupported` found wins
+/// for every selection; there is no value in checking the rest once the
+/// first says so.
+///
+/// Carries one archive fingerprint `Vec` PER SELECTION, in lock-step with
+/// `sel`'s own order (`ByteFingerprint(v)` has `v.len() == sel.len()`) — this
+/// is what lets `consume_and_reconcile` reconcile selection `i`'s archive
+/// side against selection `i`'s own consumed records only, never pooling two
+/// selections' data into one lookup (module doc, "Reconciling PER SELECTION").
+#[derive(Debug)]
+enum ArchiveMode {
+    ByteFingerprint(Vec<Vec<RecordFingerprint>>),
+    ConsumeOnly(String),
+}
+
+/// Determines `ArchiveMode` for the whole selection list. A free function,
+/// not a method on `dyn DataEngine` — see `sampled_segments`'s doc comment
+/// for why a method call became a function call: `DataEngine` is defined in
+/// `logweir-core`, out of this task's file scope.
 ///
 /// Refuses an empty `sel` outright — the same false-pass shape
-/// `sampled_segments` guards against — and short-circuits on the FIRST
-/// `EngineError::Unsupported`: an unsupported KBAK level is a fact about the
-/// whole backup set's format, not about one partition, so there is no value
-/// in reading every remaining selection once the first says so.
-fn fingerprints_for(
+/// `sampled_segments` guards against.
+fn probe_archive_mode(
     engine: &dyn DataEngine,
     sel: &[SampleSelection],
-) -> Result<Vec<RecordFingerprint>, EngineError> {
+) -> Result<ArchiveMode, EngineError> {
     if sel.is_empty() {
         return Err(EngineError::Operational(
-            "fingerprints_for called with zero sample selections; refusing to compare \
+            "probe_archive_mode called with zero sample selections; refusing to compare \
              fingerprints over an empty set"
                 .into(),
         ));
     }
-    let mut out = Vec::new();
+    let mut per_selection = Vec::with_capacity(sel.len());
     for s in sel {
-        out.extend(engine.fingerprints(s)?);
+        match engine.fingerprints(s) {
+            Ok(fp) => per_selection.push(fp),
+            Err(EngineError::Unsupported(reason)) => return Ok(ArchiveMode::ConsumeOnly(reason)),
+            Err(e) => return Err(e),
+        }
     }
-    Ok(out)
+    Ok(ArchiveMode::ByteFingerprint(per_selection))
+}
+
+/// Resolves the target-side name for one archive-side (source) topic,
+/// applying the topic-rename mapping (module doc, point 1). Refuses
+/// (`DrillError::Operational`) rather than silently reading the archive-side
+/// name when `topic` has no entry in `mapping` — see the module doc comment.
+fn mapped_topic<'a>(
+    mapping: &'a BTreeMap<String, String>,
+    topic: &str,
+) -> Result<&'a str, DrillError> {
+    mapping.get(topic).map(|s| s.as_str()).ok_or_else(|| {
+        DrillError::Operational(format!(
+            "no target-side mapping for archive topic `{topic}`; refusing to read the wrong topic"
+        ))
+    })
 }
 
 /// Consumes every selection's records from the TARGET cluster — applying the
-/// topic-rename mapping (module doc, point 1) before ever calling `reader`.
+/// topic-rename mapping before ever calling `reader` — and, when `mode` is
+/// `ByteFingerprint`, reconciles that SAME selection's own archive
+/// fingerprints against ONLY that selection's own consumed records, summing
+/// the per-selection results. This is the Task 19 fix round 1 fix for review
+/// finding F1: see the module doc comment's "Reconciling PER SELECTION"
+/// section for why calling `compare()` once per selection — never once over
+/// everything pooled — is what makes a cross-partition/cross-topic offset
+/// collision structurally impossible rather than merely untested.
+///
 /// `count` is the same per-partition cap `phase4_sample` applied to the
 /// archive side, so a healthy restore's target read is bounded the same way
 /// the archive sample was; `from` is 0 because a drill's destination topic is
 /// always a freshly created scratch topic (see `compare`'s own doc comment).
 ///
 /// A selection whose topic has NO entry in `mapping` is refused
-/// (`DrillError::Operational`), never silently skipped — see the module doc
-/// comment.
-fn consume_all(
+/// (`DrillError::Operational`), never silently skipped — see `mapped_topic`.
+///
+/// Returns `(records_restored, sampled, matching, mismatched)`.
+fn consume_and_reconcile(
     reader: &dyn ClusterReader,
     sel: &[SampleSelection],
     mapping: &BTreeMap<String, String>,
-) -> Result<Vec<ConsumedRecord>, DrillError> {
-    let mut out = Vec::new();
-    for s in sel {
-        let Some(mapped) = mapping.get(&s.topic) else {
-            return Err(DrillError::Operational(format!(
-                "no target-side mapping for archive topic `{}`; refusing to read the wrong topic",
-                s.topic
-            )));
-        };
-        out.extend(reader.consume_range(mapped, s.partition, 0, s.count)?);
+    mode: &ArchiveMode,
+) -> Result<(u64, u64, u64, u64), DrillError> {
+    let mut records_restored = 0u64;
+    let mut sampled = 0u64;
+    let mut matching = 0u64;
+    for (i, s) in sel.iter().enumerate() {
+        let mapped = mapped_topic(mapping, &s.topic)?;
+        let consumed = reader.consume_range(mapped, s.partition, 0, s.count)?;
+        records_restored += consumed.len() as u64;
+        if let ArchiveMode::ByteFingerprint(archives) = mode {
+            let (this_sampled, this_matching, why) = compare(&archives[i], &consumed);
+            sampled += this_sampled;
+            matching += this_matching;
+            for w in why {
+                tracing::error!(target: "logweir::verify", detail = %w, "reconciliation mismatch");
+            }
+        }
     }
-    Ok(out)
+    Ok((
+        records_restored,
+        sampled,
+        matching,
+        sampled.saturating_sub(matching),
+    ))
 }
 
 /// Folds `classify_parity` over every entry in `mapping`, applying the
@@ -388,7 +496,7 @@ fn engine_validation_run(
 /// The maximum `ConsumedRecord.timestamp_ms` across every mapped TARGET
 /// topic/partition — what phase 8's RPO reads. Reads only the last record of
 /// each partition (`end_offsets` then `consume_range` at `hi - 1`, count 1)
-/// rather than re-consuming everything `consume_all` already read: this is a
+/// rather than re-consuming everything `consume_and_reconcile` already read: this is a
 /// separate, cheap pass because `run`'s two canary-branch match arms bind
 /// `consumed` to a local that does not survive the match.
 ///
@@ -503,35 +611,29 @@ pub fn run(
                                    Logweir's own measurement"),
     }
 
-    // (c) Canary consume and reconcile.
-    let (records_restored, sampled, matching, mismatched) = match fingerprints_for(engine, sel) {
-        Ok(archive) => {
-            integrity.level = IntegrityLevel::ByteFingerprint;
-            let consumed = consume_all(reader, sel, mapping)?;
-            let restored = consumed.len() as u64;
-            let (sampled, matching, why) = compare(&archive, &consumed);
-            for w in why {
-                tracing::error!(target: "logweir::verify", detail = %w, "reconciliation mismatch");
-            }
-            (
-                restored,
-                sampled,
-                matching,
-                sampled.saturating_sub(matching),
-            )
-        }
-        // The archive side cannot be fingerprinted (KBAK level below the gate).
-        // The drill STILL consumes, so the restore is proved to have produced
-        // readable records — but NOTHING was sampled, so all three sample
-        // counters stay 0 and pass_rate_measured stays null.
-        Err(EngineError::Unsupported(reason)) => {
+    // (c) Canary consume and reconcile — per selection, never pooled. See
+    // the module doc comment's "Reconciling PER SELECTION" section (Task 19
+    // fix round 1, review finding F1, CRITICAL): `probe_archive_mode`
+    // determines support ONCE across every selection; `consume_and_reconcile`
+    // then reconciles EACH selection's archive fingerprints against ONLY
+    // that same selection's own consumed records, summing across selections,
+    // so a collision between two selections' offsets is structurally
+    // impossible rather than merely untested.
+    let mode = probe_archive_mode(engine, sel)?;
+    match &mode {
+        ArchiveMode::ByteFingerprint(_) => integrity.level = IntegrityLevel::ByteFingerprint,
+        // The archive side cannot be fingerprinted (KBAK level below the
+        // gate). The drill STILL consumes (inside `consume_and_reconcile`
+        // below), so the restore is proved to have produced readable
+        // records — but NOTHING was sampled, so all three sample counters
+        // stay 0 and pass_rate_measured stays null.
+        ArchiveMode::ConsumeOnly(reason) => {
             integrity.level = IntegrityLevel::ConsumeOnly;
-            integrity.partial_reason = Some(reason);
-            let consumed = consume_all(reader, sel, mapping)?;
-            (consumed.len() as u64, 0, 0, 0)
+            integrity.partial_reason = Some(reason.clone());
         }
-        Err(e) => return Err(e.into()),
-    };
+    }
+    let (records_restored, sampled, matching, mismatched) =
+        consume_and_reconcile(reader, sel, mapping, &mode)?;
     integrity.records_sampled = sampled;
     integrity.records_sampled_matching = matching;
     integrity.mismatches = mismatched;
@@ -545,6 +647,26 @@ pub fn run(
     };
     if integrity.result != IntegrityResult::Fail && mismatched > 0 {
         integrity.result = IntegrityResult::Fail;
+    }
+    // Task 19 fix round 1 (review findings F2/F3): a byte-fingerprint
+    // comparison that sampled ZERO records must never read as `Pass` —
+    // "compared nothing" is not success. `mismatched > 0` is impossible here
+    // (mismatched = sampled.saturating_sub(matching), and sampled == 0), so
+    // this can only ever promote a still-`Pass` result, never downgrade an
+    // already-established `Fail` from the sha256 check above. See the module
+    // doc comment's "`IntegrityResult::Partial`" section for why `Partial`,
+    // not `Fail`, is the right bucket: this genuinely means "could not
+    // reconcile record-for-record", not "reconciled and found corruption".
+    if integrity.level == IntegrityLevel::ByteFingerprint
+        && sampled == 0
+        && integrity.result != IntegrityResult::Fail
+    {
+        integrity.result = IntegrityResult::Partial;
+        integrity.partial_reason = Some(
+            "zero archive fingerprints were available to reconcile against; a byte-fingerprint \
+             comparison cannot verify anything it never sampled"
+                .into(),
+        );
     }
 
     // (d) Topic-config parity.
@@ -693,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints_for_refuses_an_empty_selection_list() {
+    fn probe_archive_mode_refuses_an_empty_selection_list() {
         struct NeverCalled;
         impl DataEngine for NeverCalled {
             fn id(&self) -> logweir_core::engine::EngineId {
@@ -725,15 +847,17 @@ mod tests {
                 &self,
                 _: &SampleSelection,
             ) -> Result<Vec<RecordFingerprint>, EngineError> {
-                panic!("fingerprints_for must refuse an empty selection before calling the engine")
+                panic!(
+                    "probe_archive_mode must refuse an empty selection before calling the engine"
+                )
             }
         }
-        let err = fingerprints_for(&NeverCalled, &[]).unwrap_err();
+        let err = probe_archive_mode(&NeverCalled, &[]).unwrap_err();
         assert!(matches!(err, EngineError::Operational(_)));
     }
 
     #[test]
-    fn consume_all_refuses_a_topic_with_no_mapping_entry() {
+    fn consume_and_reconcile_refuses_a_topic_with_no_mapping_entry() {
         struct Unreachable;
         impl ClusterReader for Unreachable {
             fn cluster_id(&self) -> Result<String, logweir_kafka::reader::KafkaError> {
@@ -764,11 +888,16 @@ mod tests {
                 _from: i64,
                 _max: usize,
             ) -> Result<Vec<ConsumedRecord>, logweir_kafka::reader::KafkaError> {
-                panic!("consume_all must refuse an unmapped topic before calling the reader")
+                panic!(
+                    "consume_and_reconcile must refuse an unmapped topic before calling the reader"
+                )
             }
         }
         let sel = vec![sel_for("orders", 0, (0, 100))];
-        let err = consume_all(&Unreachable, &sel, &BTreeMap::new()).unwrap_err();
+        // The mode is never consulted: `mapped_topic` must refuse BEFORE
+        // `consume_and_reconcile` ever looks at `mode`.
+        let mode = ArchiveMode::ConsumeOnly("n/a".into());
+        let err = consume_and_reconcile(&Unreachable, &sel, &BTreeMap::new(), &mode).unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("no target-side mapping"));
     }
@@ -813,6 +942,66 @@ mod tests {
         let err = classify_parity_all(&facts, &Unreachable, &BTreeMap::new(), &plan).unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("zero mapped topics"));
+    }
+
+    /// Task 19 fix round 1 (review finding F4, surviving mutant r16): a
+    /// mapped topic with no matching entry in `facts.topics` must be
+    /// REFUSED, never silently `continue`d past. Silently skipping it would
+    /// let `TopicParity` report agreement over fewer topics than the
+    /// operator actually asked about, with no signal that anything was
+    /// dropped. The `Unreachable` reader panics if `classify_parity_all`
+    /// ever reaches it — the refusal must fire on the facts lookup alone,
+    /// before any target read.
+    #[test]
+    fn classify_parity_all_refuses_a_mapped_topic_with_no_archive_facts() {
+        struct Unreachable;
+        impl ClusterReader for Unreachable {
+            fn cluster_id(&self) -> Result<String, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+            fn list_topics(
+                &self,
+            ) -> Result<Vec<logweir_kafka::reader::TopicMeta>, logweir_kafka::reader::KafkaError>
+            {
+                unimplemented!()
+            }
+            fn end_offsets(
+                &self,
+                _: &str,
+            ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
+                panic!(
+                    "classify_parity_all must refuse a mapped topic with no archive facts \
+                     before calling the reader"
+                )
+            }
+            fn topic_configs(
+                &self,
+                _: &str,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                panic!(
+                    "classify_parity_all must refuse a mapped topic with no archive facts \
+                     before calling the reader"
+                )
+            }
+            fn consume_range(
+                &self,
+                _t: &str,
+                _p: i32,
+                _from: i64,
+                _max: usize,
+            ) -> Result<Vec<ConsumedRecord>, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+        }
+        // `facts_one_segment()` only ever describes "orders" — "payments" has
+        // no corresponding `TopicFacts` entry at all.
+        let facts = facts_one_segment();
+        let plan = test_plan();
+        let mut mapping = BTreeMap::new();
+        mapping.insert("payments".to_string(), "drill-payments".to_string());
+        let err = classify_parity_all(&facts, &Unreachable, &mapping, &plan).unwrap_err();
+        assert!(matches!(err, DrillError::Operational(_)));
+        assert!(err.to_string().contains("no archive facts"));
     }
 
     #[test]
@@ -895,6 +1084,69 @@ mod tests {
         let err = newest_ts(&AllEmpty, &m).unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("no restored records"));
+    }
+
+    /// Task 19 fix round 1 (review finding F5, surviving mutant r14): the
+    /// cross-partition aggregation itself — `n.max(r.timestamp_ms)` — was
+    /// unpinned; every prior fixture gave each mapped topic a single
+    /// partition, or gave every partition the SAME timestamp, so a mutant
+    /// swapping `max` for `min` survived undetected. Two partitions with
+    /// DELIBERATELY DIFFERENT last-record timestamps close that gap:
+    /// `newest_ts` is the direct input to `measured.rpo_seconds` (module doc
+    /// on `Restored`/phase 8), so reporting the OLDEST instead of the NEWEST
+    /// restored record would corrupt a signed RPO with nothing red.
+    #[test]
+    fn newest_ts_returns_the_maximum_not_the_minimum_across_partitions() {
+        struct TwoPartitionsDistinctTimestamps;
+        impl ClusterReader for TwoPartitionsDistinctTimestamps {
+            fn cluster_id(&self) -> Result<String, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+            fn list_topics(
+                &self,
+            ) -> Result<Vec<logweir_kafka::reader::TopicMeta>, logweir_kafka::reader::KafkaError>
+            {
+                unimplemented!()
+            }
+            fn end_offsets(
+                &self,
+                _: &str,
+            ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
+                Ok(vec![(0, 1), (1, 1)])
+            }
+            fn topic_configs(
+                &self,
+                _: &str,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+            fn consume_range(
+                &self,
+                _t: &str,
+                p: i32,
+                _from: i64,
+                _max: usize,
+            ) -> Result<Vec<ConsumedRecord>, logweir_kafka::reader::KafkaError> {
+                // Partition 0's last record is OLDER; partition 1's is NEWER.
+                let ts = if p == 0 { 100 } else { 900 };
+                Ok(vec![ConsumedRecord {
+                    partition: p,
+                    offset: 0,
+                    timestamp_ms: ts,
+                    key: None,
+                    value: None,
+                    headers: vec![],
+                }])
+            }
+        }
+        let mut m = BTreeMap::new();
+        m.insert("orders".to_string(), "drill-orders".to_string());
+        let newest = newest_ts(&TwoPartitionsDistinctTimestamps, &m).unwrap();
+        assert_eq!(
+            newest, 900,
+            "must be the MAXIMUM restored timestamp across every mapped partition, \
+             never the minimum or merely the first one seen"
+        );
     }
 
     fn test_plan() -> RestorePlan {

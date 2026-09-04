@@ -157,6 +157,20 @@ fn a_window_covering_no_segment_is_an_error_not_an_empty_pass() {
     assert!(phase4_sample::run(&facts, &spec, &["orders".into()]).is_err());
 }
 
+/// Task 19 fix round 1 (review finding F2): `records_per_partition: 0` reaches
+/// `SampleSelection.count` with nothing to reject it, which lets
+/// `OsoCliEngine::fingerprints` return `Ok(vec![])` (an empty archive, not an
+/// error) and phase 7 sign a byte-fingerprint `Pass` over zero comparisons.
+/// Refused here, at the source.
+#[test]
+fn records_per_partition_zero_is_rejected_before_it_reaches_a_sample_selection() {
+    let facts = fixtures::backup_facts_orders(3);
+    let spec = fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 0, "head");
+    let err = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap_err();
+    assert!(matches!(err, DrillError::Operational(_)));
+    assert!(err.to_string().contains("records_per_partition"));
+}
+
 #[test]
 fn a_partition_with_a_gap_or_a_pruned_range_inside_the_window_is_reported() {
     let mut facts = fixtures::backup_facts_orders(3);

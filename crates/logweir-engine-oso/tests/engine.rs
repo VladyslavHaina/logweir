@@ -874,3 +874,44 @@ fn head_short_circuits_before_reading_a_later_unneeded_segment() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- validation_run() (Task 19 fix round 1, review F12/FIX 6) ---
+
+/// `OsoCliEngine` does not override `DataEngine::validation_run` — it
+/// silently inherits the trait's default body
+/// (`Err(Operational("validation_run is not implemented by this engine"))`,
+/// `logweir-core/src/engine.rs`). That default is the RIGHT content: it
+/// refuses rather than fabricates, and task-19-review.md confirmed no
+/// scorecard field claims the engine validation ran while it is in place.
+/// The risk is the MECHANISM: a default trait method means the production
+/// engine can carry that stub forever with nothing in the repository going
+/// red when the real override is owed.
+///
+/// This test is that enforcement mechanism. It is `#[ignore]`d because
+/// implementing the real override — spawning `validation run --config
+/// validation.yaml --triggered-by <s>` — needs the extracted `kafka-backup`
+/// binary, and Docker (this environment's only path to that binary) is
+/// unusable here. But it is written to COMPILE today and to FAIL the moment
+/// anyone runs it with `--ignored`, naming exactly what is still owed.
+/// Whoever adds `OsoCliEngine::validation_run` should DELETE this test as
+/// part of that change, not leave it ignored alongside a real override.
+#[test]
+#[ignore = "TODO: OsoCliEngine must override DataEngine::validation_run to spawn \
+            `validation run --config validation.yaml --triggered-by <s>` \
+            (task-19-review.md F12/FIX 6). Blocked on Docker / the extracted \
+            kafka-backup binary in this environment. Run with `--ignored` to \
+            confirm the obligation is still outstanding; delete this test \
+            once the real override lands."]
+fn oso_cli_engine_must_override_validation_run_once_docker_is_available() {
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::in_memory("logweir"),
+    );
+    let err = engine.validation_run(&plan()).unwrap_err();
+    assert!(
+        !err.to_string()
+            .contains("validation_run is not implemented by this engine"),
+        "OsoCliEngine still inherits DataEngine::validation_run's default stub; the real \
+         subprocess override is owed here"
+    );
+}

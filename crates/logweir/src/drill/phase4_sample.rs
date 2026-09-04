@@ -53,6 +53,19 @@ pub fn run(
     spec: &SampleSpec,
     topics: &[String],
 ) -> Result<Selection, DrillError> {
+    // Task 19 fix round 1 (review finding F2): `records_per_partition: 0` is
+    // an ordinary YAML value nothing else rejects, and it reaches every
+    // `SampleSelection.count` this function builds. A zero-count selection
+    // makes `OsoCliEngine::fingerprints` return `Ok(vec![])` — zero archive
+    // fingerprints, no error — which let phase 7's canary reconciliation
+    // report a byte-fingerprint `Pass` over a comparison that checked
+    // nothing. Refused at the root, not only where it was found reachable.
+    if spec.records_per_partition == 0 {
+        return Err(DrillError::Operational(
+            "sample.records_per_partition is 0; a canary sample of zero records per partition              can never establish integrity and must not reach a SampleSelection"
+                .into(),
+        ));
+    }
     let (w0, w1) = (spec.window_start, spec.window_end);
     let (ms0, ms1) = (w0.timestamp_millis(), w1.timestamp_millis());
     let mut candidates: Vec<Candidate> = Vec::new();
