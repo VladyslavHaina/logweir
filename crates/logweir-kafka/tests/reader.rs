@@ -36,10 +36,7 @@ impl ClusterReader for FakeReader {
         if let Some(e) = &self.inject {
             return Err(e.clone());
         }
-        self.topics
-            .iter()
-            .find(|t| t.name == topic)
-            .map(|t| Ok((0..t.partitions).map(|p| (p, 0i64)).collect()))
+        match self.topics.iter().find(|t| t.name == topic) {
             // An unknown topic is an ERROR here, matching `RdKafkaReader`:
             // `Ok(vec![])` would be indistinguishable from a healthy empty
             // topic, which cannot exist in real Kafka (every topic has at
@@ -48,7 +45,21 @@ impl ClusterReader for FakeReader {
             // the state Task 10's fix round declared impossible in the real
             // implementation, which would have let Tasks 16-21 write and
             // pass phase tests against a contract nothing real upholds.
-            .unwrap_or_else(|| Err(KafkaError::TopicNotFound(topic.to_string())))
+            None => Err(KafkaError::TopicNotFound(topic.to_string())),
+            // A topic present but carrying `TopicMeta::error` (round 2 added
+            // this precisely so an errored topic stays IN `list_topics`, with
+            // `partitions: 0`) must ALSO error here — the same 0-partition
+            // range that made an unknown topic look like `Ok(vec![])` makes an
+            // errored-but-present topic look exactly the same way if only
+            // `t.partitions` is consulted. This fake only has the rendered
+            // message string (not the original broker code `classify_topic_
+            // error` used to build it in `RdKafkaReader`), so it reports a
+            // generic `Client` error rather than guessing the original variant
+            // back out of text — still an `Err`, which is the property a
+            // phase test actually depends on.
+            Some(t) if t.error.is_some() => Err(KafkaError::Client(t.error.clone().unwrap())),
+            Some(t) => Ok((0..t.partitions).map(|p| (p, 0i64)).collect()),
+        }
     }
     fn topic_configs(
         &self,
@@ -102,6 +113,31 @@ fn end_offsets_for_an_unknown_topic_is_an_error_not_an_empty_ok() {
     };
     let err = r.end_offsets("does-not-exist").unwrap_err();
     assert!(matches!(err, KafkaError::TopicNotFound(t) if t == "does-not-exist"));
+}
+
+#[test]
+fn end_offsets_consults_the_topic_level_error_not_just_partition_count() {
+    // Round 2 added `TopicMeta::errored(name, msg)` precisely so an errored
+    // topic stays present in `list_topics` with `partitions: 0` and
+    // `error: Some(msg)`. But `end_offsets` computed its result from
+    // `t.partitions` alone, so an errored, PRESENT topic's `0..0` range
+    // silently produced `Ok(vec![])` -- the exact "healthy empty topic"
+    // state the unknown-topic test above already proved `end_offsets` must
+    // never produce, reachable through a second, un-covered path: a topic
+    // this fake HAS, just with `error: Some(_)`, rather than one it lacks
+    // entirely. The real `RdKafkaReader::end_offsets` returns
+    // `NotAuthorized`/`TopicNotFound` for that same metadata condition, never
+    // `Ok(vec![])`.
+    let r = FakeReader {
+        cluster_id: "c1".into(),
+        topics: vec![
+            TopicMeta::new("orders", 3),
+            TopicMeta::errored("payments", "not authorized: payments"),
+        ],
+        inject: None,
+    };
+    assert_eq!(r.end_offsets("orders").unwrap().len(), 3);
+    assert!(r.end_offsets("payments").is_err());
 }
 
 #[test]
