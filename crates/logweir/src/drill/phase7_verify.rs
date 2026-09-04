@@ -28,7 +28,10 @@
 //! results. Each selection names exactly one (topic, partition), so its own
 //! `compare()` call can never see another selection's records, making a
 //! cross-partition or cross-topic collision structurally impossible rather
-//! than merely untested.
+//! than merely untested. The cross-PARTITION half of this (two partitions
+//! of the SAME topic, which pool just as readily as two different topics
+//! since both start at offset 0) is separately pinned by
+//! `verify_phase.rs`'s `run_reconciles_two_partitions_of_one_topic_independently_not_pooled`.
 //!
 //! ## Exit-code routing (contract for the future orchestrator)
 //!
@@ -54,16 +57,38 @@
 //! exit 1, that is the exact defect this comment exists to prevent.
 //!
 //! ## `IntegrityResult::Partial` — one reachable path, one declared gap
-//! (Task 19 fix round 1, review findings F2/F3)
+//! (Task 19 fix rounds 1-2, review findings F2/F3)
 //!
-//! A byte-fingerprint comparison that samples ZERO records (`sampled == 0`
-//! after `consume_and_reconcile`) is now reported as `Partial`, never `Pass`
-//! — "compared nothing" must not read as success. Reachable in production:
-//! `sample.records_per_partition: 0` used to reach `SampleSelection.count`
-//! with nothing rejecting it (closed at the source too — see
-//! `phase4_sample::run`'s own guard — but this file no longer trusts that as
-//! the only line of defence). Pinned by `verify_phase.rs`'s
-//! `a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass`.
+//! A byte-fingerprint comparison in which ANY selection's own archive
+//! fingerprint set is empty is reported as `Partial`, never `Pass` —
+//! "compared nothing for this partition" must not read as success, even
+//! when a SIBLING selection in the same drill produced real matches. Fix
+//! round 1 checked only the AGGREGATE `sampled == 0` across every selection
+//! summed together — which a single under-sampled selection could hide
+//! inside a passing aggregate the moment any other selection contributed
+//! real matches, the SAME critical false pass surviving through a narrower
+//! door (fix round 2 re-demonstrated it: pooled with a healthy selection,
+//! the round-1 code reported `Pass, byte-fingerprint, 25/25, pass_rate 1.0`
+//! for a topic that sampled nothing). `consume_and_reconcile`'s `unverified`
+//! output now names every such selection individually, and `run` treats a
+//! non-empty `unverified` as disqualifying from `Pass` regardless of the
+//! aggregate total (see `consume_and_reconcile`'s own doc comment). This is
+//! strictly broader than the aggregate check, not a replacement running
+//! alongside it: every selection that would have produced the aggregate
+//! `sampled == 0` also appears in `unverified`.
+//!
+//! Reachable in production: `sample.records_per_partition: 0` used to reach
+//! `SampleSelection.count` with nothing rejecting it (closed at the source
+//! too — see `phase4_sample::run`'s own guard — but this file no longer
+//! trusts that as the only line of defence); `segment_keys_for_set` finding
+//! no key for a `(topic, partition, window)` the manifest facts claim
+//! exists; or no decoded record's timestamp landing in the sampled window.
+//! Pinned by `verify_phase.rs`'s
+//! `a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass`
+//! (the aggregate case) and
+//! `a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passing_aggregate`
+//! (the narrow case fix round 2 closed, with a named healthy sibling
+//! selection pooled alongside it).
 //!
 //! The brief's OTHER named `Partial` scenario — a compacted topic that
 //! legitimately holds fewer records than the archive (spec §9.3) — is
@@ -262,6 +287,18 @@ pub fn classify_parity(
 /// exactly like "every sampled segment verified", the false-pass shape this
 /// whole phase exists to prevent. Pinned by
 /// `sampled_segments_refuses_to_silently_check_nothing` (unit test, below).
+///
+/// Task 19 fix round 2 ("check for the third door"): the guard is PER
+/// SELECTION, not only on the aggregate `out` — checked, and refused,
+/// immediately after each selection's own contribution is gathered, before
+/// moving to the next. An aggregate-only check (`out.is_empty()` after the
+/// whole loop) would still pass when ONE selection among several matches
+/// zero segments but another selection's segments keep `out` non-empty —
+/// that selection's sha256 check would silently never run while a sibling
+/// selection's did, with nothing in the result to say so. Exactly the
+/// narrow-door shape review finding "FIX 2" found in the canary
+/// reconciliation; closed here before it could be found the same way.
+/// Pinned by `sampled_segments_refuses_when_one_of_several_selections_matches_nothing`.
 fn sampled_segments<'a>(
     facts: &'a BackupSetFacts,
     sel: &[SampleSelection],
@@ -269,26 +306,30 @@ fn sampled_segments<'a>(
     let mut out = Vec::new();
     for s in sel {
         let (w0, w1) = s.window;
+        let mut found_for_this_selection = 0usize;
         for t in facts.topics.iter().filter(|t| t.name == s.topic) {
             for p in t
                 .partitions
                 .iter()
                 .filter(|p| p.partition_id == s.partition)
             {
-                out.extend(
-                    p.segments
-                        .iter()
-                        .filter(|seg| seg.start_timestamp <= w1 && seg.end_timestamp >= w0),
-                );
+                let matches: Vec<&SegmentFacts> = p
+                    .segments
+                    .iter()
+                    .filter(|seg| seg.start_timestamp <= w1 && seg.end_timestamp >= w0)
+                    .collect();
+                found_for_this_selection += matches.len();
+                out.extend(matches);
             }
         }
-    }
-    if out.is_empty() {
-        return Err(DrillError::Operational(format!(
-            "sampled_segments matched zero archive segments for {} sample selection(s); the \
-             segment sha256 check would silently verify nothing",
-            sel.len()
-        )));
+        if found_for_this_selection == 0 {
+            return Err(DrillError::Operational(format!(
+                "sampled_segments matched zero archive segments for {}/{} in the sampled \
+                 window; the segment sha256 check would silently skip this partition while \
+                 checking others",
+                s.topic, s.partition
+            )));
+        }
     }
     Ok(out)
 }
@@ -373,22 +414,52 @@ fn mapped_topic<'a>(
 /// A selection whose topic has NO entry in `mapping` is refused
 /// (`DrillError::Operational`), never silently skipped — see `mapped_topic`.
 ///
-/// Returns `(records_restored, sampled, matching, mismatched)`.
+/// Returns `(records_restored, sampled, matching, mismatched, unverified)`.
+/// `unverified` names every selection (as `"topic/partition"`) whose OWN
+/// archive fingerprint set was empty while attempting `ByteFingerprint`
+/// reconciliation — Task 19 fix round 2 (review's FIX 2, the same critical
+/// finding surviving through a narrower door): round 1 only refused an
+/// AGGREGATE `sampled == 0` after summing every selection, which a single
+/// under-sampled selection can hide inside a passing aggregate the moment
+/// ANY other selection in the same `sel` contributes real matches — exactly
+/// the false pass the review re-demonstrated. `run` treats a non-empty
+/// `unverified` as disqualifying a `Pass` regardless of how healthy the
+/// other selections were, because "compared nothing for this partition" can
+/// never be outweighed by a sibling partition's real data.
 fn consume_and_reconcile(
     reader: &dyn ClusterReader,
     sel: &[SampleSelection],
     mapping: &BTreeMap<String, String>,
     mode: &ArchiveMode,
-) -> Result<(u64, u64, u64, u64), DrillError> {
+) -> Result<(u64, u64, u64, u64, Vec<String>), DrillError> {
+    // Cheaper than the panic `archives[i]` would otherwise produce if this
+    // ever desynced from `sel`: today that is structurally impossible (a
+    // private function, one call site in `run`, and `ArchiveMode::ByteFingerprint`
+    // is only ever built by `probe_archive_mode` pushing exactly one entry
+    // per selection in `sel`'s own order) — so this is a documented
+    // invariant check, not a defense against a reachable bug, and costs
+    // nothing in a release build.
+    if let ArchiveMode::ByteFingerprint(archives) = mode {
+        debug_assert_eq!(
+            archives.len(),
+            sel.len(),
+            "ArchiveMode::ByteFingerprint must carry exactly one archive fingerprint set per \
+             selection, in sel's own order"
+        );
+    }
     let mut records_restored = 0u64;
     let mut sampled = 0u64;
     let mut matching = 0u64;
+    let mut unverified = Vec::new();
     for (i, s) in sel.iter().enumerate() {
         let mapped = mapped_topic(mapping, &s.topic)?;
         let consumed = reader.consume_range(mapped, s.partition, 0, s.count)?;
         records_restored += consumed.len() as u64;
         if let ArchiveMode::ByteFingerprint(archives) = mode {
             let (this_sampled, this_matching, why) = compare(&archives[i], &consumed);
+            if this_sampled == 0 {
+                unverified.push(format!("{}/{}", s.topic, s.partition));
+            }
             sampled += this_sampled;
             matching += this_matching;
             for w in why {
@@ -401,17 +472,28 @@ fn consume_and_reconcile(
         sampled,
         matching,
         sampled.saturating_sub(matching),
+        unverified,
     ))
 }
 
 /// Folds `classify_parity` over every entry in `mapping`, applying the
 /// topic-rename mapping (module doc, point 2) before ever calling `reader`.
 /// Target partition count comes from `reader.end_offsets` (one entry per
-/// partition); target replication factor comes from `plan.default_replication_factor`
-/// — the exact value phase 6 rendered when it created the topic (see phase
-/// 6's own `Restored` doc comment and this file's `classify_parity` test
-/// `scratch_deviations_are_intentional_and_anything_else_is_not`). When a
-/// backup predates original-partition-count/replication-factor capture
+/// partition — a real, per-run READ of the cluster). Target replication
+/// factor does NOT have an equivalent read: `ClusterReader` exposes no RF
+/// accessor at all, so `plan.default_replication_factor` is used instead —
+/// this is Task 19 fix round 2's correction (review's FIX 7 remainder) of a
+/// wording bug in an earlier draft of this comment, which claimed "the exact
+/// value phase 6 rendered when it created the topic" as if it were a
+/// measurement. It is not: `plan.default_replication_factor` is what phase 6
+/// ASKED the engine to create the topic with, never read back from the
+/// broker afterward, so a genuine mismatch between the plan and what the
+/// engine actually created (a bug, a broker-side override, anything) would
+/// not be detected here. Read this field as an assertion about the PLAN, not
+/// a measurement of the cluster (see this file's `classify_parity` test
+/// `scratch_deviations_are_intentional_and_anything_else_is_not`, which
+/// exercises the same assumption). When a backup predates
+/// original-partition-count/replication-factor capture
 /// (`TopicFacts.original_partition_count`/`source_replication_factor` are
 /// `None`), the target's own value is used as the source value too, so an
 /// unknown quantity is reported as "not different" rather than fabricating a
@@ -495,10 +577,22 @@ fn engine_validation_run(
 
 /// The maximum `ConsumedRecord.timestamp_ms` across every mapped TARGET
 /// topic/partition — what phase 8's RPO reads. Reads only the last record of
-/// each partition (`end_offsets` then `consume_range` at `hi - 1`, count 1)
-/// rather than re-consuming everything `consume_and_reconcile` already read: this is a
-/// separate, cheap pass because `run`'s two canary-branch match arms bind
-/// `consumed` to a local that does not survive the match.
+/// each partition (`end_offsets` then `consume_range` at `hi - 1`, count 1),
+/// a DECLARED DEVIATION (Task 19 fix round 2, review finding F11) from the
+/// brief's literal prose ("`newest_ts` takes the maximum
+/// `ConsumedRecord.timestamp_ms` seen"), which would mean reusing whatever
+/// `consume_and_reconcile` already consumed. The real reason for the
+/// deviation, not "a local didn't survive a match arm" (an implementation
+/// detail of a since-removed code shape, not a justification): a `head`
+/// anchor's sample holds the OLDEST records in the window (`SampleSelection`'s
+/// own doc comment), so taking the max over ONLY what was sampled/consumed
+/// for the canary would badly UNDERSTATE the true newest restored timestamp
+/// and badly OVERSTATE the signed RPO. Reading the actual last record of
+/// each partition — independent of the sample — is what makes the RPO
+/// figure honest regardless of which anchor the drill used. This costs one
+/// extra broker round trip per mapped partition and assumes offset order
+/// approximates timestamp order (true for any topic that is not manually
+/// reordered), both accepted trade-offs for that correctness.
 ///
 /// Refuses `mapping.is_empty()` (nothing to measure) and refuses finding zero
 /// records across every mapped partition (there is no honest timestamp to
@@ -632,7 +726,7 @@ pub fn run(
             integrity.partial_reason = Some(reason.clone());
         }
     }
-    let (records_restored, sampled, matching, mismatched) =
+    let (records_restored, sampled, matching, mismatched, unverified) =
         consume_and_reconcile(reader, sel, mapping, &mode)?;
     integrity.records_sampled = sampled;
     integrity.records_sampled_matching = matching;
@@ -648,25 +742,33 @@ pub fn run(
     if integrity.result != IntegrityResult::Fail && mismatched > 0 {
         integrity.result = IntegrityResult::Fail;
     }
-    // Task 19 fix round 1 (review findings F2/F3): a byte-fingerprint
-    // comparison that sampled ZERO records must never read as `Pass` —
-    // "compared nothing" is not success. `mismatched > 0` is impossible here
-    // (mismatched = sampled.saturating_sub(matching), and sampled == 0), so
-    // this can only ever promote a still-`Pass` result, never downgrade an
-    // already-established `Fail` from the sha256 check above. See the module
-    // doc comment's "`IntegrityResult::Partial`" section for why `Partial`,
-    // not `Fail`, is the right bucket: this genuinely means "could not
-    // reconcile record-for-record", not "reconciled and found corruption".
+    // Task 19 fix round 2 (review findings F2/F3, and the SAME critical
+    // finding surviving fix round 1 through a narrower door): a
+    // byte-fingerprint comparison in which ANY selection's own archive
+    // fingerprint set was empty must never read as `Pass` — "compared
+    // nothing for this partition" is not success, no matter how healthy a
+    // SIBLING selection in the same drill was. Round 1's guard checked only
+    // the AGGREGATE `sampled == 0`, which a single under-sampled selection
+    // could hide inside: pooled with a healthy selection, the aggregate
+    // total stayed positive and the whole drill still reported `Pass`. This
+    // check is strictly broader — every selection that produced the
+    // aggregate `sampled == 0` also appears in `unverified`, so it subsumes
+    // round 1's guard rather than sitting alongside it. See the module doc
+    // comment's "`IntegrityResult::Partial`" section for why `Partial`, not
+    // `Fail`, is the right bucket: this means "could not reconcile
+    // record-for-record", not "reconciled and found corruption". Never
+    // downgrades an already-established `Fail` from the sha256 check above.
     if integrity.level == IntegrityLevel::ByteFingerprint
-        && sampled == 0
+        && !unverified.is_empty()
         && integrity.result != IntegrityResult::Fail
     {
         integrity.result = IntegrityResult::Partial;
-        integrity.partial_reason = Some(
-            "zero archive fingerprints were available to reconcile against; a byte-fingerprint \
-             comparison cannot verify anything it never sampled"
-                .into(),
-        );
+        integrity.partial_reason = Some(format!(
+            "zero archive fingerprints were available to reconcile against for: {} — a \
+             byte-fingerprint comparison cannot verify anything it never sampled, even when \
+             other selections in the same drill produced real matches",
+            unverified.join(", ")
+        ));
     }
 
     // (d) Topic-config parity.
@@ -812,6 +914,26 @@ mod tests {
         let err = sampled_segments(&facts, &sel).unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("zero archive segments"));
+    }
+
+    /// Task 19 fix round 2 ("check for the third door"): TWO selections, one
+    /// that matches a real segment and one that matches nothing. The
+    /// aggregate `out.is_empty()` check this function used to have would NOT
+    /// fire here — `out` ends up non-empty because of the healthy selection
+    /// — silently leaving the second selection's segment sha256 unchecked.
+    /// The per-selection guard must refuse regardless of what any other
+    /// selection contributed.
+    #[test]
+    fn sampled_segments_refuses_when_one_of_several_selections_matches_nothing() {
+        let facts = facts_one_segment();
+        let sel = vec![
+            sel_for("orders", 0, (0, 100)), // matches the one real segment
+            sel_for("orders", 7, (0, 100)), // partition 7 does not exist
+        ];
+        let err = sampled_segments(&facts, &sel).unwrap_err();
+        assert!(matches!(err, DrillError::Operational(_)));
+        assert!(err.to_string().contains("zero archive segments"));
+        assert!(err.to_string().contains("orders/7"));
     }
 
     #[test]

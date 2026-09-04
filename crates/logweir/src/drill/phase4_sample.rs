@@ -62,7 +62,8 @@ pub fn run(
     // nothing. Refused at the root, not only where it was found reachable.
     if spec.records_per_partition == 0 {
         return Err(DrillError::Operational(
-            "sample.records_per_partition is 0; a canary sample of zero records per partition              can never establish integrity and must not reach a SampleSelection"
+            "sample.records_per_partition is 0; a canary sample of zero records per partition \
+             can never establish integrity and must not reach a SampleSelection"
                 .into(),
         ));
     }

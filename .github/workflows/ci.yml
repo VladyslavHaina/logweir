@@ -22,6 +22,22 @@ jobs:
         run: |
           cargo run -p logweir-core --example emit_schema > /tmp/schema.json
           diff -u schemas/logweir-drill-scorecard-1.0.0.json /tmp/schema.json
+      - name: known-TODO tracker (Task 19 fix round 2, review FIX 6)
+        # Runs every `#[ignore]`d marker test in the workspace — currently only
+        # `oso_cli_engine_must_override_validation_run_once_docker_is_available`
+        # (crates/logweir-engine-oso/tests/engine.rs), tracking the
+        # `DataEngine::validation_run` override still owed on `OsoCliEngine`.
+        # EXPECTED TO FAIL here, same as locally: this CI runner has no
+        # Docker/extracted kafka-backup binary either. `continue-on-error`
+        # keeps that failure informational rather than blocking merges — the
+        # point is that this step is ACTUALLY EXECUTED on every build, so a
+        # default trait method nobody is reminded to override cannot go
+        # unnoticed the way a doc comment alone would let it. The day the
+        # real override lands (and this marker test is deleted as part of
+        # that change, per its own doc comment), this step simply stops
+        # running it — the obligation is closed, not silently long-lived.
+        continue-on-error: true
+        run: cargo test --workspace -- --ignored
   python-verifier:
     runs-on: ubuntu-24.04
     steps:

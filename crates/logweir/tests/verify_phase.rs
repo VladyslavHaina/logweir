@@ -1083,6 +1083,29 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
 /// has nothing to match against on the target, so every one of its archive
 /// fingerprints is "present in the archive, absent from the target" — a
 /// real, counted mismatch — regardless of what `payments` looks like.
+/// Task 19 fix round 2 (review finding FIX 2b): this test previously used
+/// `distinct_matching_pair` for both topics, which the reviewer showed makes
+/// it pass IDENTICALLY whether `compare()` is called per-selection (fixed)
+/// or once over everything pooled (the original bug reintroduced) — with
+/// distinct content, pooling can only ever turn a would-be match into a
+/// "fingerprint mismatch", never into a false MATCH, so the asserted numbers
+/// (50/25/25/0.5) come out the same under both implementations and the test
+/// could not actually distinguish them.
+///
+/// Fixed by using COLLIDING content instead — `fixtures::matching_pair`
+/// called for BOTH topics, which builds byte-IDENTICAL records (`k{i}`/`v{i}`,
+/// no topic name folded into the fingerprint) — exactly the shape the
+/// reviewer's original demonstration used. Under the FIXED (per-selection)
+/// implementation this still correctly reports `Fail` (orders' own archive
+/// has nothing to match against on the target). Under the ORIGINAL pooled
+/// bug, `payments`'s real consumed records would satisfy `orders`'s archive
+/// lookups too (same content, same offsets), and the drill would report a
+/// full `Pass` — 50 matched — for a topic that restored ZERO records. This
+/// is what "the test that would fail if this regressed" now means literally:
+/// re-pooling `compare()`'s inputs (reverting to one flat call instead of
+/// one call per selection) turns this test's expected `Fail`/`0.5` into
+/// `Pass`/`1.0`, and IS verified to do so as part of this round's mutation
+/// pass (see the report's mutant table, mutant p1).
 #[test]
 fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_healthy_topic() {
     let bytes_orders = b"segment payload for verify phase test - orders (unrestored)";
@@ -1150,8 +1173,16 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
         ],
     };
 
-    let (archive_o, _cons_o_unused) = distinct_matching_pair("orders", 25);
-    let (archive_p, cons_p) = distinct_matching_pair("payments", 25);
+    // COLLIDING content, deliberately: `fixtures::matching_pair` builds the
+    // SAME `k{i}`/`v{i}` bytes regardless of which topic calls it, so
+    // `archive_o` and `archive_p` carry byte-IDENTICAL fingerprints at each
+    // offset. That is exactly what makes this test discriminate a
+    // pooled-vs-per-selection implementation (see the doc comment above) —
+    // `distinct_matching_pair` (used by `run_aggregates_...`, whose own
+    // purpose is aggregation-completeness, not collision-sensitivity) would
+    // not.
+    let (archive_o, _cons_o_unused) = fixtures::matching_pair(25);
+    let (archive_p, cons_p) = fixtures::matching_pair(25);
 
     let mut by_topic = BTreeMap::new();
     by_topic.insert("orders".to_string(), archive_o);
@@ -1226,6 +1257,128 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
     assert_eq!(out.pass_rate(), Some(0.5));
     // Only `payments` actually produced consumed records.
     assert_eq!(out.records_restored, 25);
+}
+
+/// Task 19 fix round 2, FIX 2 (the SAME critical finding surviving fix
+/// round 1 through a narrower door): fix round 1's guard fired only on the
+/// AGGREGATE `sampled == 0`. Here `orders`'s own `engine.fingerprints`
+/// returns `Ok(vec![])` — no error, no `Unsupported` — for a topic restored
+/// to zero, POOLED with a healthy `payments` selection whose archive and
+/// consumed records genuinely match. Under fix round 1's aggregate-only
+/// guard this reported `Pass, byte-fingerprint, 25/25, pass_rate 1.0,
+/// partial_reason None` — `orders` was never compared against anything, but
+/// its silence was invisible inside `payments`'s healthy total. The
+/// per-selection guard closes this: ANY selection with zero of its OWN
+/// archive fingerprints disqualifies the result from `Pass`, regardless of
+/// what a sibling selection contributed.
+#[test]
+fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passing_aggregate() {
+    let (store, sha) = store_with_matching_segment();
+    // `facts_with_segment`/`sel_orders`/`plan_orders_to_drill_orders` only
+    // ever describe "orders"; build a second topic, "payments", by hand so
+    // this test can pool one EMPTY selection with one HEALTHY one.
+    let facts_orders = facts_with_segment(&sha);
+    let bytes_payments = b"segment payload for verify phase test - payments (healthy, FIX 2)";
+    let sha_payments = logweir_core::ids::sha256_prefixed(bytes_payments);
+    store
+        .put_create_only("logweir/seg-payments-fix2.kbak", bytes_payments)
+        .unwrap();
+    let mut facts = facts_orders.clone();
+    facts.topics.push(TopicFacts {
+        name: "payments".into(),
+        original_partition_count: Some(1),
+        source_replication_factor: Some(3),
+        configurations: fixtures::source_configs(&[("cleanup.policy", "compact")]),
+        partitions: vec![PartitionFacts {
+            partition_id: 0,
+            segments: vec![SegmentFacts {
+                key: "logweir/seg-payments-fix2.kbak".into(),
+                start_offset: 0,
+                end_offset: 24,
+                start_timestamp: WINDOW.0,
+                end_timestamp: WINDOW.1,
+                record_count: 25,
+                sha256: sha_payments,
+                uploaded_at: WINDOW.1,
+            }],
+            gaps: vec![],
+            pruned: vec![],
+        }],
+    });
+
+    let (archive_payments, cons_payments) = fixtures::matching_pair(25);
+    let mut by_topic = BTreeMap::new();
+    // "orders": Ok(vec![]) — support IS present, this specific selection's
+    // archive simply came back with nothing (e.g. `segment_keys_for_set`
+    // found no key, or no decoded timestamp landed in the window).
+    by_topic.insert("orders".to_string(), vec![]);
+    by_topic.insert("payments".to_string(), archive_payments);
+    let engine = MultiTopicEngine {
+        facts: facts.clone(),
+        by_topic,
+    };
+
+    let mut topics = BTreeMap::new();
+    // orders was genuinely restored to zero — consistent with its archive
+    // side also having nothing to compare.
+    topics.insert(
+        "drill-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 0)],
+            configs: fixtures::target_configs(&[
+                ("cleanup.policy", "delete"),
+                ("retention.ms", "-1"),
+            ]),
+            records: vec![],
+        },
+    );
+    topics.insert(
+        "drill-payments".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 25)],
+            configs: fixtures::target_configs(&[("cleanup.policy", "delete")]),
+            records: cons_payments,
+        },
+    );
+    let reader = MapReader { topics };
+
+    let sel = vec![
+        sel_orders().into_iter().next().unwrap(),
+        SampleSelection {
+            set: BackupSetRef {
+                backup_id: "backup-verify-test".into(),
+                manifest_key: "backup-verify-test/manifest.json".into(),
+            },
+            topic: "payments".into(),
+            partition: 0,
+            anchor: "head".into(),
+            count: 25,
+            window: WINDOW,
+        },
+    ];
+    let mut mapping = fixtures::mapping("orders", "drill-orders");
+    mapping.insert("payments".to_string(), "drill-payments".to_string());
+    let mut plan = plan_orders_to_drill_orders();
+    plan.topic_mapping = mapping.clone();
+
+    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+
+    assert_ne!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "orders sampled zero archive fingerprints; pooling it with a healthy payments \
+         selection must never let the aggregate read as Pass — got {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    assert!(
+        out.integrity
+            .partial_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("orders/0")),
+        "the reason must name the specific under-sampled selection: {:?}",
+        out.integrity.partial_reason
+    );
 }
 
 /// Review finding F2/F3: a byte-fingerprint comparison that samples ZERO
@@ -1439,4 +1592,222 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
         out.records_restored, 8,
         "records_restored must be the CONSUMED count (8), not matched+mismatched (5)"
     );
+}
+
+/// Task 19 fix round 2: "no shipped test drives two partitions of one topic
+/// through `run()`" (review). Every prior multi-selection test used two
+/// DIFFERENT topics; this one uses ONE topic ("orders") across TWO
+/// partitions, each independently and correctly restored but with DISTINCT
+/// per-partition content — the shape the reviewer's very first F1
+/// demonstration also used ("Same defect within one topic. Two partitions of
+/// orders, each restored perfectly, distinct content"). If `compare()` were
+/// ever pooled across selections again, partition 1's consumed records would
+/// displace partition 0's in one shared `by_offset` map (both partitions
+/// start at offset 0), and partition 0's archive entries would be checked
+/// against partition 1's — different — content, fabricating mismatches on a
+/// perfectly healthy restore.
+struct PerPartitionEngine {
+    facts: BackupSetFacts,
+    by_partition: BTreeMap<i32, Vec<RecordFingerprint>>,
+}
+
+impl DataEngine for PerPartitionEngine {
+    fn id(&self) -> EngineId {
+        EngineId {
+            id: "fake".into(),
+            version: "v0.0.0".into(),
+            digest: format!("sha256:{}", "0".repeat(64)),
+        }
+    }
+    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+        Ok(vec![])
+    }
+    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+        Ok(self.facts.clone())
+    }
+    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
+        Err(EngineError::Operational("not used by this fixture".into()))
+    }
+    fn restore(
+        &self,
+        _: &RestorePlan,
+        _: &mut dyn PhaseObserver,
+    ) -> Result<RestoreFacts, EngineError> {
+        Err(EngineError::Operational("not used by this fixture".into()))
+    }
+    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+        Ok(self
+            .by_partition
+            .get(&s.partition)
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
+        Ok(EngineRun { exit_code: 0 })
+    }
+}
+
+/// Distinct content per PARTITION (not per topic) — `partition` is folded
+/// into the key/value bytes so two partitions' records can never
+/// fingerprint-match each other.
+fn distinct_pair_for_partition(
+    partition: i32,
+    n: usize,
+) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) {
+    let mut arch = Vec::with_capacity(n);
+    let mut cons = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = i as i64;
+        let headers = vec![(
+            "x-original-offset".to_string(),
+            Some(off.to_string().into_bytes()),
+        )];
+        let key = format!("p{partition}-k{i}").into_bytes();
+        let value = format!("p{partition}-v{i}").into_bytes();
+        let tsms = 1_756_425_600_000i64 + off;
+        arch.push(RecordFingerprint {
+            topic: "orders".into(),
+            partition,
+            offset: off,
+            sha256: logweir_kafka::fingerprint::record_fingerprint(
+                Some(&key),
+                Some(&value),
+                &headers,
+                tsms,
+            ),
+        });
+        cons.push(ConsumedRecord {
+            partition,
+            offset: off,
+            timestamp_ms: tsms,
+            key: Some(key),
+            value: Some(value),
+            headers,
+        });
+    }
+    (arch, cons)
+}
+
+#[test]
+fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
+    let bytes = b"segment payload for verify phase test - two partitions";
+    let sha = logweir_core::ids::sha256_prefixed(bytes);
+    let store = logweir_engine_oso::storage::Store::in_memory("logweir");
+    store.put_create_only("logweir/seg-2p.kbak", bytes).unwrap();
+
+    let facts = BackupSetFacts {
+        backup_id: "backup-verify-test".into(),
+        created_at: fixtures::ts("2026-09-03T09:00:00Z"),
+        source_cluster_id: Some("SRC0000000000000000000".into()),
+        manifest_sha256: "sha256:0".into(),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics: vec![TopicFacts {
+            name: "orders".into(),
+            original_partition_count: Some(2),
+            source_replication_factor: Some(3),
+            configurations: fixtures::source_configs(&[("cleanup.policy", "compact")]),
+            partitions: vec![
+                PartitionFacts {
+                    partition_id: 0,
+                    segments: vec![SegmentFacts {
+                        key: "logweir/seg-2p.kbak".into(),
+                        start_offset: 0,
+                        end_offset: 9,
+                        start_timestamp: WINDOW.0,
+                        end_timestamp: WINDOW.1,
+                        record_count: 10,
+                        sha256: sha.clone(),
+                        uploaded_at: WINDOW.1,
+                    }],
+                    gaps: vec![],
+                    pruned: vec![],
+                },
+                PartitionFacts {
+                    partition_id: 1,
+                    segments: vec![SegmentFacts {
+                        key: "logweir/seg-2p.kbak".into(),
+                        start_offset: 0,
+                        end_offset: 9,
+                        start_timestamp: WINDOW.0,
+                        end_timestamp: WINDOW.1,
+                        record_count: 10,
+                        sha256: sha,
+                        uploaded_at: WINDOW.1,
+                    }],
+                    gaps: vec![],
+                    pruned: vec![],
+                },
+            ],
+        }],
+    };
+
+    let (archive_p0, cons_p0) = distinct_pair_for_partition(0, 10);
+    let (archive_p1, cons_p1) = distinct_pair_for_partition(1, 10);
+
+    let mut by_partition = BTreeMap::new();
+    by_partition.insert(0, archive_p0);
+    by_partition.insert(1, archive_p1);
+    let engine = PerPartitionEngine {
+        facts: facts.clone(),
+        by_partition,
+    };
+
+    // Both partitions land on the SAME target topic ("drill-orders"),
+    // distinguished only by their `partition` field — exactly the layout
+    // that would collide if `compare()` were ever pooled across selections.
+    let mut records = cons_p0;
+    records.extend(cons_p1);
+    let mut topics = BTreeMap::new();
+    topics.insert(
+        "drill-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 10), (1, 10)],
+            configs: fixtures::target_configs(&[("cleanup.policy", "delete")]),
+            records,
+        },
+    );
+    let reader = MapReader { topics };
+
+    let sel = vec![
+        SampleSelection {
+            set: BackupSetRef {
+                backup_id: "backup-verify-test".into(),
+                manifest_key: "backup-verify-test/manifest.json".into(),
+            },
+            topic: "orders".into(),
+            partition: 0,
+            anchor: "head".into(),
+            count: 10,
+            window: WINDOW,
+        },
+        SampleSelection {
+            set: BackupSetRef {
+                backup_id: "backup-verify-test".into(),
+                manifest_key: "backup-verify-test/manifest.json".into(),
+            },
+            topic: "orders".into(),
+            partition: 1,
+            anchor: "head".into(),
+            count: 10,
+            window: WINDOW,
+        },
+    ];
+    let mapping = fixtures::mapping("orders", "drill-orders");
+    let mut plan = plan_orders_to_drill_orders();
+    plan.topic_mapping = mapping.clone();
+
+    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+
+    assert_eq!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "two independently-healthy partitions of the same topic must not fabricate \
+         mismatches against each other — got {:?}",
+        out.integrity
+    );
+    assert_eq!(out.integrity.records_sampled, 20);
+    assert_eq!(out.integrity.records_sampled_matching, 20);
+    assert_eq!(out.integrity.mismatches, 0);
+    assert_eq!(out.pass_rate(), Some(1.0));
 }
