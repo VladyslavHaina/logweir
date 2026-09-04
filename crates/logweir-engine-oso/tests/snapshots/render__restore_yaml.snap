@@ -1,0 +1,37 @@
+---
+source: crates/logweir-engine-oso/tests/render.rs
+expression: "render_restore::render(&plan())"
+---
+# Rendered by logweir. Do not edit; regenerate with `logweir drill run`.
+mode: restore
+backup_id: "backup-2026-08-30T02:00:00Z"
+
+target:
+  bootstrap_servers:
+    - kafka-broker-1:9092
+  topics:
+    include:
+      - orders
+      - payments
+
+storage:
+  backend: s3
+  bucket: kafka-backups
+  prefix: basic-demo
+  region: us-east-1
+  endpoint: http://minio:9000
+  path_style: true
+  allow_http: true
+
+restore:
+  topic_mapping:
+    orders: drill-20260903-orders
+    payments: drill-20260903-payments
+  create_topics: true
+  default_replication_factor: 1
+  header_preflight: full
+  dry_run_check_segments: true
+  checkpoint_state: /var/lib/logweir/01J9X/checkpoint.json
+  checkpoint_interval_secs: 30
+  time_window_start: 1787961600000
+  time_window_end: 1788055200000

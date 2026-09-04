@@ -1,0 +1,36 @@
+---
+source: crates/logweir-engine-oso/tests/render.rs
+expression: "render_validation::render(&plan(), \"01J9X2QK7C4V0R8YB3ZP6MTS5A\",\nSome(\"KPMG Q3\"))"
+---
+# Rendered by logweir. Do not edit.
+backup_id: "backup-2026-08-30T02:00:00Z"
+
+storage:
+  backend: s3
+  bucket: kafka-backups
+  prefix: basic-demo
+  region: us-east-1
+  endpoint: http://minio:9000
+  path_style: true
+  allow_http: true
+
+target:
+  bootstrap_servers:
+    - kafka-broker-1:9092
+
+checks:
+  message_count:
+    enabled: true
+  offset_range:
+    enabled: true
+  consumer_group_offsets:
+    enabled: false
+
+evidence:
+  formats:
+    - json
+  storage:
+    prefix: logweir/01J9X2QK7C4V0R8YB3ZP6MTS5A/engine-validation
+    retention_days: 2555
+
+triggered_by: "KPMG Q3"

@@ -8,3 +8,11 @@
 
 pub mod kbak;
 pub mod vendored;
+
+/// Global Constraint 4: never emit these three keys, at any value, on any
+/// argv or in any rendered YAML. `render_restore` and `render_validation` are
+/// structurally incapable of writing them; `tests/render.rs` pins the
+/// property.
+pub const FORBIDDEN_KEYS: [&str; 3] = ["purge_topics", "dry_run", "header_preflight_external"];
+pub mod render_restore;
+pub mod render_validation;
