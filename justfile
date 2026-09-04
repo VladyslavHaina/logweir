@@ -17,6 +17,10 @@ golden:
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
 
+# The Python auditor verifier. Task 7 — needs `pip install cryptography pytest`.
+verify-py:
+    python3 -m pytest docs/test_verify_scorecard.py -q
+
 # Mints the checked-in signed fixtures under e2e/fixtures/signed/. Task 6.
 fixtures-sign:
     cargo run -p logweir-core --example emit_fixture > e2e/fixtures/signed/scorecard.json

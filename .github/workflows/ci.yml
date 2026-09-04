@@ -22,6 +22,15 @@ jobs:
         run: |
           cargo run -p logweir-core --example emit_schema > /tmp/schema.json
           diff -u schemas/logweir-drill-scorecard-1.0.0.json /tmp/schema.json
+  python-verifier:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install cryptography pytest
+      - run: python3 -m pytest docs/test_verify_scorecard.py -q
+
   deny:
     runs-on: ubuntu-24.04
     steps:
