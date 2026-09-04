@@ -38,7 +38,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   sync-upstream:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # The single place the upstream SOURCE pin lives. Global Constraint 8 pins v0.1
       # to engine v0.21.0. The engine BINARY is pinned by digest, in
