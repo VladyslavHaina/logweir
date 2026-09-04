@@ -7,7 +7,35 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct Restored {
+    /// Fix round 2 (2026-09-04): this figure becomes the RTO in a signed
+    /// scorecard — the number an operator quotes to justify a recovery-time
+    /// objective — so its boundary is stated plainly here, not just implied
+    /// by where the field is assigned.
+    ///
+    /// This is `RestoreFacts.started_at` as returned by `DataEngine::restore`,
+    /// forwarded unchanged (`run`, below, takes no clock reading of its own).
+    /// On the shipped engine (`OsoCliEngine::restore`,
+    /// `logweir-engine-oso/src/engine.rs:291`) that timestamp is taken
+    /// **after** `render_restore::render` builds `restore.yaml` and after
+    /// `self.write` puts it on disk — immediately before the `kafka-backup
+    /// restore` subprocess is spawned. So the measured span **excludes**
+    /// config rendering and the config-file write; it starts at the
+    /// subprocess launch.
     pub started_at: DateTime<Utc>,
+    /// The other end of the same span (fix round 2, see `started_at` above):
+    /// `RestoreFacts.finished_at`, taken at `logweir-engine-oso/src/engine.rs:303`
+    /// immediately after the `kafka-backup restore` subprocess returns —
+    /// before the exit-code check, the dropped-key check, or anything phase 6
+    /// does afterward (the post-restore `ClusterReader::end_offsets` reads and
+    /// `assert_post_condition`, below, run **after** this timestamp is fixed,
+    /// so none of that is included either).
+    ///
+    /// Read together: the reported RTO is exactly the wall-clock duration of
+    /// the restore subprocess itself. It excludes rendering/writing
+    /// `restore.yaml` before it starts and excludes every post-restore check
+    /// Logweir performs after it exits. A reader quoting this number in a
+    /// compliance document should read it as "how long the restore process
+    /// ran", not "how long the whole drill took" or "how long phase 6 took".
     pub finished_at: DateTime<Utc>,
     pub restored_end_offsets: BTreeMap<String, Vec<(i32, i64)>>,
     /// Every `Ignoring unknown config key <path>` the restore subprocess
@@ -72,7 +100,16 @@ pub fn run(
 ) -> Result<Restored, crate::drill::DrillError> {
     // The engine measures nothing for us: `restore` has no --format, writes no
     // report file, and its only machine-readable signal is the exit code
-    // (main.rs:47-51). Both timestamps below are Logweir's own clock.
+    // (main.rs:47-51). Both timestamps below are Logweir's own clock, taken
+    // INSIDE `DataEngine::restore` (not here) and forwarded unchanged onto
+    // `Restored` at the bottom of this function — `run` reads no clock of
+    // its own. Per `Restored::started_at`/`finished_at`'s doc comments: on
+    // the shipped engine that span starts AFTER config rendering and the
+    // config-file write (`logweir-engine-oso/src/engine.rs:291`) and ends
+    // BEFORE the exit-code/dropped-key checks and everything phase 6 does
+    // below this call (`engine.rs:303`). The RTO this produces is the
+    // subprocess's own wall-clock duration — nothing rendered, written, or
+    // checked around it is included.
     let facts = engine.restore(plan, obs)?;
 
     let mut restored_end_offsets = BTreeMap::new();
