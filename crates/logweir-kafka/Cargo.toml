@@ -9,6 +9,23 @@ license.workspace = true
 hex.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# `tokio` is in rdkafka's default feature set and must be kept: without it
+# `AdminClient<C, R = DefaultRuntime>` resolves DefaultRuntime to rdkafka's
+# NaiveRuntime, whose timers are std::thread::sleep, and describe_configs would
+# block the calling thread for its whole timeout instead of being driven.
+# The tokio dependency therefore also needs `time`, not `rt` alone.
+rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "zstd", "ssl", "sasl", "tokio"], optional = true }
+# "net" is REQUIRED, not optional: `Builder::enable_all()` cfg-gates its
+# `enable_io()` on net/process/signal, so without it the runtime driving
+# `describe_configs` has no reactor and `cargo test -p logweir-kafka --features
+# client` behaves differently from the workspace build, where feature
+# unification silently turns it back on.
+tokio = { version = "1", default-features = false, features = ["rt", "time", "net"], optional = true }
 
 [features]
-default = []
+# `fingerprint` and the ClusterReader trait are the pure core and are ALWAYS
+# available with --no-default-features. The broker client is opt-in, which is
+# what lets no-oso.yml build this crate with no C toolchain.
+default = ["client"]
+client = ["dep:rdkafka", "dep:tokio"]
+e2e = ["client"]
