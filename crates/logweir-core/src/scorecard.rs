@@ -185,9 +185,29 @@ pub struct Integrity {
 /// positioning claim would rest on a value that reaches no reader.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TargetDiffSummary {
-    /// Mapped target topics that already existed AND already held records.
+    /// Mapped target topics that already EXIST on the target — regardless of
+    /// whether they currently hold any records. Existence alone is what
+    /// makes writing into them a collision worth flagging (Task 16 fix
+    /// round 1, MINOR-2): an existing-but-empty topic can still carry
+    /// configuration that differs from what the restore expects, and
+    /// creating a topic fresh is a different operational fact from reusing
+    /// one someone else already created — even an empty one. The prior
+    /// wording here ("already existed AND already held records") described
+    /// a narrower rule than the code implements; the code is right (refusing
+    /// to write into an existing empty topic costs at most a false alarm,
+    /// while the narrower rule would let a restore silently write into a
+    /// topic someone else created), so this text was corrected to match it.
     #[serde(default)]
     pub collisions: Vec<String>,
+    /// Mapped target topics that do NOT exist on the target — the normal
+    /// case on a scratch cluster. Every entry here has a corresponding
+    /// `would_create` entry at the partition count the restore will build.
+    /// `skip_serializing_if` (unlike its siblings here) so a document
+    /// signed before this field existed keeps round-tripping byte-for-byte
+    /// when it has nothing to report — added in Task 16 fix round 1, after
+    /// `TargetDiff.absent` was found computed and never read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent: Vec<String>,
     /// (mapped target topic, partition count the restore created).
     #[serde(default)]
     pub would_create: Vec<(String, i32)>,
@@ -474,6 +494,7 @@ mod tests {
             },
             target_diff: TargetDiffSummary {
                 collisions: vec![],
+                absent: vec![],
                 would_create: vec![],
                 level: "full".into(),
             },

@@ -93,6 +93,12 @@ fn main() {
         },
         target_diff: TargetDiffSummary {
             collisions: vec![],
+            // Empty, not `vec!["drill-orders".into()]`: this field is
+            // `skip_serializing_if`-omitted when empty specifically so this
+            // checked-in, signed fixture's bytes (and therefore its
+            // signature) are unaffected by the field's addition in Task 16
+            // fix round 1 — see `TargetDiffSummary::absent`'s doc comment.
+            absent: vec![],
             would_create: vec![("drill-orders".to_string(), 3)],
             level: "full".into(),
         },

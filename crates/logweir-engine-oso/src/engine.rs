@@ -332,6 +332,26 @@ impl DataEngine for OsoCliEngine {
     }
 
     fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+        // Fix (Task 16 fix round 1): `phase4_sample::run` (crates/logweir)
+        // cannot populate `SampleSelection.set.manifest_key` — it only ever
+        // sees `BackupSetFacts`, which does not carry one — so every
+        // `Selection` it produces arrives with `manifest_key` empty until a
+        // caller patches it (`Selection::bind_backup_set`) from the original
+        // `BackupSetRef`. Refusing here, with a message naming exactly what
+        // is wrong, turns a forgotten patch step into a loud, specific
+        // `EngineError::Operational` rather than relying on
+        // `Store::get("")`'s incidental "object not found" (harmless today,
+        // but a guard that depends on a downstream error happening to be
+        // legible is not a guard).
+        if sel.set.manifest_key.is_empty() {
+            return Err(EngineError::Operational(
+                "SampleSelection.set.manifest_key is empty — phase 4 (phase4_sample::run) \
+                 cannot populate it from BackupSetFacts alone; the caller must patch `sel.set` \
+                 with the original BackupSetRef (Selection::bind_backup_set) before calling \
+                 fingerprints"
+                    .into(),
+            ));
+        }
         // Fix (post-review): scoped to `sel.set.manifest_key` via
         // `segment_keys_for_set`, NOT the broad `segment_keys_for` — the
         // latter resolves topic/partition against EVERY manifest under the

@@ -11,8 +11,41 @@ pub struct Selection {
     pub topics: u32,
     pub partitions: u32,
     /// Human-readable facts that must reach the operator: known capture gaps
-    /// and retention-pruned ranges inside the window.
+    /// and retention-pruned ranges overlapping the sampled window.
     pub notes: Vec<String>,
+}
+
+impl Selection {
+    /// Patches every `per_partition[..].set` to `set`. `phase4_sample::run`
+    /// cannot populate `SampleSelection.set.manifest_key` — `BackupSetFacts`
+    /// (its only input describing the backup) does not carry a manifest key;
+    /// `DataEngine::describe` consumes and drops the original `BackupSetRef`
+    /// before returning `BackupSetFacts` (logweir-engine-oso/src/engine.rs).
+    /// The caller that still holds that `BackupSetRef` (from
+    /// `DataEngine::list_backup_sets`) MUST call this before any
+    /// `SampleSelection` reaches `DataEngine::fingerprints`, which reads
+    /// `sel.set.manifest_key` to scope its segment read
+    /// (`Store::segment_keys_for_set`). `OsoCliEngine::fingerprints` refuses
+    /// with `EngineError::Operational` if `manifest_key` is still empty when
+    /// it is called, so an implementer who forgets this step gets a loud,
+    /// specific failure rather than a wrong or silent read.
+    pub fn bind_backup_set(&mut self, set: &BackupSetRef) {
+        for sel in &mut self.per_partition {
+            sel.set = set.clone();
+        }
+    }
+}
+
+/// One partition's contribution before `max_partitions` truncation is
+/// applied — carries everything the final `Selection`'s aggregate fields
+/// (`records_expected`, `topics`, `notes`) are derived from, so those fields
+/// can be recomputed from exactly what survives truncation rather than
+/// accumulated before it runs.
+struct Candidate {
+    sel: SampleSelection,
+    expected: u64,
+    topic: String,
+    notes: Vec<String>,
 }
 
 pub fn run(
@@ -22,13 +55,9 @@ pub fn run(
 ) -> Result<Selection, DrillError> {
     let (w0, w1) = (spec.window_start, spec.window_end);
     let (ms0, ms1) = (w0.timestamp_millis(), w1.timestamp_millis());
-    let mut per_partition = Vec::new();
-    let mut expected = 0u64;
-    let mut notes = Vec::new();
-    let mut n_topics = 0u32;
+    let mut candidates: Vec<Candidate> = Vec::new();
 
     for t in facts.topics.iter().filter(|t| topics.contains(&t.name)) {
-        let mut used = false;
         for p in &t.partitions {
             let in_window: Vec<_> = p
                 .segments
@@ -38,49 +67,57 @@ pub fn run(
             if in_window.is_empty() {
                 continue;
             }
-            used = true;
-            expected += in_window.iter().map(|s| s.record_count as u64).sum::<u64>();
+            let expected: u64 = in_window.iter().map(|s| s.record_count as u64).sum();
+            // The offset EXTENT actually covered by the in-window segments —
+            // `gaps`/`pruned` are OFFSET ranges (see `PartitionFacts`'s own
+            // field docs), while the window itself is a TIMESTAMP range,
+            // so the two cannot be compared directly. This is the bridge:
+            // only a gap/pruned range that intersects what was actually
+            // read for THIS window is reported as overlapping it: a gap or
+            // pruned range entirely outside this partition's in-window
+            // segments is real, but it does not overlap THIS sample.
+            let lo = in_window.iter().map(|s| s.start_offset).min().unwrap();
+            let hi = in_window.iter().map(|s| s.end_offset).max().unwrap();
+            let mut notes = Vec::new();
             for (g0, g1) in &p.gaps {
-                notes.push(format!(
-                    "{}/{}: capture gap {g0}..{g1} overlaps the sampled window",
-                    t.name, p.partition_id
-                ));
+                if *g0 <= hi && *g1 >= lo {
+                    notes.push(format!(
+                        "{}/{}: capture gap {g0}..{g1} overlaps the sampled window",
+                        t.name, p.partition_id
+                    ));
+                }
             }
             for (g0, g1) in &p.pruned {
-                notes.push(format!(
-                    "{}/{}: retention pruned {g0}..{g1} inside the sampled window",
-                    t.name, p.partition_id
-                ));
+                if *g0 <= hi && *g1 >= lo {
+                    notes.push(format!(
+                        "{}/{}: retention pruned {g0}..{g1} inside the sampled window",
+                        t.name, p.partition_id
+                    ));
+                }
             }
-            per_partition.push(SampleSelection {
-                // `BackupSetFacts` does not carry the manifest key that
-                // `DataEngine::describe` read it from — that `BackupSetRef`
-                // is consumed and dropped inside `describe` itself
-                // (logweir-engine-oso/src/engine.rs), and this function only
-                // ever sees the derived `BackupSetFacts`, not the original
-                // ref. `manifest_key` cannot be populated here; whatever
-                // later wires phase 4 into the orchestrator (out of this
-                // task's scope) still holds the real `BackupSetRef` from
-                // `list_backup_sets` and must set it before a `Selection`
-                // reaches `DataEngine::fingerprints`, which scopes its read
-                // by `sel.set.manifest_key`.
-                set: BackupSetRef {
-                    backup_id: facts.backup_id.clone(),
-                    manifest_key: String::new(),
+            candidates.push(Candidate {
+                sel: SampleSelection {
+                    // See `Selection::bind_backup_set`'s doc comment: this
+                    // cannot be populated here and MUST be patched by the
+                    // caller before `fingerprints` is called.
+                    set: BackupSetRef {
+                        backup_id: facts.backup_id.clone(),
+                        manifest_key: String::new(),
+                    },
+                    topic: t.name.clone(),
+                    partition: p.partition_id,
+                    anchor: spec.anchor.clone(),
+                    count: spec.records_per_partition,
+                    window: (ms0, ms1),
                 },
+                expected,
                 topic: t.name.clone(),
-                partition: p.partition_id,
-                anchor: spec.anchor.clone(),
-                count: spec.records_per_partition,
-                window: (ms0, ms1),
+                notes,
             });
-        }
-        if used {
-            n_topics += 1;
         }
     }
 
-    if per_partition.is_empty() {
+    if candidates.is_empty() {
         // OSO's own rule, adopted: zero records scanned is never a positive pass.
         return Err(DrillError::Operational(format!(
             "no segment in backup {} overlaps the window {} .. {}; a drill over an \
@@ -91,14 +128,30 @@ pub fn run(
         )));
     }
     if let Some(max) = spec.max_partitions {
-        per_partition.truncate(max as usize);
+        // Truncate BEFORE deriving the aggregate counts below, not after:
+        // `records_expected`/`topics`/`notes` must describe exactly the
+        // partitions `per_partition` ends up naming, never a pre-truncation
+        // total for partitions the `Selection` no longer contains.
+        candidates.truncate(max as usize);
     }
-    let partitions = per_partition.len() as u32;
+
+    let records_expected = candidates.iter().map(|c| c.expected).sum();
+    let mut topic_names: Vec<&str> = candidates.iter().map(|c| c.topic.as_str()).collect();
+    topic_names.sort_unstable();
+    topic_names.dedup();
+    let topics_count = topic_names.len() as u32;
+    let partitions = candidates.len() as u32;
+    let notes: Vec<String> = candidates
+        .iter()
+        .flat_map(|c| c.notes.iter().cloned())
+        .collect();
+    let per_partition: Vec<SampleSelection> = candidates.into_iter().map(|c| c.sel).collect();
+
     Ok(Selection {
         window: (w0, w1),
         per_partition,
-        records_expected: expected,
-        topics: n_topics,
+        records_expected,
+        topics: topics_count,
         partitions,
         notes,
     })

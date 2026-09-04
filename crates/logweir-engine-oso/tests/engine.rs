@@ -4,8 +4,8 @@
 //! these are what stand in for it. See task-12-report.md's "what remains
 //! unproven" section for exactly what these tests cannot cover.
 use logweir_core::engine::{
-    BackupSetRef, CoverageState, DataEngine, PhaseObserver, RestorePlan, SampleSelection,
-    StorageUrl,
+    BackupSetRef, CoverageState, DataEngine, EngineError, PhaseObserver, RestorePlan,
+    SampleSelection, StorageUrl,
 };
 use logweir_engine_oso::engine::OsoCliEngine;
 use logweir_engine_oso::storage::Store;
@@ -725,6 +725,31 @@ fn count_zero_returns_no_fingerprints() {
     );
     let fps = engine.fingerprints(&anchor_sel(set, "head", 0)).unwrap();
     assert!(fps.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `phase4_sample::run` (crates/logweir) cannot populate `manifest_key` — it
+/// arrives empty until a caller patches `sel.set` from the original
+/// `BackupSetRef`. This is the guard that catches a forgotten patch step: a
+/// clear, specific `EngineError::Operational`, not an incidental storage
+/// error a reader has to decode.
+#[test]
+fn an_empty_manifest_key_is_refused_with_a_clear_operational_error() {
+    let dir = unique_dir("anchor-empty-manifest-key");
+    let mut set = seed_anchor_archive(&dir);
+    set.manifest_key = String::new();
+    let loc = StorageUrl::Filesystem { path: dir.clone() };
+    let engine = engine_with(
+        "../../e2e/fixtures/fake-engine-clean.sh",
+        Store::read_only_from_url(&loc).unwrap(),
+    );
+    let err = engine
+        .fingerprints(&anchor_sel(set, "head", 3))
+        .unwrap_err();
+    match err {
+        EngineError::Operational(msg) => assert!(msg.contains("manifest_key"), "{msg}"),
+        other => panic!("expected EngineError::Operational, got {other:?}"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
