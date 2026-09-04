@@ -29,6 +29,21 @@ pub struct Sidecar {
 pub enum Error {
     #[error("key error: {0}")]
     Key(String),
+    /// The sidecar or its signature bytes are structurally invalid: base64
+    /// that will not decode, a signature blob that is not valid DER (P-256)
+    /// or is the wrong length (Ed25519), or a `payloadType` that does not
+    /// match what the caller asked to verify. This is evidence of CORRUPTION
+    /// — a truncated file, the wrong file, a bad encoding — never evidence
+    /// that a genuine, well-formed document was tampered with after signing.
+    /// A caller mapping this crate's errors onto an exit-code contract
+    /// SHOULD treat this variant as an operational failure, not as a proof
+    /// of tampering.
+    #[error("malformed signature data: {0}")]
+    Malformed(String),
+    /// A structurally valid signature was checked against the payload and
+    /// either did not verify, or no signature in the sidecar was made by the
+    /// presented key. This is the "tampered" fact: the crypto ran and gave a
+    /// definite negative answer.
     #[error("verification failed: {0}")]
     Verify(String),
 }

@@ -1,0 +1,118 @@
+{
+  "format_version": "1.0.0",
+  "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+  "outcome": "pass",
+  "last_phase_completed": 9,
+  "requested_at": "2026-09-03T09:00:00Z",
+  "approval_validated_at": "2026-09-03T09:00:30Z",
+  "triggered_by": "KPMG Q3",
+  "engine": {
+    "id": "oso-cli",
+    "version": "v0.21.0",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "execution": "subprocess",
+    "levers": {
+      "header_preflight": "honoured",
+      "dry_run_check_segments": "unknown-not-observable",
+      "unknown_key_warnings": []
+    },
+    "matrix_verdict": "pass",
+    "matrix_verdict_reason": null
+  },
+  "source": {
+    "backup_id": "backup-2026-08-30T02:00:00Z",
+    "manifest_sha256": "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f",
+    "manifest_version_id": null,
+    "captured_by_logweir": false
+  },
+  "target": {
+    "cluster_id": "MkU3OEVBNTcwNTJENDM2Qk",
+    "marker_topic": "logweir.scratch",
+    "topic_mapping_prefix": "drill-",
+    "topic_mapping_sha256": "sha256:1350c08855c7d26b531ce7c309a5584f56d80b58f5271bca3daedf048efc8dea",
+    "topic_mapping_entries": 1
+  },
+  "approval": {
+    "approver": "sre-oncall@example.com",
+    "ticket": "CHG-40881",
+    "plan_hash": "sha256:a97cc3ee6dda1bff8c8a2a185e94c7f31e9f8a4f9ef6372a8efee9d784d5808d",
+    "approved_at": "2026-09-02T17:40:00Z",
+    "key_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "self_attested": true
+  },
+  "phases": [
+    {
+      "phase": 0,
+      "name": "admit",
+      "at": "2026-09-03T09:00:00Z",
+      "outcome": "admitted",
+      "duration_ms": 41
+    }
+  ],
+  "measured": {
+    "rto_seconds": 512,
+    "rto_requested_to_verified_seconds": 542,
+    "rto_restore_only_seconds": 214,
+    "rto_excluding_preflight_seconds": 300,
+    "rpo_seconds": 0,
+    "rpo_source_relative_seconds": null,
+    "rpo_source_relative_unmeasured_reason": "source cluster never contacted"
+  },
+  "objectives": {
+    "rto_seconds": 900,
+    "rpo_seconds": 300,
+    "pass_rate": 1.0,
+    "met": true
+  },
+  "sample": {
+    "window_start": "2026-08-29T00:00:00Z",
+    "window_end": "2026-08-30T02:00:00Z",
+    "topics": 1,
+    "partitions": 3,
+    "records_expected": 75,
+    "records_restored": 75,
+    "anchor": "head",
+    "coverage_note": "no capture gap overlaps the sampled window"
+  },
+  "target_diff": {
+    "collisions": [],
+    "would_create": [
+      [
+        "drill-orders",
+        3
+      ]
+    ],
+    "level": "full"
+  },
+  "integrity": {
+    "level": "byte-fingerprint",
+    "result": "pass",
+    "partial_reason": null,
+    "records_sampled": 75,
+    "records_sampled_matching": 75,
+    "mismatches": 0,
+    "pass_rate_measured": 1.0,
+    "restoredPrincipalCouldConsume": null
+  },
+  "topic_parity": {
+    "intentionally_deviated": [
+      "cleanup.policy",
+      "retention.ms"
+    ],
+    "unexpected_divergence": []
+  },
+  "engine_subreport": {
+    "retained_verbatim": true,
+    "retrieved_from": "logweir/01J9X2QK7C4V0R8YB3ZP6MTS5A/engine-validation",
+    "caveat": "The engine's own integrity.checksums_valid is a hardcoded constant true and its restore start_time/end_time/duration_seconds are all null; this sub-report corroborates nothing Logweir claims.",
+    "body_b64": "eyJzY2hlbWFfdmVyc2lvbiI6IjEuMC4wIiwicmVwb3J0X2lkIjoiMDFKOVgyUUs3QzRWMFI4WUIzWlA2TVRTNUEifQ==",
+    "body_sha256": "sha256:a69da6652ed5af0b62318c6fdd800f8d735d59f34e08c75b159cb15fe99e6eec"
+  },
+  "evidence": {
+    "version_id": null,
+    "retain_until": null,
+    "immutable": false,
+    "create_only_enforced": true
+  },
+  "redactions": []
+}

@@ -249,11 +249,42 @@ pub struct Redaction {
 #[error("scorecard invariant violated: {0}")]
 pub struct InvariantError(pub String);
 
+/// The leading dot-separated component of a semver string, parsed as an
+/// integer. Returns `None` for anything that doesn't start with an integer
+/// (so a malformed `format_version` is refused rather than silently treated
+/// as major 0).
+fn major_version(v: &str) -> Option<u64> {
+    v.split('.').next()?.parse().ok()
+}
+
 impl Scorecard {
     /// The invariants spec §6.1 and §9.3 phase 8 state in prose. Called before
     /// signing (Task 20) and by `drill verify` (Task 6), so no signed document
     /// can carry a self-contradicting claim.
     pub fn validate_invariants(&self) -> Result<(), InvariantError> {
+        // Global Constraint 12: a reader must refuse a `format_version` whose
+        // major is newer than the one this binary understands. Checked
+        // first, and by string comparison against `crate::FORMAT_VERSION`
+        // (never by re-deriving what "this build understands" some other
+        // way), so a document from a future major bump is rejected before
+        // any other invariant is even evaluated against fields that build may
+        // have changed the meaning of.
+        let doc_major = major_version(&self.format_version).ok_or_else(|| {
+            InvariantError(format!(
+                "format_version {:?} is not a parseable semver",
+                self.format_version
+            ))
+        })?;
+        let known_major =
+            major_version(crate::FORMAT_VERSION).expect("FORMAT_VERSION is a valid semver");
+        if doc_major > known_major {
+            return Err(InvariantError(format!(
+                "format_version {} has a major version newer than this reader understands \
+                 (this build knows {})",
+                self.format_version,
+                crate::FORMAT_VERSION
+            )));
+        }
         if self.integrity.result == IntegrityResult::Partial
             && self.integrity.partial_reason.is_none()
         {
@@ -589,6 +620,46 @@ mod tests {
         assert_eq!(
             err.0,
             "integrity.pass_rate_measured is not finite (NaN or +/-Inf)"
+        );
+    }
+
+    // --- Global Constraint 12: refuse a higher-major format_version --------
+
+    #[test]
+    fn format_version_with_a_higher_major_is_refused() {
+        let mut sc = valid_scorecard();
+        sc.format_version = "9.9.9".into();
+        let err = sc
+            .validate_invariants()
+            .expect_err("a format_version from a future major must be refused");
+        assert_eq!(
+            err.0,
+            "format_version 9.9.9 has a major version newer than this reader understands \
+             (this build knows 1.0.0)"
+        );
+    }
+
+    #[test]
+    fn format_version_with_a_lower_or_equal_major_is_accepted() {
+        let mut sc = valid_scorecard();
+        sc.format_version = "1.9.9".into();
+        sc.validate_invariants()
+            .expect("a same-major minor/patch bump must not be refused");
+        sc.format_version = "0.9.9".into();
+        sc.validate_invariants()
+            .expect("an older major must not be refused by this check");
+    }
+
+    #[test]
+    fn format_version_that_does_not_parse_is_refused() {
+        let mut sc = valid_scorecard();
+        sc.format_version = "not-a-semver".into();
+        let err = sc
+            .validate_invariants()
+            .expect_err("an unparseable format_version must be refused, not treated as major 0");
+        assert_eq!(
+            err.0,
+            "format_version \"not-a-semver\" is not a parseable semver"
         );
     }
 }

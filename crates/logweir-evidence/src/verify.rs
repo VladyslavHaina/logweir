@@ -11,7 +11,10 @@ pub fn verify_detached(
     sidecar: &Sidecar,
 ) -> Result<(), Error> {
     if sidecar.payload_type != payload_type {
-        return Err(Error::Verify(format!(
+        // A payloadType mismatch says "this sidecar was never meant to be
+        // read as this kind of document" — a data-shape problem, not a
+        // cryptographic fact about tampering.
+        return Err(Error::Malformed(format!(
             "payload_type mismatch: sidecar says {}, caller says {payload_type}",
             sidecar.payload_type
         )));
@@ -22,23 +25,27 @@ pub fn verify_detached(
         if s.keyid != want {
             continue;
         }
+        // Base64 that will not decode is corruption of the sidecar itself,
+        // not a cryptographic fact about the payload.
         let raw = B64
             .decode(&s.sig)
-            .map_err(|e| Error::Verify(e.to_string()))?;
+            .map_err(|e| Error::Malformed(format!("signature is not valid base64: {e}")))?;
         let ok = match key {
             VerifyingKey::P256(k) => {
                 use p256::ecdsa::signature::Verifier as _;
-                p256::ecdsa::Signature::from_der(&raw)
-                    .ok()
-                    .map(|sig| k.verify(&msg, &sig).is_ok())
-                    .unwrap_or(false)
+                // DER that will not parse, or is the wrong length, is also
+                // structural corruption — distinct from a DER blob that
+                // parses fine but whose crypto check fails.
+                let sig = p256::ecdsa::Signature::from_der(&raw)
+                    .map_err(|e| Error::Malformed(format!("signature is not valid DER: {e}")))?;
+                k.verify(&msg, &sig).is_ok()
             }
             VerifyingKey::Ed25519(k) => {
                 use ed25519_dalek::Verifier as _;
-                ed25519_dalek::Signature::from_slice(&raw)
-                    .ok()
-                    .map(|sig| k.verify(&msg, &sig).is_ok())
-                    .unwrap_or(false)
+                let sig = ed25519_dalek::Signature::from_slice(&raw).map_err(|e| {
+                    Error::Malformed(format!("signature has the wrong length: {e}"))
+                })?;
+                k.verify(&msg, &sig).is_ok()
             }
         };
         if ok {

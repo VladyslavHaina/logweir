@@ -1,5 +1,7 @@
 use crate::Error;
-use p256::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
+use p256::pkcs8::{
+    DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding,
+};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -67,6 +69,21 @@ impl SigningKey {
     pub fn key_id(&self) -> String {
         self.verifying_key().key_id()
     }
+
+    /// PKCS#8 PEM of the PRIVATE key. Used only to mint the checked-in test
+    /// fixtures (`crates/logweir-evidence/examples/mint_fixture.rs`) — never
+    /// print the result of this method.
+    pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
+        let pem = match self {
+            SigningKey::P256(k) => k
+                .to_pkcs8_pem(LineEnding::LF)
+                .map_err(|e| Error::Key(e.to_string()))?,
+            SigningKey::Ed25519(k) => k
+                .to_pkcs8_pem(LineEnding::LF)
+                .map_err(|e| Error::Key(e.to_string()))?,
+        };
+        Ok(pem.to_string())
+    }
 }
 
 impl VerifyingKey {
@@ -94,5 +111,19 @@ impl VerifyingKey {
         let mut h = Sha256::new();
         h.update(&der);
         hex::encode(h.finalize())
+    }
+
+    /// SubjectPublicKeyInfo PEM. Used to mint the checked-in `public.pem` test
+    /// fixture and by any future caller that needs to hand out a public key.
+    pub fn to_public_key_pem(&self) -> Result<String, Error> {
+        let pem = match self {
+            VerifyingKey::P256(k) => k
+                .to_public_key_pem(LineEnding::LF)
+                .map_err(|e| Error::Key(e.to_string()))?,
+            VerifyingKey::Ed25519(k) => k
+                .to_public_key_pem(LineEnding::LF)
+                .map_err(|e| Error::Key(e.to_string()))?,
+        };
+        Ok(pem)
     }
 }

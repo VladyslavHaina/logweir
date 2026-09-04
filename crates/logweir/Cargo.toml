@@ -1,0 +1,23 @@
+[package]
+name = "logweir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "logweir"
+path = "src/lib.rs"
+
+[[bin]]
+name = "logweir"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+logweir-core = { path = "../logweir-core" }
+logweir-evidence = { path = "../logweir-evidence" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
