@@ -40,3 +40,8 @@ evidence:
   endpoint: http://localhost:9000
   path_style: true
   allow_http: true
+
+notifications:
+  webhooks: []
+  # slack_webhook: https://hooks.slack.com/services/…
+  # pagerduty_routing_key: R0…

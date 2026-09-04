@@ -182,6 +182,16 @@ pub struct RestoreFacts {
     pub unknown_key_warnings: Vec<String>,
 }
 
+/// Task 19 glue: the engine's own `validation run --config validation.yaml
+/// --triggered-by <s>` subcommand prints human text only and writes no
+/// machine-readable report to stdout — its ONLY per-run signal reachable
+/// through this trait is the exit code (see `DataEngine::validation_run`'s
+/// doc comment for why phase 7 never reads more than that).
+#[derive(Debug, Clone, Copy)]
+pub struct EngineRun {
+    pub exit_code: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SampleSelection {
     /// Which backup set's segments to sample. Without this, a `Store` whose
@@ -258,4 +268,31 @@ pub trait DataEngine {
         obs: &mut dyn PhaseObserver,
     ) -> Result<RestoreFacts, EngineError>;
     fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError>;
+
+    /// Task 19 glue, not in this trait's original Task 8a contract. Phase 7's
+    /// brief (`crates/logweir/src/drill/phase7_verify.rs`) calls
+    /// `OsoCliEngine::validation_run(plan)` "through the concrete engine
+    /// handle the orchestrator holds" — but phase 7's own signature only ever
+    /// receives `engine: &dyn DataEngine`, and this trait had no method that
+    /// could reach that subprocess through a trait object. Adding it here
+    /// WITH A DEFAULT BODY is the minimal fix: every existing implementor
+    /// (`OsoCliEngine`, and every test double across `logweir-core`,
+    /// `logweir-engine-oso` and `crates/logweir`'s own test fixtures) keeps
+    /// compiling unchanged, because none of them override it.
+    ///
+    /// The default returns `Operational` rather than a fabricated
+    /// `EngineRun { exit_code: 0 }`: a silent fake pass here would let phase
+    /// 7's `notify`/logging code report an engine validation that never ran.
+    /// `OsoCliEngine`'s real override — spawning `validation run --config
+    /// validation.yaml --triggered-by <s>` — is NOT added by this task: it
+    /// needs the extracted `kafka-backup` binary to test against, and Docker
+    /// (this environment's only path to that binary) is unusable here. See
+    /// `phase7_verify::engine_validation_run`'s doc comment for the further,
+    /// separate reason (a known upstream topic-rename mismatch) this run's
+    /// CONTENT must never be trusted even once that override exists.
+    fn validation_run(&self, _plan: &RestorePlan) -> Result<EngineRun, EngineError> {
+        Err(EngineError::Operational(
+            "validation_run is not implemented by this engine".into(),
+        ))
+    }
 }

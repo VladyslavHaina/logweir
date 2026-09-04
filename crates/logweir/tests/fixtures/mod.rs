@@ -399,6 +399,47 @@ pub fn scorecard_pass() -> Scorecard {
     serde_json::from_str(include_str!("../../../../e2e/fixtures/scorecard-pass.json")).unwrap()
 }
 
+// ---------------------------------------------------------------- phase 7 verify
+
+pub fn verify_outcome_for_compacted_topic() -> logweir::drill::phase7_verify::VerifyOutcome {
+    let mut o = base_verify_outcome();
+    o.integrity.result = IntegrityResult::Partial;
+    o.integrity.partial_reason = Some(
+        "target topic drill-orders has cleanup.policy=compact; the target \
+              legitimately holds fewer records than the archive, so a \
+              record-for-record reconciliation is not possible"
+            .into(),
+    );
+    o.integrity.records_sampled_matching = 40;
+    o.integrity.mismatches = 35;
+    o.integrity.pass_rate_measured = Some(40.0 / 75.0);
+    o
+}
+
+pub fn verify_outcome_when_fingerprints_unsupported() -> logweir::drill::phase7_verify::VerifyOutcome
+{
+    let mut o = base_verify_outcome();
+    o.integrity.level = IntegrityLevel::ConsumeOnly;
+    o.integrity.records_sampled = 0;
+    o.integrity.records_sampled_matching = 0;
+    o.integrity.mismatches = 0;
+    o.integrity.pass_rate_measured = None;
+    o
+}
+
+fn base_verify_outcome() -> logweir::drill::phase7_verify::VerifyOutcome {
+    logweir::drill::phase7_verify::VerifyOutcome {
+        integrity: integrity_pass(),
+        topic_parity: TopicParity {
+            intentionally_deviated: vec![],
+            unexpected_divergence: vec![],
+        },
+        records_restored: 75,
+        newest_restored_ts_ms: 1_756_519_200_000,
+        verified_at: ts("2026-09-03T09:09:02Z"),
+    }
+}
+
 // ---------------------------------------------------------------- storage + keys
 
 /// Records every put so `a_signing_failure_exits_4_and_uploads_nothing` can
