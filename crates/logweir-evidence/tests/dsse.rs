@@ -77,3 +77,41 @@ fn key_id_is_stable_and_is_the_sha256_of_the_spki_der() {
     assert_eq!(sk.key_id(), sk.key_id());
     assert_eq!(sk.key_id().len(), 64);
 }
+
+/// verify_detached must fail closed via the keyid-match guard (verify.rs's
+/// trailing "no signature by key ... in the sidecar" branch) when the
+/// presented key never matches any signature's keyid — not fall through to a
+/// crypto check with the wrong key.
+#[test]
+fn a_signature_does_not_verify_under_a_different_key() {
+    let sk = SigningKey::generate_p256();
+    let other_sk = SigningKey::generate_p256();
+    let wrong_vk = other_sk.verifying_key();
+    let payload = b"{}";
+    let side = sign_detached(&sk, logweir_evidence::PAYLOAD_TYPE_SCORECARD, payload).unwrap();
+
+    let err = verify_detached(
+        &wrong_vk,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        payload,
+        &side,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("no signature by key"),
+        "a mismatched key must fail via the keyid-match guard, not a crypto check: {err}"
+    );
+}
+
+/// Same guard, reached via an empty `signatures` list rather than a
+/// mismatched keyid: a sidecar with no signatures at all must not verify.
+#[test]
+fn an_empty_signature_list_fails() {
+    let sk = SigningKey::generate_p256();
+    let vk = sk.verifying_key();
+    let side = logweir_evidence::Sidecar {
+        payload_type: logweir_evidence::PAYLOAD_TYPE_SCORECARD.to_string(),
+        signatures: vec![],
+    };
+    assert!(verify_detached(&vk, logweir_evidence::PAYLOAD_TYPE_SCORECARD, b"{}", &side).is_err());
+}
