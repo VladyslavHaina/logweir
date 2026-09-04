@@ -70,7 +70,11 @@ fn a_changed_payload_type_fails_even_with_identical_bytes() {
     let vk = sk.verifying_key();
     let payload = b"{}";
     let side = sign_detached(&sk, logweir_evidence::PAYLOAD_TYPE_SCORECARD, payload).unwrap();
-    assert!(verify_detached(&vk, "application/json", payload, &side).is_err());
+    let err = verify_detached(&vk, "application/json", payload, &side).unwrap_err();
+    assert!(
+        matches!(err, Error::Verify(_)),
+        "a payload_type mismatch is evidence of substitution, not corruption: {err:?}"
+    );
 }
 
 #[test]
@@ -120,13 +124,14 @@ fn an_empty_signature_list_fails() {
 
 // --- Deferred finding: malformed data must not be reported as tampering ----
 //
-// `Error::Verify` is the crypto engine giving a definite negative answer
-// (a well-formed signature that does not match, or no signature by this
-// key). `Error::Malformed` is corruption of the sidecar itself — bytes that
-// never reached a crypto check at all. A caller mapping these onto an
-// exit-code contract needs to tell "this file is corrupt" apart from "this
-// document was tampered with", so the two must never collapse to the same
-// variant.
+// `Error::Verify` is a definite negative answer the crypto/protocol layer
+// actually gave (a well-formed signature that does not match, no signature
+// by this key, or a payload_type mismatch — evidence of substitution).
+// `Error::Malformed` is corruption of the sidecar's signature bytes
+// themselves — data that never reached a crypto check at all. A caller
+// mapping these onto an exit-code contract needs to tell "this file is
+// corrupt" apart from "this document was tampered with or substituted", so
+// the two must never collapse to the same variant.
 
 #[test]
 fn base64_that_will_not_decode_is_malformed_not_verify() {
@@ -222,15 +227,23 @@ fn a_genuinely_tampered_payload_is_verify_not_malformed() {
 }
 
 #[test]
-fn payload_type_mismatch_is_malformed_not_verify() {
+fn payload_type_mismatch_is_verify_not_malformed() {
+    // Controller ruling: a payload_type mismatch is NOT one of the five
+    // structurally-collapsed outcomes the deferred finding enumerated
+    // (undecodable base64, non-DER signature, wrong-length signature, bad
+    // signature, no signature by the key). A signed sidecar whose
+    // payload_type does not match is evidence of SUBSTITUTION — a
+    // genuinely-signed sidecar for a different document handed over in
+    // place of this one — which deserves the escalate-not-retry signal
+    // `Error::Verify` carries, not `Error::Malformed`.
     let sk = SigningKey::generate_p256();
     let vk = sk.verifying_key();
     let payload = b"{}";
     let side = sign_detached(&sk, logweir_evidence::PAYLOAD_TYPE_SCORECARD, payload).unwrap();
     let err = verify_detached(&vk, "application/json", payload, &side).unwrap_err();
     assert!(
-        matches!(err, Error::Malformed(_)),
-        "a payload_type mismatch is a data-shape problem, not tamper evidence, got: {err:?}"
+        matches!(err, Error::Verify(_)),
+        "a payload_type mismatch is evidence of substitution, not corruption: {err:?}"
     );
 }
 
@@ -255,4 +268,59 @@ fn no_signature_by_the_presented_key_is_verify_not_malformed() {
         matches!(err, Error::Verify(_)),
         "no signature by the presented key must stay Verify, got: {err:?}"
     );
+}
+
+// --- FIX 2: verify_detached reports the signature it actually matched -----
+
+#[test]
+fn verify_detached_returns_the_matched_signatures_keyid() {
+    let sk = SigningKey::generate_p256();
+    let vk = sk.verifying_key();
+    let payload = b"{}";
+    let side = sign_detached(&sk, logweir_evidence::PAYLOAD_TYPE_SCORECARD, payload).unwrap();
+    let keyid = verify_detached(
+        &vk,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        payload,
+        &side,
+    )
+    .unwrap();
+    assert_eq!(keyid, sk.key_id());
+}
+
+/// A sidecar carrying more than one signature, where the signature that
+/// matches the presented key is NOT at index 0. The reported keyid must be
+/// the one that was actually checked and verified — never
+/// `sidecar.signatures[0]`, which a caller (previously the CLI) must not
+/// assume is the signature that verified.
+#[test]
+fn a_two_signature_sidecar_reports_the_matching_keyid_even_when_not_first() {
+    let sk_a = SigningKey::generate_p256();
+    let sk_b = SigningKey::generate_p256();
+    let vk_b = sk_b.verifying_key();
+    let payload = b"{}";
+
+    let side_a = sign_detached(&sk_a, logweir_evidence::PAYLOAD_TYPE_SCORECARD, payload).unwrap();
+    let side_b = sign_detached(&sk_b, logweir_evidence::PAYLOAD_TYPE_SCORECARD, payload).unwrap();
+
+    // Index 0 is A's signature (does not match vk_b); index 1 is B's (the
+    // one that must actually be checked and reported against vk_b).
+    let two_sig_sidecar = logweir_evidence::Sidecar {
+        payload_type: logweir_evidence::PAYLOAD_TYPE_SCORECARD.to_string(),
+        signatures: vec![side_a.signatures[0].clone(), side_b.signatures[0].clone()],
+    };
+
+    let keyid = verify_detached(
+        &vk_b,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        payload,
+        &two_sig_sidecar,
+    )
+    .unwrap();
+    assert_eq!(
+        keyid,
+        sk_b.key_id(),
+        "the reported keyid must be the signature that actually matched (index 1), not index 0"
+    );
+    assert_ne!(keyid, sk_a.key_id());
 }

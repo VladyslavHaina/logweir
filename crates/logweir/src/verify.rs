@@ -53,33 +53,42 @@ pub fn verify_scorecard(
             return Err(ExitCode::Operational);
         }
     };
-    if let Err(e) = verify_detached(&key, PAYLOAD_TYPE_SCORECARD, &bytes, &sidecar) {
-        // Deferred finding: `logweir-evidence::Error` distinguishes structural
-        // corruption of the sidecar (`Malformed` — base64 that will not
-        // decode, a DER blob that is invalid or the wrong length, a
-        // payload_type mismatch) from a definite cryptographic negative
-        // (`Verify` — a well-formed signature that does not match, or no
-        // signature by the presented key). The former says nothing about
-        // whether the archive itself is trustworthy — it is an operational
-        // failure, like a truncated file, and must NOT be reported as
-        // tampering. The latter is exactly what tampering after signing
-        // produces, so it maps to the same exit code the brief assigns a
-        // bad signature: 4, "signing or lock-proof failed".
-        return match e {
-            EvidenceError::Malformed(msg) => {
-                eprintln!("cannot verify: the signature data is malformed: {msg}");
-                Err(ExitCode::Operational)
-            }
-            EvidenceError::Verify(msg) => {
-                eprintln!("SIGNATURE INVALID: {msg}");
-                Err(ExitCode::SigningOrLock)
-            }
-            EvidenceError::Key(msg) => {
-                eprintln!("{msg}");
-                Err(ExitCode::Operational)
-            }
-        };
-    }
+    // Deferred finding: `logweir-evidence::Error` distinguishes structural
+    // corruption of the sidecar (`Malformed` — base64 that will not decode,
+    // a DER blob that is invalid or the wrong length) from a definite
+    // cryptographic/protocol negative (`Verify` — a well-formed signature
+    // that does not match, no signature by the presented key, or a
+    // payload_type mismatch, which is evidence of substitution). The former
+    // says nothing about whether the archive itself is trustworthy — it is
+    // an operational failure, like a truncated file, and must NOT be
+    // reported as tampering. The latter is exactly what tampering (or
+    // substitution) after signing produces, so it maps to the same exit
+    // code the brief assigns a bad signature: 4, "signing or lock-proof
+    // failed".
+    //
+    // `verify_detached` returns the `keyid` of the signature that actually
+    // matched and verified — never `sidecar.signatures[0]`, which is not
+    // necessarily the signature that was checked when a sidecar carries more
+    // than one signature.
+    let matched_key_id = match verify_detached(&key, PAYLOAD_TYPE_SCORECARD, &bytes, &sidecar) {
+        Ok(id) => id,
+        Err(e) => {
+            return match e {
+                EvidenceError::Malformed(msg) => {
+                    eprintln!("cannot verify: the signature data is malformed: {msg}");
+                    Err(ExitCode::Operational)
+                }
+                EvidenceError::Verify(msg) => {
+                    eprintln!("SIGNATURE INVALID: {msg}");
+                    Err(ExitCode::SigningOrLock)
+                }
+                EvidenceError::Key(msg) => {
+                    eprintln!("{msg}");
+                    Err(ExitCode::Operational)
+                }
+            };
+        }
+    };
     let sc: Scorecard = match serde_json::from_slice(&bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -103,7 +112,7 @@ pub fn verify_scorecard(
         outcome: sc.outcome,
         approver: sc.approval.approver.clone(),
         ticket: sc.approval.ticket.clone(),
-        key_id: sidecar.signatures[0].keyid.clone(),
+        key_id: matched_key_id,
     })
 }
 

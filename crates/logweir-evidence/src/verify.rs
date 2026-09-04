@@ -4,17 +4,25 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 /// Verify-as-read: the caller passes the bytes it actually read from disk or
 /// from the bucket, never a re-serialisation of a parsed value. A
 /// re-serialisation would verify a document nobody stored (spec §6 C3).
+///
+/// On success, returns the `keyid` of the signature that was actually
+/// checked and matched — never `sidecar.signatures[0]`, which a caller must
+/// not assume is the signature that verified when a sidecar carries more
+/// than one signature.
 pub fn verify_detached(
     key: &VerifyingKey,
     payload_type: &str,
     payload: &[u8],
     sidecar: &Sidecar,
-) -> Result<(), Error> {
+) -> Result<String, Error> {
     if sidecar.payload_type != payload_type {
-        // A payloadType mismatch says "this sidecar was never meant to be
-        // read as this kind of document" — a data-shape problem, not a
-        // cryptographic fact about tampering.
-        return Err(Error::Malformed(format!(
+        // A signed sidecar whose payload_type does not match is evidence of
+        // SUBSTITUTION — a genuinely-signed sidecar for a different kind of
+        // document handed over in place of this one. PAE binds payload_type
+        // cryptographically, so such a sidecar could never verify either
+        // way; this is about which signal an operator gets, and substitution
+        // is an escalation ("tampered"), not "retry, operational error".
+        return Err(Error::Verify(format!(
             "payload_type mismatch: sidecar says {}, caller says {payload_type}",
             sidecar.payload_type
         )));
@@ -49,7 +57,7 @@ pub fn verify_detached(
             }
         };
         if ok {
-            return Ok(());
+            return Ok(s.keyid.clone());
         }
         return Err(Error::Verify(
             "signature does not verify over the payload".into(),
