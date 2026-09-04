@@ -14,7 +14,11 @@ Requires only the `cryptography` package:
 
 Exit 0 = the signature verifies over the bytes of scorecard.json exactly as
           stored, and the document does not contradict itself.
-Exit 1 = it does not, or the sidecar/document is malformed or inconsistent.
+Exit 1 = it does not — or any of the three inputs cannot be read, parsed,
+          or understood (a mistyped path, a truncated sidecar, a malformed
+          PEM, or a public key of a type this script does not support).
+          Every such case prints a one-line `INVALID: ...` reason to
+          stderr; none of them should ever surface as a raw traceback.
 
 DSSE v1 Pre-Authentication Encoding (PAE), from the DSSE specification
 (https://github.com/secure-systems-lab/dsse/blob/master/protocol.md):
@@ -39,6 +43,14 @@ Sidecar shape (the checked-in `.sig` files):
 The one asymmetry worth stating twice: `sig` is base64 of **DER** for an
 ECDSA P-256 key, but base64 of the **raw 64-byte** R||S value for Ed25519.
 There is no ASN.1 for Ed25519 here — the format simply differs by key type.
+
+IMPORTANT — this script does not solve key distribution. It only checks
+that the signature over `scorecard.json` verifies under whatever
+`public.pem` you hand it. If `public.pem` arrived from the same place as
+the other two files, a successful VALID proves only that the three files
+are mutually consistent, not that they came from the publisher you think
+they did. See docs/verify-a-scorecard.md, "Where the public key comes
+from", before trusting a VALID result.
 """
 import base64
 import binascii
@@ -70,11 +82,13 @@ def pae(payload_type: str, payload: bytes) -> bytes:
 def verify_signature(public_key, message: bytes, signature: bytes) -> bool:
     """True iff `signature` is a valid signature over `message` by `public_key`.
 
-    ECDSA P-256 signatures are DER-encoded; Ed25519 signatures are the raw
-    64-byte value. `cryptography`'s `verify()` raises InvalidSignature both
-    for a genuine mismatch and for a signature blob that fails to decode
-    (bad DER, wrong length) — both are "this does not check out", which is
-    exactly the one bit this function reports.
+    Callers must have already confirmed `public_key` is EC or Ed25519 —
+    this function's `else` branch assumes EC. ECDSA P-256 signatures are
+    DER-encoded; Ed25519 signatures are the raw 64-byte value.
+    `cryptography`'s `verify()` raises InvalidSignature both for a genuine
+    mismatch and for a signature blob that fails to decode (bad DER, wrong
+    length) — both are "this does not check out", which is exactly the one
+    bit this function reports.
     """
     try:
         if isinstance(public_key, ed25519.Ed25519PublicKey):
@@ -91,9 +105,21 @@ def main(scorecard_path: str, sig_path: str, pubkey_path: str) -> int:
     # any trailing newline. Re-serialising the parsed JSON before verifying
     # would check a signature over a document nobody actually signed or
     # published — exactly the substitution this format is built to catch.
-    payload = open(scorecard_path, "rb").read()
+    try:
+        payload = open(scorecard_path, "rb").read()
+    except OSError as e:
+        print(f"INVALID: cannot read scorecard {scorecard_path!r}: {e}", file=sys.stderr)
+        return 1
 
-    sidecar = json.load(open(sig_path))
+    try:
+        sidecar = json.load(open(sig_path))
+    except OSError as e:
+        print(f"INVALID: cannot read signature {sig_path!r}: {e}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as e:
+        print(f"INVALID: {sig_path!r} is not valid JSON: {e}", file=sys.stderr)
+        return 1
+
     payload_type = sidecar.get("payloadType")
     if payload_type != PAYLOAD_TYPE:
         print(f"INVALID: unexpected payloadType {payload_type!r}", file=sys.stderr)
@@ -110,7 +136,30 @@ def main(scorecard_path: str, sig_path: str, pubkey_path: str) -> int:
         print(f"INVALID: sig is not valid base64: {e}", file=sys.stderr)
         return 1
 
-    public_key = serialization.load_pem_public_key(open(pubkey_path, "rb").read())
+    try:
+        pubkey_bytes = open(pubkey_path, "rb").read()
+    except OSError as e:
+        print(f"INVALID: cannot read public key {pubkey_path!r}: {e}", file=sys.stderr)
+        return 1
+    try:
+        public_key = serialization.load_pem_public_key(pubkey_bytes)
+    except ValueError as e:
+        print(f"INVALID: {pubkey_path!r} is not a valid PEM public key: {e}", file=sys.stderr)
+        return 1
+
+    # Only ECDSA P-256 and Ed25519 are defined by this format (see the
+    # module docstring's asymmetry note). Anything else — RSA, a different
+    # EC curve, and so on — has no defined `sig` encoding here, so it is
+    # reported as unsupported rather than fed into the EC verify path
+    # below, which would raise a raw TypeError on a non-EC key.
+    if not isinstance(public_key, (ec.EllipticCurvePublicKey, ed25519.Ed25519PublicKey)):
+        print(
+            f"INVALID: unsupported public key type {type(public_key).__name__}; "
+            "only ECDSA P-256 and Ed25519 are supported",
+            file=sys.stderr,
+        )
+        return 1
+
     message = pae(payload_type, payload)
     if not verify_signature(public_key, message, signature):
         print("INVALID: signature does not verify over these bytes", file=sys.stderr)

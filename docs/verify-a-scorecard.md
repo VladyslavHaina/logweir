@@ -31,12 +31,68 @@ An auditor needs exactly three files to check one scorecard:
 |---|---|
 | `scorecard.json` | The scorecard itself: the measured result, as a JSON document. |
 | `scorecard.sig` | The DSSE sidecar: a JSON file naming the signing key and holding the signature over `scorecard.json`'s exact bytes. |
-| `public.pem` | The publisher's public key, PEM-encoded (SPKI), used to check the signature. This is *not* secret and is normally distributed once, out of band, and reused across many scorecards from the same publisher. |
+| `public.pem` | The publisher's public key, PEM-encoded (SPKI), used to check the signature. This is *not* secret, but **it must not arrive by the same channel as the other two files** — see the next section before you run anything. |
 
 Do not accept a fourth input. In particular, never let anyone hand you a
 "re-typed" or "reformatted" copy of `scorecard.json` — see
 [The payload is never re-serialised](#the-payload-is-never-re-serialised)
 below for why that would silently defeat the check.
+
+## Where the public key comes from
+
+Read this before you verify anything — it changes what you do first, not
+just how you interpret the result.
+
+**Never verify a scorecard against a `public.pem` that arrived in the same
+handoff as `scorecard.json` and `scorecard.sig`.** If someone hands you a
+forged scorecard and a forged signature, they can just as easily hand you
+the public half of whatever key they forged it with, all three in one
+bundle. This script will print a clean `VALID` for that bundle — correctly,
+by its own narrow contract: the three files really are consistent with each
+other. That is not the same claim as "this scorecard was published by the
+organization you think published it," and a `VALID` result does not
+distinguish the two unless you have separately pinned the key.
+
+**The key must reach you through a channel independent of the document
+itself** — read off the publisher's own website over TLS, read aloud or
+handed over in person, retrieved from your organization's own trusted-key
+registry established ahead of time — anything other than "it was in the
+same email, folder, or tarball as the scorecard."
+
+**Pin it once, the first time you receive a key from a given publisher,**
+by recording its fingerprint:
+
+```bash
+openssl pkey -pubin -in public.pem -outform DER | openssl dgst -sha256
+```
+
+This prints something like `SHA2-256(stdin)= 917cf9a2...`. That hex digest
+is the SHA-256 of the key's SPKI DER encoding — which is exactly the value
+the sidecar's `signatures[].keyid` field carries, so you can cross-check
+the sidecar's own claim about which key it's signed by, before running any
+cryptographic verification at all:
+
+```bash
+python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['signatures'][0]['keyid'])" scorecard.sig
+```
+
+If that value does not match the fingerprint you pinned for this publisher,
+stop. Do not proceed to Route 1 or Route 2 below — a mismatch means either
+an untold-you key rotation or a forgery attempt, and either way it is
+something to resolve with the publisher out of band, not something either
+verifier can adjudicate for you.
+
+Record the pinned fingerprint somewhere durable (next to the publisher's
+name, alongside your own organization's other trusted keys) and reuse
+*that* retained copy of `public.pem` for every later scorecard from this
+publisher. A fresh `public.pem` that arrives bundled with a later scorecard
+is worth nothing on its own, however convenient it is to use — check its
+fingerprint against your pinned one first.
+
+**To state the failure mode plainly: verifying `scorecard.json` against a
+`public.pem` delivered in the same bundle proves only that the bundle is
+internally consistent. It does not prove authenticity. Authenticity comes
+from the key having reached you a different way.**
 
 ## Two ways to verify
 
@@ -230,17 +286,28 @@ evidence report, retained verbatim (see `engine_subreport.caveat` in the
 scorecard itself, which states this in the document). It is tempting to
 read a `pass`-looking upstream sub-report as independent corroboration of
 Logweir's own `integrity` block. It is not, for two concrete, verified
-reasons:
+reasons. (The checked-in test fixtures under `e2e/fixtures/signed/` embed a
+minimal placeholder body — decode `scorecard.json`'s
+`engine_subreport.body_b64` yourself and you will find a two-field stub,
+not a full report — so the paths below describe the real upstream engine's
+report schema, the one a genuine production scorecard embeds, not
+necessarily the bytes in these particular fixtures.)
 
-- The upstream engine's evidence report sets `checksums_valid` to the
-  hardcoded literal `true` in every report it ever emits — it is not
-  computed from anything
+- The literal JSON path **`engine_subreport.body.integrity.checksums_valid`**
+  — where `body` denotes the JSON object you get by base64-decoding
+  `engine_subreport.body_b64` (there is no field literally named `body` in
+  the sidecar; decode `body_b64` first, then walk `.integrity
+  .checksums_valid` in the result) — is the hardcoded literal `true` in
+  every report the upstream engine ever emits. It is not computed from
+  anything
   [VERIFIED `U/kafka-backup/crates/kafka-backup-core/src/evidence/emit.rs:109`
   — `checksums_valid: true,` is a literal in the struct construction].
   A field that is always `true` by construction cannot corroborate
   anything; it is not evidence, it is a constant.
-- The same report's restore timing fields — `start_time`, `end_time`, and
-  `duration_seconds` — are always `None`
+- The same decoded report's restore timing fields — reachable the same
+  way at `engine_subreport.body.restore.start_time`,
+  `engine_subreport.body.restore.end_time`, and
+  `engine_subreport.body.restore.duration_seconds` — are always `None`
   [VERIFIED `U/kafka-backup/crates/kafka-backup-core/src/evidence/emit.rs:100-104`
   — `RestoreInfo { target_bootstrap_servers, start_time: None, end_time:
   None, duration_seconds: None }`], so the sub-report cannot corroborate
@@ -277,12 +344,21 @@ self-attested run is not a forgery, but it is a materially weaker
 governance signal than one where a different approving party's key is on
 record).
 
-Both verifiers surface this rather than hiding it: a scorecard with
-`self_attested: true` prints a line reading
+Both verifiers surface this rather than hiding it: `verify_scorecard.py`
+prints, verbatim (this is the actual output — compare your terminal
+against these exact characters, not a paraphrase of them):
 
 ```
-SELF-ATTESTED — the approval key equals the signing key
+VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
+       rto_seconds=512  rpo_seconds=0
+       integrity=byte-fingerprint/pass
+       approval: SELF-ATTESTED — the approval key equals the signing key
 ```
+
+`logweir drill verify` prints the equivalent line as `approval:
+SELF-ATTESTED — the approval key equals the signing key` among its own
+report fields. Either way, the line to look for ends in `SELF-ATTESTED —
+the approval key equals the signing key`.
 
 If you are an auditor deciding how much weight to give a passing scorecard,
 treat `self_attested: true` as a reason to seek additional corroboration —
