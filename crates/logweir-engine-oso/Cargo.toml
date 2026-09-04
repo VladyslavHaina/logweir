@@ -25,9 +25,13 @@ lz4_flex = "0.13"
 # `zstd-sys`/`cc` — so this crate is not C-toolchain-free overall; only the
 # rdkafka half of that claim holds.
 logweir-kafka = { path = "../logweir-kafka", default-features = false }
+object_store.workspace = true
+futures.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 
 [features]
 default = []
+e2e = []

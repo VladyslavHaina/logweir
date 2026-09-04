@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -55,6 +55,6 @@ jobs:
           repository: osodevops/kafka-backup
           ref: ${{ env.UPSTREAM_TAG }}
           path: upstream/kafka-backup
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask sync-upstream --tag "$UPSTREAM_TAG" --upstream upstream/kafka-backup

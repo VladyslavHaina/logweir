@@ -7,6 +7,7 @@
 //! break parsing but never the build. See `scripts/check-no-oso.sh`.
 
 pub mod kbak;
+pub mod storage;
 pub mod vendored;
 
 /// Global Constraint 4: never emit these three keys, at any value, on any

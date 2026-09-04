@@ -1,5 +1,9 @@
 [licenses]
-allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+# CDLA-Permissive-2.0 added by Task 12b: `webpki-root-certs` (pulled in via
+# object_store 0.14's aws+azure+gcp+http tree — reqwest ->
+# rustls-platform-verifier -> webpki-root-certs) is licensed under it and
+# nothing narrower is available upstream.
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CDLA-Permissive-2.0"]
 confidence-threshold = 0.9
 
 [bans]

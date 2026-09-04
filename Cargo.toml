@@ -1,11 +1,12 @@
 # `Cargo.lock` carries deliberate `cargo update -p <pkg> --precise <version>`
 # pins below the newest resolvable version, none of them reflected in any
 # `[dependencies]`/`[workspace.dependencies]` entry here (they are all
-# TRANSITIVE). All exist because this workspace's pinned toolchain
-# (`rust-toolchain.toml`, CI's `dtolnay/rust-toolchain@1.82.0`) is rustc
-# 1.82.0, which cannot parse Rust edition 2024 and enforces an MSRV floor on
+# TRANSITIVE). All six were pinned while this workspace's toolchain
+# (`rust-toolchain.toml`, CI's `dtolnay/rust-toolchain@1.82.0`) was rustc
+# 1.82.0, which could not parse Rust edition 2024 and enforced an MSRV floor on
 # every crate it builds. A bare `cargo update` must never be run — it would
-# float every one of these back to a version that will not build:
+# float every one of these back to a version that will not build on the
+# lowest toolchain this workspace still needs to support:
 #   indexmap  2.13.1              (later releases move to edition2024)
 #   wasip2    1.0.0+wasi-0.2.4    (later releases move to edition2024)
 #   base64ct  1.7.3               (later releases move to edition2024)
@@ -17,8 +18,19 @@
 #                                  added `zstd` as a dependency)
 # The first five predate Task 9 (see task-1-report.md in the SDD tracking
 # directory for how each was found); `jobserver` was added by Task 9's own
-# fix pass. If a new dependency drags in another edition2024 or MSRV-floor
-# crate, pin it the same way and add it to this list.
+# fix pass.
+#
+# Task 12b (addendum ruling A5) bumped the toolchain pin itself from 1.82.0 to
+# 1.89.0 — object_store 0.14's aws+azure+gcp+http dependency tree requires
+# edition2024 (stable since 1.85) AND, once that resolved, `crc-fast` /
+# `icu_*` / `idna_adapter` report an MSRV floor as high as 1.89. Global
+# Constraint 9 fixes the object_store crate, version and feature set, so per
+# A5 the toolchain is what yields, never object_store. This did NOT remove
+# any of the six pins above: none of them needed a precise pin to resolve
+# under object_store's tree (all six still hold, unchanged, on 1.89.0), and
+# re-evaluating whether 1.89.0 lets any of them float free of their pin is
+# out of this task's scope. If a new dependency drags in another edition2024
+# or MSRV-floor crate, pin it the same way and add it to this list.
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask", "e2e"]
@@ -26,7 +38,7 @@ members = ["crates/*", "xtask", "e2e"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/logweir/logweir"
 
@@ -49,3 +61,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 sha2 = "0.10"
 thiserror = "1"
+# Global Constraint 9: the same crate, version and feature set OSO uses, so a
+# bucket OSO can read, we can read. Task 12b.
+object_store = { version = "0.14", features = ["aws", "azure", "gcp", "http"] }
+futures = "0.3"
+# No "process": nothing here spawns via tokio — the engine runner is
+# std::process (Task 12). "rt" + "time" + "net" is what object_store's HTTP
+# clients need from the single reused current-thread runtime.
+tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
