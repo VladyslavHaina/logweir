@@ -76,6 +76,26 @@ pub fn backup_facts_orders(partitions: i32) -> BackupSetFacts {
     }
 }
 
+/// Like `backup_facts_orders`, but partition 0 carries the given `gaps` and
+/// `pruned` ranges instead of none — for a phase that must detect and report
+/// a coverage gap (the backup could not capture a range) or an
+/// operator-pruned range (retention deliberately removed one) rather than
+/// treating the archive as fully covered (2026-09-04 fix review: the
+/// original `backup_facts_orders` hardcoded both to empty, so no consumer
+/// could build either case).
+pub fn backup_facts_orders_with_coverage(
+    partitions: i32,
+    gaps: &[(i64, i64)],
+    pruned: &[(i64, i64)],
+) -> BackupSetFacts {
+    let mut facts = backup_facts_orders(partitions);
+    if let Some(p0) = facts.topics[0].partitions.first_mut() {
+        p0.gaps = gaps.to_vec();
+        p0.pruned = pruned.to_vec();
+    }
+    facts
+}
+
 pub fn mapping(from: &str, to: &str) -> BTreeMap<String, String> {
     [(from.to_string(), to.to_string())].into_iter().collect()
 }
@@ -116,10 +136,15 @@ pub fn plan() -> RestorePlan {
 // ---------------------------------------------------------------- target side
 
 // UNCOMMENT IN TASK 16 — phase2_target::{TargetState, TopicState}
-// pub fn target_with(topic: &str, partitions: i32, end_offset: i64, configs: &[(&str, &str)])
+// `cluster_id` is a PARAMETER, not hardcoded: a caller building a
+// wrong-cluster or target-equals-source fixture (phase 0's most
+// safety-critical checks) needs a `TargetState` reporting a DIFFERENT
+// cluster id than the "allowed" one, which a hardcoded constant makes
+// impossible (2026-09-04 fix review).
+// pub fn target_with(cluster_id: &str, topic: &str, partitions: i32, end_offset: i64, configs: &[(&str, &str)])
 //     -> TargetState {
 //     TargetState {
-//         cluster_id: "MkU3OEVBNTcwNTJENDM2Qk".into(),
+//         cluster_id: cluster_id.into(),
 //         topics: [(topic.to_string(), TopicState {
 //             partitions,
 //             end_offsets: (0..partitions).map(|p| (p, if p == 0 { end_offset } else { 0 })).collect(),
@@ -129,8 +154,8 @@ pub fn plan() -> RestorePlan {
 // }
 
 // UNCOMMENT IN TASK 16 — phase2_target::TargetState
-// pub fn empty_target() -> TargetState {
-//     TargetState { cluster_id: "MkU3OEVBNTcwNTJENDM2Qk".into(), topics: BTreeMap::new() }
+// pub fn empty_target(cluster_id: &str) -> TargetState {
+//     TargetState { cluster_id: cluster_id.into(), topics: BTreeMap::new() }
 // }
 
 pub fn source_configs(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -150,8 +175,14 @@ pub fn target_configs(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
 // impl ClusterReader for FakeReader {
 //     fn cluster_id(&self) -> Result<String, KafkaError> { Ok(self.state.cluster_id.clone()) }
 //     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+//         // `TopicMeta::new`, not a bare struct literal: `TopicMeta` carries a
+//         // third field, `error: Option<String>` (Task 10), and a literal
+//         // naming only `name`/`partitions` does not compile (2026-09-04 fix
+//         // review). Every topic built from `TargetState` is reported healthy;
+//         // an "errored" topic needs its own fixture once `TopicState` grows
+//         // a way to express one.
 //         Ok(self.state.topics.iter()
-//             .map(|(n, t)| TopicMeta { name: n.clone(), partitions: t.partitions }).collect())
+//             .map(|(n, t)| TopicMeta::new(n.clone(), t.partitions)).collect())
 //     }
 //     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
 //         Ok(self.state.topics.get(topic).map(|t| t.end_offsets.clone()).unwrap_or_default())
@@ -211,6 +242,22 @@ pub fn matching_pair(n: usize) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) 
             value: Some(value),
             headers,
         });
+    }
+    (arch, cons)
+}
+
+/// Like `matching_pair`, but the consumed record at `mismatch_at` carries a
+/// DIFFERENT value than the one its archive fingerprint was computed from —
+/// so a reconciliation comparison over the result must report exactly one
+/// mismatch, never a false pass (2026-09-04 fix review: `matching_pair` had
+/// no mismatching counterpart, so no consumer could build this case).
+pub fn matching_pair_with_mismatch(
+    n: usize,
+    mismatch_at: usize,
+) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) {
+    let (arch, mut cons) = matching_pair(n);
+    if let Some(rec) = cons.get_mut(mismatch_at) {
+        rec.value = Some(b"tampered".to_vec());
     }
     (arch, cons)
 }
@@ -491,5 +538,5 @@ impl DataEngine for SleepEngine {
 // UNCOMMENT IN TASK 16 — phase2_target::TargetState (via FakeReader/target_with)
 // /// (a reader whose target already holds records, an engine that sleeps `ms`).
 // pub fn engine_that_sleeps_ms(ms: u64) -> (FakeReader, SleepEngine) {
-//     (FakeReader { state: target_with("drill-orders", 3, 500, &[]) }, SleepEngine { ms })
+//     (FakeReader { state: target_with("MkU3OEVBNTcwNTJENDM2Qk", "drill-orders", 3, 500, &[]) }, SleepEngine { ms })
 // }

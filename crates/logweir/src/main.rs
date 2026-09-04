@@ -1,5 +1,5 @@
 use clap::Parser;
-use logweir::drill::phase0_admit;
+use logweir::drill::{phase0_admit, DrillError};
 use logweir::{cli, exit, schema, verify};
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_kafka::{rdkafka_reader::RdKafkaReader, reader::AuthConfig};
@@ -100,9 +100,17 @@ fn run_phase0_only(spec_path: &Path, allowed_path: &Path) -> exit::ExitCode {
             eprintln!("phase 0 admitted the plan; phases 1-9 land in Task 21a");
             exit::ExitCode::Operational
         }
-        Err(e) => {
+        // A genuine guard refusal: the plan is refused, before anything ran.
+        Err(DrillError::Guard(e)) => {
             eprintln!("refused: {e}");
             exit::ExitCode::GuardRefused
+        }
+        // Everything else (a broker that could not be read, an unreachable
+        // cluster) is operational, not a refusal: the plan may be fine and
+        // the correct action is to retry, not to page someone to edit it.
+        Err(e) => {
+            eprintln!("could not evaluate phase 0: {e}");
+            exit::ExitCode::Operational
         }
     }
 }
