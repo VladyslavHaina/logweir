@@ -1,0 +1,99 @@
+use super::phase2_target::TargetState;
+use logweir_core::engine::BackupSetFacts;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone)]
+pub struct Collision {
+    pub topic: String,
+    pub existing_partitions: i32,
+    pub existing_end_offsets: i64,
+    pub existing_configs_differing: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TargetDiff {
+    /// Target topics that already exist and already hold records.
+    pub collisions: Vec<Collision>,
+    /// Target topics that do not exist — the normal case on a scratch cluster.
+    pub absent: Vec<String>,
+    /// (target topic, partition count the restore will create).
+    pub would_create: Vec<(String, i32)>,
+}
+
+impl TargetDiff {
+    /// THE SINK. Phase 3's whole justification is that no shipped artifact
+    /// performs this diff; a value computed and then dropped would leave the
+    /// §4 positioning claim resting on something no reader ever sees. The
+    /// orchestrator writes this into `Scorecard.target_diff`, `drill show`
+    /// renders it, and phase 6 takes its rendered partition counts from
+    /// `would_create` rather than re-deriving them.
+    pub fn summarise(&self) -> logweir_core::scorecard::TargetDiffSummary {
+        logweir_core::scorecard::TargetDiffSummary {
+            collisions: self
+                .collisions
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}: {} partition(s), {} record(s) already present, differing config: [{}]",
+                        c.topic,
+                        c.existing_partitions,
+                        c.existing_end_offsets,
+                        c.existing_configs_differing.join(", ")
+                    )
+                })
+                .collect(),
+            would_create: self.would_create.clone(),
+            // "shallow" only if spec §15 cut 0d is ever taken; v0.1 always
+            // reads the target's real state, so this is "full".
+            level: "full".into(),
+        }
+    }
+}
+
+/// A diff against ACTUAL TARGET STATE, which OSO's dry run never performs and
+/// which the operator's dry run fakes with an unconditional DryRunPassed.
+pub fn run(
+    target: &TargetState,
+    facts: &BackupSetFacts,
+    mapping: &BTreeMap<String, String>,
+) -> TargetDiff {
+    let mut d = TargetDiff::default();
+    for t in &facts.topics {
+        let Some(dst) = mapping.get(&t.name) else {
+            continue;
+        };
+        // Match the engine's own derivation so `would_create` cannot lie:
+        // original_partition_count when present, else max(partition_id)+1
+        // (restore/engine.rs:1421-1436).
+        let want = t.original_partition_count.unwrap_or_else(|| {
+            t.partitions
+                .iter()
+                .map(|p| p.partition_id)
+                .max()
+                .unwrap_or(-1)
+                + 1
+        });
+        match target.topics.get(dst) {
+            None => {
+                d.absent.push(dst.clone());
+                d.would_create.push((dst.clone(), want));
+            }
+            Some(st) => {
+                let total: i64 = st.end_offsets.iter().map(|(_, hi)| *hi).sum();
+                let differing = t
+                    .configurations
+                    .iter()
+                    .filter(|(k, v)| st.configs.get(*k).map(|cur| cur != *v).unwrap_or(false))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                d.collisions.push(Collision {
+                    topic: dst.clone(),
+                    existing_partitions: st.partitions,
+                    existing_end_offsets: total,
+                    existing_configs_differing: differing,
+                });
+            }
+        }
+    }
+    d
+}

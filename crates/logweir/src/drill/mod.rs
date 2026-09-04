@@ -2,6 +2,9 @@
 //! docs/adr/0007-from-cluster-in-v0.1.md.
 pub mod phase0_admit;
 pub mod phase1_approval;
+pub mod phase2_target;
+pub mod phase3_diff;
+pub mod phase4_sample;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DrillError {

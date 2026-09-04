@@ -4,16 +4,14 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
-// UNCOMMENT IN TASK 16 — phase2_target::{TargetState, TopicState}
-// use logweir::drill::phase2_target::{TargetState, TopicState};
+use logweir::drill::phase2_target::{TargetState, TopicState};
 // UNCOMMENT IN TASK 20 — phase8_score::Timeline
 // use logweir::drill::phase8_score::Timeline;
 use logweir_core::engine::*;
 use logweir_core::outcome::*;
 use logweir_core::scorecard::*;
 use logweir_core::spec::{ObjectivesSpec, SampleSpec};
-// UNCOMMENT IN TASK 16 — add `ClusterReader, TopicMeta` to the import below (used by FakeReader)
-use logweir_kafka::reader::{ConsumedRecord, KafkaError, TopicDeleter};
+use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicDeleter, TopicMeta};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -135,28 +133,45 @@ pub fn plan() -> RestorePlan {
 
 // ---------------------------------------------------------------- target side
 
-// UNCOMMENT IN TASK 16 — phase2_target::{TargetState, TopicState}
-// `cluster_id` is a PARAMETER, not hardcoded: a caller building a
-// wrong-cluster or target-equals-source fixture (phase 0's most
-// safety-critical checks) needs a `TargetState` reporting a DIFFERENT
-// cluster id than the "allowed" one, which a hardcoded constant makes
-// impossible (2026-09-04 fix review).
-// pub fn target_with(cluster_id: &str, topic: &str, partitions: i32, end_offset: i64, configs: &[(&str, &str)])
-//     -> TargetState {
-//     TargetState {
-//         cluster_id: cluster_id.into(),
-//         topics: [(topic.to_string(), TopicState {
-//             partitions,
-//             end_offsets: (0..partitions).map(|p| (p, if p == 0 { end_offset } else { 0 })).collect(),
-//             configs: configs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-//         })].into_iter().collect(),
-//     }
-// }
+/// `cluster_id` is a PARAMETER, not hardcoded: a caller building a
+/// wrong-cluster or target-equals-source fixture (phase 0's most
+/// safety-critical checks) needs a `TargetState` reporting a DIFFERENT
+/// cluster id than the "allowed" one, which a hardcoded constant makes
+/// impossible (2026-09-04 fix review).
+pub fn target_with(
+    cluster_id: &str,
+    topic: &str,
+    partitions: i32,
+    end_offset: i64,
+    configs: &[(&str, &str)],
+) -> TargetState {
+    TargetState {
+        cluster_id: cluster_id.into(),
+        topics: [(
+            topic.to_string(),
+            TopicState {
+                partitions,
+                end_offsets: (0..partitions)
+                    .map(|p| (p, if p == 0 { end_offset } else { 0 }))
+                    .collect(),
+                configs: configs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    }
+}
 
-// UNCOMMENT IN TASK 16 — phase2_target::TargetState
-// pub fn empty_target(cluster_id: &str) -> TargetState {
-//     TargetState { cluster_id: cluster_id.into(), topics: BTreeMap::new() }
-// }
+/// A target holding no topics — the normal case on a scratch cluster.
+pub fn empty_target(cluster_id: &str) -> TargetState {
+    TargetState {
+        cluster_id: cluster_id.into(),
+        topics: BTreeMap::new(),
+    }
+}
 
 pub fn source_configs(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
     kv.iter()
@@ -167,32 +182,61 @@ pub fn target_configs(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
     source_configs(kv)
 }
 
-// UNCOMMENT IN TASK 16 — phase2_target::TargetState (FakeReader::state)
-// /// A reader that answers from a `TargetState`, so phases 2, 6 and 7 are
-// /// testable with no broker.
-// pub struct FakeReader { pub state: TargetState }
-//
-// impl ClusterReader for FakeReader {
-//     fn cluster_id(&self) -> Result<String, KafkaError> { Ok(self.state.cluster_id.clone()) }
-//     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-//         // `TopicMeta::new`, not a bare struct literal: `TopicMeta` carries a
-//         // third field, `error: Option<String>` (Task 10), and a literal
-//         // naming only `name`/`partitions` does not compile (2026-09-04 fix
-//         // review). Every topic built from `TargetState` is reported healthy;
-//         // an "errored" topic needs its own fixture once `TopicState` grows
-//         // a way to express one.
-//         Ok(self.state.topics.iter()
-//             .map(|(n, t)| TopicMeta::new(n.clone(), t.partitions)).collect())
-//     }
-//     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-//         Ok(self.state.topics.get(topic).map(|t| t.end_offsets.clone()).unwrap_or_default())
-//     }
-//     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-//         Ok(self.state.topics.get(topic).map(|t| t.configs.clone()).unwrap_or_default())
-//     }
-//     fn consume_range(&self, _t: &str, _p: i32, _from: i64, _max: usize)
-//         -> Result<Vec<ConsumedRecord>, KafkaError> { Ok(vec![]) }
-// }
+/// A reader that answers from a `TargetState`, so phases 2, 6 and 7 are
+/// testable with no broker.
+pub struct FakeReader {
+    pub state: TargetState,
+}
+
+impl ClusterReader for FakeReader {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok(self.state.cluster_id.clone())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        // `TopicMeta::new`, not a bare struct literal: `TopicMeta` carries a
+        // third field, `error: Option<String>` (Task 10), and a literal
+        // naming only `name`/`partitions` does not compile (2026-09-04 fix
+        // review). Every topic built from `TargetState` is reported healthy.
+        // A topic present but unreadable (errored metadata) is deliberately
+        // NOT buildable from this fixture: phase2_target::run fails the
+        // whole read rather than recording a healthy-looking empty
+        // `TopicState` for it (see phases_2_4.rs,
+        // `a_topic_present_but_unreadable_is_never_recorded_as_absent_or_empty`,
+        // which exercises that case with its own small `ClusterReader`
+        // double, not through `TargetState`/`FakeReader`).
+        Ok(self
+            .state
+            .topics
+            .iter()
+            .map(|(n, t)| TopicMeta::new(n.clone(), t.partitions))
+            .collect())
+    }
+    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(self
+            .state
+            .topics
+            .get(topic)
+            .map(|t| t.end_offsets.clone())
+            .unwrap_or_default())
+    }
+    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(self
+            .state
+            .topics
+            .get(topic)
+            .map(|t| t.configs.clone())
+            .unwrap_or_default())
+    }
+    fn consume_range(
+        &self,
+        _t: &str,
+        _p: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+}
 
 pub struct RecordingDeleter {
     pub deleted: std::sync::Mutex<Vec<String>>,
@@ -568,8 +612,12 @@ impl DataEngine for SleepEngine {
     }
 }
 
-// UNCOMMENT IN TASK 16 — phase2_target::TargetState (via FakeReader/target_with)
-// /// (a reader whose target already holds records, an engine that sleeps `ms`).
-// pub fn engine_that_sleeps_ms(ms: u64) -> (FakeReader, SleepEngine) {
-//     (FakeReader { state: target_with("MkU3OEVBNTcwNTJENDM2Qk", "drill-orders", 3, 500, &[]) }, SleepEngine { ms })
-// }
+/// (a reader whose target already holds records, an engine that sleeps `ms`).
+pub fn engine_that_sleeps_ms(ms: u64) -> (FakeReader, SleepEngine) {
+    (
+        FakeReader {
+            state: target_with("MkU3OEVBNTcwNTJENDM2Qk", "drill-orders", 3, 500, &[]),
+        },
+        SleepEngine { ms },
+    )
+}
