@@ -13,12 +13,22 @@ so would invalidate the signatures these fixtures exist to exercise:
   has `engine_subreport: null` — `OsoCliEngine` does not override
   `DataEngine::validation_run`, so no engine report is ever retained. See
   `docs/stability.md`, "`engine_subreport` is always null in v0.1".
-- **`evidence.create_only_enforced: true`** (in `scorecard-pass.json`). Task 20
+- **`evidence.create_only_enforced: true`** — in `scorecard.json` and
+  `scorecard-self-attested.json`, **the two files in THIS directory**. Task 20
   made phase 8 zero all four `evidence` fields before signing, because they
   describe an upload that has not happened yet; the real post-put readback lives
   in the separately signed storage receipt.
 
-Regenerating and re-signing them is release engineering's call, not a test's.
+  This bullet used to say "(in `scorecard-pass.json`)". That was the file
+  **outside** this directory, `e2e/fixtures/scorecard-pass.json`, and it is no
+  longer true of it: that file is **unsigned**, so the signature argument above
+  never applied to it, and Task 22 corrected its value to `false` rather than
+  documenting a divergence that did not have to exist. See
+  `e2e/fixtures/README.md`.
+
+Regenerating and re-signing the two files in this directory is release
+engineering's call, not a test's — and it is not free: `mint_fixture` generates
+a NEW key pair on every run, so `public.pem` and `signing.pem` change with them.
 
 
 ---

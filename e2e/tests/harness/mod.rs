@@ -62,18 +62,26 @@ pub fn root() -> PathBuf {
 /// The SHIPPED binary, driven as a subprocess. Everything this suite asserts
 /// about exit codes is an assertion about this file.
 ///
-/// USE `cargo test --workspace --features e2e` (what `just e2e` runs), NOT
-/// `cargo test -p e2e --features e2e`. The `e2e` package depends on the
-/// `logweir` LIBRARY, so a `-p e2e` run does not rebuild the BINARY — it will
-/// happily test whatever `target/debug/logweir` was left over from an earlier
-/// build. Measured while mutation-testing this suite: a mutant that mapped
-/// `DrillError::NotPass` to exit 0 SURVIVED a `-p e2e` run and was killed
-/// immediately once the workspace was rebuilt.
+/// USE **`just e2e`**, NOT `cargo test -p e2e --features e2e`. Two separate
+/// reasons, and both bite:
+///
+/// 1. The `e2e` package depends on the `logweir` LIBRARY, so a `-p e2e` run
+///    does not rebuild the BINARY — it will happily test whatever
+///    `target/debug/logweir` was left over from an earlier build. Measured
+///    while mutation-testing this suite: a mutant that mapped
+///    `DrillError::NotPass` to exit 0 SURVIVED a `-p e2e` run and was killed
+///    immediately once the workspace was rebuilt.
+/// 2. A bare `cargo test --workspace --features e2e` also **fails**: this
+///    suite drives ONE compose stack, ONE broker and ONE bucket, so its tests
+///    collide when run in parallel. `just e2e` supplies `--test-threads=1`,
+///    which is what makes it pass; `ci.yml` and `engine-matrix.yml` pass the
+///    same flag. If you must spell it out:
+///    `cargo test --workspace --features e2e -- --test-threads=1`.
 pub fn bin() -> PathBuf {
     let p = root().join("target/debug/logweir");
     assert!(
         p.exists(),
-        "{} is missing; run `cargo test --workspace --features e2e`, which builds it",
+        "{} is missing; run `just e2e`, which builds it",
         p.display()
     );
     p

@@ -72,7 +72,15 @@ $COMPOSE --profile setup run --rm minio-setup
 $COMPOSE --profile setup run --rm topic-setup
 
 echo "==> 3/6 producing records and taking a backup with the pinned engine"
-./scripts/e2e-seed.sh
+# LOGWEIR_SEED_REFRESH_FIXTURES=0: seed the stack, but do NOT refresh the two
+# CHECKED-IN fixtures `scripts/e2e-seed.sh` refreshes by default
+# (e2e/fixtures/manifests/0.21.json and
+# e2e/fixtures/segments/upstream-0.21.0.kbak). A drill needs the archive in
+# MinIO, not those files; refreshing them is a maintainer action (`just
+# e2e-seed`). Without this, running the quickstart left a stranger with two
+# modified tracked files, no explanation, and a working tree that no longer
+# satisfies the release gate's clean-tree precondition.
+LOGWEIR_SEED_REFRESH_FIXTURES=0 ./scripts/e2e-seed.sh
 
 echo "==> 4/6 minting a signing key and an APPROVER key (two different keys)"
 mkdir -p .demo
@@ -165,6 +173,25 @@ cargo run --release -p logweir -- drill verify \
   --scorecard .demo/scorecard.json --signature .demo/scorecard.sig \
   --public-key .demo/signer.pub.pem
 "$PYTHON" docs/verify_scorecard.py .demo/scorecard.json .demo/scorecard.sig .demo/signer.pub.pem
+
+# THE QUICKSTART MUST NOT MODIFY THE REPOSITORY. Everything this script writes
+# goes to `.demo/` or `.engine/`, both gitignored. This checks it rather than
+# claiming it, because "the demo leaves your tree alone" is exactly the kind of
+# statement that quietly stops being true. It is a real check, not decoration:
+# reverting the LOGWEIR_SEED_REFRESH_FIXTURES=0 above makes it fail.
+if git -C . rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  dirty=$(git status --porcelain 2>/dev/null || true)
+  if [ -n "$dirty" ]; then
+    echo >&2
+    echo "demo: WARNING — the working tree is not clean after this run:" >&2
+    printf '%s\n' "$dirty" >&2
+    echo "The demo writes only to .demo/ and .engine/, both gitignored, so this" >&2
+    echo "is either a change you already had, or a defect. Please report it." >&2
+  else
+    echo
+    echo "Working tree still clean: the demo wrote only to .demo/ and .engine/."
+  fi
+fi
 
 echo
 echo "Done. measured.rto_seconds and measured.rpo_seconds in .demo/scorecard.json are real numbers."

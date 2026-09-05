@@ -79,6 +79,12 @@ anything is started. It takes about four minutes and does six things:
 
 Tear it down with `just e2e-down`.
 
+**It does not modify your working tree.** Everything it writes goes to `.demo/`
+and `.engine/`, both gitignored, and it checks `git status` for you at the end
+and says so. (It seeds the stack with `LOGWEIR_SEED_REFRESH_FIXTURES=0`, so it
+does not refresh the two checked-in archive fixtures that `just e2e-seed`
+deliberately refreshes — that is a maintainer action, not part of the demo.)
+
 The demo rebinds one field of `examples/drill.yaml`: `sample.window_start` /
 `sample.window_end`, which name the point-in-time range you are recovering to
 and are therefore specific to your archive, not to Logweir. A window that

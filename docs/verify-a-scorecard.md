@@ -153,6 +153,14 @@ Exit code `1` and a line starting `INVALID` (printed to stderr) means it
 does not, along with the specific reason (signature mismatch, unexpected
 `payloadType`, malformed base64, or a self-contradicting document).
 
+Exit code **`2` means the script could not run at all** — its one dependency,
+`cryptography`, is not installed. It prints `CANNOT RUN:` and the `pip install`
+line, and says `NOTHING WAS VERIFIED`. This is deliberately **not** exit 1: exit
+1 is a verdict on your document, and "the verifier would not start" must never
+be mistaken for "the signature did not check out". If you are branching on this
+in automation, treat 2 as an infrastructure failure and re-run, never as a
+finding.
+
 ### What "verify" actually checks
 
 Both routes check three things, in order:

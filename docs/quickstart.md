@@ -22,6 +22,20 @@ a second rather than four minutes. Override the interpreter with
 
 Tear down with `just e2e-down`.
 
+**It leaves your working tree clean.** Everything the demo writes goes to
+`.demo/` and `.engine/`, both gitignored, and the script checks `git status`
+itself at the end and tells you the result.
+
+The one thing worth knowing: `scripts/e2e-seed.sh` has a second job besides
+seeding — by default it also refreshes two **checked-in** fixtures
+(`e2e/fixtures/manifests/0.21.json` and
+`e2e/fixtures/segments/upstream-0.21.0.kbak`) from the archive it just made.
+Those bytes are not reproducible between runs, so refreshing them shows up as
+two modified tracked files. That is a **maintainer** action — `just e2e-seed` —
+and the demo opts out of it with `LOGWEIR_SEED_REFRESH_FIXTURES=0`. If you run
+`scripts/e2e-seed.sh` directly and see two modified fixtures, that is why; set
+the same variable to avoid it.
+
 What it proves, in order: the engine is digest-pinned and extractable; a real
 backup exists; the plan was approved by a **different key** than the one that
 signs the result; the drill ran every phase against a real broker and a real

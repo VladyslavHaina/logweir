@@ -58,11 +58,15 @@ e2e:
 # it refuses a dirty one, because a second backup into the same backup_id does
 # not accumulate and would leave a partial archive.
 #
-# A SUCCESSFUL RUN ALWAYS DIRTIES THE TREE and is not byte-reproducible: record
+# A SUCCESSFUL RUN DIRTIES THE TREE and is not byte-reproducible: record
 # timestamps differ per run, so the zstd frames and the manifest timestamps do
 # too. Any CI job that calls this MUST NOT `git diff --exit-code` afterwards.
 # The committed fixtures are checked instead by the default (Docker-free) test
 # set — see crates/logweir-engine-oso/tests/kbak.rs.
+# `scripts/demo.sh` seeds with LOGWEIR_SEED_REFRESH_FIXTURES=0, which does
+# everything except the fixture refresh and leaves the tree clean — the
+# quickstart must not hand a stranger two modified tracked files. THIS recipe
+# is the maintainer form and refreshes them on purpose.
 e2e-seed:
     ./scripts/e2e-seed.sh
 

@@ -121,8 +121,13 @@ def _sign(payload_type: str, payload: bytes) -> dict:
             "signatures": [{"keyid": "fixture", "sig": _b64.b64encode(sig).decode()}]}
 
 
-def _write_signed(d, name, payload_type, doc):
-    payload = json.dumps(doc, indent=2).encode() + b"\n"
+def _write_signed(d, name, payload_type, doc, ensure_ascii=True):
+    # `ensure_ascii=False` matters: Python escapes non-ASCII to \uXXXX by
+    # default, so a document with an accented topic name would land on disk as
+    # pure ASCII and could not distinguish a byte-length PAE from a code-point
+    # one. Rust's serde_json — what Logweir actually signs with — writes UTF-8
+    # raw, so `False` is the shape a real scorecard has.
+    payload = json.dumps(doc, indent=2, ensure_ascii=ensure_ascii).encode() + b"\n"
     p = pathlib.Path(d) / f"{name}.json"
     s = pathlib.Path(d) / f"{name}.sig"
     p.write_bytes(payload)
@@ -223,3 +228,96 @@ def test_the_three_payload_types_match_the_rust_constants():
     py = VERIFIER.read_text()
     for t in (SCORECARD_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
         assert t in py, f"{t} is not declared in verify_scorecard.py"
+
+
+# ------------------------------------------------------------------ PAE lengths
+# Task 22 fix round 1, FIX 4. `verify_scorecard.py`'s module docstring names this
+# hazard in as many words — "a naive `len(payload_type)` in Python counts *code
+# points*, which is only byte-correct for ASCII ... every fixture in this
+# repository still verifies (they are pure ASCII), which is exactly the trap" —
+# and then nothing checked it. A code-point implementation survived all fifteen
+# tests above. These two close it: the first at the function, the second end to
+# end through the shipped CLI.
+
+def _verifier_module():
+    """Import docs/verify_scorecard.py as a module, so `pae()` can be called
+    directly. Every other test here spawns it as a subprocess, which is the
+    right shape for behaviour but cannot reach a pure function."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vs_under_test", str(VERIFIER))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_pae_length_prefixes_are_byte_counts_not_code_points():
+    v = _verifier_module()
+    # 'ü' is 2 bytes in UTF-8, '→' is 3, '𝄞' is 4. A code-point count and a
+    # byte count therefore disagree by a known amount in BOTH fields.
+    ptype = "application/vnd.logweir.tëst→𝄞+json;version=1.0.0"
+    payload = "hëllo→𝄞".encode("utf-8")
+
+    tb = ptype.encode("utf-8")
+    expected = (b"DSSEv1 " + str(len(tb)).encode() + b" " + tb + b" "
+                + str(len(payload)).encode() + b" " + payload)
+    assert v.pae(ptype, payload) == expected
+
+    # The test must not be able to pass vacuously: assert the naive
+    # code-point computation is genuinely DIFFERENT here, so this fixture
+    # actually distinguishes the two implementations.
+    naive = (b"DSSEv1 " + str(len(ptype)).encode() + b" " + tb + b" "
+             + str(len(payload.decode())).encode() + b" " + payload)
+    assert naive != expected, "this fixture cannot tell the two apart"
+
+    # And the prefixes are the byte counts, spelled out.
+    assert len(tb) > len(ptype), "the payload type must be multi-byte here"
+    assert v.pae(ptype, payload).startswith(b"DSSEv1 " + str(len(tb)).encode() + b" ")
+
+
+def test_a_scorecard_whose_content_is_multibyte_utf8_still_verifies():
+    # The end-to-end half: a real signed document whose PAYLOAD is multi-byte,
+    # verified through the CLI. A code-point length on the payload signs one
+    # prefix and verifies against another, so this returns 1 instead of 0.
+    doc = json.loads((ROOT / "e2e" / "fixtures" / "scorecard-pass.json").read_bytes())
+    doc["triggered_by"] = "sürety-drill → Zürich · 𝄞 · 東京"
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "utf8-scorecard", SCORECARD_TYPE, doc, ensure_ascii=False)
+        raw = p.read_bytes()
+        assert len(raw) > len(raw.decode()), "the payload must be multi-byte here"
+        r = run(p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "VALID" in r.stdout
+
+
+# ----------------------------------------------- a missing dependency, handled
+# Task 22 fix round 1, FIX 5. `cryptography` is the script's one third-party
+# import and the first thing a fresh machine hits. It used to raise, printing a
+# traceback and exiting 1 — the code this script's own contract defines as "the
+# signature did not verify". An auditor's automation could not tell "your
+# scorecard is forged" from "I could not start".
+
+def test_a_missing_cryptography_package_says_what_to_install_and_exits_2():
+    import os
+    with tempfile.TemporaryDirectory() as d:
+        # Shadow the real package with one that refuses to import, FIRST on
+        # sys.path. This reproduces a machine that has not run `pip install`
+        # without uninstalling anything.
+        shadow = pathlib.Path(d) / "cryptography"
+        shadow.mkdir()
+        (shadow / "__init__.py").write_text(
+            'raise ImportError("simulated: cryptography is not installed")\n'
+        )
+        env = dict(os.environ, PYTHONPATH=d)
+        r = subprocess.run(
+            [sys.executable, str(VERIFIER),
+             str(FIX / "scorecard.json"), str(FIX / "scorecard.sig"), str(FIX / "public.pem")],
+            capture_output=True, text=True, env=env,
+        )
+        out = r.stdout + r.stderr
+        assert "Traceback" not in out, f"a raw traceback reached the user:\n{out}"
+        assert "pip install cryptography" in out, out
+        # The load-bearing assertion: NOT 1. Exit 1 is a verdict on the
+        # document, and no document was examined here.
+        assert r.returncode == 2, f"expected exit 2, got {r.returncode}:\n{out}"
+        assert "NOTHING WAS VERIFIED" in out
+        assert "INVALID" not in out, "a setup failure must not be reported as an invalid document"

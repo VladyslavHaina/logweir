@@ -35,6 +35,10 @@ Exit 1 = it does not — or any of the three inputs cannot be read, parsed,
           PEM, or a public key of a type this script does not support).
           Every such case prints a one-line `INVALID: ...` reason to
           stderr; none of them should ever surface as a raw traceback.
+Exit 2 = THIS SCRIPT COULD NOT RUN — its one dependency is missing. It is
+          deliberately NOT 1: exit 1 is a verdict on the document, and
+          "the verifier would not start" must never be mistaken for
+          "the signature did not check out". Nothing was verified.
 
 DSSE v1 Pre-Authentication Encoding (PAE), from the DSSE specification
 (https://github.com/secure-systems-lab/dsse/blob/master/protocol.md):
@@ -73,9 +77,32 @@ import binascii
 import json
 import sys
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+# `cryptography` is this script's ONE third-party dependency, and it is not in
+# the standard library, so a fresh machine hits this line first. An uncaught
+# ImportError prints a traceback whose last line names a module the reader has
+# to go and look up; worse, the interpreter exits 1, which this script's own
+# contract defines as "the signature did not verify". Neither is acceptable in
+# the tool an auditor reaches for, so say what to install and exit 2.
+try:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+except ImportError as _exc:  # pragma: no cover - exercised via a subprocess test
+    print(
+        f"CANNOT RUN: this script needs the `cryptography` package ({_exc}).\n"
+        "\n"
+        "    pip install cryptography\n"
+        "\n"
+        "or, without touching your system Python:\n"
+        "\n"
+        "    python3 -m venv venv && venv/bin/pip install cryptography\n"
+        "    venv/bin/python3 verify_scorecard.py <document.json> <document.sig> <public.pem>\n"
+        "\n"
+        "NOTHING WAS VERIFIED. This is exit 2, not exit 1: it is not a verdict\n"
+        "on the document.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 

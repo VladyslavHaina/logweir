@@ -14,6 +14,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    // Task 22 fix round 1, FIX 5. This is a `//` comment, not a `///` one, on
+    // purpose: clap turns doc comments into help TEXT, so build rationale in a
+    // `///` would be printed to users by `logweir drill --help`. The `///`
+    // lines below are the description clap renders; before they existed the
+    // `drill` row of `logweir --help` was blank — the first thing a new user
+    // sees of the subcommand the whole tool exists for.
+    /// Run a restore drill, or show and verify the scorecard one produced.
     #[command(subcommand)]
     Drill(DrillCmd),
     /// Print a JSON Schema. v0.1 accepts only `scorecard`.
@@ -38,6 +45,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum DrillCmd {
+    /// Run the drill: restore a sampled window into the scratch cluster,
+    /// reconcile it per record, and emit a signed scorecard.
     Run {
         #[arg(long)]
         spec: PathBuf,
@@ -63,11 +72,16 @@ pub enum DrillCmd {
         #[arg(long)]
         metrics_file: Option<PathBuf>,
     },
+    /// Render a scorecard as a fixed-width table (or `--format json`, the
+    /// exact stored bytes). Reads a file; runs no drill and touches no cluster.
     Show {
+        /// Path to the scorecard JSON, as written by `drill run --out`.
         scorecard: PathBuf,
         #[arg(long, default_value = "table")]
         format: String,
     },
+    /// Check a scorecard's DSSE signature against a public key. Exit 0 only
+    /// if the signature covers the bytes of `--scorecard` exactly as stored.
     Verify {
         #[arg(long)]
         scorecard: PathBuf,
