@@ -12,6 +12,23 @@
 # evidence that an archive exists: a backup of empty topics also exits 0, and a
 # drill that restores nothing and reports success is this project's recurring
 # defect. So each stage asserts a COUNT or a HASH, not an exit status.
+#
+# FOR WHOEVER WIRES CI (Task 22 owns release engineering; the compose-backed CI
+# job is deferred to Task 13/21c): A SUCCESSFUL SEED ALWAYS DIRTIES THE TREE.
+# The two refreshed fixtures are NOT reproducible byte for byte — each record
+# carries its own produce timestamp, so the zstd frames differ on every run and
+# so does the manifest's created_at/uploaded_at. Three runs, three digests
+# (2adb1d54…, ad343edc…, efbbac61…). That is inherent to the brief's contract
+# that these fixtures come from a real archive rather than from an encoder.
+# Therefore:
+#   * a CI job that seeds MUST NOT run `git diff --exit-code` afterwards, and
+#     must not treat a dirty tree as a failure;
+#   * refreshed fixtures are committed deliberately, by a human, not by CI;
+#   * to check the committed fixtures are sound, run the DEFAULT test set —
+#     `the_upstream_fixture_pair_describes_itself` and
+#     `the_upstream_segment_is_a_real_zstd_kbak_container` in
+#     crates/logweir-engine-oso/tests/kbak.rs decode them and cross-check the
+#     pair. That is deterministic and needs no Docker.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -134,36 +151,37 @@ if not segs:
 print(sorted(segs)[0])')
 
 echo "==> refreshing the fixtures from the REAL archive"
+# STAGE FIRST, VALIDATE, THEN MOVE. Writing straight onto the tracked fixtures
+# and validating afterwards means every failure path below leaves the working
+# tree holding unvalidated bytes — worse, a manifest and a segment that do not
+# describe each other, which no gate would notice. Review round 1 reproduced
+# exactly that against a stale archive. So the bytes land in a scratch
+# directory the trap removes, every guard runs against the STAGED files, and
+# the tracked fixtures are only touched once all of them pass. A failed seed
+# leaves the tracked fixtures byte-identical to how it found them.
+stage=$(mktemp -d "${TMPDIR:-/tmp}/logweir-seed.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
 # `mc cat` to stdout, not `mc cp` + `docker compose cp`: the mc container is
 # `--rm`, so there is no container left to copy out of afterwards. With -T
 # there is no TTY between here and the object, and the sha256 assertion below
 # is what proves the bytes survived the pipe unchanged.
-$MC cat "${ARCHIVE}/${MANIFEST_KEY}" 2>/dev/null > e2e/fixtures/manifests/0.21.json
-[ -s e2e/fixtures/manifests/0.21.json ] || die "manifest fixture came back empty"
+$MC cat "${ARCHIVE}/${MANIFEST_KEY}" 2>/dev/null > "$stage/manifest.json"
+[ -s "$stage/manifest.json" ] || die "manifest came back empty"
 
-# NOTE ON THE SEGMENT FIXTURE PATH. The task brief targets
-# e2e/fixtures/segments/none.kbak. That path is no longer free: none.kbak is a
-# hand-minted 5-record UNCOMPRESSED container, and `none`/`zstd`/`lz4` form a
-# compression matrix that crates/logweir-engine-oso/tests/kbak.rs cross-compares
-# record for record, plus pins for null-vs-empty fields, a corrupted key-length
-# prefix and a disagreeing total_len. Overwriting it with this archive's
-# 338-record ZSTD-flagged segment fails 8 existing tests (6 in kbak.rs, 2 in
-# engine.rs) and makes the filename assert a compression the bytes do not use.
-# The upstream bytes therefore land beside the matrix instead of on top of it;
-# the manifest fixture, which no test pins to hand-authored content, is
-# refreshed in place exactly as the brief asks.
-$MC cat "${ARCHIVE}/${SEGMENT_KEY}" 2>/dev/null > e2e/fixtures/segments/upstream-0.21.0.kbak
-[ -s e2e/fixtures/segments/upstream-0.21.0.kbak ] || die "segment fixture came back empty"
+$MC cat "${ARCHIVE}/${SEGMENT_KEY}" 2>/dev/null > "$stage/segment.kbak"
+[ -s "$stage/segment.kbak" ] || die "segment came back empty"
 
 # The manifest is the archive's own account of itself, so check it against the
 # broker (record count) and against the bytes on disk (sha256). An archive of
 # empty topics, a truncated download and a manifest with placeholder hashes all
 # fail here; none of them would fail an exit-status check.
-segment_sha=$(shasum -a 256 e2e/fixtures/segments/upstream-0.21.0.kbak | cut -d' ' -f1)
-python3 - "$broker_records" "$SEGMENT_KEY" "$segment_sha" <<'PY'
+segment_sha=$(shasum -a 256 "$stage/segment.kbak" | cut -d' ' -f1)
+python3 - "$stage/manifest.json" "$broker_records" "$SEGMENT_KEY" "$segment_sha" <<'PY'
 import json, sys
-broker_records, segment_key, segment_sha = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-m = json.load(open("e2e/fixtures/manifests/0.21.json"))
+manifest_path, broker_records = sys.argv[1], int(sys.argv[2])
+segment_key, segment_sha = sys.argv[3], sys.argv[4]
+m = json.load(open(manifest_path))
 segs = [s for t in m["topics"] for p in t["partitions"] for s in p["segments"]]
 if not segs:
     sys.exit("manifest lists no segments: the archive is empty")
@@ -184,9 +202,36 @@ print(f"    segment:  {segment_key}")
 print(f"              sha256 {segment_sha} matches the manifest byte for byte")
 PY
 
-# A KBAK container, not a JSON blob or an HTML error page.
-head -c 4 e2e/fixtures/segments/upstream-0.21.0.kbak | grep -q '^KBAK' \
-  || die "segment fixture does not start with the KBAK magic"
+# A KBAK container, not a JSON blob or an HTML error page. This is NOT a
+# truncation guard: a file cut to 100 bytes still starts with these four
+# bytes (measured). Truncation is caught by the sha256 comparison above, and
+# thereafter by `the_upstream_fixture_pair_describes_itself` in
+# crates/logweir-engine-oso/tests/kbak.rs, which decodes the committed bytes
+# in the DEFAULT test set.
+head -c 4 "$stage/segment.kbak" | grep -q '^KBAK' \
+  || die "segment does not start with the KBAK magic"
+
+# NOTE ON THE SEGMENT FIXTURE PATH. The task brief targets
+# e2e/fixtures/segments/none.kbak. That path is no longer free: none.kbak is a
+# hand-minted 5-record UNCOMPRESSED container, and `none`/`zstd`/`lz4` form a
+# compression matrix that crates/logweir-engine-oso/tests/kbak.rs cross-compares
+# record for record, plus pins for null-vs-empty fields, a corrupted key-length
+# prefix and a disagreeing total_len. Overwriting it with this archive's
+# 338-record ZSTD-flagged segment fails 8 existing tests (6 in kbak.rs, 2 in
+# engine.rs) and makes the filename assert a compression the bytes do not use.
+# The upstream bytes therefore land beside the matrix instead of on top of it;
+# the manifest fixture, which no test pins to hand-authored content, is
+# refreshed in place exactly as the brief asks.
+#
+# Every guard above passed, so — and only now — publish. The two files move
+# back to back because the standing test asserts they describe each other;
+# publishing one without the other is the inconsistent pair this ordering
+# exists to prevent.
+mv "$stage/manifest.json" e2e/fixtures/manifests/0.21.json
+mv "$stage/segment.kbak"  e2e/fixtures/segments/upstream-0.21.0.kbak
 
 echo "==> seeded. manifest -> e2e/fixtures/manifests/0.21.json"
 echo "               segment -> e2e/fixtures/segments/upstream-0.21.0.kbak (real 0.21.0 bytes)"
+echo "    NOTE: both fixtures are freshly generated bytes and will show as"
+echo "    modified in \`git status\`. That is expected and is not reproducible"
+echo "    across runs — never gate CI on a clean tree after seeding."

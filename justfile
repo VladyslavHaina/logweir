@@ -50,6 +50,19 @@ e2e-down:
 e2e:
     cargo test --workspace --features e2e -- --test-threads=1 --nocapture
 
+# Produce, back up with the pinned engine, and refresh the two fixtures that
+# must come from a REAL archive. Needs a FRESH stack (`e2e-down` then `e2e-up`);
+# it refuses a dirty one, because a second backup into the same backup_id does
+# not accumulate and would leave a partial archive.
+#
+# A SUCCESSFUL RUN ALWAYS DIRTIES THE TREE and is not byte-reproducible: record
+# timestamps differ per run, so the zstd frames and the manifest timestamps do
+# too. Any CI job that calls this MUST NOT `git diff --exit-code` afterwards.
+# The committed fixtures are checked instead by the default (Docker-free) test
+# set — see crates/logweir-engine-oso/tests/kbak.rs.
+e2e-seed:
+    ./scripts/e2e-seed.sh
+
 demo:
     ./scripts/demo.sh
 

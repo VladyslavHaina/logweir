@@ -367,3 +367,150 @@ fn x_original_offset_and_timestamp_headers_are_little_endian_i64_matching_the_re
         assert_eq!(i64::from_le_bytes(ts_bytes), rec.timestamp);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The upstream fixture pair. `e2e/fixtures/segments/upstream-0.21.0.kbak` and
+// `e2e/fixtures/manifests/0.21.json` are the only fixtures in this repo that
+// are BYTES THE PINNED UPSTREAM ENGINE ACTUALLY WROTE, refreshed by
+// `scripts/e2e-seed.sh` against a live archive. Everything else under
+// e2e/fixtures/segments/ is minted by `examples/mint_segments.rs`, which only
+// ever proves this decoder is self-consistent.
+//
+// These two tests are deliberately NOT `#[cfg(feature = "e2e")]`: they need no
+// Docker, and their whole point is that the DEFAULT `cargo test` notices if the
+// committed fixtures are garbage, are from two different seed runs, or are
+// silently swapped for self-encoded ones. Without them nothing in CI would.
+//
+// If a re-seed legitimately changes the shape (a different RECORDS_PER_TOPIC, a
+// different key format, a different compression), update the constants here in
+// the same commit as the fixtures — do not delete the assertions.
+
+const UPSTREAM_SEGMENT: &str = "../../e2e/fixtures/segments/upstream-0.21.0.kbak";
+const UPSTREAM_MANIFEST: &str = "../../e2e/fixtures/manifests/0.21.json";
+
+/// `scripts/e2e-seed.sh` produces 1000 keys `orders-000001..orders-001000` into
+/// a 3-partition topic and copies the sorted-first segment, which is always
+/// `orders/partition=0`. Kafka's default partitioner is murmur2 over the key
+/// bytes, so that partition's membership — and therefore this count — is stable
+/// across runs. Two independent seeds (implementer and reviewer) both produced
+/// 338.
+const UPSTREAM_RECORDS: usize = 338;
+
+#[test]
+fn the_upstream_segment_is_a_real_zstd_kbak_container() {
+    let bytes = std::fs::read(UPSTREAM_SEGMENT).unwrap();
+
+    // Header byte 4 is the format version, byte 5 the compression codec.
+    // Asserting codec 1 (zstd) is what makes this fixture impossible to satisfy
+    // with a copy of `none.kbak` (codec 0) or a self-encoded uncompressed
+    // container: the bytes have to have gone through upstream's zstd writer.
+    assert_eq!(&bytes[0..4], b"KBAK", "not a KBAK container");
+    assert_eq!(bytes[4], 1, "unexpected KBAK format version");
+    assert_eq!(
+        bytes[5], 1,
+        "compression codec must be zstd (1), the codec backup-drill.yaml asks for"
+    );
+
+    let recs = decode_segment(&bytes).expect("the real upstream segment must decode");
+    assert_eq!(
+        recs.len(),
+        UPSTREAM_RECORDS,
+        "upstream-0.21.0.kbak no longer holds {UPSTREAM_RECORDS} records; re-seed and update the constant deliberately"
+    );
+
+    // Contiguous, ascending, starting at 0 — a partition segment written from
+    // the beginning of the log. A truncated or spliced file fails here.
+    for (i, rec) in recs.iter().enumerate() {
+        assert_eq!(rec.offset, i as i64, "offsets are not contiguous from 0");
+    }
+
+    // Upstream sets `include_offset_headers=true` by default, and Logweir's
+    // whole header-based offset recovery depends on those two headers being
+    // present on every archived record. Assert it on ALL of them, not a sample.
+    for rec in &recs {
+        let (_, off) = rec
+            .headers
+            .iter()
+            .find(|(k, _)| k == "x-original-offset")
+            .unwrap_or_else(|| panic!("record {} has no x-original-offset", rec.offset));
+        let off: [u8; 8] = off.as_deref().unwrap().try_into().unwrap();
+        assert_eq!(i64::from_le_bytes(off), rec.offset);
+
+        let (_, ts) = rec
+            .headers
+            .iter()
+            .find(|(k, _)| k == "x-original-timestamp")
+            .unwrap_or_else(|| panic!("record {} has no x-original-timestamp", rec.offset));
+        let ts: [u8; 8] = ts.as_deref().unwrap().try_into().unwrap();
+        assert_eq!(i64::from_le_bytes(ts), rec.timestamp);
+    }
+
+    // The payloads are the seed script's own, so key and value have to agree —
+    // which is what catches a fixture refreshed from some other topic or run.
+    for rec in &recs {
+        let key = String::from_utf8(rec.key.clone().expect("every record has a key")).unwrap();
+        let id: u32 = key
+            .strip_prefix("orders-")
+            .unwrap_or_else(|| panic!("unexpected key {key}"))
+            .parse()
+            .unwrap();
+        let value =
+            String::from_utf8(rec.value.clone().expect("every record has a value")).unwrap();
+        assert_eq!(value, format!("{{\"id\":{id},\"topic\":\"orders\"}}"));
+    }
+}
+
+/// The seed writes both fixtures from ONE archive, and only after cross-checking
+/// them. This is the standing version of that check: it fails if the two files
+/// ever come from different runs, or if either is corrupted after the fact.
+#[test]
+fn the_upstream_fixture_pair_describes_itself() {
+    use logweir_engine_oso::vendored::manifest::BackupManifest;
+
+    let bytes = std::fs::read(UPSTREAM_SEGMENT).unwrap();
+    let raw = std::fs::read_to_string(UPSTREAM_MANIFEST).unwrap();
+    let m: BackupManifest = serde_json::from_str(&raw).expect("the real upstream manifest parses");
+
+    let all: Vec<_> = m
+        .topics
+        .iter()
+        .flat_map(|t| t.partitions.iter().flat_map(|p| p.segments.iter()))
+        .collect();
+    assert_eq!(all.len(), 6, "the archive should describe 6 segments");
+    assert_eq!(
+        all.iter().map(|s| s.record_count).sum::<i64>(),
+        2000,
+        "the archive should describe every record the seed produced"
+    );
+    for s in &all {
+        assert!(
+            !s.sha256.is_empty(),
+            "segment {} has no sha256; this is not a >=0.21 manifest",
+            s.key
+        );
+    }
+
+    // Find the entry for the segment the seed always copies: sorted-first, i.e.
+    // orders/partition=0. Located by content, not by index, so a reordered
+    // manifest does not silently pass.
+    let entry = all
+        .iter()
+        .find(|s| s.key.contains("/orders/partition=0/"))
+        .expect("manifest describes orders/partition=0");
+
+    assert_eq!(
+        logweir_core::ids::sha256_hex(&bytes),
+        entry.sha256,
+        "upstream-0.21.0.kbak and 0.21.json are from DIFFERENT archives (or one is corrupt)"
+    );
+    assert_eq!(
+        bytes.len() as u64,
+        entry.compressed_size,
+        "segment file size disagrees with the manifest's compressed_size"
+    );
+
+    let recs = decode_segment(&bytes).unwrap();
+    assert_eq!(recs.len() as i64, entry.record_count);
+    assert_eq!(recs[0].offset, entry.start_offset);
+    assert_eq!(recs[recs.len() - 1].offset, entry.end_offset);
+}
