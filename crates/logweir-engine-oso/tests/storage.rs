@@ -175,3 +175,81 @@ fn a_read_only_store_rejects_a_put_even_over_the_archive_prefix() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// MINOR-2 (Task 20 review): `list_keys` returns every key under the prefix, in
+// ascending order, and Task 20's phase 8 depends on that when it picks the
+// engine-validation report. Caveat, stated rather than glossed: this test
+// pins the OBSERVABLE contract (all keys, ascending) but cannot pin the
+// `out.sort()` line itself — `object_store`'s `InMemory` is a `BTreeMap` and
+// returns keys ordered regardless, so removing the sort leaves this green
+// (mutant Z4). `storage.rs`'s doc comment says the same. Proving the sort
+// would need a deliberately-unordered `ObjectStore` double, which `Store` has
+// no constructor for and which is not worth widening its public API to allow.
+#[test]
+fn list_keys_returns_every_key_under_the_prefix_sorted() {
+    let s = Store::in_memory("logweir");
+    for k in [
+        "logweir/run/c.json",
+        "logweir/run/a.json",
+        "logweir/run/b.json",
+    ] {
+        s.put_create_only(k, b"{}").unwrap();
+    }
+    let keys = s.list_keys("logweir/run/").unwrap();
+    assert_eq!(
+        keys,
+        vec![
+            "logweir/run/a.json".to_string(),
+            "logweir/run/b.json".to_string(),
+            "logweir/run/c.json".to_string(),
+        ],
+        "list_keys must sort; phase 8 takes keys[0] and would otherwise retain \
+         whichever object the backend happened to stream first"
+    );
+}
+
+// The sibling half of the same guarantee: `list_manifest_keys` is now expressed
+// as `list_keys` plus a filter, so it must apply the filter and nothing else —
+// and it inherits the sort.
+#[test]
+fn list_manifest_keys_filters_list_keys_and_keeps_the_ordering() {
+    let s = Store::in_memory("logweir");
+    for k in [
+        "logweir/z/manifest.json",
+        "logweir/a/manifest.json",
+        "logweir/a/notes.txt",
+    ] {
+        s.put_create_only(k, b"{}").unwrap();
+    }
+    assert_eq!(
+        s.list_manifest_keys("logweir/").unwrap(),
+        vec![
+            "logweir/a/manifest.json".to_string(),
+            "logweir/z/manifest.json".to_string(),
+        ]
+    );
+}
+
+// Spec §6 C3: `evidence.immutable` may be `true` ONLY after a provider
+// readback. `object_store` 0.14 models no Object Lock / WORM API on any
+// backend it can build, so the honest answer is "no proof", unconditionally.
+// Pinned directly here because it is the SOURCE of that claim: phase 8's
+// `sc.evidence.immutable = lock.map(..).unwrap_or(false)` is a provable no-op
+// while this returns `None`, so a mutant deleting that assignment cannot be
+// caught downstream — but a mutant fabricating a `Some` here can, and is
+// (Task 20 mutant M15).
+#[test]
+fn object_lock_readback_reports_no_proof_rather_than_guessing() {
+    let s = Store::in_memory("logweir");
+    s.put_create_only("logweir/drills/RUN.json", b"{}").unwrap();
+    assert!(
+        s.object_lock_readback("logweir/drills/RUN.json").is_none(),
+        "no backend object_store 0.14 can build exposes Object Lock; claiming \
+         otherwise would put an unverified WORM assertion into a signed document"
+    );
+    assert!(
+        s.object_lock_readback("logweir/drills/does-not-exist.json")
+            .is_none(),
+        "and absence of the object is not evidence of retention either"
+    );
+}

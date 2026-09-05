@@ -43,6 +43,36 @@ fn the_four_rto_numbers_are_computed_from_scorecard_fields_only() {
     );
 }
 
+/// The archive-coverage gap is `requested - newest_restored`, in that order.
+/// Swapping the operands publishes a NEGATIVE gap in a signed document — a
+/// headline auditor-facing number, inverted, which a reader would most likely
+/// take to mean "no data loss".
+#[test]
+fn the_rpo_is_how_far_short_of_the_requested_point_the_newest_record_falls() {
+    let pit = 1_756_519_200_000i64;
+    let m = compute_measured(&fixtures::timeline(), pit, pit - 90_000);
+    assert_eq!(
+        m.rpo_seconds,
+        Some(90),
+        "the newest restored record is 90s BEFORE the requested recovery point, \
+         so the archive-coverage gap is +90s"
+    );
+}
+
+/// A gap of -90 seconds is not a smaller gap, it is a meaningless one. If the
+/// newest restored record lands at or beyond the requested recovery point,
+/// there is no coverage gap at that point.
+#[test]
+fn a_record_newer_than_the_requested_point_is_a_zero_gap_never_a_negative_one() {
+    let pit = 1_756_519_200_000i64;
+    let m = compute_measured(&fixtures::timeline(), pit, pit + 90_000);
+    assert_eq!(m.rpo_seconds, Some(0));
+    assert!(
+        m.rpo_seconds.unwrap() >= 0,
+        "rpo_seconds must never be negative in a signed document"
+    );
+}
+
 /// The value compared against the objective is the one that excludes phase 5,
 /// because header_preflight: full is a full read and decode of the window that
 /// no incident responder performs.
@@ -72,6 +102,64 @@ fn a_missed_rpo_is_fail_objective() {
     );
     assert_eq!(outcome, Outcome::FailObjective);
     assert_eq!(obj.met, Some(false));
+}
+
+/// The pass-rate objective is ENFORCED, not decorative. `integrity_rate` keeps
+/// `result: Pass` so `decide` reaches the objectives at all — with
+/// `integrity_fail()` the run short-circuits to `FailIntegrity` and the rate
+/// comparison is never consulted, which is exactly why no earlier test pinned
+/// it.
+#[test]
+fn a_measured_pass_rate_below_the_objective_is_fail_objective() {
+    let (outcome, obj, measured_rate) = decide(
+        &fixtures::measured(1, 1, 0),
+        &fixtures::objectives(900, 300, 1.0),
+        &fixtures::integrity_rate(8, 10),
+    );
+    assert_eq!(measured_rate, Some(0.8));
+    assert_eq!(
+        obj.met,
+        Some(false),
+        "0.8 measured against a required 1.0 is a MISSED objective"
+    );
+    assert_eq!(outcome, Outcome::FailObjective);
+}
+
+/// The boundary: measured exactly equal to the requested rate is met.
+#[test]
+fn a_measured_pass_rate_exactly_at_the_objective_is_met() {
+    let (outcome, obj, _) = decide(
+        &fixtures::measured(1, 1, 0),
+        &fixtures::objectives(900, 300, 0.8),
+        &fixtures::integrity_rate(8, 10),
+    );
+    assert_eq!(obj.met, Some(true));
+    assert_eq!(outcome, Outcome::Pass);
+}
+
+/// The `+ f64::EPSILON` tolerance in `decide` is load-bearing, not slop.
+/// `3.0/10.0` is one ULP below the f64 nearest `0.1 + 0.2`, so a bare `>=`
+/// would report a missed objective for a rate that is exactly what was asked
+/// for. Deleting the tolerance turns this test red.
+#[test]
+fn a_pass_rate_one_ulp_low_from_float_representation_still_counts_as_met() {
+    let want = 0.1f64 + 0.2f64; // 0.30000000000000004, one ULP above 0.3
+    let got = 3.0f64 / 10.0f64; // 0.29999999999999999
+    assert!(
+        got < want,
+        "the fixture must actually straddle the boundary"
+    );
+    let (_, obj, measured_rate) = decide(
+        &fixtures::measured(1, 1, 0),
+        &fixtures::objectives(900, 300, want),
+        &fixtures::integrity_rate(3, 10),
+    );
+    assert_eq!(measured_rate, Some(got));
+    assert_eq!(
+        obj.met,
+        Some(true),
+        "a one-ULP floating-point shortfall is a rounding artefact, not a missed objective"
+    );
 }
 
 #[test]
@@ -257,8 +345,11 @@ fn an_existing_key_is_refused_and_the_first_drills_bytes_are_untouched() {
     );
 }
 
-/// `immutable` is set ONLY from a provider readback. An input claiming `true`
-/// is overwritten by what the store actually reported, not carried through.
+/// `immutable` is set ONLY from a provider readback. A caller's claim of `true`
+/// reaches neither the in-memory scorecard (step 7 overwrites it with what the
+/// store actually reported) nor the signed artifact (step 3 zeroes it before
+/// the bytes exist). Both halves are asserted, because only asserting the
+/// in-memory half is what let the divergence hide the first time.
 #[test]
 fn immutable_is_false_without_a_provider_readback_even_when_the_input_claimed_true() {
     let store = fixtures::recording_store();
@@ -275,28 +366,65 @@ fn immutable_is_false_without_a_provider_readback_even_when_the_input_claimed_tr
         signed.scorecard.evidence.retain_until, None,
         "a retention date nobody read back must not survive either"
     );
+    let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).unwrap();
+    assert_eq!(
+        doc["evidence"]["immutable"],
+        serde_json::json!(false),
+        "and the SIGNED bytes — the only thing an auditor sees — must not carry \
+         the caller's WORM claim either"
+    );
+    assert_eq!(doc["evidence"]["retain_until"], serde_json::Value::Null);
 }
 
-/// The scorecard is NEVER re-serialised after signing.
+/// The signed artifact carries NO claim about the upload, because at signing
+/// time there is nothing to claim: the put has not happened.
 ///
-/// Step 6's evidence readback mutates `Signed.scorecard` after the payload was
-/// signed, so this is the one case where `Signed.scorecard` and `Signed.bytes`
-/// deliberately disagree. Re-serialising at the end to "tidy that up" would
-/// produce bytes the sidecar no longer verifies over — an auditor downloading
-/// the stored object would get a document whose signature fails — so the
-/// disagreement is pinned here on purpose, in both directions.
+/// Two properties are pinned together here, and they are the pair that makes
+/// the signature meaningful:
+///
+/// 1. The four post-put fields (`create_only_enforced`, `immutable`,
+///    `retain_until`, `version_id`) are zeroed BEFORE serialisation, whatever
+///    the caller supplied — so a valid signature can never cover an
+///    unsubstantiated WORM or create-only claim.
+/// 2. The scorecard is never re-serialised AFTER signing. Step 7's readback
+///    lands on `Signed.scorecard` only; re-serialising to "tidy up" the
+///    divergence would produce bytes the sidecar no longer covers.
+///
+/// The caller here supplies the most optimistic possible evidence block and
+/// the store genuinely enforces create-only, so BOTH a carried-through claim
+/// and a re-serialised readback would show up as `true` in the bytes. Neither
+/// does.
 #[test]
-fn the_evidence_readback_never_re_serialises_the_signed_payload() {
+fn the_signed_bytes_carry_no_unsubstantiated_claim_about_the_upload() {
     let store = fixtures::recording_store();
     let key = fixtures::good_signing_key();
     let mut sc = fixtures::scorecard_pass();
-    // Chosen so step 6 genuinely CHANGES `sc`: without a divergence between
-    // the input evidence block and the readback, a re-serialisation would
-    // produce identical bytes and this test could not tell the difference.
+    sc.evidence.create_only_enforced = true;
     sc.evidence.immutable = true;
     sc.evidence.retain_until = Some(fixtures::ts("2030-01-01T00:00:00Z"));
+    sc.evidence.version_id = Some("v-claimed-by-the-caller".into());
 
     let signed = logweir::drill::phase8_score::run(&sc, &key.path, &store).unwrap();
+
+    let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).unwrap();
+    assert_eq!(
+        doc["evidence"]["create_only_enforced"],
+        serde_json::json!(false)
+    );
+    assert_eq!(doc["evidence"]["immutable"], serde_json::json!(false));
+    assert_eq!(doc["evidence"]["retain_until"], serde_json::Value::Null);
+    assert_eq!(doc["evidence"]["version_id"], serde_json::Value::Null);
+
+    // The in-memory value holds the REAL readback: this store does enforce
+    // create-only, so the two deliberately disagree — and they disagree in the
+    // safe direction, the signed document under-claiming rather than over-
+    // claiming. That is also what makes property 2 above testable at all.
+    assert!(
+        signed.scorecard.evidence.create_only_enforced,
+        "the post-put truth is still captured in memory for a future receipt"
+    );
+
+    // Property 2: the stored bytes are still the signed bytes.
     let (stored, _) = store
         .get(&format!("logweir/drills/{}.json", sc.run_id))
         .unwrap();
@@ -311,21 +439,6 @@ fn the_evidence_readback_never_re_serialises_the_signed_payload() {
         &signed.sidecar,
     )
     .expect("the stored bytes must still verify after the readback");
-
-    let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).unwrap();
-    assert_eq!(
-        doc["evidence"]["immutable"],
-        serde_json::json!(true),
-        "documented consequence of signing before putting: the readback lands on \
-         Signed.scorecard ONLY. The SIGNED bytes still carry the evidence block the \
-         caller supplied, because step 6 runs after signing and the payload is never \
-         re-serialised. Whoever builds the scorecard (Task 21a) therefore owns getting \
-         evidence.create_only_enforced right BEFORE phase 8 is called."
-    );
-    assert!(
-        !signed.scorecard.evidence.immutable,
-        "and the in-memory scorecard carries the honest readback"
-    );
 }
 
 /// Step 2: a self-contradicting document is refused BEFORE it is signed, and
@@ -368,7 +481,9 @@ fn an_engine_subreport_under_the_per_run_prefix_is_carried_verbatim() {
     assert!(sub.retained_verbatim);
     assert_eq!(
         sub.retrieved_from,
-        format!("logweir/{}/engine-validation", sc.run_id)
+        format!("logweir/{}/engine-validation/report.json", sc.run_id),
+        "retrieved_from must name the exact key that was read, not the prefix it \
+         sits under — a prefix does not identify what body_sha256 binds"
     );
     use base64::Engine as _;
     let decoded = base64::engine::general_purpose::STANDARD
@@ -407,6 +522,63 @@ fn an_absent_engine_subreport_is_a_note_on_phase_8_not_a_failure() {
         p8.notes,
         vec!["no engine validation report under the per-run prefix".to_string()],
         "an empty prefix is a warning on the phase record, never a silent drop"
+    );
+}
+
+/// MINOR-1: the brief assumes the per-run prefix holds exactly one object. When
+/// it does not, the artifact must say which object was retained and that others
+/// were dropped, rather than discarding them in silence.
+#[test]
+fn extra_objects_under_the_engine_validation_prefix_are_named_not_silently_dropped() {
+    let store = fixtures::recording_store();
+    let mut sc = fixtures::scorecard_pass();
+    sc.phases.push(logweir_core::scorecard::PhaseRecord {
+        phase: 8,
+        name: "score".into(),
+        at: fixtures::ts("2026-09-03T09:09:02Z"),
+        outcome: "scored".into(),
+        duration_ms: 3,
+        notes: vec![],
+    });
+    let prefix = format!("logweir/{}/engine-validation", sc.run_id);
+    // Written in REVERSE lexicographic order. Note this does NOT prove
+    // `list_keys` sorts: the in-memory backend is a BTreeMap and returns keys
+    // ordered whether or not `out.sort()` runs (mutant Z4 survives, and
+    // `storage.rs` documents that honestly). What this DOES pin is the
+    // phase-8 call site's choice of `keys[0]` over `keys[last]` (mutant Z3)
+    // and that the retained key is named rather than assumed.
+    store
+        .put_create_only(&format!("{prefix}/b.json"), b"{\"second\":true}")
+        .unwrap();
+    store
+        .put_create_only(&format!("{prefix}/a.json"), b"{\"first\":true}")
+        .unwrap();
+
+    let signed =
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+    let sub = signed.scorecard.engine_subreport.clone().unwrap();
+    assert_eq!(
+        sub.retrieved_from,
+        format!("{prefix}/a.json"),
+        "the lexicographically first key is retained, deterministically"
+    );
+    assert_eq!(
+        sub.body_sha256,
+        logweir_core::ids::sha256_prefixed(b"{\"first\":true}")
+    );
+
+    let p8 = signed
+        .scorecard
+        .phases
+        .iter()
+        .find(|p| p.phase == 8)
+        .unwrap();
+    assert_eq!(
+        p8.notes,
+        vec![format!(
+            "engine-validation prefix held 2 objects; retained {prefix}/a.json and dropped the rest"
+        )],
+        "dropping evidence silently is the failure mode this note exists to prevent"
     );
 }
 

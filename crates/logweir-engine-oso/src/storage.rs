@@ -268,6 +268,17 @@ impl Store {
     ///
     /// Sorted so a caller taking `keys[0]` gets a deterministic answer rather
     /// than whatever order the backend happened to stream.
+    ///
+    /// The sort is DEFENSIVE and, honestly, unproven: `object_store` 0.14
+    /// contracts no list ordering across backends, but both in-process
+    /// backends this workspace can build (`InMemory`, which is a `BTreeMap`,
+    /// and `LocalFileSystem`) happen to return keys already ordered. So no
+    /// test here can distinguish "sorted by this line" from "sorted by the
+    /// backend" — deleting `out.sort()` leaves the suite green (Task 20 fix
+    /// round 1, mutant Z4). It is kept because phase 8 takes `keys[0]` and a
+    /// backend that streamed in arbitrary order would otherwise make WHICH
+    /// engine report is retained non-deterministic; it is documented as
+    /// unproven rather than asserted as a tested guarantee.
     pub fn list_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
         use futures::StreamExt as _;
         let rt = &self.rt;

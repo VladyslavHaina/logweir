@@ -383,6 +383,22 @@ pub fn integrity_fail() -> Integrity {
         Some(74.0 / 75.0),
     )
 }
+/// A byte-fingerprint integrity block whose RESULT is `pass` but whose measured
+/// ratio is `matching / sampled`. Exists so `decide`'s pass-rate comparison can
+/// be exercised on its own: `integrity_fail()` carries `result: Fail`, which
+/// short-circuits `decide` to `FailIntegrity` before the objectives are ever
+/// consulted, so it cannot reach the rate arm.
+pub fn integrity_rate(matching: u64, sampled: u64) -> Integrity {
+    integ(
+        IntegrityLevel::ByteFingerprint,
+        IntegrityResult::Pass,
+        matching,
+        sampled,
+        None,
+        Some(matching as f64 / sampled as f64),
+    )
+}
+
 pub fn integrity_consume_only() -> Integrity {
     integ(
         IntegrityLevel::ConsumeOnly,
