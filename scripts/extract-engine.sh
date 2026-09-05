@@ -65,7 +65,16 @@ shasum -a 256 "third_party/kafka-backup-${TAG}.tar.gz" \
 # Task 21c owns e2e/compose/, which does not exist yet when this script first
 # runs; create it so `set -e` does not abort on the redirection below.
 mkdir -p e2e/compose
-printf 'OSO_DIGEST=%s\n' "$DIGEST" > e2e/compose/.env
+# Task 7b addendum A6 fixes this file's exact content: the KAFKA_VERSION pin the
+# compose stack reads, and the GR6 note beside the upstream image reference so a
+# reader hitting Global Constraint 14 does not re-raise it. `.env` is generated,
+# so the comment has to be emitted here — it is the only writer.
+cat > e2e/compose/.env <<ENV
+KAFKA_VERSION=3.7.1
+# Upstream image reference, permitted by GR6: GC14 governs what Logweir publishes,
+# not what it pulls. Keep in lockstep with third_party/kafka-backup-binary.digest.
+OSO_DIGEST=${DIGEST}
+ENV
 sed -i.bak "s|REPLACE_WITH_PINNED_DIGEST|${DIGEST#sha256:}|" Dockerfile && rm -f Dockerfile.bak
 
 # The extracted binary is a linux/amd64 ELF (upstream never publishes

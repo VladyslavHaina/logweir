@@ -1,49 +1,29 @@
 {
-  "backup_id": "backup-0.21-test",
-  "created_at": 1620000000000,
-  "source_cluster_id": "cluster-a",
-  "source_brokers": ["broker1:9092"],
+  "backup_id": "drill-demo",
+  "created_at": 1788577426431,
+  "source_cluster_id": null,
+  "source_brokers": [],
   "compression": "zstd",
   "topics": [
     {
       "name": "orders",
-      "original_partition_count": 2,
-      "source_replication_factor": 3,
-      "configurations": { "retention.ms": "604800000" },
+      "original_partition_count": 3,
+      "source_replication_factor": 1,
       "partitions": [
         {
           "partition_id": 0,
           "segments": [
             {
-              "key": "orders/0/00000000000000000000.seg",
+              "key": "drill-demo/topics/orders/partition=0/segment-00000000000000000000.bin.zst",
               "start_offset": 0,
-              "end_offset": 99,
-              "start_timestamp": 1620000000000,
-              "end_timestamp": 1620000001000,
-              "record_count": 100,
-              "uncompressed_size": 2048,
-              "compressed_size": 1024,
-              "sha256": "abc123def4560000000000000000000000000000000000000000000000",
-              "uploaded_at": 1620000002000
-            }
-          ],
-          "gaps": [
-            {
-              "start_offset": 100,
-              "end_offset": 105,
-              "reason": "offset_out_of_range",
-              "detected_at": 1620000003000
-            }
-          ],
-          "pruned": [
-            {
-              "start_offset": 200,
-              "end_offset": 249,
-              "segments": 1,
-              "bytes": 512,
-              "pruned_at": 1620000005000,
-              "cutoff_timestamp": 1620000000000,
-              "reason": "retention"
+              "end_offset": 337,
+              "start_timestamp": 1788577419847,
+              "end_timestamp": 1788577419856,
+              "record_count": 338,
+              "uncompressed_size": 45595,
+              "compressed_size": 3181,
+              "sha256": "2adb1d541a906dc9bae2f44ebd4b13e9208bb16baa7660c7012fa7062fe1a328",
+              "uploaded_at": 1788577426533
             }
           ]
         },
@@ -51,20 +31,93 @@
           "partition_id": 1,
           "segments": [
             {
-              "key": "orders/1/00000000000000000000.seg",
+              "key": "drill-demo/topics/orders/partition=1/segment-00000000000000000000.bin.zst",
               "start_offset": 0,
-              "end_offset": 49,
-              "start_timestamp": 1620000000000,
-              "end_timestamp": 1620000001000,
-              "record_count": 50,
-              "uncompressed_size": 1024,
-              "compressed_size": 512,
-              "sha256": "789xyz00011100000000000000000000000000000000000000000000000",
-              "uploaded_at": 1620000002500
+              "end_offset": 325,
+              "start_timestamp": 1788577419841,
+              "end_timestamp": 1788577419856,
+              "record_count": 326,
+              "uncompressed_size": 43973,
+              "compressed_size": 2992,
+              "sha256": "eb99214f41120ab47eb57446ec38785d87b51c17727a1fb333b82da9a7a2a32d",
+              "uploaded_at": 1788577426534
             }
-          ],
-          "gaps": [],
-          "pruned": []
+          ]
+        },
+        {
+          "partition_id": 2,
+          "segments": [
+            {
+              "key": "drill-demo/topics/orders/partition=2/segment-00000000000000000000.bin.zst",
+              "start_offset": 0,
+              "end_offset": 335,
+              "start_timestamp": 1788577419847,
+              "end_timestamp": 1788577419856,
+              "record_count": 336,
+              "uncompressed_size": 45325,
+              "compressed_size": 2973,
+              "sha256": "c13f9aa673846834d2b233e78b09fd01c96f067f5576f546802c5c040d63c78e",
+              "uploaded_at": 1788577426533
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "payments",
+      "original_partition_count": 3,
+      "source_replication_factor": null,
+      "partitions": [
+        {
+          "partition_id": 1,
+          "segments": [
+            {
+              "key": "drill-demo/topics/payments/partition=1/segment-00000000000000000000.bin.zst",
+              "start_offset": 0,
+              "end_offset": 341,
+              "start_timestamp": 1788577421617,
+              "end_timestamp": 1788577421628,
+              "record_count": 342,
+              "uncompressed_size": 47503,
+              "compressed_size": 3277,
+              "sha256": "8ad84d39427edf9be6dc0eacf2c1d64c7592e2ca8798e9702c417068f00818b4",
+              "uploaded_at": 1788577426545
+            }
+          ]
+        },
+        {
+          "partition_id": 2,
+          "segments": [
+            {
+              "key": "drill-demo/topics/payments/partition=2/segment-00000000000000000000.bin.zst",
+              "start_offset": 0,
+              "end_offset": 329,
+              "start_timestamp": 1788577421611,
+              "end_timestamp": 1788577421628,
+              "record_count": 330,
+              "uncompressed_size": 45833,
+              "compressed_size": 3060,
+              "sha256": "0ee0202a004b23c271c2c7d33e562f0a0407849f5c4e4e363bd944d4edc900ba",
+              "uploaded_at": 1788577426546
+            }
+          ]
+        },
+        {
+          "partition_id": 0,
+          "segments": [
+            {
+              "key": "drill-demo/topics/payments/partition=0/segment-00000000000000000000.bin.zst",
+              "start_offset": 0,
+              "end_offset": 327,
+              "start_timestamp": 1788577421617,
+              "end_timestamp": 1788577421628,
+              "record_count": 328,
+              "uncompressed_size": 45557,
+              "compressed_size": 3069,
+              "sha256": "12e59a23614bc8994a047674b1e8d8fd16743ca6b9ed5e265cac71bfe03b23d5",
+              "uploaded_at": 1788577426545
+            }
+          ]
         }
       ]
     }

@@ -1,0 +1,39 @@
+# Modelled on U/kafka-backup-demos/config/backup-basic.yaml [VERIFIED, read in
+# full], with topics.include: [orders, payments], prefix: drill-demo,
+# backup.compression: zstd and segment_max_records: 1000 so the demo produces
+# several segments.
+#
+# The bootstrap is stated here explicitly and is NOT inherited from the demo.
+# The demo's source block is `bootstrap_servers: [kafka-broker-1:9092]`
+# [VERIFIED U/kafka-backup-demos/config/backup-basic.yaml:8-9], but under this
+# compose file port 9092 on the broker is the EXTERNAL listener, which
+# advertises `localhost:9092`; a `kafka-backup` container on `kafka-net` would
+# resolve `localhost` to itself and never reach the broker, so
+# scripts/e2e-seed.sh, the whole e2e suite and scripts/demo.sh would all fail
+# at the backup step. Use the INTERNAL listener instead.
+mode: backup
+backup_id: "drill-demo"
+
+source:
+  bootstrap_servers:
+    - kafka-broker-1:9094
+  topics:
+    include:
+      - orders
+      - payments
+
+storage:
+  backend: s3
+  bucket: kafka-backups
+  region: us-east-1
+  prefix: drill-demo
+  endpoint: http://minio:9000
+  path_style: true
+  allow_http: true
+
+backup:
+  compression: zstd
+  continuous: false
+  segment_max_records: 1000
+  segment_max_bytes: 10485760  # 10MB
+  max_concurrent_partitions: 3

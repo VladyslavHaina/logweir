@@ -1,0 +1,150 @@
+# Adapted from osodevops/kafka-backup-demos/docker-compose.yml (MIT).
+# Kept: kafka-broker-1 (KRaft, no ZooKeeper), minio, minio-setup, kafka-backup.
+# Removed: the demo topic zoo, the monitoring profile, the whole enterprise
+# profile (schema registry, Apicurio, the EE image) — none of it is in scope.
+#
+# An explicit project name: without it compose derives one from this file's
+# parent directory, i.e. the project would be called `compose`, which collides
+# with every other repo on the machine that keeps its stack in a `compose/`
+# directory. `just e2e-down`'s `down -v` deletes volumes by project, so a
+# generic name is also a footgun.
+name: logweir-e2e
+
+networks:
+  kafka-net: { driver: bridge }
+volumes:
+  minio-data:
+
+services:
+  kafka-broker-1:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    hostname: kafka-broker-1
+    restart: always
+    networks: [kafka-net]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_NODE_ID: 1001
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://kafka-broker-1:9092,CONTROLLER://kafka-broker-1:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1001@kafka-broker-1:9093
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+      # MUST carry the KAFKA_ prefix: the apache/kafka entrypoint translates only
+      # KAFKA_*-prefixed variables into server.properties, so the unprefixed form
+      # is silently ignored and auto-creation stays at its default `true` —
+      # which would let `a_restore_into_an_empty_scratch_target_succeeds` pass
+      # without `create_topics: true` ever being honoured.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+    # A `Running` broker that is not yet serving is the false-pass this project
+    # keeps hitting, so health is proved by an actual client round trip on the
+    # INTERNAL listener — the one every in-network client uses — rather than by
+    # a port probe or a `sleep`. `--list` opens a real Kafka connection and
+    # fetches metadata; it fails while the KRaft quorum is still forming.
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-broker-1:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # Creates the SOURCE topics, the MARKER topic and the READER-FIXTURE topic.
+  # The marker topic is the v0.1 segregation proof: without it, phase 0 refuses
+  # with exit 3.
+  topic-setup:
+    image: ${KAFKA_CLI_IMAGE:-confluentinc/cp-kafka:7.6.0}
+    networks: [kafka-net]
+    # The brief's `sleep 10` is a guess about broker startup; the healthcheck
+    # above is a measurement of it. Waiting on `service_healthy` is why this
+    # command no longer opens with a sleep.
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+    restart: on-failure
+    profiles: [setup]
+    command: >
+      bash -c '
+      kafka-topics --create --if-not-exists --bootstrap-server kafka-broker-1:9094 --partitions 3 --replication-factor 1 --topic orders &&
+      kafka-topics --create --if-not-exists --bootstrap-server kafka-broker-1:9094 --partitions 3 --replication-factor 1 --topic payments &&
+      kafka-topics --create --if-not-exists --bootstrap-server kafka-broker-1:9094 --partitions 1 --replication-factor 1 --topic logweir.scratch &&
+      kafka-topics --create --if-not-exists --bootstrap-server kafka-broker-1:9094 --partitions 3 --replication-factor 1 --topic test-topic &&
+      echo READY'
+
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    networks: [kafka-net]
+    ports: ["9000:9000", "9001:9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes: [minio-data:/data]
+    # MinIO's own readiness probe, the same one its Kubernetes chart uses
+    # (httpGet /minio/health/ready on 9000). `mc ready local` is the documented
+    # in-image equivalent and needs no curl, which this image does not ship.
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  minio-setup:
+    image: minio/mc:latest
+    networks: [kafka-net]
+    # Same reason as topic-setup: `sleep 5` replaced by MinIO's readiness probe.
+    depends_on:
+      minio: { condition: service_healthy }
+    restart: on-failure
+    # Behind a profile for the same reason topic-setup is: it is a one-shot that
+    # exits, and `docker compose up -d --wait` fails (exit 1) the moment any
+    # container it is waiting on exits, even with status 0. Profiling it keeps
+    # the default `up --wait` set to exactly the two long-running services, so
+    # `just e2e-up`'s first line means "both servers are actually serving".
+    # `docker compose run <svc>` auto-enables the target service's own profiles,
+    # so the smoke test and scripts/e2e-seed.sh still reach it with no flag.
+    profiles: [setup]
+    environment:
+      # `docker compose run --rm ... minio-setup` starts a FRESH container every
+      # time, and `mc` keeps aliases in the container's own ~/.mc/config.json —
+      # so an alias created by one `run` is gone by the next. Both the smoke
+      # test and scripts/e2e-seed.sh do exactly that, and would otherwise fail
+      # with "Unable to find alias". MC_HOST_<alias> defines the alias from the
+      # environment instead, so every container of this service has it.
+      MC_HOST_local: http://minioadmin:minioadmin@minio:9000
+    entrypoint: >
+      /bin/sh -c "
+      mc mb local/kafka-backups --ignore-existing;
+      mc mb local/logweir-evidence --ignore-existing;
+      echo 'buckets ready';
+      "
+
+  # The engine, PINNED BY DIGEST — never by tag (Global Constraint 7).
+  # Global Constraint 14 forbids Logweir from PUBLISHING its own artifacts under
+  # `osodevops/`; pulling upstream's published image to extract the pinned engine
+  # binary is required by Global Constraints 7, 8, 10 and 15 and is not a
+  # violation (controller ruling GR6).
+  kafka-backup:
+    image: osodevops/kafka-backup@${OSO_DIGEST}
+    # Upstream publishes linux/amd64 ONLY — no arm64 manifest exists for any
+    # tag. Without this the daemon asks for its own default platform and fails
+    # with "no matching manifest for linux/arm64/v8". It is a no-op on an
+    # amd64 host, so the pin is safe everywhere and required on Apple Silicon.
+    platform: linux/amd64
+    networks: [kafka-net]
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      RUST_LOG: info
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    volumes: ["./config:/config"]
+    profiles: [tools]

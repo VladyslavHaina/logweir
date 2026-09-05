@@ -27,12 +27,25 @@ fixtures-sign:
     cargo run -p logweir-evidence --example mint_fixture
 
 # Bring the compose stack up, seed topics, produce, back up. See Task 21.
+# `--wait` blocks until every non-profiled service reports HEALTHY, so this
+# recipe cannot hand back a broker that is merely `Running` and not yet
+# serving. The two one-shot setup services sit behind the `setup` profile
+# precisely so they are not in that wait set (`--wait` exits 1 the moment a
+# container it is waiting on exits, even with status 0); they run here, in
+# order, as foreground commands whose exit codes `just` checks.
 e2e-up:
-    docker compose -f e2e/compose/docker-compose.yml up -d
+    docker compose -f e2e/compose/docker-compose.yml up -d --wait
+    docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
 
+# Both profiles are named on purpose. `down` only removes containers for
+# services in the ACTIVE profile set, so a plain `down -v` walks past any
+# `topic-setup` / `minio-setup` / `kafka-backup` container left over from an
+# earlier `up`, and the next `down` walks past it again — verified: it survived
+# a full `down -v` on this machine. `--remove-orphans` additionally clears
+# containers for services this file no longer defines.
 e2e-down:
-    docker compose -f e2e/compose/docker-compose.yml down -v
+    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
 e2e:
     cargo test --workspace --features e2e -- --test-threads=1 --nocapture
