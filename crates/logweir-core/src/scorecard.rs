@@ -5,14 +5,42 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Scorecard {
+    /// Semver of the document format, and the field every reader checks
+    /// FIRST: Global Constraint 12 — readers ignore unknown fields and refuse
+    /// a higher major.
+    ///
+    /// The schema PINS the major with a pattern rather than leaving the field
+    /// an unconstrained string. Without it, a document reading `"9.9.9"`
+    /// validated cleanly against the file named
+    /// `logweir-drill-scorecard-1.0.0.json`, so a schema-only validator — the
+    /// one route that does not go through
+    /// `Scorecard::refuse_unreadable_major` — accepted exactly the document
+    /// GC12 exists to refuse. The pattern allows any `1.x.y`, because a MINOR
+    /// bump adds optional fields only and a 1.0.0 reader must still read it.
+    #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
     pub format_version: String,
     pub run_id: String,
     pub outcome: Outcome,
-    /// Highest phase INDEX completed. v0.1 implements ELEVEN phase slots,
-    /// -1 through 9 (Global Constraint 18, panel decision D1, 2026-09-03).
-    /// -1 is the source-side capture phase; a value below it is impossible
-    /// because the phase-0 admission guard refusing yields exit code 3 with
-    /// last_phase_completed = -1 (spec §6.1).
+    /// Highest phase INDEX completed. The DOMAIN is eleven phase slots, -1
+    /// through 9 (Global Constraint 18, panel decision D1, 2026-09-03); -1 is
+    /// the source-side `--from-cluster` capture phase, whose code lands in a
+    /// follow-up, so v0.1.0 never emits it.
+    ///
+    /// WHAT A v0.1.0 SIGNED DOCUMENT CAN ACTUALLY CARRY IS 5, 6 or 7, and the
+    /// reason is structural rather than incidental: `phase8_score::run` signs
+    /// a frozen clone, so phase 8's own record — and phase 9's, which happens
+    /// after the put — are pushed onto the in-memory document AFTER the bytes
+    /// were signed. A drill that completed teardown therefore reads 7 here and
+    /// is NOT a drill whose teardown was skipped; the teardown is attested in
+    /// its own separately signed document. `drill run`'s console line quotes
+    /// this same value so the two cannot disagree.
+    ///
+    /// A previous version of this comment added "a value below -1 is
+    /// impossible because the phase-0 admission guard refusing yields exit
+    /// code 3 with last_phase_completed = -1", which implied such a document
+    /// exists. It does not: exit 3 writes NO scorecard at all. The lower bound
+    /// is a domain rule, enforced by `validate_invariants`, not a description
+    /// of anything v0.1 emits.
     pub last_phase_completed: i8,
     pub requested_at: DateTime<Utc>,
     #[serde(default)]
@@ -409,17 +437,23 @@ fn major_version(v: &str) -> Option<u64> {
 }
 
 impl Scorecard {
-    /// The invariants spec §6.1 and §9.3 phase 8 state in prose. Called before
-    /// signing (Task 20) and by `drill verify` (Task 6), so no signed document
-    /// can carry a self-contradicting claim.
-    pub fn validate_invariants(&self) -> Result<(), InvariantError> {
-        // Global Constraint 12: a reader must refuse a `format_version` whose
-        // major is newer than the one this binary understands. Checked
-        // first, and by string comparison against `crate::FORMAT_VERSION`
-        // (never by re-deriving what "this build understands" some other
-        // way), so a document from a future major bump is rejected before
-        // any other invariant is even evaluated against fields that build may
-        // have changed the meaning of.
+    /// GLOBAL CONSTRAINT 12, IN ONE PLACE: a reader must refuse a
+    /// `format_version` whose major is newer than the one this binary
+    /// understands, and must ignore unknown fields.
+    ///
+    /// Public, and separate from `validate_invariants`, because Logweir ships
+    /// THREE readers and the rule belongs to all of them. It used to be an
+    /// inlined first block of `validate_invariants`, which meant `drill
+    /// verify` honoured it (it calls that function) and `drill show` did not
+    /// (it never did) — a `format_version: "2.0.0"` document rendered its full
+    /// table, header reading `v2.0.0`, `outcome Pass`, and exited 0. A rule the
+    /// README states and the project keeps in one place out of three is not a
+    /// rule. `docs/verify_scorecard.py` is the third reader and implements the
+    /// same comparison against its own `FORMAT_VERSION` constant.
+    ///
+    /// The comparison is against `crate::FORMAT_VERSION` by string, never by
+    /// re-deriving what "this build understands" some other way.
+    pub fn refuse_unreadable_major(&self) -> Result<(), InvariantError> {
         let doc_major = major_version(&self.format_version).ok_or_else(|| {
             InvariantError(format!(
                 "format_version {:?} is not a parseable semver",
@@ -436,6 +470,17 @@ impl Scorecard {
                 crate::FORMAT_VERSION
             )));
         }
+        Ok(())
+    }
+
+    /// The invariants spec §6.1 and §9.3 phase 8 state in prose. Called before
+    /// signing (Task 20) and by `drill verify` (Task 6), so no signed document
+    /// can carry a self-contradicting claim.
+    pub fn validate_invariants(&self) -> Result<(), InvariantError> {
+        // Checked FIRST, so a document from a future major bump is rejected
+        // before any other invariant is evaluated against fields that build
+        // may have changed the meaning of.
+        self.refuse_unreadable_major()?;
         if self.integrity.result == IntegrityResult::Partial
             && self.integrity.partial_reason.is_none()
         {

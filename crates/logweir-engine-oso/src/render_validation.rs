@@ -46,6 +46,26 @@ pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> S
     // (spec §6 C4). `run_id` is escaped as part of the WHOLE composed value —
     // not interpolated raw into an otherwise-unescaped line — so a `run_id`
     // containing a newline or colon cannot split this into two lines either.
+    // CARRIED DEFECT, LATENT AND NAMED HERE SO IT CANNOT LAND SILENTLY.
+    //
+    // This prefix is relative to the storage block of THIS document — the
+    // ARCHIVE — while `logweir::drill::phase8_score::run` lists the identical
+    // string on the EVIDENCE store. `DrillSpec`'s own doc comment says the two
+    // are a different bucket and a different principal by default (spec §7.1),
+    // so as written they can never meet, and phase 8's retrieval would find
+    // nothing however well the engine behaved.
+    //
+    // It is inert today and only today: `OsoCliEngine` does not override
+    // `DataEngine::validation_run`, so this document is never handed to the
+    // engine and nothing is ever written under this prefix on either bucket.
+    // The `#[ignore]`d marker test
+    // `oso_cli_engine_must_override_validation_run_once_docker_is_available`
+    // (crates/logweir-engine-oso/tests/engine.rs), which CI runs on every
+    // build, is the obligation this note belongs to: whoever lands that
+    // override must decide which bucket the engine report lives in and make
+    // BOTH sides name it, or phase 8's retrieval silently returns nothing and
+    // publishes `engine_subreport: null` — a false negative in a signed
+    // document, indistinguishable from the honest one v0.1 publishes.
     let evidence_prefix = format!("logweir/{run_id}/engine-validation");
     s.push_str("evidence:\n  formats:\n    - json\n  storage:\n");
     s.push_str(&format!("    prefix: {}\n", yaml_scalar(&evidence_prefix)));

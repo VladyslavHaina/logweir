@@ -7,6 +7,23 @@ v1 envelope from the specification, so if this script and `logweir drill
 verify` disagree, the signed-scorecard format is broken, not merely this
 script.
 
+THAT CLAIM IS LOAD-BEARING AND IT IS WHY `check_invariants` BELOW IS AS LONG
+AS IT IS. This script used to implement exactly ONE of the ~12 checks
+`Scorecard::validate_invariants` performs, and parsed no other field — so a
+document with `format_version: "2.0.0"`, or `measured.rpo_seconds: -90`, or
+`records_sampled_matching: 9999` over `records_sampled: 10`, printed a clean
+`VALID` here and was refused by `logweir drill verify`. The `-90` case is the
+exact value `docs/formats/drill-scorecard.md` says a reader "would most likely
+read as no data loss", printed under a VALID banner by the tool the auditor is
+told to trust MORE. Every arm below mirrors one arm of the Rust validator, in
+the same order and with the same wording, so a disagreement is a bug in the
+format rather than an artefact of one implementation being shorter.
+
+The DSSE core — `pae`, `verify_signature` and the signature check in `main` —
+is unchanged and is still about twenty lines. `check_invariants` is separate,
+runs only AFTER the signature has verified, and answers a different question:
+a signature proves who wrote the bytes, never that the bytes make sense.
+
 Requires only the `cryptography` package:
 
   pip install cryptography
@@ -74,6 +91,7 @@ from", before trusting a VALID result.
 """
 import base64
 import binascii
+import hashlib
 import json
 import sys
 
@@ -106,6 +124,12 @@ except ImportError as _exc:  # pragma: no cover - exercised via a subprocess tes
 
 PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 
+# Global Constraint 12, and the single value this reader's major-version
+# refusal is measured against. Keep in step with `logweir_core::FORMAT_VERSION`
+# (crates/logweir-core/src/lib.rs); `docs/test_verify_scorecard.py::
+# test_the_format_version_matches_the_rust_constant` fails if they drift.
+FORMAT_VERSION = "1.0.0"
+
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
 # PAYLOAD_TYPE_PUT_RECEIPT and PAYLOAD_TYPE_TEARDOWN; `docs/
@@ -134,6 +158,24 @@ def resolve_payload_type(name: str) -> str:
         f"unknown --payload-type {name!r}; use one of "
         + ", ".join(sorted(PAYLOAD_TYPES)) + " or a full media type"
     )
+
+
+def key_id(public_key) -> str:
+    """The sidecar `keyid`: lowercase hex sha256 of the key's SPKI DER.
+
+    This is how a sidecar says WHICH key signed, and it is how Logweir's own
+    verifier selects the signature to check. Computing it here rather than
+    ignoring `keyid` altogether is the difference between "some signature in
+    this sidecar verifies under your key" and "the signature that CLAIMS to be
+    by your key verifies under it" — and, more to the point, it is what makes
+    this script and `logweir drill verify` reach the same verdict on a sidecar
+    whose keyid names a different key.
+    """
+    der = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(der).hexdigest()
 
 
 def pae(payload_type: str, payload: bytes) -> bytes:
@@ -170,6 +212,154 @@ def verify_signature(public_key, message: bytes, signature: bytes) -> bool:
         return True
     except InvalidSignature:
         return False
+
+
+def _major(version: str):
+    """Leading integer of a dotted version string, or None if there is none.
+
+    Mirrors `logweir_core::scorecard::major_version` exactly: split on ".",
+    take the first field, parse it as an integer. Anything else is "not a
+    parseable semver", which is a refusal rather than an assumption.
+    """
+    head = version.split(".")[0] if isinstance(version, str) else ""
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _finite(x) -> bool:
+    """True iff `x` is a finite number. JSON has no NaN/Infinity literal, but
+    `json.loads` accepts the non-standard `NaN`/`Infinity` tokens by default,
+    so a document carrying one reaches here as a float."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and abs(x) != float("inf")
+
+
+def check_invariants(doc) -> str:
+    """The scorecard's self-consistency rules, or "" when the document holds.
+
+    ARM FOR ARM, IN ORDER, WITH `Scorecard::validate_invariants`
+    (crates/logweir-core/src/scorecard.rs). The two implementations are
+    documented as reaching the same verdict — `docs/verify-a-scorecard.md`
+    says a disagreement "is a bug in the format" — and for one release they
+    did not: this function checked one rule and the Rust checked twelve.
+
+    A signature proves who wrote the bytes; these rules ask whether the bytes
+    make sense. Both are required for `VALID`.
+
+    Returns a one-line reason on failure so the caller can print it in the
+    script's single `INVALID: ...` form. Every field access goes through
+    `.get`, so a document that is missing a block is reported as malformed
+    rather than raising the `KeyError` this script's contract promises never
+    to surface.
+    """
+    if not isinstance(doc, dict):
+        return "the payload is not a JSON object"
+
+    # Global Constraint 12, FIRST: a reader must refuse a `format_version`
+    # whose major is newer than the one it understands, before any other rule
+    # is evaluated against fields that future major may have redefined. This
+    # is the rule the README states for every reader and that this script did
+    # not implement at all — it never read `format_version`.
+    version = doc.get("format_version")
+    doc_major = _major(version)
+    if doc_major is None:
+        return f"format_version {version!r} is not a parseable semver"
+    known_major = _major(FORMAT_VERSION)
+    if doc_major > known_major:
+        return (
+            f"format_version {version} has a major version newer than this reader "
+            f"understands (this script knows {FORMAT_VERSION})"
+        )
+
+    integrity = doc.get("integrity")
+    objectives = doc.get("objectives")
+    measured = doc.get("measured")
+    source = doc.get("source")
+    engine = doc.get("engine")
+    for name, block in (
+        ("integrity", integrity),
+        ("objectives", objectives),
+        ("measured", measured),
+        ("source", source),
+        ("engine", engine),
+    ):
+        if not isinstance(block, dict):
+            return f"the document has no {name} block; it is not a drill scorecard"
+
+    if integrity.get("result") == "partial" and not integrity.get("partial_reason"):
+        return "integrity.result is 'partial' but partial_reason is null"
+
+    # The format's only two float fields.
+    for name, value in (
+        ("objectives.pass_rate", objectives.get("pass_rate")),
+        ("integrity.pass_rate_measured", integrity.get("pass_rate_measured")),
+    ):
+        if value is not None and not _finite(value):
+            return f"{name} is not finite (NaN or +/-Inf)"
+
+    # Global Constraint 18(a): captured_by_logweir is a BICONDITIONAL.
+    last_phase = doc.get("last_phase_completed")
+    if not isinstance(last_phase, int) or isinstance(last_phase, bool):
+        return "last_phase_completed is not an integer"
+    rel = measured.get("rpo_source_relative_seconds")
+    reason = measured.get("rpo_source_relative_unmeasured_reason")
+    if source.get("captured_by_logweir"):
+        if last_phase < -1:
+            return "source.captured_by_logweir is true but last_phase_completed is below -1"
+        if rel is None:
+            return "source.captured_by_logweir is true but rpo_source_relative_seconds is null"
+        if reason is not None:
+            return "source.captured_by_logweir is true but an unmeasured reason is present"
+    else:
+        if rel is not None:
+            return "rpo_source_relative_seconds is set but the source was never contacted"
+        if reason is None:
+            return (
+                "source.captured_by_logweir is false but "
+                "rpo_source_relative_unmeasured_reason is null"
+            )
+
+    if (
+        integrity.get("level") != "byte-fingerprint"
+        and objectives.get("pass_rate") is not None
+        and objectives.get("met") is True
+    ):
+        return "objectives.met must be null when pass_rate is not measurable"
+
+    # Every seconds-valued gap in the document is non-negative. `-90` here is
+    # the exact value the format doc says a reader "would most likely read as
+    # no data loss"; this script printed it under a VALID banner.
+    for name, value in (
+        ("measured.rpo_seconds", measured.get("rpo_seconds")),
+        ("measured.rpo_source_relative_seconds", rel),
+        ("objectives.rpo_seconds", objectives.get("rpo_seconds")),
+    ):
+        if value is not None and value < 0:
+            return (
+                f"{name} is negative ({value}); a recovery-point gap of less than zero "
+                "is not a smaller gap, it is a meaningless one"
+            )
+
+    sampled = integrity.get("records_sampled")
+    matching = integrity.get("records_sampled_matching")
+    if isinstance(sampled, int) and isinstance(matching, int) and matching > sampled:
+        return "records_sampled_matching exceeds records_sampled"
+
+    if engine.get("matrix_verdict") == "fail" and engine.get("matrix_verdict_reason") is None:
+        return "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null"
+
+    if (
+        integrity.get("level") != "byte-fingerprint"
+        and integrity.get("pass_rate_measured") is not None
+    ):
+        return "integrity.pass_rate_measured is set but the level is not byte-fingerprint"
+
+    # Global Constraint 18: ELEVEN phase slots, -1 through 9.
+    if not (-1 <= last_phase <= 9):
+        return "last_phase_completed outside -1..=9"
+
+    return ""
 
 
 def main(
@@ -211,12 +401,6 @@ def main(
     if not signatures:
         print("INVALID: sidecar has no signatures", file=sys.stderr)
         return 1
-    sig_b64 = signatures[0].get("sig", "")
-    try:
-        signature = base64.b64decode(sig_b64, validate=True)
-    except (binascii.Error, ValueError) as e:
-        print(f"INVALID: sig is not valid base64: {e}", file=sys.stderr)
-        return 1
 
     try:
         pubkey_bytes = open(pubkey_path, "rb").read()
@@ -242,8 +426,37 @@ def main(
         )
         return 1
 
+    # EVERY signature whose `keyid` names THIS key is tried — not
+    # `signatures[0]`, which this script used to hard-index. A DSSE envelope
+    # may carry one signature per signing key, so the entry for the key the
+    # auditor was handed need not be first; reporting INVALID for such a
+    # sidecar (which `logweir drill verify` accepts) is the disagreement this
+    # script exists not to have. Selecting BY keyid, rather than trying them
+    # all blindly, is the other half of that agreement: Logweir's own verifier
+    # refuses a sidecar that carries no signature claiming to be by your key,
+    # and says so in those words.
+    want = key_id(public_key)
+    mine = []
+    for entry in signatures:
+        if not isinstance(entry, dict):
+            print("INVALID: sidecar signatures entry is not an object", file=sys.stderr)
+            return 1
+        if entry.get("keyid") != want:
+            continue
+        try:
+            mine.append(base64.b64decode(entry.get("sig", ""), validate=True))
+        except (binascii.Error, ValueError) as e:
+            print(f"INVALID: sig is not valid base64: {e}", file=sys.stderr)
+            return 1
+    if not mine:
+        print(
+            f"INVALID: no signature by key {want} in the sidecar",
+            file=sys.stderr,
+        )
+        return 1
+
     message = pae(payload_type, payload)
-    if not verify_signature(public_key, message, signature):
+    if not any(verify_signature(public_key, message, s) for s in mine):
         print("INVALID: signature does not verify over these bytes", file=sys.stderr)
         return 1
 
@@ -255,18 +468,33 @@ def main(
     # the payload type rather than attempted over every document: a receipt has
     # no `integrity` block, and reaching for one would raise a KeyError — i.e.
     # the traceback this script's contract promises never to emit.
-    doc = json.loads(payload)
+    # The bytes verified; they may still not be JSON at all. An unguarded
+    # `json.loads` raised `json.JSONDecodeError` here — a raw traceback on a
+    # correctly-signed payload, which this script's own contract (see the
+    # module docstring's exit-1 paragraph) promises never to emit.
+    try:
+        doc = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(
+            f"INVALID: the signature verified but the payload is not valid JSON: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
     if payload_type_wanted == PAYLOAD_TYPES["scorecard"]:
-        integrity = doc["integrity"]
-        if integrity["result"] == "partial" and not integrity.get("partial_reason"):
-            print("INVALID: integrity.result is 'partial' with no partial_reason", file=sys.stderr)
+        problem = check_invariants(doc)
+        if problem:
+            print(f"INVALID: {problem}", file=sys.stderr)
             return 1
 
+        # Every field below is reachable: `check_invariants` returned "", which
+        # required each of these blocks to be present and well-formed.
+        integrity = doc["integrity"]
         measured = doc["measured"]
-        print(f"VALID  run_id={doc['run_id']}  outcome={doc['outcome']}")
-        print(f"       rto_seconds={measured['rto_seconds']}  rpo_seconds={measured['rpo_seconds']}")
-        print(f"       integrity={integrity['level']}/{integrity['result']}")
-        if doc["approval"].get("self_attested"):
+        print(f"VALID  run_id={doc.get('run_id')}  outcome={doc.get('outcome')}")
+        print(f"       rto_seconds={measured.get('rto_seconds')}  rpo_seconds={measured.get('rpo_seconds')}")
+        print(f"       integrity={integrity.get('level')}/{integrity.get('result')}")
+        if isinstance(doc.get("approval"), dict) and doc["approval"].get("self_attested"):
             print("       approval: SELF-ATTESTED — the approval key equals the signing key")
         # The four `evidence` fields are zeroed BEFORE signing, because they
         # describe an upload that has not happened yet. Say so, so nobody reads
@@ -280,14 +508,21 @@ def main(
     if payload_type_wanted == PAYLOAD_TYPES["receipt"]:
         # The receipt's whole job is to bind to ONE scorecard. Print the
         # binding, and say plainly what a `false` does and does not mean.
-        print(f"VALID  receipt for {doc['scorecard_key']}")
-        print(f"       binds to scorecard {doc['scorecard_sha256']}")
+        if not isinstance(doc, dict) or "scorecard_sha256" not in doc:
+            print(
+                "INVALID: the signature verified under the receipt payload type but the "
+                "document is not a put receipt (no scorecard_sha256)",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"VALID  receipt for {doc.get('scorecard_key')}")
+        print(f"       binds to scorecard {doc.get('scorecard_sha256')}")
         print(
-            f"       create_only_enforced={doc['create_only_enforced']}  "
-            f"immutable={doc['immutable']}  version_id={doc.get('version_id')}"
+            f"       create_only_enforced={doc.get('create_only_enforced')}  "
+            f"immutable={doc.get('immutable')}  version_id={doc.get('version_id')}"
         )
-        print(f"       observed_at={doc['observed_at']}")
-        if not doc["create_only_enforced"]:
+        print(f"       observed_at={doc.get('observed_at')}")
+        if not doc.get("create_only_enforced"):
             print(
                 "       NOTE: create_only_enforced=false means the backend answered "
                 "'not supported' and Logweir took a HEAD-then-PUT fallback. It is NOT "

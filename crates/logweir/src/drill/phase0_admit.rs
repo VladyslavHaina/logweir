@@ -25,7 +25,10 @@ pub fn run(
     allowed: &AllowedClusters,
     reader: &dyn ClusterReader,
 ) -> Result<Admitted, DrillError> {
-    let bad = scan_forbidden_keys(spec_text);
+    // `?` on purpose: the scan FAILS CLOSED. A spec text this scanner cannot
+    // parse is a spec it did not scan, and that is a `GuardRefusal` (exit 3),
+    // never an empty result silently treated as clean.
+    let bad = scan_forbidden_keys(spec_text)?;
     if !bad.is_empty() {
         return Err(GuardRefusal(format!(
             "forbidden key(s) present in the drill spec, at any value: {}. \

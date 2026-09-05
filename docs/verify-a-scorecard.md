@@ -8,8 +8,12 @@ own binary, and without reading a line of this project's source code.
 
 A **drill scorecard** is a JSON document that records the measured result
 of one Kafka restore drill: which backup it restored, what RTO/RPO it
-measured, whether the restored data matched the source by byte fingerprint,
-who approved the drill, and more. It is published as a
+measured, whether the restored data matched **the archive** by byte
+fingerprint, who approved the drill, and more. (The archive, not the source
+cluster: v0.1 never contacts the source, and the scorecard says so itself in
+`measured.rpo_source_relative_unmeasured_reason`. Every other surface —
+`README.md`, the format reference — says "archive" too; this page said "source"
+and was the one page written for the reader least able to check it.) It is published as a
 [DSSE (Dead Simple Signing Envelope)](https://github.com/secure-systems-lab/dsse)
 signed statement: the scorecard itself is never modified to carry a
 signature — instead, a separate sidecar file holds the signature over the
@@ -109,6 +113,16 @@ whichever is convenient; running both and comparing the verdict is even
 better, since agreement between two independent implementations is stronger
 evidence than either alone.
 
+That equality is a property somebody has to maintain, and for one release it
+did not hold: `verify_scorecard.py` implemented ONE of the ~12 self-consistency
+rules `logweir drill verify` applies, so a document with
+`format_version: "2.0.0"`, or `measured.rpo_seconds: -90`, or
+`records_sampled_matching: 9999` over `records_sampled: 10`, printed `VALID`
+here and was refused there. The Python verifier's `check_invariants` now
+mirrors the Rust validator arm for arm, in the same order and with the same
+wording. If you find a document the two disagree about, that is a bug in the
+format — report it.
+
 ### Route 1: `logweir drill verify` (if you have the Logweir binary)
 
 ```bash
@@ -119,9 +133,14 @@ logweir drill verify \
 ```
 
 Exit code `0` means the signature is valid and the document does not
-contradict itself. A non-zero exit code (`1` for an operational problem
-such as a file that will not parse, `4` for a genuine signature or
-lock-proof failure) means it does not.
+contradict itself. A non-zero exit code means it does not: `1` for an
+operational problem such as a file that will not parse, and `4` for a
+signature failure, a lock-proof failure, **or a document this reader cannot
+honestly interpret** — a `format_version` whose major is newer than this build
+understands, or any other self-contradiction `validate_invariants` catches.
+The last case is a valid signature over a document the reader must refuse
+anyway (Global Constraint 12), which is why it is not exit 0: a signature
+proves who wrote the bytes, never that this reader may act on them.
 
 ### Route 2: `verify_scorecard.py` (no Rust required)
 
@@ -172,11 +191,32 @@ Both routes check three things, in order:
 2. **The signature verifies** over the DSSE v1 Pre-Authentication Encoding
    (PAE) of `(payloadType, payload)`, where `payload` is the raw bytes of
    `scorecard.json` as they were read from disk — see below.
-3. **The document does not contradict itself**: specifically, that
-   `integrity.result` is never `"partial"` without a `partial_reason`
-   explaining why. A signature only proves who wrote the bytes; it says
-   nothing about whether the bytes make sense, so this check is separate
-   from the cryptography.
+3. **The document does not contradict itself.** A signature only proves who
+   wrote the bytes; it says nothing about whether the bytes make sense, so this
+   check is separate from the cryptography — and **both routes apply the same
+   set**, which is what makes the "same verdict" claim above true. The set is:
+
+   - `format_version`'s major is not newer than this reader understands
+     (Global Constraint 12), checked **first**, before any rule that depends on
+     what a field means;
+   - `integrity.result` is never `"partial"` without a `partial_reason`;
+   - the two float fields are finite;
+   - `source.captured_by_logweir` agrees, in **both** directions, with
+     `last_phase_completed` and the two `rpo_source_relative_*` fields;
+   - `objectives.met` is not `true` when the pass rate was not measurable;
+   - no seconds-valued gap — `measured.rpo_seconds`,
+     `measured.rpo_source_relative_seconds`, `objectives.rpo_seconds` — is
+     negative;
+   - `records_sampled_matching` does not exceed `records_sampled`;
+   - `engine.matrix_verdict: "fail"` carries a `matrix_verdict_reason`;
+   - `integrity.pass_rate_measured` is null unless the level is
+     `byte-fingerprint`;
+   - `last_phase_completed` is within `-1..=9`.
+
+   `logweir drill show` is the third reader Logweir ships. It renders rather
+   than verifies, so it applies only the first rule — it **refuses** a document
+   whose major version it does not understand, and exits 1 rather than printing
+   a table under field meanings a future major may have redefined.
 
 ### The payload is never re-serialised
 
@@ -446,7 +486,17 @@ authority, and these live only there:
 - `sample.records_expected` versus `integrity.records_sampled` — the canary size
   against what was actually reconciled.
 - `integrity.pass_rate_measured`'s null-ness, which is a different statement
-  from a measured 0.
+  from a measured 0. (It IS shown, as `measured —`, on the footer's `pass_rate`
+  line; what the table cannot convey is *which* of the three null cases applies.
+  `integrity.partial_reason`, printed verbatim below it, names it.)
+- `engine.matrix_verdict` and `engine.matrix_verdict_reason` — the
+  support-matrix row this run established. The table does not render them at
+  all, so the JSON is the only place to read them. A `fail` here always carries
+  its reason.
+- `last_phase_completed`. A completed drill signs `7`, not `9` — phase 8's own
+  record and phase 9's teardown are both written after the bytes are frozen.
+  `7` is **not** "teardown was skipped"; teardown is attested in its own signed
+  document. See [the format reference](formats/drill-scorecard.md).
 - `redactions[]`.
 
 If you are deciding what a scorecard proves, read the JSON. If you are pasting
@@ -486,9 +536,12 @@ receipt — see [The storage receipt](#the-storage-receipt-a-second-signed-docum
 **In v0.1 this block is `null` in every scorecard the tool produces.** Logweir
 never invokes the engine's `validation run`, so nothing writes a report for it
 to retain: `OsoCliEngine` inherits `DataEngine::validation_run`'s default, which
-refuses rather than fabricating one, and phase 8 records
-`"no engine validation report under the per-run prefix"` and leaves the field
-null. A drill that reaches phase 8 at all therefore publishes
+refuses rather than fabricating one, and phase 8 leaves the field null. (Phase 8
+also logs `"no engine validation report under the per-run prefix"`, on the
+structured log and **not** in the scorecard — the signed document's `phases`
+array ends before phase 8's own record, because phase 8 signs a frozen copy.
+Do not go looking for that sentence in the JSON.) A drill that reaches phase 8
+at all therefore publishes
 `"engine_subreport": null`, and that is the correct reading of the field today:
 no engine sub-report was retained. The rest of this section describes what the
 block WOULD mean once the engine's own validation run is invoked, and it is here

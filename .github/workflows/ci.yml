@@ -20,6 +20,21 @@ jobs:
       - run: cargo test --workspace
       - name: pure-layer linkage guard (Global Constraint 2)
         run: ./scripts/check-no-oso.sh
+      - name: pure-layer purity guard (Global Constraint 1)
+        run: ./scripts/check-pure-core.sh
+      # `scripts/check-dod.sh` — the sole enforcer of the ASF attribution
+      # footer (Global Constraint 14), the GC14 namespace rule and relative
+      # link integrity. It existed, worked, printed an honest list of what it
+      # does NOT cover, and was reachable only from `just dod`: `grep -rn
+      # check-dod .github/` returned nothing, so a doc merged without the
+      # footer, or a publish to a forbidden namespace added to a workflow, was
+      # caught by nobody. It is a laptop-only check by design (no network, no
+      # GitHub API), which is exactly why it runs here as an ordinary step.
+      # NOTE for whoever edits this comment: check-dod.sh greps THIS directory
+      # for a publish under the upstream namespace, so do not write that
+      # pattern out in prose here — the guard would report itself.
+      - name: definition of done (attribution, GC14 namespaces, link integrity)
+        run: ./scripts/check-dod.sh
       - name: schema drift
         run: |
           cargo run -p logweir-core --example emit_schema > /tmp/schema.json

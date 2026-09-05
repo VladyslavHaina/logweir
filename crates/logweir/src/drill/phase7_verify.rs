@@ -1245,10 +1245,71 @@ pub fn run(
     })
 }
 
+/// A webhook URL reduced to the part that identifies the SINK, never the part
+/// that authorises posting to it.
+///
+/// `notifications.slack_webhook` is a `https://hooks.slack.com/services/T…/B…/…`
+/// URL, and that URL **is** a bearer credential: whoever holds it can post as
+/// the integration, with no other secret. It was logged verbatim at INFO on
+/// the success path and again on the error path, to the JSON subscriber
+/// intended for a log aggregator — while `pagerduty_routing_key`, four lines
+/// below, was deliberately never logged. The asymmetry was the tell.
+///
+/// Only scheme and host survive. The path, the query, the fragment and any
+/// `user:password@` userinfo are all dropped, because the secret can live in
+/// any of them (Slack puts it in the path; a signed webhook puts it in the
+/// query). An operator can still tell WHICH sink a line is about — that is the
+/// whole diagnostic value of the field — without the line being enough to use
+/// it. A URL that will not parse is reported as `<unparseable url>` rather
+/// than echoed, because "it did not look like a URL to me" is not a reason to
+/// print a secret.
+///
+/// Pinned by `crates/logweir/tests/notify.rs`.
+pub fn redact_url(url: &str) -> String {
+    // Hand-parsed rather than pulled in as a dependency: `crates/logweir`
+    // carries no URL crate, and the rule is "keep the prefix up to the first
+    // '/' after the scheme, minus any userinfo", which is four lines.
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<unparseable url>".into();
+    };
+    if scheme.is_empty() || rest.is_empty() {
+        return "<unparseable url>".into();
+    }
+    // Everything before the first `/`, `?` or `#` is the authority.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .expect("split always yields at least one element");
+    // `user:password@host` — the credential half is dropped, the host kept.
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host.is_empty() {
+        return "<unparseable url>".into();
+    }
+    format!("{scheme}://{host}/…")
+}
+
+/// What a failed notification may say about itself, with the URL taken out.
+///
+/// `ureq::Error::Status(code, response)` displays as `<url>: status code <n>`
+/// and `Transport` embeds the URL too, so neither may be printed. The status
+/// code is the whole diagnostic payload and carries no secret; a transport
+/// failure is reported by kind only.
+fn redact_ureq_error(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, _) => format!("status code {code}"),
+        ureq::Error::Transport(_) => "transport error".into(),
+    }
+}
+
 /// POSTs one JSON summary per configured sink. EVERY transport failure is
 /// logged and swallowed: the drill result is a measurement, and a webhook being
 /// down must never change it. `ureq` is blocking on purpose — it adds no async
 /// runtime to `crates/logweir`.
+///
+/// NO SINK URL REACHES A LOG LINE INTACT — see `redact_url`. That includes the
+/// error arm: `ureq::Error`'s own `Display` embeds the request URL, so
+/// `error = %e` leaked the same credential a second time, by a route a reader
+/// of the `url = %url` field alone would not have noticed.
 pub fn notify(n: &Notifications, sc: &Scorecard) {
     let body = serde_json::json!({
         "run_id": sc.run_id,
@@ -1263,10 +1324,16 @@ pub fn notify(n: &Notifications, sc: &Scorecard) {
         sinks.push(u.clone());
     }
     for url in sinks {
+        let sink = redact_url(&url);
         match ureq::post(&url).send_json(&body) {
-            Ok(_) => tracing::info!(target: "logweir::notify", url = %url, "notified"),
-            Err(e) => tracing::warn!(target: "logweir::notify", url = %url,
-                                     error = %e, "notification failed; continuing"),
+            Ok(_) => tracing::info!(target: "logweir::notify", sink = %sink, "notified"),
+            // `error = %e` is NOT logged: `ureq::Error`'s `Display` embeds the
+            // request URL, credential and all. What an operator needs from a
+            // failed notification is which sink and what kind of failure, and
+            // both survive `redact_url` + the variant name.
+            Err(e) => tracing::warn!(target: "logweir::notify", sink = %sink,
+                                     error = %redact_ureq_error(&e),
+                                     "notification failed; continuing"),
         }
     }
     if let Some(key) = &n.pagerduty_routing_key {
@@ -1280,7 +1347,12 @@ pub fn notify(n: &Notifications, sc: &Scorecard) {
                          "custom_details": body },
         });
         if let Err(e) = ureq::post("https://events.pagerduty.com/v2/enqueue").send_json(&ev) {
-            tracing::warn!(target: "logweir::notify", error = %e, "pagerduty enqueue failed");
+            // The URL here is a fixed public endpoint and carries no secret,
+            // but the routing key travels in the BODY and `ureq::Error` is
+            // redacted for every sink alike rather than case by case — a
+            // per-sink exemption is how the next credential reaches a log.
+            tracing::warn!(target: "logweir::notify", error = %redact_ureq_error(&e),
+                           "pagerduty enqueue failed");
         }
     }
 }

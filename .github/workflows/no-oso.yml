@@ -28,6 +28,12 @@ jobs:
             fi
           done
       - run: ./scripts/check-no-oso.sh
+      # Global Constraint 1, the OTHER pure-layer dimension. The job above
+      # greps `cargo tree` for cloud/k8s/engine crates only; nothing checked
+      # that `logweir-core` reads no clock and no entropy, and
+      # `ids::new_run_id` called `ulid::Ulid::new()` — a `SystemTime::now()`
+      # plus an OS-entropy read — through every review of the build.
+      - run: ./scripts/check-pure-core.sh
   # Job 2 exists from SP4 onward and is EXEMPT from the zero-AWS assertion by
   # construction — that is the whole point of the optional `msk-iam` feature
   # (spec §6 C2). It is a no-op in v0.1 because the feature does not yet exist.

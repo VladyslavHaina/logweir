@@ -155,12 +155,34 @@ impl Store {
     /// construction rather than only at the put: a spec naming a prefix
     /// outside `logweir/` is a phase-0 refusal, not a panic in the middle of
     /// a signed upload.
+    ///
+    /// THE PREFIX MUST BE EXACTLY `logweir/`, not merely start with it, and
+    /// that is a fix. `starts_with` admitted `logweir/prod/` — a legal-looking
+    /// prefix that `docs/quickstart.md` and `examples/drill.yaml` both already
+    /// described as refused — while every key builder in this crate is
+    /// hard-coded to `logweir/drills/…`. The result was `assert!(key
+    /// .starts_with(&self.prefix))` firing in `put_create_only`, AFTER the
+    /// restore had already run: a panic, exit 101, outside the five-code exit
+    /// contract entirely, on the one path where the drill had already touched
+    /// the operator's cluster. Refusing at construction puts it back inside
+    /// the contract, and this constructor's own doc comment above already
+    /// promised exactly that.
+    ///
+    /// `Filesystem` is exempt because it HAS no prefix — `StorageUrl::prefix`
+    /// returns `""` for it, since upstream's variant carries only `path` — and
+    /// its keys still go through the `LOGWEIR_ROOT` assertion in
+    /// `put_create_only`, so objects still land under `<path>/logweir/`. The
+    /// exemption is about a field that does not exist, not about the rule.
     pub fn from_url(u: &StorageUrl) -> Result<Self, StoreError> {
         let rt = Self::new_rt();
         let prefix = u.prefix().to_string();
-        if !prefix.starts_with(LOGWEIR_ROOT) && !matches!(u, StorageUrl::Filesystem { .. }) {
+        if prefix != LOGWEIR_ROOT && !matches!(u, StorageUrl::Filesystem { .. }) {
             return Err(StoreError::Backend(format!(
-                "evidence prefix `{prefix}` must start with `{LOGWEIR_ROOT}` (Global Constraint 6)"
+                "evidence prefix `{prefix}` must be exactly `{LOGWEIR_ROOT}` (Global \
+                 Constraint 6). Logweir builds every evidence key as \
+                 `{LOGWEIR_ROOT}drills/<run_id>…`, so a deeper prefix such as \
+                 `{LOGWEIR_ROOT}prod/` names a location nothing would ever be written \
+                 to; put the environment in the BUCKET, not in the prefix."
             )));
         }
         let inner = Self::build_backend(u, &rt)?;

@@ -1,6 +1,7 @@
 # The default recipe is the release gate (Task 22 step 8), so it must be able to
 # FAIL on formatting: it never runs the rewriting `fmt` recipe. Run `just fmt`
-# yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh.
+# yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh
+# and check-pure-core.sh.
 default: lint test
 
 fmt:
@@ -10,6 +11,7 @@ lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     ./scripts/check-no-oso.sh
+    ./scripts/check-pure-core.sh
 
 test:
     cargo test --workspace

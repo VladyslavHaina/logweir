@@ -15,21 +15,21 @@ This is `logweir drill show` over the scorecard `scripts/demo.sh` produced on a
 laptop — real output, pasted unedited:
 
 ```
-logweir drill scorecard  (01M1RJZNEM507A7XQ7WCGPK6SJ v1.0.0)
+logweir drill scorecard  (01M1RZW1F5KQE6HANC41M91CS9 v1.0.0)
 ------------------------------------------------------------------------
-  outcome                     Pass
+  outcome                     pass
   engine                      oso-cli 0.21.0 sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317
-  levers                      header_preflight=Honoured  dry_run_check_segments=UnknownNotObservable
+  levers                      header_preflight=honoured  dry_run_check_segments=unknown-not-observable
   target                      5L6g3nShT-eMCtK--X86sw  marker=logweir.scratch  2 mapping entry/ies
   approval                    demo@example.com (DEMO-1)
 
-  rto requested→verified      6s
-  rto approval→verified       6s
+  rto requested→verified      7s
+  rto approval→verified       7s
   rto restore only            0s
-* rto excluding preflight     6s   <- compared against objectives.rto_seconds
-  rpo                         9s   archive coverage gap at the requested point (NOT source-relative loss)
+* rto excluding preflight     7s   <- compared against objectives.rto_seconds
+  rpo                         12s   archive coverage gap at the requested point (NOT source-relative loss)
 
-  integrity                   ByteFingerprint/Pass  150/150 matched, 0 mismatch(es)
+  integrity                   byte-fingerprint/pass  150/150 matched, 0 mismatch(es)
   target diff                 0 collision(s), 2 would-create (full)
   topic parity                intended []  unexpected []
   evidence                    immutable=false  create_only_enforced=false
@@ -112,8 +112,14 @@ Logweir **drives** upstream's engine. It does not fork it, link it, or modify it
   [third_party/](third_party/README.md) and the licence ships inside the
   container image.
 - **Shelled out to, by digest.** `third_party/kafka-backup-binary.digest` pins
-  an immutable image digest, never a tag. Exactly three subcommands are
-  reachable from shipped code: `restore`, `validate-restore`, `validation run`.
+  an immutable image digest, never a tag. The allowlist `scripts/check-no-oso.sh`
+  enforces is exactly three subcommands — `restore`, `validate-restore`,
+  `validation run` — and that is a *ceiling*, not a description: **v0.1 actually
+  invokes two.** `OsoCliEngine` does not override `DataEngine::validation_run`,
+  so the engine's own validation run is never executed and
+  `engine_subreport` is `null` in every scorecard v0.1 produces. See
+  [ADR 0002](docs/adr/0002-shell-out.md) and
+  [stability.md](docs/stability.md).
 - **Never linked.** No crate in this workspace depends on `kafka-backup-core`,
   under any feature or target; `scripts/check-no-oso.sh` proves it on every
   build with `cargo tree`, `cargo metadata --all-features` and a narrow linkage

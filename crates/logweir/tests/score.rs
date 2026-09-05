@@ -79,7 +79,7 @@ fn a_record_newer_than_the_requested_point_is_a_zero_gap_never_a_negative_one() 
 #[test]
 fn the_objective_is_compared_against_rto_excluding_preflight() {
     let m = fixtures::measured(/*rto*/ 950, /*excl*/ 300, /*rpo*/ 0);
-    let (outcome, obj, _) = decide(
+    let (outcome, obj) = decide(
         &m,
         &fixtures::objectives(900, 300, 1.0),
         &fixtures::integrity_pass(),
@@ -95,7 +95,7 @@ fn the_objective_is_compared_against_rto_excluding_preflight() {
 #[test]
 fn a_missed_rpo_is_fail_objective() {
     let m = fixtures::measured(400, 300, 900);
-    let (outcome, obj, _) = decide(
+    let (outcome, obj) = decide(
         &m,
         &fixtures::objectives(900, 300, 1.0),
         &fixtures::integrity_pass(),
@@ -111,12 +111,18 @@ fn a_missed_rpo_is_fail_objective() {
 /// it.
 #[test]
 fn a_measured_pass_rate_below_the_objective_is_fail_objective() {
-    let (outcome, obj, measured_rate) = decide(
+    let integ = fixtures::integrity_rate(8, 10);
+    assert_eq!(
+        integ.pass_rate_measured,
+        Some(0.8),
+        "the rate under test is PHASE 7's published field; `decide` reads it and \
+         never recomputes one from the two counters"
+    );
+    let (outcome, obj) = decide(
         &fixtures::measured(1, 1, 0),
         &fixtures::objectives(900, 300, 1.0),
-        &fixtures::integrity_rate(8, 10),
+        &integ,
     );
-    assert_eq!(measured_rate, Some(0.8));
     assert_eq!(
         obj.met,
         Some(false),
@@ -128,7 +134,7 @@ fn a_measured_pass_rate_below_the_objective_is_fail_objective() {
 /// The boundary: measured exactly equal to the requested rate is met.
 #[test]
 fn a_measured_pass_rate_exactly_at_the_objective_is_met() {
-    let (outcome, obj, _) = decide(
+    let (outcome, obj) = decide(
         &fixtures::measured(1, 1, 0),
         &fixtures::objectives(900, 300, 0.8),
         &fixtures::integrity_rate(8, 10),
@@ -149,12 +155,13 @@ fn a_pass_rate_one_ulp_low_from_float_representation_still_counts_as_met() {
         got < want,
         "the fixture must actually straddle the boundary"
     );
-    let (_, obj, measured_rate) = decide(
+    let integ = fixtures::integrity_rate(3, 10);
+    assert_eq!(integ.pass_rate_measured, Some(got));
+    let (_, obj) = decide(
         &fixtures::measured(1, 1, 0),
         &fixtures::objectives(900, 300, want),
-        &fixtures::integrity_rate(3, 10),
+        &integ,
     );
-    assert_eq!(measured_rate, Some(got));
     assert_eq!(
         obj.met,
         Some(true),
@@ -164,7 +171,7 @@ fn a_pass_rate_one_ulp_low_from_float_representation_still_counts_as_met() {
 
 #[test]
 fn a_mismatch_is_fail_integrity_regardless_of_the_objectives() {
-    let (outcome, _, _) = decide(
+    let (outcome, _) = decide(
         &fixtures::measured(1, 1, 0),
         &fixtures::objectives(900, 300, 1.0),
         &fixtures::integrity_fail(),
@@ -174,20 +181,22 @@ fn a_mismatch_is_fail_integrity_regardless_of_the_objectives() {
 
 #[test]
 fn consume_only_keeps_the_requested_pass_rate_and_leaves_met_null() {
-    let (outcome, obj, measured_rate) = decide(
+    let integ = fixtures::integrity_consume_only();
+    assert_eq!(
+        integ.pass_rate_measured, None,
+        "the MEASURED rate is null — it lives in integrity.pass_rate_measured, set by \
+         phase 7 and by nobody else"
+    );
+    let (outcome, obj) = decide(
         &fixtures::measured(1, 1, 0),
         &fixtures::objectives(900, 300, 1.0),
-        &fixtures::integrity_consume_only(),
+        &integ,
     );
     assert_eq!(outcome, Outcome::Pass);
     assert_eq!(
         obj.pass_rate,
         Some(1.0),
         "objectives.pass_rate is the REQUEST; discarding it would hide what was asked for"
-    );
-    assert_eq!(
-        measured_rate, None,
-        "the MEASURED rate is null — it goes to integrity.pass_rate_measured"
     );
     assert_eq!(
         obj.met, None,
@@ -204,7 +213,8 @@ fn the_published_objectives_block_is_the_request_not_the_measurement() {
     integ.records_sampled = 100;
     integ.records_sampled_matching = 90;
     integ.mismatches = 10;
-    let (_, obj, measured_rate) = decide(
+    integ.pass_rate_measured = Some(0.9);
+    let (_, obj) = decide(
         &fixtures::measured(1, 1, 0),
         &fixtures::objectives(900, 300, 0.5),
         &integ,
@@ -212,7 +222,125 @@ fn the_published_objectives_block_is_the_request_not_the_measurement() {
     assert_eq!(obj.rto_seconds, Some(900));
     assert_eq!(obj.rpo_seconds, Some(300));
     assert_eq!(obj.pass_rate, Some(0.5), "the ask, not the 0.9 measured");
-    assert_eq!(measured_rate, Some(0.9), "the measurement, published apart");
+    assert_eq!(
+        integ.pass_rate_measured,
+        Some(0.9),
+        "the measurement is published apart, in the block phase 7 owns, and `decide` \
+         leaves it exactly as it found it"
+    );
+}
+
+/// The counters and the published rate are DIFFERENT FACTS, and `decide` reads
+/// the published one. This fixture is the shape `phase7_verify::roll_up`
+/// produces when one selection reconciles perfectly and another never
+/// reconciled at all: `25/25` in the counters, and a deliberately withheld
+/// rate. A `decide` that recomputes `matching / sampled` reports `met: true`
+/// here and turns this test red at assertion time. The end-to-end form of the
+/// same property, over a REAL phase-7 verdict and into the SIGNED BYTES, is
+/// `crates/logweir/tests/verify_phase.rs`'s
+/// `the_signed_document_carries_no_pass_rate_beside_a_partial_verdict`.
+#[test]
+fn decide_reads_the_published_rate_and_never_recomputes_one_from_the_counters() {
+    let mut integ = fixtures::integrity_pass();
+    integ.result = logweir_core::outcome::IntegrityResult::Partial;
+    integ.partial_reason = Some("one selection returned zero archive fingerprints".into());
+    integ.records_sampled = 25;
+    integ.records_sampled_matching = 25;
+    integ.mismatches = 0;
+    integ.pass_rate_measured = None;
+    let (outcome, obj) = decide(
+        &fixtures::measured(1, 1, 0),
+        &fixtures::objectives(900, 300, 1.0),
+        &integ,
+    );
+    assert_eq!(outcome, Outcome::FailIntegrity);
+    assert_eq!(
+        obj.met, None,
+        "the counters say 25/25 and the published rate says nothing; `met` follows the \
+         published rate, so the aggregate verdict is unmeasurable"
+    );
+}
+
+/// `all()` over an empty slice is vacuously TRUE. All three objective fields
+/// are optional, so `objectives: {}` used to sign `met: true` under three `—`
+/// rows — the identical defect `phase7_verify::roll_up` answers first and
+/// explicitly for an empty ledger. Nothing was requested, so there is nothing
+/// to report.
+#[test]
+fn no_objective_requested_leaves_met_null_never_vacuously_true() {
+    let (outcome, obj) = decide(
+        &fixtures::measured(1, 1, 0),
+        &logweir_core::spec::ObjectivesSpec {
+            rto_seconds: None,
+            rpo_seconds: None,
+            pass_rate: None,
+        },
+        &fixtures::integrity_pass(),
+    );
+    assert_eq!(
+        obj.met, None,
+        "no objective was requested, so `met: true` claims a verdict nobody asked for"
+    );
+    assert_eq!(
+        outcome,
+        Outcome::Pass,
+        "an unrequested objective is not a MISSED one; integrity still decides the outcome"
+    );
+}
+
+// ------------------------------------------------------- phase 8: the matrix verdict
+
+/// `docs/support-matrix.md`'s five outcomes, decided from what the drill
+/// actually did. The three-row table in `matrix_verdict_for`'s own doc comment,
+/// asserted.
+#[test]
+fn the_matrix_verdict_describes_the_drill_that_ran() {
+    use logweir::drill::phase8_score::matrix_verdict_for;
+    use logweir_core::outcome::{IntegrityLevel as L, MatrixVerdict as V};
+
+    // A pass at byte-fingerprint level is the one green row.
+    assert_eq!(
+        matrix_verdict_for(Outcome::Pass, L::ByteFingerprint, V::Pass),
+        (V::Pass, None)
+    );
+    // A pass at a REDUCED integrity level is `pass-degraded`, which is what
+    // that value is for — "the drill passed at a reduced integrity level".
+    assert_eq!(
+        matrix_verdict_for(Outcome::Pass, L::ConsumeOnly, V::Pass),
+        (V::PassDegraded, None)
+    );
+    // Anything that is not a pass is a `fail` carrying its reason.
+    for outcome in [
+        Outcome::FailObjective,
+        Outcome::FailIntegrity,
+        Outcome::PreflightFailed,
+    ] {
+        let (verdict, reason) = matrix_verdict_for(outcome, L::ByteFingerprint, V::Pass);
+        assert_eq!(verdict, V::Fail, "{outcome:?} must not carry a matrix pass");
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains(outcome.wire_name())),
+            "{outcome:?}: a `fail` verdict must name the outcome that produced it: {reason:?}"
+        );
+    }
+}
+
+/// The lever readback is NEVER RAISED here. Phase 5 lowered the field on
+/// evidence — the engine accepted `header_preflight` and did not act on it —
+/// and a drill-level verdict must not overwrite an engine-level finding with
+/// a weaker one, in either direction.
+#[test]
+fn a_lever_finding_from_phase_5_survives_the_drill_level_verdict() {
+    use logweir::drill::phase8_score::matrix_verdict_for;
+    use logweir_core::outcome::{IntegrityLevel as L, MatrixVerdict as V};
+    for outcome in [Outcome::Pass, Outcome::PreflightFailed] {
+        assert_eq!(
+            matrix_verdict_for(outcome, L::ByteFingerprint, V::FailLeverNotHonoured),
+            (V::FailLeverNotHonoured, None),
+            "{outcome:?} must not overwrite the lever finding"
+        );
+    }
 }
 
 // ----------------------------------------------------------------- phase 8: sign + put

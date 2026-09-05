@@ -108,9 +108,13 @@ logweir doctor \
   --approver-key approver.pub.pem
 ```
 
-`doctor` checks credentials, the engine digest and glibc floor, target
+`doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
-attempted. Add `--strict` to treat a check it could not perform (for example
+attempted. It compares the engine's own `--version` output against the pinned
+`0.21.0`; it does **not** compute or compare an image digest
+(`third_party/kafka-backup-binary.digest` is quoted in the failure message and
+nowhere else), so a green `ok engine version` line says the right version ran,
+not that the right binary did. Add `--strict` to treat a check it could not perform (for example
 `storage`, with no live bucket to list against) as a failure rather than a skip.
 
 `allowed-clusters.json` must name the target cluster's own id:

@@ -20,7 +20,12 @@ fn main() {
         format_version: logweir_core::FORMAT_VERSION.to_string(),
         run_id: "01J9X2QK7C4V0R8YB3ZP6MTS5A".into(),
         outcome: Outcome::Pass,
-        last_phase_completed: 9,
+        // 7, not 9: `phase8_score::run` signs a frozen clone, so phase 8's own
+        // record and phase 9's teardown are both pushed AFTER the bytes were
+        // signed. No real drill can emit 9 in a SIGNED document, and a
+        // canonical example carrying a value the code cannot produce is not an
+        // example. See `Scorecard::last_phase_completed`'s own doc comment.
+        last_phase_completed: 7,
         requested_at: t("2026-09-03T09:00:00Z"),
         approval_validated_at: Some(t("2026-09-03T09:00:30Z")),
         triggered_by: Some("KPMG Q3".into()),

@@ -94,24 +94,35 @@ pub fn compute_measured(
     }
 }
 
-/// Returns `(outcome, objectives-as-REQUESTED, measured pass rate)`. The caller
-/// writes the third element into `integrity.pass_rate_measured`.
+/// Returns `(outcome, objectives-as-REQUESTED)`.
 ///
-/// `integ` is phase 7's verdict, consumed as given: `IntegrityResult` is
-/// decided in exactly one place (`phase7_verify::roll_up`) and phase 8 never
-/// re-derives or second-guesses it.
-pub fn decide(
-    m: &Measured,
-    spec: &ObjectivesSpec,
-    integ: &Integrity,
-) -> (Outcome, Objectives, Option<f64>) {
-    // pass_rate is NULL when integrity.level is consume-only or not-attempted,
-    // in which case objectives.met is null rather than true.
-    let pass_rate = if integ.level == IntegrityLevel::ByteFingerprint && integ.records_sampled > 0 {
-        Some(integ.records_sampled_matching as f64 / integ.records_sampled as f64)
-    } else {
-        None
-    };
+/// `integ` is phase 7's verdict, consumed as given — ALL of it, not only
+/// `IntegrityResult`. Phase 8 never re-derives or second-guesses any part of
+/// it, and it returns no pass rate for a caller to write back, because
+/// `integrity.pass_rate_measured` is decided in exactly one place
+/// (`phase7_verify::roll_up`) and phase 8 has no business writing to it.
+///
+/// THAT IS THE WHOLE POINT OF THIS SIGNATURE, and it is a fix, not a style
+/// choice. `decide` used to recompute `records_sampled_matching /
+/// records_sampled` here and hand it back as a third tuple element, which
+/// `drill::mod` assigned straight onto `sc.integrity.pass_rate_measured`.
+/// `roll_up` withholds that ratio whenever some selection's record lane never
+/// reached a conclusion — a rate over PART of the sample, published as if it
+/// were the whole, is misleading even when every figure in it is true — and
+/// the recomputation here dropped exactly that condition. A drill whose second
+/// selection returned zero archive fingerprints therefore signed
+/// `integrity.result: "partial"` beside `pass_rate_measured: 1.0` and
+/// `objectives.met: true`. Removing the return value removes the door: there
+/// is no rate for a caller to republish. Pinned across the seam by
+/// `crates/logweir/tests/verify_phase.rs`'s
+/// `phase_8_never_republishes_a_pass_rate_phase_7_withheld` and
+/// `the_signed_document_carries_no_pass_rate_beside_a_partial_verdict`.
+pub fn decide(m: &Measured, spec: &ObjectivesSpec, integ: &Integrity) -> (Outcome, Objectives) {
+    // Phase 7's number, verbatim. Null when the level is consume-only or
+    // not-attempted, when the denominator is zero, OR when part of the sample
+    // was never reconciled — three cases, all of them `roll_up`'s to decide
+    // and none of them re-testable from the two counters alone.
+    let pass_rate = integ.pass_rate_measured;
 
     let rto_ok = match (spec.rto_seconds, m.rto_excluding_preflight_seconds) {
         (Some(want), Some(got)) => Some(got <= want),
@@ -143,7 +154,17 @@ pub fn decide(
     let met = if spec.pass_rate.is_some() && pass_rate.is_none() {
         None // unmeasurable, so the aggregate verdict is unmeasurable
     } else {
-        Some([rto_ok, rpo_ok, rate_ok].into_iter().flatten().all(|b| b))
+        // `all()` OVER AN EMPTY SLICE IS VACUOUSLY TRUE, and all three spec
+        // fields are optional: `objectives: {}` used to publish `met: true`
+        // under three `—` rows. That is the identical vacuous-`all()` defect
+        // `phase7_verify::roll_up` answers first and explicitly for the empty
+        // ledger; the guard had not been carried across the seam into phase 8.
+        // No objective requested is not "every objective met", it is nothing
+        // to report — `null`. `crates/logweir/src/metrics.rs` already gets
+        // this right by zipping, so the metrics file and the scorecard used to
+        // disagree in opposite directions.
+        let answered: Vec<bool> = [rto_ok, rpo_ok, rate_ok].into_iter().flatten().collect();
+        (!answered.is_empty()).then(|| answered.into_iter().all(|b| b))
     };
 
     let outcome = if integ.result != IntegrityResult::Pass {
@@ -160,7 +181,8 @@ pub fn decide(
     // ratio here would make two of three fields the ask and the third the
     // result, and would silently discard the adopter's `pass_rate: 1.0` — an
     // auditor could not tell from the document what rate was required. The
-    // measurement is published separately, in `integrity.pass_rate_measured`.
+    // measurement is published separately, in `integrity.pass_rate_measured`,
+    // by phase 7 and by nobody else.
     (
         outcome,
         Objectives {
@@ -169,8 +191,60 @@ pub fn decide(
             pass_rate: spec.pass_rate,
             met,
         },
-        pass_rate,
     )
+}
+
+/// The engine-matrix row this RUN establishes, decided once, immediately
+/// before the document is validated and signed.
+///
+/// `docs/support-matrix.md` defines `pass` as "the full drill ran and passed".
+/// Until this function existed, phase 5 raised the field to `Pass` the moment
+/// the `header_preflight` lever was honoured and nothing ever lowered it
+/// again, so a drill that then blocked at preflight, restored nothing, failed
+/// its reconciliation or missed its RTO signed `matrix_verdict: "pass"` inside
+/// a document whose own `outcome` said otherwise — verified on four real
+/// signed artifacts. A signed field saying "pass" inside a failed drill is
+/// indefensible whatever it was meant to mean.
+///
+/// `observed` is phase 5's per-run lever readback and is never RAISED here: a
+/// run that did not see the engine honour the lever keeps
+/// `fail(lever-not-honoured)` and its own meaning. Everything else is answered
+/// from what the drill actually did:
+///
+/// | outcome | integrity level | verdict |
+/// |---|---|---|
+/// | `pass` | `byte-fingerprint` | `pass` |
+/// | `pass` | anything else | `pass-degraded` |
+/// | anything else | — | `fail`, with a reason naming the outcome |
+///
+/// `EngineInfo.matrix_verdict`'s doc comment used to say the value was "copied
+/// from this engine tag's engine-matrix row; never re-derived per run", which
+/// was never true of the shipped code and is not true here either; that
+/// comment is corrected at its source.
+pub fn matrix_verdict_for(
+    outcome: Outcome,
+    level: IntegrityLevel,
+    observed: logweir_core::outcome::MatrixVerdict,
+) -> (logweir_core::outcome::MatrixVerdict, Option<String>) {
+    use logweir_core::outcome::MatrixVerdict as V;
+    if observed != V::Pass {
+        // Phase 5 already lowered it on evidence. Never raise, and never
+        // overwrite a lever finding with a weaker drill-level one.
+        return (observed, None);
+    }
+    match (outcome, level) {
+        (Outcome::Pass, IntegrityLevel::ByteFingerprint) => (V::Pass, None),
+        (Outcome::Pass, _) => (V::PassDegraded, None),
+        // `validate_invariants` REQUIRES a reason for `fail`, which is why
+        // this arm always builds one rather than leaving it null.
+        (other, _) => (
+            V::Fail,
+            Some(format!(
+                "the drill ran and did not pass: outcome {}",
+                crate::metrics::outcome_str(&other)
+            )),
+        ),
+    }
 }
 
 /// The signed result. `bytes` is what was signed AND what was stored: the
@@ -212,6 +286,40 @@ fn sig<E: std::fmt::Display>(e: E) -> DrillError {
     DrillError::SigningOrLock(e.to_string())
 }
 
+/// PHASE 8's OWN WARNINGS HAVE NO HOME IN THE SIGNED DOCUMENT, and saying so
+/// is the fix rather than the defect.
+///
+/// `drill::sign_and_publish` freezes a clone BEFORE `record(sc, 8, …)` pushes
+/// phase 8's record, deliberately: the document phase 8 signs cannot contain
+/// the record of its own signing. So `phases.iter_mut().find(|p| p.phase == 8)`
+/// answered `None` on every real run, and the "no engine validation report
+/// under the per-run prefix" note — which fires on EVERY v0.1 run, because
+/// `DataEngine::validation_run` is never invoked — was pushed onto nothing and
+/// discarded in silence, while `docs/stability.md` and
+/// `docs/verify-a-scorecard.md` both asserted it reached the document. A
+/// documented guarantee the code does not deliver is this build's recurring
+/// defect; both documents are corrected, and the note now goes somewhere a
+/// reader can actually meet it.
+///
+/// That somewhere is the structured log, on the `logweir::score` target, and
+/// the line says explicitly that the note is NOT in the signed bytes so nobody
+/// goes looking for it there. The phase-record push is kept for a caller whose
+/// document already carries a phase-8 record — `crates/logweir/tests/score.rs`
+/// builds exactly that shape — so the path is not dead, merely not taken by
+/// this orchestrator.
+fn note(sc: &mut Scorecard, msg: &str) {
+    tracing::warn!(
+        target: "logweir::score",
+        run_id = %sc.run_id,
+        note = msg,
+        "phase 8 warning; NOT carried in the signed document, whose phase list ends \
+         before phase 8's own record"
+    );
+    if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 8) {
+        p.notes.push(msg.to_string());
+    }
+}
+
 pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, DrillError> {
     let mut sc = sc.clone();
     let run_id = sc.run_id.clone();
@@ -224,6 +332,13 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     //    exact stored report bytes with no canonicalization at verification
     //    time, so a parsed value re-emitted through `to_deterministic_json`
     //    would no longer verify.
+    // NOTE: this lists the EVIDENCE store, while `render_validation` writes the
+    // identical prefix into a document whose `storage:` block is the ARCHIVE —
+    // a different bucket and principal by default. The mismatch is inert today
+    // (the engine's `validation run` is never invoked, so nothing is ever
+    // written under either) and is named at both sites so that whoever wires
+    // `DataEngine::validation_run` has to resolve it; see
+    // `crates/logweir-engine-oso/src/render_validation.rs`.
     match store.list_keys(&format!("logweir/{run_id}/engine-validation/")) {
         Ok(keys) if !keys.is_empty() => {
             // `list_keys` sorts, so this is the lexicographically first key,
@@ -249,29 +364,42 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
             // not hold, say so rather than dropping the extras in silence.
             if keys.len() > 1 {
                 let n = keys.len();
-                if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 8) {
-                    p.notes.push(format!(
+                let key = key.clone();
+                note(
+                    &mut sc,
+                    &format!(
                         "engine-validation prefix held {n} objects; retained {key} and \
                          dropped the rest"
-                    ));
-                }
+                    ),
+                );
             }
         }
         // An empty prefix is a warning on the phase record, never a failure:
         // the engine's own report is corroboration, not the measurement.
         _ => {
             sc.engine_subreport = None;
-            if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 8) {
-                p.notes
-                    .push("no engine validation report under the per-run prefix".into());
-            }
+            note(
+                &mut sc,
+                "no engine validation report under the per-run prefix",
+            );
         }
     }
 
-    // 2. Refuse to sign a self-contradicting document.
+    // 2. The engine-matrix row this run establishes. Decided HERE, at the one
+    //    chokepoint every signed document passes through — the phase-5
+    //    `Verdict::Block` jump, the phase-6 `RestoreNoOp` interception and the
+    //    normal run all reach `run` and none of them can miss it — and before
+    //    `validate_invariants`, so a `fail` without its required reason is
+    //    unconstructible rather than merely unlikely.
+    let (verdict, reason) =
+        matrix_verdict_for(sc.outcome, sc.integrity.level, sc.engine.matrix_verdict);
+    sc.engine.matrix_verdict = verdict;
+    sc.engine.matrix_verdict_reason = reason;
+
+    // 3. Refuse to sign a self-contradicting document.
     sc.validate_invariants().map_err(sig)?;
 
-    // 3. Never sign a claim that cannot be substantiated at signing time.
+    // 4. Never sign a claim that cannot be substantiated at signing time.
     //
     //    These four fields describe the upload that has NOT HAPPENED YET —
     //    whether the put was conditional, what version id it got, and what the
@@ -302,10 +430,10 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.evidence.retain_until = None;
     sc.evidence.version_id = None;
 
-    // 4. The EXACT bytes that will be stored.
+    // 5. The EXACT bytes that will be stored.
     let bytes = logweir_core::det_json::to_deterministic_json(&sc).map_err(sig)?;
 
-    // 5. Sign. Any failure here is exit 4 and NOTHING has been uploaded — this
+    // 6. Sign. Any failure here is exit 4 and NOTHING has been uploaded — this
     //    step precedes every put, which is the mechanism, not a convention.
     let key = logweir_evidence::keys::SigningKey::from_pem_file(signing_key).map_err(sig)?;
     let sidecar = logweir_evidence::sign::sign_detached(
@@ -316,7 +444,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     .map_err(sig)?;
     let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(sig)?;
 
-    // 6. Create-only puts. An object that already exists is REFUSED
+    // 7. Create-only puts. An object that already exists is REFUSED
     //    (`StoreError::AlreadyExists`), never overwritten, so a drill can
     //    never silently replace a previous drill's evidence. A backend that
     //    answers Unsupported takes the HEAD-then-PUT fallback inside
@@ -328,11 +456,11 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
         .put_create_only(&format!("logweir/drills/{run_id}.sig"), &sidecar_bytes)
         .map_err(sig)?;
 
-    // 7. Readback ONLY, and IN-MEMORY ONLY. No readback => immutable: false.
+    // 8. Readback ONLY, and IN-MEMORY ONLY. No readback => immutable: false.
     //
     //    These assignments land on `Signed.scorecard` AFTER the bytes were
     //    signed, so they are deliberately NOT in the signed artifact — see
-    //    step 3, which zeroed all four fields precisely so the signed document
+    //    step 4, which zeroed all four fields precisely so the signed document
     //    carries no unsubstantiated claim about them. The signed bytes and
     //    `Signed.scorecard` therefore disagree here on purpose, and in the
     //    safe direction: the document under-claims, and the readback is the
@@ -343,7 +471,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.evidence.version_id = out.version_id.clone();
     // The two lines below are LIVE WIRING that is provably a no-op in v0.1, and
     // that is worth stating rather than discovering: `object_lock_readback`
-    // returns `None` on every backend `object_store` 0.14 can build, and step 3
+    // returns `None` on every backend `object_store` 0.14 can build, and step 4
     // already zeroed both fields, so both sides are equal today. Deleting them
     // therefore changes nothing observable and no test can catch it (Task 20
     // fix round 1, mutants M12/M16 — knowingly accepted survivors). They are
@@ -356,7 +484,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.evidence.retain_until = lock.as_ref().and_then(|l| l.retain_until);
     sc.evidence.immutable = lock.map(|l| l.immutable).unwrap_or(false);
 
-    // 8. Any failure at 6 or 7 is also exit 4 — see the `map_err(sig)` above.
+    // 9. Any failure at 7 or 8 is also exit 4 — see the `map_err(sig)` above.
     //    NOTE: `bytes` is what was signed AND what was stored. `sc` now carries
     //    the evidence readback, which is why `Signed.bytes` is returned
     //    alongside it: the orchestrator writes THESE bytes to --out and never
@@ -378,7 +506,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
 /// version id it got, and what the provider says about WORM retention — are
 /// unknowable at signing time, so step 3 zeroes all four in the signed
 /// document rather than sign a claim the store has never been asked about.
-/// Step 7 then performs the real readback and lands it on `Signed.scorecard`,
+/// Step 8 then performs the real readback and lands it on `Signed.scorecard`,
 /// which nothing serialises.
 ///
 /// Until this receipt existed, that readback was published NOWHERE an auditor

@@ -26,6 +26,16 @@ output.**
   sub-report was retained", **not** "the engine reported nothing wrong". See
   `docs/stability.md`.
 
+- **`last_phase_completed` was `9` and is now `7`, matching the code.** No real
+  drill can emit `9` in a SIGNED document: `phase8_score::run` is handed a
+  frozen clone, so phase 8's own record and phase 9's teardown are both pushed
+  after the bytes were signed, and a v0.1.0 signed scorecard ends at 5, 6 or 7.
+  This file is unsigned, so it was corrected in place rather than documented as
+  a divergence — the same treatment `create_only_enforced` got below, for the
+  same reason. `drill run`'s stdout line quotes the artifact's value, so the
+  console and the document cannot disagree about it. The signed fixtures under
+  `signed/` still read `9` and say so in their own README.
+
 - **`evidence.create_only_enforced` was `true` and is now `false`, matching the
   code.** Task 20 made phase 8 zero all four `evidence` fields immediately
   before signing, because they describe an upload that has not happened yet, so

@@ -25,8 +25,15 @@ pub enum Command {
     Drill(DrillCmd),
     /// Print a JSON Schema. v0.1 accepts only `scorecard`.
     Schema { which: String },
-    /// Check credentials, engine digest and glibc floor, target reachability,
+    /// Check credentials, engine VERSION and glibc floor, target reachability,
     /// marker topic and approver key — before a drill is attempted.
+    //
+    // "engine version", not "engine digest": `doctor` compares the engine's
+    // `--version` string against the pinned 0.21.0 and computes NO digest.
+    // `third_party/kafka-backup-binary.digest` is read only to interpolate
+    // into a failure message. The module's own doc comment said "engine
+    // version pinned" and was right; this help text was the wrong one, and it
+    // is the line an operator reads before deciding what `doctor` proved.
     Doctor {
         #[arg(long)]
         spec: PathBuf,

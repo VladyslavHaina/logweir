@@ -78,6 +78,12 @@ futures = "0.3"
 # std::process (Task 12). "rt" + "time" + "net" is what object_store's HTTP
 # clients need from the single reused current-thread runtime.
 tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
+# Pinned deliberately: crates.io is at 3.0.0, but `Ulid::new()`, `random()`,
+# `from_parts()` and `to_string()` are unchanged across 1.x-3.x and v0.1 uses
+# nothing else; revisit only if a further API is needed. `logweir-core` uses
+# ONLY the pure `from_parts`/`to_string` encoder half (Global Constraint 1) —
+# the clock and entropy read lives in `crates/logweir/src/ids.rs`.
+ulid = "1"
 
 # Task 22, addendum ruling A5. `cargo dist` reads its targets, installers and CI
 # backend from here; without this section `cargo dist plan` errors out and

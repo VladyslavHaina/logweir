@@ -5,6 +5,7 @@ pub mod cli;
 pub mod doctor;
 pub mod drill;
 pub mod exit;
+pub mod ids;
 pub mod metrics;
 pub mod schema;
 pub mod show;

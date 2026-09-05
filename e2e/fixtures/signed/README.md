@@ -13,6 +13,17 @@ so would invalidate the signatures these fixtures exist to exercise:
   has `engine_subreport: null` — `OsoCliEngine` does not override
   `DataEngine::validation_run`, so no engine report is ever retained. See
   `docs/stability.md`, "`engine_subreport` is always null in v0.1".
+- **`last_phase_completed: 9`.** No real drill can sign that value.
+  `phase8_score::run` is handed a frozen clone, so phase 8's own phase record —
+  and phase 9's teardown, which happens after the put — are pushed onto the
+  in-memory document AFTER the bytes were signed; a v0.1.0 signed scorecard
+  therefore ends at **5, 6 or 7**, and a completed drill reads `7`. Reading `9`
+  here is not "teardown ran"; reading `7` in a real artifact is not "teardown
+  did not run" (it is attested in its own signed document). `emit_fixture` now
+  emits `7`, so this divergence closes by itself the next time
+  `just fixtures-sign` is run; it is listed rather than fixed here for the
+  same reason as the bullet below. The unsigned `e2e/fixtures/scorecard-pass.json`
+  was corrected in place, exactly as `create_only_enforced` was.
 - **`evidence.create_only_enforced: true`** — in `scorecard.json` and
   `scorecard-self-attested.json`, **the two files in THIS directory**. Task 20
   made phase 8 zero all four `evidence` fields before signing, because they

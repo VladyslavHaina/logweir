@@ -38,10 +38,31 @@ that reader and this one is a reference.
 | `format_version` | string | Semver of this format. `1.0.0` in v0.1. |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
-| `last_phase_completed` | integer | Domain `-1..=9`. `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../adr/0007-from-cluster-in-v0.1.md) — so **v0.1.0 never emits `-1`**. |
+| `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../adr/0007-from-cluster-in-v0.1.md) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
 | `requested_at` | RFC 3339 | When the run was requested. |
 | `approval_validated_at` | RFC 3339 | When the approval's signature was checked. |
 | `triggered_by` | string \| null | Free text from `--triggered-by`. Deliberately **not** a metric label: unbounded cardinality. |
+
+### Why a completed drill reads `last_phase_completed: 7`
+
+The scorecard is the **exact bytes phase 8 signed**, and phase 8 signs a frozen
+copy. Its own phase record is pushed onto the in-memory document afterwards,
+and phase 9 (teardown) runs after the upload. So the highest phase a SIGNED
+scorecard can record is 7, and the emittable values in v0.1.0 are:
+
+| Value | What happened |
+|---|---|
+| `5` | The preflight blocked the plan, or the restore ran and left every sampled partition empty (`record` does not advance the counter on a phase that errored). |
+| `6` | The restore completed and verification did not. |
+| `7` | Every phase through verification completed — **the normal successful drill**. |
+
+**`7` does not mean teardown was skipped.** Teardown is attested in its own
+separately signed document, `<run_id>.teardown.json`. `drill run`'s stdout line
+quotes this same value, from the artifact rather than from the in-memory copy,
+so the console and the document cannot disagree about it.
+
+`8` and `9` are in the DOMAIN — `validate_invariants` accepts `-1..=9` — and no
+v0.1.0 writer produces them.
 
 ## `engine`
 
@@ -54,8 +75,8 @@ that reader and this one is a reference.
 | `engine.levers.header_preflight` | enum | Whether the engine honoured the preflight lever. |
 | `engine.levers.dry_run_check_segments` | enum | Whether the segment check was honoured. `unknown-not-observable` is a real and common value: the lever's effect is not observable from outside on every version. |
 | `engine.levers.unknown_key_warnings` | string[] | Keys Logweir rendered that the engine reported ignoring. A **non-empty array is a degraded restore**, not a cosmetic warning: the engine ran with less configuration than the approved plan specified. |
-| `engine.matrix_verdict` | enum | This engine version's support-matrix row. |
-| `engine.matrix_verdict_reason` | string \| null | Why, when the verdict is not `pass`. |
+| `engine.matrix_verdict` | enum | The support-matrix row **this run** established, decided at signing time from what the drill actually did — never a `pass` inside a document whose own `outcome` is not `pass`. `pass` = the full drill ran and passed at `byte-fingerprint` level; `pass-degraded` = it passed at a reduced integrity level; `fail` = it ran and did not pass, with the reason below; `fail-lever-not-honoured` = phase 5 observed the engine accept a lever and not act on it, and that finding is never overwritten by a drill-level verdict; `unsupported-lever-absent` = the engine predates a lever Logweir needs. See [support-matrix.md](../support-matrix.md). |
+| `engine.matrix_verdict_reason` | string \| null | Why, when the verdict is `fail`. **Required** for `fail` and null otherwise — enforced by `validate_invariants` and by both verifiers. |
 
 ## `source` and `target`
 
@@ -150,7 +171,7 @@ Copied verbatim from your spec, plus the verdict.
 | `rto_seconds` | integer \| null | Requested maximum RTO. |
 | `rpo_seconds` | integer \| null | Requested maximum coverage gap. **Never negative** — a negative allowed gap is unsatisfiable, not strict, since the measured value is non-negative. |
 | `pass_rate` | float \| null | Requested minimum reconciliation rate. |
-| `met` | bool \| **null** | **Tri-state.** `true` every non-null objective was met; `false` at least one was missed; **`null` a `pass_rate` objective was requested but could not be measured** — unmeasurable, which is not met. Do not collapse `null` into either. |
+| `met` | bool \| **null** | **Tri-state.** `true` every requested objective was met; `false` at least one was missed; **`null`** either a `pass_rate` objective was requested and could not be measured (unmeasurable, which is not met) **or no objective was requested at all** — `objectives: {}` reads `null`, never a vacuous `true`. Do not collapse `null` into either. |
 
 ## `sample`
 

@@ -75,7 +75,26 @@ KAFKA_VERSION=3.7.1
 # not what it pulls. Keep in lockstep with third_party/kafka-backup-binary.digest.
 OSO_DIGEST=${DIGEST}
 ENV
-sed -i.bak "s|REPLACE_WITH_PINNED_DIGEST|${DIGEST#sha256:}|" Dockerfile && rm -f Dockerfile.bak
+# The Dockerfile pins the SAME digest, and it is REWRITTEN here rather than
+# templated: this line used to `sed` for a `REPLACE_WITH_PINNED_DIGEST` marker
+# that the Dockerfile has not contained for several tasks, so re-running this
+# script silently updated the digest file and `e2e/compose/.env` and left the
+# image build on the OLD digest. The two happened to agree, which is exactly
+# why nobody noticed. `e2e-seed.sh` already carries a drift check for `.env`;
+# the Dockerfile had none.
+#
+# Rewrite the whole `FROM osodevops/kafka-backup@sha256:…` reference, then
+# ASSERT the file now names this digest — a `sed` that matched nothing must
+# not be reported as an update.
+sed -i.bak -E "s|(FROM osodevops/kafka-backup@)sha256:[0-9a-f]{64}|\1${DIGEST}|" Dockerfile \
+  && rm -f Dockerfile.bak
+if ! grep -q "FROM osodevops/kafka-backup@${DIGEST}" Dockerfile; then
+  echo "FAIL: Dockerfile does not pin ${DIGEST} after the rewrite." >&2
+  echo "      Expected a line 'FROM osodevops/kafka-backup@<digest> AS engine'." >&2
+  grep -n 'FROM osodevops/kafka-backup' Dockerfile >&2 || true
+  exit 1
+fi
+echo "ok: Dockerfile, third_party/kafka-backup-binary.digest and e2e/compose/.env all pin ${DIGEST}"
 
 # The extracted binary is a linux/amd64 ELF (upstream never publishes
 # arm64). On Linux (CI, and any real deployment host) it is exec'd directly

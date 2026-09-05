@@ -19,7 +19,13 @@ pub fn render_table(sc: &Scorecard) -> String {
     ));
     o.push_str(&"-".repeat(72));
     o.push('\n');
-    row(&mut o, "outcome", format!("{:?}", sc.outcome));
+    // The WIRE spelling, not Rust `Debug`. One binary produced three
+    // spellings of the same enum — `Pass` here, `pass` on `drill run`'s stdout
+    // line, `pass` in the JSON and the Prometheus labels — so a reader
+    // comparing the table against the signed document (which is what this
+    // table is FOR) had to translate. `wire_name` is pinned against each
+    // enum's own `Serialize` impl in `logweir_core::outcome`.
+    row(&mut o, "outcome", sc.outcome.wire_name());
     row(
         &mut o,
         "engine",
@@ -32,8 +38,9 @@ pub fn render_table(sc: &Scorecard) -> String {
         &mut o,
         "levers",
         format!(
-            "header_preflight={:?}  dry_run_check_segments={:?}",
-            sc.engine.levers.header_preflight, sc.engine.levers.dry_run_check_segments
+            "header_preflight={}  dry_run_check_segments={}",
+            sc.engine.levers.header_preflight.wire_name(),
+            sc.engine.levers.dry_run_check_segments.wire_name()
         ),
     );
     row(
@@ -90,9 +97,9 @@ pub fn render_table(sc: &Scorecard) -> String {
         &mut o,
         "integrity",
         format!(
-            "{:?}/{:?}  {}/{} matched, {} mismatch(es)",
-            sc.integrity.level,
-            sc.integrity.result,
+            "{}/{}  {}/{} matched, {} mismatch(es)",
+            sc.integrity.level.wire_name(),
+            sc.integrity.result.wire_name(),
             sc.integrity.records_sampled_matching,
             sc.integrity.records_sampled,
             sc.integrity.mismatches
@@ -240,6 +247,32 @@ fn run_writing(
             return crate::exit::ExitCode::Operational;
         }
     };
+    // GLOBAL CONSTRAINT 12. `drill show` IS A READER, and the reader contract
+    // is "ignore unknown fields, refuse a higher major". Task ownership treated
+    // this command as a renderer, so it never inherited the refusal that
+    // `drill verify` gets for free from `validate_invariants` — a real
+    // scorecard with `format_version` rewritten to `"2.0.0"` printed the full
+    // table, header reading `v2.0.0`, `outcome Pass`, and exited 0. Rendering
+    // a document under field meanings a future major may have redefined is
+    // exactly the overstatement the constraint exists to prevent, and it is
+    // worse on the `table` path than anywhere else: the table is the surface a
+    // human reads instead of the JSON.
+    //
+    // BOTH formats, deliberately. `--format json` writes the raw bytes, so it
+    // looks like a harmless passthrough — but its exit code is what a CronJob
+    // or a CI step branches on, and exit 0 over a document this build cannot
+    // honestly interpret is the same claim by a quieter route (the same
+    // argument `run_writing`'s own fix round 1 makes about parsing on every
+    // format rather than only on `table`).
+    //
+    // Exit 1, not 4: `show` performs no signature check and makes no claim
+    // about one, and `docs/verify-a-scorecard.md` defines 4 as a signature or
+    // lock-proof failure. "This reader cannot honestly render this document"
+    // is an operational refusal.
+    if let Err(e) = sc.refuse_unreadable_major() {
+        eprintln!("refusing to render: {e}");
+        return crate::exit::ExitCode::Operational;
+    }
     match format {
         "json" => {
             // The RAW bytes as stored — printing a re-serialisation would show
@@ -428,5 +461,75 @@ mod tests {
             run_writing(&path, "table", &mut FailingWriter),
             crate::exit::ExitCode::Operational
         );
+    }
+
+    /// GLOBAL CONSTRAINT 12. The README says "a reader ... refuses a higher
+    /// major"; this reader rendered one and exited 0. The mutant that undoes
+    /// the fix — deleting the `refuse_unreadable_major` call — turns both
+    /// assertions below red at ASSERTION time: the exit code becomes `Ok` and
+    /// the table is written.
+    fn a_scorecard_at_format_version(v: &str) -> Vec<u8> {
+        let mut doc: serde_json::Value = serde_json::from_slice(GOOD_SCORECARD).unwrap();
+        doc["format_version"] = serde_json::Value::String(v.into());
+        serde_json::to_vec_pretty(&doc).unwrap()
+    }
+
+    #[test]
+    fn a_higher_major_format_version_is_refused_and_never_rendered() {
+        let (_dir, path) = write_temp(&a_scorecard_at_format_version("2.0.0"));
+        let mut out = Vec::new();
+        assert_eq!(
+            run_writing(&path, "table", &mut out),
+            crate::exit::ExitCode::Operational,
+            "a document from a future major bump must be refused, not rendered"
+        );
+        assert!(
+            out.is_empty(),
+            "nothing may be written for a document this reader cannot honestly \
+             interpret: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    /// The `json` passthrough looks harmless and is not: its EXIT CODE is what
+    /// a CronJob or a CI step branches on, so exit 0 over an uninterpretable
+    /// document makes the same claim by a quieter route.
+    #[test]
+    fn a_higher_major_format_version_is_refused_under_json_format_too() {
+        let (_dir, path) = write_temp(&a_scorecard_at_format_version("2.0.0"));
+        let mut out = Vec::new();
+        assert_eq!(
+            run_writing(&path, "json", &mut out),
+            crate::exit::ExitCode::Operational
+        );
+        assert!(out.is_empty());
+    }
+
+    /// The other half of GC12, and the half a too-eager refusal would break:
+    /// a HIGHER MINOR is readable — "readers ignore unknown fields" — so
+    /// `1.9.9` still renders. A mutant that refuses on any version difference
+    /// rather than on the major turns this red.
+    #[test]
+    fn a_higher_minor_format_version_still_renders() {
+        let (_dir, path) = write_temp(&a_scorecard_at_format_version("1.9.9"));
+        let mut out = Vec::new();
+        assert_eq!(
+            run_writing(&path, "table", &mut out),
+            crate::exit::ExitCode::Ok
+        );
+        assert!(!out.is_empty());
+    }
+
+    /// A `format_version` that is not semver at all is refused rather than
+    /// rendered under an assumed meaning.
+    #[test]
+    fn an_unparseable_format_version_is_refused() {
+        let (_dir, path) = write_temp(&a_scorecard_at_format_version("not-a-version"));
+        let mut out = Vec::new();
+        assert_eq!(
+            run_writing(&path, "table", &mut out),
+            crate::exit::ExitCode::Operational
+        );
+        assert!(out.is_empty());
     }
 }

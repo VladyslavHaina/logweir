@@ -6,6 +6,47 @@ use logweir_core::engine::*;
 use logweir_core::spec::Anchor;
 use std::path::PathBuf;
 
+/// How much of a failed subprocess's stream may travel into an `EngineError`.
+///
+/// This is not cosmetic. `crates/logweir/src/drill/mod.rs` writes an
+/// `EngineError`'s `Display` into `PhaseRecord.outcome`, which phase 8 signs
+/// and puts **create-only** into the evidence bucket: whatever lands there is
+/// immutable and cannot be redacted afterwards. The capture was unbounded, and
+/// the child inherits the parent environment — which is where
+/// `AWS_SECRET_ACCESS_KEY` lives on the Kubernetes path
+/// (`examples/cronjob-drill.yaml`). An engine that echoes its configuration on
+/// failure could therefore write a credential into a write-once document.
+///
+/// A byte cap does not make that impossible and is not claimed to: it bounds
+/// the blast radius and the document size. `RUST_LOG=warn` (set in
+/// `run_engine`) remains the measure that keeps the engine quiet in the first
+/// place, and it is a mitigation, not a boundary.
+const MAX_CAPTURED_STREAM_BYTES: usize = 4096;
+
+/// The TAIL of a captured stream, capped at `MAX_CAPTURED_STREAM_BYTES`, with
+/// an explicit marker when anything was dropped — never a silent truncation,
+/// which would let a reader mistake a cut-off message for the whole of it.
+///
+/// The tail rather than the head: a process's last output is what explains why
+/// it stopped. The cut is moved to a `char` boundary so the result is always
+/// valid UTF-8 (`String` requires it, and the engine's output is text).
+fn captured(s: &str) -> String {
+    if s.len() <= MAX_CAPTURED_STREAM_BYTES {
+        return s.to_string();
+    }
+    let mut cut = s.len() - MAX_CAPTURED_STREAM_BYTES;
+    while cut < s.len() && !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!(
+        "[{} earlier byte(s) dropped; a signed scorecard is immutable and this capture is \
+         bounded at {} bytes]\n{}",
+        cut,
+        MAX_CAPTURED_STREAM_BYTES,
+        &s[cut..]
+    )
+}
+
 pub struct OsoCliEngine {
     binary: PathBuf,
     version: String,
@@ -230,13 +271,16 @@ impl DataEngine for OsoCliEngine {
             .ok_or_else(|| {
                 EngineError::Operational(format!(
                     "validate-restore exited {} and printed no JSON object\nstdout: {}\nstderr: {}",
-                    run.exit_code, run.stdout, run.stderr
+                    run.exit_code,
+                    captured(&run.stdout),
+                    captured(&run.stderr)
                 ))
             })?;
         let r: vendored::manifest::DryRunReport = serde_json::from_str(json).map_err(|e| {
             EngineError::Operational(format!(
                 "validate-restore exited {} and its stdout is not a DryRunReport: {e}\nstdout: {}",
-                run.exit_code, run.stdout
+                run.exit_code,
+                captured(&run.stdout)
             ))
         })?;
 
@@ -337,7 +381,9 @@ impl DataEngine for OsoCliEngine {
         if run.exit_code != 0 {
             return Err(EngineError::Operational(format!(
                 "kafka-backup restore exited {}\nstdout: {}\nstderr: {}",
-                run.exit_code, run.stdout, run.stderr
+                run.exit_code,
+                captured(&run.stdout),
+                captured(&run.stderr)
             )));
         }
         self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
@@ -512,5 +558,54 @@ fn select_sample(
             out.dedup_by_key(|f| f.offset);
             Ok(out)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{captured, MAX_CAPTURED_STREAM_BYTES};
+
+    /// The whole point of the cap: an `EngineError`'s `Display` is written
+    /// into `PhaseRecord.outcome`, which is signed and put create-only. An
+    /// unbounded capture puts unbounded, unredactable subprocess output into
+    /// an immutable document.
+    #[test]
+    fn a_captured_stream_is_bounded_and_says_so_when_it_was_cut() {
+        let huge = "x".repeat(MAX_CAPTURED_STREAM_BYTES * 3);
+        let out = captured(&huge);
+        assert!(
+            out.len() < MAX_CAPTURED_STREAM_BYTES + 200,
+            "the capture is unbounded: {} bytes",
+            out.len()
+        );
+        assert!(
+            out.contains("earlier byte(s) dropped"),
+            "a silent truncation lets a reader mistake a cut-off message for the whole of it"
+        );
+    }
+
+    /// The TAIL survives: a process's last output is what explains why it
+    /// stopped.
+    #[test]
+    fn a_captured_stream_keeps_its_end_not_its_beginning() {
+        let s = format!("{}THE-REASON", "y".repeat(MAX_CAPTURED_STREAM_BYTES * 2));
+        assert!(captured(&s).ends_with("THE-REASON"));
+    }
+
+    /// Anything that fits is passed through byte for byte — the normal case,
+    /// and the one every existing test asserts against.
+    #[test]
+    fn a_short_stream_is_passed_through_unchanged() {
+        assert_eq!(captured("exited 1: no such file"), "exited 1: no such file");
+    }
+
+    /// The cut lands on a `char` boundary, so a multi-byte character straddling
+    /// it cannot panic the very error path that is trying to report a failure.
+    #[test]
+    fn a_multibyte_character_at_the_cut_does_not_panic() {
+        let s = "é".repeat(MAX_CAPTURED_STREAM_BYTES); // 2 bytes each
+        let out = captured(&s);
+        assert!(out.contains("earlier byte(s) dropped"));
+        assert!(out.ends_with('é'));
     }
 }

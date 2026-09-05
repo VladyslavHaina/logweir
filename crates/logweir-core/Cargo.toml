@@ -15,9 +15,11 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-ulid = "1"        # pinned deliberately: crates.io is at 3.0.0, but `Ulid::new()`
-                  # and `to_string()` are unchanged across 1.x-3.x and v0.1 uses
-                  # nothing else; revisit only if a third API is needed.
+# ENCODER ONLY. Global Constraint 1 forbids a clock read in this crate, so
+# `ids::format_run_id` uses `Ulid::from_parts` + `to_string` and NOTHING that
+# reads `SystemTime` or the entropy pool — `Ulid::new()` reads both and lives
+# in `crates/logweir/src/ids.rs`. `scripts/check-pure-core.sh` greps for it.
+ulid = { version = "1", default-features = false }
 
 [features]
 default = []

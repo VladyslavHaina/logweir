@@ -95,6 +95,60 @@ fn a_write_outside_the_logweir_root_panics_even_when_the_prefix_allows_it() {
     let _ = s.put_create_only("kafka-backups/daily/manifest.json", b"{}");
 }
 
+/// A DEEPER prefix under `logweir/` used to be accepted at construction and
+/// then panic mid-drill.
+///
+/// `logweir/prod/` reads as legal against the rule as `examples/drill.yaml`
+/// and `docs/quickstart.md` state it, and `from_url`'s `starts_with` accepted
+/// it — but every key builder in this crate is hard-coded to
+/// `logweir/drills/…`, so `put_create_only`'s
+/// `assert!(key.starts_with(&self.prefix))` fired AFTER the restore had run:
+/// exit 101, outside the five-code exit contract, on the one failure path
+/// where the drill had already written to the operator's cluster. The refusal
+/// belongs at construction, which is what `from_url`'s own doc comment
+/// promised all along.
+#[test]
+fn a_prefix_deeper_than_the_sanctioned_root_is_refused_at_construction() {
+    let deeper = logweir_core::engine::StorageUrl::S3 {
+        bucket: "logweir-evidence".into(),
+        prefix: "logweir/prod/".into(),
+        region: Some("us-east-1".into()),
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+    let msg = match Store::from_url(&deeper) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a prefix no key builder can honour must be refused before anything runs"),
+    };
+    assert!(
+        msg.contains("must be exactly `logweir/`"),
+        "the refusal must say what is wrong with it: {msg}"
+    );
+    assert!(
+        msg.contains("logweir/prod/"),
+        "the refusal must name the prefix it refused: {msg}"
+    );
+}
+
+/// The counterpart: the sanctioned root itself still builds. A refusal that
+/// rejected everything would satisfy the test above and break every drill.
+#[test]
+fn the_sanctioned_root_still_builds() {
+    let ok = logweir_core::engine::StorageUrl::S3 {
+        bucket: "logweir-evidence".into(),
+        prefix: "logweir/".into(),
+        region: Some("us-east-1".into()),
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+    assert!(
+        Store::from_url(&ok).is_ok(),
+        "`logweir/` is the prefix every example pins"
+    );
+}
+
 #[test]
 fn fifty_sequential_puts_share_one_runtime() {
     // InMemory cannot observe connection reuse, so this asserts the property

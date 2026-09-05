@@ -263,7 +263,16 @@ override `DataEngine::validation_run`, so Logweir never runs the engine's
 `logweir/<run_id>/engine-validation/` for phase 8 to retain. The default
 implementation refuses rather than fabricating a report, so there is no risk of
 a scorecard claiming an engine validation that never happened — the field is
-simply `null`, and `phases[8].notes` records why on the in-memory document.
+simply `null`.
+
+**The reason is NOT in the scorecard.** This paragraph used to say
+`phases[8].notes` records it; it cannot. Phase 8 signs a frozen copy of the
+document, so the document's `phases` array ends before phase 8's own record —
+there is nowhere in the signed bytes for a phase-8 warning to go. The note is
+emitted on the structured log instead (`target: logweir::score`, with the run
+id), and it says in the line that it is not in the signed document. What the
+artifact carries is `engine_subreport: null`, and this section is what tells
+you how to read it.
 
 Two consequences worth stating plainly:
 

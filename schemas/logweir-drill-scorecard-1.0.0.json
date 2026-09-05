@@ -48,13 +48,15 @@
       "$ref": "#/definitions/EvidenceInfo"
     },
     "format_version": {
-      "type": "string"
+      "description": "Semver of the document format, and the field every reader checks FIRST: Global Constraint 12 — readers ignore unknown fields and refuse a higher major.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string. Without it, a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-drill-scorecard-1.0.0.json`, so a schema-only validator — the one route that does not go through `Scorecard::refuse_unreadable_major` — accepted exactly the document GC12 exists to refuse. The pattern allows any `1.x.y`, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
     },
     "integrity": {
       "$ref": "#/definitions/Integrity"
     },
     "last_phase_completed": {
-      "description": "Highest phase INDEX completed. v0.1 implements ELEVEN phase slots, -1 through 9 (Global Constraint 18, panel decision D1, 2026-09-03). -1 is the source-side capture phase; a value below it is impossible because the phase-0 admission guard refusing yields exit code 3 with last_phase_completed = -1 (spec §6.1).",
+      "description": "Highest phase INDEX completed. The DOMAIN is eleven phase slots, -1 through 9 (Global Constraint 18, panel decision D1, 2026-09-03); -1 is the source-side `--from-cluster` capture phase, whose code lands in a follow-up, so v0.1.0 never emits it.\n\nWHAT A v0.1.0 SIGNED DOCUMENT CAN ACTUALLY CARRY IS 5, 6 or 7, and the reason is structural rather than incidental: `phase8_score::run` signs a frozen clone, so phase 8's own record — and phase 9's, which happens after the put — are pushed onto the in-memory document AFTER the bytes were signed. A drill that completed teardown therefore reads 7 here and is NOT a drill whose teardown was skipped; the teardown is attested in its own separately signed document. `drill run`'s console line quotes this same value so the two cannot disagree.\n\nA previous version of this comment added \"a value below -1 is impossible because the phase-0 admission guard refusing yields exit code 3 with last_phase_completed = -1\", which implied such a document exists. It does not: exit 3 writes NO scorecard at all. The lower bound is a domain rule, enforced by `validate_invariants`, not a description of anything v0.1 emits.",
       "type": "integer",
       "format": "int8"
     },
@@ -376,7 +378,7 @@
       }
     },
     "MatrixVerdict": {
-      "description": "Copied from this engine tag's engine-matrix row; never re-derived per run. Every variant serialises as a FLAT kebab-case string, so the field's schema is a plain enum and the auditor's ~20-line Python verifier never has to handle `string | object`. The reason for a `fail` lives in `EngineInfo.matrix_verdict_reason`, mirroring the `integrity.result`/`partial_reason` pair.",
+      "description": "The engine-matrix row THIS RUN established, decided once — in `logweir::drill::phase8_score::matrix_verdict_for` — immediately before the document is validated and signed.\n\nThis comment used to read \"copied from this engine tag's engine-matrix row; never re-derived per run\". That was never true of the shipped code: phase 5 raised the field to `Pass` the moment the `header_preflight` lever was honoured, and nothing lowered it afterwards, so a drill that blocked at preflight, restored nothing, failed its reconciliation or missed its RTO signed `matrix_verdict: \"pass\"` beside its own contradicting `outcome`. `docs/support-matrix.md` defines the five values; the decision function's doc comment carries the table.\n\nEvery variant serialises as a FLAT kebab-case string, so the field's schema is a plain enum and the auditor's ~20-line Python verifier never has to handle `string | object`. The reason for a `fail` lives in `EngineInfo.matrix_verdict_reason`, mirroring the `integrity.result`/`partial_reason` pair.",
       "type": "string",
       "enum": [
         "pass",

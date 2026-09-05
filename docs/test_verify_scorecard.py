@@ -117,8 +117,20 @@ def _sign(payload_type: str, payload: bytes) -> dict:
     message = b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" " \
         + str(len(payload)).encode() + b" " + payload
     sig = key.sign(message, ec.ECDSA(hashes.SHA256()))
+    # The REAL keyid — lowercase hex sha256 of the public key's SPKI DER.
+    # `"fixture"` used to stand here, which worked only because the verifier
+    # ignored `keyid` entirely. `logweir drill verify` selects the signature to
+    # check BY keyid and refuses a sidecar that carries none for the key it was
+    # given, so a placeholder made these fixtures documents the two verifiers
+    # disagreed about — the exact defect this file's later tests pin.
+    import hashlib as _h
+    der = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
     return {"payloadType": payload_type,
-            "signatures": [{"keyid": "fixture", "sig": _b64.b64encode(sig).decode()}]}
+            "signatures": [{"keyid": _h.sha256(der).hexdigest(),
+                            "sig": _b64.b64encode(sig).decode()}]}
 
 
 def _write_signed(d, name, payload_type, doc, ensure_ascii=True):
@@ -321,3 +333,269 @@ def test_a_missing_cryptography_package_says_what_to_install_and_exits_2():
         assert r.returncode == 2, f"expected exit 2, got {r.returncode}:\n{out}"
         assert "NOTHING WAS VERIFIED" in out
         assert "INVALID" not in out, "a setup failure must not be reported as an invalid document"
+
+
+# ------------------------------------------------- the two verifiers must AGREE
+# `docs/verify-a-scorecard.md` says both routes "reach the same verdict" and
+# that a disagreement "is a bug in the format". For one release that was false:
+# this script implemented ONE of the ~12 rules `Scorecard::validate_invariants`
+# applies and parsed no other field, so each document below printed a clean
+# `VALID` here and was refused by `logweir drill verify`. The three cases are
+# the ones the final whole-branch review found by execution.
+
+SCORECARD_PASS = ROOT / "e2e" / "fixtures" / "scorecard-pass.json"
+
+
+def _signed_scorecard(d, **overrides):
+    """A correctly-signed scorecard built from the checked-in format example,
+    with `overrides` applied by dotted path. The SIGNATURE IS GENUINE — every
+    case below is a document whose bytes really were signed by the fixture key,
+    so a refusal can only come from the invariant check and never from the
+    cryptography."""
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    for path, value in overrides.items():
+        parts = path.split(".")
+        node = doc
+        for p in parts[:-1]:
+            node = node[p]
+        node[parts[-1]] = value
+    return _write_signed(d, "case", SCORECARD_TYPE, doc)
+
+
+def test_the_unmodified_format_example_is_valid_under_the_full_invariant_set():
+    # The control. Without it, a `check_invariants` that refused everything
+    # would make every test below pass for the wrong reason.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "VALID" in r.stdout
+
+
+def test_a_higher_major_format_version_is_refused():
+    # Global Constraint 12. This script did not read `format_version` at all.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, format_version="2.0.0")
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "major version newer" in r.stderr
+
+
+def test_a_higher_minor_format_version_is_still_accepted():
+    # The other half of GC12: readers ignore unknown fields and accept a higher
+    # MINOR. A refusal on any version difference would be wrong too.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, format_version="1.9.9")
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+
+
+def test_a_negative_rpo_is_refused():
+    # `-90` is the exact value docs/formats/drill-scorecard.md says a reader
+    # "would most likely read as no data loss" — printed under a VALID banner
+    # by the tool the auditor is told to trust more.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"measured.rpo_seconds": -90})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "negative" in r.stderr
+
+
+def test_more_matching_records_than_sampled_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.records_sampled": 10,
+                "integrity.records_sampled_matching": 9999,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "exceeds records_sampled" in r.stderr
+
+
+def test_a_matrix_fail_without_a_reason_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"engine.matrix_verdict": "fail"})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "matrix_verdict_reason" in r.stderr
+
+
+def test_a_pass_rate_measured_without_byte_fingerprint_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.level": "consume-only",
+                "integrity.pass_rate_measured": 1.0,
+                "objectives.met": None,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "not byte-fingerprint" in r.stderr
+
+
+def test_a_last_phase_completed_outside_the_domain_is_refused():
+    # Global Constraint 18: ELEVEN phase slots, -1 through 9.
+    for bad in (-2, 10):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, last_phase_completed=bad)
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{bad}: {r.stdout}"
+            assert "-1..=9" in r.stderr
+
+
+def test_the_captured_by_logweir_biconditional_is_enforced_in_both_directions():
+    with tempfile.TemporaryDirectory() as d:
+        # true, but the source-relative RPO is still null with a reason.
+        sc, sig = _signed_scorecard(d, **{"source.captured_by_logweir": True})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "captured_by_logweir is true" in r.stderr
+    with tempfile.TemporaryDirectory() as d:
+        # false, but a source-relative RPO is present anyway.
+        sc, sig = _signed_scorecard(
+            d, **{"measured.rpo_source_relative_seconds": 5}
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "never contacted" in r.stderr
+
+
+def test_met_true_is_refused_when_the_pass_rate_was_not_measurable():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.level": "consume-only",
+                "integrity.pass_rate_measured": None,
+                "objectives.met": True,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "met must be null" in r.stderr
+
+
+def test_the_format_version_matches_the_rust_constant():
+    # The refusal above is only meaningful if this script and the signer agree
+    # on what "this major" is.
+    rust = (ROOT / "crates" / "logweir-core" / "src" / "lib.rs").read_text()
+    assert 'pub const FORMAT_VERSION: &str = "1.0.0"' in rust
+    assert _verifier_module().FORMAT_VERSION == "1.0.0"
+
+
+# ------------------------------------------ no raw tracebacks, ever (the header
+# promises "none of them should ever surface as a raw traceback")
+
+def test_a_correctly_signed_non_scorecard_is_reported_not_traced_back():
+    # A genuinely-signed document under the SCORECARD payload type that has no
+    # `integrity` block. The old code did `doc["integrity"]` and raised
+    # `KeyError: 'integrity'` — a raw traceback on a correctly-signed payload.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _write_signed(d, "notascorecard", SCORECARD_TYPE, {"hello": "world"})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "INVALID" in r.stderr
+
+
+def test_a_correctly_signed_non_json_payload_is_reported_not_traced_back():
+    # `json.loads(payload)` raised `json.JSONDecodeError` after the signature
+    # had already verified.
+    with tempfile.TemporaryDirectory() as d:
+        payload = b"this is signed, and it is not JSON\n"
+        p = pathlib.Path(d) / "blob.json"
+        s = pathlib.Path(d) / "blob.sig"
+        p.write_bytes(payload)
+        s.write_text(json.dumps(_sign(SCORECARD_TYPE, payload)))
+        r = run(p, s, FIX / "public.pem")
+        assert r.returncode == 1
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "not valid JSON" in r.stderr
+
+
+def test_a_correctly_signed_non_receipt_is_reported_not_traced_back():
+    with tempfile.TemporaryDirectory() as d:
+        doc, sig = _write_signed(d, "notareceipt", RECEIPT_TYPE, {"hello": "world"})
+        r = run_typed("receipt", doc, sig, FIX / "public.pem")
+        assert r.returncode == 1
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "INVALID" in r.stderr
+
+
+# --------------------------------------------------------- multi-signature DSSE
+
+def test_a_multi_signature_sidecar_verifies_on_any_matching_signature():
+    # DSSE envelopes may carry one signature per signing key. This script
+    # hard-indexed `signatures[0]`, so a sidecar whose FIRST entry belongs to a
+    # key the auditor was not given reported INVALID while `logweir drill
+    # verify` accepted it — a disagreement, in the one place this script exists
+    # not to have one.
+    import base64 as _b64
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        payload = json.dumps(doc, indent=2).encode() + b"\n"
+        p = pathlib.Path(d) / "multi.json"
+        p.write_bytes(payload)
+        sidecar = _sign(SCORECARD_TYPE, payload)
+        genuine = sidecar["signatures"][0]
+        # A syntactically valid signature by some OTHER key, placed FIRST. Its
+        # keyid names a different key, so a verifier that selects by keyid
+        # skips it and a verifier that hard-indexes [0] fails on it.
+        other = {"keyid": "0" * 64,
+                 "sig": _b64.b64encode(b"\x30\x44" + b"\x00" * 68).decode()}
+        sidecar["signatures"] = [other, genuine]
+        s = pathlib.Path(d) / "multi.sig"
+        s.write_text(json.dumps(sidecar))
+        r = run(p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr + r.stdout
+
+
+def test_a_sidecar_whose_signatures_are_all_wrong_still_fails():
+    # The counterpart: "try every signature" must not become "accept anything".
+    import base64 as _b64
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        payload = json.dumps(doc, indent=2).encode() + b"\n"
+        p = pathlib.Path(d) / "bogus.json"
+        p.write_bytes(payload)
+        s = pathlib.Path(d) / "bogus.sig"
+        # Both entries claim THIS key, so keyid selection cannot excuse the
+        # failure: the signature maths is what must reject them.
+        real_keyid = _sign(SCORECARD_TYPE, payload)["signatures"][0]["keyid"]
+        s.write_text(json.dumps({
+            "payloadType": SCORECARD_TYPE,
+            "signatures": [
+                {"keyid": real_keyid,
+                 "sig": _b64.b64encode(b"\x30\x44" + b"\x00" * 68).decode()},
+                {"keyid": real_keyid,
+                 "sig": _b64.b64encode(b"\x30\x44" + b"\x11" * 68).decode()},
+            ],
+        }))
+        r = run(p, s, FIX / "public.pem")
+        assert r.returncode == 1
+        assert "does not verify" in r.stderr
+
+
+def test_a_sidecar_naming_only_another_key_is_refused_by_name():
+    # `logweir drill verify` says "no signature by key <id> in the sidecar" and
+    # exits 4. This script used to ignore `keyid` altogether and verify the
+    # first entry's bytes regardless — so a sidecar naming a different key
+    # produced two different verdicts.
+    import base64 as _b64
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        payload = json.dumps(doc, indent=2).encode() + b"\n"
+        p = pathlib.Path(d) / "wrongkey.json"
+        p.write_bytes(payload)
+        sidecar = _sign(SCORECARD_TYPE, payload)
+        sidecar["signatures"][0]["keyid"] = "1" * 64
+        s = pathlib.Path(d) / "wrongkey.sig"
+        s.write_text(json.dumps(sidecar))
+        r = run(p, s, FIX / "public.pem")
+        assert r.returncode == 1
+        assert "no signature by key" in r.stderr

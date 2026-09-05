@@ -2780,3 +2780,134 @@ fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_
         "the reason must say the archive was found WRONG, not merely unchecked: {reason:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// THE PHASE-7 → PHASE-8 SEAM.
+//
+// Every test above this line stops at `phase7_verify::run`'s answer. The final
+// whole-branch review found the build's recurring defect surviving one layer
+// downstream of it: `roll_up` withholds `pass_rate_measured` when part of the
+// sample was never reconciled, and phase 8 recomputed the same ratio from the
+// two counters with that condition dropped — so a signed document carried
+// `integrity.result: "partial"` beside `integrity.pass_rate_measured: 1.0` and
+// `objectives.met: true`.
+//
+// Both halves were individually correct and individually reviewed. Nothing
+// crossed the seam, which is why 405 green tests did not see it. These two
+// tests cross it, and the second one crosses it all the way into the SIGNED
+// BYTES — the only surface an auditor actually reads.
+
+/// A REAL phase-7 verdict for the shape that produces it: one selection
+/// reconciles record-for-record, a second returns zero archive fingerprints.
+/// The sample is therefore non-empty (`records_sampled: 25`) and every figure
+/// in `25/25` is true — and the ratio over the WHOLE sample is still unknown,
+/// so `roll_up` publishes no rate.
+fn a_partial_verdict_over_a_partly_reconciled_sample() -> logweir_core::scorecard::Integrity {
+    let (facts, store) = two_topic_facts_and_store(25);
+    let (archive_orders, cons_orders) = distinct_matching_pair("orders", 25);
+    let (_archive_payments, cons_payments) = distinct_matching_pair("payments", 25);
+
+    let engine = LaneEngine {
+        facts: facts.clone(),
+        by_selection: [
+            ("orders/0".to_string(), Ok(archive_orders)),
+            // Support IS present; the archive simply returned nothing to
+            // compare for this selection. `Ok(vec![])`, never `Err`, so the
+            // level stays `byte-fingerprint` and no downgrade is recorded.
+            ("payments/0".to_string(), Ok(Vec::new())),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let reader = MapReader {
+        topics: [
+            target("drill-orders", vec![(0, 25)], cons_orders),
+            target("drill-payments", vec![(0, 25)], cons_payments),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
+        &two_topic_mapping(),
+        &two_topic_plan(),
+    )
+    .expect("a partly-reconciled sample is a DRILL RESULT, never an Err");
+
+    assert_eq!(out.integrity.level, IntegrityLevel::ByteFingerprint);
+    assert_eq!(out.integrity.result, IntegrityResult::Partial);
+    assert_eq!(out.integrity.records_sampled, 25);
+    assert_eq!(out.integrity.records_sampled_matching, 25);
+    assert_eq!(
+        out.integrity.pass_rate_measured, None,
+        "phase 7 WITHHOLDS the rate when part of the sample was never reconciled"
+    );
+    out.integrity
+}
+
+/// Phase 8 consumes phase 7's rate as given. It does not recompute it, and it
+/// does not answer `met` from a number phase 7 refused to publish.
+#[test]
+fn phase_8_never_republishes_a_pass_rate_phase_7_withheld() {
+    let integ = a_partial_verdict_over_a_partly_reconciled_sample();
+    let (outcome, objectives) = logweir::drill::phase8_score::decide(
+        &fixtures::measured(1, 1, 0),
+        &fixtures::objectives(900, 300, 1.0),
+        &integ,
+    );
+    assert_eq!(outcome, logweir_core::outcome::Outcome::FailIntegrity);
+    assert_eq!(
+        objectives.met, None,
+        "`met` is answered from the rate phase 7 published; a withheld rate makes the \
+         aggregate verdict unmeasurable, never true"
+    );
+}
+
+/// The same property asserted against the SIGNED BYTES, because that is the
+/// artifact the claim is made in. A unit assertion on `decide`'s return value
+/// would not have caught the original defect: the republication happened at
+/// the orchestrator's assignment, one line after `decide` returned.
+#[test]
+fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
+    let integ = a_partial_verdict_over_a_partly_reconciled_sample();
+    let (outcome, objectives) = logweir::drill::phase8_score::decide(
+        &fixtures::measured(1, 1, 0),
+        &fixtures::objectives(900, 300, 1.0),
+        &integ,
+    );
+
+    let mut sc = fixtures::scorecard_pass();
+    sc.integrity = integ;
+    sc.outcome = outcome;
+    sc.objectives = objectives;
+
+    let store = fixtures::recording_store();
+    let signed =
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store.inner)
+            .expect("a partial verdict is a signable document");
+
+    // Parsed from `signed.bytes` — the exact bytes the signature covers.
+    let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).unwrap();
+    assert_eq!(
+        doc["integrity"]["result"], "partial",
+        "the fixture must actually be the shape under test"
+    );
+    assert_eq!(
+        doc["integrity"]["pass_rate_measured"],
+        serde_json::Value::Null,
+        "a signed `pass_rate_measured` beside `result: partial` tells an auditor the \
+         drill reconciled the whole sample when it did not: {}",
+        String::from_utf8_lossy(&signed.bytes)
+    );
+    assert_eq!(
+        doc["objectives"]["met"],
+        serde_json::Value::Null,
+        "`met: true` beside a partial integrity result is the same overstatement one \
+         field along"
+    );
+}

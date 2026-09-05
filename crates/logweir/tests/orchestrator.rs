@@ -369,6 +369,137 @@ fn every_phase_from_0_through_9_has_a_call_site_and_they_run_in_ascending_order(
     assert_eq!(signed.last_phase_completed, 7);
 }
 
+/// THE CONSOLE AND THE ARTIFACT MUST AGREE. Nobody owned this question, and
+/// they did not: `drill run` printed `last phase completed 9` for a run whose
+/// signed scorecard says `7`. Both numbers were individually correct — phase 9
+/// really did complete, and it really did happen after the bytes were frozen —
+/// and an auditor comparing the two had no way to know that. Reading
+/// `docs/formats/drill-scorecard.md` would have told them teardown never ran.
+///
+/// The assertion is against the SIGNED BYTES read back out of the store, never
+/// against the in-memory document the line is derived from, so a mutant that
+/// changes either side is caught. Deleting the fix — printing
+/// `sc.last_phase_completed` again — makes this fail at assertion time with
+/// `9` against `7`.
+#[test]
+fn the_stdout_line_quotes_the_signed_artifact_never_the_in_memory_copy() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let signed: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+
+    assert_eq!(
+        sc.last_phase_completed, 9,
+        "the in-memory document legitimately outlives the artifact by two records"
+    );
+    assert_eq!(
+        signed.last_phase_completed, 7,
+        "and the artifact stops at 7"
+    );
+
+    let line = logweir::drill::summary_line(&sc);
+    assert!(
+        line.contains(&format!(
+            "last phase completed {}",
+            signed.last_phase_completed
+        )),
+        "the console must quote the signed artifact ({}), not the in-memory copy ({}): {line}",
+        signed.last_phase_completed,
+        sc.last_phase_completed
+    );
+    // The outcome is quoted in the artifact's own spelling too.
+    assert!(
+        line.contains("outcome pass"),
+        "the outcome must read as the signed document spells it: {line}"
+    );
+}
+
+/// `engine.matrix_verdict` DESCRIBES THE DRILL, and a failed drill must not
+/// sign `"pass"`.
+///
+/// `docs/support-matrix.md` defines `pass` as "the full drill ran and passed".
+/// Phase 5 raised the field the moment the `header_preflight` lever was
+/// honoured and nothing lowered it again, so all four non-passing shapes below
+/// signed `matrix_verdict: "pass"` with a null reason — verified on the real
+/// artifacts read back out of the store here. A signed field saying "pass"
+/// inside a failed drill is indefensible whatever it was meant to mean.
+///
+/// Read from the SIGNED BYTES, not from the returned document: the claim is
+/// about what an auditor finds in the artifact.
+#[test]
+fn a_drill_that_did_not_pass_never_signs_a_matrix_pass() {
+    for shape in [
+        Drill::MissesTheRpoObjective,
+        Drill::ReconcilesWithMismatches,
+        Drill::BlocksAtPreflight,
+        Drill::RestoresNothing,
+    ] {
+        let f = fixtures::orchestrator_fixture(shape);
+        let _ = execute_with(&f.args, &f.run_id, &f.ctx);
+        let signed: logweir_core::scorecard::Scorecard =
+            serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+        assert_ne!(
+            signed.outcome,
+            Outcome::Pass,
+            "{shape:?} must not pass; the fixture is wrong"
+        );
+        assert_eq!(
+            signed.engine.matrix_verdict,
+            logweir_core::outcome::MatrixVerdict::Fail,
+            "{shape:?} signed outcome {:?} beside matrix_verdict {:?}",
+            signed.outcome,
+            signed.engine.matrix_verdict
+        );
+        let reason = signed
+            .engine
+            .matrix_verdict_reason
+            .as_deref()
+            .unwrap_or_else(|| panic!("{shape:?}: a `fail` verdict must carry its reason"));
+        assert!(
+            reason.contains(signed.outcome.wire_name()),
+            "{shape:?}: the reason must name the outcome that produced it: {reason:?}"
+        );
+    }
+}
+
+/// The other direction, so the fix cannot be "always fail": a drill that
+/// passes at byte-fingerprint level signs `pass` with a null reason, exactly
+/// as `docs/support-matrix.md`'s one green row records.
+#[test]
+fn a_drill_that_passed_at_byte_fingerprint_level_signs_a_matrix_pass() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let signed: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(signed.outcome, Outcome::Pass);
+    assert_eq!(signed.integrity.level, IntegrityLevel::ByteFingerprint);
+    assert_eq!(
+        signed.engine.matrix_verdict,
+        logweir_core::outcome::MatrixVerdict::Pass
+    );
+    assert_eq!(signed.engine.matrix_verdict_reason, None);
+}
+
+/// The same property on the phase-5 jump, where the signed value is 5 and the
+/// in-memory value is 5 as well — so this test's job is to prove the
+/// derivation does not merely subtract two from whatever it is handed.
+#[test]
+fn the_stdout_line_quotes_the_artifact_on_the_blocked_preflight_path_too() {
+    let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
+    let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
+        logweir::drill::DrillError::NotPass(sc) => sc,
+        other => panic!("a blocked preflight is a drill RESULT: {other:?}"),
+    };
+    let signed: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(signed.last_phase_completed, 5);
+    assert!(
+        logweir::drill::summary_line(&sc).contains("last phase completed 5"),
+        "{}",
+        logweir::drill::summary_line(&sc)
+    );
+}
+
 /// task-21a-addendum.md ruling A5. The file at `--out` is the EXACT byte
 /// string phase 8 signed — never a re-serialisation of a document phase 9
 /// then mutated — so `logweir drill verify` on it recomputes the digest the

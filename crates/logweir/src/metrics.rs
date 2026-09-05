@@ -7,15 +7,19 @@ use logweir_core::scorecard::Scorecard;
 use std::io::Write;
 use std::path::Path;
 
-/// One mapping from `Outcome` to its wire string, shared by the metric label and
-/// the `drill run` summary line so the two can never disagree.
+/// One mapping from `Outcome` to its wire string, shared by the metric label,
+/// the `drill run` summary line and `drill show`'s table so the three can never
+/// disagree.
+///
+/// It is a one-line delegation to `Outcome::wire_name` and not a second match,
+/// which is the fix: this function's own comment used to claim the mapping was
+/// "shared ... so the two can never disagree" while `crate::show` rendered a
+/// THIRD spelling from Rust `Debug` (`Pass`, `ByteFingerprint/Pass`,
+/// `Honoured`). The spelling now lives beside the enum, next to the
+/// `#[serde(rename_all)]` attribute that decides the JSON, and is pinned
+/// against it variant by variant.
 pub fn outcome_str(o: &Outcome) -> &'static str {
-    match o {
-        Outcome::Pass => "pass",
-        Outcome::FailObjective => "fail-objective",
-        Outcome::FailIntegrity => "fail-integrity",
-        Outcome::PreflightFailed => "preflight-failed",
-    }
+    o.wire_name()
 }
 
 /// The exit code this scorecard's `outcome` produces, as a number a dashboard

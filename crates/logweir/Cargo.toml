@@ -27,6 +27,9 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Global Constraint 1: the ULID clock/entropy read lives in THIS crate
+# (`src/ids.rs`), never in `logweir-core`, which keeps only the pure encoder.
+ulid.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]

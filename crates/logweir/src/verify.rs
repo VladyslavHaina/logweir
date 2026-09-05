@@ -119,7 +119,12 @@ pub fn verify_scorecard(
 fn print_report(r: &VerifyReport) {
     println!("signature: VALID  key {}", r.key_id);
     println!("run_id:    {}", r.run_id);
-    println!("outcome:   {:?}", r.outcome);
+    // The WIRE spelling, like every other surface. This line was the FOURTH
+    // rendering of one enum out of one binary (`Pass` here, `pass` on `drill
+    // run`'s stdout, `Pass` in `drill show`'s table, `pass` in the JSON and
+    // the Prometheus labels) — and it is the one an auditor reads directly
+    // beside the document it is verifying.
+    println!("outcome:   {}", r.outcome.wire_name());
     if r.self_attested {
         // R13: the artifact must survive this reading rather than hide it.
         println!("approval:  SELF-ATTESTED — the approval key equals the signing key");

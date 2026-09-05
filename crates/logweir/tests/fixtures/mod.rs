@@ -1198,7 +1198,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             out: Some(out.clone()),
             metrics_file: Some(metrics.clone()),
         },
-        run_id: logweir_core::ids::new_run_id(),
+        run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {
             spec,
             spec_text,

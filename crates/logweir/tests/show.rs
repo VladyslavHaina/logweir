@@ -62,9 +62,16 @@ fn row_line<'a>(table: &'a str, label: &str) -> &'a str {
 }
 
 /// Guarantee: a drill that did not pass must read unmistakably as not
-/// passing. `render_table` never branches on `outcome`, it Debug-prints the
-/// real enum, so a scorecard whose top-level outcome is `fail-integrity`
-/// renders `FailIntegrity` on the `outcome` row and never `Pass`.
+/// passing. `render_table` never branches on `outcome`, it prints the real
+/// enum's WIRE spelling, so a scorecard whose top-level outcome is
+/// `fail-integrity` renders exactly that on the `outcome` row and never
+/// `pass`.
+///
+/// The wire spelling, not Rust `Debug`: this row used to read `FailIntegrity`
+/// while the signed JSON said `fail-integrity` and `drill run`'s stdout line
+/// said `fail-integrity` — three spellings of one value out of one binary,
+/// with the table (the surface a human reads INSTEAD of the JSON) the odd one
+/// out.
 #[test]
 fn a_non_pass_outcome_never_renders_as_pass() {
     let mut sc = fixtures::scorecard_pass();
@@ -72,12 +79,13 @@ fn a_non_pass_outcome_never_renders_as_pass() {
     let table = logweir::show::render_table(&sc);
     let line = row_line(&table, "outcome");
     assert!(
-        line.contains("FailIntegrity"),
-        "the outcome row must name the real outcome: {line}"
+        line.contains("fail-integrity"),
+        "the outcome row must name the real outcome, in the spelling the signed \
+         document uses: {line}"
     );
     assert!(
-        !line.contains("Pass"),
-        "a failing outcome must never render as Pass: {line}"
+        !line.contains("pass"),
+        "a failing outcome must never render as pass: {line}"
     );
 }
 
@@ -88,13 +96,13 @@ fn a_preflight_failed_outcome_never_renders_as_pass() {
     sc.outcome = Outcome::PreflightFailed;
     let table = logweir::show::render_table(&sc);
     let line = row_line(&table, "outcome");
-    assert!(line.contains("PreflightFailed"), "{line}");
-    assert!(!line.contains("Pass"), "{line}");
+    assert!(line.contains("preflight-failed"), "{line}");
+    assert!(!line.contains("pass"), "{line}");
 }
 
 /// Guarantee: a `Partial` integrity result must not render like a `Pass`.
-/// The `integrity` row Debug-prints `result` next to `level`, so `Partial`
-/// and `Pass` produce visibly different rows.
+/// The `integrity` row prints `result`'s wire spelling next to `level`'s, so
+/// `partial` and `pass` produce visibly different rows.
 #[test]
 fn a_partial_integrity_result_does_not_render_as_pass() {
     let mut sc = fixtures::scorecard_pass();
@@ -103,19 +111,19 @@ fn a_partial_integrity_result_does_not_render_as_pass() {
     let table = logweir::show::render_table(&sc);
     let line = row_line(&table, "integrity");
     assert!(
-        line.contains("Partial"),
+        line.contains("partial"),
         "a partial integrity result must be visible: {line}"
     );
     assert!(
-        !line.contains("/Pass"),
+        !line.contains("/pass"),
         "a partial result must never render as the pass result: {line}"
     );
 }
 
 /// Guarantee: anything the scorecard marks as not-attempted must be visible,
-/// not dropped for tidiness. `IntegrityLevel::NotAttempted` is Debug-printed
-/// in the same `integrity` row as `ByteFingerprint`/`ConsumeOnly` — it is
-/// never special-cased away.
+/// not dropped for tidiness. `IntegrityLevel::NotAttempted` is printed in the
+/// same `integrity` row as `byte-fingerprint`/`consume-only` — it is never
+/// special-cased away.
 #[test]
 fn a_not_attempted_integrity_level_is_visible() {
     let mut sc = fixtures::scorecard_pass();
@@ -123,7 +131,7 @@ fn a_not_attempted_integrity_level_is_visible() {
     let table = logweir::show::render_table(&sc);
     let line = row_line(&table, "integrity");
     assert!(
-        line.contains("NotAttempted"),
+        line.contains("not-attempted"),
         "a not-attempted integrity level must not be dropped for tidiness: {line}"
     );
 }

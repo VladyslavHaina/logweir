@@ -23,7 +23,7 @@ pub struct DrillSpec {
 /// treats every transport failure as a logged warning — a drill result that is
 /// already signed and uploaded must not be downgraded because a webhook was
 /// down.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Notifications {
     #[serde(default)]
     pub webhooks: Vec<String>,
@@ -31,6 +31,34 @@ pub struct Notifications {
     pub slack_webhook: Option<String>,
     #[serde(default)]
     pub pagerduty_routing_key: Option<String>,
+}
+
+/// HAND-WRITTEN, not derived, and for the same reason
+/// `logweir_kafka::reader::AuthConfig` writes its own: all three fields are
+/// secrets. A Slack incoming-webhook URL is a bearer credential — whoever
+/// holds it can post as the integration — and so is a PagerDuty routing key.
+/// `DrillSpec` derives `Debug`, so a derived impl here would put all three
+/// into any `{:?}` of the spec, and this struct sits one field away from an
+/// error message or a log line at all times. There is no `{:?}` site today;
+/// this exists so that adding one is not a disclosure.
+///
+/// Presence is still reported, because "no notification was configured" and
+/// "a notification was configured and failed" are different findings an
+/// operator has to be able to tell apart from a log.
+impl std::fmt::Debug for Notifications {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Notifications")
+            .field(
+                "webhooks",
+                &format_args!("{} configured", self.webhooks.len()),
+            )
+            .field("slack_webhook", &self.slack_webhook.as_ref().map(|_| "***"))
+            .field(
+                "pagerduty_routing_key",
+                &self.pagerduty_routing_key.as_ref().map(|_| "***"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -153,7 +153,7 @@ pub struct RunArgs {
 
 pub fn run(args: RunArgs) -> ExitCode {
     // Spec §13: structured JSON logs on stdout with run_id on every line.
-    let run_id = logweir_core::ids::new_run_id();
+    let run_id = crate::ids::new_run_id();
     // `try_init`, not `init`: `init` PANICS when a global subscriber is
     // already installed, and `run` is a library entry point a test or an
     // embedder may call more than once in one process. A logger that is
@@ -243,15 +243,59 @@ fn finish(args: &RunArgs, sc: &Scorecard) {
     println!("{}", summary_line(sc));
 }
 
-/// One line on stdout so `drill run` is not silent. Task 21b replaces this call
-/// with `crate::show::render_table(sc)` when it lands the table; this helper is
-/// then deleted. Marker for that edit: LOGWEIR-21B-RENDER-TABLE.
-fn summary_line(sc: &Scorecard) -> String {
+/// The value `last_phase_completed` carries in the SIGNED document.
+///
+/// `phase8_score::run` is handed a frozen clone, so phase 8's own record — and
+/// phase 9's, which happens after the put — are pushed onto the in-memory
+/// document AFTER the bytes were signed. Both are legitimate facts about the
+/// run and neither can be in the artifact, so a successful drill genuinely
+/// ends at `last_phase_completed: 9` in memory and `7` on disk.
+///
+/// THE SIGNED ARTIFACT IS THE AUTHORITY. An auditor reads the console line
+/// beside the artifact, and it printed `last phase completed 9` for a document
+/// that says `7` — a contradiction whose only documented resolution
+/// (`docs/formats/drill-scorecard.md`) would have led them to conclude
+/// teardown never ran, when in fact it did and is attested in a separate
+/// signed document. So the line quotes the artifact.
+///
+/// The definition is exactly `record`'s, restricted to the phases that can be
+/// in the signed bytes: the highest phase below 8 that completed. It is right
+/// on all three signing paths — the phase-5 `Verdict::Block` jump (5), the
+/// phase-6 `RestoreNoOp` interception (5, because phase 6 errored and `record`
+/// does not advance on an error) and the normal run (7) — and it is pinned
+/// against a real signed document, not against itself, by
+/// `the_stdout_line_quotes_the_signed_artifact_never_the_in_memory_copy`.
+pub fn signed_last_phase_completed(sc: &Scorecard) -> i8 {
+    sc.phases
+        .iter()
+        .filter(|p| p.phase < 8 && p.outcome == "ok")
+        .map(|p| p.phase)
+        .max()
+        .unwrap_or(-1)
+}
+
+/// One line on stdout so `drill run` is not silent.
+///
+/// This helper carried a "Task 21b replaces this call with
+/// `crate::show::render_table(sc)` … this helper is then deleted" marker. Task
+/// 21b landed the table, it is tested against the compiled binary, and the
+/// replacement was NOT made — `drill run` deliberately prints one line and
+/// leaves the fourteen-row table to `drill show`, which is a separate command
+/// an operator runs against the artifact. The marker described an edit nobody
+/// intends to make, so it is gone rather than left to age.
+///
+/// Every value here is the SIGNED document's, in the SIGNED document's
+/// spelling: `outcome_str` is `Outcome::wire_name`, and the phase number is
+/// `signed_last_phase_completed`. A console line an operator cannot reconcile
+/// with the artifact it just wrote is worse than no console line.
+pub fn summary_line(sc: &Scorecard) -> String {
     format!(
-        "run {} — outcome {} — last phase completed {}",
+        "run {} — outcome {} — last phase completed {} (as signed; \
+         phase 8's own record and phase 9's teardown are written after the \
+         bytes are frozen, and teardown is attested separately)",
         sc.run_id,
         crate::metrics::outcome_str(&sc.outcome),
-        sc.last_phase_completed
+        signed_last_phase_completed(sc)
     )
 }
 
@@ -713,11 +757,16 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
         c.spec.sample.window_end.timestamp_millis(),
         verified.newest_restored_ts_ms,
     );
-    let (outcome, objectives, measured_rate) =
+    let (outcome, objectives) =
         phase8_score::decide(&sc.measured, &c.spec.objectives, &sc.integrity);
     sc.outcome = outcome;
     sc.objectives = objectives;
-    sc.integrity.pass_rate_measured = measured_rate;
+    // NOTHING assigns to `sc.integrity.pass_rate_measured` here, and no third
+    // return value invites it to. Phase 7 set that field in `roll_up` and is
+    // the only writer; the line that used to stand here overwrote phase 7's
+    // deliberate `None` with a ratio recomputed from the two counters with
+    // `whole_sample_reconciled` dropped — see `phase8_score::decide`'s doc
+    // comment for the signed document that produced.
 
     // 8
     let signed = sign_and_publish(&mut sc, args, run_id, c)?;
@@ -912,6 +961,21 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
                 dry_run_check_segments: LeverState::UnknownNotObservable,
                 unknown_key_warnings: Vec::new(),
             },
+            // The claims-nothing STARTING value, raised only by phase 5's own
+            // per-run lever readback and then resolved, at signing time, by
+            // `phase8_score::matrix_verdict_for`.
+            //
+            // It reads "not yet established" here while
+            // `docs/support-matrix.md` defines the variant as "the engine
+            // accepted a lever and did not act on it", and the gap between
+            // those two readings never reaches an artifact: NO scorecard is
+            // signed before phase 5 has run. Phases 0-4 fail with exit 1 or 3
+            // and write nothing, and all three signing paths (the phase-5
+            // `Verdict::Block` jump, the phase-6 `RestoreNoOp` interception
+            // and the normal run) are downstream of the readback. So by the
+            // time this value can be signed it means exactly what the
+            // support matrix says: phase 5 looked, and the engine did not
+            // honour the lever.
             matrix_verdict: MatrixVerdict::FailLeverNotHonoured,
             // `matrix_verdict_reason` is REQUIRED only for `fail` and must be
             // null otherwise (`Scorecard::validate_invariants`).

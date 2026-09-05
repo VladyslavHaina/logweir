@@ -90,3 +90,43 @@ fn drill_verify_labels_a_self_attested_scorecard() {
         "the label must be surfaced, got: {s}"
     );
 }
+
+/// ONE SPELLING PER VALUE, on the surface an auditor reads beside the document
+/// they are verifying. `drill verify`'s summary printed Rust `Debug` — `Pass`
+/// — while the signed JSON it had just checked said `pass`. That was the
+/// FOURTH rendering of one enum out of one binary.
+#[test]
+fn the_verify_summary_prints_the_outcome_as_the_signed_document_spells_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let sc = dir.path().join("scorecard.json");
+    let sig = dir.path().join("scorecard.sig");
+    std::fs::copy("../../e2e/fixtures/signed/scorecard.json", &sc).unwrap();
+    std::fs::copy("../../e2e/fixtures/signed/scorecard.sig", &sig).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_logweir"))
+        .args([
+            "drill",
+            "verify",
+            "--scorecard",
+            sc.to_str().unwrap(),
+            "--signature",
+            sig.to_str().unwrap(),
+            "--public-key",
+            "../../e2e/fixtures/signed/public.pem",
+        ])
+        .output()
+        .expect("the compiled binary runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        printed.contains("outcome:   pass"),
+        "the outcome must read as the signed document spells it: {printed}"
+    );
+    assert!(
+        !printed.contains("outcome:   Pass"),
+        "Rust Debug is a fourth spelling of a value the document already spells: {printed}"
+    );
+}

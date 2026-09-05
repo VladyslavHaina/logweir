@@ -10,16 +10,36 @@ pub struct GuardRefusal(pub String);
 /// key found, AT ANY VALUE and AT ANY DEPTH. Matching on the key rather than
 /// the value is the point: `purge_topics: false` is refused too, because the
 /// key's presence means someone believes they are configuring purging.
-pub fn scan_forbidden_keys(doc_text: &str) -> Vec<String> {
-    let v: serde_yaml::Value = match serde_yaml::from_str(doc_text) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
+///
+/// IT FAILS CLOSED. A document this function cannot parse is a document it did
+/// not scan, and it returns `Err` rather than an empty list — a scanner that
+/// answers "I found nothing" over text it never read is indistinguishable from
+/// a scanner that read the text and found nothing clean, which is precisely
+/// the shape this whole guard exists to prevent. The predecessor returned
+/// `vec![]` on a parse error.
+///
+/// This is a BACKSTOP, and its scope is worth stating exactly, because its
+/// name invites over-reading: today it is applied to the adopter's SPEC TEXT
+/// (`phase0_admit::run`) and to rendered documents in the renderer's own
+/// tests. Global Constraint 4 / GR7 — the three keys never being emitted on
+/// any argv or in any rendered YAML — is enforced STRUCTURALLY, at
+/// `logweir-engine-oso`'s renderers, which name none of the three keys and
+/// escape every interpolated value through `yaml_scalar` so a value cannot
+/// forge a key line. That structural property is the guarantee; this function
+/// is a second pair of eyes over the input a human wrote.
+pub fn scan_forbidden_keys(doc_text: &str) -> Result<Vec<String>, GuardRefusal> {
+    let v: serde_yaml::Value = serde_yaml::from_str(doc_text).map_err(|e| {
+        GuardRefusal(format!(
+            "the forbidden-key scan could not parse this document, so it did not scan it: \
+             {e}. A guard that reports `no forbidden keys` over text it never read is \
+             worse than no guard."
+        ))
+    })?;
     let mut found = Vec::new();
     walk(&v, String::new(), &mut found);
     found.sort();
     found.dedup();
-    found
+    Ok(found)
 }
 
 fn walk(v: &serde_yaml::Value, path: String, out: &mut Vec<String>) {
@@ -90,7 +110,7 @@ target:
   dry_run: true
 ";
         assert_eq!(
-            scan_forbidden_keys(rendered),
+            scan_forbidden_keys(rendered).unwrap(),
             vec!["target.dry_run".to_string()]
         );
     }
@@ -99,7 +119,7 @@ target:
     fn a_dry_run_key_at_value_false_is_caught_identically() {
         let rendered = "target:\n  dry_run: false\n";
         assert_eq!(
-            scan_forbidden_keys(rendered),
+            scan_forbidden_keys(rendered).unwrap(),
             vec!["target.dry_run".to_string()]
         );
     }
