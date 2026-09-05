@@ -210,6 +210,7 @@
       }
     },
     "EvidenceInfo": {
+      "description": "WHAT THIS BLOCK IS NOT: it is not evidence about the upload, and it is not a statement about the storage backend's capabilities.\n\nAll four fields describe the upload of THIS scorecard — an event that has not happened when the scorecard is signed, and cannot happen before it, because a signature covers bytes and the bytes must exist first. The scorecard is never re-serialised afterwards (that would invalidate the signature). So `crate::drill::phase8_score::run` ZEROES all four immediately before serialising, whatever the caller supplied, and every scorecard Logweir emits in v0.1 carries `{version_id: null, retain_until: null, immutable: false, create_only_enforced: false}`.\n\nRead that as **\"no proof was obtainable at signing time\"** — never as a finding about the object or the backend. The block deliberately UNDER-claims; what it buys is the guarantee that a valid Logweir signature can never cover an unsubstantiated WORM or create-only assertion.\n\nThe real post-upload readback is performed and held in memory, but in v0.1 it is published nowhere an auditor can read; making it auditor-visible needs a second signed receipt written after the upload. `docs/stability.md` carries the adopter-facing version of this note.",
       "type": "object",
       "required": [
         "create_only_enforced",
@@ -217,20 +218,22 @@
       ],
       "properties": {
         "create_only_enforced": {
-          "description": "false when the backend lacks conditional put (spec §11).",
+          "description": "Always false in v0.1, on EVERY backend, including those whose conditional put was in fact used: whether the put was conditional is only known after it happens, and this document is signed first. `false` is NOT evidence that the backend lacks conditional put (spec §11) and NOT evidence that the object could have been overwritten — the two cases are indistinguishable in the signed document by design.",
           "type": "boolean"
         },
         "immutable": {
-          "description": "ONLY after a provider readback; else false (spec §6 C3).",
+          "description": "Spec §6 C3 permits `true` ONLY after a provider readback. Always false in v0.1 — the readback happens after signing, and `object_store` 0.14 exposes no Object Lock / WORM API on any backend it can build, so there is nothing to read back. `false` means \"not proven here\"; it is NOT a claim that the object is mutable or unprotected.",
           "type": "boolean"
         },
         "retain_until": {
+          "description": "Always null in v0.1: a retention date can only come from a provider readback performed after the put. NOT a claim that no retention applies.",
           "default": null,
           "type": "string",
           "format": "date-time",
           "nullable": true
         },
         "version_id": {
+          "description": "Always null in v0.1: the store's version id for this object is only known after the put, and the put follows the signature. NOT a claim that the bucket is unversioned.",
           "default": null,
           "type": "string",
           "nullable": true
@@ -261,7 +264,7 @@
           "nullable": true
         },
         "pass_rate_measured": {
-          "description": "MEASURED `records_sampled_matching / records_sampled`. Null when `level` is not `byte-fingerprint`. The REQUESTED rate stays in `objectives.pass_rate`, so an auditor can read both the ask and the result off one document.",
+          "description": "MEASURED `records_sampled_matching / records_sampled`. The REQUESTED rate stays in `objectives.pass_rate`, so an auditor can read both the ask and the result off one document.\n\nNull in THREE cases, not one — a `byte-fingerprint` document with a null rate here is well-formed, not malformed: 1. `level` is not `byte-fingerprint` (also enforced by `validate_invariants`). 2. Not every selection's record lane reached a conclusion. A ratio over part of the sample, published as if it were the whole, is misleading even when every figure in it is true. 3. `records_sampled` is 0 — a zero denominator is withheld rather than published as NaN.\n\nDecided in one place, `crate::drill::phase7_verify::roll_up`.",
           "default": null,
           "type": "number",
           "format": "double",
@@ -387,13 +390,14 @@
       "type": "object",
       "properties": {
         "rpo_seconds": {
-          "description": "ARCHIVE COVERAGE GAP at the requested recovery point — NOT source-relative data loss.",
+          "description": "ARCHIVE COVERAGE GAP at the requested recovery point — NOT source-relative data loss.\n\n`requested_point_in_time - newest_restored_record`, in that order, and **never negative**: it is how far SHORT of the requested recovery point the newest restored record falls. A record at or beyond the requested point means no gap there, which is 0. A negative gap is not a smaller gap, it is a meaningless one, and a reader meeting `-90` here would most likely take it for \"no data loss\". Enforced by `validate_invariants`, so the rule holds for every writer, not only for today's single call site in `crate::drill::phase8_score`.",
           "default": null,
           "type": "integer",
           "format": "int64",
           "nullable": true
         },
         "rpo_source_relative_seconds": {
+          "description": "Source-relative data loss: how far behind the live source the restored data is. Null in v0.1 (the source is never contacted); becomes a number only under `--from-cluster`. **Never negative**, for the same reason as `rpo_seconds` and enforced by the same `validate_invariants` rule — a rule deliberately put in place BEFORE the first writer exists, so the `--from-cluster` implementation inherits it rather than has to invent it.",
           "default": null,
           "type": "integer",
           "format": "int64",
@@ -439,7 +443,7 @@
       "type": "object",
       "properties": {
         "met": {
-          "description": "false when ANY non-null objective is missed; null when pass_rate is null.",
+          "description": "The aggregate verdict over whichever objectives above are non-null.\n\n- `true`  — every non-null objective was met. - `false` — at least one non-null objective was missed. - `null`  — a `pass_rate` objective WAS requested but could not be measured (`integrity.pass_rate_measured` is null), so the aggregate is unmeasurable rather than satisfied.\n\nThe null condition is about the MEASURED rate, not this block's `pass_rate`. The earlier wording (\"null when pass_rate is null\") read the other way round and was wrong in the direction that matters: when `objectives.pass_rate` is null, no rate was asked for, nothing is unmeasurable, and `met` is a plain true/false over the remaining objectives. Decided in exactly one place, `crate::drill::phase8_score::decide`.",
           "default": null,
           "type": "boolean",
           "nullable": true
@@ -451,6 +455,7 @@
           "nullable": true
         },
         "rpo_seconds": {
+          "description": "The REQUESTED maximum archive-coverage gap, copied verbatim from the adopter's spec. **Never negative** — a negative allowed gap is not a stricter objective, it is an unsatisfiable one (`measured.rpo_seconds` is itself non-negative, so `got <= want` could never hold), and a signed document asserting it would be incoherent. Enforced by `validate_invariants`; nothing else validates this value, since it travels straight from YAML into the signed document.",
           "default": null,
           "type": "integer",
           "format": "int64",
@@ -498,7 +503,7 @@
           "type": "string"
         },
         "notes": {
-          "description": "Free-form evidence attached to this phase record. Currently populated only on phase 5 (`crate::drill::phase5_preflight`), which carries each `Finding`'s tag/detail here so a `preflight-failed` scorecard states *why* the drill was refused, not just that it was — without this field the adjudication's reasoning had nowhere in the signed document to land. `skip_serializing_if` (matching `TargetDiffSummary::absent`, Task 16 fix round 1) so a document signed before this field existed keeps round-tripping byte-for-byte when it has nothing to report.\n\nThis reverses `task-3-addendum.md` A2 (\"do not add a `notes` field to `PhaseRecord`\"), on controller authority, in Task 17 fix round 1: that ruling predates `task-21a-brief.md:259`, which writes `p.notes = …` against this exact struct, so leaving the field out only delayed the same `E0560` to Task 21a.",
+          "description": "Free-form evidence attached to this phase record. Two producers today, and the list is corrected here rather than left stale (Task 20 fix round 2): - phase 5 (`crate::drill::phase5_preflight`) carries each `Finding`'s tag/detail here so a `preflight-failed` scorecard states *why* the drill was refused, not just that it was — without this field the adjudication's reasoning had nowhere in the signed document to land. Note that phase 5 defines WHAT it contributes; the `PhaseRecord` itself is not constructed until the orchestrator lands (Task 21a). - phase 8 (`crate::drill::phase8_score`) writes onto the phase-8 record when the engine-validation prefix is empty, and when it holds more than one object (naming the key retained and that others were dropped). Both are warnings that must not be silent: an absent or ambiguous engine sub-report is a fact about the evidence, not a failure.\n\n`skip_serializing_if` (matching `TargetDiffSummary::absent`, Task 16 fix round 1) so a document signed before this field existed keeps round-tripping byte-for-byte when it has nothing to report.\n\nThis reverses `task-3-addendum.md` A2 (\"do not add a `notes` field to `PhaseRecord`\"), on controller authority, in Task 17 fix round 1: that ruling predates `task-21a-brief.md:259`, which writes `p.notes = …` against this exact struct, so leaving the field out only delayed the same `E0560` to Task 21a.",
           "type": "array",
           "items": {
             "type": "string"

@@ -108,14 +108,25 @@ pub struct PhaseRecord {
     pub at: DateTime<Utc>,
     pub outcome: String,
     pub duration_ms: u64,
-    /// Free-form evidence attached to this phase record. Currently populated
-    /// only on phase 5 (`crate::drill::phase5_preflight`), which carries each
-    /// `Finding`'s tag/detail here so a `preflight-failed` scorecard states
-    /// *why* the drill was refused, not just that it was — without this
-    /// field the adjudication's reasoning had nowhere in the signed document
-    /// to land. `skip_serializing_if` (matching `TargetDiffSummary::absent`,
-    /// Task 16 fix round 1) so a document signed before this field existed
-    /// keeps round-tripping byte-for-byte when it has nothing to report.
+    /// Free-form evidence attached to this phase record. Two producers today,
+    /// and the list is corrected here rather than left stale (Task 20 fix
+    /// round 2):
+    /// - phase 5 (`crate::drill::phase5_preflight`) carries each `Finding`'s
+    ///   tag/detail here so a `preflight-failed` scorecard states *why* the
+    ///   drill was refused, not just that it was — without this field the
+    ///   adjudication's reasoning had nowhere in the signed document to land.
+    ///   Note that phase 5 defines WHAT it contributes; the `PhaseRecord`
+    ///   itself is not constructed until the orchestrator lands (Task 21a).
+    /// - phase 8 (`crate::drill::phase8_score`) writes onto the phase-8 record
+    ///   when the engine-validation prefix is empty, and when it holds more
+    ///   than one object (naming the key retained and that others were
+    ///   dropped). Both are warnings that must not be silent: an absent or
+    ///   ambiguous engine sub-report is a fact about the evidence, not a
+    ///   failure.
+    ///
+    /// `skip_serializing_if` (matching `TargetDiffSummary::absent`, Task 16 fix
+    /// round 1) so a document signed before this field existed keeps
+    /// round-tripping byte-for-byte when it has nothing to report.
     ///
     /// This reverses `task-3-addendum.md` A2 ("do not add a `notes` field to
     /// `PhaseRecord`"), on controller authority, in Task 17 fix round 1: that
@@ -139,8 +150,24 @@ pub struct Measured {
     pub rto_excluding_preflight_seconds: Option<u64>,
     /// ARCHIVE COVERAGE GAP at the requested recovery point — NOT
     /// source-relative data loss.
+    ///
+    /// `requested_point_in_time - newest_restored_record`, in that order, and
+    /// **never negative**: it is how far SHORT of the requested recovery point
+    /// the newest restored record falls. A record at or beyond the requested
+    /// point means no gap there, which is 0. A negative gap is not a smaller
+    /// gap, it is a meaningless one, and a reader meeting `-90` here would
+    /// most likely take it for "no data loss". Enforced by
+    /// `validate_invariants`, so the rule holds for every writer, not only for
+    /// today's single call site in `crate::drill::phase8_score`.
     #[serde(default)]
     pub rpo_seconds: Option<i64>,
+    /// Source-relative data loss: how far behind the live source the restored
+    /// data is. Null in v0.1 (the source is never contacted); becomes a number
+    /// only under `--from-cluster`. **Never negative**, for the same reason as
+    /// `rpo_seconds` and enforced by the same `validate_invariants` rule — a
+    /// rule deliberately put in place BEFORE the first writer exists, so the
+    /// `--from-cluster` implementation inherits it rather than has to invent
+    /// it.
     #[serde(default)]
     pub rpo_source_relative_seconds: Option<i64>,
     #[serde(default)]
@@ -151,11 +178,32 @@ pub struct Measured {
 pub struct Objectives {
     #[serde(default)]
     pub rto_seconds: Option<u64>,
+    /// The REQUESTED maximum archive-coverage gap, copied verbatim from the
+    /// adopter's spec. **Never negative** — a negative allowed gap is not a
+    /// stricter objective, it is an unsatisfiable one (`measured.rpo_seconds`
+    /// is itself non-negative, so `got <= want` could never hold), and a
+    /// signed document asserting it would be incoherent. Enforced by
+    /// `validate_invariants`; nothing else validates this value, since it
+    /// travels straight from YAML into the signed document.
     #[serde(default)]
     pub rpo_seconds: Option<i64>,
     #[serde(default)]
     pub pass_rate: Option<f64>,
-    /// false when ANY non-null objective is missed; null when pass_rate is null.
+    /// The aggregate verdict over whichever objectives above are non-null.
+    ///
+    /// - `true`  — every non-null objective was met.
+    /// - `false` — at least one non-null objective was missed.
+    /// - `null`  — a `pass_rate` objective WAS requested but could not be
+    ///   measured (`integrity.pass_rate_measured` is null), so the aggregate
+    ///   is unmeasurable rather than satisfied.
+    ///
+    /// The null condition is about the MEASURED rate, not this block's
+    /// `pass_rate`. The earlier wording ("null when pass_rate is null") read
+    /// the other way round and was wrong in the direction that matters: when
+    /// `objectives.pass_rate` is null, no rate was asked for, nothing is
+    /// unmeasurable, and `met` is a plain true/false over the remaining
+    /// objectives. Decided in exactly one place,
+    /// `crate::drill::phase8_score::decide`.
     #[serde(default)]
     pub met: Option<bool>,
 }
@@ -181,10 +229,21 @@ pub struct Integrity {
     pub records_sampled: u64,
     pub records_sampled_matching: u64,
     pub mismatches: u64,
-    /// MEASURED `records_sampled_matching / records_sampled`. Null when
-    /// `level` is not `byte-fingerprint`. The REQUESTED rate stays in
-    /// `objectives.pass_rate`, so an auditor can read both the ask and the
-    /// result off one document.
+    /// MEASURED `records_sampled_matching / records_sampled`. The REQUESTED
+    /// rate stays in `objectives.pass_rate`, so an auditor can read both the
+    /// ask and the result off one document.
+    ///
+    /// Null in THREE cases, not one — a `byte-fingerprint` document with a
+    /// null rate here is well-formed, not malformed:
+    /// 1. `level` is not `byte-fingerprint` (also enforced by
+    ///    `validate_invariants`).
+    /// 2. Not every selection's record lane reached a conclusion. A ratio over
+    ///    part of the sample, published as if it were the whole, is misleading
+    ///    even when every figure in it is true.
+    /// 3. `records_sampled` is 0 — a zero denominator is withheld rather than
+    ///    published as NaN.
+    ///
+    /// Decided in one place, `crate::drill::phase7_verify::roll_up`.
     #[serde(default)]
     pub pass_rate_measured: Option<f64>,
     /// SP3 only; null, never false, when not attempted. The wire name is
@@ -261,15 +320,52 @@ pub struct EngineSubreport {
     pub body_sha256: String,
 }
 
+/// WHAT THIS BLOCK IS NOT: it is not evidence about the upload, and it is not
+/// a statement about the storage backend's capabilities.
+///
+/// All four fields describe the upload of THIS scorecard — an event that has
+/// not happened when the scorecard is signed, and cannot happen before it,
+/// because a signature covers bytes and the bytes must exist first. The
+/// scorecard is never re-serialised afterwards (that would invalidate the
+/// signature). So `crate::drill::phase8_score::run` ZEROES all four
+/// immediately before serialising, whatever the caller supplied, and every
+/// scorecard Logweir emits in v0.1 carries
+/// `{version_id: null, retain_until: null, immutable: false,
+/// create_only_enforced: false}`.
+///
+/// Read that as **"no proof was obtainable at signing time"** — never as a
+/// finding about the object or the backend. The block deliberately
+/// UNDER-claims; what it buys is the guarantee that a valid Logweir signature
+/// can never cover an unsubstantiated WORM or create-only assertion.
+///
+/// The real post-upload readback is performed and held in memory, but in v0.1
+/// it is published nowhere an auditor can read; making it auditor-visible
+/// needs a second signed receipt written after the upload. `docs/stability.md`
+/// carries the adopter-facing version of this note.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvidenceInfo {
+    /// Always null in v0.1: the store's version id for this object is only
+    /// known after the put, and the put follows the signature. NOT a claim
+    /// that the bucket is unversioned.
     #[serde(default)]
     pub version_id: Option<String>,
+    /// Always null in v0.1: a retention date can only come from a provider
+    /// readback performed after the put. NOT a claim that no retention
+    /// applies.
     #[serde(default)]
     pub retain_until: Option<DateTime<Utc>>,
-    /// ONLY after a provider readback; else false (spec §6 C3).
+    /// Spec §6 C3 permits `true` ONLY after a provider readback. Always false
+    /// in v0.1 — the readback happens after signing, and `object_store` 0.14
+    /// exposes no Object Lock / WORM API on any backend it can build, so there
+    /// is nothing to read back. `false` means "not proven here"; it is NOT a
+    /// claim that the object is mutable or unprotected.
     pub immutable: bool,
-    /// false when the backend lacks conditional put (spec §11).
+    /// Always false in v0.1, on EVERY backend, including those whose
+    /// conditional put was in fact used: whether the put was conditional is
+    /// only known after it happens, and this document is signed first. `false`
+    /// is NOT evidence that the backend lacks conditional put (spec §11) and
+    /// NOT evidence that the object could have been overwritten — the two
+    /// cases are indistinguishable in the signed document by design.
     pub create_only_enforced: bool,
 }
 
@@ -396,6 +492,36 @@ impl Scorecard {
             return Err(InvariantError(
                 "objectives.met must be null when pass_rate is not measurable".into(),
             ));
+        }
+        // Every seconds-valued gap in the document is non-negative. These are
+        // the format's only signed integers, and each has a direction that,
+        // until now, only one call site enforced: `measured.rpo_seconds` by
+        // the clamp in `crate::drill::phase8_score::compute_measured`,
+        // `objectives.rpo_seconds` by nothing at all (it travels straight from
+        // adopter YAML into the signed document), and
+        // `measured.rpo_source_relative_seconds` by a writer that does not
+        // exist yet (`--from-cluster`). Stating the rule here, in the
+        // scorecard's own validator, converts a property guaranteed by one
+        // call site into one guaranteed by the type — including for phases not
+        // yet written. Checked field by field so the message names the
+        // offender. The four RTO figures need no equivalent: they are `u64`,
+        // so negative is already unrepresentable.
+        for (name, value) in [
+            ("measured.rpo_seconds", self.measured.rpo_seconds),
+            (
+                "measured.rpo_source_relative_seconds",
+                self.measured.rpo_source_relative_seconds,
+            ),
+            ("objectives.rpo_seconds", self.objectives.rpo_seconds),
+        ] {
+            if let Some(v) = value {
+                if v < 0 {
+                    return Err(InvariantError(format!(
+                        "{name} is negative ({v}); a recovery-point gap of less than zero \
+                         is not a smaller gap, it is a meaningless one"
+                    )));
+                }
+            }
         }
         if self.integrity.records_sampled_matching > self.integrity.records_sampled {
             return Err(InvariantError(
@@ -631,6 +757,71 @@ mod tests {
             err.0,
             "source.captured_by_logweir is false but rpo_source_relative_unmeasured_reason is null"
         );
+    }
+
+    // --- Non-negativity of the format's three signed integers ---------------
+    //
+    // One test per field, each asserting the SPECIFIC message, so collapsing
+    // the loop to cover fewer fields makes exactly the dropped field's test
+    // fail.
+
+    #[test]
+    fn measured_rpo_seconds_may_not_be_negative() {
+        let mut sc = valid_scorecard();
+        sc.measured.rpo_seconds = Some(-90);
+        let err = sc
+            .validate_invariants()
+            .expect_err("a negative archive-coverage gap must be refused");
+        assert_eq!(
+            err.0,
+            "measured.rpo_seconds is negative (-90); a recovery-point gap of less than zero \
+             is not a smaller gap, it is a meaningless one"
+        );
+    }
+
+    /// Null in v0.1 and written by no code yet — which is exactly why the rule
+    /// is here rather than at a call site: `--from-cluster` inherits it.
+    #[test]
+    fn measured_rpo_source_relative_seconds_may_not_be_negative() {
+        let mut sc = valid_scorecard();
+        // The Global Constraint 18(a) true-branch, so this test trips the
+        // non-negativity arm and not the captured_by_logweir arms.
+        sc.source.captured_by_logweir = true;
+        sc.measured.rpo_source_relative_seconds = Some(-1);
+        sc.measured.rpo_source_relative_unmeasured_reason = None;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a negative source-relative RPO must be refused");
+        assert_eq!(
+            err.0,
+            "measured.rpo_source_relative_seconds is negative (-1); a recovery-point gap of \
+             less than zero is not a smaller gap, it is a meaningless one"
+        );
+    }
+
+    /// This one is adopter input travelling straight from YAML into a signed
+    /// document, validated by nothing else anywhere.
+    #[test]
+    fn objectives_rpo_seconds_may_not_be_negative() {
+        let mut sc = valid_scorecard();
+        sc.objectives.rpo_seconds = Some(-300);
+        let err = sc
+            .validate_invariants()
+            .expect_err("a negative REQUESTED rpo objective must be refused");
+        assert_eq!(
+            err.0,
+            "objectives.rpo_seconds is negative (-300); a recovery-point gap of less than zero \
+             is not a smaller gap, it is a meaningless one"
+        );
+    }
+
+    #[test]
+    fn a_zero_gap_is_valid_the_rule_refuses_only_negatives() {
+        let mut sc = valid_scorecard();
+        sc.measured.rpo_seconds = Some(0);
+        sc.objectives.rpo_seconds = Some(0);
+        sc.validate_invariants()
+            .expect("zero is a legitimate gap — the archive covers the requested point");
     }
 
     // --- Finiteness of the format's two float fields ------------------------
