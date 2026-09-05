@@ -1,4 +1,7 @@
-default: fmt lint test
+# The default recipe is the release gate (Task 22 step 8), so it must be able to
+# FAIL on formatting: it never runs the rewriting `fmt` recipe. Run `just fmt`
+# yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh.
+default: lint test
 
 fmt:
     cargo fmt --all
@@ -83,3 +86,15 @@ check-todo-markers:
 # Run this once after a fresh clone; `cargo test --workspace` needs .engine/.
 engine:
     ./scripts/extract-engine.sh
+
+# Task 22. Broken RELATIVE markdown links across the docs and the root files.
+# http/https are never fetched (Global Constraint 17); this is a repository
+# integrity check, not a network check.
+links:
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md third_party/ e2e/fixtures/
+
+# Task 22. The v0.1.0 definition of done, as far as it is mechanically
+# checkable without GitHub Actions or a live stack. Prints what it could NOT
+# check as UNVERIFIED rather than skipping it silently.
+dod:
+    ./scripts/check-dod.sh

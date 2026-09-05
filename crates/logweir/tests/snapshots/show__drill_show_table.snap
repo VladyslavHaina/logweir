@@ -20,6 +20,19 @@ logweir drill scorecard  (01J9X2QK7C4V0R8YB3ZP6MTS5A v1.0.0)
   integrity                   ByteFingerprint/Pass  75/75 matched, 0 mismatch(es)
   target diff                 0 collision(s), 1 would-create (full)
   topic parity                intended [cleanup.policy, retention.ms]  unexpected []
-  evidence                    immutable=false  create_only_enforced=true
+  evidence                    immutable=false  create_only_enforced=false
 
   no capture gap overlaps the sampled window
+
+  objectives (from the approved plan)
+    rto_seconds                  900   compared against the starred row above
+    rpo_seconds                  300
+    pass_rate                      1   measured 1
+    met                          yes
+
+  qualifiers the fourteen rows above do not carry
+    integrity.partial_reason  —
+    engine_subreport.caveat   The engine's own integrity.checksums_valid is a hardcoded constant true and its restore start_time/end_time/duration_seconds are all null; this sub-report corroborates nothing Logweir claims.
+
+  This table is a SUMMARY of a signed document, not the document. `--format json`
+  prints the signed bytes; docs/verify-a-scorecard.md lists what the summary omits.

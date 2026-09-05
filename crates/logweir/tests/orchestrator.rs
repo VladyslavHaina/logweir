@@ -68,6 +68,9 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
         "logweir_drill_integrity_level",
         "logweir_drill_integrity_result",
         "logweir_evidence_lock_verified",
+        // Task 22. Added by a later fix than the original eight and panelled in
+        // `dashboards/logweir.json`, so it belongs in this list too.
+        "logweir_drill_exit_code",
     ] {
         assert!(
             t.contains(m),
@@ -78,6 +81,59 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
         !t.contains("triggered_by"),
         "unbounded cardinality: it lives in the scorecard"
     );
+}
+
+/// Task 22. The hand-maintained list above is a promise that someone remembers
+/// to update it. This reads `dashboards/logweir.json` ITSELF, pulls every
+/// `logweir_*` metric name out of its PromQL expressions, and requires each one
+/// to appear in the textfile the CLI actually writes.
+///
+/// It is the mechanical half of the brief's rule "the dashboard must not outrun
+/// the writer": adding a panel over a metric nothing emits turns this red
+/// without anyone having to notice.
+#[test]
+fn every_metric_name_the_dashboard_queries_is_one_the_cli_writes() {
+    let dashboard = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dashboards/logweir.json"),
+    )
+    .expect("dashboards/logweir.json is checked in");
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("logweir.prom");
+    logweir::metrics::write_textfile(&p, &fixtures::scorecard_pass()).unwrap();
+    let emitted = std::fs::read_to_string(&p).unwrap();
+
+    // Every `logweir_`-prefixed identifier anywhere in the dashboard document.
+    // Scanning the whole file rather than only `expr` fields is deliberate: a
+    // metric named in a panel description a reader will act on is a claim too.
+    let mut names: Vec<String> = Vec::new();
+    let bytes = dashboard.as_bytes();
+    let mut i = 0usize;
+    while let Some(off) = dashboard[i..].find("logweir_") {
+        let start = i + off;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        names.push(dashboard[start..end].to_string());
+        i = end;
+    }
+    names.sort();
+    names.dedup();
+    assert!(
+        names.len() >= 8,
+        "found only {} metric names in the dashboard; the scan is broken, not the dashboard",
+        names.len()
+    );
+    for n in &names {
+        assert!(
+            emitted.contains(n.as_str()),
+            "dashboards/logweir.json names `{n}`, which crates/logweir/src/metrics.rs \
+             does not write. Either add the metric to the writer or drop the panel — \
+             a dashboard over a metric nothing emits renders an empty graph that reads \
+             as \"no drills failed\".\nwritten:\n{emitted}"
+        );
+    }
 }
 
 /// Phases 7 and 8 are wired: the scorecard is SCORED before it is signed.

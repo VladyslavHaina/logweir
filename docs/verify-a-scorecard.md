@@ -137,6 +137,11 @@ pip install cryptography
 python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
 ```
 
+A drill publishes three signed documents, each under its own payload type.
+`--payload-type scorecard|receipt|teardown` selects which one is being checked;
+the default is the scorecard, so the three-argument form above is unchanged.
+See [Verifying the receipt's signature](#verifying-the-receipts-signature).
+
 (If you would rather not install into your system Python, create a
 virtual environment first: `python3 -m venv venv && venv/bin/pip install
 cryptography && venv/bin/python3 verify_scorecard.py ...`. Either way, this
@@ -349,42 +354,37 @@ object and hash it yourself.
 
 ### Verifying the receipt's signature
 
-`verify_scorecard.py` will **refuse** the receipt, correctly: it pins
-`payloadType` to the scorecard's, and a sidecar for a different kind of
-document must never be accepted as a scorecard signature. Refusal here is the
-script working, not failing.
-
-To check the receipt, reuse the same script's two cryptographic helpers —
-`pae()` and `verify_signature()`, the parts that are not scorecard-specific —
-against the receipt's own payload type:
+The shipped verifier does it, with `--payload-type`:
 
 ```bash
-python3 - receipt.json receipt.sig public.pem <<'EOF'
-import base64, importlib.util, json, sys
-from cryptography.hazmat.primitives import serialization
-
-RECEIPT_TYPE = "application/vnd.logweir.drill-put-receipt+json;version=1.0.0"
-
-spec = importlib.util.spec_from_file_location("v", "verify_scorecard.py")
-v = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(v)
-
-payload = open(sys.argv[1], "rb").read()          # exact bytes, never re-serialised
-sidecar = json.load(open(sys.argv[2]))
-key = serialization.load_pem_public_key(open(sys.argv[3], "rb").read())
-
-if sidecar.get("payloadType") != RECEIPT_TYPE:
-    sys.exit(f"INVALID: unexpected payloadType {sidecar.get('payloadType')!r}")
-sig = base64.b64decode(sidecar["signatures"][0]["sig"], validate=True)
-if not v.verify_signature(key, v.pae(RECEIPT_TYPE, payload), sig):
-    sys.exit("INVALID: receipt signature does not verify over these bytes")
-
-r = json.loads(payload)
-print(f"VALID  receipt for {r['scorecard_key']}")
-print(f"       binds to {r['scorecard_sha256']}")
-print(f"       create_only_enforced={r['create_only_enforced']}  immutable={r['immutable']}")
-EOF
+python3 docs/verify_scorecard.py --payload-type receipt \
+    <run_id>.receipt.json <run_id>.receipt.sig public.pem
 ```
+
+```
+VALID  receipt for logweir/drills/01M1RJZNEM507A7XQ7WCGPK6SJ.json
+       binds to scorecard sha256:9b9df728…
+       create_only_enforced=True  immutable=False  version_id=None
+       observed_at=2026-09-05T10:49:22.143115Z
+       This signature covers the receipt only. Verify the scorecard separately,
+       then check sha256(scorecard.json) equals the digest above.
+```
+
+The flag takes `scorecard` (the default), `receipt`, `teardown`, or a full media
+type. **Naming the wrong one is a refusal, not a warning** — the default path
+still refuses a receipt, exactly as it did before the flag existed, because a
+sidecar for one kind of document must never be accepted as the signature over
+another. And selecting the right type is not a way to pass: the signature still
+has to cover those exact bytes.
+
+The scorecard-specific consistency checks (the `integrity.result: partial`
+rule, the run summary) apply **only** on the scorecard path. A receipt has no
+`integrity` block, and the script does not reach for one.
+
+Until v0.1.0 this flag did not exist and an auditor had to hand-roll PAE in a
+throwaway script to check a receipt at all — which is how a signature that
+verifies nothing gets built. If you have such a script from an earlier draft of
+this document, delete it and use the flag.
 
 Everything the [Where the public key comes from](#where-the-public-key-comes-from)
 section says applies unchanged: the receipt is signed by the same publisher
@@ -395,6 +395,55 @@ internal consistency and nothing about authenticity.
 run** — it does not mean the upload was not create-only. The receipt is
 written after the scorecard is already signed and stored, and a failure to
 write it is logged and deliberately does not retract a measurement.
+
+## The `logweir drill show` table is a SUMMARY, not the document
+
+`logweir drill show scorecard.json` renders a fixed-width table. It is the
+image in the README and it is what most people will actually look at, so it is
+worth being precise about what it is.
+
+**The fourteen rows are frozen by the specification.** Their layout does not
+change between versions, which is what makes them safe to paste into a ticket.
+They carry: outcome; engine id/version/digest; the two levers; target cluster,
+marker topic and mapping count; approval; the four RTO figures with the compared
+one starred; RPO; integrity level/result and the sampled counts; the target
+diff; topic parity; and the `evidence` block.
+
+**Those fourteen rows omit three things that most qualify the result**, and a
+reader who saw only them came away more confident than the signed document
+supports. That was a real defect and it is fixed by a **footer** printed below
+the table — the rows themselves are untouched:
+
+| Omitted from the fourteen rows | Where it is now |
+|---|---|
+| `objectives.rto_seconds`, `rpo_seconds`, `pass_rate` — the starred row *cites* the RTO objective and never displayed it | footer, `objectives (from the approved plan)` |
+| `objectives.met` — whether the drill met what it was asked to meet | footer, rendered as a **tri-state**: `yes` / `NO` / `unmeasurable`. `unmeasurable` is not met; it means a `pass_rate` objective was requested and could not be measured |
+| `integrity.partial_reason` — why a `partial` result was partial | footer, verbatim |
+| `engine_subreport.caveat` — which states the sub-report "corroborates nothing Logweir claims" | footer, verbatim; and when the block is `null`, the footer says so in words rather than leaving a blank |
+
+The footer closes with the sentence that matters most:
+
+> This table is a SUMMARY of a signed document, not the document. `--format
+> json` prints the signed bytes; docs/verify-a-scorecard.md lists what the
+> summary omits.
+
+**What the table still does not show, by design.** The signed JSON is the
+authority, and these live only there:
+
+- The whole `phases` array, including the `notes` a `preflight-failed` run uses
+  to say *why* it was refused.
+- `source.manifest_sha256` and `target.topic_mapping_sha256` — the two digests
+  that make the archive and the mapping checkable rather than described.
+- `approval.plan_hash` and `approval.key_id`.
+- `sample.records_expected` versus `integrity.records_sampled` — the canary size
+  against what was actually reconciled.
+- `integrity.pass_rate_measured`'s null-ness, which is a different statement
+  from a measured 0.
+- `redactions[]`.
+
+If you are deciding what a scorecard proves, read the JSON. If you are pasting
+evidence into a change record, paste the table **and** attach the JSON and its
+`.sig` — a table cannot be verified.
 
 ## What the scorecard does **not** claim
 
@@ -513,7 +562,13 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        rto_seconds=512  rpo_seconds=0
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
+       evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
 ```
+
+(The `evidence:` line is printed on **every** scorecard, self-attested or not.
+It is there so nobody reads the zeroed `evidence` block as a finding about
+their bucket — see [The `evidence` block is not a finding about your
+bucket](#the-evidence-block-is-not-a-finding-about-your-bucket).)
 
 `logweir drill verify` prints the equivalent line as `approval:
 SELF-ATTESTED — the approval key equals the signing key` among its own
@@ -525,3 +580,9 @@ treat `self_attested: true` as a reason to seek additional corroboration —
 an out-of-band record of the change ticket, a second reviewer, or a
 separate independent drill — rather than as a defect in the artifact
 itself.
+
+
+---
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

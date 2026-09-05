@@ -25,3 +25,9 @@ sign-off above is the only requirement.
 Logweir is licensed under Apache-2.0. By contributing, you agree that your
 contributions are licensed under the same terms: inbound = outbound,
 Apache-2.0.
+
+
+---
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

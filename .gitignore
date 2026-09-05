@@ -23,3 +23,5 @@
 # run wrote with --out, and the TMPDIR the engine container mounts. All of it is
 # reproduced by running the suite; none of it is evidence.
 /.e2e/
+__pycache__/
+.pytest_cache/

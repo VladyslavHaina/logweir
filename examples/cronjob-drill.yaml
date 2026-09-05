@@ -1,0 +1,148 @@
+# A scheduled Logweir drill as a plain Kubernetes CronJob.
+#
+# NO CRD, NO OPERATOR, and it creates no Kubernetes Job of its own: the pod runs
+# `logweir drill run`, which spawns the engine as a LOCAL SUBPROCESS. The image
+# already contains the extracted, digest-pinned `kafka-backup` binary.
+#
+# Read docs/kubernetes.md before deploying this. In particular: the exit code
+# that means "a drill ran and did not pass" is nearly invisible to a Kubernetes
+# operator unless the Job is shaped exactly as it is below.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-drill
+# v0.1 makes NO Kubernetes API calls, so it needs no token at all. Mounting one
+# would be a credential in a pod that has no use for it.
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: logweir-drill
+spec:
+  schedule: "17 3 * * 1"          # 03:17 every Monday
+  concurrencyPolicy: Forbid       # a drill restores; never run two at once
+  successfulJobsHistoryLimit: 3
+  # Keep FAILED pods around: the exit code lives only on the pod object, so
+  # deleting them deletes the result. See docs/kubernetes.md §1.
+  failedJobsHistoryLimit: 10
+  jobTemplate:
+    spec:
+      # THE TWO LINES THAT MAKE THE EXIT CODE READABLE (docs/kubernetes.md §1).
+      #
+      # `backoffLimit: 0` + `restartPolicy: Never` yields exactly ONE pod, an
+      # immediate Failed condition, and a cleanly readable
+      # `.status.containerStatuses[0].state.terminated.exitCode`.
+      #
+      # The alternative is actively harmful: `restartPolicy: OnFailure` with a
+      # non-zero backoffLimit RETRIES a drill that legitimately did not pass —
+      # re-running a restore against the same archive expecting a different
+      # answer — and buries the original code in `lastState`.
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: logweir-drill
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: logweir
+              # Your own registry, or a locally built image. Logweir publishes
+              # nothing under the `osodevops/` namespace — that namespace is
+              # upstream's, and this image only CONTAINS the engine binary
+              # extracted from it under the MIT licence carried in third_party/.
+              image: logweir:v0.1.0
+              # docs/kubernetes.md §2: on an arm64 node the engine layer is
+              # linux/amd64 and MUST be pre-pulled host-side with
+              # `docker pull --platform linux/amd64 <digest>`. `Never` makes a
+              # missing pre-pull fail legibly as ErrImageNeverPull instead of as
+              # an opaque pull error. On an amd64 cluster with a real registry,
+              # `IfNotPresent` is the right value.
+              imagePullPolicy: Never
+              args:
+                - drill
+                - run
+                - --spec=/etc/logweir/drill.yaml
+                - --approval=/etc/logweir/approval.json
+                - --approver-key=/etc/logweir/approver.pub.pem
+                - --allowed-clusters=/etc/logweir/allowed-clusters.json
+                - --signing-key=/etc/logweir-keys/signing.pem
+                - --out=/scratch/scorecard.json
+                - --metrics-file=/metrics/logweir.prom
+                - --triggered-by=cronjob/logweir-drill
+              env:
+                # MANDATORY. An empty version or digest is refused with exit 1:
+                # a signed scorecard must name the engine image that produced
+                # the restore. Keep these in lockstep with the image tag above
+                # and with third_party/kafka-backup-binary.digest.
+                - name: LOGWEIR_ENGINE_VERSION
+                  value: "0.21.0"
+                - name: LOGWEIR_ENGINE_DIGEST
+                  value: "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317"
+                # The rendered restore.yaml and the restore checkpoint land
+                # here. Pod-local and never uploaded — a crashed restore is not
+                # resumable in v0.1 (docs/stability.md).
+                - name: TMPDIR
+                  value: /scratch
+                # object_store's OWN credential chain, not the AWS SDK's:
+                # ~/.aws/credentials, AWS_PROFILE and SSO are unsupported.
+                # On EKS, drop these two and use IRSA / Pod Identity instead.
+                - name: AWS_REGION
+                  value: us-east-1
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef: { name: logweir-s3, key: access-key-id }
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: logweir-s3, key: secret-access-key }
+              volumeMounts:
+                - { name: config,  mountPath: /etc/logweir,      readOnly: true }
+                - { name: keys,    mountPath: /etc/logweir-keys, readOnly: true }
+                - { name: scratch, mountPath: /scratch }
+                - { name: metrics, mountPath: /metrics }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: "250m", memory: "512Mi" }
+                limits:   { memory: "2Gi" }
+          volumes:
+            # The plan, the approval and the cluster allowlist. The approval is
+            # a public, signed document — it belongs in a ConfigMap, and the
+            # approver's PUBLIC key beside it.
+            - name: config
+              configMap:
+                name: logweir-drill-config
+                items:
+                  - { key: drill.yaml,             path: drill.yaml }
+                  - { key: approval.json,          path: approval.json }
+                  - { key: approval.sig,           path: approval.sig }
+                  - { key: approver.pub.pem,       path: approver.pub.pem }
+                  - { key: allowed-clusters.json,  path: allowed-clusters.json }
+            # The PRIVATE signing key, and nothing else. Verified to mount
+            # cleanly as a Secret file (docs/kubernetes.md §3).
+            - name: keys
+              secret:
+                secretName: logweir-signing-key
+                defaultMode: 0400
+                items:
+                  - { key: signing.pem, path: signing.pem }
+            # emptyDir is verified; no PVC was exercised in v0.1 (the test
+            # cluster's only StorageClass was `hostpath`).
+            - name: scratch
+              emptyDir: {}
+            # The Prometheus textfile collector's directory. v0.1 has NO HTTP
+            # surface, so this file — not a /metrics endpoint — is how the
+            # dashboard gets data; mount the same directory node_exporter's
+            # --collector.textfile.directory points at.
+            - name: metrics
+              emptyDir: {}
+#
+# Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+# Foundation. Logweir is not affiliated with or endorsed by the ASF.

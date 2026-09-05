@@ -19,3 +19,9 @@ so would invalidate the signatures these fixtures exist to exercise:
   in the separately signed storage receipt.
 
 Regenerating and re-signing them is release engineering's call, not a test's.
+
+
+---
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

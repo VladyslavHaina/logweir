@@ -3,7 +3,97 @@
 A fresh clone must run `just engine` before `cargo test --workspace`; CI does
 this in the `build` job.
 
+## The v0.1.0 tag is the compatibility boundary
+
+Read this before adding a field to the scorecard.
+
+`format_version` is `1.0.0` and has been throughout the build. Up to and
+including the v0.1.0 tag, adding a field to
+`schemas/logweir-drill-scorecard-1.0.0.json` was an internal edit: no document
+had been published, no reader existed, and the schema could be regenerated
+freely. **The tag ends that.** From v0.1.0 onward, every scorecard in an
+adopter's evidence bucket is a document some reader may already parse, so:
+
+- **Adding an optional field is a MINOR bump** — `1.1.0` — with a new schema
+  file beside the old one. It is not a free edit and it is not "still 1.0.0".
+- **Changing a field's type, its meaning, or an identity rule
+  (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs two maintainer
+  approvals ([MAINTAINERS.md](../MAINTAINERS.md)).
+- **Removing or renaming a field is a MAJOR bump**, including a rename that
+  merely fixes a spelling. `integrity.restoredPrincipalCouldConsume` is
+  camelCase on the wire *permanently* for exactly this reason: it was frozen
+  before SP3 fills it in.
+
+The reason this is written down rather than left to judgement: the first change
+after a release is the one most likely to be treated as if the release had not
+happened. It has. **Do not let the first post-release addition inherit a
+pre-release ruling by accident.**
+
 ## Known limitations of v0.1
+
+- **`--from-cluster` (phase −1) has no execution path in v0.1.0.** This is the
+  most consequential gap on this page, and it is a *scheduling* gap, not a
+  scope decision: `--from-cluster` **is** in v0.1's scope, funded and decided —
+  the 2026-09-03 deferral was refuted 3-0 and revoked
+  ([ADR 0007](adr/0007-from-cluster-in-v0.1.md)). What is deferred is when in
+  the task order the code lands, and it lands in a follow-up task authored after
+  the main line is green.
+
+  What that means concretely, and each item is checkable:
+
+  - There is **no `--from-cluster` flag on the CLI**.
+    `logweir drill run --from-cluster ...` is a usage error and exits **1**,
+    naming the unknown argument. It is not silently ignored.
+  - Every scorecard v0.1.0 emits carries `source.captured_by_logweir: false`, a
+    null `measured.rpo_source_relative_seconds`, and
+    `rpo_source_relative_unmeasured_reason: "source cluster never contacted"`.
+    `last_phase_completed` never takes the value `-1`.
+  - **The format is already bound**, so this costs no compatibility event later:
+    the three fields are in the frozen 1.0.0 schema and
+    `Scorecard::validate_invariants` enforces their pairing in **both**
+    directions today, before the first writer exists.
+  - **The consequence for an adopter is real and is the point of recording it:**
+    you must already possess a `kafka-backup` archive to run a drill. Logweir
+    cannot take the backup for you in v0.1.0.
+
+- **No musl release target.** `rdkafka` vendors and compiles `librdkafka` from
+  C, which does not cross-compile to musl without substantially more work than
+  v0.1 has ([ADR 0004](adr/0004-kafka-client.md)). `release.yml` *attempts* the
+  build in a `continue-on-error` job and the release does not block on it, so a
+  musl binary may or may not be attached to a given release. Do not assume one.
+
+- **Three release workflows have never been executed.**
+  `.github/workflows/release.yml`, `release-drill.yml` and `engine-matrix.yml`
+  were authored for the v0.1.0 tag against a repository with **no GitHub remote
+  configured**, so none of them has ever run. They are checked in, their YAML
+  parses, and their content is reviewed — but "the release workflow produced
+  binaries and an image" and "the drill ran from the released binary artifact"
+  are **UNVERIFIED**, not green. Run them via `workflow_dispatch` before
+  announcing the tag. `docs/support-matrix.md` says the same about its own rows.
+
+- **The sample window in `examples/drill.yaml` is illustrative and will not
+  match your archive.** `sample.window_start` / `sample.window_end` name the
+  point-in-time range you are recovering to, so a checked-in example cannot
+  carry a correct one. A window that overlaps no segment is REFUSED with exit
+  1 — "a drill over an empty window would report a pass that means nothing" —
+  rather than reported as a pass over nothing. `scripts/demo.sh` and the e2e
+  harness both rebind those two fields at run time, and only those two.
+
+- **The exit-code contract is nearly invisible under Kubernetes** unless the
+  Job is shaped with `restartPolicy: Never` and `backoffLimit: 0`. Exit 2 ("a
+  drill ran and did not pass — a scorecard WAS signed") otherwise renders as a
+  generic `Error`, indistinguishable from exit 1 ("nothing ran, no artifact").
+  Full details, and the retry behaviour that is actively harmful, in
+  [kubernetes.md](kubernetes.md).
+
+- **The checked-in fixtures show one value the code cannot emit.**
+  `e2e/fixtures/signed/*.json` carry a POPULATED `engine_subreport`, which no
+  v0.1 scorecard has; they are not regenerated because doing so would invalidate
+  the signatures they exist to exercise. `e2e/fixtures/scorecard-pass.json` is
+  unsigned and **was** corrected: its `evidence.create_only_enforced` now reads
+  `false`, matching what phase 8 emits. Both facts are stated beside the files
+  in [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
+
 
 - **S3 credentials come from `object_store`'s own chain, not the AWS SDK's.**
   `logweir-engine-oso`'s `Store::from_url`/`Store::read_only_from_url` build
@@ -181,8 +271,12 @@ Two consequences worth stating plainly:
   not "the engine reported nothing wrong".
 - The checked-in examples (`e2e/fixtures/signed/*.json`,
   `e2e/fixtures/scorecard-pass.json`) show a POPULATED block. They document the
-  format; they are not output the shipping code can produce. Same class of
-  divergence as `evidence.create_only_enforced: true` in those same fixtures.
+  format; they are not output the shipping code can produce. The `signed/` pair
+  cannot be regenerated without invalidating the signatures they exist to
+  exercise, which is why they stay as they are; `scorecard-pass.json` is
+  unsigned, so its OTHER divergence — `evidence.create_only_enforced: true` —
+  was corrected to `false` in Task 22 rather than documented. See
+  [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
 
 `crates/logweir-engine-oso/tests/engine.rs` carries an `#[ignore]`d marker test
 that CI runs on every build so the missing override cannot be forgotten, and
@@ -252,3 +346,8 @@ imply resumability, and Logweir does not offer it in v0.1.
   formats (scorecard, put-receipt, teardown attestation) and the `logweir`
   CLI's flags and exit codes are covered by the stability promises above;
   internal crate APIs may change in any release before 1.0.
+
+---
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

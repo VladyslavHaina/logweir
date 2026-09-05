@@ -1,0 +1,192 @@
+{
+  "__comment": "Logweir v0.1. Every panel below reads ONLY a metric name crates/logweir/src/metrics.rs actually writes, and crates/logweir/tests/orchestrator.rs::the_textfile_metrics_carry_every_name_the_dashboard_reads asserts that every one of those names is emitted. If a panel is added here, add its metric there in the same commit — otherwise this repository ships a dashboard over a metric nothing writes. v0.1 has NO HTTP surface: the CLI writes a Prometheus TEXTFILE at --metrics-file and node_exporter's textfile collector scrapes it. `triggered_by` is deliberately NOT a label (unbounded cardinality) and lives in the scorecard.",
+  "title": "Logweir — restore drills",
+  "uid": "logweir-drills",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "time": { "from": "now-30d", "to": "now" },
+  "tags": ["logweir", "kafka", "disaster-recovery"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(logweir_drill_runs_total, cluster)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Did the last drill pass?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Exit code of the last drill",
+      "description": "0 pass. 1 operational — NO scorecard was written. 2 a drill result that is NOT a pass — a scorecard WAS written and signed; this is the most valuable result the tool produces and must not be confused with 1. 3 refused by a guard before anything ran. 4 signing or lock proof failed and nothing was uploaded.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_exit_code{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "0 pass", "color": "green", "index": 0 },
+              "1": { "text": "1 operational (no scorecard)", "color": "orange", "index": 1 },
+              "2": { "text": "2 DID NOT PASS (scorecard signed)", "color": "red", "index": 2 },
+              "3": { "text": "3 refused by a guard", "color": "purple", "index": 3 },
+              "4": { "text": "4 signing/lock failed", "color": "purple", "index": 4 }
+            } }
+          ],
+          "noValue": "no drill has reported"
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Drill runs by outcome",
+      "description": "logweir_drill_runs_total is a counter written once per run, labelled by outcome.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 12, "x": 6, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(logweir_drill_runs_total{cluster=~\"$cluster\"}[7d]))", "legendFormat": "{{outcome}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Objectives met",
+      "description": "1 met, 0 missed, per objective. ABSENT means the objective was not measurable — which is not the same as met, and is why this panel shows no value rather than a zero.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_objective_met{cluster=~\"$cluster\"}", "legendFormat": "{{objective}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "MISSED", "color": "red", "index": 0 },
+              "1": { "text": "met", "color": "green", "index": 1 }
+            } }
+          ],
+          "noValue": "unmeasurable"
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Measured recovery",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "RTO (seconds)",
+      "description": "logweir_drill_rto_seconds is measured.rto_excluding_preflight_seconds — the figure compared against objectives.rto_seconds, because header_preflight: full is a full read and decode of the window that no incident responder performs. The scorecard carries three other RTO figures; this is the one the objective is scored on.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_rto_seconds{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "RPO (seconds)",
+      "description": "Archive COVERAGE GAP at the requested recovery point. This is NOT source-relative data loss: it says how far the archive's coverage falls short of the point you asked to recover to, not how many records the source held that the archive did not.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_rpo_seconds{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Integrity",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Records that did not reconcile",
+      "description": "Per-record byte-fingerprint mismatches within the sampled window. A compacted target topic is reported through this path too, as a mismatch rather than as `partial` — see docs/stability.md.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_fingerprint_mismatches{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Integrity level achieved",
+      "description": "byte-fingerprint is the full per-record check. consume-only is the degraded level taken when the engine cannot supply what a fingerprint needs. not-attempted means no integrity check ran at all — read it as an absence of evidence, never as a pass.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 17 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_integrity_level{cluster=~\"$cluster\"} == 1", "legendFormat": "{{level}}" }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "name" }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Integrity result",
+      "description": "pass, fail, or partial. A `partial` carries a partial_reason in the signed scorecard, which this dashboard cannot show — read the document.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 17 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_integrity_result{cluster=~\"$cluster\"} == 1", "legendFormat": "{{result}}" }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "name" }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Evidence object lock verified",
+      "description": "1 ONLY after a provider readback actually answered. object_store 0.14 models no Object Lock / WORM API on any backend Logweir can build, so this reads 0 on every backend today. 0 means NO PROOF WAS OBTAINABLE — it is not a finding that your bucket is unprotected.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_evidence_lock_verified{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "no proof obtainable", "color": "text", "index": 0 },
+              "1": { "text": "verified by readback", "color": "green", "index": 1 }
+            } }
+          ]
+        }
+      },
+      "options": { "colorMode": "none", "graphMode": "none", "textMode": "value" }
+    }
+  ]
+}

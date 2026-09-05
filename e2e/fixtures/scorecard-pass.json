@@ -112,7 +112,7 @@
     "version_id": null,
     "retain_until": null,
     "immutable": false,
-    "create_only_enforced": true
+    "create_only_enforced": false
   },
   "redactions": []
 }

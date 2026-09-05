@@ -1,0 +1,192 @@
+name: release
+# Builds the v0.1.0 release artifacts on a `v*` tag.
+#
+# NOT YET EXECUTED. This workflow has never run: there is no GitHub remote
+# configured for this repository at the time of the v0.1.0 tag, so the release
+# DoD line "release.yml produced binaries and a debian:bookworm-slim image" is
+# recorded as UNVERIFIED rather than ticked. Whoever first pushes this repo
+# should run it via `workflow_dispatch` before announcing the tag.
+#
+# Three triples, from `[workspace.metadata.dist]` in the root Cargo.toml — the
+# only place cargo-dist reads them from:
+#   x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, aarch64-apple-darwin
+#
+# THE BINARIES CARRY NO ENGINE (Global Constraint 10). The engine is dynamically
+# linked against glibc >= 2.36 and ships in the debian:bookworm-slim image only.
+# A standalone binary (a release tarball, or `cargo install --path`) needs
+# `kafka-backup` of the pinned digest on $PATH, plus LOGWEIR_ENGINE_VERSION and
+# LOGWEIR_ENGINE_DIGEST. Logweir is NOT on crates.io at v0.1.0 — the workspace's
+# path dependencies carry no versions, so `cargo publish` refuses.
+#
+# The musl target is ATTEMPTED and never blocks the release (ADR 0004: rdkafka
+# vendors and compiles librdkafka from C). It is deliberately NOT in
+# `[workspace.metadata.dist].targets`, because a triple listed there is a
+# hard-failing build.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-dist@0.28.0 }
+      - id: plan
+        run: |
+          cargo dist plan --output-format=json > dist-manifest.json
+          echo "manifest<<EOF" >> "$GITHUB_OUTPUT"
+          cat dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-manifest, path: dist-manifest.json }
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with: { targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+      - name: cmake (rdkafka vendors and builds librdkafka from C)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - name: cmake (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-dist@0.28.0 }
+      - run: cargo dist build --target=${{ matrix.target }} --output-format=json > dist.json
+      - name: The binary must carry no engine
+        # Global Constraint 10, asserted rather than assumed. If a future change
+        # ever embeds the engine, this fails the release rather than shipping a
+        # binary whose provenance story is wrong.
+        run: |
+          bin=$(find target -name logweir -type f -perm -u+x | head -1)
+          [ -n "$bin" ] || { echo "no logweir binary was produced" >&2; exit 1; }
+          if strings "$bin" | grep -q 'kafka-backup-core'; then
+            echo "the released binary references kafka-backup-core" >&2; exit 1
+          fi
+          echo "ok: $bin ($(du -h "$bin" | cut -f1))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/distrib/*
+
+  # ATTEMPTED, never blocking. Step 6 and ADR 0004: if the vendored librdkafka
+  # build does not cooperate, the release ships without musl and
+  # docs/stability.md records the omission.
+  musl:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with: { targets: x86_64-unknown-linux-musl }
+      - run: sudo apt-get update && sudo apt-get install -y cmake musl-tools
+      - run: cargo build --release -p logweir --target x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: binary-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/logweir
+      - name: Record the outcome for docs/stability.md
+        if: failure()
+        run: |
+          echo "::warning::the musl build failed; the release ships without it, as ADR 0004 allows." \
+               " docs/stability.md must record this — do NOT block the release on it."
+
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract the pinned engine
+        # The image is the ONLY artifact that carries the engine, so the digest
+        # pin and the MIT licence redistribution both matter here.
+        run: ./scripts/extract-engine.sh
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # linux/amd64 ONLY, and stated rather than defaulted: the engine layer
+          # has no arm64 manifest, so any other platform fails at the `engine`
+          # stage. See the Dockerfile's own comment.
+          platforms: linux/amd64
+          # ghcr.io under THIS repository's own namespace. Global Constraint 14:
+          # Logweir never publishes under `osodevops/`, `kafkabackup.com` or
+          # `oso.sh`. Pulling upstream's image to extract the engine is a
+          # different act and is permitted (global ruling GR6).
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
+      - name: The image must carry the engine, the licences and a working CLI
+        run: |
+          docker build --platform linux/amd64 -t logweir:check .
+          # EVERY dynamic dependency must resolve. Task 22 shipped an image
+          # whose ENGINE ran, whose licences were present and whose `docker
+          # images` row looked healthy — while `logweir` itself died at the
+          # dynamic loader on a missing `libsasl2.so.2`, because the runtime
+          # stage installed `libssl3` but not `libsasl2-2`. `--version` below
+          # catches it too, but this line NAMES the missing library.
+          missing=$(docker run --rm --entrypoint /bin/sh logweir:check \
+                      -c 'ldd /usr/local/bin/logweir' | grep "not found" || true)
+          if [ -n "$missing" ]; then
+            echo "the image's logweir binary has unresolved libraries:" >&2
+            echo "$missing" >&2
+            exit 1
+          fi
+          docker run --rm --entrypoint /usr/local/bin/kafka-backup logweir:check --version
+          docker run --rm logweir:check --version
+          # Global Constraint 15: the upstream MIT licence must be IN the image
+          # that redistributes the upstream binary.
+          docker run --rm --entrypoint /bin/sh logweir:check -c \
+            'test -s /usr/share/licenses/kafka-backup/LICENSE && test -s /usr/share/licenses/logweir/LICENSE'
+          echo "ok: engine, CLI and both licences are present"
+
+  publish:
+    needs: [plan, build, image]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+          body: |
+            The binaries in this release **carry no engine**: they need
+            `kafka-backup` of the pinned digest on `$PATH`, plus
+            `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`. The container
+            image carries both.
+
+            Apache Kafka® and Kafka® are registered trademarks of the Apache
+            Software Foundation. Logweir is not affiliated with or endorsed by
+            the ASF.

@@ -127,6 +127,74 @@ pub fn render_table(sc: &Scorecard) -> String {
     );
     o.push('\n');
     o.push_str(&format!("  {}\n", sc.sample.coverage_note));
+    o.push_str(&qualifiers(sc));
+    o
+}
+
+/// Task 22, carried obligation 3.
+///
+/// The fourteen rows above are spec §13's frozen layout and are NOT touched
+/// here — no row is added, removed or reordered. What is added is a FOOTER,
+/// below the table, in the same place `sample.coverage_note` already sits.
+///
+/// The reason is a review finding, not a preference: the frozen table cites
+/// `objectives.rto_seconds` in the starred row's annotation but never displays
+/// it, never says whether the objectives were `met`, and omits both
+/// `integrity.partial_reason` and `engine_subreport.caveat` — which in this
+/// repository's own fixture reads that the engine sub-report "corroborates
+/// nothing Logweir claims". A reader who saw only the table therefore came away
+/// MORE confident than the signed document supports, which is the exact failure
+/// this surface exists to prevent.
+///
+/// Every value below is read from the scorecard; nothing is inferred, and the
+/// closing line says plainly that the table is a summary of a signed document
+/// rather than the document.
+fn qualifiers(sc: &Scorecard) -> String {
+    let mut o = String::new();
+    o.push('\n');
+    o.push_str("  objectives (from the approved plan)\n");
+    o.push_str(&format!(
+        "    rto_seconds               {:>6}   compared against the starred row above\n",
+        opt(sc.objectives.rto_seconds)
+    ));
+    o.push_str(&format!(
+        "    rpo_seconds               {:>6}\n",
+        opt(sc.objectives.rpo_seconds)
+    ));
+    o.push_str(&format!(
+        "    pass_rate                 {:>6}   measured {}\n",
+        opt(sc.objectives.pass_rate),
+        opt(sc.integrity.pass_rate_measured)
+    ));
+    // `met` is a tri-state and is rendered as one. "unmeasurable" is NOT "met",
+    // and collapsing null into either direction is the class of overstatement
+    // this footer exists to remove.
+    o.push_str(&format!(
+        "    met                       {:>6}\n",
+        match sc.objectives.met {
+            Some(true) => "yes",
+            Some(false) => "NO",
+            None => "unmeasurable",
+        }
+    ));
+    o.push('\n');
+    o.push_str("  qualifiers the fourteen rows above do not carry\n");
+    o.push_str(&format!(
+        "    integrity.partial_reason  {}\n",
+        sc.integrity.partial_reason.as_deref().unwrap_or("—")
+    ));
+    match &sc.engine_subreport {
+        Some(e) => o.push_str(&format!("    engine_subreport.caveat   {}\n", e.caveat)),
+        None => o.push_str(
+            "    engine_subreport          null — no engine sub-report was retained; \
+             this is NOT \"the engine reported nothing wrong\"\n",
+        ),
+    }
+    o.push_str(
+        "\n  This table is a SUMMARY of a signed document, not the document. \
+         `--format json`\n  prints the signed bytes; docs/verify-a-scorecard.md \
+         lists what the summary omits.\n",
+    );
     o
 }
 

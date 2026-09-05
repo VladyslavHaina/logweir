@@ -78,3 +78,25 @@ futures = "0.3"
 # std::process (Task 12). "rt" + "time" + "net" is what object_store's HTTP
 # clients need from the single reused current-thread runtime.
 tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
+
+# Task 22, addendum ruling A5. `cargo dist` reads its targets, installers and CI
+# backend from here; without this section `cargo dist plan` errors out and
+# `.github/workflows/release.yml` has no source of truth for the triples it
+# builds.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = ["github"]
+installers = []
+# The three triples step 6 requires. The binary carries NO engine (Global
+# Constraint 10 — the engine is dynamically linked and ships in the
+# debian:bookworm-slim image only).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+pr-run-mode = "plan"
+# release.yml is hand-extended with the debian:bookworm-slim image job and the
+# non-blocking musl attempt, so `cargo dist generate --check` must tolerate a
+# workflow that is not byte-identical to the generated one.
+allow-dirty = ["ci"]

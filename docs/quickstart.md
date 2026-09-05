@@ -1,0 +1,242 @@
+# Quickstart
+
+Two paths. The first proves the tool works on your laptop in four minutes with
+no cloud resources. The second runs a drill against a scratch cluster you
+already have.
+
+If you only want to know what a scorecard means once someone hands you one, read
+[verify-a-scorecard.md](verify-a-scorecard.md) instead.
+
+---
+
+## Path 1: the demo
+
+```bash
+./scripts/demo.sh
+```
+
+Needs `docker`, `cargo`, `openssl`, `jq`, and `python3` with the `cryptography`
+package. All five are checked before anything starts, so a missing one costs you
+a second rather than four minutes. Override the interpreter with
+`LOGWEIR_PYTHON=/path/to/python3`.
+
+Tear down with `just e2e-down`.
+
+What it proves, in order: the engine is digest-pinned and extractable; a real
+backup exists; the plan was approved by a **different key** than the one that
+signs the result; the drill ran every phase against a real broker and a real
+archive; and the scorecard verifies under **two independent verifiers**, one of
+which shares no code with Logweir.
+
+---
+
+## Path 2: a scratch cluster you already have
+
+### 0. What you need before you start
+
+- An **existing** `kafka-backup` archive in an S3-compatible bucket. Logweir
+  does not back up (`--from-cluster` is in v0.1's scope but its code lands in a
+  follow-up — [ADR 0007](adr/0007-from-cluster-in-v0.1.md)).
+- A **scratch** Kafka cluster you are willing to have topics created in. Not
+  your production cluster, and not a cluster anything else depends on.
+- A **marker topic** on that scratch cluster. This is v0.1's segregation proof:
+  if it is absent, phase 0 refuses the drill with exit 3 before anything runs.
+  Create it with any name you like and put that name in the spec.
+- The `kafka-backup` binary of the pinned digest on `$PATH`, or the container
+  image, which carries it.
+
+### 1. Write the drill spec
+
+Start from [`examples/drill.yaml`](../examples/drill.yaml). Three blocks need
+your attention:
+
+**`source`** — where the archive is. `prefix` is the backup id's prefix in the
+bucket, not the bucket root; getting this wrong produces "the archive holds no
+backup set at the configured source storage location", which is the correct
+refusal and a confusing first experience.
+
+**`sample`** — **the window is deployment-specific and the example's dates are
+illustrative.**
+
+```yaml
+sample:
+  window_start: "2026-09-04T00:00:00Z"   # a range your archive actually covers
+  window_end:   "2026-09-05T00:00:00Z"
+  records_per_partition: 25
+  anchor: head
+```
+
+A window that overlaps no segment is **refused** — "a drill over an empty window
+would report a pass that means nothing" — rather than reported as a pass over
+nothing. `anchor: head` is the only value v0.1 implements; `tail` and `random`
+are refused at phase 0, for reasons [stability.md](stability.md) sets out in
+full (they are unsound here, not merely unimplemented).
+
+**`objectives`** — what you are actually testing.
+
+```yaml
+objectives:
+  rto_seconds: 900
+  rpo_seconds: 300
+  pass_rate: 1.0
+```
+
+`rto_seconds` is compared against `measured.rto_excluding_preflight_seconds`,
+not against the wall clock — see
+[formats/drill-scorecard.md](formats/drill-scorecard.md) for why.
+
+### 2. Check before you run
+
+```bash
+logweir doctor \
+  --spec drill.yaml \
+  --allowed-clusters allowed-clusters.json \
+  --approver-key approver.pub.pem
+```
+
+`doctor` checks credentials, the engine digest and glibc floor, target
+reachability, the marker topic and the approver key — before a drill is
+attempted. Add `--strict` to treat a check it could not perform (for example
+`storage`, with no live bucket to list against) as a failure rather than a skip.
+
+`allowed-clusters.json` must name the target cluster's own id:
+
+```json
+{ "allowed_cluster_ids": ["<the scratch cluster's id>"], "source_cluster_id": null }
+```
+
+**Derive it from the running broker rather than typing it.** An allowlist that
+does not name this cluster is refused at phase 0 with exit 3, which is the guard
+doing its job and looks like a bug the first time.
+
+### 3. The two-key approval flow
+
+The approval is a separate signed document. In a real deployment it is produced
+on the **approver's** machine, with the **approver's** key, and only
+`approval.json` and `approval.sig` cross the boundary.
+
+```bash
+# On the approver's machine:
+PLAN_HASH="sha256:$(shasum -a 256 drill.yaml | cut -d' ' -f1)"
+jq -n --arg h "$PLAN_HASH" \
+      '{approver:"sre-oncall@example.com", ticket:"CHG-40881",
+        plan_hash:$h, approved_at:(now|todate)}' > approval.json
+
+cargo run -p logweir-evidence --example sign_approval \
+  -- approver.pem approval.json approval.sig
+```
+
+`plan_hash` binds the approval to the **exact bytes** of the spec that will run.
+Edit the spec after approving and phase 1 refuses with exit 3 — which is the
+point. `openssl dgst` cannot produce this sidecar: the signature covers
+PAE(payloadType, payload), never the bare bytes.
+
+**If the approver key equals the signing key**, Logweir does not refuse; it
+labels the scorecard `approval.self_attested: true`, and both verifiers print
+`SELF-ATTESTED`. A self-attested run is not a forgery, but it is a materially
+weaker governance signal, and an auditor is entitled to treat it as a reason to
+seek corroboration.
+
+### 4. Run the drill
+
+```bash
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
+export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
+export LOGWEIR_ENGINE_VERSION=0.21.0
+export LOGWEIR_ENGINE_DIGEST=sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317
+
+logweir drill run \
+  --spec drill.yaml \
+  --approval approval.json --approver-key approver.pub.pem \
+  --allowed-clusters allowed-clusters.json \
+  --signing-key signer.pem \
+  --out scorecard.json \
+  --metrics-file /var/lib/node_exporter/textfile/logweir.prom \
+  --triggered-by "quarterly DR drill"
+```
+
+Credentials come from `object_store`'s **own** chain (static keys, then web
+identity / IRSA, ECS, EKS Pod Identity, IMDS). That is **not** the AWS SDK
+chain: `~/.aws/credentials`, `AWS_PROFILE` and SSO are unsupported.
+
+`LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST` are mandatory. An empty
+value is refused with exit 1: a signed scorecard must name the engine image that
+produced the restore.
+
+`--out` writes `scorecard.json` and its DSSE sidecar beside it as
+`scorecard.sig`.
+
+### 5. Read the exit code — it is the result
+
+| Code | Meaning | What you do |
+|---|---|---|
+| 0 | Pass. | Archive the scorecard. |
+| 1 | Operational — the drill could not be attempted or continued. **No artifact.** | Fix the environment and re-run. |
+| **2** | **A drill ran, was measured, and did not pass. A scorecard WAS written and signed.** | **Read the scorecard.** This is the finding you scheduled the drill for. |
+| 3 | Refused by a guard, before anything ran. | Fix the plan. Nothing happened. |
+| 4 | Signing or lock proof failed — and nothing was uploaded. | Fix keys or bucket permissions. |
+
+**1 and 2 are completely different things** and are easy to confuse under a
+scheduler. Under Kubernetes they are actively hard to tell apart unless the Job
+is shaped correctly — read [kubernetes.md](kubernetes.md) before scheduling one.
+
+### 6. Read the scorecard
+
+```bash
+logweir drill show scorecard.json
+```
+
+The table is a fixed-width summary of a signed document. Below the fourteen rows
+it prints the objectives, whether they were met, `integrity.partial_reason` and
+the engine sub-report's own caveat — the qualifiers that most change how much a
+result is worth and that the frozen layout does not carry.
+
+Verify it, twice:
+
+```bash
+logweir drill verify --scorecard scorecard.json \
+  --signature scorecard.sig --public-key signer.pub.pem
+
+python3 docs/verify_scorecard.py scorecard.json scorecard.sig signer.pub.pem
+```
+
+The second shares no code with Logweir. If they ever disagree, the format is
+broken, not merely one of the tools.
+
+### 7. What landed in the bucket
+
+Under your evidence prefix — Logweir writes under `logweir/` and nowhere else,
+and refuses a prefix that is not exactly that:
+
+```
+logweir/drills/<run_id>.json           the signed scorecard
+logweir/drills/<run_id>.sig            its DSSE sidecar
+logweir/drills/<run_id>.receipt.json   what the store answered AFTER the put
+logweir/drills/<run_id>.receipt.sig
+logweir/drills/<run_id>.teardown.json  what was torn down
+logweir/drills/<run_id>.teardown.sig
+```
+
+The receipt exists because the scorecard's four `evidence` fields describe facts
+that only exist after the upload, and the scorecard is signed before it. Verify
+it with the same tool:
+
+```bash
+python3 docs/verify_scorecard.py --payload-type receipt \
+    <run_id>.receipt.json <run_id>.receipt.sig signer.pub.pem
+```
+
+Then check the binding by hand — `scorecard_sha256` in the receipt is the sha256
+of the scorecard's exact stored bytes:
+
+```bash
+shasum -a 256 scorecard.json
+```
+
+A **missing** receipt means "no storage evidence was published for this run" —
+never "the upload was not create-only".
+
+---
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

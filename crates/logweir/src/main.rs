@@ -1,6 +1,6 @@
 use clap::Parser;
 use logweir::drill::RunArgs;
-use logweir::{cli, exit, schema, verify};
+use logweir::{cli, exit, schema, show, verify};
 
 fn main() -> std::process::ExitCode {
     // `cli::Cli::parse()` (via clap's `Parser::parse`) calls `Error::exit()`
@@ -61,9 +61,20 @@ fn main() -> std::process::ExitCode {
             out,
             metrics_file,
         }),
-        _ => {
-            eprintln!("not yet implemented in this task");
-            exit::ExitCode::Operational
+        // Task 22 (carried obligation 1). `show::run` has been implemented and
+        // golden-tested since `d403abc`, but this match ended in a `_ =>` arm
+        // that printed "not yet implemented in this task" — so the ONLY way to
+        // reach the renderer was to link the library from a test. The shipped
+        // binary silently had no `drill show`.
+        //
+        // There is deliberately NO catch-all arm now. With every variant named,
+        // adding a subcommand to `cli.rs` without dispatching it is a compile
+        // error (`non-exhaustive patterns`), not a runtime stub that a reader
+        // discovers from a message. That is the structural half of the fix; the
+        // wiring is the other half, and `crates/logweir/tests/cli_show.rs`
+        // asserts the compiled binary, not the library, renders a table.
+        cli::Command::Drill(cli::DrillCmd::Show { scorecard, format }) => {
+            show::run(&scorecard, &format)
         }
     };
     code.into()

@@ -143,3 +143,9 @@ here so a future dependency change does not "simplify" it away.
   would itself be hand-rolled protocol code for something `rdkafka` already
   provides, so it is excluded by the same constraint, not merely
   de-prioritized.
+
+
+---
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

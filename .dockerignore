@@ -1,0 +1,11 @@
+# Task 22. Without this, `COPY . .` in the builder stage pulls the entire
+# `target/` directory (multiple GB after a local build) and the generated
+# scratch dirs into the build context, which is slow at best and, on a machine
+# with a warm cargo cache, large enough to make `docker build` look hung.
+/target
+/.e2e
+/.demo
+/.engine
+/.git
+/upstream
+**/*.tar.gz
