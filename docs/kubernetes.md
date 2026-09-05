@@ -129,10 +129,46 @@ All **verified** on `docker-desktop`:
 - **The default ServiceAccount has zero access.** A drill pod needs its own
   ServiceAccount, Role and RoleBinding. `automountServiceAccountToken: false` is
   appropriate for v0.1, which makes no Kubernetes API calls at all.
-- **The signing key mounts cleanly as a Secret file**, and the drill spec, the
-  approval and the allowed-clusters list mount as a ConfigMap.
+- **The signing key needs `fsGroup`. Without it a non-root pod cannot read its
+  own key, and this page used to claim the Secret "mounts cleanly".** It does
+  not: kubelet writes Secret files owned by `root:root`, so a container running
+  as `runAsUser: 65532` — which the image sets and the manifest repeats — reads
+  nothing through the owner bits. `examples/cronjob-drill.yaml` shipped
+  `runAsUser: 65532`, `defaultMode: 0400` and **no `fsGroup` anywhere**, so
+  every scheduled drill would have died at phase 1 opening
+  `/etc/logweir-keys/signing.pem`.
+
+  **All four combinations run live on `docker-desktop`, 2026-09-05**, in one
+  pod shape with the manifest's own uid/gid, `busybox` doing `ls -lL` then
+  `cat`:
+
+  | `defaultMode` | `fsGroup` | file as mounted | `cat` |
+  |---|---|---|---|
+  | `0400` | none | `-r-------- root root` | **Permission denied** |
+  | `0440` | none | `-r--r----- root root` | **Permission denied** |
+  | `0400` | `65532` | `-r--r----- root 65532` | reads |
+  | `0440` | `65532` | `-r--r----- root 65532` | reads |
+
+  **`fsGroup` is the load-bearing half, and it is sufficient on its own.**
+  Two things happen when it is set: kubelet chowns the volume's group to that
+  GID, *and* it ORs group-read into the file mode — which is why row 3 lands on
+  disk as `0440` even though the manifest asked for `0400`. Widening the mode
+  without `fsGroup` (row 2) fixes nothing, because the group is still root's.
+
+  `examples/cronjob-drill.yaml` now sets `fsGroup: 65532` and writes
+  `defaultMode: 0440`, so the manifest states the permission that actually
+  lands rather than one kubelet silently widens.
+- **The ConfigMap was never the failing half, and that was checked, not
+  assumed.** The drill spec, the approval and the allowed-clusters list mount as
+  a ConfigMap; the manifest sets no `defaultMode` there, so kubelet's `0644`
+  applies. Verified live in the same pod shape, with **no `fsGroup`**:
+  `-rw-r--r-- root root drill.yaml`, `cat` exit 0. The files are `root:root` for
+  the same reason the Secret's are — the group bits simply do not matter when
+  the world bits are set. That is also why the key is a Secret and not a
+  ConfigMap.
 - **`emptyDir` is verified** for the engine's scratch directory. **No PVC was
   exercised.** The only StorageClass on the test cluster was `hostpath`.
+- **The metrics file must NOT be an `emptyDir`** — see §5.
 
 ## 4. What the pod still needs from you
 
@@ -145,7 +181,70 @@ The container image carries the engine; the environment does not carry itself:
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`, or an IRSA / Pod Identity setup | `object_store`'s own credential chain — **not** the AWS SDK's. `~/.aws/credentials`, `AWS_PROFILE` and SSO are unsupported. See [stability.md](stability.md). |
 | `TMPDIR` | Where the rendered `restore.yaml` and the restore checkpoint land. Point it at a writable volume; the checkpoint is pod-local and is never uploaded, so a crashed restore is not resumable in v0.1. |
 
-## 5. What is NOT here in v0.1
+## 5. The metrics file is the only metrics surface, so where you mount it decides whether you get any
+
+v0.1 has **no HTTP surface** — no `/metrics`, no `/healthz`, no `/readyz`. The
+Prometheus **textfile** written at `--metrics-file` is not one of two routes; it
+is the route. So the volume behind it is load-bearing.
+
+`examples/cronjob-drill.yaml` mounted it on an **`emptyDir`**, directly beneath
+its own comment telling the reader to mount node_exporter's textfile directory.
+An emptyDir is deleted with the pod. Every drill therefore wrote its metrics
+into a filesystem nothing would ever scrape and then destroyed it, and
+[../dashboards/logweir.json](../dashboards/logweir.json) stayed empty forever —
+which looks exactly like Logweir never running.
+
+**Verified live on `docker-desktop`, 2026-09-05.** One pod shape at
+`runAsUser: 65532` wrote `logweir.prom`; the pod was then **deleted**; a second
+pod mounted the same volume and read it back:
+
+```
+hostPath /var/lib/node_exporter/textfile   ->  logweir_drill_last_run_timestamp_seconds 1757000000
+emptyDir                                   ->  total 0
+                                               cat: can't open '/metrics/logweir.prom'
+```
+
+Three facts decide the shape, each of them run:
+
+- **`type: Directory`, not `DirectoryOrCreate`.** `DirectoryOrCreate` makes
+  kubelet create the path and it lands `drwxr-xr-x root root`, which uid 65532
+  cannot write: `can't create /metrics/logweir.prom: Permission denied`, at
+  phase 8, after the whole drill has already run. `Directory` fails at **mount**
+  time instead, before the container starts, with an event that names the path:
+
+  ```
+  Warning  FailedMount  MountVolume.SetUp failed for volume "metrics":
+                        hostPath type check failed: /var/lib/... is not a directory
+  ```
+
+  Loud beats silent.
+- **`fsGroup` does not apply to `hostPath`.** Ownership is host-side setup, not
+  manifest setup. Verified: the directory at `root:root 0755` refuses the write;
+  at `0775` with group 65532 it succeeds.
+
+  ```bash
+  sudo install -d -m 0775 -g 65532 /var/lib/node_exporter/textfile
+  ```
+
+- **A `hostPath` volume is forbidden by Pod Security `baseline` AND
+  `restricted`.** Verified by labelling the namespace and re-applying:
+
+  ```
+  Error from server (Forbidden): violates PodSecurity "baseline:latest":
+    hostPath volumes (volume "metrics")
+  ```
+
+  Everything else in the worked manifest satisfies `restricted`; the metrics
+  volume is the one thing that does not. In a namespace that enforces either
+  profile, **delete both the `--metrics-file` argument and the `metrics`
+  volume** rather than pointing the flag at an emptyDir. No metrics is an honest
+  state; a dashboard fed by a deleted file is not.
+
+**Unverified:** a shared PVC read by a node_exporter sidecar, and any push-based
+route (Pushgateway, OTLP). Neither was tested, and v0.1 emits nothing but the
+textfile.
+
+## 6. What is NOT here in v0.1
 
 Stated so nobody goes looking:
 
@@ -160,7 +259,9 @@ Stated so nobody goes looking:
   document checked against the approver's public key.
 - **No HTTP surface.** No `/metrics`, `/healthz` or `/readyz`. Metrics are a
   Prometheus **textfile** written at `--metrics-file` and scraped through
-  node_exporter's textfile collector; see [../dashboards/logweir.json](../dashboards/logweir.json).
+  node_exporter's textfile collector — see §5 for where that file has to live,
+  and [../dashboards/logweir.json](../dashboards/logweir.json) for the
+  dashboard it feeds.
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

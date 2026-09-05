@@ -116,22 +116,37 @@ jobs:
         # pass-degraded, and integrity.level is consume-only. Nothing here may
         # report a FAULT — the verdict for these tags is
         # `unsupported (lever-absent)` whatever happens.
-        run: |
-          cargo test --workspace --features e2e -- --test-threads=1 \
-            a_restore_into_an_empty_scratch_target_succeeds
+        run: ./scripts/run-named-tests.sh a_restore_into_an_empty_scratch_target_succeeds
 
-      - name: dry_run_check_segments positive control
+      - name: Deleted-segment positive control
         id: control
         continue-on-error: true
-        # THE POSITIVE CONTROL. A fixture archive with a deliberately deleted
-        # NON-OLDEST segment must yield `valid: false`. A tag where it stays
-        # `valid: true` accepted the lever and did not act on it — which is
+        # THE POSITIVE CONTROL, and the ONLY input to `fail(lever-not-honoured)`
+        # below. A fixture archive with a deliberately deleted NON-OLDEST
+        # segment must make the engine's `validate-restore` report the archive
+        # unrestorable, so the drill blocks at phase 5 and signs
+        # `outcome: preflight-failed` with the finding inside the signed bytes.
+        # A tag where the drill sails past that is a tag that accepted the
+        # `dry_run_check_segments` lever and did not act on it — which is
         # `fail (lever-not-honoured)`, a materially different verdict from a
         # plain failure, because the engine reported success over an archive it
-        # did not check. The fixture pair lives in e2e/fixtures/dryrun/.
-        run: |
-          cargo test --workspace --features e2e -- --test-threads=1 dry_run_check_segments || \
-          cargo test -p logweir-engine-oso -- dry_run
+        # never checked. The test quarantines a real segment out of the live
+        # MinIO archive and puts it back before it asserts, so a failure cannot
+        # leave the archive broken for the rest of the sweep.
+        # (`e2e/fixtures/dryrun/{clean,data-missing}.json` are PARSE fixtures for
+        # the dry-run report struct — they exercise no engine and are not this
+        # control.)
+        #
+        # This step used to filter on the string `dry_run_check_segments`. That
+        # is the name of a struct field and of a rendered-YAML key; it has never
+        # been the name of a test, so the filter matched 0 of the 475 tests,
+        # `cargo test` exited 0 having run nothing, `steps.control.outcome` was
+        # always `success`, and the `fail(lever-not-honoured)` branch below was
+        # unreachable by construction. The real control is the e2e test named
+        # here (`e2e/tests/full_drill.rs`). `run-named-tests.sh` resolves every
+        # name against `--list` first and exits 1 on a name that matches
+        # nothing, so this cannot silently go vacuous again.
+        run: ./scripts/run-named-tests.sh a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard
 
       - name: Record this row
         if: always()
@@ -142,7 +157,7 @@ jobs:
             reason="below the 0.21.0 full-drill floor; reduced row set only"
           elif [ "${{ steps.control.outcome }}" != "success" ]; then
             outcome="fail(lever-not-honoured)"
-            reason="dry_run_check_segments positive control did not report valid:false"
+            reason="the deleted-segment positive control did not block the restore at preflight"
           elif [ "${{ steps.full.outcome }}" = "success" ]; then
             outcome="pass"
             reason=""

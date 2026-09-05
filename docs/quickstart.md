@@ -15,8 +15,8 @@ If you only want to know what a scorecard means once someone hands you one, read
 ./scripts/demo.sh
 ```
 
-Needs `docker`, `cargo`, `openssl`, `jq`, and `python3` with the `cryptography`
-package. All five are checked before anything starts, so a missing one costs you
+Needs `docker`, `cargo`, `openssl`, `shasum`, and `python3` with the
+`cryptography` package. All five are checked before anything starts, so a missing one costs you
 a second rather than four minutes. Override the interpreter with
 `LOGWEIR_PYTHON=/path/to/python3`.
 
@@ -134,19 +134,24 @@ on the **approver's** machine, with the **approver's** key, and only
 `approval.json` and `approval.sig` cross the boundary.
 
 ```bash
-# On the approver's machine:
-PLAN_HASH="sha256:$(shasum -a 256 drill.yaml | cut -d' ' -f1)"
-jq -n --arg h "$PLAN_HASH" \
-      '{approver:"sre-oncall@example.com", ticket:"CHG-40881",
-        plan_hash:$h, approved_at:(now|todate)}' > approval.json
-
-cargo run -p logweir-evidence --example sign_approval \
-  -- approver.pem approval.json approval.sig
+# On the approver's machine, with the approver's PRIVATE key:
+logweir drill approve \
+  --spec drill.yaml \
+  --key approver.pem \
+  --approver sre-oncall@example.com \
+  --ticket CHG-40881 \
+  --out approval.json
 ```
 
+That writes `approval.json` **and** `approval.sig` beside it — the only path
+`drill run` looks for the sidecar. It needs nothing but the `logweir` binary:
+no clone, no Rust toolchain, no `jq`, no `shasum`. In the container image it is
+`docker run --rm -v "$PWD:/w" -w /w logweir:v0.1.0 drill approve …`.
+
 `plan_hash` binds the approval to the **exact bytes** of the spec that will run.
-Edit the spec after approving and phase 1 refuses with exit 3 — which is the
-point. `openssl dgst` cannot produce this sidecar: the signature covers
+Edit the spec after approving — including moving the sample window — and phase 1
+refuses with exit 3, which is the point: **re-run `drill approve` on every spec
+edit.** `openssl dgst` cannot produce this sidecar: the signature covers
 PAE(payloadType, payload), never the bare bytes.
 
 **If the approver key equals the signing key**, Logweir does not refuse; it
@@ -159,6 +164,12 @@ seek corroboration.
 
 ```bash
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
+# Optional. `logweir doctor` and `logweir drill run` resolve the engine through
+# ONE chain — $LOGWEIR_ENGINE_BIN, then ./.engine/kafka-backup, then
+# /usr/local/bin/kafka-backup, then $PATH — so an engine on $PATH is enough for
+# both and this line only pins a non-standard location. (They used to disagree:
+# `doctor` searched $PATH and `drill run` did not, so a $PATH install passed
+# `doctor` and then died mid-drill.)
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
 export LOGWEIR_ENGINE_VERSION=0.21.0
 export LOGWEIR_ENGINE_DIGEST=sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317

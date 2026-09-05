@@ -115,14 +115,17 @@ jobs:
               -e "s|^\( *window_end:\).*|\1   \"$end\"|" \
               examples/drill.yaml > .rd/drill.yaml
 
-          plan="sha256:$(sha256sum .rd/drill.yaml | cut -d' ' -f1)"
-          jq -n --arg h "$plan" \
-            '{approver:"release-drill@example.com", ticket:"REL-1",
-              plan_hash:$h, approved_at:(now|todate)}' > .rd/approval.json
-          cargo run --release -p logweir-evidence --example sign_approval \
-            -- .rd/approver.pem .rd/approval.json .rd/approval.sig
-
-          # EVERY command below is the RELEASED binary.
+          # EVERY command below is the RELEASED binary — INCLUDING the approval.
+          # It used to be minted with `jq` plus `cargo run -p logweir-evidence
+          # --example sign_approval`, which is not in the release artifact at
+          # all: this job therefore proved the tarball could RUN a drill while
+          # quietly using the source tree to produce the one mandatory input
+          # `drill run` will not start without. If `drill approve` regresses,
+          # this job must fail.
+          "$LOGWEIR_BIN" drill approve --spec .rd/drill.yaml \
+            --key .rd/approver.pem \
+            --approver release-drill@example.com --ticket REL-1 \
+            --out .rd/approval.json
           "$LOGWEIR_BIN" doctor --spec .rd/drill.yaml \
             --allowed-clusters .rd/allowed-clusters.json \
             --approver-key .rd/approver.pub.pem

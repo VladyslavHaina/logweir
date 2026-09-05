@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Logweir demo. Requires: docker, cargo, openssl, jq, python3 (with the
+# The Logweir demo. Requires: docker, cargo, openssl, shasum, python3 (with the
 # `cryptography` package). Takes ~4 minutes on a warm cargo cache.
 #
 # Zero cloud spend (Global Constraint 17): everything runs in local containers.
@@ -28,9 +28,13 @@ cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f e2e/compose/docker-compose.yml"
 
-for tool in docker cargo openssl jq shasum; do
+# `jq` is no longer here: the only step that used it was the approval, which
+# is now `logweir drill approve`. A prerequisite check that demands a tool
+# nothing runs is the same shape as a check that reports ok having run
+# nothing — it makes the requirement list untrustworthy.
+for tool in docker cargo openssl shasum; do
   command -v "$tool" >/dev/null 2>&1 || {
-    echo "demo: \`$tool\` is not on \$PATH. Requires: docker, cargo, openssl, jq, python3." >&2
+    echo "demo: \`$tool\` is not on \$PATH. Requires: docker, cargo, openssl, shasum, python3." >&2
     exit 1
   }
 done
@@ -43,7 +47,7 @@ done
 # `LOGWEIR_PYTHON=/path/to/python3` (e.g. a virtualenv).
 PYTHON="${LOGWEIR_PYTHON:-python3}"
 command -v "$PYTHON" >/dev/null 2>&1 || {
-  echo "demo: \`$PYTHON\` is not on \$PATH. Requires: docker, cargo, openssl, jq, python3." >&2
+  echo "demo: \`$PYTHON\` is not on \$PATH. Requires: docker, cargo, openssl, shasum, python3." >&2
   exit 1
 }
 "$PYTHON" -c 'import cryptography' >/dev/null 2>&1 || {

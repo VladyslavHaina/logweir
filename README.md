@@ -62,7 +62,7 @@ One command, on a laptop, with no cloud resources:
 ./scripts/demo.sh
 ```
 
-It needs `docker`, `cargo`, `openssl`, `jq` and `python3` with the
+It needs `docker`, `cargo`, `openssl`, `shasum` and `python3` with the
 `cryptography` package (`pip install cryptography`; or point `LOGWEIR_PYTHON`
 at an interpreter that has it). All five are checked at second zero, before
 anything is started. It takes about four minutes and does six things:

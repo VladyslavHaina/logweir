@@ -26,7 +26,7 @@ raises against that engine or against an operator that defaults to it.**
 | `pass` | The full drill ran and passed. |
 | `pass-degraded` | The drill passed at a reduced integrity level (e.g. `consume-only`, because the KBAK decoder returned `Unsupported`). |
 | `fail(reason)` | The drill ran and did not pass, for the stated reason. |
-| `fail(lever-not-honoured)` | The engine accepted a lever and did not act on it. The `dry_run_check_segments` positive control catches this: a fixture archive with a deliberately deleted **non-oldest** segment must yield `valid: false`; a version where it stays `valid: true` lands here. |
+| `fail(lever-not-honoured)` | The engine accepted a lever and did not act on it. The deleted-segment positive control catches this: a **non-oldest** segment is removed from the live archive, so `validate-restore` must report it unrestorable and the drill must block at phase 5 with `outcome: preflight-failed` and exit 2. A version where the drill sails past lands here. The control is the e2e test `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`. |
 | `unsupported(lever-absent)` | The engine predates a lever Logweir needs. Reported, never treated as a fault. |
 
 ## Rows
@@ -56,7 +56,18 @@ so nobody quotes a projected verdict as a tested one.
 `.github/workflows/engine-matrix.yml` runs the full compose drill against each
 tag in the declared window — the newest four minors plus `v0.19.1` — records one
 of the five outcomes, and opens a PR when this file changes. It also carries the
-`dry_run_check_segments` positive control described above.
+deleted-segment positive control described above.
+
+**That control was vacuous until 2026-09-05.** The step filtered `cargo test` on
+the string `dry_run_check_segments`, which is the name of a struct field and of a
+rendered-YAML key and has never been the name of a test: it matched **0 of the
+475 tests**, and `cargo test` exits 0 on a filter that matches nothing. So
+`fail(lever-not-honoured)` — the one outcome of the five that detects upstream
+accepting a lever and ignoring it — was unreachable by construction, and the
+weekly job would have published a green verdict about a check that never ran.
+Both filter-based steps now go through `scripts/run-named-tests.sh`, which
+resolves every name against `--list` first and **exits 1 on a name that matches
+nothing**.
 
 Until it has run, this file is short on purpose.
 

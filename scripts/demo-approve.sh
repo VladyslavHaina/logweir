@@ -3,7 +3,10 @@
 # approver's own machine, with the approver's own key, and only approval.json
 # and approval.sig cross the boundary.
 #
-# Requires: bash, jq, cargo, and .demo/approver.pem (minted by scripts/demo.sh).
+# Requires: bash, a `logweir` binary (built here if $LOGWEIR_BIN is unset), and
+# .demo/approver.pem (minted by scripts/demo.sh). No `jq` and no `shasum`: the
+# hashing and the signing are `logweir drill approve`'s job, which is the only
+# way an operator with nothing but the release artifact can do this at all.
 #
 # Usage: demo-approve.sh [spec.yaml]   (default: .demo/drill.yaml)
 #
@@ -17,16 +20,21 @@ cd "$(dirname "$0")/.."
 
 SPEC="${1:-.demo/drill.yaml}"
 [ -f "$SPEC" ] || { echo "demo-approve: no such spec: $SPEC" >&2; exit 1; }
-PLAN_HASH="sha256:$(shasum -a 256 "$SPEC" | cut -d' ' -f1)"
-jq -n --arg h "$PLAN_HASH" \
-      --arg a "demo@example.com" \
-      --arg t "DEMO-1" \
-      '{approver:$a, ticket:$t, plan_hash:$h, approved_at:(now|todate)}' \
-  > .demo/approval.json
 
-# The sidecar is DSSE: the signature covers PAE(payloadType, payload), never the
-# bare bytes, so `logweir` and the Python verifier agree on what was signed.
-cargo run --release -p logweir-evidence --example sign_approval \
-  --  .demo/approver.pem .demo/approval.json .demo/approval.sig
+# `logweir drill approve` — the SHIPPED command, not a cargo example. It hashes
+# the spec, builds the approval document and writes the DSSE sidecar beside it
+# at `.sig`, which is the only path `drill run` looks for. The sidecar is DSSE:
+# the signature covers PAE(payloadType, payload), never the bare bytes, so
+# `logweir` and the Python verifier agree on what was signed.
+LOGWEIR_BIN="${LOGWEIR_BIN:-}"
+if [ -z "$LOGWEIR_BIN" ]; then
+  cargo build --release -p logweir
+  LOGWEIR_BIN="target/release/logweir"
+fi
 
-echo "approved $SPEC plan_hash=$PLAN_HASH"
+"$LOGWEIR_BIN" drill approve \
+  --spec "$SPEC" \
+  --key .demo/approver.pem \
+  --approver demo@example.com \
+  --ticket DEMO-1 \
+  --out .demo/approval.json

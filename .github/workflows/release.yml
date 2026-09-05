@@ -126,6 +126,60 @@ jobs:
         # pin and the MIT licence redistribution both matter here.
         run: ./scripts/extract-engine.sh
       - uses: docker/setup-buildx-action@v3
+      # THE CHECKS RUN BEFORE THE PUSH, and that ordering is the point. They
+      # used to run after `build-push-action` with `push: true`, so an image
+      # that failed every assertion below was already published to ghcr under
+      # the release tag before anything looked at it — a gate downstream of the
+      # thing it gates. Now the image is built and interrogated locally first,
+      # and only a verified image is pushed.
+      - name: The image must carry the engine, the licences and a working CLI
+        run: |
+          docker build --platform linux/amd64 -t logweir:check .
+          # EVERY dynamic dependency must resolve. Task 22 shipped an image
+          # whose ENGINE ran, whose licences were present and whose `docker
+          # images` row looked healthy — while `logweir` itself died at the
+          # dynamic loader on a missing `libsasl2.so.2`, because the runtime
+          # stage installed `libssl3` but not `libsasl2-2`. `--version` below
+          # catches it too, but this line NAMES the missing library.
+          missing=$(docker run --rm --entrypoint /bin/sh logweir:check \
+                      -c 'ldd /usr/local/bin/logweir' | grep "not found" || true)
+          if [ -n "$missing" ]; then
+            echo "the image's logweir binary has unresolved libraries:" >&2
+            echo "$missing" >&2
+            exit 1
+          fi
+          docker run --rm --entrypoint /usr/local/bin/kafka-backup logweir:check --version
+          docker run --rm logweir:check --version
+          # The image must be able to produce the approval `drill run` will not
+          # start without. `--approval` is mandatory and, until `drill approve`
+          # existed, the only producer in the tree was a cargo EXAMPLE that this
+          # image does not contain: an operator with nothing but the image could
+          # not mint one at all. Minted here over the image's OWN spec example
+          # and read back, so a regression fails the release.
+          #
+          # The key and the spec are made on the RUNNER and mounted in: the
+          # runtime image is debian:bookworm-slim plus three libraries and
+          # carries no `openssl` CLI, which is exactly the situation an
+          # operator is in.
+          mkdir -p .imgcheck && chmod 0777 .imgcheck
+          openssl ecparam -genkey -name prime256v1 -noout \
+            | openssl pkcs8 -topk8 -nocrypt -out .imgcheck/approver.pem
+          chmod 0644 .imgcheck/approver.pem
+          cp examples/drill.yaml .imgcheck/drill.yaml
+          docker run --rm -v "$PWD/.imgcheck:/w" -w /w logweir:check \
+            drill approve --spec drill.yaml --key approver.pem \
+            --approver ci@example.com --ticket REL-CHECK --out approval.json
+          test -s .imgcheck/approval.json
+          test -s .imgcheck/approval.sig
+          grep -q 'drill-approval' .imgcheck/approval.sig
+          grep -q "sha256:$(sha256sum .imgcheck/drill.yaml | cut -d' ' -f1)" \
+            .imgcheck/approval.json
+          rm -rf .imgcheck
+          # Global Constraint 15: the upstream MIT licence must be IN the image
+          # that redistributes the upstream binary.
+          docker run --rm --entrypoint /bin/sh logweir:check -c \
+            'test -s /usr/share/licenses/kafka-backup/LICENSE && test -s /usr/share/licenses/logweir/LICENSE'
+          echo "ok: engine, CLI, approval minting and both licences are present"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -146,29 +200,6 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}:latest
-      - name: The image must carry the engine, the licences and a working CLI
-        run: |
-          docker build --platform linux/amd64 -t logweir:check .
-          # EVERY dynamic dependency must resolve. Task 22 shipped an image
-          # whose ENGINE ran, whose licences were present and whose `docker
-          # images` row looked healthy — while `logweir` itself died at the
-          # dynamic loader on a missing `libsasl2.so.2`, because the runtime
-          # stage installed `libssl3` but not `libsasl2-2`. `--version` below
-          # catches it too, but this line NAMES the missing library.
-          missing=$(docker run --rm --entrypoint /bin/sh logweir:check \
-                      -c 'ldd /usr/local/bin/logweir' | grep "not found" || true)
-          if [ -n "$missing" ]; then
-            echo "the image's logweir binary has unresolved libraries:" >&2
-            echo "$missing" >&2
-            exit 1
-          fi
-          docker run --rm --entrypoint /usr/local/bin/kafka-backup logweir:check --version
-          docker run --rm logweir:check --version
-          # Global Constraint 15: the upstream MIT licence must be IN the image
-          # that redistributes the upstream binary.
-          docker run --rm --entrypoint /bin/sh logweir:check -c \
-            'test -s /usr/share/licenses/kafka-backup/LICENSE && test -s /usr/share/licenses/logweir/LICENSE'
-          echo "ok: engine, CLI and both licences are present"
 
   publish:
     needs: [plan, build, image]

@@ -10,6 +10,7 @@
 //! `Skipped` and the run continues — it is never silently reported `ok` on
 //! the strength of not having looked, and it never blocks a run that had no
 //! way to look. See `CheckResult` below.
+use crate::engine_bin::engine_path;
 use crate::exit::ExitCode;
 use logweir_kafka::reader::{AuthConfig, ClusterReader};
 use std::path::PathBuf;
@@ -111,9 +112,12 @@ fn skip_verdict(skipped: usize, strict: bool) -> ExitCode {
     }
 }
 
-/// 1. `$LOGWEIR_ENGINE_BIN`, else /usr/local/bin/kafka-backup, else `kafka-backup`
-///    on $PATH. On failure name the pinned digest and the glibc floor, because
-///    the standalone binary carries no engine and that is the usual cause.
+/// 1. Resolved by `crate::engine_bin::engine_path` — `$LOGWEIR_ENGINE_BIN`,
+///    else `.engine/kafka-backup`, else `/usr/local/bin/kafka-backup`, else a
+///    `$PATH` scan — which is the SAME chain `drill run` walks, so a green line
+///    here names the binary the drill will actually execute. On failure name
+///    the pinned digest and the glibc floor, because the standalone binary
+///    carries no engine and that is the usual cause.
 fn check_engine_present() -> Result<String, String> {
     let p = engine_path();
     if p.exists() {
@@ -450,71 +454,14 @@ fn parse_spec(p: &std::path::Path) -> Result<logweir_core::spec::DrillSpec, Stri
     serde_yaml::from_str(&t).map_err(|e| e.to_string())
 }
 
-/// Fix round 2, M2: the "else `kafka-backup` on $PATH" fallback this
-/// function's own doc comment promises could never fire. It used to return
-/// the BARE name `PathBuf::from("kafka-backup")`, and `check_engine_present`
-/// tests that with `.exists()` — which stats the name relative to the
-/// current working directory, never `$PATH`. So an operator with a
-/// correctly installed `kafka-backup` on `$PATH` (anywhere other than their
-/// cwd or `/usr/local/bin`) was told "no engine at kafka-backup", while
-/// check 2's `Command::new("kafka-backup")` WOULD have found it (exec-family
-/// calls search `$PATH` for a bare name; `stat`/`exists` do not) — the two
-/// checks disagreed about where the same binary lives. This now performs the
-/// same `$PATH` scan `execve` would, so whatever this function returns is
-/// something `.exists()` can answer correctly AND `Command::new` will run —
-/// one resolution, consulted by both checks.
-fn engine_path() -> PathBuf {
-    if let Ok(p) = std::env::var("LOGWEIR_ENGINE_BIN") {
-        return PathBuf::from(p);
-    }
-    let d = PathBuf::from("/usr/local/bin/kafka-backup");
-    if d.exists() {
-        return d;
-    }
-    if let Some(found) = which_on_path("kafka-backup") {
-        return found;
-    }
-    // Nothing resolved: fall through to the bare name so the failure
-    // message still names what was being looked for. `.exists()` on this
-    // correctly reports absent — it is no longer being asked to resolve
-    // `$PATH` itself.
-    PathBuf::from("kafka-backup")
-}
-
-fn which_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    find_on_path(&path, name)
-}
-
-/// The `$PATH`-search logic, factored out as a pure function of an explicit
-/// `PATH`-like value so it is unit-testable without touching this process's
-/// real environment (`std::env::set_var` on a shared test binary risks
-/// racing other tests reading `PATH`/`LOGWEIR_ENGINE_BIN` concurrently).
-/// Mirrors what `execve` does for a bare command name: scan each directory
-/// in order, return the first entry that exists and is executable.
-fn find_on_path(path_var: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
-    std::env::split_paths(path_var).find_map(|dir| {
-        let candidate = dir.join(name);
-        if is_executable(&candidate) {
-            Some(candidate)
-        } else {
-            None
-        }
-    })
-}
-
-#[cfg(unix)]
-fn is_executable(p: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p)
-        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(p: &std::path::Path) -> bool {
-    p.is_file()
-}
+// The engine resolution that lived here — `engine_path`, `which_on_path`,
+// `find_on_path`, `is_executable` — moved to `crate::engine_bin`, which
+// `crate::drill` now calls too. They used to disagree: this module walked
+// `$LOGWEIR_ENGINE_BIN` -> `/usr/local/bin/kafka-backup` -> `$PATH`, while
+// `crate::drill`'s default was the literal `.engine/kafka-backup`, and
+// `Command::new` never searches `$PATH` for a path containing a slash. So the
+// install `README.md` documents — the engine on `$PATH` — produced a green
+// `doctor` and a drill that died at phase 5.
 
 /// Fix round 1 (coordinator ruling on the task-14b review): the CLI-level
 /// tests in `crates/logweir/tests/doctor.rs` assert on `run()`'s AGGREGATE
@@ -819,37 +766,9 @@ mod tests {
         assert!(evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).is_ok());
     }
 
-    /// Fix round 2, M2's regression test: a bare name on `$PATH`, not in the
-    /// current directory and not in `/usr/local/bin`, must resolve. Uses a
-    /// synthetic `PATH`-like value (two tempdirs) rather than the real
-    /// process environment — see `find_on_path`'s doc comment for why.
-    #[test]
-    fn find_on_path_resolves_a_bare_name_through_path_entries_in_order() {
-        use std::os::unix::fs::PermissionsExt;
-        let empty_dir = tempfile::tempdir().unwrap();
-        let bin_dir = tempfile::tempdir().unwrap();
-        let exe = bin_dir.path().join("kafka-backup");
-        std::fs::write(&exe, "#!/bin/sh\necho hi\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path_var = std::env::join_paths([empty_dir.path(), bin_dir.path()]).unwrap();
-        assert_eq!(find_on_path(&path_var, "kafka-backup"), Some(exe));
-    }
-
-    #[test]
-    fn find_on_path_skips_a_non_executable_candidate() {
-        let dir = tempfile::tempdir().unwrap();
-        // `fs::write` does not set the executable bit.
-        std::fs::write(dir.path().join("kafka-backup"), "not executable").unwrap();
-        let path_var = std::env::join_paths([dir.path()]).unwrap();
-        assert_eq!(find_on_path(&path_var, "kafka-backup"), None);
-    }
-
-    #[test]
-    fn find_on_path_returns_none_when_nothing_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let path_var = std::env::join_paths([dir.path()]).unwrap();
-        assert_eq!(find_on_path(&path_var, "kafka-backup"), None);
-    }
+    // The three `find_on_path_*` tests that lived here moved to
+    // `crate::engine_bin::tests` with the function itself, unrenamed, when
+    // `doctor` and `drill run` were unified onto one resolution.
 
     /// Fix round 2, M3's regression test: a reachable archive holding zero
     /// backup sets must FAIL, never `Passed`. `e2e/fixtures/empty-archive/`

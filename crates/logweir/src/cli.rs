@@ -52,6 +52,41 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum DrillCmd {
+    /// Mint the DSSE-signed approval `drill run --approval` requires. Runs no
+    /// drill and touches no cluster.
+    //
+    // The unowned-path audit: `drill run --approval` is MANDATORY, and the
+    // only producer in the tree was a cargo EXAMPLE
+    // (`logweir-evidence/examples/sign_approval.rs`), which ships in neither
+    // the container image nor the release tarballs. On the Kubernetes path
+    // this product targets, an operator could not mint `approval.sig` from
+    // Logweir's own artifacts at all — and `plan_hash` binds the approval to
+    // the exact spec bytes, so they would have to re-mint on every spec edit.
+    // See `crates/logweir/src/approve.rs` for why this is a subcommand rather
+    // than a second `[[bin]]`.
+    Approve {
+        /// The drill spec this approval authorises. `plan_hash` is the sha256
+        /// of its EXACT bytes, so re-run this after any edit — including a
+        /// moved `sample.window_*`.
+        #[arg(long)]
+        spec: PathBuf,
+        /// The approver's PRIVATE key (PKCS#8 PEM, P-256 or Ed25519).
+        /// `drill run --approver-key` takes the matching PUBLIC key.
+        #[arg(long)]
+        key: PathBuf,
+        /// Who approved: a person, a rota address, a change-management
+        /// identity. Copied into the signed scorecard verbatim.
+        #[arg(long)]
+        approver: String,
+        /// The change ticket this drill is authorised under.
+        #[arg(long)]
+        ticket: String,
+        /// Where the approval JSON is written. Its DSSE sidecar lands beside
+        /// it with the extension replaced by `.sig`, which is the only place
+        /// `drill run` looks for it.
+        #[arg(long, default_value = "approval.json")]
+        out: PathBuf,
+    },
     /// Run the drill: restore a sampled window into the scratch cluster,
     /// reconcile it per record, and emit a signed scorecard.
     Run {

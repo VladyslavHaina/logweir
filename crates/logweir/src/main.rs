@@ -37,6 +37,19 @@ fn main() -> std::process::ExitCode {
             approver_key,
             strict,
         }),
+        cli::Command::Drill(cli::DrillCmd::Approve {
+            spec,
+            key,
+            approver,
+            ticket,
+            out,
+        }) => logweir::approve::run(&logweir::approve::ApproveArgs {
+            spec,
+            key,
+            approver,
+            ticket,
+            out,
+        }),
         cli::Command::Drill(cli::DrillCmd::Verify {
             scorecard,
             signature,

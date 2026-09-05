@@ -379,10 +379,6 @@ pub struct Ctx {
     pub store: Store,
 }
 
-/// `LOGWEIR_ENGINE_BIN` overrides where the digest-pinned `kafka-backup`
-/// binary was extracted to at image build time (spec §6 C4).
-const ENGINE_BIN_DEFAULT: &str = ".engine/kafka-backup";
-
 fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
     let spec_text = std::fs::read_to_string(&args.spec)
         .map_err(|e| DrillError::Operational(format!("{}: {e}", args.spec.display())))?;
@@ -439,7 +435,18 @@ fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
     // version or digest immediately after phase 0 — see `assert_engine_identity`
     // — rather than here, so a plan the guard would REFUSE still exits 3 on a
     // host with no engine environment at all.
-    let binary = std::env::var("LOGWEIR_ENGINE_BIN").unwrap_or_else(|_| ENGINE_BIN_DEFAULT.into());
+    //
+    // `crate::engine_bin::engine_path` and NOT a local default: this line used
+    // to read `$LOGWEIR_ENGINE_BIN` or fall back to the literal
+    // `.engine/kafka-backup`, while `logweir doctor` walked
+    // `$LOGWEIR_ENGINE_BIN` -> `/usr/local/bin/kafka-backup` -> a `$PATH` scan.
+    // `Command::new` performs no `$PATH` search for a path containing `/`, so
+    // the install `README.md` documents (the engine on `$PATH`) gave a green
+    // `doctor` — seven `ok` lines, including `ok engine version` — and then a
+    // drill that read the target cluster and the archive manifest through
+    // phases 0-4 and died at phase 5 the first time it tried to execute the
+    // engine. One resolution now, for both commands.
+    let binary = crate::engine_bin::engine_path();
     let version = std::env::var("LOGWEIR_ENGINE_VERSION").unwrap_or_default();
     let digest = std::env::var("LOGWEIR_ENGINE_DIGEST").unwrap_or_default();
     // Pod-local scratch for the rendered restore.yaml / validation.yaml. Never
@@ -448,7 +455,7 @@ fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
     std::fs::create_dir_all(&workdir)
         .map_err(|e| DrillError::Operational(format!("{}: {e}", workdir.display())))?;
     let engine = logweir_engine_oso::engine::OsoCliEngine::new(
-        PathBuf::from(binary),
+        binary,
         version,
         digest,
         workdir,

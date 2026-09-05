@@ -56,6 +56,16 @@ pre-release ruling by accident.**
     you must already possess a `kafka-backup` archive to run a drill. Logweir
     cannot take the backup for you in v0.1.0.
 
+- **The YAML parser is archived.** The drill spec and both rendered engine
+  documents are YAML, parsed by `serde_yaml` 0.9, which resolves to
+  `0.9.34+deprecated` — an archived crate (RUSTSEC-2024-0370). It is kept for
+  v0.1 deliberately: no alternative was evaluated, and swapping the parser under
+  the two renderers that Global Constraints 4 and 7 pin is not a release-week
+  change. **Revisit before v0.2.** `deny.toml` carries the matching `ignore`
+  entry and points here; this paragraph is what it points at, and it was missing
+  until 2026-09-05 — `deny.toml`'s comment claimed a sentence in this document
+  that did not exist.
+
 - **No musl release target.** `rdkafka` vendors and compiles `librdkafka` from
   C, which does not cross-compile to musl without substantially more work than
   v0.1 has ([ADR 0004](adr/0004-kafka-client.md)). `release.yml` *attempts* the

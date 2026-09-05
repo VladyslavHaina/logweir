@@ -49,6 +49,25 @@ spec:
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
+            # WITHOUT THIS LINE EVERY SCHEDULED DRILL DIES OPENING ITS OWN
+            # SIGNING KEY. Kubelet writes Secret files owned by `root:root`, so
+            # a container running as 65532 reads nothing through the owner
+            # bits: `cat /etc/logweir-keys/signing.pem` is `Permission denied`
+            # and `drill run` exits 1 at phase 1 having done nothing. This
+            # manifest shipped `runAsUser: 65532`, `defaultMode: 0400` and no
+            # `fsGroup` at all.
+            #
+            # `fsGroup` chowns the volume's group to this GID *and* ORs
+            # group-read into the file mode, so it is sufficient on its own.
+            # Widening the mode without it is not: the group is still root's.
+            # All four combinations were run live on docker-desktop — see the
+            # table in docs/kubernetes.md §3.
+            #
+            # `fsGroup` applies to Secret, ConfigMap, emptyDir and most
+            # dynamically provisioned volumes. It does NOT apply to `hostPath`
+            # — see the `metrics` volume below, which needs host-side
+            # ownership instead.
+            fsGroup: 65532
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: logweir
@@ -116,6 +135,19 @@ spec:
             # The plan, the approval and the cluster allowlist. The approval is
             # a public, signed document — it belongs in a ConfigMap, and the
             # approver's PUBLIC key beside it.
+            #
+            # Produce `approval.json` and `approval.sig` with the SHIPPED
+            # binary, on the approver's own machine, with the approver's
+            # PRIVATE key — the image can do this and needs nothing else:
+            #
+            #   docker run --rm -v "$PWD:/w" -w /w logweir:v0.1.0 drill approve \
+            #     --spec drill.yaml --key approver.pem \
+            #     --approver sre-oncall@example.com --ticket CHG-40881 \
+            #     --out approval.json
+            #
+            # RE-RUN IT ON EVERY EDIT OF drill.yaml, the sample window
+            # included: `plan_hash` binds the approval to the spec's exact
+            # bytes and phase 1 refuses a mismatch with exit 3.
             - name: config
               configMap:
                 name: logweir-drill-config
@@ -125,12 +157,22 @@ spec:
                   - { key: approval.sig,           path: approval.sig }
                   - { key: approver.pub.pem,       path: approver.pub.pem }
                   - { key: allowed-clusters.json,  path: allowed-clusters.json }
-            # The PRIVATE signing key, and nothing else. Verified to mount
-            # cleanly as a Secret file (docs/kubernetes.md §3).
+            # The PRIVATE signing key, and nothing else.
+            #
+            # `0440`, not `0400`: with `fsGroup` set, kubelet writes the file
+            # as `root:65532` and ORs group-read in anyway, so `0400` lands on
+            # disk as `0440` regardless. Saying `0440` here means the manifest
+            # states the permission that actually exists instead of one kubelet
+            # silently widens — `ls -l` inside the pod matches this line.
+            #
+            # It is `fsGroup` above that makes the key readable, NOT this mode:
+            # `0440` with no `fsGroup` is still `root:root` and still denied.
+            # Verified live on docker-desktop, all four combinations
+            # (docs/kubernetes.md §3).
             - name: keys
               secret:
                 secretName: logweir-signing-key
-                defaultMode: 0400
+                defaultMode: 0440
                 items:
                   - { key: signing.pem, path: signing.pem }
             # emptyDir is verified; no PVC was exercised in v0.1 (the test
@@ -139,10 +181,42 @@ spec:
               emptyDir: {}
             # The Prometheus textfile collector's directory. v0.1 has NO HTTP
             # surface, so this file — not a /metrics endpoint — is how the
-            # dashboard gets data; mount the same directory node_exporter's
-            # --collector.textfile.directory points at.
+            # dashboard gets data. It MUST therefore be the same directory
+            # node_exporter's `--collector.textfile.directory` points at.
+            #
+            # This was an `emptyDir`, directly beneath that sentence. An
+            # emptyDir is deleted with the pod, so every scheduled drill wrote
+            # `logweir.prom` into a filesystem nothing would ever scrape and
+            # then destroyed it: dashboards/logweir.json stays empty forever,
+            # which is
+            # indistinguishable from Logweir being broken.
+            #
+            # `type: Directory` and NOT `DirectoryOrCreate`, deliberately: a
+            # created-on-demand directory would be root-owned 0755 and this pod
+            # (uid 65532) could not write into it, so the drill would die at
+            # phase 8 having done all the work. `fsGroup` does not apply to
+            # hostPath. The directory must already exist on every node this
+            # CronJob can be scheduled onto, writable by GID 65532 — which is
+            # normally already true where node_exporter runs as a DaemonSet:
+            #
+            #   sudo install -d -m 0775 -g 65532 /var/lib/node_exporter/textfile
+            #
+            # If it is missing, the pod fails at mount time with a FailedMount
+            # event that names the path. That is the loud failure; the emptyDir
+            # was the silent one.
+            #
+            # A hostPath volume is FORBIDDEN by Pod Security `baseline` and
+            # `restricted` (verified: `violates PodSecurity "baseline:latest":
+            # hostPath volumes`). Everything else in this manifest satisfies
+            # `restricted`; this volume is the one thing that does not. In such
+            # a namespace, delete BOTH the `--metrics-file` argument above and
+            # this volume, rather than pointing the flag at an emptyDir: no
+            # metrics is an honest state, and a dashboard fed by a file that is
+            # deleted with the pod is not.
             - name: metrics
-              emptyDir: {}
+              hostPath:
+                path: /var/lib/node_exporter/textfile
+                type: Directory
 #
 # Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 # Foundation. Logweir is not affiliated with or endorsed by the ASF.
