@@ -1318,6 +1318,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "insta",
  "logweir-core",
  "logweir-engine-oso",
  "logweir-evidence",

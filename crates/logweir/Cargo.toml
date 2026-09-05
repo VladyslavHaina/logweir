@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 logweir-engine-oso = { path = "../logweir-engine-oso" }
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 serde_json.workspace = true

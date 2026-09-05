@@ -1,0 +1,25 @@
+---
+source: crates/logweir/tests/show.rs
+expression: "logweir::show::render_table(&fixtures::scorecard_pass())"
+---
+
+logweir drill scorecard  (01J9X2QK7C4V0R8YB3ZP6MTS5A v1.0.0)
+------------------------------------------------------------------------
+  outcome                     Pass
+  engine                      oso-cli v0.21.0 sha256:0000000000000000000000000000000000000000000000000000000000000000
+  levers                      header_preflight=Honoured  dry_run_check_segments=UnknownNotObservable
+  target                      MkU3OEVBNTcwNTJENDM2Qk  marker=logweir.scratch  1 mapping entry/ies
+  approval                    sre-oncall@example.com (CHG-40881)
+
+  rto requested→verified      542s
+  rto approval→verified       512s
+  rto restore only            214s
+* rto excluding preflight     300s   <- compared against objectives.rto_seconds
+  rpo                         0s   archive coverage gap at the requested point (NOT source-relative loss)
+
+  integrity                   ByteFingerprint/Pass  75/75 matched, 0 mismatch(es)
+  target diff                 0 collision(s), 1 would-create (full)
+  topic parity                intended [cleanup.policy, retention.ms]  unexpected []
+  evidence                    immutable=false  create_only_enforced=true
+
+  no capture gap overlaps the sampled window
