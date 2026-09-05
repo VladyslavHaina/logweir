@@ -33,10 +33,18 @@ An auditor needs exactly three files to check one scorecard:
 | `scorecard.sig` | The DSSE sidecar: a JSON file naming the signing key and holding the signature over `scorecard.json`'s exact bytes. |
 | `public.pem` | The publisher's public key, PEM-encoded (SPKI), used to check the signature. This is *not* secret, but **it must not arrive by the same channel as the other two files** — see the next section before you run anything. |
 
-Do not accept a fourth input. In particular, never let anyone hand you a
-"re-typed" or "reformatted" copy of `scorecard.json` — see
-[The payload is never re-serialised](#the-payload-is-never-re-serialised)
+Do not accept a fourth input **to the signature check**. In particular, never
+let anyone hand you a "re-typed" or "reformatted" copy of `scorecard.json` —
+see [The payload is never re-serialised](#the-payload-is-never-re-serialised)
 below for why that would silently defeat the check.
+
+Two further files may accompany a scorecard, and they are **separate signed
+documents, not extra inputs to the check above**: `<run_id>.receipt.json` /
+`.receipt.sig`, the storage receipt (see
+[The storage receipt](#the-storage-receipt-a-second-signed-document)), and
+`<run_id>.teardown.json` / `.teardown.sig`, the teardown attestation. Each is
+verified on its own, against its own `payloadType`. Neither is required to
+verify a scorecard, and neither can substitute for one.
 
 ## Where the public key comes from
 
@@ -259,6 +267,135 @@ does not use `verify_scorecard.py`, `logweir`, or any cryptography beyond
 `sha256sum`. It is the auditor re-deriving a fact from the underlying
 storage, not re-checking Logweir's own signature.
 
+## The storage receipt: a second signed document
+
+**Read this before quoting a scorecard's `evidence` block to anyone.**
+
+The scorecard's `evidence` block —
+
+```json
+"evidence": { "create_only_enforced": false, "immutable": false,
+              "retain_until": null, "version_id": null }
+```
+
+— is **always exactly that**, in every scorecard Logweir emits, on every
+storage backend. It is not a finding. The reason is structural rather than a
+limitation: all four fields describe the *upload of this scorecard*, an event
+that has not happened when the scorecard is signed, and cannot happen before
+it, because a signature covers bytes and the bytes have to exist first. The
+document is never re-serialised afterwards — that would invalidate the
+signature. So rather than sign four values nothing had established, Logweir
+zeroes them.
+
+Read those four fields as **"no proof was obtainable at signing time"**, never
+as "the object is mutable", "the put was not conditional", or "no retention
+applies". The block deliberately under-claims, and that is what guarantees a
+valid Logweir signature can never cover an unsubstantiated WORM or
+create-only assertion.
+
+The real post-upload readback is published in a **second signed document**,
+written after the put and stored beside the scorecard in the evidence bucket:
+
+| File | What it is |
+|---|---|
+| `<run_id>.receipt.json` | The storage receipt: what the object store actually answered *after* the scorecard was uploaded. |
+| `<run_id>.receipt.sig` | Its own DSSE sidecar, under `payloadType` `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`. |
+
+```json
+{
+  "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+  "scorecard_sha256": "sha256:9f0e…",
+  "scorecard_key": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json",
+  "create_only_enforced": true,
+  "version_id": "3HL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo",
+  "immutable": false,
+  "retain_until": null,
+  "observed_at": "2026-09-03T09:09:04Z"
+}
+```
+
+`create_only_enforced: true` here means the store performed a genuine
+conditional put — the object could not have silently replaced a previous
+drill's evidence. `false` means the backend answered "not supported" and
+Logweir took a HEAD-then-PUT fallback, which is recorded honestly and is
+**not** the same statement as "the object was overwritten". `immutable` and
+`retain_until` are `true`/non-null only after a provider readback actually
+answered; on every backend Logweir can build today that readback returns
+nothing, so expect `false`/`null` and do not read it as a finding.
+
+### How the receipt binds to the scorecard
+
+`scorecard_sha256` is the SHA-256 of the **exact signed bytes** of
+`scorecard.json` — not the run id, not a re-serialisation. That is what makes
+the pairing checkable rather than asserted: any other scorecard, including the
+same run signed a second time, produces a different digest, so a receipt
+cannot be moved onto a document it does not describe.
+
+Check the binding with no tooling at all:
+
+```bash
+sha256sum scorecard.json
+python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['scorecard_sha256'])" receipt.json
+```
+
+The second value is the first, prefixed with `sha256:`. If they differ, the
+receipt describes a different document — treat that as a finding, not as a
+formatting quirk. Do not `jq .` or re-save `scorecard.json` first, for the
+same reason the signature check forbids it.
+
+`scorecard_key` is the object key the scorecard was actually put at, carried
+out of the upload rather than reconstructed, so you can fetch that exact
+object and hash it yourself.
+
+### Verifying the receipt's signature
+
+`verify_scorecard.py` will **refuse** the receipt, correctly: it pins
+`payloadType` to the scorecard's, and a sidecar for a different kind of
+document must never be accepted as a scorecard signature. Refusal here is the
+script working, not failing.
+
+To check the receipt, reuse the same script's two cryptographic helpers —
+`pae()` and `verify_signature()`, the parts that are not scorecard-specific —
+against the receipt's own payload type:
+
+```bash
+python3 - receipt.json receipt.sig public.pem <<'EOF'
+import base64, importlib.util, json, sys
+from cryptography.hazmat.primitives import serialization
+
+RECEIPT_TYPE = "application/vnd.logweir.drill-put-receipt+json;version=1.0.0"
+
+spec = importlib.util.spec_from_file_location("v", "verify_scorecard.py")
+v = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(v)
+
+payload = open(sys.argv[1], "rb").read()          # exact bytes, never re-serialised
+sidecar = json.load(open(sys.argv[2]))
+key = serialization.load_pem_public_key(open(sys.argv[3], "rb").read())
+
+if sidecar.get("payloadType") != RECEIPT_TYPE:
+    sys.exit(f"INVALID: unexpected payloadType {sidecar.get('payloadType')!r}")
+sig = base64.b64decode(sidecar["signatures"][0]["sig"], validate=True)
+if not v.verify_signature(key, v.pae(RECEIPT_TYPE, payload), sig):
+    sys.exit("INVALID: receipt signature does not verify over these bytes")
+
+r = json.loads(payload)
+print(f"VALID  receipt for {r['scorecard_key']}")
+print(f"       binds to {r['scorecard_sha256']}")
+print(f"       create_only_enforced={r['create_only_enforced']}  immutable={r['immutable']}")
+EOF
+```
+
+Everything the [Where the public key comes from](#where-the-public-key-comes-from)
+section says applies unchanged: the receipt is signed by the same publisher
+key, so a receipt verified against a `public.pem` from the same bundle proves
+internal consistency and nothing about authenticity.
+
+**A receipt that is absent means no storage evidence was published for that
+run** — it does not mean the upload was not create-only. The receipt is
+written after the scorecard is already signed and stored, and a failure to
+write it is logged and deliberately does not retract a measurement.
+
 ## What the scorecard does **not** claim
 
 A signature guarantees the *bytes* are what the publisher wrote and
@@ -278,6 +415,14 @@ archive, outside that window, would also match. Read `sample.coverage_note`
 for whatever the drill itself says about how representative the window is
 — but do not extend a byte-fingerprint match on one window into a claim
 about records the drill never touched.
+
+### The `evidence` block is not a finding about your bucket
+
+`evidence.create_only_enforced: false` and `evidence.immutable: false` are
+what *every* Logweir scorecard says, because the upload had not happened when
+the document was signed. They are not evidence that the object was
+overwritable or unprotected. The storage facts live in the separately signed
+receipt — see [The storage receipt](#the-storage-receipt-a-second-signed-document).
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 

@@ -180,6 +180,17 @@ pub struct Signed {
     pub scorecard: Scorecard,
     pub bytes: Vec<u8>,
     pub sidecar: logweir_evidence::Sidecar,
+    /// The object key `bytes` was ACTUALLY put at, carried out rather than
+    /// left to be reconstructed by whoever needs to name it.
+    ///
+    /// Reconstructing a key that is supposed to identify a specific object is
+    /// the same defect shape Task 20 fix round 1 removed from
+    /// `EngineSubreport.retrieved_from` (which named the prefix, not the key):
+    /// the artifact ends up pointing at a location that may not hold what was
+    /// written. `run` builds this string once, puts at it, reads the object
+    /// lock back from it, and hands it out here, so the three can never
+    /// disagree.
+    pub key: String,
 }
 
 /// Hand-written rather than derived: `bytes` is the whole document and
@@ -311,9 +322,8 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     //    answers Unsupported takes the HEAD-then-PUT fallback inside
     //    `put_create_only`, which reports create_only_enforced: false —
     //    recorded honestly, never assumed.
-    let out: PutOutcome = store
-        .put_create_only(&format!("logweir/drills/{run_id}.json"), &bytes)
-        .map_err(sig)?;
+    let scorecard_key = format!("logweir/drills/{run_id}.json");
+    let out: PutOutcome = store.put_create_only(&scorecard_key, &bytes).map_err(sig)?;
     store
         .put_create_only(&format!("logweir/drills/{run_id}.sig"), &sidecar_bytes)
         .map_err(sig)?;
@@ -342,7 +352,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     // caught (mutant M15). `object_lock_readback`'s honest-`None` contract is
     // pinned at its source, in
     // `crates/logweir-engine-oso/tests/storage.rs::object_lock_readback_reports_no_proof_rather_than_guessing`.
-    let lock = store.object_lock_readback(&format!("logweir/drills/{run_id}.json"));
+    let lock = store.object_lock_readback(&scorecard_key);
     sc.evidence.retain_until = lock.as_ref().and_then(|l| l.retain_until);
     sc.evidence.immutable = lock.map(|l| l.immutable).unwrap_or(false);
 
@@ -355,6 +365,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
         scorecard: sc,
         bytes,
         sidecar,
+        key: scorecard_key,
     })
 }
 
@@ -388,7 +399,8 @@ pub struct PutReceipt {
     pub run_id: String,
     /// `sha256:<hex>` of the SIGNED scorecard bytes this receipt describes.
     pub scorecard_sha256: String,
-    /// The object key the scorecard was put at.
+    /// The object key the scorecard was put at — taken from `Signed.key`,
+    /// i.e. the exact string `phase8_score::run` handed to `put_create_only`.
     pub scorecard_key: String,
     /// Observed from the put itself: `true` only when the backend performed a
     /// genuine conditional put. A backend that answered `Unsupported` took the
@@ -413,7 +425,8 @@ pub fn put_receipt(signed: &Signed) -> PutReceipt {
     PutReceipt {
         run_id: signed.scorecard.run_id.clone(),
         scorecard_sha256: logweir_core::ids::sha256_prefixed(&signed.bytes),
-        scorecard_key: format!("logweir/drills/{}.json", signed.scorecard.run_id),
+        // The key `run` ACTUALLY put at, never a second reconstruction of it.
+        scorecard_key: signed.key.clone(),
         create_only_enforced: e.create_only_enforced,
         version_id: e.version_id.clone(),
         immutable: e.immutable,

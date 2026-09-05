@@ -773,3 +773,164 @@ fn a_key_the_engine_dropped_during_the_restore_reaches_the_signed_levers() {
          runs, and phase 6's arrives afterwards"
     );
 }
+
+/// THE MAINLINE EXIT-2 PATH — a drill that ran every phase, was measured, was
+/// SCORED, and did not pass.
+///
+/// This is the review's finding R3. Both exit-2 routes that were covered
+/// before — a blocked preflight and a no-op restore — `return Err(NotPass)`
+/// early from inside phases 5 and 6 and never reach `execute_with`'s final
+/// `if sc.outcome != Outcome::Pass` gate. So that gate could be replaced with
+/// `if false` and the entire workspace stayed green: a restore that missed its
+/// RTO by 25 minutes would be signed as `fail-objective` in the bucket and
+/// reported to the CronJob as **exit 0, passed**. That is the most valuable
+/// result this product produces, announced as its opposite.
+///
+/// Both scoring routes are covered: `decide` reaches `FailObjective` through
+/// the objectives and `FailIntegrity` through phase 7's verdict, and they are
+/// different branches of the same function.
+#[test]
+fn a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase() {
+    for (shape, want) in [
+        (Drill::MissesTheRpoObjective, Outcome::FailObjective),
+        (Drill::ReconcilesWithMismatches, Outcome::FailIntegrity),
+    ] {
+        let f = fixtures::orchestrator_fixture(shape);
+        let err = execute_with(&f.args, &f.run_id, &f.ctx)
+            .err()
+            .unwrap_or_else(|| panic!("{shape:?} must not report success"));
+        let sc = match &err {
+            logweir::drill::DrillError::NotPass(sc) => sc.clone(),
+            other => panic!("{shape:?} is a drill RESULT, got {other:?}"),
+        };
+
+        // The exit code. `report` turns this same `NotPass` into the process
+        // status (pinned by
+        // `drill::tests::a_drill_result_reports_exit_2_and_an_operational_failure_reports_exit_1`),
+        // so the two together cover the whole chain from score to exit status.
+        let code = ExitCode::from(err);
+        assert_eq!(code, ExitCode::DrillNotPass, "{shape:?}");
+        assert_ne!(code, ExitCode::Ok, "{shape:?} must never report success");
+
+        // It went THROUGH scoring rather than returning early: phases 6 and 7
+        // both ran, and `measured` carries real numbers.
+        let phases: Vec<i8> = sc.phases.iter().map(|p| p.phase).collect();
+        assert!(
+            phases.contains(&6) && phases.contains(&7),
+            "{shape:?} must reach the final gate, not an early return: {phases:?}"
+        );
+        assert!(
+            sc.measured.rto_seconds.is_some(),
+            "{shape:?} was not scored"
+        );
+        assert!(
+            sc.measured.rpo_seconds.is_some(),
+            "{shape:?} was not scored"
+        );
+        assert_eq!(sc.outcome, want, "{shape:?}");
+
+        // ...and a scorecard was EMITTED, which is what makes exit 2 different
+        // from exit 1: locally at --out, and in the bucket.
+        let on_disk = std::fs::read(&f.out).expect("--out was written");
+        assert_eq!(on_disk, scorecard_from_store(&f));
+        let signed: logweir_core::scorecard::Scorecard = serde_json::from_slice(&on_disk).unwrap();
+        assert_eq!(
+            signed.outcome, want,
+            "{shape:?}: the SIGNED document must carry the failing outcome"
+        );
+    }
+
+    // The positive direction of the same gate: a genuine pass must still be
+    // exit 0. A mutant that always returns `NotPass` has to fail somewhere.
+    let ok = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&ok.args, &ok.run_id, &ok.ctx)
+        .expect("a passing drill must not be reported as a non-pass");
+    assert_eq!(sc.outcome, Outcome::Pass);
+}
+
+/// FIX 2. The `RestoreNoOp` interception runs a restore that ACTUALLY
+/// EXECUTED, so anything it created on the operator's cluster is still there.
+/// Returning straight to exit 2 would leave scratch topics behind on the one
+/// failure path where a drill wrote to their broker.
+///
+/// The phase-5 branch deliberately does NOT tear down: `restore` never ran, so
+/// that drill created nothing, and deleting a mapped topic it did not create
+/// would destroy someone else's data to tidy up after a run that touched
+/// nothing. Both halves of that asymmetry are asserted here.
+#[test]
+fn a_no_op_restore_still_tears_down_its_scratch_topics_but_a_blocked_preflight_does_not() {
+    let f = fixtures::orchestrator_fixture(Drill::RestoresNothing);
+    let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
+        logweir::drill::DrillError::NotPass(sc) => sc,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        sc.phases.iter().any(|p| p.phase == 9),
+        "the restore ran; its scratch topics must not be left behind: {:?}",
+        sc.phases.iter().map(|p| p.phase).collect::<Vec<_>>()
+    );
+    let att = f
+        .ctx
+        .store
+        .get(&format!("logweir/drills/{}.teardown.json", f.run_id))
+        .expect("a teardown that happened must be attested")
+        .0;
+    let v: serde_json::Value = serde_json::from_slice(&att).unwrap();
+    assert_eq!(v["topics_deleted"], serde_json::json!(["drill-orders"]));
+    assert_eq!(
+        v["scorecard_sha256"],
+        serde_json::json!(logweir_core::ids::sha256_prefixed(&scorecard_from_store(
+            &f
+        ))),
+        "the attestation binds to the signed bytes, not to the run id again"
+    );
+
+    // The other half of the asymmetry.
+    let b = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
+    let sc = match execute_with(&b.args, &b.run_id, &b.ctx).unwrap_err() {
+        logweir::drill::DrillError::NotPass(sc) => sc,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !sc.phases.iter().any(|p| p.phase == 9),
+        "a blocked preflight created nothing; it must not delete topics it did not make"
+    );
+    assert!(
+        b.ctx
+            .store
+            .get(&format!("logweir/drills/{}.teardown.json", b.run_id))
+            .is_err(),
+        "no teardown ran, so no teardown may be attested"
+    );
+}
+
+/// FIX 3. `PutReceipt.scorecard_key` must be the key `phase8_score::run`
+/// actually put at, carried out on `Signed`, never a second reconstruction —
+/// the same defect shape as Task 20's `retrieved_from` naming a prefix.
+#[test]
+fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let r: logweir::drill::phase8_score::PutReceipt = serde_json::from_slice(
+        &f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.receipt.json", f.run_id))
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    // The key must name an object that EXISTS and holds the bytes the receipt
+    // is bound to — which is the whole property a reconstructed key cannot
+    // guarantee.
+    let at_key = f.ctx.store.get(&r.scorecard_key).unwrap_or_else(|e| {
+        panic!(
+            "the receipt names `{}`, which holds nothing: {e}",
+            r.scorecard_key
+        )
+    });
+    assert_eq!(
+        r.scorecard_sha256,
+        logweir_core::ids::sha256_prefixed(&at_key.0),
+        "the key and the digest must name the same object"
+    );
+}

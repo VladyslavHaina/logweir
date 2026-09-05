@@ -560,6 +560,13 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
                 .collect();
         }
         let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+        // NO teardown here, deliberately, and the asymmetry with the phase-6
+        // branch below is the point: a blocked preflight means `restore` never
+        // ran, so this drill created NOTHING on the target. The names in
+        // `topic_mapping` may nevertheless exist — phase 3 reports exactly
+        // that as a collision — and deleting a topic this run did not create,
+        // on a plan that never executed, would destroy someone else's data to
+        // tidy up after a drill that touched nothing.
         return Err(DrillError::NotPass(Box::new(signed.scorecard)));
     }
 
@@ -614,7 +621,28 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
                 p.notes = vec![msg];
             }
             let signed = sign_and_publish(&mut sc, args, run_id, c)?;
-            return Err(DrillError::NotPass(Box::new(signed.scorecard)));
+            // ...and then PHASE 9 STILL RUNS. This branch differs from the
+            // phase-5 one in the fact that matters here: the restore actually
+            // executed, so whatever it created on the operator's cluster is
+            // still there. Returning straight to exit 2 would leave scratch
+            // topics behind on the one failure path where a drill wrote to
+            // their broker — the residue that makes people stop running
+            // drills. A8 requires the interception to reach exit 2 with a
+            // signed scorecard; it says nothing about skipping cleanup, and
+            // its own snippet is explicitly "not prescribed here as final
+            // code". A teardown that itself fails is attested honestly by
+            // `phase9_teardown` (`topics_failed`), never swallowed.
+            let mut out = signed.scorecard.clone();
+            teardown(
+                &mut out,
+                args,
+                run_id,
+                c,
+                deleter,
+                &admitted.topic_mapping,
+                &logweir_core::ids::sha256_prefixed(&signed.bytes),
+            );
+            return Err(DrillError::NotPass(Box::new(out)));
         }
         Err(e) => return Err(e),
     };
@@ -679,25 +707,65 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
     let signed = sign_and_publish(&mut sc, args, run_id, c)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     sc = signed.scorecard.clone();
-    // 9 — a teardown failure is a warning on the phase record, never an outcome.
-    // The attestation is BOUND to the signed bytes, not to the run id again.
-    let _ = record(&mut sc, 9, "teardown", || {
+    // 9
+    teardown(
+        &mut sc,
+        args,
+        run_id,
+        c,
+        deleter,
+        &admitted.topic_mapping,
+        &signed_bytes_sha256,
+    );
+    // THE MAINLINE EXIT-2 GATE. A drill that ran every phase, was measured and
+    // was scored `fail-objective` or `fail-integrity` is a drill RESULT: exit
+    // 2, with the signed scorecard already in the bucket. Deleting this
+    // comparison makes Logweir report SUCCESS for a restore that missed its
+    // RTO — the review's mutant R3, which survived the whole suite because
+    // the two exit-2 paths that were covered both return early from phases 5
+    // and 6 and never reach here. Pinned by
+    // `a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase`.
+    if sc.outcome != Outcome::Pass {
+        return Err(DrillError::NotPass(Box::new(sc)));
+    }
+    Ok(sc)
+}
+
+/// Phase 9, in one place, because two paths reach it: the normal end of a run
+/// and the phase-6 `RestoreNoOp` interception — both of which have executed a
+/// restore and may therefore have created topics on the operator's cluster.
+///
+/// A teardown failure is a WARNING on the phase record, never an outcome: the
+/// drill result is already signed and uploaded, and leaving scratch topics
+/// behind is an operational annoyance rather than a false claim. What is NOT
+/// allowed is silence — `phase9_teardown::run` records every topic the broker
+/// refused in `topics_failed` and never lists it as deleted.
+///
+/// The attestation is BOUND to the signed bytes, not to the run id again:
+/// binding to the run id twice carries no independent information and cannot
+/// identify WHICH signed document this teardown accompanies.
+fn teardown(
+    sc: &mut Scorecard,
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    deleter: &dyn TopicDeleter,
+    mapping: &BTreeMap<String, String>,
+    scorecard_sha256: &str,
+) {
+    let _ = record(sc, 9, "teardown", || {
         let a = phase9_teardown::run(
             deleter,
-            &admitted.topic_mapping,
+            mapping,
             &c.spec.target.teardown,
             run_id,
-            &signed_bytes_sha256,
+            scorecard_sha256,
         );
         if let Err(e) = phase9_teardown::persist(&a, &args.signing_key, &c.store) {
             tracing::warn!(error = %e, "teardown attestation not persisted");
         }
         Ok(a)
     });
-    if sc.outcome != Outcome::Pass {
-        return Err(DrillError::NotPass(Box::new(sc)));
-    }
-    Ok(sc)
 }
 
 /// Phase 8, and everything that must happen with the signed bytes still in

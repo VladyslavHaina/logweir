@@ -720,6 +720,17 @@ pub enum Drill {
     /// readback that arrives at phase 6, after phase 5's own has already been
     /// recorded, and that has to reach the same signed list.
     DropsARenderedKeyDuringRestore,
+    /// Every phase RUNS and the restore is byte-perfect, but the newest
+    /// restored record lands an hour short of the requested recovery point, so
+    /// the measured RPO (3600s) blows the 300s objective. This is the ordinary
+    /// real-world exit 2 — "the drill worked, but it missed its objective" —
+    /// and it is the only shape that reaches phase 8's SCORING and then the
+    /// final non-pass gate. Scores `fail-objective`.
+    MissesTheRpoObjective,
+    /// Every phase RUNS, and one restored record does not reconcile against
+    /// its archive fingerprint. Reaches the same final gate by the other
+    /// route. Scores `fail-integrity`.
+    ReconcilesWithMismatches,
 }
 
 pub const FIXTURE_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
@@ -1091,7 +1102,23 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         .unwrap();
 
     let facts = orchestrator_facts(&segment_bytes);
-    let (fps, records) = orchestrator_pair(FIXTURE_SAMPLE_RECORDS, window_end_ms);
+    // An hour short of the requested recovery point: `measured.rpo_seconds` is
+    // `sample.window_end - newest_restored_record`, so this is 3600 against a
+    // 300s objective. The archive fingerprints are built from the SAME
+    // timestamps, so integrity still passes — the drill is healthy and simply
+    // did not recover far enough, which is what `fail-objective` means.
+    let newest_ms = if shape == Drill::MissesTheRpoObjective {
+        window_end_ms - 3_600_000
+    } else {
+        window_end_ms
+    };
+    let (fps, mut records) = orchestrator_pair(FIXTURE_SAMPLE_RECORDS, newest_ms);
+    if shape == Drill::ReconcilesWithMismatches {
+        // One record on the TARGET differs from the bytes its archive
+        // fingerprint was computed over. `compare` must report exactly one
+        // mismatch, and `roll_up` must turn that into `IntegrityResult::Fail`.
+        records[0].value = Some(b"tampered".to_vec());
+    }
 
     let mut engine = FixtureEngine::new(facts, fps);
     match shape {
@@ -1106,7 +1133,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             engine.preflight_unknown_keys = vec!["restore.header_preflight".into()];
             engine.restore_unknown_keys = vec!["restore.checkpoint_interval_secs".into()];
         }
-        Drill::Passes | Drill::RestoresNothing => {}
+        Drill::Passes
+        | Drill::RestoresNothing
+        | Drill::MissesTheRpoObjective
+        | Drill::ReconcilesWithMismatches => {}
     }
 
     // ---- the target cluster ----
