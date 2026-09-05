@@ -1,5 +1,8 @@
 # Stability
 
+A fresh clone must run `just engine` before `cargo test --workspace`; CI does
+this in the `build` job.
+
 ## Known limitations of v0.1
 
 - **S3 credentials come from `object_store`'s own chain, not the AWS SDK's.**
@@ -111,3 +114,59 @@ The rendered `restore.checkpoint_state` path is **pod-local and is never uploade
 restore process dies mid-run, there is no checkpoint to resume from: the drill re-runs from
 phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
 imply resumability, and Logweir does not offer it in v0.1.
+
+## Engine compatibility and support policy
+
+- **Engine version floors, and why each exists (spec §7.2).** `kafka-backup`
+  **0.16.0** is the floor for the unknown-config-key warning mechanism
+  `OsoCliEngine` parses off stderr/stdout (`Ignoring unknown config key
+  ...`); below it, a dropped rendered key fails silently instead of aborting
+  the run. `kafka-backup` **0.21.0** is the floor for the full drill as
+  shipped — it is the version this plan verified every vendored struct and
+  CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
+  `ae5a102f93b5270927d95d4ccec184b577febb10`), and it is the version pinned
+  by digest in `third_party/kafka-backup-binary.digest`.
+
+- **Runtime image floor.** The extracted `kafka-backup` binary is dynamically
+  linked against **glibc >= 2.36** and **libssl3**, and performs TLS
+  connections that need a CA bundle — hence `debian:bookworm-slim` plus
+  `ca-certificates` and `libssl3` in the runtime stage, never a musl or
+  distroless base (see the `Dockerfile`'s own comment).
+
+- **Format policy.** `format_version` in the signed scorecard and the
+  put-receipt is semver. A **minor** bump adds optional fields only —
+  existing readers keep working by ignoring what they don't recognise. A
+  reader **ignores unknown fields** on any document whose major matches what
+  it supports, and **refuses** a document whose major is higher than it
+  supports, rather than guessing at a shape it has never seen.
+
+- **CLI flags and exit codes are stable within a major.** A given Logweir
+  major version does not remove or repurpose a flag, nor change the meaning
+  of an exit code, without a major bump. New flags and new exit codes may be
+  added in a minor.
+
+- **Supported OSO digests.** Logweir supports the digest currently pinned in
+  `third_party/kafka-backup-binary.digest`, plus the two minor versions
+  before it, on a two-minor deprecation window:
+
+  | Engine version | Status |
+  | --- | --- |
+  | 0.21.x | supported (currently pinned) |
+  | 0.20.x | supported (deprecation window) |
+  | 0.19.x | supported (deprecation window) |
+  | 0.16.0 – 0.18.x | unsupported (below the full-drill floor; only the unknown-key warning mechanism works) |
+  | < 0.16.0 | unsupported (lever-absent: the warning mechanism this plan depends on does not exist) |
+
+  `strimzi-backup-operator` hard-codes `DEFAULT_BACKUP_IMAGE =
+  "osodevops/kafka-backup:v0.19.1"` [VERIFIED-SPEC
+  `U/strimzi-backup-operator/src/engine.rs:17`], which is **below** the
+  0.21.0 full-drill floor. That is a support-matrix row reading `unsupported
+  (lever-absent)` — an operator whose default has not caught up yet — not a
+  fault Logweir raises against that operator.
+
+- **Explicit non-contracts.** The Rust crates in this workspace
+  (`logweir-core`, `logweir-engine-oso`, `logweir-evidence`, `logweir-kafka`,
+  `logweir`) are **not** a stable API before 1.0. Only the signed document
+  formats (scorecard, put-receipt, teardown attestation) and the `logweir`
+  CLI's flags and exit codes are covered by the stability promises above;
+  internal crate APIs may change in any release before 1.0.

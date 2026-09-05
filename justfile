@@ -52,3 +52,8 @@ demo:
 # green on its own.
 check-todo-markers:
     cargo test --workspace -- --ignored
+
+# Resolve the pinned OSO image by digest and extract the engine binary.
+# Run this once after a fresh clone; `cargo test --workspace` needs .engine/.
+engine:
+    ./scripts/extract-engine.sh
