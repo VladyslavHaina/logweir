@@ -133,6 +133,42 @@ fn a_missing_marker_topic_is_refused() {
     assert_eq!(before, list_evidence_bucket());
 }
 
+// --- the sample anchor ------------------------------------------------------
+
+/// `tail` and `random` select archive records phase 7's leading-range read
+/// cannot reach. v0.1 REFUSES them at phase 0 rather than silently sampling
+/// `head` under a plan that asked for something else — the scorecard would
+/// otherwise record an anchor the drill never applied. See
+/// `logweir_core::spec::Anchor` for the measurement that forced this.
+#[test]
+fn a_sample_anchor_of_random_is_refused_before_anything_runs() {
+    expect_exit_3(|s| s["sample"]["anchor"] = "random".into(), "sample.anchor");
+}
+
+#[test]
+fn a_sample_anchor_of_tail_is_refused_exactly_the_same() {
+    expect_exit_3(|s| s["sample"]["anchor"] = "tail".into(), "sample.anchor");
+}
+
+/// An anchor that is not one of the three does not reach a guard at all: it is
+/// unspellable, so the spec does not parse. That is exit 1 (Logweir could not
+/// read its own input), not exit 3, and it is loud either way — the point of
+/// the closed enum is that it can never degrade to head-like behaviour the way
+/// a free-form string did.
+#[test]
+fn an_unspellable_sample_anchor_fails_to_parse_and_never_degrades_silently() {
+    let mut spec = spec_default();
+    spec["sample"]["anchor"] = "sideways".into();
+    let before = list_evidence_bucket();
+    let r = drill_run(&spec);
+    let e = r.out.stderr_utf8();
+    assert_eq!(r.out.status.code(), Some(1), "{e}");
+    assert!(e.contains("drill spec does not parse"), "{e}");
+    assert!(e.contains("sideways"), "{e}");
+    assert!(!r.scorecard.exists());
+    assert_eq!(before, list_evidence_bucket());
+}
+
 // --- approval ----------------------------------------------------------------
 #[test]
 fn an_approval_over_different_spec_bytes_is_refused() {

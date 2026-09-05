@@ -426,6 +426,21 @@ receipt — see [The storage receipt](#the-storage-receipt-a-second-signed-docum
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
+**In v0.1 this block is `null` in every scorecard the tool produces.** Logweir
+never invokes the engine's `validation run`, so nothing writes a report for it
+to retain: `OsoCliEngine` inherits `DataEngine::validation_run`'s default, which
+refuses rather than fabricating one, and phase 8 records
+`"no engine validation report under the per-run prefix"` and leaves the field
+null. A drill that reaches phase 8 at all therefore publishes
+`"engine_subreport": null`, and that is the correct reading of the field today:
+no engine sub-report was retained. The rest of this section describes what the
+block WOULD mean once the engine's own validation run is invoked, and it is here
+now so that nobody who meets a populated one later mistakes it for corroboration.
+(The checked-in fixtures under `e2e/fixtures/signed/` and
+`e2e/fixtures/scorecard-pass.json` do carry a populated block; they are
+hand-authored examples of the FORMAT, predate this limitation being established,
+and are not what the shipping code emits.)
+
 The `engine_subreport` block embeds the upstream backup engine's own
 evidence report, retained verbatim (see `engine_subreport.caveat` in the
 scorecard itself, which states this in the document). It is tempting to

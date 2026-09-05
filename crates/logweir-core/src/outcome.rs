@@ -30,7 +30,32 @@ pub enum IntegrityLevel {
 #[schemars(rename_all = "kebab-case")]
 pub enum IntegrityResult {
     Pass,
-    /// The compacted-topic / non-reconcilable-record case. NOT a pass.
+    /// A selection whose evidence was inconclusive — something in the sample
+    /// was not examined, so the drill cannot claim it. NOT a pass.
+    ///
+    /// A COMPACTED TOPIC DOES NOT REACH THIS in v0.1: it is reported as `fail`,
+    /// through the same path a real mismatch takes. See `docs/stability.md`.
+    // Full rationale, kept out of the doc comment because schemars publishes
+    // doc comments as `description` in schemas/logweir-drill-scorecard-1.0.0.json
+    // and this belongs in the code, not in the wire format:
+    //
+    // What actually reaches `Partial` in v0.1, per `phase7_verify`'s module
+    // doc: an archive returning zero or short fingerprints for a selection; a
+    // (topic, partition, window) the manifest claims exists but no segment
+    // matches; a pre-0.21 segment carrying no sha256; a consume-only selection
+    // whose target partition gave back less than the manifest claims. Each
+    // names itself in `integrity.partial_reason`.
+    //
+    // What does NOT reach it, despite the name this variant is usually
+    // explained by: a compacted topic. Telling "compaction removed this record
+    // on purpose" apart from "the restore or the archive lost it" needs a
+    // specific mismatch cross-referenced against `topic_parity`'s
+    // `cleanup.policy=compact` flag, and `phase7_verify::run` does not attempt
+    // it. That is a declared limitation, not a defect.
+    // `fixtures::verify_outcome_for_compacted_topic` pins the SHAPE of such a
+    // document for the scoring and rendering layers and describes no path
+    // `run` itself can take; Task 21c confirmed against a live cluster that no
+    // e2e drill can drive it.
     Partial,
     Fail,
 }

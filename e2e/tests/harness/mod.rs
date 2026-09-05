@@ -395,22 +395,41 @@ pub fn spec_default() -> serde_yaml::Value {
     v["sample"]["window_start"] = start.into();
     v["sample"]["window_end"] = end.into();
     v["target"]["teardown"] = "keep".into();
-    // `anchor: head`, not the example's `random`. MEASURED PRODUCT LIMITATION,
-    // reported rather than papered over: `phase7_verify::verdict_for_selection`
-    // reconciles against `reader.consume_range(mapped, partition, 0, count)` —
-    // the FIRST `count` records of the target partition — while phase 4's
-    // `random` anchor picks `count` records spread evenly across the whole
-    // window. On this stack (338 records per partition, 25 sampled) the two
-    // sets overlap in exactly 2 offsets, so the drill scored
-    // `records_sampled_matching: 12 / 150`, `pass_rate_measured: 0.08` and
-    // `fail-integrity` — a FALSE FAIL, on a restore that was byte-for-byte
-    // correct. The safe direction, but wrong. `head` is the one anchor for
-    // which the sampled offsets and the consumed offsets are the same set, so
-    // it is what this suite uses to exercise the byte-fingerprint lane for
-    // real. Fixing the anchor/consume-range mismatch is a phase-7 change and
-    // belongs to a task that owns that file.
-    v["sample"]["anchor"] = "head".into();
+    // NOTE: `sample.anchor` is NOT overridden here. It was, in fix round 0,
+    // to work around the example shipping `anchor: random` — which phase 7
+    // cannot reconcile and which therefore reported a byte-for-byte correct
+    // restore as `fail-integrity` with `pass_rate_measured: 0.08`. That is now
+    // fixed at the source: the anchor is a closed enum defaulting to `head`,
+    // `tail`/`random` are refused at phase 0, and the example says `head`. A
+    // harness that kept overriding it would hide exactly the defect
+    // `the_shipped_example_spec_runs_as_written_and_never_reports_a_false_fail`
+    // exists to catch.
     v
+}
+
+/// The shipped example, with NOTHING overridden except the one field that is
+/// necessarily data-dependent. Used by the regression test for the defect
+/// `spec_default`'s note describes.
+pub fn spec_example_with_only_the_window_bound() -> serde_yaml::Value {
+    let mut v: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(root().join("examples/drill.yaml")).unwrap())
+            .unwrap();
+    let newest = newest_source_record_ts_ms();
+    v["sample"]["window_start"] = rfc3339(newest - 24 * 3600 * 1000).into();
+    v["sample"]["window_end"] = rfc3339(newest + 1000).into();
+    v
+}
+
+/// `sample.anchor` exactly as `examples/drill.yaml` spells it, for a test that
+/// needs to prove it read the value from the file rather than from itself.
+pub fn example_anchor() -> String {
+    let v: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(root().join("examples/drill.yaml")).unwrap())
+            .unwrap();
+    v["sample"]["anchor"]
+        .as_str()
+        .expect("examples/drill.yaml states sample.anchor")
+        .to_string()
 }
 
 /// A topic the archive does not hold. See `full_drill.rs` for why this is the

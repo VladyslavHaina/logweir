@@ -97,12 +97,17 @@ pub fn mapping(from: &str, to: &str) -> BTreeMap<String, String> {
     [(from.to_string(), to.to_string())].into_iter().collect()
 }
 
-pub fn sample_spec(from: &str, to: &str, per_partition: usize, anchor: &str) -> SampleSpec {
+pub fn sample_spec(
+    from: &str,
+    to: &str,
+    per_partition: usize,
+    anchor: logweir_core::spec::Anchor,
+) -> SampleSpec {
     SampleSpec {
         window_start: ts(from),
         window_end: ts(to),
         records_per_partition: per_partition,
-        anchor: anchor.to_string(),
+        anchor,
         max_partitions: None,
     }
 }
@@ -418,6 +423,15 @@ pub fn scorecard_pass() -> Scorecard {
 
 // ---------------------------------------------------------------- phase 7 verify
 
+/// A SHAPE fixture, not a scenario `phase7_verify::run` can produce.
+///
+/// `run` has no reachable path from a compacted target topic to
+/// `IntegrityResult::Partial` — see `IntegrityResult::Partial`'s own doc
+/// comment and `phase7_verify`'s module doc, both of which state the
+/// limitation. This exists so the scoring and rendering layers have a
+/// `Partial`-with-a-reason document to consume; do not read a test built on it
+/// as end-to-end coverage of compacted topics. Task 21c confirmed against a
+/// live cluster that no e2e drill can drive this row.
 pub fn verify_outcome_for_compacted_topic() -> logweir::drill::phase7_verify::VerifyOutcome {
     let mut o = base_verify_outcome();
     o.integrity.result = IntegrityResult::Partial;

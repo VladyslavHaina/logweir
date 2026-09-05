@@ -7,6 +7,7 @@ use logweir_core::engine::{
     BackupSetRef, CoverageState, DataEngine, EngineError, PhaseObserver, RestorePlan,
     SampleSelection, StorageUrl,
 };
+use logweir_core::spec::Anchor;
 use logweir_engine_oso::engine::OsoCliEngine;
 use logweir_engine_oso::storage::Store;
 use std::path::{Path, PathBuf};
@@ -376,7 +377,7 @@ fn fingerprints_decodes_segments_in_the_window_and_sorts_by_offset() {
         set: b1_ref(),
         topic: "orders".into(),
         partition: 0,
-        anchor: "head".into(),
+        anchor: Anchor::Head,
         count: 10,
         window: (1_756_425_600_001, 1_756_425_600_003),
     };
@@ -459,7 +460,7 @@ fn fingerprints_are_scoped_to_the_requested_set_not_merged_across_sets() {
         set: b1_ref(),
         topic: "orders".into(),
         partition: 0,
-        anchor: "head".into(),
+        anchor: Anchor::Head,
         count: 10,
         window: (1_756_425_600_000, 1_756_425_600_004),
     };
@@ -563,7 +564,7 @@ fn fingerprints_come_from_the_requested_set_when_two_sets_share_offsets_with_dif
         },
         topic: "orders".into(),
         partition: 0,
-        anchor: "head".into(),
+        anchor: Anchor::Head,
         count: 10,
         window: (200, 201),
     };
@@ -637,12 +638,12 @@ fn seed_anchor_archive(dir: &std::path::Path) -> BackupSetRef {
 const KEYS: [&str; 6] = ["k0", "k1", "k2", "k3", "k4", "k5"];
 const VALUES: [&str; 6] = ["v0", "v1", "v2", "v3", "v4", "v5"];
 
-fn anchor_sel(set: BackupSetRef, anchor: &str, count: usize) -> SampleSelection {
+fn anchor_sel(set: BackupSetRef, anchor: Anchor, count: usize) -> SampleSelection {
     SampleSelection {
         set,
         topic: "orders".into(),
         partition: 0,
-        anchor: anchor.into(),
+        anchor,
         count,
         window: (300, 305),
     }
@@ -657,7 +658,9 @@ fn head_anchor_returns_the_earliest_count_records() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::read_only_from_url(&loc).unwrap(),
     );
-    let fps = engine.fingerprints(&anchor_sel(set, "head", 3)).unwrap();
+    let fps = engine
+        .fingerprints(&anchor_sel(set, Anchor::Head, 3))
+        .unwrap();
     assert_eq!(
         fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
         vec![300, 301, 302]
@@ -674,7 +677,9 @@ fn tail_anchor_returns_the_latest_count_records() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::read_only_from_url(&loc).unwrap(),
     );
-    let fps = engine.fingerprints(&anchor_sel(set, "tail", 3)).unwrap();
+    let fps = engine
+        .fingerprints(&anchor_sel(set, Anchor::Tail, 3))
+        .unwrap();
     assert_eq!(
         fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
         vec![303, 304, 305]
@@ -698,7 +703,9 @@ fn random_anchor_returns_a_bounded_evenly_spaced_sample() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::read_only_from_url(&loc).unwrap(),
     );
-    let fps = engine.fingerprints(&anchor_sel(set, "random", 3)).unwrap();
+    let fps = engine
+        .fingerprints(&anchor_sel(set, Anchor::Random, 3))
+        .unwrap();
     let offsets: Vec<i64> = fps.iter().map(|f| f.offset).collect();
     assert_eq!(offsets, vec![300, 302, 305]);
     assert_eq!(
@@ -723,7 +730,9 @@ fn count_zero_returns_no_fingerprints() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::read_only_from_url(&loc).unwrap(),
     );
-    let fps = engine.fingerprints(&anchor_sel(set, "head", 0)).unwrap();
+    let fps = engine
+        .fingerprints(&anchor_sel(set, Anchor::Head, 0))
+        .unwrap();
     assert!(fps.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -744,7 +753,7 @@ fn an_empty_manifest_key_is_refused_with_a_clear_operational_error() {
         Store::read_only_from_url(&loc).unwrap(),
     );
     let err = engine
-        .fingerprints(&anchor_sel(set, "head", 3))
+        .fingerprints(&anchor_sel(set, Anchor::Head, 3))
         .unwrap_err();
     match err {
         EngineError::Operational(msg) => assert!(msg.contains("manifest_key"), "{msg}"),
@@ -764,29 +773,19 @@ fn count_larger_than_available_returns_everything() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::read_only_from_url(&loc).unwrap(),
     );
-    let fps = engine.fingerprints(&anchor_sel(set, "tail", 1000)).unwrap();
+    let fps = engine
+        .fingerprints(&anchor_sel(set, Anchor::Tail, 1000))
+        .unwrap();
     assert_eq!(fps.len(), 6);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `anchor` is entirely Logweir-internal (never engine-reported), so an
-/// unrecognised value is a bug in the caller, not degraded data — and a
-/// scorecard cannot honestly claim an anchor that was never applied.
-#[test]
-fn an_unknown_anchor_is_an_operational_error() {
-    let dir = unique_dir("anchor-unknown");
-    let set = seed_anchor_archive(&dir);
-    let loc = StorageUrl::Filesystem { path: dir.clone() };
-    let engine = engine_with(
-        "../../e2e/fixtures/fake-engine-clean.sh",
-        Store::read_only_from_url(&loc).unwrap(),
-    );
-    let err = engine
-        .fingerprints(&anchor_sel(set, "bogus", 3))
-        .unwrap_err();
-    assert!(err.to_string().contains("bogus"));
-    let _ = std::fs::remove_dir_all(&dir);
-}
+// DELETED (Task 21c fix round 1): `an_unknown_anchor_is_an_operational_error`.
+// `SampleSelection.anchor` is `logweir_core::spec::Anchor`, a closed enum, so
+// there is no unknown anchor to construct and `select_sample` has no
+// catch-all arm left to test — the compiler now enforces what that test
+// asserted at run time. Recorded here rather than silently removed, because a
+// vanished test name should always be explainable.
 
 /// Builds a backup set with TWO segments in the manifest, both matching the
 /// query window: `hs/.../segment-...400.bin` (offsets 400-402, WRITTEN to
@@ -846,17 +845,17 @@ fn head_short_circuits_before_reading_a_later_unneeded_segment() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::read_only_from_url(&loc).unwrap(),
     );
-    let window_sel = |anchor: &str| SampleSelection {
+    let window_sel = |anchor: Anchor| SampleSelection {
         set: set.clone(),
         topic: "orders".into(),
         partition: 0,
-        anchor: anchor.into(),
+        anchor,
         count: 3,
         window: (400, 502),
     };
 
     // head: satisfied by the first segment alone; must not touch the second.
-    let fps = engine.fingerprints(&window_sel("head")).unwrap();
+    let fps = engine.fingerprints(&window_sel(Anchor::Head)).unwrap();
     assert_eq!(
         fps.iter().map(|f| f.offset).collect::<Vec<_>>(),
         vec![400, 401, 402]
@@ -866,7 +865,7 @@ fn head_short_circuits_before_reading_a_later_unneeded_segment() {
     // to know which are the LATEST 3 records, reaches the missing one, fails.
     // This is what proves segment B was genuinely in `head`'s path too, not
     // excluded by topic/partition/window for some other reason.
-    let err = engine.fingerprints(&window_sel("tail")).unwrap_err();
+    let err = engine.fingerprints(&window_sel(Anchor::Tail)).unwrap_err();
     assert!(
         err.to_string().contains("segment-00000000000000000500.bin"),
         "{err}"

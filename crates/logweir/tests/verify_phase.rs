@@ -1,6 +1,7 @@
 mod fixtures; // crates/logweir/tests/fixtures/mod.rs — Task 14 step 5c
 use logweir::drill::phase7_verify::{classify_parity, compare};
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
+use logweir_core::spec::Anchor;
 
 // ---------------------------------------------------------------------------
 // task-19-brief.md Step 1, verbatim. Six tests.
@@ -35,6 +36,15 @@ fn an_archive_offset_absent_from_the_target_is_a_mismatch() {
 /// A compacted topic cannot be reconciled record-for-record: the target
 /// legitimately holds fewer records. That is `partial`, and partial is NOT a
 /// pass — it produces outcome fail-integrity with a non-null reason.
+///
+/// **SHAPE ONLY — this is not coverage of compacted topics.** It asserts over
+/// a hand-built `VerifyOutcome`, because `phase7_verify::run` has no reachable
+/// path from a compacted target to `Partial` (module doc; and
+/// `IntegrityResult::Partial`'s own doc comment). Task 21c tried to drive this
+/// row end to end against a live cluster and could not, which is why
+/// `e2e/tests/full_drill.rs` carries
+/// `a_drill_with_nothing_to_restore_is_refused_and_never_reports_a_pass`
+/// instead of the compacted-topic row its brief asked for.
 #[test]
 fn a_compacted_topic_is_partial_with_a_reason() {
     let o = fixtures::verify_outcome_for_compacted_topic();
@@ -244,7 +254,7 @@ fn sel_orders() -> Vec<SampleSelection> {
         },
         topic: "orders".into(),
         partition: 0,
-        anchor: "head".into(),
+        anchor: Anchor::Head,
         count: 50,
         window: WINDOW,
     }]
@@ -1131,7 +1141,7 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
             },
             topic: "orders".into(),
             partition: 0,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 25,
             window: WINDOW,
         },
@@ -1142,7 +1152,7 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
             },
             topic: "payments".into(),
             partition: 0,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 25,
             window: WINDOW,
         },
@@ -1317,7 +1327,7 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
             },
             topic: "orders".into(),
             partition: 0,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 25,
             window: WINDOW,
         },
@@ -1328,7 +1338,7 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
             },
             topic: "payments".into(),
             partition: 0,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 25,
             window: WINDOW,
         },
@@ -1448,7 +1458,7 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
             },
             topic: "payments".into(),
             partition: 0,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 25,
             window: WINDOW,
         },
@@ -1952,7 +1962,7 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
             },
             topic: "orders".into(),
             partition: 0,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 10,
             window: WINDOW,
         },
@@ -1963,7 +1973,7 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
             },
             topic: "orders".into(),
             partition: 1,
-            anchor: "head".into(),
+            anchor: Anchor::Head,
             count: 10,
             window: WINDOW,
         },
@@ -2123,7 +2133,7 @@ fn sel_for(topic: &str, partition: i32, count: usize) -> SampleSelection {
         },
         topic: topic.into(),
         partition,
-        anchor: "head".into(),
+        anchor: Anchor::Head,
         count,
         window: WINDOW,
     }

@@ -1334,7 +1334,7 @@ mod tests {
             },
             topic: topic.into(),
             partition,
-            anchor: "head".into(),
+            anchor: logweir_core::spec::Anchor::Head,
             count: 10,
             window,
         }

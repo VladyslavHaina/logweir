@@ -207,6 +207,75 @@ fn a_drill_with_nothing_to_restore_is_refused_and_never_reports_a_pass() {
     );
 }
 
+/// THE TEST WHOSE ABSENCE LET D4 THROUGH: the shipped example config, run as
+/// written, must either PASS or be REFUSED — it must never quietly report
+/// `fail-integrity` about a healthy backup.
+///
+/// Only `sample.window_start`/`window_end` are bound, because those are the one
+/// pair that cannot be checked in: `scripts/e2e-seed.sh` produces records at
+/// run time, so any fixed window in a repository file matches no segment.
+/// EVERY OTHER FIELD — including `sample.anchor`, which is what this test is
+/// really about — comes from `examples/drill.yaml` verbatim, and the anchor the
+/// scorecard reports is asserted equal to the value read out of that file.
+///
+/// Before fix round 1 this failed: the example shipped `anchor: random`, phase
+/// 4 fingerprinted archive records spread across the window while phase 7 read
+/// the target's first 25, and a byte-for-byte correct restore scored
+/// `records_sampled_matching: 12 / 150`, `pass_rate_measured: 0.08`,
+/// `outcome: fail-integrity`.
+#[test]
+fn the_shipped_example_spec_runs_as_written_and_never_reports_a_false_fail() {
+    let out = drill_run(&spec_example_with_only_the_window_bound());
+    let code = out.out.status.code();
+    assert_ne!(
+        code,
+        Some(2),
+        "the shipped example reported a DRILL FAILURE against a healthy archive: {}",
+        out.out.stderr_utf8()
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "the shipped example must pass (or be refused at 3 — never a false fail): {}",
+        out.out.stderr_utf8()
+    );
+
+    let sc = read_scorecard(&out);
+    assert_eq!(sc["outcome"], "pass");
+    assert_eq!(sc["integrity"]["result"], "pass");
+    assert_eq!(sc["integrity"]["mismatches"], 0);
+    assert_eq!(
+        sc["integrity"]["pass_rate_measured"], 1.0,
+        "0.08 here is the exact signature of the anchor/consume-range mismatch"
+    );
+    // The anchor really came from the file, not from this test.
+    assert_eq!(
+        sc["sample"]["anchor"].as_str().unwrap(),
+        example_anchor(),
+        "the scorecard must report the anchor examples/drill.yaml actually states"
+    );
+    assert!(logweir_verify(&out).success());
+}
+
+/// The same guarantee for an adopter who OMITS `sample.anchor` entirely — which
+/// is how the defect reached everyone who never thought about the field, since
+/// the serde default used to be `random`.
+#[test]
+fn a_spec_that_omits_the_sample_anchor_gets_head_and_passes() {
+    let mut spec = spec_default();
+    let sample = spec["sample"].as_mapping_mut().expect("sample block");
+    sample.remove(serde_yaml::Value::from("anchor"));
+    assert!(
+        spec["sample"].get("anchor").is_none(),
+        "the field must actually be gone for this test to mean anything"
+    );
+    let out = drill_run(&spec);
+    assert_eq!(out.out.status.code(), Some(0), "{}", out.out.stderr_utf8());
+    let sc = read_scorecard(&out);
+    assert_eq!(sc["sample"]["anchor"], "head", "the default must be head");
+    assert_eq!(sc["outcome"], "pass");
+}
+
 /// THE MAINLINE EXIT-2 GATE, end to end. Every other non-pass row in this file
 /// returns EARLY — the phase-5 block, the phase-4 refusal — so none of them
 /// reaches `execute_with`'s final `if sc.outcome != Outcome::Pass`. That
@@ -428,6 +497,12 @@ fn validate_restore_json_stdout_parses_even_though_the_command_logs_first() {
 /// that CI runs on every build, and the override is owed to whoever adds it —
 /// not to this task, which owns no file in that crate's engine module.
 ///
+/// The gap is also stated where a READER meets it, not only here:
+/// `docs/stability.md` ("`engine_subreport` is always null in v0.1"),
+/// `docs/verify-a-scorecard.md`'s `engine_subreport` section, and
+/// `e2e/fixtures/signed/README.md` — the last because the checked-in example
+/// documents carry a POPULATED block the shipping code cannot emit.
+///
 /// This test pins the gap so it cannot be mistaken for coverage: it goes RED the
 /// day the override lands, at which point the brief's real round-trip assertions
 /// belong here, driven by `harness::oso_evidence_verify`.
@@ -436,6 +511,13 @@ fn the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run(
     let out = drill_run(&spec_default());
     assert_eq!(out.out.status.code(), Some(0), "{}", out.out.stderr_utf8());
     let sc = read_scorecard(&out);
+    // The KEY must be present and null, not merely absent — otherwise this
+    // assertion would also hold for a scorecard that dropped the field
+    // entirely, and would be pinning nothing.
+    assert!(
+        sc.as_object().unwrap().contains_key("engine_subreport"),
+        "the scorecard no longer carries an engine_subreport field at all"
+    );
     assert_eq!(
         sc["engine_subreport"],
         serde_json::Value::Null,

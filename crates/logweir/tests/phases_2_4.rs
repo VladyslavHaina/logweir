@@ -1,6 +1,7 @@
 mod fixtures;
 use logweir::drill::{phase2_target, phase3_diff, phase4_sample, DrillError};
 use logweir_core::engine::BackupSetRef;
+use logweir_core::spec::Anchor;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
 
@@ -136,7 +137,12 @@ fn the_partition_count_falls_back_to_max_partition_id_plus_one() {
 #[test]
 fn sample_select_narrows_to_the_window_and_counts_expected_records() {
     let facts = fixtures::backup_facts_orders(3);
-    let spec = fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 25, "head");
+    let spec = fixtures::sample_spec(
+        "2026-08-29T00:00:00Z",
+        "2026-08-30T02:00:00Z",
+        25,
+        Anchor::Head,
+    );
     let s = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap();
     assert_eq!(s.topics, 1);
     assert_eq!(s.partitions, 3);
@@ -145,7 +151,7 @@ fn sample_select_narrows_to_the_window_and_counts_expected_records() {
     assert!(s
         .per_partition
         .iter()
-        .all(|p| p.count == 25 && p.anchor == "head"));
+        .all(|p| p.count == 25 && p.anchor == Anchor::Head));
 }
 
 #[test]
@@ -153,7 +159,12 @@ fn a_window_covering_no_segment_is_an_error_not_an_empty_pass() {
     // Mirrors OSO's own rule: "Zero records scanned is never reported as a
     // positive pass" (docs/restore-preflight.md @ v0.21.0).
     let facts = fixtures::backup_facts_orders(3);
-    let spec = fixtures::sample_spec("2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z", 25, "head");
+    let spec = fixtures::sample_spec(
+        "2020-01-01T00:00:00Z",
+        "2020-01-02T00:00:00Z",
+        25,
+        Anchor::Head,
+    );
     assert!(phase4_sample::run(&facts, &spec, &["orders".into()]).is_err());
 }
 
@@ -165,7 +176,12 @@ fn a_window_covering_no_segment_is_an_error_not_an_empty_pass() {
 #[test]
 fn records_per_partition_zero_is_rejected_before_it_reaches_a_sample_selection() {
     let facts = fixtures::backup_facts_orders(3);
-    let spec = fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 0, "head");
+    let spec = fixtures::sample_spec(
+        "2026-08-29T00:00:00Z",
+        "2026-08-30T02:00:00Z",
+        0,
+        Anchor::Head,
+    );
     let err = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap_err();
     assert!(matches!(err, DrillError::Operational(_)));
     assert!(err.to_string().contains("records_per_partition"));
@@ -177,7 +193,12 @@ fn a_partition_with_a_gap_or_a_pruned_range_inside_the_window_is_reported() {
     facts.topics[0].partitions[0].gaps.push((150, 200));
     let s = phase4_sample::run(
         &facts,
-        &fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 25, "head"),
+        &fixtures::sample_spec(
+            "2026-08-29T00:00:00Z",
+            "2026-08-30T02:00:00Z",
+            25,
+            Anchor::Head,
+        ),
         &["orders".into()],
     )
     .unwrap();
@@ -204,7 +225,12 @@ fn a_gap_outside_the_sampled_offsets_is_not_reported_as_overlapping() {
         .push((900_000, 999_999));
     let s = phase4_sample::run(
         &facts,
-        &fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 25, "head"),
+        &fixtures::sample_spec(
+            "2026-08-29T00:00:00Z",
+            "2026-08-30T02:00:00Z",
+            25,
+            Anchor::Head,
+        ),
         &["orders".into()],
     )
     .unwrap();
@@ -324,8 +350,12 @@ fn a_topic_present_but_unreadable_is_never_recorded_as_absent_or_empty() {
 #[test]
 fn max_partitions_truncates_consistently_with_the_reported_counts() {
     let facts = fixtures::backup_facts_orders(3);
-    let mut spec =
-        fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 25, "head");
+    let mut spec = fixtures::sample_spec(
+        "2026-08-29T00:00:00Z",
+        "2026-08-30T02:00:00Z",
+        25,
+        Anchor::Head,
+    );
     spec.max_partitions = Some(1);
     let s = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap();
     assert_eq!(
@@ -354,7 +384,12 @@ fn max_partitions_truncates_consistently_with_the_reported_counts() {
 #[test]
 fn selection_set_arrives_empty_and_bind_backup_set_patches_every_entry() {
     let facts = fixtures::backup_facts_orders(3);
-    let spec = fixtures::sample_spec("2026-08-29T00:00:00Z", "2026-08-30T02:00:00Z", 25, "head");
+    let spec = fixtures::sample_spec(
+        "2026-08-29T00:00:00Z",
+        "2026-08-30T02:00:00Z",
+        25,
+        Anchor::Head,
+    );
     let mut s = phase4_sample::run(&facts, &spec, &["orders".into()]).unwrap();
     assert!(
         s.per_partition

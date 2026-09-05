@@ -3,6 +3,7 @@
 //! 8/8b) meet the trait boundary logweir-core defines.
 use crate::{render_restore, subprocess, vendored};
 use logweir_core::engine::*;
+use logweir_core::spec::Anchor;
 use std::path::PathBuf;
 
 pub struct OsoCliEngine {
@@ -435,12 +436,12 @@ impl DataEngine for OsoCliEngine {
             // record earlier than what has already been collected — reading
             // it could only add records `select_sample`'s `"head"` branch
             // would discard anyway.
-            if sel.anchor == "head" && all.len() >= sel.count {
+            if sel.anchor == Anchor::Head && all.len() >= sel.count {
                 break;
             }
         }
         all.sort_by_key(|f| f.offset);
-        select_sample(all, &sel.anchor, sel.count)
+        select_sample(all, sel.anchor, sel.count)
     }
 }
 
@@ -477,7 +478,7 @@ impl DataEngine for OsoCliEngine {
 /// that was never actually applied.
 fn select_sample(
     sorted: Vec<RecordFingerprint>,
-    anchor: &str,
+    anchor: Anchor,
     count: usize,
 ) -> Result<Vec<RecordFingerprint>, EngineError> {
     // Backstop, not the primary path: `fingerprints()` already returns before
@@ -491,12 +492,12 @@ fn select_sample(
         return Ok(sorted);
     }
     match anchor {
-        "head" => Ok(sorted.into_iter().take(count).collect()),
-        "tail" => {
+        Anchor::Head => Ok(sorted.into_iter().take(count).collect()),
+        Anchor::Tail => {
             let start = sorted.len() - count;
             Ok(sorted.into_iter().skip(start).collect())
         }
-        "random" => {
+        Anchor::Random => {
             let n = sorted.len();
             let mut out: Vec<RecordFingerprint> = Vec::with_capacity(count);
             for i in 0..count {
@@ -511,8 +512,5 @@ fn select_sample(
             out.dedup_by_key(|f| f.offset);
             Ok(out)
         }
-        other => Err(EngineError::Operational(format!(
-            "unknown sample anchor `{other}`; expected `head`, `tail`, or `random`"
-        ))),
     }
 }

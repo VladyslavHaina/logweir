@@ -108,6 +108,48 @@ this in the `build` job.
   `immutable`/`retain_until` today. A bucket genuinely under Object Lock will
   not be recognised as such until that API exists.
 
+### A compacted target topic is reported as a mismatch, not as `partial`
+
+`integrity.result: partial` exists for a sample the drill could not fully
+examine, and a compacted topic — which legitimately holds fewer records than
+the archive — reads like the obvious case for it. **v0.1 does not classify it
+that way.** Distinguishing "compaction removed this record on purpose" from
+"the restore or the archive lost it" needs a specific mismatch cross-referenced
+against the target's `cleanup.policy`, and phase 7 does not attempt it. A
+compacted target is reported through the same path a real mismatch takes:
+`integrity.result: fail`, with the offsets logged.
+
+This is the safe direction — a drill over a compacted topic FAILS rather than
+passing — but it means you cannot run a meaningful drill against a compacted
+scratch topic in v0.1. Restore into a scratch topic with
+`cleanup.policy=delete`, which is what phase 6 creates by default.
+
+### `engine_subreport` is always null in v0.1
+
+The scorecard reserves `engine_subreport` for the upstream engine's own
+verbatim evidence report. **v0.1 never populates it.** `OsoCliEngine` does not
+override `DataEngine::validation_run`, so Logweir never runs the engine's
+`validation run` subcommand and nothing is ever written under
+`logweir/<run_id>/engine-validation/` for phase 8 to retain. The default
+implementation refuses rather than fabricating a report, so there is no risk of
+a scorecard claiming an engine validation that never happened — the field is
+simply `null`, and `phases[8].notes` records why on the in-memory document.
+
+Two consequences worth stating plainly:
+
+- Reading `engine_subreport: null` means "no engine sub-report was retained",
+  not "the engine reported nothing wrong".
+- The checked-in examples (`e2e/fixtures/signed/*.json`,
+  `e2e/fixtures/scorecard-pass.json`) show a POPULATED block. They document the
+  format; they are not output the shipping code can produce. Same class of
+  divergence as `evidence.create_only_enforced: true` in those same fixtures.
+
+`crates/logweir-engine-oso/tests/engine.rs` carries an `#[ignore]`d marker test
+that CI runs on every build so the missing override cannot be forgotten, and
+`e2e/tests/full_drill.rs`'s
+`the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
+turns RED the day it lands.
+
 ### A crashed restore is not resumable in v0.1
 
 The rendered `restore.checkpoint_state` path is **pod-local and is never uploaded**. If the

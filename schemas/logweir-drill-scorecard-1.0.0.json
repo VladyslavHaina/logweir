@@ -325,7 +325,7 @@
           ]
         },
         {
-          "description": "The compacted-topic / non-reconcilable-record case. NOT a pass.",
+          "description": "A selection whose evidence was inconclusive — something in the sample was not examined, so the drill cannot claim it. NOT a pass.\n\nA COMPACTED TOPIC DOES NOT REACH THIS in v0.1: it is reported as `fail`, through the same path a real mismatch takes. See `docs/stability.md`.",
           "type": "string",
           "enum": [
             "partial"

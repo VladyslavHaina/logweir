@@ -1,6 +1,6 @@
 use crate::drill::DrillError;
 use logweir_core::guard::{check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal};
-use logweir_core::spec::{AllowedClusters, DrillSpec};
+use logweir_core::spec::{AllowedClusters, Anchor, DrillSpec};
 use logweir_kafka::reader::ClusterReader;
 use std::collections::BTreeMap;
 
@@ -57,6 +57,27 @@ pub fn run(
     // `check_topic_mapping_coverage` returns `Result<(), GuardRefusal>`; `?`
     // converts it into `DrillError::Guard` via the `#[from]` impl.
     check_topic_mapping_coverage(&spec.source.topics, &topic_mapping)?;
+
+    // v0.1 implements `head` and refuses the other two, HERE, before anything
+    // runs. `logweir_core::spec::Anchor`'s doc comment carries the full
+    // reasoning and the measurement; the short version is that phase 4 honours
+    // the anchor when choosing which ARCHIVE records to fingerprint while
+    // `phase7_verify::verdict_for_selection` reads the TARGET's first
+    // `records_per_partition` records, so `tail` and `random` reconcile two
+    // different sets of records and report a healthy backup as broken.
+    //
+    // A REFUSAL, not a downgrade to `head`: silently running a different
+    // sample than the approved plan named is the same class of dishonesty as
+    // silently restoring a different backup set (`pick_backup_set` refuses
+    // that too), and the scorecard would then record an anchor the drill did
+    // not apply.
+    if spec.sample.anchor != Anchor::Head {
+        return Err(GuardRefusal(format!(
+            "sample.anchor `{}` is not supported in v0.1; only `head` is. Phase 7 reconciles              the restored topic by reading its FIRST sample.records_per_partition records,              while `{}` selects archive records from elsewhere in the window — the two would              compare different records and report a healthy backup as a failure. Set              `sample.anchor: head`, or omit the field (that is now its default). Refusing              rather than silently sampling `head` under a plan that asked for `{}`.",
+            spec.sample.anchor, spec.sample.anchor, spec.sample.anchor
+        ))
+        .into());
+    }
 
     // FROM HERE ON every failure reaches the network. A `KafkaError` here
     // means the guard could not observe the fact it needed — it is NOT a
@@ -147,7 +168,7 @@ mod tests {
                 window_start: ts("2026-08-29T00:00:00Z"),
                 window_end: ts("2026-08-30T00:00:00Z"),
                 records_per_partition: 25,
-                anchor: "random".into(),
+                anchor: Anchor::Head,
                 max_partitions: None,
             },
             objectives: ObjectivesSpec {
@@ -319,6 +340,59 @@ mod tests {
             DrillError::Guard(GuardRefusal(msg)) => {
                 assert!(msg.contains("leader election in progress"), "{msg}");
             }
+            other => panic!("expected a guard refusal (exit 3), got {other:?}"),
+        }
+    }
+
+    /// `tail` and `random` select archive records phase 7's leading-range
+    /// read cannot reach, so they are REFUSED at phase 0 rather than
+    /// downgraded. Refusing is exit 3 — the plan is not one this version can
+    /// honour, and nothing has run.
+    #[test]
+    fn a_sample_anchor_other_than_head_is_a_guard_refusal_naming_the_limitation() {
+        for anchor in [Anchor::Tail, Anchor::Random] {
+            let mut spec = spec_with(&["orders"], "drill-");
+            spec.sample.anchor = anchor;
+            let reader = healthy_reader("ALLOWED0000000000000000", &spec.target.marker_topic);
+            let err = run(
+                &spec,
+                "restore: {}\n",
+                &allowed(&["ALLOWED0000000000000000"], None),
+                &reader,
+            )
+            .unwrap_err();
+            match err {
+                DrillError::Guard(GuardRefusal(msg)) => {
+                    assert!(msg.contains("sample.anchor"), "{msg}");
+                    assert!(msg.contains(anchor.as_str()), "{msg}");
+                    assert!(msg.contains("head"), "{msg}");
+                }
+                other => panic!("expected a guard refusal (exit 3) for {anchor}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The refusal is LOCAL: it must not need a reachable broker, or a plan
+    /// this version cannot honour would report exit 1 ("retry me") on a host
+    /// whose target is down. Same property the forbidden-key and mapping
+    /// guards have.
+    #[test]
+    fn the_anchor_refusal_does_not_need_a_reachable_broker() {
+        let mut spec = spec_with(&["orders"], "drill-");
+        spec.sample.anchor = Anchor::Random;
+        let reader = StubReader {
+            cluster_id: Err(KafkaError::Unreachable("no broker answered".into())),
+            topics: Err(KafkaError::Unreachable("no broker answered".into())),
+        };
+        match run(
+            &spec,
+            "restore: {}\n",
+            &allowed(&["ALLOWED0000000000000000"], None),
+            &reader,
+        )
+        .unwrap_err()
+        {
+            DrillError::Guard(GuardRefusal(msg)) => assert!(msg.contains("sample.anchor"), "{msg}"),
             other => panic!("expected a guard refusal (exit 3), got {other:?}"),
         }
     }

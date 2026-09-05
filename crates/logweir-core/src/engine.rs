@@ -208,7 +208,9 @@ pub struct SampleSelection {
     pub set: BackupSetRef,
     pub topic: String,
     pub partition: i32,
-    pub anchor: String, // head | tail | random
+    /// A closed set since Task 21c — see `crate::spec::Anchor` for why, and
+    /// for why v0.1 refuses everything but `Head` at phase 0.
+    pub anchor: crate::spec::Anchor,
     /// A CAP on how many fingerprints `fingerprints()` returns, not a promise
     /// of exactly this many: fewer than `count` matching records in the
     /// window is not an error. What this bounds differs BY ANCHOR — an

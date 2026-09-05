@@ -977,7 +977,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             partitions: 0,
             records_expected: 0,
             records_restored: 0,
-            anchor: c.spec.sample.anchor.clone(),
+            anchor: c.spec.sample.anchor.as_str().to_string(),
             coverage_note: "phase 4 has not run".into(),
         },
         target_diff: TargetDiffSummary::default(),
@@ -1054,7 +1054,7 @@ fn sample_info(
         records_expected: sel.per_partition.iter().map(|s| s.count as u64).sum(),
         // Phase 7 measures this; phase 4 cannot know it.
         records_restored: 0,
-        anchor: spec.anchor.clone(),
+        anchor: spec.anchor.as_str().to_string(),
         coverage_note: if sel.notes.is_empty() {
             "no capture gap or retention-pruned range overlaps the sampled window".into()
         } else {

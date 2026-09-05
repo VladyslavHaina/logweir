@@ -132,7 +132,7 @@ pub fn run(
                     },
                     topic: t.name.clone(),
                     partition: p.partition_id,
-                    anchor: spec.anchor.clone(),
+                    anchor: spec.anchor,
                     count: spec.records_per_partition,
                     window: (ms0, ms1),
                 },
