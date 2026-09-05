@@ -214,6 +214,20 @@ pub struct SampleInfo {
     pub window_end: DateTime<Utc>,
     pub topics: u32,
     pub partitions: u32,
+    /// THE CANARY SIZE: how many records this drill set out to reconcile —
+    /// the sum of `sample.records_per_partition` over the partitions actually
+    /// selected. `integrity.records_sampled` is measured against THIS figure.
+    ///
+    /// It is NOT `crate::drill::phase4_sample::Selection::records_expected`
+    /// (in `crates/logweir`), which shares the name and answers a different
+    /// question: how many records the manifest says the whole sampled window
+    /// holds. The two differ by orders of magnitude on any real archive — 25
+    /// against 500 on a single partition of this repository's own fixtures —
+    /// and substituting one for the other would make a signed document
+    /// overstate or understate what was verified. Both definition sites carry
+    /// this note deliberately (Task 16's parked item, discharged in Task
+    /// 21a); the field is not renamed because a scorecard field name is a
+    /// Global Constraint 12 question and the format is frozen at 1.0.0.
     pub records_expected: u64,
     pub records_restored: u64,
     pub anchor: String, // head | tail | random
@@ -338,10 +352,15 @@ pub struct EngineSubreport {
 /// UNDER-claims; what it buys is the guarantee that a valid Logweir signature
 /// can never cover an unsubstantiated WORM or create-only assertion.
 ///
-/// The real post-upload readback is performed and held in memory, but in v0.1
-/// it is published nowhere an auditor can read; making it auditor-visible
-/// needs a second signed receipt written after the upload. `docs/stability.md`
-/// carries the adopter-facing version of this note.
+/// The real post-upload readback IS published — in a second, separately signed
+/// document written after the put: `logweir/drills/<run_id>.receipt.json` plus
+/// its `.receipt.sig` sidecar (`crate::drill::phase8_score::PutReceipt`, Task
+/// 21a, discharging Task 20's carried obligation). It carries the observed
+/// `create_only_enforced`, `version_id`, `immutable` and `retain_until`, bound
+/// to the scorecard by the sha256 of the exact SIGNED BYTES. Read the two
+/// documents together: the scorecard is the measurement and under-claims about
+/// storage; the receipt is the storage evidence. `docs/stability.md` carries
+/// the adopter-facing version of this note.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvidenceInfo {
     /// Always null in v0.1: the store's version id for this object is only

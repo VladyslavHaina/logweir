@@ -35,7 +35,11 @@ objectives:
 evidence:
   backend: s3
   bucket: logweir-evidence
-  prefix: logweir
+  # Global Constraint 6: logweir writes only under `logweir/`, and
+  # `Store::from_url` refuses an evidence prefix that does not start with
+  # exactly that — trailing slash included. `logweir` (no slash) is refused at
+  # construction, which Task 21a found by wiring `drill run` end to end.
+  prefix: logweir/
   region: us-east-1
   endpoint: http://localhost:9000
   path_style: true

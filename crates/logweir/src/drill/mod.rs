@@ -1,5 +1,9 @@
-//! The eleven-phase orchestrator (-1..=9). Phase -1 ships in v0.1 — Global Constraint 18 (reversed 2026-09-03) and
-//! docs/adr/0007-from-cluster-in-v0.1.md.
+//! The eleven-phase orchestrator (-1..=9). Phase -1 is the `--from-cluster`
+//! source-side capture — Global Constraint 18 (reversed 2026-09-03) and
+//! docs/adr/0007-from-cluster-in-v0.1.md put it in v0.1 scope, and global
+//! ruling GR4 Part B defers its execution path to Task 24, so it is NOT wired
+//! here. The slot domain is `-1..=9`; the ten modules below are phases 0
+//! through 9.
 pub mod phase0_admit;
 pub mod phase1_approval;
 pub mod phase2_target;
@@ -10,6 +14,19 @@ pub mod phase6_restore;
 pub mod phase7_verify;
 pub mod phase8_score;
 pub mod phase9_teardown;
+
+use crate::exit::ExitCode;
+use logweir_core::engine::{BackupSetRef, DataEngine, RestorePlan};
+use logweir_core::outcome::{IntegrityLevel, IntegrityResult, LeverState, MatrixVerdict, Outcome};
+use logweir_core::scorecard::{
+    ApprovalInfo, EngineInfo, EvidenceInfo, Integrity, Levers, Measured, Objectives, PhaseRecord,
+    SampleInfo, Scorecard, SourceInfo, TargetDiffSummary, TargetInfo, TopicParity,
+};
+use logweir_core::spec::{AllowedClusters, DrillSpec};
+use logweir_engine_oso::storage::Store;
+use logweir_kafka::reader::{ClusterReader, TopicDeleter};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DrillError {
@@ -36,12 +53,18 @@ pub enum DrillError {
     /// site, BEFORE the generic `record(...)?` short-circuit, build and sign
     /// a scorecard from it, and return `DrillError::NotPass(Box::new(signed))`
     /// so it reaches ExitCode::DrillNotPass (2). See `task-21a-addendum.md`
-    /// ruling A8 for the required orchestrator wiring. If this variant ever
-    /// reaches `impl From<DrillError> for ExitCode` unhandled (or handled by
-    /// a catch-all that maps it to `Operational`), that is the exact defect
+    /// ruling A8 for the required orchestrator wiring — implemented in
+    /// `execute_with`'s phase-6 branch. If this variant ever reaches
+    /// `impl From<DrillError> for ExitCode` unhandled (or handled by a
+    /// catch-all that maps it to `Operational`), that is the exact defect
     /// this comment exists to prevent.
     #[error("drill-not-pass: {0}")]
     RestoreNoOp(String),
+    /// A drill RESULT that is not a pass. The scorecard is carried out so it
+    /// is still signed and uploaded — exit 1 here would produce no artifact,
+    /// and this signed document is the NIS2 IR 4.2.3 evidence.
+    #[error("drill did not pass")]
+    NotPass(Box<Scorecard>),
     /// The drill RAN, and its result could not be signed or its lock proof
     /// could not be obtained. That is neither a pass nor an operational
     /// failure: "the result exists but is unattested" is its own outcome, and
@@ -56,12 +79,15 @@ pub enum DrillError {
 /// Global Constraint 11 / spec §6 C5, in ONE place. A blanket `map_err` at any
 /// call site would move the exit-4 contract out of here, so nothing else in
 /// the crate may map a `DrillError` to an `ExitCode`.
-impl From<DrillError> for crate::exit::ExitCode {
+impl From<DrillError> for ExitCode {
     fn from(e: DrillError) -> Self {
-        use crate::exit::ExitCode;
         match e {
             // A guard refused the plan before anything ran.
             DrillError::Guard(_) => ExitCode::GuardRefused, // 3
+            // A drill RESULT that is not a pass. A scorecard IS written and
+            // signed — `execute_with` does that before ever constructing this
+            // variant, which is what makes exit 2's promise true.
+            DrillError::NotPass(_) => ExitCode::DrillNotPass, // 2
             // The drill ran; its result is unattested.
             DrillError::SigningOrLock(_) => ExitCode::SigningOrLock, // 4
             // A drill RESULT that is not a pass. It must have been intercepted
@@ -80,5 +106,1092 @@ impl From<DrillError> for crate::exit::ExitCode {
                 ExitCode::Operational // 1
             }
         }
+    }
+}
+
+/// Runs one phase and pushes its `PhaseRecord` BEFORE returning, so a crash or
+/// an error leaves a truthful partial record. `last_phase_completed` is updated
+/// in exactly one place, which is why it can never drift from `phases`.
+pub fn record<T>(
+    sc: &mut Scorecard,
+    phase: i8,
+    name: &str,
+    f: impl FnOnce() -> Result<T, DrillError>,
+) -> Result<T, DrillError> {
+    // Global Constraint 1: the clock is read HERE, in `crates/logweir`.
+    let at = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+    let r = f();
+    let outcome = match &r {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("failed: {e}"),
+    };
+    sc.phases.push(PhaseRecord {
+        phase,
+        name: name.to_string(),
+        at,
+        outcome,
+        duration_ms: t0.elapsed().as_millis() as u64,
+        notes: vec![],
+    });
+    if r.is_ok() {
+        sc.last_phase_completed = phase;
+    }
+    r
+}
+
+pub struct RunArgs {
+    pub spec: PathBuf,
+    pub approval: PathBuf,
+    pub approver_key: PathBuf,
+    pub allowed_clusters: PathBuf,
+    pub signing_key: PathBuf,
+    pub triggered_by: Option<String>,
+    pub out: Option<PathBuf>,
+    pub metrics_file: Option<PathBuf>,
+}
+
+pub fn run(args: RunArgs) -> ExitCode {
+    // Spec §13: structured JSON logs on stdout with run_id on every line.
+    let run_id = logweir_core::ids::new_run_id();
+    // `try_init`, not `init`: `init` PANICS when a global subscriber is
+    // already installed, and `run` is a library entry point a test or an
+    // embedder may call more than once in one process. A logger that is
+    // already configured is not a reason to abort a drill.
+    let _ = tracing_subscriber::fmt()
+        .json()
+        .with_current_span(true)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+    let _span = tracing::info_span!("drill", run_id = %run_id).entered();
+
+    let outcome = execute(&args, &run_id);
+    report(&args, &run_id, outcome)
+}
+
+/// Everything `run` does with `execute`'s answer, split out so it can be
+/// tested. `run` itself builds the real `Ctx` and therefore needs a live
+/// broker and the engine binary, and this is the product's PRIMARY OUTPUT:
+/// the difference between exit 1 ("Logweir could not do its job; there is no
+/// artifact") and exit 2 ("a drill ran and did not pass; the signed scorecard
+/// is in the bucket") is the whole point of the tool, and it must not be the
+/// one decision with no coverage.
+///
+/// NOTE the shape: no arm here names an `ExitCode` literal except `Ok`.
+/// `impl From<DrillError> for ExitCode` is the single place the contract
+/// lives (its own doc comment says so), and a second mapping written out here
+/// — `Err(NotPass(..)) => ExitCode::DrillNotPass` — would be exactly the
+/// duplication that comment forbids: two places to keep in step, and only one
+/// of them under the exit-code tests. So this function decides only what to
+/// PRINT and whether a drill result exists to finish; the code comes from the
+/// conversion.
+fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) -> ExitCode {
+    match outcome {
+        Ok(sc) => {
+            finish(args, &sc);
+            exiting(run_id, ExitCode::Ok)
+        }
+        Err(e) => {
+            match &e {
+                // A drill RESULT: the scorecard was signed and uploaded by
+                // phase 8, so the metrics and the summary line are owed.
+                DrillError::NotPass(sc) => finish(args, sc),
+                _ => {
+                    tracing::error!(error = %e, "drill failed");
+                    eprintln!("{e}");
+                }
+            }
+            let code = ExitCode::from(e);
+            exiting(run_id, code)
+        }
+    }
+}
+
+/// Logs the exit code and what it means, then returns it unchanged.
+///
+/// This exists for a delivery-layer reason, verified on a live cluster: a
+/// Kubernetes Job's exit code is visible ONLY in
+/// `pod.status.containerStatuses[].state.terminated.exitCode` — it is absent
+/// from Job status and `kubectl get pods` renders every non-zero code as a
+/// generic "Error". So an operator cannot tell exit 1 ("Logweir could not do
+/// its job; there is no artifact") from exit 2 ("a drill ran and did not
+/// pass; go and read the signed scorecard") from the delivery layer at all.
+/// The log line is the one place that distinction survives into a log
+/// aggregator. Documenting it for operators is Tasks 22/23's job; emitting it
+/// is this one's.
+fn exiting(run_id: &str, code: ExitCode) -> ExitCode {
+    let meaning = match code {
+        ExitCode::Ok => "the drill passed",
+        ExitCode::Operational => "logweir could not do its job; NO scorecard was written",
+        ExitCode::DrillNotPass => "a drill ran and did not pass; a SIGNED scorecard was written",
+        ExitCode::GuardRefused => "the plan was refused before anything ran; no scorecard",
+        ExitCode::SigningOrLock => "the drill ran but its result is unattested; nothing uploaded",
+    };
+    tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "drill finished");
+    code
+}
+
+/// The scorecard file is written by `write_scorecard_artifact` from the bytes
+/// phase 8 signed, before phase 9 can touch the in-memory document. This writes
+/// the metrics and the stdout line only.
+fn finish(args: &RunArgs, sc: &Scorecard) {
+    if let Some(p) = &args.metrics_file {
+        if let Err(e) = crate::metrics::write_textfile(p, sc) {
+            tracing::warn!(error = %e, path = %p.display(), "metrics textfile not written");
+        }
+    }
+    println!("{}", summary_line(sc));
+}
+
+/// One line on stdout so `drill run` is not silent. Task 21b replaces this call
+/// with `crate::show::render_table(sc)` when it lands the table; this helper is
+/// then deleted. Marker for that edit: LOGWEIR-21B-RENDER-TABLE.
+fn summary_line(sc: &Scorecard) -> String {
+    format!(
+        "run {} — outcome {} — last phase completed {}",
+        sc.run_id,
+        crate::metrics::outcome_str(&sc.outcome),
+        sc.last_phase_completed
+    )
+}
+
+/// The local artifact is the EXACT byte string phase 8 signed, so `drill verify`
+/// on the file recomputes the digest the signature covers. Never a
+/// re-serialisation: phase 9 pushes a record onto the in-memory scorecard after
+/// this point, and a document that grew a phase after signing does not verify.
+///
+/// The DSSE sidecar lands beside it with the extension replaced by `.sig`
+/// (`crates/logweir/src/cli.rs`'s own `--out` documentation), because a
+/// scorecard file nobody can verify locally is not evidence.
+fn write_scorecard_artifact(args: &RunArgs, run_id: &str, signed: &phase8_score::Signed) {
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("./logweir-{run_id}.json")));
+    if let Err(e) = std::fs::write(&out, &signed.bytes) {
+        tracing::warn!(error = %e, path = %out.display(), "scorecard artifact not written");
+        return;
+    }
+    let sig = out.with_extension("sig");
+    match serde_json::to_vec(&signed.sidecar) {
+        Ok(b) => {
+            if let Err(e) = std::fs::write(&sig, &b) {
+                tracing::warn!(error = %e, path = %sig.display(), "DSSE sidecar not written");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "DSSE sidecar could not be serialised"),
+    }
+}
+
+/// The target-cluster handle the orchestrator holds. Phases 0, 2, 6 and 7 read
+/// through `ClusterReader`; phase 9 deletes through `TopicDeleter`. They are
+/// two traits on purpose (see `TopicDeleter`'s own doc comment), and this is
+/// the one place the drill needs both from a single object — `RdKafkaReader`
+/// on the live path, a double in `tests/fixtures/mod.rs`.
+pub trait TargetClient: ClusterReader + TopicDeleter {
+    fn as_reader(&self) -> &dyn ClusterReader;
+    fn as_deleter(&self) -> &dyn TopicDeleter;
+}
+
+impl<T: ClusterReader + TopicDeleter> TargetClient for T {
+    fn as_reader(&self) -> &dyn ClusterReader {
+        self
+    }
+    fn as_deleter(&self) -> &dyn TopicDeleter {
+        self
+    }
+}
+
+/// Everything one drill run holds that is NOT produced by a phase. `context`
+/// is the only place a broker, a bucket or an engine handle is constructed,
+/// which is what keeps the phase functions pure enough to unit-test — and
+/// what lets `tests/orchestrator.rs` drive the whole sequence against doubles
+/// with no broker and no engine binary.
+///
+/// Every field here is built WITHOUT a network round trip. That is
+/// load-bearing, not incidental: phase 0 must be able to REFUSE a plan (exit
+/// 3) on a host whose archive bucket is unreachable and whose engine binary
+/// is absent. Reading the archive from here — as an earlier draft of this
+/// task did — turns every such refusal into exit 1, "Logweir could not do its
+/// job", which is precisely the exit-code confusion this task exists to get
+/// right. The archive read therefore lives in `execute_with`, AFTER phase 0
+/// and phase 1; `crates/logweir/tests/guard_cli.rs` pins the consequence.
+pub struct Ctx {
+    pub spec: DrillSpec,
+    pub spec_text: String,
+    pub allowed: AllowedClusters,
+    pub client: Box<dyn TargetClient>,
+    pub engine: Box<dyn DataEngine>,
+    /// Reads the OSO ARCHIVE. Phase 7 reads segment bytes back through this
+    /// handle; `Store::read_only_from_url` builds one that physically cannot
+    /// put, so Global Constraint 6 cannot be reached from the archive side.
+    pub archive: Store,
+    /// Writes the EVIDENCE. Two stores, deliberately: the ARCHIVE is read from
+    /// `spec.source.storage` and the EVIDENCE is written to `spec.evidence`,
+    /// which Global Constraint 6 forces under `logweir/` and, where the
+    /// adopter provides one, a separate bucket with a separate principal.
+    /// `Store::from_url` refuses an evidence prefix outside `logweir/` at
+    /// construction, so a bad spec fails before phase 0.
+    pub store: Store,
+}
+
+/// `LOGWEIR_ENGINE_BIN` overrides where the digest-pinned `kafka-backup`
+/// binary was extracted to at image build time (spec §6 C4).
+const ENGINE_BIN_DEFAULT: &str = ".engine/kafka-backup";
+
+fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
+    let spec_text = std::fs::read_to_string(&args.spec)
+        .map_err(|e| DrillError::Operational(format!("{}: {e}", args.spec.display())))?;
+    let spec: DrillSpec = serde_yaml::from_str(&spec_text)
+        .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
+    let allowed_text = std::fs::read_to_string(&args.allowed_clusters).map_err(|e| {
+        DrillError::Operational(format!("{}: {e}", args.allowed_clusters.display()))
+    })?;
+    let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
+        .map_err(|e| DrillError::Operational(format!("allowed-clusters does not parse: {e}")))?;
+
+    // v0.1 ships PLAINTEXT and SASL/SCRAM over TLS, but `TargetSpec` carries
+    // no auth block, so there is nothing in the spec to render a
+    // `ScramSha512` from. Plaintext is what the shipped spec can express;
+    // widening it is a spec change, not an orchestrator change.
+    let connect = || {
+        logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
+            &spec.target.bootstrap_servers,
+            logweir_kafka::reader::AuthConfig::Plaintext,
+        )
+    };
+    // Scope deletion to this drill's own scratch namespace before the handle
+    // ever reaches phase 9. An UNSCOPED reader can delete nothing at all
+    // (`RdKafkaReader::delete_topics` refuses everything until this is set),
+    // which is the safe direction: a degenerate prefix is refused by phase
+    // 0's own mapping guard as a REFUSAL (exit 3), and turning it into an
+    // exit-1 construction failure here would hide that.
+    let reader = match connect()?.with_scratch_prefix(spec.target.topic_mapping_prefix.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "target.topic_mapping_prefix is not a usable scratch namespace; teardown is \
+                 disabled for this run and phase 0 is left to refuse the plan"
+            );
+            connect()?
+        }
+    };
+
+    let store =
+        Store::from_url(&spec.evidence).map_err(|e| DrillError::Operational(e.to_string()))?;
+    let archive = Store::read_only_from_url(&spec.source.storage)
+        .map_err(|e| DrillError::Operational(e.to_string()))?;
+    // A SECOND read-only handle over the same archive: `Store` is not `Clone`
+    // and `OsoCliEngine` takes ownership of the one it reads through, while
+    // phase 7 reads segment bytes through `Ctx::archive`. Both are read-only.
+    let engine_archive = Store::read_only_from_url(&spec.source.storage)
+        .map_err(|e| DrillError::Operational(e.to_string()))?;
+
+    // Engine identity. The binary is extracted at image build time from the
+    // digest-pinned image; the version and digest describe THAT image and end
+    // up in the signed scorecard, so they are read from the environment the
+    // image sets rather than guessed here. `execute_with` refuses an empty
+    // version or digest immediately after phase 0 — see `assert_engine_identity`
+    // — rather than here, so a plan the guard would REFUSE still exits 3 on a
+    // host with no engine environment at all.
+    let binary = std::env::var("LOGWEIR_ENGINE_BIN").unwrap_or_else(|_| ENGINE_BIN_DEFAULT.into());
+    let version = std::env::var("LOGWEIR_ENGINE_VERSION").unwrap_or_default();
+    let digest = std::env::var("LOGWEIR_ENGINE_DIGEST").unwrap_or_default();
+    // Pod-local scratch for the rendered restore.yaml / validation.yaml. Never
+    // uploaded: a crashed restore is not resumable in v0.1 (spec §11).
+    let workdir = std::env::temp_dir().join(format!("logweir-{}", std::process::id()));
+    std::fs::create_dir_all(&workdir)
+        .map_err(|e| DrillError::Operational(format!("{}: {e}", workdir.display())))?;
+    let engine = logweir_engine_oso::engine::OsoCliEngine::new(
+        PathBuf::from(binary),
+        version,
+        digest,
+        workdir,
+        engine_archive,
+    );
+
+    Ok(Ctx {
+        spec,
+        spec_text,
+        allowed,
+        client: Box::new(reader),
+        engine: Box::new(engine),
+        archive,
+        store,
+    })
+}
+
+/// The phase sequence, over handles this function does not build. `pub`
+/// because `tests/orchestrator.rs` drives it directly: it is the only check
+/// that phases 7 and 8 are wired in the scoring order, and a `Ctx` built from
+/// doubles is the only way to reach that check without a live broker and the
+/// engine binary (which belong to Task 21c).
+pub fn execute(args: &RunArgs, run_id: &str) -> Result<Scorecard, DrillError> {
+    let c = context(args)?;
+    execute_with(args, run_id, &c)
+}
+
+/// Refuses an engine identity that would enter a signed document empty.
+///
+/// `engine.digest` is the pinned image digest an auditor uses to say WHICH
+/// engine produced this restore; `engine.version` is the tag the support
+/// matrix is keyed on. An empty string in either is not "unknown", it is a
+/// signed document that names no engine at all — so this is a hard refusal,
+/// not a warning. It runs after phase 0 on purpose: a plan the admission
+/// guard REFUSES must exit 3 even on a host with no engine environment.
+fn assert_engine_identity(id: &logweir_core::engine::EngineId) -> Result<(), DrillError> {
+    for (field, value, var) in [
+        ("engine.version", &id.version, "LOGWEIR_ENGINE_VERSION"),
+        ("engine.digest", &id.digest, "LOGWEIR_ENGINE_DIGEST"),
+    ] {
+        if value.trim().is_empty() {
+            return Err(DrillError::Operational(format!(
+                "{field} is empty; a signed scorecard must name the engine image it ran. \
+                 Set {var} to the value of the digest-pinned image this binary was \
+                 extracted from."
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, DrillError> {
+    let mut sc = new_scorecard(run_id, args, c);
+    // Phase 9 deletes through the SAME client. Named here so the layering rule
+    // — `logweir-kafka` is the only crate that dials a broker — is visible.
+    let deleter: &dyn TopicDeleter = c.client.as_deleter();
+    let reader: &dyn ClusterReader = c.client.as_reader();
+
+    // 0
+    let admitted = record(&mut sc, 0, "admit", || {
+        phase0_admit::run(&c.spec, &c.spec_text, &c.allowed, reader)
+    })?;
+    sc.target = target_info(&c.spec, &admitted);
+    assert_engine_identity(&c.engine.id())?;
+
+    // 1
+    let signing_pub = logweir_evidence::keys::SigningKey::from_pem_file(&args.signing_key)
+        .map_err(|e| DrillError::Operational(e.to_string()))?
+        .verifying_key();
+    let approved = record(&mut sc, 1, "approval", || {
+        phase1_approval::verify(
+            &c.spec_text,
+            &args.approval,
+            &args.approver_key,
+            &signing_pub,
+        )
+    })?;
+    sc.approval = approved.approval.clone();
+    sc.approval_validated_at = Some(approved.validated_at);
+
+    // The archive read every later phase consumes. Not a phase of its own in
+    // spec §9.3, and deliberately placed HERE: phases 0 and 1 are the two
+    // gates that can refuse a plan, and neither of them touches the archive,
+    // so a refused plan never opens the bucket. `set` is also what
+    // `Selection::bind_backup_set` needs below — `BackupSetFacts` does not
+    // carry a manifest key, so this is the only binding of it the drill has.
+    let set = pick_backup_set(c.engine.as_ref(), &c.spec)?;
+    let facts = c.engine.describe(&set)?;
+    sc.source = source_info(&facts);
+
+    // 2
+    let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
+    let target = record(&mut sc, 2, "target-ready", || {
+        phase2_target::run(reader, &of_interest)
+    })?;
+    // 3 — the diff REACHES A READER, which is the whole point of phase 3
+    let diff = record(&mut sc, 3, "target-diff", || {
+        Ok(phase3_diff::run(&target, &facts, &admitted.topic_mapping))
+    })?;
+    sc.target_diff = diff.summarise();
+    // 4
+    let src_topics: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
+    let mut sel = record(&mut sc, 4, "sample-select", || {
+        phase4_sample::run(&facts, &c.spec.sample, &src_topics)
+    })?;
+    // Binding note appended to the brief during Task 16 fix round 1:
+    // `phase4_sample::run` emits `per_partition[..].set.manifest_key` EMPTY,
+    // and `OsoCliEngine::fingerprints` refuses loudly if it is still empty
+    // when phase 7 calls it. This is the only place the real `BackupSetRef`
+    // and the `Selection` are both in scope.
+    sel.bind_backup_set(&set);
+    sc.sample = sample_info(&c.spec.sample, &sel);
+
+    // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
+    // record's own `duration_ms` is the number `compute_measured` subtracts
+    // to produce `rto_excluding_preflight_seconds`. Measuring it anywhere
+    // else would score the header sweep no incident responder performs.
+    let plan = build_plan(&c.spec, &set, &admitted.topic_mapping, run_id);
+    let (verdict, report) = record(&mut sc, 5, "preflight", || {
+        let r = c.engine.preflight(&plan)?;
+        Ok((phase5_preflight::adjudicate(&r), r))
+    })?;
+    // The per-run lever readback (spec §9.3 phase 5(1), §7.2(a)). Observed,
+    // never declared: `new_scorecard` starts both fields at their
+    // claims-nothing values and only this line can raise them.
+    sc.engine.levers.header_preflight = if report.header_preflight_honoured {
+        LeverState::Honoured
+    } else {
+        LeverState::Ignored
+    };
+    sc.engine.levers.unknown_key_warnings = report.unknown_key_warnings.clone();
+    if report.header_preflight_honoured {
+        sc.engine.matrix_verdict = MatrixVerdict::Pass;
+    }
+
+    if let phase5_preflight::Verdict::Block { findings } = verdict {
+        // Straight to phase 8: score, sign, upload. NEVER phase 6, and never
+        // exit 1 — a preflight finding is the most valuable result a drill can
+        // produce and it must land in a signed artifact.
+        sc.outcome = Outcome::PreflightFailed;
+        sc.integrity.level = IntegrityLevel::NotAttempted;
+        sc.integrity.result = IntegrityResult::Fail;
+        sc.measured.rto_seconds = None;
+        // Carried obligation from Task 17: `PhaseRecord.notes` exists so a
+        // `preflight-failed` scorecard states WHICH ground blocked the
+        // restore, not merely that one did. This orchestrator is its sole
+        // writer; without this loop phase 5 adjudicates correctly and then
+        // discards its reasoning.
+        if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 5) {
+            p.notes = findings
+                .iter()
+                .map(|f| format!("{}/{} {}: {}", f.topic, f.partition, f.state, f.detail))
+                .collect();
+        }
+        let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+        return Err(DrillError::NotPass(Box::new(signed.scorecard)));
+    }
+
+    // 6 — the topics phase 3 said would be created are carried in through
+    // `plan`, which `build_plan` produced from the same mapping.
+    let mut obs = crate::metrics::PhaseLogger::new(run_id);
+    let restored = match record(&mut sc, 6, "restore", || {
+        phase6_restore::run(
+            c.engine.as_ref(),
+            &plan,
+            reader,
+            &admitted.topic_mapping,
+            &mut obs,
+        )
+    }) {
+        Ok(r) => r,
+        // task-21a-addendum.md ruling A8. Mirrors the phase-5 `Verdict::Block`
+        // branch above: a restore that ran, exited 0, and left every selected
+        // partition at end offset <= 0 is a positively established fact ABOUT
+        // THE ARCHIVE, not an operational failure — never exit 1 for the most
+        // valuable negative finding phase 6 can produce.
+        Err(DrillError::RestoreNoOp(msg)) => {
+            // `FailIntegrity`, not a new `Outcome` variant. A8 leaves the
+            // variant open and demands an explicit GC12 determination; here
+            // it is. GC12's text is "`format_version` is `1.0.0` and semver:
+            // a minor adds optional fields only; a major changes an identity
+            // rule. Readers ignore unknown fields and refuse a higher major."
+            // A new `Outcome` value is NOT an added optional field: `outcome`
+            // is a required field whose JSON Schema pins its allowed value
+            // set, and "readers ignore unknown fields" gives no cover for an
+            // unknown VALUE of a known field — the auditor's own verifier
+            // (docs/verify_scorecard.py) validating against the published
+            // 1.0.0 schema would REJECT `outcome: "restore-no-op"` outright.
+            // That is a major change, and GC12 fixes the version at 1.0.0, so
+            // minting the variant is not available to this task.
+            //
+            // `FailIntegrity` is also the honest answer, not merely the
+            // permitted one: it is exactly what `phase8_score::decide`
+            // returns for `integrity.result != Pass`, and the two lines below
+            // set precisely that. What makes a no-op restore DISTINGUISHABLE
+            // in the signed document from phase 5's block and from a genuine
+            // phase-7 reconciliation failure is three facts a reader can
+            // check: `outcome` (`fail-integrity` vs `preflight-failed`),
+            // `integrity.level` (`not-attempted` vs `byte-fingerprint`), and
+            // the phase-6 record itself, whose `outcome` begins
+            // "failed: drill-not-pass:" and whose `notes` carry the reason.
+            sc.outcome = Outcome::FailIntegrity;
+            sc.integrity.level = IntegrityLevel::NotAttempted;
+            sc.integrity.result = IntegrityResult::Fail;
+            sc.measured.rto_seconds = None;
+            if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 6) {
+                p.notes = vec![msg];
+            }
+            let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+            return Err(DrillError::NotPass(Box::new(signed.scorecard)));
+        }
+        Err(e) => return Err(e),
+    };
+    // Every config key Logweir rendered that the engine dropped, from both
+    // readbacks. Phase 5's were recorded above; phase 6's arrive here.
+    for w in &restored.unknown_key_warnings {
+        if !sc.engine.levers.unknown_key_warnings.contains(w) {
+            sc.engine.levers.unknown_key_warnings.push(w.clone());
+        }
+    }
+
+    // 7
+    let verified = record(&mut sc, 7, "verify", || {
+        phase7_verify::run(
+            c.engine.as_ref(),
+            reader,
+            &c.archive,
+            &facts,
+            &sel.per_partition,
+            &admitted.topic_mapping,
+            &plan,
+        )
+    })?;
+    sc.integrity = verified.integrity.clone();
+    sc.topic_parity = verified.topic_parity.clone();
+    sc.sample.records_restored = verified.records_restored;
+
+    // 7 -> 8: SCORE BEFORE SIGNING. `phase8_score::run` signs the document it is
+    // handed and never recomputes, so `measured`, `outcome` and `objectives`
+    // must be final at this point. This is the spec §14 SP1c exit criterion —
+    // "a signed scorecard whose measured.rto_seconds and measured.rpo_seconds
+    // are numbers" — and it has no other implementing step.
+    let timeline = phase8_score::Timeline {
+        requested_at: sc.requested_at,
+        approval_validated_at: approved.validated_at,
+        restore_started_at: restored.started_at,
+        restore_finished_at: restored.finished_at,
+        phase5_duration_ms: sc
+            .phases
+            .iter()
+            .find(|p| p.phase == 5)
+            .map(|p| p.duration_ms)
+            .unwrap_or(0),
+        verified_at: verified.verified_at,
+    };
+    sc.measured = phase8_score::compute_measured(
+        &timeline,
+        // The requested recovery point. `SourceSpec` carries no
+        // `point_in_time` field; the drill's recovery point IS the end of the
+        // window it restores and samples, which is the same value
+        // `build_plan` renders as `restore.time_window_end`.
+        c.spec.sample.window_end.timestamp_millis(),
+        verified.newest_restored_ts_ms,
+    );
+    let (outcome, objectives, measured_rate) =
+        phase8_score::decide(&sc.measured, &c.spec.objectives, &sc.integrity);
+    sc.outcome = outcome;
+    sc.objectives = objectives;
+    sc.integrity.pass_rate_measured = measured_rate;
+
+    // 8
+    let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+    let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
+    sc = signed.scorecard.clone();
+    // 9 — a teardown failure is a warning on the phase record, never an outcome.
+    // The attestation is BOUND to the signed bytes, not to the run id again.
+    let _ = record(&mut sc, 9, "teardown", || {
+        let a = phase9_teardown::run(
+            deleter,
+            &admitted.topic_mapping,
+            &c.spec.target.teardown,
+            run_id,
+            &signed_bytes_sha256,
+        );
+        if let Err(e) = phase9_teardown::persist(&a, &args.signing_key, &c.store) {
+            tracing::warn!(error = %e, "teardown attestation not persisted");
+        }
+        Ok(a)
+    });
+    if sc.outcome != Outcome::Pass {
+        return Err(DrillError::NotPass(Box::new(sc)));
+    }
+    Ok(sc)
+}
+
+/// Phase 8, and everything that must happen with the signed bytes still in
+/// hand, in ONE place used by all three paths that reach it (phase 5's
+/// `Verdict::Block`, phase 6's `RestoreNoOp`, and the normal run). Three
+/// copies of this sequence is three chances for one of them to drop a step:
+/// the artifact write, the post-put receipt and the notification are all
+/// obligations of every signed result, not of the happy path only.
+///
+/// `record` borrows `sc` mutably, so the document phase 8 signs is frozen
+/// here rather than borrowed out from under it.
+fn sign_and_publish(
+    sc: &mut Scorecard,
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+) -> Result<phase8_score::Signed, DrillError> {
+    let to_sign = sc.clone();
+    let signed = record(sc, 8, "score-and-sign", || {
+        phase8_score::run(&to_sign, &args.signing_key, &c.store)
+    })?;
+    write_scorecard_artifact(args, run_id, &signed);
+    // Carried obligation from Task 20. Phase 8 signs BEFORE it puts — bytes
+    // cannot be signed before they are serialised — so the four storage facts
+    // (`create_only_enforced`, `immutable`, `retain_until`, `version_id`) are
+    // unknowable at signing time and the signed scorecard neutralises all
+    // four. Until this receipt existed, Logweir published NO verifiable
+    // evidence that its own upload was create-only, and `docs/stability.md`
+    // said so. The receipt is a second, separately signed document carrying
+    // the real post-put readback — the same pattern phase 9 uses for the
+    // teardown attestation, and for the same reason.
+    let receipt = phase8_score::put_receipt(&signed);
+    if let Err(e) = phase8_score::persist_put_receipt(&receipt, &args.signing_key, &c.store) {
+        // A warning, never an outcome: the drill result is already signed and
+        // uploaded, and a receipt that could not be written must not retract
+        // a measurement. It also must not be silent.
+        //
+        // It goes to the LOG and nowhere else, deliberately. The obvious
+        // alternative — a note on the phase-8 record — cannot work and would
+        // only look like it did: the document was frozen and signed before
+        // this line runs, and `execute_with` then adopts that signed document,
+        // so any note written here is discarded a few lines later. A field
+        // that appears to carry evidence and provably cannot is worse than no
+        // field at all. The receipt's ABSENCE from the bucket is the durable
+        // signal (`docs/stability.md` says so in those words).
+        tracing::warn!(error = %e, "post-put evidence receipt not persisted");
+    }
+    phase7_verify::notify(&c.spec.notifications, &signed.scorecard);
+    Ok(signed)
+}
+
+/// `spec.source.backup` is either `latestCompleted` or a pinned backup id.
+/// A pinned id that the archive does not hold is refused by name rather than
+/// silently falling back to the newest set — a drill that quietly restored a
+/// different backup than the approved plan named would make the whole
+/// approval chain meaningless.
+fn pick_backup_set(engine: &dyn DataEngine, spec: &DrillSpec) -> Result<BackupSetRef, DrillError> {
+    let sets = engine.list_backup_sets(&spec.source.storage)?;
+    if sets.is_empty() {
+        return Err(DrillError::Operational(
+            "the archive holds no backup set at the configured source storage location".into(),
+        ));
+    }
+    if spec.source.backup == "latestCompleted" {
+        // `list_manifests` returns them sorted by key, and manifest keys are
+        // timestamp-ordered, so the last is the newest.
+        return Ok(sets.last().cloned().expect("non-empty"));
+    }
+    sets.iter()
+        .find(|s| s.backup_id == spec.source.backup)
+        .cloned()
+        .ok_or_else(|| {
+            DrillError::Operational(format!(
+                "the archive holds no backup set with id `{}`; refusing to fall back to \
+                 another set, which would restore something other than the approved plan",
+                spec.source.backup
+            ))
+        })
+}
+
+/// The one plan both phase 5 and phase 6 run against, unchanged — that
+/// identity is what binds the approved plan to the executed one (see
+/// `logweir_engine_oso::render_restore`'s module doc).
+fn build_plan(
+    spec: &DrillSpec,
+    set: &BackupSetRef,
+    mapping: &BTreeMap<String, String>,
+    run_id: &str,
+) -> RestorePlan {
+    RestorePlan {
+        set: set.clone(),
+        storage: spec.source.storage.clone(),
+        target_bootstrap: spec.target.bootstrap_servers.clone(),
+        topic_mapping: mapping.clone(),
+        time_window: (spec.sample.window_start, spec.sample.window_end),
+        default_replication_factor: spec.target.default_replication_factor,
+        // Pod-local and never uploaded: a crashed restore is NOT resumable in
+        // v0.1 (spec §11).
+        checkpoint_state: std::env::temp_dir()
+            .join(format!("logweir-{run_id}"))
+            .join("checkpoint.json"),
+        checkpoint_interval_secs: 30,
+    }
+}
+
+fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
+    let id = c.engine.id();
+    Scorecard {
+        format_version: logweir_core::FORMAT_VERSION.to_string(),
+        run_id: run_id.to_string(),
+        // Global Constraint 1: the clock is read HERE, never in logweir-core.
+        requested_at: chrono::Utc::now(),
+        triggered_by: args.triggered_by.clone(),
+        outcome: Outcome::FailIntegrity,
+        last_phase_completed: -1,
+        approval_validated_at: None,
+        engine: EngineInfo {
+            id: id.id,
+            version: id.version,
+            digest: id.digest,
+            execution: "subprocess".into(),
+            levers: Levers {
+                // Claims-nothing starting values, raised only by phase 5's own
+                // per-run readback. A scorecard that never reached phase 5
+                // must not assert the engine honoured a lever nobody checked.
+                header_preflight: LeverState::Ignored,
+                // Not observable from DryRunReport at all — see `LeverState`.
+                dry_run_check_segments: LeverState::UnknownNotObservable,
+                unknown_key_warnings: Vec::new(),
+            },
+            matrix_verdict: MatrixVerdict::FailLeverNotHonoured,
+            // `matrix_verdict_reason` is REQUIRED only for `fail` and must be
+            // null otherwise (`Scorecard::validate_invariants`).
+            matrix_verdict_reason: None,
+        },
+        // `captured_by_logweir` is true iff phase −1 ran (Global Constraint 18,
+        // reversed 2026-09-03; global ruling GR4 Part A). `validate_invariants`
+        // does NOT refuse `true`: it requires that `true` implies
+        // `last_phase_completed >= -1` and a non-null
+        // `measured.rpo_source_relative_seconds` with a null
+        // `rpo_source_relative_unmeasured_reason`, and that `false` implies the
+        // reverse. This orchestrator never runs phase −1 — the `--from-cluster`
+        // path is Task 24 (GR4 Part B) — so `false` stands and the invariant
+        // holds dormant but correct.
+        source: SourceInfo {
+            backup_id: String::new(),
+            manifest_sha256: String::new(),
+            manifest_version_id: None,
+            captured_by_logweir: false,
+        },
+        target: TargetInfo {
+            cluster_id: String::new(),
+            marker_topic: c.spec.target.marker_topic.clone(),
+            topic_mapping_prefix: c.spec.target.topic_mapping_prefix.clone(),
+            topic_mapping_sha256: String::new(),
+            topic_mapping_entries: 0,
+        },
+        approval: ApprovalInfo {
+            approver: String::new(),
+            ticket: String::new(),
+            plan_hash: String::new(),
+            approved_at: chrono::DateTime::UNIX_EPOCH,
+            key_id: String::new(),
+            self_attested: false,
+        },
+        phases: Vec::new(),
+        measured: Measured {
+            rto_seconds: None,
+            rto_requested_to_verified_seconds: None,
+            rto_restore_only_seconds: None,
+            rto_excluding_preflight_seconds: None,
+            rpo_seconds: None,
+            // v0.1 never contacts the source. This pair is exactly the
+            // `captured_by_logweir == false` branch `validate_invariants`
+            // requires, and it must hold from the first byte: a scorecard
+            // signed on the phase-5 block path never reaches
+            // `compute_measured`.
+            rpo_source_relative_seconds: None,
+            rpo_source_relative_unmeasured_reason: Some("source cluster never contacted".into()),
+        },
+        // The REQUEST, known from the spec before any phase runs; `met` stays
+        // null until `phase8_score::decide` answers it.
+        objectives: Objectives {
+            rto_seconds: c.spec.objectives.rto_seconds,
+            rpo_seconds: c.spec.objectives.rpo_seconds,
+            pass_rate: c.spec.objectives.pass_rate,
+            met: None,
+        },
+        sample: SampleInfo {
+            window_start: c.spec.sample.window_start,
+            window_end: c.spec.sample.window_end,
+            topics: 0,
+            partitions: 0,
+            records_expected: 0,
+            records_restored: 0,
+            anchor: c.spec.sample.anchor.clone(),
+            coverage_note: "phase 4 has not run".into(),
+        },
+        target_diff: TargetDiffSummary::default(),
+        integrity: Integrity {
+            level: IntegrityLevel::NotAttempted,
+            result: IntegrityResult::Fail,
+            partial_reason: None,
+            records_sampled: 0,
+            records_sampled_matching: 0,
+            mismatches: 0,
+            pass_rate_measured: None,
+            restored_principal_could_consume: None,
+        },
+        topic_parity: TopicParity {
+            intentionally_deviated: Vec::new(),
+            unexpected_divergence: Vec::new(),
+        },
+        engine_subreport: None,
+        // All four zeroed; `phase8_score::run` zeroes them again immediately
+        // before serialising, whatever any caller supplied.
+        evidence: EvidenceInfo {
+            version_id: None,
+            retain_until: None,
+            immutable: false,
+            create_only_enforced: false,
+        },
+        redactions: Vec::new(),
+    }
+}
+
+fn source_info(facts: &logweir_core::engine::BackupSetFacts) -> SourceInfo {
+    SourceInfo {
+        backup_id: facts.backup_id.clone(),
+        manifest_sha256: facts.manifest_sha256.clone(),
+        manifest_version_id: facts.manifest_version_id.clone(),
+        // See `new_scorecard`: phase −1 is Task 24's (GR4 Part B).
+        captured_by_logweir: false,
+    }
+}
+
+fn target_info(spec: &DrillSpec, admitted: &phase0_admit::Admitted) -> TargetInfo {
+    TargetInfo {
+        cluster_id: admitted.target_cluster_id.clone(),
+        marker_topic: spec.target.marker_topic.clone(),
+        topic_mapping_prefix: spec.target.topic_mapping_prefix.clone(),
+        // sha256 over the topic_mapping block AS RENDERED into restore.yaml —
+        // the same function that renders it, so the hash and the bytes the
+        // engine was handed cannot drift.
+        topic_mapping_sha256: logweir_core::ids::sha256_prefixed(
+            logweir_engine_oso::render_restore::render_topic_mapping_block(&admitted.topic_mapping)
+                .as_bytes(),
+        ),
+        topic_mapping_entries: admitted.topic_mapping.len() as u32,
+    }
+}
+
+fn sample_info(
+    spec: &logweir_core::spec::SampleSpec,
+    sel: &phase4_sample::Selection,
+) -> SampleInfo {
+    SampleInfo {
+        window_start: sel.window.0,
+        window_end: sel.window.1,
+        topics: sel.topics,
+        partitions: sel.partitions,
+        // THE CANARY SIZE — the number of records this drill set out to
+        // reconcile — and deliberately NOT `Selection::records_expected`,
+        // which answers a different question (how many records the manifest
+        // says the whole window holds). The two share a name and differ by
+        // orders of magnitude on any real archive; substituting one for the
+        // other would make the signed document overstate what was verified.
+        // Both definition sites carry this note (Task 16's parked item).
+        // `integrity.records_sampled` is measured against THIS figure.
+        records_expected: sel.per_partition.iter().map(|s| s.count as u64).sum(),
+        // Phase 7 measures this; phase 4 cannot know it.
+        records_restored: 0,
+        anchor: spec.anchor.clone(),
+        coverage_note: if sel.notes.is_empty() {
+            "no capture gap or retention-pruned range overlaps the sampled window".into()
+        } else {
+            sel.notes.join("; ")
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `finish` and `summary_line` are private and are reached only from
+    //! `run`, which needs a live broker and the engine binary. Their call
+    //! sites therefore have no integration-test coverage available to them,
+    //! and "the metrics file is never written" is exactly the kind of silent
+    //! omission this build keeps shipping — so they are pinned here, inside
+    //! the crate, where the private items are nameable.
+    use super::*;
+
+    fn a_scorecard() -> Scorecard {
+        serde_json::from_str(include_str!("../../../../e2e/fixtures/scorecard-pass.json"))
+            .expect("the checked-in fixture parses")
+    }
+
+    fn args_with(metrics_file: Option<PathBuf>) -> RunArgs {
+        RunArgs {
+            spec: PathBuf::from("drill.yaml"),
+            approval: PathBuf::from("approval.json"),
+            approver_key: PathBuf::from("approver.pem"),
+            allowed_clusters: PathBuf::from("allowed.json"),
+            signing_key: PathBuf::from("signer.pem"),
+            triggered_by: None,
+            out: None,
+            metrics_file,
+        }
+    }
+
+    #[test]
+    fn finish_writes_the_textfile_metrics_when_the_flag_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("logweir.prom");
+        finish(&args_with(Some(p.clone())), &a_scorecard());
+        let t = std::fs::read_to_string(&p).expect("--metrics-file was written");
+        assert!(t.contains("logweir_drill_runs_total"), "{t}");
+        assert!(t.contains("logweir_drill_exit_code"), "{t}");
+    }
+
+    #[test]
+    fn finish_writes_no_metrics_file_when_the_flag_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        finish(&args_with(None), &a_scorecard());
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "no --metrics-file means no file, not a default path"
+        );
+    }
+
+    /// `drill run` must not be silent, and the line must carry the three
+    /// facts an operator reads off a terminated pod: which run, what it
+    /// concluded, and how far it got.
+    #[test]
+    fn the_summary_line_names_the_run_the_outcome_and_the_last_phase() {
+        let mut sc = a_scorecard();
+        sc.outcome = Outcome::PreflightFailed;
+        sc.last_phase_completed = 5;
+        let line = summary_line(&sc);
+        assert!(line.contains(&sc.run_id), "{line}");
+        assert!(line.contains("preflight-failed"), "{line}");
+        assert!(line.contains("5"), "{line}");
+    }
+
+    /// THE routing, and the product's primary output. A drill RESULT must
+    /// reach exit 2 with its metrics written; an operational failure must
+    /// reach exit 1 with NO metrics file, because on the exit-1 path no
+    /// scorecard exists to describe.
+    #[test]
+    fn a_drill_result_reports_exit_2_and_an_operational_failure_reports_exit_1() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let pass = dir.path().join("pass.prom");
+        assert_eq!(
+            report(&args_with(Some(pass.clone())), "01TEST", Ok(a_scorecard())),
+            ExitCode::Ok
+        );
+        assert!(pass.exists(), "a pass writes its metrics");
+
+        let notpass = dir.path().join("notpass.prom");
+        let mut sc = a_scorecard();
+        sc.outcome = Outcome::FailIntegrity;
+        assert_eq!(
+            report(
+                &args_with(Some(notpass.clone())),
+                "01TEST",
+                Err(DrillError::NotPass(Box::new(sc)))
+            ),
+            ExitCode::DrillNotPass,
+            "a drill that ran and did not pass is exit 2, never exit 1: the \
+             signed scorecard exists and an operator has to be told to read it"
+        );
+        assert!(
+            notpass.exists(),
+            "exit 2 owes the same metrics a pass does — it is a real result"
+        );
+
+        let op = dir.path().join("operational.prom");
+        assert_eq!(
+            report(
+                &args_with(Some(op.clone())),
+                "01TEST",
+                Err(DrillError::Operational("broker unreachable".into()))
+            ),
+            ExitCode::Operational
+        );
+        assert!(
+            !op.exists(),
+            "there is no scorecard on the exit-1 path, so there is nothing to publish"
+        );
+
+        for (e, want) in [
+            (
+                DrillError::Guard(logweir_core::guard::GuardRefusal("x".into())),
+                ExitCode::GuardRefused,
+            ),
+            (
+                DrillError::SigningOrLock("x".into()),
+                ExitCode::SigningOrLock,
+            ),
+        ] {
+            assert_eq!(report(&args_with(None), "01TEST", Err(e)), want);
+        }
+    }
+
+    /// A pinned `source.backup` that the archive does not hold must be
+    /// refused BY NAME. Falling back to the newest set would restore
+    /// something other than the document the approver signed, which makes the
+    /// whole approval chain meaningless.
+    #[test]
+    fn a_pinned_backup_id_the_archive_does_not_hold_is_refused_never_substituted() {
+        use logweir_core::engine::*;
+
+        struct TwoSets;
+        impl DataEngine for TwoSets {
+            fn id(&self) -> EngineId {
+                unreachable!()
+            }
+            fn list_backup_sets(&self, _l: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+                Ok(["older", "newest"]
+                    .iter()
+                    .map(|b| BackupSetRef {
+                        backup_id: (*b).into(),
+                        manifest_key: format!("{b}/manifest.json"),
+                    })
+                    .collect())
+            }
+            fn describe(&self, _s: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+                unreachable!()
+            }
+            fn preflight(&self, _p: &RestorePlan) -> Result<PreflightReport, EngineError> {
+                unreachable!()
+            }
+            fn restore(
+                &self,
+                _p: &RestorePlan,
+                _o: &mut dyn PhaseObserver,
+            ) -> Result<RestoreFacts, EngineError> {
+                unreachable!()
+            }
+            fn fingerprints(
+                &self,
+                _s: &SampleSelection,
+            ) -> Result<Vec<RecordFingerprint>, EngineError> {
+                unreachable!()
+            }
+        }
+
+        let mut spec: DrillSpec = serde_yaml::from_str(
+            "source:\n  storage:\n    backend: filesystem\n    path: /a\n  topics: [t]\n\
+             target:\n  bootstrap_servers: [x:9092]\n  topic_mapping_prefix: \"d-\"\n\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {}\n\
+             evidence:\n  backend: filesystem\n  path: /b\n",
+        )
+        .unwrap();
+
+        spec.source.backup = "latestCompleted".into();
+        assert_eq!(
+            pick_backup_set(&TwoSets, &spec).unwrap().backup_id,
+            "newest",
+            "latestCompleted takes the last set list_backup_sets returns"
+        );
+
+        spec.source.backup = "older".into();
+        assert_eq!(pick_backup_set(&TwoSets, &spec).unwrap().backup_id, "older");
+
+        spec.source.backup = "a-backup-that-was-deleted".into();
+        let e = pick_backup_set(&TwoSets, &spec).unwrap_err();
+        assert!(
+            matches!(e, DrillError::Operational(ref m)
+                     if m.contains("a-backup-that-was-deleted") && m.contains("refusing to fall back")),
+            "the refusal must name the missing id: {e}"
+        );
+    }
+
+    /// Every exit code gets a distinct sentence, and 1 and 2 in particular
+    /// must not read alike: at the delivery layer (a Kubernetes Job) they are
+    /// otherwise indistinguishable.
+    #[test]
+    fn every_exit_code_logs_a_distinct_meaning() {
+        let codes = [
+            ExitCode::Ok,
+            ExitCode::Operational,
+            ExitCode::DrillNotPass,
+            ExitCode::GuardRefused,
+            ExitCode::SigningOrLock,
+        ];
+        let mut seen: Vec<u8> = Vec::new();
+        for c in codes {
+            assert_eq!(exiting("01TEST", c), c, "exiting must not alter the code");
+            seen.push(c as u8);
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, vec![0, 1, 2, 3, 4]);
     }
 }

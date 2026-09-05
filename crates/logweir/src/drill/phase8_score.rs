@@ -357,3 +357,101 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
         sidecar,
     })
 }
+
+/// The post-put storage receipt — Task 20's carried obligation, discharged in
+/// Task 21a.
+///
+/// `run` above signs the scorecard BEFORE it puts it, because a signature
+/// covers bytes and the bytes must exist first. The consequence is that the
+/// four storage facts describing that put — whether it was conditional, what
+/// version id it got, and what the provider says about WORM retention — are
+/// unknowable at signing time, so step 3 zeroes all four in the signed
+/// document rather than sign a claim the store has never been asked about.
+/// Step 7 then performs the real readback and lands it on `Signed.scorecard`,
+/// which nothing serialises.
+///
+/// Until this receipt existed, that readback was published NOWHERE an auditor
+/// could read it, and `docs/stability.md` recorded the gap in those words:
+/// Logweir published no verifiable evidence that its own upload was
+/// create-only. This is a SECOND signed document carrying it — the same
+/// pattern `phase9_teardown` uses for the teardown attestation, and for the
+/// same reason: a fact that becomes true after signing needs its own
+/// signature, not a second bite at the first one.
+///
+/// It deliberately does NOT restate the scorecard. `scorecard_sha256` binds it
+/// to the exact signed bytes, so a reader can tell WHICH document this receipt
+/// describes — binding to `run_id` alone would carry no independent
+/// information (the same argument `TeardownAttestation::scorecard_sha256`
+/// makes).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PutReceipt {
+    pub run_id: String,
+    /// `sha256:<hex>` of the SIGNED scorecard bytes this receipt describes.
+    pub scorecard_sha256: String,
+    /// The object key the scorecard was put at.
+    pub scorecard_key: String,
+    /// Observed from the put itself: `true` only when the backend performed a
+    /// genuine conditional put. A backend that answered `Unsupported` took the
+    /// HEAD-then-PUT fallback and reports `false` — recorded, never assumed.
+    pub create_only_enforced: bool,
+    /// The store's version id for the object, when the backend returned one.
+    pub version_id: Option<String>,
+    /// Spec §6 C3: `true` ONLY after a provider readback actually answered.
+    /// `false` means "no proof obtainable", never "the object is mutable".
+    pub immutable: bool,
+    pub retain_until: Option<DateTime<Utc>>,
+    /// When the readback was taken. Global Constraint 1: the clock is read in
+    /// `crates/logweir`, never in `logweir-core`.
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Reads the post-put facts off `Signed.scorecard` — where `run` step 7 put
+/// them — and never off the signed bytes, which by construction carry the
+/// zeroed values.
+pub fn put_receipt(signed: &Signed) -> PutReceipt {
+    let e = &signed.scorecard.evidence;
+    PutReceipt {
+        run_id: signed.scorecard.run_id.clone(),
+        scorecard_sha256: logweir_core::ids::sha256_prefixed(&signed.bytes),
+        scorecard_key: format!("logweir/drills/{}.json", signed.scorecard.run_id),
+        create_only_enforced: e.create_only_enforced,
+        version_id: e.version_id.clone(),
+        immutable: e.immutable,
+        retain_until: e.retain_until,
+        observed_at: chrono::Utc::now(),
+    }
+}
+
+/// Signed with `PAYLOAD_TYPE_PUT_RECEIPT` and put create-only next to the
+/// scorecard, exactly as `phase9_teardown::persist` does for its attestation.
+/// Signing precedes both puts for the same reason it does everywhere else, and
+/// the same `SigningOrLock` variant carries the failure.
+///
+/// The CALLER treats a failure here as a warning, never as an outcome: the
+/// drill result is already signed and uploaded, and a receipt that could not
+/// be written must not retract a measurement.
+pub fn persist_put_receipt(
+    r: &PutReceipt,
+    signing_key: &Path,
+    store: &Store,
+) -> Result<(), DrillError> {
+    let bytes = logweir_core::det_json::to_deterministic_json(r).map_err(sig)?;
+    let key = logweir_evidence::keys::SigningKey::from_pem_file(signing_key).map_err(sig)?;
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &key,
+        logweir_evidence::PAYLOAD_TYPE_PUT_RECEIPT,
+        &bytes,
+    )
+    .map_err(sig)?;
+    let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(sig)?;
+    store
+        .put_create_only(&format!("logweir/drills/{}.receipt.json", r.run_id), &bytes)
+        .map_err(sig)?;
+    store
+        .put_create_only(
+            &format!("logweir/drills/{}.receipt.sig", r.run_id),
+            &sidecar_bytes,
+        )
+        .map_err(sig)?;
+    Ok(())
+}

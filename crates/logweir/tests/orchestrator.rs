@@ -1,0 +1,775 @@
+//! Task 21a — the phase orchestrator, the `DrillError` -> exit-code contract
+//! and the Prometheus textfile metrics.
+mod fixtures;
+
+use logweir::drill::{record, DrillError};
+use logweir::exit::ExitCode;
+
+/// The partial-record contract: the PhaseRecord is pushed BEFORE the phase's
+/// result is returned, so a crash mid-drill still leaves a truthful document.
+#[test]
+fn a_failing_phase_still_leaves_its_record_and_updates_last_phase_completed() {
+    let mut sc = fixtures::scorecard_pass();
+    sc.phases.clear();
+    sc.last_phase_completed = -1;
+
+    let ok: Result<u8, DrillError> = record(&mut sc, 0, "admit", || Ok(1));
+    assert!(ok.is_ok());
+    assert_eq!(sc.phases.len(), 1);
+    assert_eq!(sc.last_phase_completed, 0);
+
+    let bad: Result<u8, DrillError> = record(&mut sc, 6, "restore", || {
+        Err(DrillError::Operational("boom".into()))
+    });
+    assert!(bad.is_err());
+    assert_eq!(sc.phases.len(), 2, "a failing phase still gets a record");
+    assert_eq!(sc.phases[1].outcome, "failed: operational: boom");
+    assert_eq!(
+        sc.last_phase_completed, 0,
+        "a phase that failed is not 'completed'"
+    );
+    assert!(sc.phases[1].duration_ms < 5_000);
+}
+
+#[test]
+fn every_drill_error_maps_to_its_contracted_exit_code() {
+    assert_eq!(
+        ExitCode::from(DrillError::Guard(logweir_core::guard::GuardRefusal(
+            "x".into()
+        ))),
+        ExitCode::GuardRefused
+    );
+    assert_eq!(
+        ExitCode::from(DrillError::Operational("x".into())),
+        ExitCode::Operational
+    );
+    assert_eq!(
+        ExitCode::from(DrillError::SigningOrLock("x".into())),
+        ExitCode::SigningOrLock
+    );
+    assert_eq!(
+        ExitCode::from(DrillError::NotPass(Box::new(fixtures::scorecard_pass()))),
+        ExitCode::DrillNotPass
+    );
+}
+
+#[test]
+fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("logweir.prom");
+    logweir::metrics::write_textfile(&p, &fixtures::scorecard_pass()).unwrap();
+    let t = std::fs::read_to_string(&p).unwrap();
+    for m in [
+        "logweir_drill_runs_total",
+        "logweir_drill_rto_seconds",
+        "logweir_drill_rpo_seconds",
+        "logweir_drill_objective_met",
+        "logweir_drill_fingerprint_mismatches",
+        "logweir_drill_integrity_level",
+        "logweir_drill_integrity_result",
+        "logweir_evidence_lock_verified",
+    ] {
+        assert!(
+            t.contains(m),
+            "dashboards/logweir.json reads `{m}`, which nothing wrote:\n{t}"
+        );
+    }
+    assert!(
+        !t.contains("triggered_by"),
+        "unbounded cardinality: it lives in the scorecard"
+    );
+}
+
+/// Phases 7 and 8 are wired: the scorecard is SCORED before it is signed.
+/// `phase8_score::run` signs the document it is handed and never recomputes, so
+/// if `compute_measured`/`decide` were dropped from `execute` the numbers would
+/// be null and `outcome` would stay at its default — this test fails first.
+#[test]
+fn execute_scores_before_it_signs() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let sc =
+        logweir::drill::execute_with(&f.args, &f.run_id, &f.ctx).expect("fixture drill passes");
+    assert!(
+        sc.measured.rto_seconds.is_some(),
+        "measured.rto_seconds is null"
+    );
+    assert!(
+        sc.measured.rpo_seconds.is_some(),
+        "measured.rpo_seconds is null"
+    );
+    assert_eq!(sc.outcome, logweir_core::outcome::Outcome::Pass);
+    assert_eq!(sc.last_phase_completed, 9);
+}
+
+// ---------------------------------------------------------------------------
+// Beyond the brief's four. Every test below exists to kill a specific mutant:
+// a phase whose CALL SITE is deleted, a routing decision flipped, a value
+// carried from the wrong place, or an obligation silently dropped.
+
+use fixtures::Drill;
+use logweir::drill::execute_with;
+use logweir_core::outcome::{IntegrityLevel, IntegrityResult, Outcome};
+use logweir_evidence::keys::{SigningKey, VerifyingKey};
+
+fn signing_pub(f: &fixtures::OrchestratorFixture) -> VerifyingKey {
+    SigningKey::from_pem_file(&f.args.signing_key)
+        .unwrap()
+        .verifying_key()
+}
+
+fn scorecard_from_store(f: &fixtures::OrchestratorFixture) -> Vec<u8> {
+    f.ctx
+        .store
+        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .expect("phase 8 uploaded the scorecard")
+        .0
+}
+
+/// The phase-5 jump. `Verdict::Block` goes STRAIGHT to phase 8 — score, sign,
+/// upload — and returns exit 2 with a signed artifact. Never phase 6, and
+/// never exit 1 with nothing to show for it.
+#[test]
+fn a_blocked_preflight_exits_2_with_a_signed_scorecard_and_never_reaches_phase_6() {
+    let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err();
+    let sc = match &err {
+        logweir::drill::DrillError::NotPass(sc) => sc.clone(),
+        other => panic!("a blocked preflight is a drill RESULT, got {other:?}"),
+    };
+    assert_eq!(
+        ExitCode::from(err),
+        ExitCode::DrillNotPass,
+        "a preflight finding is the most valuable result a drill can produce; \
+         exit 1 would discard it"
+    );
+    assert_eq!(sc.outcome, Outcome::PreflightFailed);
+    assert_eq!(sc.integrity.level, IntegrityLevel::NotAttempted);
+    assert_eq!(sc.integrity.result, IntegrityResult::Fail);
+    assert!(sc.measured.rto_seconds.is_none());
+    let phases: Vec<i8> = sc.phases.iter().map(|p| p.phase).collect();
+    assert!(
+        !phases.contains(&6) && !phases.contains(&7),
+        "a blocked plan must never restore or verify: {phases:?}"
+    );
+    assert_eq!(
+        phases,
+        vec![0, 1, 2, 3, 4, 5],
+        "the jump goes straight from 5 to 8, and 8's own record is pushed after \
+         the document it signs is frozen"
+    );
+    // ...and it is genuinely SIGNED and uploaded, not merely returned.
+    let bytes = scorecard_from_store(&f);
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+        &f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.sig", f.run_id))
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    logweir_evidence::verify::verify_detached(
+        &signing_pub(&f),
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        &bytes,
+        &sidecar,
+    )
+    .expect("the uploaded preflight-failed scorecard must verify");
+}
+
+/// Carried obligation from Task 17. `PhaseRecord.notes` exists so a
+/// `preflight-failed` scorecard states WHICH ground blocked the restore. This
+/// task is its sole writer; without the copy the field is a sink nothing
+/// reaches and the adjudication's reasoning is discarded.
+#[test]
+fn a_blocked_preflight_writes_every_finding_into_the_phase_5_notes() {
+    let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
+    let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
+        logweir::drill::DrillError::NotPass(sc) => sc,
+        other => panic!("expected NotPass, got {other:?}"),
+    };
+    let p5 = sc
+        .phases
+        .iter()
+        .find(|p| p.phase == 5)
+        .expect("phase 5 record");
+    assert_eq!(p5.notes.len(), 1, "one finding, one note: {:?}", p5.notes);
+    assert!(
+        p5.notes[0].starts_with("orders/0 empty:"),
+        "the note must name the topic, partition and ground: {:?}",
+        p5.notes[0]
+    );
+    assert!(
+        p5.notes[0].contains("no records in the selected window"),
+        "the note must carry the finding's detail: {:?}",
+        p5.notes[0]
+    );
+    // The note has to survive into the SIGNED bytes, not just the in-memory
+    // document — that is the whole point of the field.
+    let bytes = scorecard_from_store(&f);
+    let signed: logweir_core::scorecard::Scorecard = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        signed
+            .phases
+            .iter()
+            .find(|p| p.phase == 5)
+            .map(|p| p.notes.clone())
+            .unwrap_or_default(),
+        p5.notes,
+        "the findings must be inside the signed document"
+    );
+}
+
+/// task-21a-addendum.md ruling A8. A restore that ran, exited 0, and left every
+/// selected partition at end offset 0 is a positively established fact ABOUT
+/// THE ARCHIVE. Routing it to exit 1 would throw away the most valuable
+/// negative finding phase 6 can produce, and would leave no artifact.
+#[test]
+fn a_no_op_restore_is_a_drill_result_at_exit_2_never_an_operational_exit_1() {
+    let f = fixtures::orchestrator_fixture(Drill::RestoresNothing);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err();
+    let sc = match &err {
+        logweir::drill::DrillError::NotPass(sc) => sc.clone(),
+        logweir::drill::DrillError::RestoreNoOp(m) => panic!(
+            "RestoreNoOp escaped the phase-6 call site unintercepted; the next \
+             `From<DrillError> for ExitCode` would panic: {m}"
+        ),
+        other => panic!("a no-op restore is a drill RESULT, got {other:?}"),
+    };
+    let code = ExitCode::from(err);
+    assert_eq!(code, ExitCode::DrillNotPass);
+    assert_ne!(
+        code,
+        ExitCode::Operational,
+        "exit 1 says nothing about the archive; this finding says everything"
+    );
+    assert_eq!(sc.outcome, Outcome::FailIntegrity);
+    assert_eq!(sc.integrity.level, IntegrityLevel::NotAttempted);
+    assert_eq!(sc.integrity.result, IntegrityResult::Fail);
+    assert!(sc.measured.rto_seconds.is_none());
+    // Distinguishable from phase 5's block in the signed document itself.
+    assert_ne!(sc.outcome, Outcome::PreflightFailed);
+    let p6 = sc
+        .phases
+        .iter()
+        .find(|p| p.phase == 6)
+        .expect("phase 6 record");
+    assert!(
+        p6.outcome.starts_with("failed: drill-not-pass:"),
+        "the phase record must name the classification: {}",
+        p6.outcome
+    );
+    assert_eq!(p6.notes.len(), 1, "the reason belongs in the document");
+    assert!(
+        p6.notes[0].contains("end offset 0 after"),
+        "{:?}",
+        p6.notes[0]
+    );
+    assert!(
+        !sc.phases.iter().any(|p| p.phase == 7),
+        "phase 7 must never run over a restore that wrote nothing"
+    );
+    // Signed and uploaded, exactly as phase 5's block is.
+    let bytes = scorecard_from_store(&f);
+    assert!(!bytes.is_empty());
+}
+
+/// Every phase's CALL SITE, in order. Deleting any `record(...)` line, or
+/// moving one, changes this list. Phase 8's own record is absent by design:
+/// `phase8_score::run` is handed a frozen clone, so the document it signs
+/// cannot contain the record of its own signing, and `execute_with` adopts
+/// the signed document afterwards.
+#[test]
+fn every_phase_from_0_through_9_has_a_call_site_and_they_run_in_ascending_order() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let seen: Vec<(i8, &str)> = sc
+        .phases
+        .iter()
+        .map(|p| (p.phase, p.name.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (0, "admit"),
+            (1, "approval"),
+            (2, "target-ready"),
+            (3, "target-diff"),
+            (4, "sample-select"),
+            (5, "preflight"),
+            (6, "restore"),
+            (7, "verify"),
+            (9, "teardown"),
+        ]
+    );
+    assert!(sc.phases.iter().all(|p| p.outcome == "ok"));
+    // The signed document is the same sequence minus phase 9, which happens
+    // after signing and is attested separately.
+    let signed: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(
+        signed.phases.iter().map(|p| p.phase).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4, 5, 6, 7]
+    );
+    assert_eq!(signed.last_phase_completed, 7);
+}
+
+/// task-21a-addendum.md ruling A5. The file at `--out` is the EXACT byte
+/// string phase 8 signed — never a re-serialisation of a document phase 9
+/// then mutated — so `logweir drill verify` on it recomputes the digest the
+/// signature covers.
+#[test]
+fn the_out_artifact_is_the_exact_byte_string_phase_8_signed_and_still_verifies() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let on_disk = std::fs::read(&f.out).expect("--out was written");
+    assert_eq!(
+        on_disk,
+        scorecard_from_store(&f),
+        "the local artifact and the uploaded object must be the same bytes"
+    );
+    let sidecar: logweir_evidence::Sidecar =
+        serde_json::from_slice(&std::fs::read(f.out.with_extension("sig")).unwrap()).unwrap();
+    logweir_evidence::verify::verify_detached(
+        &signing_pub(&f),
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        &on_disk,
+        &sidecar,
+    )
+    .expect("the --out artifact must verify against its own sidecar");
+    // The in-memory document HAS grown phase 9 by now; re-serialising it would
+    // have produced different bytes, which is the defect A5 names.
+    assert_eq!(sc.last_phase_completed, 9);
+    assert_ne!(
+        logweir_core::det_json::to_deterministic_json(&sc).unwrap(),
+        on_disk,
+        "if these were equal the test could not distinguish the signed bytes \
+         from a re-serialisation"
+    );
+}
+
+/// Carried obligation from Task 20. Phase 8 signs before it puts, so the four
+/// storage facts are unknowable at signing time and the scorecard neutralises
+/// them. Until this receipt existed, Logweir published NO verifiable evidence
+/// that its own upload was create-only.
+#[test]
+fn a_second_signed_receipt_publishes_the_post_put_readback() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+
+    let scorecard_bytes = scorecard_from_store(&f);
+    let signed: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_bytes).unwrap();
+    assert!(
+        !signed.evidence.create_only_enforced,
+        "the SIGNED scorecard must keep under-claiming: the put had not happened"
+    );
+
+    let receipt_bytes = f
+        .ctx
+        .store
+        .get(&format!("logweir/drills/{}.receipt.json", f.run_id))
+        .expect("the post-put receipt must be uploaded beside the scorecard")
+        .0;
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+        &f.ctx
+            .store
+            .get(&format!("logweir/drills/{}.receipt.sig", f.run_id))
+            .expect("the receipt must be signed")
+            .0,
+    )
+    .unwrap();
+    logweir_evidence::verify::verify_detached(
+        &signing_pub(&f),
+        logweir_evidence::PAYLOAD_TYPE_PUT_RECEIPT,
+        &receipt_bytes,
+        &sidecar,
+    )
+    .expect("the receipt must verify with its own payload type");
+
+    let r: logweir::drill::phase8_score::PutReceipt =
+        serde_json::from_slice(&receipt_bytes).unwrap();
+    assert_eq!(r.run_id, f.run_id);
+    assert_eq!(
+        r.scorecard_sha256,
+        logweir_core::ids::sha256_prefixed(&scorecard_bytes),
+        "the receipt must be bound to the exact signed bytes it describes"
+    );
+    assert_eq!(r.scorecard_key, format!("logweir/drills/{}.json", f.run_id));
+    assert!(
+        r.create_only_enforced,
+        "the in-memory store DOES conditional puts; the receipt reports the \
+         observed fact the scorecard could not"
+    );
+}
+
+/// Carried obligation from Task 17, second half: nothing pinned the
+/// skip-when-empty byte-stability that keeps the already-signed fixtures
+/// valid. `notes` was added to `PhaseRecord` after those fixtures were minted,
+/// so an omitted-when-empty field is the only thing keeping their signatures
+/// good — and this asserts the CRYPTOGRAPHY, not merely that they parse.
+#[test]
+fn an_empty_notes_field_stays_absent_so_the_checked_in_signed_fixtures_still_verify() {
+    for stem in ["scorecard", "scorecard-self-attested"] {
+        check_signed_fixture_round_trips(stem);
+    }
+}
+
+fn check_signed_fixture_round_trips(stem: &str) {
+    let bytes = std::fs::read(format!("../../e2e/fixtures/signed/{stem}.json")).unwrap();
+    let sc: logweir_core::scorecard::Scorecard = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        !sc.phases.is_empty() && sc.phases.iter().all(|p| p.notes.is_empty()),
+        "this fixture predates `notes`; it must still carry phase records"
+    );
+    let round = logweir_core::det_json::to_deterministic_json(&sc).unwrap();
+    assert_eq!(
+        round, bytes,
+        "re-serialising must reproduce the checked-in bytes exactly: an empty \
+         `notes` that serialised as `[]` would break every signature minted \
+         before the field existed"
+    );
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+        &std::fs::read(format!("../../e2e/fixtures/signed/{stem}.sig")).unwrap(),
+    )
+    .unwrap();
+    let key =
+        VerifyingKey::from_pem_file(std::path::Path::new("../../e2e/fixtures/signed/public.pem"))
+            .unwrap();
+    logweir_evidence::verify::verify_detached(
+        &key,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        &round,
+        &sidecar,
+    )
+    .expect("the regenerated bytes must still verify, not merely parse");
+    // And the skip is load-bearing rather than incidental: one note changes
+    // the bytes, so a signature over the old document would no longer hold.
+    let mut mutated = sc.clone();
+    mutated.phases[0].notes.push("x".into());
+    assert_ne!(
+        logweir_core::det_json::to_deterministic_json(&mutated).unwrap(),
+        bytes
+    );
+}
+
+/// The `Selection` phase 4 emits carries an EMPTY `manifest_key`, and
+/// `OsoCliEngine::fingerprints` refuses one. The orchestrator is the only
+/// place that holds both the `Selection` and the real `BackupSetRef`.
+#[test]
+fn the_backup_set_ref_is_bound_into_every_selection_before_the_engine_fingerprints_it() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    // The fixture engine records what it was asked about; a real engine would
+    // simply have refused.
+    let calls = fixtures::fingerprint_calls(&f);
+    assert!(!calls.is_empty(), "phase 7 must reach the engine at all");
+    for s in &calls {
+        assert!(
+            !s.set.manifest_key.is_empty(),
+            "phase 4 emits an empty manifest_key; `bind_backup_set` was skipped for {}/{}",
+            s.topic,
+            s.partition
+        );
+        assert_eq!(s.set.manifest_key, "drills/fixture/manifest.json");
+    }
+}
+
+/// `sample.records_expected` is the CANARY SIZE, not the manifest's window
+/// total. Task 16 parked the distinction for this task; substituting one for
+/// the other would make the signed document overstate what was verified.
+#[test]
+fn the_sample_block_publishes_the_canary_size_not_the_manifest_window_total() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    assert_eq!(sc.sample.partitions, 1);
+    assert_eq!(sc.sample.topics, 1);
+    assert_eq!(
+        sc.sample.records_expected,
+        fixtures::FIXTURE_SAMPLE_RECORDS as u64,
+        "records_per_partition x partitions selected"
+    );
+    assert_eq!(
+        sc.sample.records_restored,
+        fixtures::FIXTURE_SAMPLE_RECORDS as u64
+    );
+    assert_eq!(sc.sample.anchor, "head");
+    assert_eq!(sc.integrity.records_sampled, sc.sample.records_expected);
+}
+
+/// `rto_excluding_preflight_seconds` is THE number compared against the RTO
+/// objective, and phase 5's header sweep — which no incident responder
+/// performs — must not be in it. The duration comes from the phase-5 record,
+/// which is why phase 5's engine call sits inside that record.
+#[test]
+fn the_phase_5_duration_is_subtracted_from_the_scored_rto() {
+    let f = fixtures::orchestrator_fixture(Drill::HasASlowPreflight);
+    let sc = execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let p5 = sc.phases.iter().find(|p| p.phase == 5).unwrap();
+    assert!(
+        p5.duration_ms >= 1_000,
+        "the fixture's preflight sleeps; got {}ms",
+        p5.duration_ms
+    );
+    let rto = sc.measured.rto_seconds.unwrap();
+    let excl = sc.measured.rto_excluding_preflight_seconds.unwrap();
+    assert!(rto >= 1, "the slow preflight must show up in the raw RTO");
+    assert_eq!(
+        excl,
+        rto - (p5.duration_ms / 1000),
+        "the phase-5 duration reaching `Timeline` is what makes these differ"
+    );
+    assert!(excl < rto);
+    // ...and the restore-only figure brackets the SUBPROCESS, not the
+    // preflight that ran before it: the fixture's restore is instantaneous, so
+    // a `restore_started_at` taken from any earlier instant would show up here
+    // as a second or more.
+    assert_eq!(
+        sc.measured.rto_restore_only_seconds,
+        Some(0),
+        "restore_started_at must come from phase 6's own Restored, not from an \
+         earlier timestamp on the scorecard"
+    );
+}
+
+/// An engine identity is what an auditor uses to say WHICH engine produced a
+/// restore. An empty version or digest is not "unknown", it is a signed
+/// document that names no engine at all.
+#[test]
+fn a_scorecard_is_never_signed_over_an_engine_that_names_itself_nothing() {
+    let f = fixtures::orchestrator_fixture(Drill::NamesNoEngine);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err();
+    assert_eq!(ExitCode::from(err), ExitCode::Operational);
+    assert!(
+        f.ctx.store.list_keys("logweir/").unwrap().is_empty(),
+        "nothing may be uploaded for a run that cannot name its engine"
+    );
+}
+
+/// The facts each phase established have to reach the document. A phase whose
+/// RESULT is dropped on the floor is the same defect as a phase that never
+/// ran, and no ordering assertion catches it.
+#[test]
+fn each_phases_result_reaches_the_signed_document() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+
+    // 0 — admission
+    assert_eq!(sc.target.cluster_id, fixtures::FIXTURE_CLUSTER_ID);
+    assert_eq!(sc.target.marker_topic, fixtures::FIXTURE_MARKER_TOPIC);
+    assert_eq!(sc.target.topic_mapping_entries, 1);
+    assert_eq!(
+        sc.target.topic_mapping_sha256,
+        logweir_core::ids::sha256_prefixed(
+            logweir_engine_oso::render_restore::render_topic_mapping_block(
+                &[("orders".to_string(), "drill-orders".to_string())]
+                    .into_iter()
+                    .collect()
+            )
+            .as_bytes()
+        ),
+        "the hash must cover the block AS RENDERED into restore.yaml"
+    );
+    // 1 — approval
+    assert_eq!(sc.approval.ticket, "CHG-40881");
+    assert_eq!(sc.approval.approver, "sre-oncall@example.com");
+    assert!(
+        sc.approval.self_attested,
+        "the fixture signs its own approval"
+    );
+    assert!(sc.approval_validated_at.is_some());
+    // the archive read
+    assert_eq!(sc.source.backup_id, "backup-2026-08-30T02:00:00Z");
+    assert!(!sc.source.manifest_sha256.is_empty());
+    assert!(!sc.source.captured_by_logweir, "phase -1 is Task 24's");
+    // 3 — the diff
+    assert_eq!(sc.target_diff.collisions.len(), 1);
+    assert!(
+        sc.target_diff.collisions[0].starts_with("drill-orders: 1 partition(s), 25 record(s)"),
+        "the diff must report what it actually READ off the target: {:?}",
+        sc.target_diff.collisions[0]
+    );
+    assert_eq!(sc.target_diff.level, "full");
+    // 5 — the lever readback
+    assert_eq!(
+        sc.engine.levers.header_preflight,
+        logweir_core::outcome::LeverState::Honoured
+    );
+    assert_eq!(
+        sc.engine.matrix_verdict,
+        logweir_core::outcome::MatrixVerdict::Pass
+    );
+    assert_eq!(sc.engine.version, "v0.21.0-fixture");
+    // 7 — integrity and parity
+    assert_eq!(sc.integrity.level, IntegrityLevel::ByteFingerprint);
+    assert_eq!(sc.integrity.result, IntegrityResult::Pass);
+    assert_eq!(sc.integrity.mismatches, 0);
+    assert!(
+        sc.topic_parity
+            .intentionally_deviated
+            .contains(&"drill-orders: cleanup.policy".to_string()),
+        "a config the restore deliberately changed is INTENDED, and is named \
+         against the target topic: {:?}",
+        sc.topic_parity.intentionally_deviated
+    );
+    assert!(
+        sc.topic_parity.unexpected_divergence.is_empty(),
+        "{:?}",
+        sc.topic_parity.unexpected_divergence
+    );
+    // 8 — the objectives, as REQUESTED plus the verdict
+    assert_eq!(sc.objectives.rto_seconds, Some(900));
+    assert_eq!(sc.objectives.met, Some(true));
+    assert_eq!(sc.triggered_by.as_deref(), Some("fixture"));
+}
+
+/// Phase 9's call site, its policy and its binding. The attestation is bound
+/// to the SIGNED BYTES, not to the run id a second time.
+#[test]
+fn teardown_deletes_the_mapped_scratch_topics_and_attests_them_against_the_signed_bytes() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let bytes = f
+        .ctx
+        .store
+        .get(&format!("logweir/drills/{}.teardown.json", f.run_id))
+        .expect("phase 9 must persist its attestation")
+        .0;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["teardown_policy"], "delete");
+    assert_eq!(v["topics_deleted"], serde_json::json!(["drill-orders"]));
+    assert_eq!(v["topics_failed"], serde_json::json!([]));
+    assert_eq!(
+        v["scorecard_sha256"],
+        serde_json::json!(logweir_core::ids::sha256_prefixed(&scorecard_from_store(
+            &f
+        )))
+    );
+}
+
+/// The metrics file is written for a drill RESULT, and it carries the one
+/// thing Kubernetes hides: which exit code this run produced.
+#[test]
+fn the_metrics_file_distinguishes_a_pass_from_a_signed_non_pass() {
+    let pass = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = execute_with(&pass.args, &pass.run_id, &pass.ctx).unwrap();
+    logweir::metrics::write_textfile(&pass.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&pass.metrics).unwrap();
+    assert!(t.contains("outcome=\"pass\""), "{t}");
+    assert!(
+        t.contains("logweir_drill_exit_code{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 0"),
+        "{t}"
+    );
+
+    let blocked = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
+    let sc = match execute_with(&blocked.args, &blocked.run_id, &blocked.ctx).unwrap_err() {
+        logweir::drill::DrillError::NotPass(sc) => *sc,
+        other => panic!("{other:?}"),
+    };
+    logweir::metrics::write_textfile(&blocked.metrics, &sc).unwrap();
+    let t = std::fs::read_to_string(&blocked.metrics).unwrap();
+    assert!(t.contains("outcome=\"preflight-failed\""), "{t}");
+    assert!(
+        t.contains("logweir_drill_exit_code{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 2"),
+        "a drill result must never be reported as exit 1: {t}"
+    );
+    assert!(t.contains("logweir_drill_integrity_level{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\",level=\"not-attempted\"} 1"), "{t}");
+}
+
+/// The eight names have to be present as SAMPLES, not merely inside the
+/// `# HELP` / `# TYPE` comment lines that mention them. A metric whose value
+/// line is deleted still leaves its name in the comments, so a bare
+/// `contains(name)` check — which is what the brief's own test performs —
+/// cannot tell the two apart, and a dashboard reading it would show no data.
+#[test]
+fn every_metric_name_is_emitted_as_a_sample_not_only_as_a_help_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("logweir.prom");
+    logweir::metrics::write_textfile(&p, &fixtures::scorecard_pass()).unwrap();
+    let text = std::fs::read_to_string(&p).unwrap();
+    let samples: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .collect();
+    for m in [
+        "logweir_drill_runs_total",
+        "logweir_drill_rto_seconds",
+        "logweir_drill_rpo_seconds",
+        "logweir_drill_objective_met",
+        "logweir_drill_fingerprint_mismatches",
+        "logweir_drill_integrity_level",
+        "logweir_drill_integrity_result",
+        "logweir_evidence_lock_verified",
+        "logweir_drill_exit_code",
+    ] {
+        assert!(
+            samples.iter().any(|l| l.starts_with(m)),
+            "`{m}` appears only in a HELP/TYPE comment; no sample was emitted:\n{text}"
+        );
+    }
+    // All three objectives are non-null in this fixture, so all three lines
+    // must be there — a loop that emitted only the first would pass a bare
+    // name check.
+    for o in ["rto", "rpo", "pass_rate"] {
+        assert!(
+            samples
+                .iter()
+                .any(|l| l.contains(&format!("objective=\"{o}\""))),
+            "the {o} objective produced no sample:\n{text}"
+        );
+    }
+}
+
+/// The lever readback is OBSERVED, never declared. A scorecard that never saw
+/// the engine honour `header_preflight` must not carry a matrix pass — and
+/// this is the only path on which the two differ, because a honoured lever
+/// sets both to their positive values.
+#[test]
+fn an_ignored_engine_lever_is_reported_as_ignored_and_never_as_a_matrix_pass() {
+    let f = fixtures::orchestrator_fixture(Drill::IgnoresTheHeaderLever);
+    let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
+        logweir::drill::DrillError::NotPass(sc) => sc,
+        other => panic!("an ignored lever blocks the plan at phase 5: {other:?}"),
+    };
+    assert_eq!(
+        sc.engine.levers.header_preflight,
+        logweir_core::outcome::LeverState::Ignored
+    );
+    assert_eq!(
+        sc.engine.matrix_verdict,
+        logweir_core::outcome::MatrixVerdict::FailLeverNotHonoured,
+        "a run that did not observe the lever must not publish `pass`"
+    );
+    assert_eq!(sc.outcome, Outcome::PreflightFailed);
+    let p5 = sc.phases.iter().find(|p| p.phase == 5).unwrap();
+    assert!(
+        p5.notes.iter().any(|n| n.contains("lever-ignored")),
+        "{:?}",
+        p5.notes
+    );
+}
+
+/// Spec §7.2(a): a config key Logweir rendered that the engine dropped is a
+/// per-run readback that must reach the signed document. There are TWO such
+/// readbacks — phase 5's preflight and phase 6's restore — and phase 6's
+/// arrives after phase 5's has already been written, so it has to be merged
+/// rather than overwrite or be overwritten.
+#[test]
+fn a_key_the_engine_dropped_during_the_restore_reaches_the_signed_levers() {
+    let f = fixtures::orchestrator_fixture(Drill::DropsARenderedKeyDuringRestore);
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(
+        sc.engine.levers.unknown_key_warnings,
+        vec![
+            // phase 5's, recorded first...
+            "restore.header_preflight".to_string(),
+            // ...and phase 6's, MERGED in rather than replacing it.
+            "restore.checkpoint_interval_secs".to_string(),
+        ],
+        "both readbacks have to survive: phase 5's is written before phase 6 \
+         runs, and phase 6's arrives afterwards"
+    );
+}

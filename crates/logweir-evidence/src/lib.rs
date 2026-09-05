@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 pub const PAYLOAD_TYPE_SCORECARD: &str =
     "application/vnd.logweir.drill-scorecard+json;version=1.0.0";
 pub const PAYLOAD_TYPE_TEARDOWN: &str = "application/vnd.logweir.drill-teardown+json;version=1.0.0";
+/// The post-put storage receipt (Task 21a, discharging Task 20's carried
+/// obligation). A scorecard is SIGNED before it is PUT — bytes cannot be
+/// signed before they are serialised — so `evidence.create_only_enforced`,
+/// `immutable`, `retain_until` and `version_id` are unknowable at signing
+/// time and the scorecard neutralises all four. This second document carries
+/// the readback taken AFTER the put, signed on its own, so the storage claim
+/// is something an auditor can check rather than something only Logweir's
+/// memory ever held.
+pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
+    "application/vnd.logweir.drill-put-receipt+json;version=1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signature {

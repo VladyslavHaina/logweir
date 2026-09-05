@@ -7,6 +7,18 @@ use logweir_core::spec::SampleSpec;
 pub struct Selection {
     pub window: (DateTime<Utc>, DateTime<Utc>),
     pub per_partition: Vec<SampleSelection>,
+    /// How many records the MANIFEST says the sampled window holds, summed
+    /// over the selected partitions.
+    ///
+    /// It is NOT the canary size, and it is NOT what the scorecard's
+    /// identically-named `sample.records_expected` publishes: that field is
+    /// the sum of `count` over `per_partition` — how many records the drill
+    /// set out to reconcile. On this repository's own fixtures the two are 500
+    /// and 25 for a single partition. `crate::drill::sample_info` computes the
+    /// scorecard's figure from `per_partition[..].count` for exactly this
+    /// reason; substituting this field there would make the signed document
+    /// claim it verified twenty times what it did (Task 16's parked item,
+    /// discharged in Task 21a).
     pub records_expected: u64,
     pub topics: u32,
     pub partitions: u32,

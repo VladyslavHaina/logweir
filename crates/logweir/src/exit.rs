@@ -1,11 +1,12 @@
 /// Global Constraint 11 / spec §6 C5. A CronJob, a change-control pipeline and
 /// an alert rule all consume these without parsing stdout.
 ///
-/// `DrillNotPass` and `GuardRefused` are not constructed until Tasks 14, 17 and
-/// 21a land, and `ci.yml` runs `clippy -D warnings`, so the allow below is
-/// REQUIRED for this task's gate to be green. **Task 21a deletes this line**;
-/// if it is still here after Task 21a, a variant is genuinely dead.
-#[allow(dead_code)]
+/// Every variant is constructed on a live path as of Task 21a — `Ok` and
+/// `DrillNotPass` in `crate::drill::run`, `Operational` there and in
+/// `main.rs`'s clap-usage arm, `GuardRefused` and `SigningOrLock` through
+/// `impl From<DrillError> for ExitCode` — so Task 6's `#[allow(dead_code)]`
+/// is gone. If a variant ever becomes unreachable again, `clippy -D warnings`
+/// says so rather than an allow hiding it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     /// Clean pass.

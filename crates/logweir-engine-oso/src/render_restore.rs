@@ -38,10 +38,7 @@ pub fn render(plan: &RestorePlan) -> String {
     // explicit entry per selected topic. Both sides go through `yaml_scalar`:
     // an operator-influenced topic name is exactly the kind of value GC4
     // cares about ("never emitted, at any value") — see that function's doc.
-    s.push_str("  topic_mapping:\n");
-    for (src, dst) in &plan.topic_mapping {
-        s.push_str(&format!("    {}: {}\n", yaml_scalar(src), yaml_scalar(dst)));
-    }
+    s.push_str(&render_topic_mapping_block(&plan.topic_mapping));
     // config.rs:860-863 — create_topics DEFAULTS TO FALSE ("safe default -
     // won't create topics unexpectedly"). A scratch target contains none of
     // the prefixed topics, so without this the restore has nothing to write to.
@@ -94,6 +91,22 @@ pub fn render(plan: &RestorePlan) -> String {
     // auto_consumer_groups — spec §2's non-goals forbid Logweir from setting
     // either, and they are what `offset_recovery_requested()` keys off
     // (restore/preflight.rs:196-198).
+    s
+}
+
+/// The `restore.topic_mapping` block exactly as it appears in the rendered
+/// `restore.yaml`. Factored out of `render` so
+/// `scorecard.target.topic_mapping_sha256` — whose own field doc promises
+/// "sha256 over the rendered restore.yaml topic_mapping block, so an auditor
+/// can re-derive exactly what was written" — hashes the BYTES the engine was
+/// actually handed. A second, independently-formatted rendering of the same
+/// map would be free to drift from this one, and an auditor re-deriving the
+/// hash would then get a different answer than the drill published.
+pub fn render_topic_mapping_block(mapping: &std::collections::BTreeMap<String, String>) -> String {
+    let mut s = String::from("  topic_mapping:\n");
+    for (src, dst) in mapping {
+        s.push_str(&format!("    {}: {}\n", yaml_scalar(src), yaml_scalar(dst)));
+    }
     s
 }
 

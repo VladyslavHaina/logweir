@@ -688,3 +688,494 @@ pub fn engine_that_sleeps_ms(ms: u64) -> (FakeReader, SleepEngine) {
         SleepEngine { ms },
     )
 }
+
+// ------------------------------------------------------------ orchestrator
+
+/// What the orchestrator fixture should make the drill do. Everything else is
+/// held identical, so a test that asserts on the difference is asserting on
+/// the one behaviour it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drill {
+    /// Every phase succeeds and the objectives are met.
+    Passes,
+    /// The engine's preflight reports `CoverageState::Empty` for the sampled
+    /// partition, which `phase5_preflight::adjudicate` blocks on.
+    BlocksAtPreflight,
+    /// The restore runs, exits 0, and every selected partition on the target
+    /// is still at end offset 0 — `phase6_restore::assert_post_condition`'s
+    /// `RestoreNoOp`.
+    RestoresNothing,
+    /// Everything passes, but the engine's preflight takes over a second, so
+    /// `phase5_duration_ms` is a number a test can see subtracted from the
+    /// scored RTO.
+    HasASlowPreflight,
+    /// Everything passes, but the engine reports no version and no digest —
+    /// the identity a signed scorecard must name.
+    NamesNoEngine,
+    /// The engine did not honour `restore.header_preflight=full`. Phase 5
+    /// blocks on it, and the signed scorecard must say the lever was ignored
+    /// rather than claim a matrix pass nobody established.
+    IgnoresTheHeaderLever,
+    /// The engine logs `Ignoring unknown config key` during the RESTORE — a
+    /// readback that arrives at phase 6, after phase 5's own has already been
+    /// recorded, and that has to reach the same signed list.
+    DropsARenderedKeyDuringRestore,
+}
+
+pub const FIXTURE_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
+pub const FIXTURE_MARKER_TOPIC: &str = "logweir.scratch";
+/// Under `logweir/` only because seeding an in-memory `Store` goes through
+/// `put_create_only`, which asserts Global Constraint 6 unconditionally and on
+/// every handle. A real OSO archive key is never under `logweir/`, and nothing
+/// in phase 7 cares: it reads the key back with `Store::get`, which has no
+/// prefix rule at all.
+pub const FIXTURE_SEGMENT_KEY: &str = "logweir/fixture-archive/orders/0/000000000000.kbak";
+pub const FIXTURE_WINDOW_START: &str = "2026-08-29T00:00:00Z";
+pub const FIXTURE_WINDOW_END: &str = "2026-08-30T02:00:00Z";
+pub const FIXTURE_SAMPLE_RECORDS: usize = 25;
+/// How many records the manifest says the sampled window holds — twenty times
+/// the canary size, so the two `records_expected` figures cannot be confused.
+pub const FIXTURE_WINDOW_RECORDS: i64 = 500;
+
+/// `n` archive fingerprints at offsets 0..n and the matching consumed records,
+/// with the LAST record landing exactly on `newest_ms` and the rest one second
+/// apart before it. Unlike `matching_pair`, the caller chooses the timestamps,
+/// because `measured.rpo_seconds` is
+/// `sample.window_end - newest_restored_record` and a drill that is meant to
+/// meet an RPO objective has to control both halves of that subtraction.
+pub fn orchestrator_pair(
+    n: usize,
+    newest_ms: i64,
+) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) {
+    let mut arch = Vec::with_capacity(n);
+    let mut cons = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = i as i64;
+        let headers = vec![(
+            "x-original-offset".to_string(),
+            Some(off.to_string().into_bytes()),
+        )];
+        let key = format!("k{i}").into_bytes();
+        let value = format!("v{i}").into_bytes();
+        let tsms = newest_ms - ((n - 1 - i) as i64) * 1000;
+        arch.push(RecordFingerprint {
+            topic: "orders".into(),
+            partition: 0,
+            offset: off,
+            sha256: logweir_kafka::fingerprint::record_fingerprint(
+                Some(&key),
+                Some(&value),
+                &headers,
+                tsms,
+            ),
+        });
+        cons.push(ConsumedRecord {
+            partition: 0,
+            offset: off,
+            timestamp_ms: tsms,
+            key: Some(key),
+            value: Some(value),
+            headers,
+        });
+    }
+    (arch, cons)
+}
+
+/// One topic, one partition, one segment, whose `sha256` is the real hash of
+/// `segment_bytes` — so `phase7_verify::segment_evidence` reading it back out
+/// of the archive store is a genuine comparison, not a fixture that agrees
+/// with itself by construction.
+pub fn orchestrator_facts(segment_bytes: &[u8]) -> BackupSetFacts {
+    let t0 = ts(FIXTURE_WINDOW_START).timestamp_millis();
+    let t1 = ts(FIXTURE_WINDOW_END).timestamp_millis();
+    BackupSetFacts {
+        backup_id: "backup-2026-08-30T02:00:00Z".into(),
+        created_at: ts(FIXTURE_WINDOW_END),
+        source_cluster_id: Some("SRC0000000000000000000".into()),
+        manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics: vec![TopicFacts {
+            name: "orders".into(),
+            original_partition_count: Some(1),
+            source_replication_factor: Some(3),
+            configurations: source_configs(&[
+                ("cleanup.policy", "compact"),
+                ("retention.ms", "604800000"),
+            ]),
+            partitions: vec![PartitionFacts {
+                partition_id: 0,
+                segments: vec![SegmentFacts {
+                    key: FIXTURE_SEGMENT_KEY.into(),
+                    start_offset: 0,
+                    end_offset: FIXTURE_WINDOW_RECORDS - 1,
+                    start_timestamp: t0,
+                    end_timestamp: t1,
+                    // The MANIFEST's window total, deliberately much larger
+                    // than the canary size: `Selection::records_expected` and
+                    // the scorecard's `sample.records_expected` answer
+                    // different questions, and a fixture where the two
+                    // coincide cannot tell one from the other.
+                    record_count: FIXTURE_WINDOW_RECORDS,
+                    sha256: logweir_core::ids::sha256_prefixed(segment_bytes),
+                    uploaded_at: t1,
+                }],
+                gaps: vec![],
+                pruned: vec![],
+            }],
+        }],
+    }
+}
+
+/// A `DataEngine` that answers from memory: no subprocess, no engine binary,
+/// no archive credentials. Every method a phase actually calls is answered
+/// from a field, so a test can move exactly one of them.
+pub struct FixtureEngine {
+    pub facts: BackupSetFacts,
+    pub set: BackupSetRef,
+    pub fingerprints: Vec<RecordFingerprint>,
+    pub coverage: CoverageState,
+    pub header_honoured: bool,
+    /// Makes phase 5 take measurable wall-clock time, so
+    /// `rto_excluding_preflight_seconds` differs from `rto_seconds`.
+    pub preflight_sleep_ms: u64,
+    /// What `restore` reports as dropped config keys. Phase 5's readback and
+    /// phase 6's are separate, and both have to reach `engine.levers`.
+    pub restore_unknown_keys: Vec<String>,
+    /// What `preflight` reports as dropped config keys — the FIRST of the two
+    /// readbacks, recorded before phase 6 has run at all.
+    pub preflight_unknown_keys: Vec<String>,
+    pub version: String,
+    pub digest: String,
+    /// Every `SampleSelection` `fingerprints()` was asked about, so a test can
+    /// assert the orchestrator bound the real `BackupSetRef` into them first.
+    pub fingerprint_calls: std::sync::Arc<std::sync::Mutex<Vec<SampleSelection>>>,
+    pub restored: std::sync::Arc<std::sync::Mutex<bool>>,
+}
+
+impl FixtureEngine {
+    fn new(facts: BackupSetFacts, fingerprints: Vec<RecordFingerprint>) -> Self {
+        Self {
+            set: BackupSetRef {
+                backup_id: facts.backup_id.clone(),
+                manifest_key: "drills/fixture/manifest.json".into(),
+            },
+            facts,
+            fingerprints,
+            coverage: CoverageState::Full,
+            header_honoured: true,
+            preflight_sleep_ms: 0,
+            restore_unknown_keys: Vec::new(),
+            preflight_unknown_keys: Vec::new(),
+            version: "v0.21.0-fixture".into(),
+            digest: format!("sha256:{}", "0".repeat(64)),
+            fingerprint_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            restored: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        }
+    }
+}
+
+impl DataEngine for FixtureEngine {
+    fn id(&self) -> EngineId {
+        EngineId {
+            id: "oso-cli".into(),
+            version: self.version.clone(),
+            digest: self.digest.clone(),
+        }
+    }
+    fn list_backup_sets(&self, _l: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+        Ok(vec![self.set.clone()])
+    }
+    fn describe(&self, _s: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+        Ok(self.facts.clone())
+    }
+    fn preflight(&self, _p: &RestorePlan) -> Result<PreflightReport, EngineError> {
+        if self.preflight_sleep_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(self.preflight_sleep_ms));
+        }
+        Ok(PreflightReport {
+            valid: self.coverage == CoverageState::Full,
+            errors: vec![],
+            warnings: vec![],
+            segments_to_process: 1,
+            records_to_restore: FIXTURE_SAMPLE_RECORDS as u64,
+            time_range: None,
+            partitions: vec![PartitionCoverage {
+                topic: "orders".into(),
+                partition: 0,
+                state: self.coverage.clone(),
+                detail: String::new(),
+            }],
+            header_preflight_honoured: self.header_honoured,
+            unknown_key_warnings: self.preflight_unknown_keys.clone(),
+        })
+    }
+    fn restore(
+        &self,
+        _p: &RestorePlan,
+        o: &mut dyn PhaseObserver,
+    ) -> Result<RestoreFacts, EngineError> {
+        *self.restored.lock().unwrap() = true;
+        o.phase_started(6, "restore");
+        let started_at = Utc::now();
+        o.phase_finished(6, "ok");
+        Ok(RestoreFacts {
+            started_at,
+            finished_at: Utc::now(),
+            exit_code: 0,
+            unknown_key_warnings: self.restore_unknown_keys.clone(),
+        })
+    }
+    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+        self.fingerprint_calls.lock().unwrap().push(s.clone());
+        Ok(self.fingerprints.clone())
+    }
+}
+
+/// A target cluster that both READS and DELETES, which is what
+/// `logweir::drill::TargetClient` needs from one object. `FakeReader` cannot
+/// serve here: it consumes nothing and deletes nothing, and phase 7 has to
+/// read records back.
+pub struct FixtureClient {
+    pub cluster_id: String,
+    pub topics: Vec<TopicMeta>,
+    pub end_offsets: BTreeMap<String, Vec<(i32, i64)>>,
+    pub configs: BTreeMap<String, BTreeMap<String, String>>,
+    pub records: BTreeMap<String, Vec<ConsumedRecord>>,
+    pub deleted: std::sync::Mutex<Vec<String>>,
+}
+
+impl ClusterReader for FixtureClient {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok(self.cluster_id.clone())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(self.topics.clone())
+    }
+    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(self.end_offsets.get(topic).cloned().unwrap_or_default())
+    }
+    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(self.configs.get(topic).cloned().unwrap_or_default())
+    }
+    fn consume_range(
+        &self,
+        t: &str,
+        p: i32,
+        from: i64,
+        max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(self
+            .records
+            .get(t)
+            .map(|rs| {
+                rs.iter()
+                    .filter(|r| r.partition == p && r.offset >= from)
+                    .take(max)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
+impl TopicDeleter for FixtureClient {
+    fn delete_topics(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.deleted.lock().unwrap().extend_from_slice(names);
+        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
+    }
+}
+
+/// A whole drill run, wired against doubles: `RunArgs` on real files, a `Ctx`
+/// whose engine, target client and both stores answer from memory.
+///
+/// `logweir::drill::execute` (the public entry the CLI calls) constructs the
+/// real `Ctx` itself and therefore needs a live broker and the extracted
+/// engine binary — Task 21c's territory. `execute_with` is the same phase
+/// sequence over a `Ctx` the caller supplies, which is what makes the
+/// score-before-sign ordering testable at all here.
+pub struct OrchestratorFixture {
+    pub args: logweir::drill::RunArgs,
+    pub run_id: String,
+    pub ctx: logweir::drill::Ctx,
+    /// The exact bytes the archive holds for the one fixture segment.
+    pub segment_bytes: Vec<u8>,
+    pub out: PathBuf,
+    pub metrics: PathBuf,
+    /// Shared with the `FixtureEngine` inside `ctx`, which is otherwise
+    /// unreachable behind `Box<dyn DataEngine>`.
+    pub fingerprint_calls: std::sync::Arc<std::sync::Mutex<Vec<SampleSelection>>>,
+    _dir: tempfile::TempDir,
+}
+
+pub fn orchestrator_args_against_fixture_engine() -> OrchestratorFixture {
+    orchestrator_fixture(Drill::Passes)
+}
+
+pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
+    use logweir_evidence::{keys::SigningKey, sign::sign_detached};
+
+    let dir = tempfile::tempdir().unwrap();
+    let window_end_ms = ts(FIXTURE_WINDOW_END).timestamp_millis();
+
+    // ---- the spec, and the approval signed over its exact bytes ----
+    let spec_text = format!(
+        "source:\n  \
+           storage:\n    backend: filesystem\n    path: /logweir-fixture-archive\n  \
+           backup: latestCompleted\n  \
+           topics: [orders]\n\
+         target:\n  \
+           bootstrap_servers: [localhost:9092]\n  \
+           marker_topic: {FIXTURE_MARKER_TOPIC}\n  \
+           topic_mapping_prefix: \"drill-\"\n  \
+           default_replication_factor: 1\n  \
+           teardown: delete\n\
+         sample:\n  \
+           window_start: \"{FIXTURE_WINDOW_START}\"\n  \
+           window_end: \"{FIXTURE_WINDOW_END}\"\n  \
+           records_per_partition: {FIXTURE_SAMPLE_RECORDS}\n  \
+           anchor: head\n\
+         objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n\
+         evidence:\n  backend: filesystem\n  path: /logweir-fixture-evidence\n\
+         notifications:\n  webhooks: []\n"
+    );
+    let spec_path = dir.path().join("drill.yaml");
+    std::fs::write(&spec_path, &spec_text).unwrap();
+
+    let signing_pem = dir.path().join("signer.pem");
+    std::fs::copy("../../e2e/fixtures/signed/signing.pem", &signing_pem).unwrap();
+    let signer = SigningKey::from_pem_file(&signing_pem).unwrap();
+
+    let approval_doc = serde_json::json!({
+        "approver": "sre-oncall@example.com",
+        "ticket": "CHG-40881",
+        "plan_hash": logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+        "approved_at": "2026-09-02T17:40:00Z",
+    });
+    let approval_bytes = serde_json::to_vec_pretty(&approval_doc).unwrap();
+    let approval = dir.path().join("approval.json");
+    std::fs::write(&approval, &approval_bytes).unwrap();
+    let side = sign_detached(
+        &signer,
+        logweir::drill::phase1_approval::PAYLOAD_TYPE_APPROVAL,
+        &approval_bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        approval.with_extension("sig"),
+        serde_json::to_vec(&side).unwrap(),
+    )
+    .unwrap();
+    let approver_pub = dir.path().join("approver.pub.pem");
+    write_pub(&signer, &approver_pub);
+
+    let allowed_path = dir.path().join("allowed-clusters.json");
+    std::fs::write(
+        &allowed_path,
+        serde_json::to_vec(&serde_json::json!({
+            "allowed_cluster_ids": [FIXTURE_CLUSTER_ID],
+            "source_cluster_id": serde_json::Value::Null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // ---- the archive: one segment, stored under its own manifest key ----
+    let segment_bytes = b"logweir-fixture-segment-0".to_vec();
+    let archive = logweir_engine_oso::storage::Store::in_memory("");
+    archive
+        .put_create_only(FIXTURE_SEGMENT_KEY, &segment_bytes)
+        .unwrap();
+
+    let facts = orchestrator_facts(&segment_bytes);
+    let (fps, records) = orchestrator_pair(FIXTURE_SAMPLE_RECORDS, window_end_ms);
+
+    let mut engine = FixtureEngine::new(facts, fps);
+    match shape {
+        Drill::BlocksAtPreflight => engine.coverage = CoverageState::Empty,
+        Drill::HasASlowPreflight => engine.preflight_sleep_ms = 1_100,
+        Drill::NamesNoEngine => {
+            engine.version = String::new();
+            engine.digest = String::new();
+        }
+        Drill::IgnoresTheHeaderLever => engine.header_honoured = false,
+        Drill::DropsARenderedKeyDuringRestore => {
+            engine.preflight_unknown_keys = vec!["restore.header_preflight".into()];
+            engine.restore_unknown_keys = vec!["restore.checkpoint_interval_secs".into()];
+        }
+        Drill::Passes | Drill::RestoresNothing => {}
+    }
+
+    // ---- the target cluster ----
+    let restored_hi = if shape == Drill::RestoresNothing {
+        0
+    } else {
+        FIXTURE_SAMPLE_RECORDS as i64
+    };
+    let client = FixtureClient {
+        cluster_id: FIXTURE_CLUSTER_ID.into(),
+        topics: vec![
+            TopicMeta::new(FIXTURE_MARKER_TOPIC, 1),
+            TopicMeta::new("drill-orders", 1),
+        ],
+        end_offsets: [("drill-orders".to_string(), vec![(0, restored_hi)])]
+            .into_iter()
+            .collect(),
+        configs: [(
+            "drill-orders".to_string(),
+            target_configs(&[("cleanup.policy", "delete"), ("retention.ms", "604800000")]),
+        )]
+        .into_iter()
+        .collect(),
+        records: [("drill-orders".to_string(), records)]
+            .into_iter()
+            .collect(),
+        deleted: std::sync::Mutex::new(Vec::new()),
+    };
+
+    let spec: logweir_core::spec::DrillSpec = serde_yaml::from_str(&spec_text).unwrap();
+    let allowed: logweir_core::spec::AllowedClusters =
+        serde_json::from_slice(&std::fs::read(&allowed_path).unwrap()).unwrap();
+
+    let out = dir.path().join("scorecard.json");
+    let metrics = dir.path().join("logweir.prom");
+    let fingerprint_calls = engine.fingerprint_calls.clone();
+    OrchestratorFixture {
+        args: logweir::drill::RunArgs {
+            spec: spec_path,
+            approval,
+            approver_key: approver_pub,
+            allowed_clusters: allowed_path,
+            signing_key: signing_pem,
+            triggered_by: Some("fixture".into()),
+            out: Some(out.clone()),
+            metrics_file: Some(metrics.clone()),
+        },
+        run_id: logweir_core::ids::new_run_id(),
+        ctx: logweir::drill::Ctx {
+            spec,
+            spec_text,
+            allowed,
+            client: Box::new(client),
+            engine: Box::new(engine),
+            archive,
+            store: logweir_engine_oso::storage::Store::in_memory("logweir"),
+        },
+        segment_bytes,
+        out,
+        metrics,
+        fingerprint_calls,
+        _dir: dir,
+    }
+}
+
+/// Every `SampleSelection` the fixture engine was asked to fingerprint, so a
+/// test can assert the orchestrator bound the real `BackupSetRef` into them
+/// first. Reaches through `Ctx::engine`'s trait object by keeping the
+/// `FixtureEngine` reachable, which is why `orchestrator_fixture` holds one.
+pub fn fingerprint_calls(f: &OrchestratorFixture) -> Vec<SampleSelection> {
+    f.fingerprint_calls.lock().unwrap().clone()
+}

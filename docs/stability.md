@@ -72,10 +72,30 @@
     could tell the difference.
   - The real post-upload readback *is* captured — `Store::put_create_only`
     reports whether the conditional put was used, and
-    `Store::object_lock_readback` is consulted — but in v0.1 it is held in
-    memory only and **is not published anywhere an auditor can read.** Making
-    it auditor-visible requires a second signed receipt written *after* the
-    upload, the same shape as the teardown attestation. That is not in v0.1.
+    `Store::object_lock_readback` is consulted — and since Task 21a it **is**
+    published, in a **second signed document written after the upload**:
+
+    ```
+    logweir/drills/<run_id>.receipt.json   # the readback
+    logweir/drills/<run_id>.receipt.sig    # its DSSE sidecar
+    ```
+
+    The receipt carries `create_only_enforced`, `version_id`, `immutable`,
+    `retain_until` and the time they were observed, plus `scorecard_sha256` —
+    the sha256 of the **exact signed scorecard bytes** it describes, so a
+    reader can tell which document the readback belongs to. Its payload type is
+    `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`; verify it
+    the same way as the scorecard, against that type. This is the same shape as
+    the teardown attestation, and for the same reason: a fact that only becomes
+    true after signing needs its own signature rather than a second bite at the
+    first one.
+
+    Read the two documents together. The scorecard is the measurement and
+    under-claims about storage; the receipt is the storage evidence and claims
+    only what the store actually answered. A receipt that fails to upload is a
+    logged warning and never changes the drill's outcome — so its **absence**
+    means "no storage evidence was published for this run", never "the upload
+    was not create-only".
 
   Independently of the above: `object_store` 0.14 — the crate, version and
   feature set Global Constraint 9 fixes — models no Object Lock / WORM API on
