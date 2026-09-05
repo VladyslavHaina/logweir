@@ -217,6 +217,27 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
             ))
         }
     };
+    evaluate_target(&sp, &al, &r)
+}
+
+/// The reachability/allow-list/marker-topic evaluation, factored out of
+/// `check_target` so it can be exercised directly against a stub
+/// `ClusterReader` — no broker needed — in `tests::` below. Mirrors
+/// `drill::phase0_admit::run`'s identical split for the identical reason
+/// (see that function's own doc comment): the marker topic must be
+/// CONFIRMED HEALTHY, not merely named in the list. Fix round 1: this used
+/// to check presence by name alone (`topics.iter().any(...)`), which is the
+/// same defect Task 14 fixed in phase 0 — a topic mid-leader-election, or
+/// one this principal cannot describe, still appears in `list_topics`'s
+/// output (by `TopicMeta`'s own contract) carrying `partitions: 0` and an
+/// `error`, and reporting "ok" on name alone would send an adopter into a
+/// drill phase 0 immediately refuses — the worst possible ordering for
+/// trust in a command whose one job is catching this before a drill runs.
+fn evaluate_target(
+    sp: &logweir_core::spec::DrillSpec,
+    al: &logweir_core::spec::AllowedClusters,
+    r: &dyn ClusterReader,
+) -> CheckResult {
     let id = match r.cluster_id() {
         Ok(id) => id,
         Err(e) => return CheckResult::Failed(format!("target unreachable: {e}")),
@@ -230,14 +251,21 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
         Ok(topics) => topics,
         Err(e) => return CheckResult::Failed(format!("target: {e}")),
     };
-    if !topics.iter().any(|t| t.name == sp.target.marker_topic) {
-        return CheckResult::Failed(format!(
+    match topics.iter().find(|t| t.name == sp.target.marker_topic) {
+        None => CheckResult::Failed(format!(
             "target marker topic `{}` does not exist. Create it on the SCRATCH \
              cluster only — its existence is the v0.1 segregation proof.",
             sp.target.marker_topic
-        ));
+        )),
+        Some(t) if t.error.is_some() => CheckResult::Failed(format!(
+            "target marker topic `{}` exists but its metadata carried an error, so its \
+             presence cannot be confirmed healthy: {}. Recreate it healthy on the SCRATCH \
+             cluster only — its existence is the v0.1 segregation proof.",
+            sp.target.marker_topic,
+            t.error.as_deref().unwrap_or("<no detail>")
+        )),
+        Some(_) => CheckResult::Passed(format!("cluster {id}, marker topic present")),
     }
-    CheckResult::Passed(format!("cluster {id}, marker topic present"))
 }
 
 fn parse_spec(p: &std::path::Path) -> Result<logweir_core::spec::DrillSpec, String> {
@@ -254,5 +282,217 @@ fn engine_path() -> PathBuf {
         d
     } else {
         PathBuf::from("kafka-backup")
+    }
+}
+
+/// Fix round 1 (coordinator ruling on the task-14b review): the CLI-level
+/// tests in `crates/logweir/tests/doctor.rs` assert on `run()`'s AGGREGATE
+/// output. That is blind to one specific mutation: gutting a check's
+/// function body to a fake `Ok`/`Passed` while leaving its entry in the
+/// `checks` Vec untouched, because the entry's own static label still
+/// prints on an "ok" line, and a later check's real, unrelated failure
+/// (`storage`'s unreachable-endpoint skip, or `target`'s ~20s
+/// unreachable-broker timeout) still keeps the overall exit code at 1 —
+/// see task-14b-report.md's "mutant table" for the four survivors this
+/// found (mutants 3-6). These unit tests call each check function DIRECTLY
+/// and assert on ITS OWN return value, so they die at assertion time
+/// regardless of what any other check does. The existing named tests in
+/// `tests/doctor.rs` are unmodified; these are additive.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logweir_core::spec::AllowedClusters;
+    use logweir_kafka::reader::{ConsumedRecord, KafkaError, TopicMeta};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    #[test]
+    fn check_spec_names_an_unparsable_file_as_a_drill_spec_problem() {
+        let e = check_spec(Path::new("../../Cargo.toml")).unwrap_err();
+        assert!(e.contains("drill spec"), "got: {e}");
+    }
+
+    #[test]
+    fn check_allowed_names_an_unparsable_file_as_an_allowed_clusters_problem() {
+        let e = check_allowed(Path::new("../../Cargo.toml")).unwrap_err();
+        assert!(e.contains("allowed-clusters"), "got: {e}");
+    }
+
+    #[test]
+    fn check_approver_names_an_unloadable_file_as_an_approver_key_problem() {
+        let e = check_approver(Path::new("../../Cargo.toml")).unwrap_err();
+        assert!(e.contains("approver key"), "got: {e}");
+    }
+
+    #[test]
+    fn check_storage_names_an_unconstructable_config_as_a_storage_problem() {
+        match check_storage(Path::new("../../e2e/fixtures/drill-bad-storage.yaml")) {
+            CheckResult::Failed(why) => assert!(why.contains("storage"), "got: {why}"),
+            CheckResult::Passed(d) => panic!("expected Failed, got Passed({d})"),
+            CheckResult::Skipped(w) => panic!("expected Failed, got Skipped({w})"),
+        }
+    }
+
+    /// "Could not determine" must be distinguishable from "verified fine".
+    /// `examples/drill.yaml`'s source storage constructs fine (a well-formed
+    /// S3 config) but this process has no MinIO to reach (`just e2e-up`,
+    /// Task 7b, is not running under default `cargo test`) — that MUST be a
+    /// `Skipped`, structurally distinct from `Passed`, never folded into a
+    /// bare `Ok`/"ok" that a reader can't tell from a genuine pass.
+    #[test]
+    fn check_storage_reports_skipped_not_passed_when_it_cannot_reach_a_well_formed_target() {
+        match check_storage(Path::new("../../examples/drill.yaml")) {
+            CheckResult::Skipped(why) => assert!(!why.is_empty()),
+            CheckResult::Passed(d) => panic!(
+                "a storage this process cannot reach must never report Passed \
+                 (undetectable false confidence): got Passed({d})"
+            ),
+            CheckResult::Failed(why) => panic!(
+                "a well-formed but unreachable storage must Skip, not Fail: got Failed({why})"
+            ),
+        }
+    }
+
+    struct StubReader {
+        cluster_id: Result<String, KafkaError>,
+        topics: Result<Vec<TopicMeta>, KafkaError>,
+    }
+
+    impl ClusterReader for StubReader {
+        fn cluster_id(&self) -> Result<String, KafkaError> {
+            self.cluster_id.clone()
+        }
+        fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+            self.topics.clone()
+        }
+        fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+            Ok(vec![])
+        }
+        fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+            Ok(BTreeMap::new())
+        }
+        fn consume_range(
+            &self,
+            _topic: &str,
+            _partition: i32,
+            _from: i64,
+            _max: usize,
+        ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+            Ok(vec![])
+        }
+    }
+
+    fn spec_with_marker_topic(marker: &str) -> logweir_core::spec::DrillSpec {
+        let yaml = format!(
+            "source:\n  storage:\n    backend: filesystem\n    path: /tmp\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [localhost:9092]\n  marker_topic: \"{marker}\"\n  \
+             topic_mapping_prefix: \"drill-\"\n\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {{}}\n\
+             evidence:\n  backend: filesystem\n  path: /tmp\n"
+        );
+        serde_yaml::from_str(&yaml).expect("fixture spec must parse")
+    }
+
+    fn allowed(ids: &[&str]) -> AllowedClusters {
+        AllowedClusters {
+            allowed_cluster_ids: ids.iter().map(|s| s.to_string()).collect(),
+            source_cluster_id: None,
+        }
+    }
+
+    #[test]
+    fn evaluate_target_passes_when_the_marker_topic_is_healthy() {
+        let sp = spec_with_marker_topic("logweir.scratch");
+        let al = allowed(&["ALLOWED0000000000000000"]);
+        let r = StubReader {
+            cluster_id: Ok("ALLOWED0000000000000000".into()),
+            topics: Ok(vec![TopicMeta::new("logweir.scratch", 1)]),
+        };
+        match evaluate_target(&sp, &al, &r) {
+            CheckResult::Passed(_) => {}
+            other => panic!(
+                "expected Passed, got a Failed/Skipped instead: {}",
+                match other {
+                    CheckResult::Failed(w) => w,
+                    CheckResult::Skipped(w) => w,
+                    CheckResult::Passed(_) => unreachable!(),
+                }
+            ),
+        }
+    }
+
+    /// Fix round 1, item 2: the identical defect Task 14 fixed in phase 0
+    /// (`drill::phase0_admit`) — a marker topic present in `list_topics`'s
+    /// output but carrying an `error` (leader election, an authorization
+    /// gap) must be a NAMED failure, distinguishable from the topic being
+    /// absent, never read as healthy on name alone.
+    #[test]
+    fn evaluate_target_fails_when_the_marker_topic_is_present_but_errored() {
+        let sp = spec_with_marker_topic("logweir.scratch");
+        let al = allowed(&["ALLOWED0000000000000000"]);
+        let r = StubReader {
+            cluster_id: Ok("ALLOWED0000000000000000".into()),
+            topics: Ok(vec![TopicMeta::errored(
+                "logweir.scratch",
+                "leader election in progress",
+            )]),
+        };
+        match evaluate_target(&sp, &al, &r) {
+            CheckResult::Failed(why) => {
+                assert!(why.contains("logweir.scratch"), "got: {why}");
+                assert!(why.contains("leader election in progress"), "got: {why}");
+            }
+            CheckResult::Passed(d) => panic!(
+                "an errored marker topic must never report Passed (the exact defect Task 14 \
+                 fixed in phase 0): got Passed({d})"
+            ),
+            CheckResult::Skipped(w) => panic!("expected Failed, got Skipped({w})"),
+        }
+    }
+
+    #[test]
+    fn evaluate_target_fails_when_the_marker_topic_is_absent() {
+        let sp = spec_with_marker_topic("logweir.scratch");
+        let al = allowed(&["ALLOWED0000000000000000"]);
+        let r = StubReader {
+            cluster_id: Ok("ALLOWED0000000000000000".into()),
+            topics: Ok(vec![]),
+        };
+        match evaluate_target(&sp, &al, &r) {
+            CheckResult::Failed(why) => {
+                assert!(why.contains("logweir.scratch"), "got: {why}");
+                assert!(why.contains("does not exist"), "got: {why}");
+            }
+            other => panic!(
+                "expected Failed, got: {}",
+                match other {
+                    CheckResult::Passed(d) => d,
+                    CheckResult::Skipped(w) => w,
+                    CheckResult::Failed(_) => unreachable!(),
+                }
+            ),
+        }
+    }
+
+    #[test]
+    fn evaluate_target_fails_when_the_cluster_is_not_in_the_allow_list() {
+        let sp = spec_with_marker_topic("logweir.scratch");
+        let al = allowed(&["SOMETHING_ELSE0000000000"]);
+        let r = StubReader {
+            cluster_id: Ok("ALLOWED0000000000000000".into()),
+            topics: Ok(vec![TopicMeta::new("logweir.scratch", 1)]),
+        };
+        match evaluate_target(&sp, &al, &r) {
+            CheckResult::Failed(why) => assert!(why.contains("not in allowedClusterIds"), "{why}"),
+            other => panic!(
+                "expected Failed, got: {}",
+                match other {
+                    CheckResult::Passed(d) => d,
+                    CheckResult::Skipped(w) => w,
+                    CheckResult::Failed(_) => unreachable!(),
+                }
+            ),
+        }
     }
 }
