@@ -30,22 +30,10 @@ pub struct RdKafkaReader {
 
 impl RdKafkaReader {
     pub fn connect(bootstrap: &[String], auth: AuthConfig) -> Result<Self, KafkaError> {
-        let mut c = ClientConfig::new();
-        c.set("bootstrap.servers", bootstrap.join(","))
+        // Shared by both clients this constructs.
+        let mut base = ClientConfig::new();
+        base.set("bootstrap.servers", bootstrap.join(","))
             .set("client.id", "logweir-drill")
-            .set("group.id", "logweir-canary-do-not-commit")
-            .set("enable.auto.commit", "false") // never commit on any cluster
-            .set("enable.partition.eof", "true")
-            // A `from` outside the log's retained range must be a loud,
-            // distinguishable error, not a silent reseek to a DIFFERENT
-            // offset whose records get fingerprinted as if they were the
-            // ones asked for [VERIFIED rdkafka-sys 4.10.0+2.12.1's vendored
-            // librdkafka/CONFIGURATION.md:203 — default is `largest`
-            // ("latest"); 'error' is the documented alternative that
-            // "trigger[s] an error (ERR__AUTO_OFFSET_RESET) which is
-            // retrieved by consuming messages"]. See `consume_range`'s
-            // handling of `KafkaError::MessageConsumption(AutoOffsetReset)`.
-            .set("auto.offset.reset", "error")
             // Explicit rather than relying on the default: librdkafka's own
             // docs note the consumer default (false) already differs from
             // the producer default (true) and from the Java consumer
@@ -57,14 +45,14 @@ impl RdKafkaReader {
             .set("allow.auto.create.topics", "false");
         match auth {
             AuthConfig::Plaintext => {
-                c.set("security.protocol", "PLAINTEXT");
+                base.set("security.protocol", "PLAINTEXT");
             }
             AuthConfig::ScramSha512 {
                 username,
                 password,
                 tls,
             } => {
-                c.set(
+                base.set(
                     "security.protocol",
                     if tls { "SASL_SSL" } else { "SASL_PLAINTEXT" },
                 )
@@ -78,9 +66,37 @@ impl RdKafkaReader {
                 ));
             }
         }
-        let consumer: BaseConsumer = c.create().map_err(|e| KafkaError::Client(e.to_string()))?;
-        let admin: AdminClient<DefaultClientContext> =
-            c.create().map_err(|e| KafkaError::Client(e.to_string()))?;
+        // Fix round 2, nit M7: these four properties are meaningful only to
+        // a CONSUMER. Setting them on `base` and sharing `base` with the
+        // admin client's `create()` (the previous shape) made librdkafka log
+        // a `CONFWARN` for every one of them when the admin client's
+        // underlying (producer-shaped) handle was built — four lines of
+        // noise interleaved into `doctor`'s check list, and into every
+        // `drill run`'s log, on every single connection. Cloning `base` here
+        // means the admin client's `create()` below never sees these keys at
+        // all, so librdkafka has nothing to warn about — this removes the
+        // cause rather than filtering the symptom.
+        let mut consumer_cfg = base.clone();
+        consumer_cfg
+            .set("group.id", "logweir-canary-do-not-commit")
+            .set("enable.auto.commit", "false") // never commit on any cluster
+            .set("enable.partition.eof", "true")
+            // A `from` outside the log's retained range must be a loud,
+            // distinguishable error, not a silent reseek to a DIFFERENT
+            // offset whose records get fingerprinted as if they were the
+            // ones asked for [VERIFIED rdkafka-sys 4.10.0+2.12.1's vendored
+            // librdkafka/CONFIGURATION.md:203 — default is `largest`
+            // ("latest"); 'error' is the documented alternative that
+            // "trigger[s] an error (ERR__AUTO_OFFSET_RESET) which is
+            // retrieved by consuming messages"]. See `consume_range`'s
+            // handling of `KafkaError::MessageConsumption(AutoOffsetReset)`.
+            .set("auto.offset.reset", "error");
+        let consumer: BaseConsumer = consumer_cfg
+            .create()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let admin: AdminClient<DefaultClientContext> = base
+            .create()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
         Ok(Self {
             consumer,
             admin,

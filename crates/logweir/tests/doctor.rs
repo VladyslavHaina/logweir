@@ -102,3 +102,15 @@ fn check_7_an_unreachable_target_is_named_as_a_target_problem() {
     a[0] = ("--spec", "../../e2e/fixtures/drill-unreachable.yaml");
     assert_fails_with(doctor(&a, &ENGINE_OK), "target");
 }
+
+/// Fix round 2, M3: a reachable archive holding zero backup sets must be a
+/// NAMED failure end-to-end through the CLI, not just at the unit-test
+/// level (`doctor::tests::check_storage_fails_on_a_reachable_but_empty_archive`
+/// in `src/doctor.rs`) — mirrors `check_6_...`'s own shape for the
+/// unconstructable-config case.
+#[test]
+fn check_6b_a_reachable_but_empty_archive_is_named_as_a_storage_problem() {
+    let mut a = OK_ARGS;
+    a[0] = ("--spec", "../../e2e/fixtures/drill-empty-archive.yaml");
+    assert_fails_with(doctor(&a, &ENGINE_OK), "zero backup sets");
+}

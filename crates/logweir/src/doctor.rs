@@ -18,6 +18,14 @@ pub struct DoctorArgs {
     pub spec: PathBuf,
     pub allowed_clusters: PathBuf,
     pub approver_key: PathBuf,
+    /// Fix round 2, M5: a plain `0` exit does not distinguish "all seven
+    /// checks verified" from "storage skipped, the rest verified" — both are
+    /// silently the same to a script keying on exit code alone. GC11 leaves
+    /// no third exit code to add, so this is the non-breaking way: an
+    /// opt-in flag that maps `skipped > 0` onto `ExitCode::Operational`
+    /// instead of leaving it at `Ok`. Default `false` keeps today's
+    /// behaviour (a skip never fails a run that had no way to look).
+    pub strict: bool,
 }
 
 /// The outcome of one check. `Skipped` exists so a check that needs a live
@@ -76,12 +84,31 @@ pub fn run(args: &DoctorArgs) -> ExitCode {
     }
     if skipped > 0 {
         println!("\n{skipped} check(s) skipped — run `just e2e-up` to exercise them.");
+        if args.strict {
+            eprintln!(
+                "--strict: {skipped} check(s) were never actually looked at, which counts as \
+                 not verified."
+            );
+        }
     } else {
         println!(
             "\nAll checks passed. `logweir drill run` should work against this configuration."
         );
     }
-    ExitCode::Ok
+    skip_verdict(skipped, args.strict)
+}
+
+/// The `--strict`/skip-count decision (fix round 2, M5), factored out as a
+/// pure function so it is unit-testable on its own: reaching the "all seven
+/// genuinely passed vs. one skipped" branch of `run()` end-to-end needs a
+/// live, reachable target (`just e2e-up`, Task 7b), which the default
+/// `cargo test` run does not have (GR2) — this needs neither.
+fn skip_verdict(skipped: usize, strict: bool) -> ExitCode {
+    if skipped > 0 && strict {
+        ExitCode::Operational
+    } else {
+        ExitCode::Ok
+    }
 }
 
 /// 1. `$LOGWEIR_ENGINE_BIN`, else /usr/local/bin/kafka-backup, else `kafka-backup`
@@ -106,14 +133,61 @@ fn check_engine_present() -> Result<String, String> {
 }
 
 /// 2. `--version` matches the pin.
+///
+/// Fix round 2, M1: `out.status` used to be discarded entirely, so an engine
+/// that could not run AT ALL (wrong architecture, missing interpreter, not
+/// executable) fell through to the same "version mismatch" text as an engine
+/// that ran fine and printed a different number. On darwin — the demo
+/// platform — `Command::output()` for the pinned linux/amd64 binary does not
+/// return an `Err` (unlike, say, a plain ENOENT for a missing file): the
+/// process runs (traditional Unix execve-without-a-recognised-magic falls
+/// back to `/bin/sh`), and `/bin/sh` itself prints "cannot execute binary
+/// file" to stderr and exits non-zero (conventionally 126) — so the SECOND
+/// line of the first command in the demo told a Mac user to go hunt a
+/// version problem that did not exist. `out.status.success()` is now
+/// consulted before anything else.
 fn check_engine_version() -> Result<String, String> {
-    let out = std::process::Command::new(engine_path())
+    let path = engine_path();
+    let out = std::process::Command::new(&path)
         .arg("--version")
         .output()
-        .map_err(|e| format!("cannot execute the engine: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "the engine at {} could not be executed: {e}. This usually means the wrong \
+                 architecture (the pinned kafka-backup is linux/amd64 only) or a missing \
+                 interpreter/dynamic linker — not a version mismatch.",
+                path.display()
+            )
+        })?;
+    evaluate_engine_version(&path, &out)
+}
+
+/// Split out of `check_engine_version` (fix round 2) so the exec-failure /
+/// version-mismatch distinction is directly unit-testable against a
+/// hand-built `std::process::Output` — no subprocess, no platform
+/// dependence, so the darwin-specific failure mode above is pinned on every
+/// CI runner regardless of what engine (if any) is actually installed there.
+fn evaluate_engine_version(
+    path: &std::path::Path,
+    out: &std::process::Output,
+) -> Result<String, String> {
     let s =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    if s.contains("0.21.0") {
+    if !out.status.success() {
+        return Err(format!(
+            "the engine at {} exited {} without producing version output: `{}`. This is an \
+             EXECUTION failure, not a version mismatch — on darwin/arm64 the pinned linux/amd64 \
+             binary cannot run natively (see check 1's glibc >= 2.36 / libssl3 / CA-bundle note); \
+             use the container image or a linux/amd64 host.",
+            path.display(),
+            out.status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "via a signal".into()),
+            s.trim()
+        ));
+    }
+    if version_matches(&s) {
         Ok(s.trim().to_string())
     } else {
         Err(format!(
@@ -121,6 +195,34 @@ fn check_engine_version() -> Result<String, String> {
             s.trim()
         ))
     }
+}
+
+/// Fix round 2, M6: `s.contains("0.21.0")` accepted `0.21.01`, `10.21.0` and
+/// `0.21.0-rc1` — Global Constraint 8 pins an EXACT version. Matches the pin
+/// only when it is not immediately adjacent to another digit or `.` (rules
+/// out `10.21.0` and `0.21.01`) and not immediately followed by `-` (rules
+/// out a `0.21.0-rc1` prerelease suffix), i.e. as a whole version token.
+fn version_matches(s: &str) -> bool {
+    const PIN: &str = "0.21.0";
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = s.get(start..).and_then(|s| s.find(PIN)) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || {
+            let c = bytes[idx - 1];
+            !(c.is_ascii_digit() || c == b'.')
+        };
+        let after = idx + PIN.len();
+        let after_ok = after >= bytes.len() || {
+            let c = bytes[after];
+            !(c.is_ascii_digit() || c == b'.' || c == b'-')
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
 }
 
 fn check_spec(p: &std::path::Path) -> Result<String, String> {
@@ -152,10 +254,13 @@ fn check_approver(p: &std::path::Path) -> Result<String, String> {
 }
 
 /// 6. One `list` against the configured prefix — proves credentials, endpoint
-///    and bucket in a single call. A storage configuration that will not
-///    construct is a FAILURE; a well-formed one this process cannot reach is a
-///    SKIP, because `cargo test` and CI run with no MinIO (`just e2e-up`,
-///    Task 7b).
+///    and bucket in a single call, AND that the archive holds something a
+///    drill could restore from (fix round 2, M3). A storage configuration
+///    that will not construct, or that constructs but is EMPTY, is a
+///    FAILURE. A credentials/not-found error is also a FAILURE, distinct
+///    from a genuinely unreachable endpoint (fix round 2, M4), which is the
+///    only case that SKIPs — `cargo test` and CI run with no MinIO (`just
+///    e2e-up`, Task 7b).
 ///
 /// Uses `Store::read_only_from_url`, never `Store::from_url`: `source.storage`
 /// names the OSO archive being READ, not the evidence bucket that
@@ -171,20 +276,92 @@ fn check_storage(spec: &std::path::Path) -> CheckResult {
         Ok(sp) => sp,
         Err(e) => return CheckResult::Failed(format!("storage: cannot read the drill spec: {e}")),
     };
+    let loc = storage_location(&sp.source.storage);
     let st = match logweir_engine_oso::storage::Store::read_only_from_url(&sp.source.storage) {
         Ok(st) => st,
         Err(e) => return CheckResult::Failed(format!("storage: {e}")),
     };
     match st.list_manifest_keys(sp.source.storage.prefix()) {
-        Ok(keys) => CheckResult::Passed(format!(
-            "{} backup set(s) under {}",
-            keys.len(),
-            sp.source.storage.prefix()
+        // Fix round 2, M3: a reachable archive holding ZERO backup sets used
+        // to print `ok`. `source.backup: latestCompleted` has nothing to
+        // select from an empty archive and a drill against it fails in
+        // phase 1 — this is the build's signature defect ("a check that
+        // cannot fail") arriving in doctor: a green line in front of a
+        // guaranteed-failing drill. Reachable-and-empty is now its own
+        // FAILURE, distinct from reachable-with-backups (`Passed`) and from
+        // unreachable (`Skipped`, below).
+        Ok(keys) if keys.is_empty() => CheckResult::Failed(format!(
+            "storage at {loc} is reachable but holds zero backup sets. `source.backup: {}` has \
+             nothing to select, and a drill against this configuration would fail in phase 1 — \
+             point --spec at an archive that has completed at least one backup.",
+            sp.source.backup
         )),
-        Err(e) => CheckResult::Skipped(format!(
-            "storage at {} not reachable ({e}); run `just e2e-up` to exercise this check",
-            sp.source.storage.prefix()
-        )),
+        Ok(keys) => CheckResult::Passed(format!("{} backup set(s) under {loc}", keys.len())),
+        Err(e) => classify_storage_error(&loc, &e.to_string()),
+    }
+}
+
+/// Fix round 2, M4: every `Err` from `list_manifest_keys` used to become an
+/// unconditional `Skipped` naming `just e2e-up` as the remedy. An S3
+/// `AccessDenied` (wrong credentials) or a not-found bucket/prefix (a typo)
+/// landed there too, alongside a genuinely down MinIO — telling someone with
+/// a credentials problem to go start a local compose stack wastes their
+/// time, and contradicts this check's own doc comment ("proves credentials,
+/// endpoint and bucket"). Classified against `object_store::Error`'s own
+/// Display text [VERIFIED object_store-0.14.1/src/lib.rs:2233-2331:
+/// `NotFound` renders "... not found: ...", `PermissionDenied` renders
+/// "...necessary privileges...", `Unauthenticated` renders "...valid
+/// authentication credentials..."] — `list_keys`
+/// (`crates/logweir-engine-oso/src/storage.rs:289`) stringifies the
+/// underlying `object_store::Error` directly via `.to_string()`, so these
+/// exact phrases survive into the `EngineError` this function receives.
+/// Anything that does not match one of those three (connection refused, DNS
+/// failure, a timeout) is a genuine reachability gap and still SKIPs.
+fn classify_storage_error(loc: &str, e: &str) -> CheckResult {
+    let el = e.to_ascii_lowercase();
+    if el.contains("necessary privileges") || el.contains("valid authentication credentials") {
+        CheckResult::Failed(format!(
+            "storage credentials at {loc} were rejected: {e}. This is a credentials/permissions \
+             problem — `just e2e-up` will not fix it. Check the access key, secret and bucket \
+             policy."
+        ))
+    } else if el.contains("not found") {
+        CheckResult::Failed(format!(
+            "storage location {loc} was not found: {e}. This looks like a configuration problem \
+             (a typo'd bucket, container or prefix) — `just e2e-up` will not fix it."
+        ))
+    } else {
+        CheckResult::Skipped(format!(
+            "storage at {loc} not reachable ({e}); run `just e2e-up` to exercise this check"
+        ))
+    }
+}
+
+/// A human-readable location for `check_storage`'s messages. `StorageUrl`'s
+/// own `prefix()` method returns `""` for `Filesystem` (it has no such
+/// field), so interpolating "under {prefix}" alone (the round-1 shape) left
+/// a message ending in a dangling "under " for that backend (fix round 2,
+/// M3, second half) — this names the backend's own bucket/container/path,
+/// appending the prefix only when there is one to show.
+fn storage_location(u: &logweir_core::engine::StorageUrl) -> String {
+    use logweir_core::engine::StorageUrl;
+    match u {
+        StorageUrl::S3 { bucket, prefix, .. } => with_prefix(format!("s3://{bucket}"), prefix),
+        StorageUrl::Azure {
+            account_name,
+            container_name,
+            prefix,
+        } => with_prefix(format!("azure://{account_name}/{container_name}"), prefix),
+        StorageUrl::Gcs { bucket, prefix } => with_prefix(format!("gcs://{bucket}"), prefix),
+        StorageUrl::Filesystem { path } => path.display().to_string(),
+    }
+}
+
+fn with_prefix(base: String, prefix: &str) -> String {
+    if prefix.is_empty() {
+        base
+    } else {
+        format!("{base}/{prefix}")
     }
 }
 
@@ -273,16 +450,70 @@ fn parse_spec(p: &std::path::Path) -> Result<logweir_core::spec::DrillSpec, Stri
     serde_yaml::from_str(&t).map_err(|e| e.to_string())
 }
 
+/// Fix round 2, M2: the "else `kafka-backup` on $PATH" fallback this
+/// function's own doc comment promises could never fire. It used to return
+/// the BARE name `PathBuf::from("kafka-backup")`, and `check_engine_present`
+/// tests that with `.exists()` — which stats the name relative to the
+/// current working directory, never `$PATH`. So an operator with a
+/// correctly installed `kafka-backup` on `$PATH` (anywhere other than their
+/// cwd or `/usr/local/bin`) was told "no engine at kafka-backup", while
+/// check 2's `Command::new("kafka-backup")` WOULD have found it (exec-family
+/// calls search `$PATH` for a bare name; `stat`/`exists` do not) — the two
+/// checks disagreed about where the same binary lives. This now performs the
+/// same `$PATH` scan `execve` would, so whatever this function returns is
+/// something `.exists()` can answer correctly AND `Command::new` will run —
+/// one resolution, consulted by both checks.
 fn engine_path() -> PathBuf {
     if let Ok(p) = std::env::var("LOGWEIR_ENGINE_BIN") {
         return PathBuf::from(p);
     }
     let d = PathBuf::from("/usr/local/bin/kafka-backup");
     if d.exists() {
-        d
-    } else {
-        PathBuf::from("kafka-backup")
+        return d;
     }
+    if let Some(found) = which_on_path("kafka-backup") {
+        return found;
+    }
+    // Nothing resolved: fall through to the bare name so the failure
+    // message still names what was being looked for. `.exists()` on this
+    // correctly reports absent — it is no longer being asked to resolve
+    // `$PATH` itself.
+    PathBuf::from("kafka-backup")
+}
+
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    find_on_path(&path, name)
+}
+
+/// The `$PATH`-search logic, factored out as a pure function of an explicit
+/// `PATH`-like value so it is unit-testable without touching this process's
+/// real environment (`std::env::set_var` on a shared test binary risks
+/// racing other tests reading `PATH`/`LOGWEIR_ENGINE_BIN` concurrently).
+/// Mirrors what `execve` does for a bare command name: scan each directory
+/// in order, return the first entry that exists and is executable.
+fn find_on_path(path_var: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_var).find_map(|dir| {
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &std::path::Path) -> bool {
+    p.is_file()
 }
 
 /// Fix round 1 (coordinator ruling on the task-14b review): the CLI-level
@@ -305,6 +536,17 @@ mod tests {
     use logweir_kafka::reader::{ConsumedRecord, KafkaError, TopicMeta};
     use std::collections::BTreeMap;
     use std::path::Path;
+
+    /// Test-only formatter for a `CheckResult` a test did NOT expect, so a
+    /// failing `match`'s `panic!` names the payload it actually got instead
+    /// of just "a different variant".
+    fn describe(r: &CheckResult) -> String {
+        match r {
+            CheckResult::Passed(d) => format!("Passed({d})"),
+            CheckResult::Skipped(w) => format!("Skipped({w})"),
+            CheckResult::Failed(w) => format!("Failed({w})"),
+        }
+    }
 
     #[test]
     fn check_spec_names_an_unparsable_file_as_a_drill_spec_problem() {
@@ -494,5 +736,189 @@ mod tests {
                 }
             ),
         }
+    }
+
+    // ---- Fix round 2 -----------------------------------------------------
+
+    /// Fix round 2, M5's regression test: `--strict` must turn a skip into a
+    /// failure, and must never fail a run with zero skips even under
+    /// `--strict`. Pure-function unit test — reaching this branch of
+    /// `run()` for real needs a live, reachable target (`just e2e-up`), which
+    /// the default `cargo test` run does not have (GR2).
+    #[test]
+    fn skip_verdict_is_ok_without_strict_regardless_of_skips() {
+        assert_eq!(skip_verdict(0, false), ExitCode::Ok);
+        assert_eq!(skip_verdict(3, false), ExitCode::Ok);
+    }
+
+    #[test]
+    fn skip_verdict_is_operational_under_strict_only_when_something_was_skipped() {
+        assert_eq!(skip_verdict(0, true), ExitCode::Ok);
+        assert_eq!(skip_verdict(1, true), ExitCode::Operational);
+    }
+
+    #[test]
+    fn version_matches_accepts_only_the_exact_pin() {
+        assert!(version_matches("kafka-backup 0.21.0"));
+        assert!(version_matches("kafka-backup 0.21.0\n"));
+        assert!(version_matches("0.21.0"));
+        assert!(!version_matches("kafka-backup 0.19.1"));
+        assert!(
+            !version_matches("kafka-backup 0.21.01"),
+            "must reject a longer patch number"
+        );
+        assert!(
+            !version_matches("kafka-backup 10.21.0"),
+            "must reject a different major version"
+        );
+        assert!(
+            !version_matches("kafka-backup 0.21.0-rc1"),
+            "must reject a prerelease suffix"
+        );
+    }
+
+    fn fake_output(exit_code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(exit_code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// Fix round 2, M1's regression test: an engine that could not execute
+    /// at all must never be reported as a version mismatch. Built from a
+    /// hand-crafted `std::process::Output` (exit 126, the conventional shell
+    /// "command found but not executable" code) rather than a real
+    /// subprocess, so this is pinned on every platform regardless of what
+    /// engine binary (if any) happens to be installed on the CI runner.
+    #[test]
+    fn evaluate_engine_version_names_an_exec_failure_distinctly_from_a_version_mismatch() {
+        let out = fake_output(126, "", "kafka-backup: ...: cannot execute binary file\n");
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
+        assert!(
+            !e.contains("version mismatch: expected"),
+            "must not claim a version mismatch for a binary that never ran: {e}"
+        );
+        assert!(
+            e.contains("EXECUTION failure") || e.contains("architecture"),
+            "must name the real problem: {e}"
+        );
+    }
+
+    #[test]
+    fn evaluate_engine_version_names_a_real_version_mismatch_when_the_engine_ran_successfully() {
+        let out = fake_output(0, "kafka-backup 0.19.1\n", "");
+        let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).unwrap_err();
+        assert!(e.contains("version mismatch: expected 0.21.0"), "got: {e}");
+    }
+
+    #[test]
+    fn evaluate_engine_version_passes_on_an_exact_pin_match() {
+        let out = fake_output(0, "kafka-backup 0.21.0\n", "");
+        assert!(evaluate_engine_version(Path::new("/fake/kafka-backup"), &out).is_ok());
+    }
+
+    /// Fix round 2, M2's regression test: a bare name on `$PATH`, not in the
+    /// current directory and not in `/usr/local/bin`, must resolve. Uses a
+    /// synthetic `PATH`-like value (two tempdirs) rather than the real
+    /// process environment — see `find_on_path`'s doc comment for why.
+    #[test]
+    fn find_on_path_resolves_a_bare_name_through_path_entries_in_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let empty_dir = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let exe = bin_dir.path().join("kafka-backup");
+        std::fs::write(&exe, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path_var = std::env::join_paths([empty_dir.path(), bin_dir.path()]).unwrap();
+        assert_eq!(find_on_path(&path_var, "kafka-backup"), Some(exe));
+    }
+
+    #[test]
+    fn find_on_path_skips_a_non_executable_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        // `fs::write` does not set the executable bit.
+        std::fs::write(dir.path().join("kafka-backup"), "not executable").unwrap();
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(find_on_path(&path_var, "kafka-backup"), None);
+    }
+
+    #[test]
+    fn find_on_path_returns_none_when_nothing_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(find_on_path(&path_var, "kafka-backup"), None);
+    }
+
+    /// Fix round 2, M3's regression test: a reachable archive holding zero
+    /// backup sets must FAIL, never `Passed`. `e2e/fixtures/empty-archive/`
+    /// is a real, checked-in, genuinely empty directory (tracked via its
+    /// `.gitkeep`, which does not end in `/manifest.json` and so never
+    /// counts as a backup set itself).
+    #[test]
+    fn check_storage_fails_on_a_reachable_but_empty_archive() {
+        match check_storage(Path::new("../../e2e/fixtures/drill-empty-archive.yaml")) {
+            CheckResult::Failed(why) => assert!(why.contains("zero backup sets"), "got: {why}"),
+            other => panic!("expected Failed, got: {}", describe(&other)),
+        }
+    }
+
+    /// Fix round 2, M4: credentials/permission and not-found errors must be
+    /// named as FAILURES, distinct from a genuine reachability gap, which
+    /// alone SKIPs. The input strings mirror `object_store::Error`'s own
+    /// Display text verbatim (verified against
+    /// object_store-0.14.1/src/lib.rs:2233-2331), which is exactly the text
+    /// that reaches `classify_storage_error` in production, since
+    /// `list_keys` stringifies that error directly.
+    #[test]
+    fn classify_storage_error_treats_permission_denied_as_failed_not_skipped() {
+        let e = "operational: The operation lacked the necessary privileges to complete for \
+                 path logweir/x: 403 Forbidden";
+        match classify_storage_error("s3://bucket", e) {
+            CheckResult::Failed(why) => assert!(why.contains("credentials"), "got: {why}"),
+            other => panic!("expected Failed, got: {}", describe(&other)),
+        }
+    }
+
+    #[test]
+    fn classify_storage_error_treats_unauthenticated_as_failed_not_skipped() {
+        let e = "operational: The operation lacked valid authentication credentials for path \
+                 logweir/x: InvalidAccessKeyId";
+        match classify_storage_error("s3://bucket", e) {
+            CheckResult::Failed(why) => assert!(why.contains("credentials"), "got: {why}"),
+            other => panic!("expected Failed, got: {}", describe(&other)),
+        }
+    }
+
+    #[test]
+    fn classify_storage_error_treats_not_found_as_failed_not_skipped() {
+        let e = "operational: Object at location logweir/x not found: 404 Not Found";
+        match classify_storage_error("s3://bucket", e) {
+            CheckResult::Failed(why) => assert!(why.contains("configuration"), "got: {why}"),
+            other => panic!("expected Failed, got: {}", describe(&other)),
+        }
+    }
+
+    #[test]
+    fn classify_storage_error_treats_a_generic_transport_error_as_skipped_not_failed() {
+        let e = "operational: Generic S3 error: error sending request for url \
+                 (http://127.0.0.1:1/): connection refused";
+        match classify_storage_error("s3://bucket", e) {
+            CheckResult::Skipped(_) => {}
+            other => panic!("expected Skipped, got: {}", describe(&other)),
+        }
+    }
+
+    /// Fix round 2, M3's second half: `Filesystem` has no `prefix()`, so
+    /// naming it must not end in a dangling "under " with nothing after it.
+    #[test]
+    fn storage_location_never_ends_in_a_dangling_under_for_filesystem() {
+        let u = logweir_core::engine::StorageUrl::Filesystem {
+            path: std::path::PathBuf::from("/tmp/archive"),
+        };
+        let loc = storage_location(&u);
+        assert!(!loc.ends_with("under "), "got: {loc}");
+        assert_eq!(loc, "/tmp/archive");
     }
 }

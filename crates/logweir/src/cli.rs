@@ -27,6 +27,12 @@ pub enum Command {
         allowed_clusters: PathBuf,
         #[arg(long)]
         approver_key: PathBuf,
+        /// Fix round 2, M5: treat any skipped check (e.g. `storage` with no
+        /// live bucket to list against) as a failure to verify, exiting 1
+        /// instead of 0. Off by default — a skip alone must not fail a run
+        /// that genuinely had no way to look (addendum A2/A4).
+        #[arg(long)]
+        strict: bool,
     },
 }
 

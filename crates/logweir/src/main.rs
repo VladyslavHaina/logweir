@@ -30,10 +30,12 @@ fn main() -> std::process::ExitCode {
             spec,
             allowed_clusters,
             approver_key,
+            strict,
         } => logweir::doctor::run(&logweir::doctor::DoctorArgs {
             spec,
             allowed_clusters,
             approver_key,
+            strict,
         }),
         cli::Command::Drill(cli::DrillCmd::Verify {
             scorecard,
