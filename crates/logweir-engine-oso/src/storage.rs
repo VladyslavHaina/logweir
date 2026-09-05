@@ -366,7 +366,11 @@ impl Store {
     /// straight through: a real archive at `s3://bucket` with a non-empty
     /// `prefix` would have every returned segment key 404 in `get`, reporting
     /// a present backup's segments as missing.
-    fn qualify(&self, relative_key: &str) -> String {
+    ///
+    /// `pub` since Task 21c: `OsoCliEngine::describe` must qualify the segment
+    /// keys it lifts out of a manifest body for exactly the same reason
+    /// `segments_in_manifest` does, and it lives in a different module.
+    pub fn qualify(&self, relative_key: &str) -> String {
         if self.prefix.is_empty() {
             relative_key.to_string()
         } else {

@@ -11,4 +11,17 @@ e2e = []
 
 [dependencies]
 
+# Task 21c. The e2e suites drive the SHIPPED `logweir` binary as a subprocess;
+# these are here for the things a test process must do itself — mint and sign an
+# approval over the exact spec bytes, read the target cluster, and parse the
+# signed scorecard.
 [dev-dependencies]
+logweir = { path = "../crates/logweir" }
+logweir-core = { path = "../crates/logweir-core" }
+logweir-engine-oso = { path = "../crates/logweir-engine-oso" }
+logweir-evidence = { path = "../crates/logweir-evidence" }
+logweir-kafka = { path = "../crates/logweir-kafka" }
+base64.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

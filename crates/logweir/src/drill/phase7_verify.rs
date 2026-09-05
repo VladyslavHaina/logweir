@@ -681,7 +681,24 @@ fn segment_evidence(store: &Store, segs: &[&SegmentFacts]) -> Result<Evidence, D
         // `DrillError`'s existing `#[from] EngineError`, rather than adding a
         // second `From` impl for a type this crate does not own.
         let (bytes, _vid) = store.get(&seg.key).map_err(EngineError::from)?;
-        if logweir_core::ids::sha256_prefixed(&bytes) != seg.sha256 {
+        // Compared as BARE HEX on both sides. `SegmentFacts.sha256` is copied
+        // verbatim out of the engine's manifest, where the field is bare hex
+        // (`"sha256": "27f6c448…"` — measured against a real 0.21.0 manifest);
+        // `sha256_prefixed` produces Logweir's own `sha256:<hex>` form, which
+        // is what `engine.digest`, `approval.plan_hash` and
+        // `target.topic_mapping_sha256` use. Comparing the two forms directly
+        // made EVERY segment of a real archive report
+        // "sha256 mismatch against the manifest", so the segment lane could
+        // never return `Verified` outside the unit tests — which construct
+        // `SegmentFacts` by hand and happen to write the prefixed form. Found
+        // by Task 21c against MinIO. The `strip_prefix` accepts either form, so
+        // a manifest that ever adopts the prefixed spelling still compares
+        // correctly.
+        let want = seg
+            .sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(seg.sha256.as_str());
+        if logweir_core::ids::sha256_hex(&bytes) != want {
             tracing::error!(target: "logweir::verify", key = %seg.key,
                             "sha256 mismatch against the manifest");
             failed.push(seg.key.clone());

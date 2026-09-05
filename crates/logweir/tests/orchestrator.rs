@@ -934,3 +934,31 @@ fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
         "the key and the digest must name the same object"
     );
 }
+
+/// REGRESSION (Task 21c, found the first time the orchestrator was pointed at a
+/// real engine). `build_plan` puts the restore checkpoint at
+/// `temp_dir()/logweir-<run_id>/checkpoint.json`, and `drill::context` creates a
+/// DIFFERENT directory (`logweir-<pid>`, for the rendered restore.yaml).
+/// Nothing created the checkpoint's parent, and the engine does not create it
+/// either, so `kafka-backup restore` exited 1 with a bare
+/// `IO error: No such file or directory (os error 2)` on every run against the
+/// real binary — on any host, CI included. Every existing test passed, because
+/// every engine in this suite is a double that never opens the path.
+///
+/// This asserts the directory the plan names actually exists once the drill has
+/// run, which is the only thing the real engine needs from it.
+#[test]
+fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let dir = std::env::temp_dir().join(format!("logweir-{}", f.run_id));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!dir.exists(), "the fixture must start without it");
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("fixture drill passes");
+    assert!(
+        dir.is_dir(),
+        "{} was never created, so the engine's `restore.checkpoint_state` has no \
+         parent directory to write into",
+        dir.display()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -66,3 +66,41 @@ pub fn check_topic_mapping_coverage(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GR7 / Global Constraint 4: the phase-0 guard is the backstop for a
+    /// forbidden key that reaches a rendered restore document by any route.
+    /// It is exercised against a constructed document, because no Logweir code
+    /// path may exist that is capable of emitting the key — global ruling GR7
+    /// deleted the `LOGWEIR_TEST_INJECT_DRY_RUN` hook Task 21c's brief
+    /// proposed, and Global Constraint 4 admits no test or debug exception.
+    ///
+    /// The expected value is the DOTTED PATH `target.dry_run`, not the bare
+    /// key name the addendum's snippet wrote: `scan_forbidden_keys` reports
+    /// where it found the key, which is the only form an operator can act on.
+    #[test]
+    fn a_dry_run_key_in_a_rendered_restore_document_is_caught_by_the_key_scan() {
+        let rendered = "\
+target:
+  bootstrap_servers: kafka-broker-1:9094
+  create_topics: true
+  dry_run: true
+";
+        assert_eq!(
+            scan_forbidden_keys(rendered),
+            vec!["target.dry_run".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_key_at_value_false_is_caught_identically() {
+        let rendered = "target:\n  dry_run: false\n";
+        assert_eq!(
+            scan_forbidden_keys(rendered),
+            vec!["target.dry_run".to_string()]
+        );
+    }
+}

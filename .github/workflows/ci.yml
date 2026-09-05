@@ -40,6 +40,45 @@ jobs:
         # running it — the obligation is closed, not silently long-lived.
         continue-on-error: true
         run: cargo test --workspace -- --ignored
+  # Task 21c. The only job that runs Logweir end to end against a real broker,
+  # a real MinIO and a real archive. Deliberately a SEPARATE job from `build`:
+  # it needs Docker, it takes minutes rather than seconds, and its failures mean
+  # something different from a unit-test failure.
+  #
+  # linux/amd64 runner, so `.engine/kafka-backup` executes natively and
+  # `harness::engine_bin`'s probe picks it over `e2e/fixtures/engine-docker.sh`.
+  # The harness PRINTS which route it took; read that line before trusting a
+  # green run on any other architecture.
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake
+      # `docs/verify_scorecard.py` is the auditor's independent verifier and the
+      # e2e suite runs it on every signed artifact. `harness::python_verify`
+      # PANICS rather than skipping when `cryptography` is missing, so this
+      # install is load-bearing, not decoration.
+      - run: pip install cryptography
+      - name: Extract the pinned engine
+        run: ./scripts/extract-engine.sh
+      - run: docker compose -f e2e/compose/docker-compose.yml up -d --wait
+      - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
+      - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
+      # A SUCCESSFUL SEED ALWAYS DIRTIES THE TREE (scripts/e2e-seed.sh says so
+      # in those words): the two refreshed fixtures are not byte-reproducible.
+      # Never add a `git diff --exit-code` after this step.
+      - run: ./scripts/e2e-seed.sh
+      - run: cargo test --workspace --features e2e -- --test-threads=1
+      - if: always()
+        run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: compose-logs, path: /tmp/compose.log }
+      - if: always()
+        run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
+
   python-verifier:
     runs-on: ubuntu-24.04
     steps:

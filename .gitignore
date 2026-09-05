@@ -18,3 +18,8 @@
 .env.local
 .demo/
 /upstream/
+# Task 21c: the e2e suite's scratch directory — generated specs, approvals,
+# per-run keys, the allowlist built from the LIVE cluster id, the scorecard the
+# run wrote with --out, and the TMPDIR the engine container mounts. All of it is
+# reproduced by running the suite; none of it is evidence.
+/.e2e/

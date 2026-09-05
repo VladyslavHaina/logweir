@@ -6,7 +6,13 @@ source:
   storage:
     backend: s3
     bucket: kafka-backups
-    prefix: basic-demo
+    # `scripts/e2e-seed.sh` backs up under `backup_id: drill-demo`
+    # (e2e/compose/config/backup-drill.yaml), so this is the prefix the archive
+    # actually lives at. It read `basic-demo` — the name of a DIFFERENT upstream
+    # demo — until Task 21c ran this example against the real stack and got
+    # "the archive holds no backup set at the configured source storage
+    # location".
+    prefix: drill-demo
     region: us-east-1
     endpoint: http://localhost:9000
     path_style: true

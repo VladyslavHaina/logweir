@@ -464,6 +464,71 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
     );
 }
 
+/// REGRESSION (Task 21c, found against MinIO). A real 0.21.0 manifest stores
+/// each segment's digest as BARE HEX (`"sha256": "27f6c448…"`), while
+/// `logweir_core::ids::sha256_prefixed` produces Logweir's own `sha256:<hex>`
+/// form. `segment_evidence` compared the two directly, so every segment of
+/// every real archive reported "sha256 mismatch against the manifest" and the
+/// segment lane could never return `Verified` outside these tests — which
+/// construct `SegmentFacts` by hand and happen to write the prefixed form.
+///
+/// This is the same scenario as
+/// `a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only`
+/// with ONE difference: the manifest's digest is spelled the way the engine
+/// actually spells it.
+#[test]
+fn a_manifest_sha256_in_the_engines_bare_hex_form_still_verifies() {
+    let bytes = b"segment payload for verify phase test";
+    let bare_hex = logweir_core::ids::sha256_hex(bytes);
+    assert!(
+        !bare_hex.starts_with("sha256:"),
+        "this test is only meaningful if the value really is unprefixed"
+    );
+    let store = logweir_engine_oso::storage::Store::in_memory("logweir");
+    store.put_create_only("logweir/seg.kbak", bytes).unwrap();
+    let facts = facts_with_segment(&bare_hex);
+    let (archive, cons) = fixtures::matching_pair(50);
+
+    let mut topics = BTreeMap::new();
+    topics.insert(
+        "drill-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 50)],
+            configs: fixtures::target_configs(&[
+                ("cleanup.policy", "delete"),
+                ("retention.ms", "-1"),
+            ]),
+            records: cons,
+        },
+    );
+    let reader = MapReader { topics };
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "partial_reason: {:?}",
+        out.integrity.partial_reason
+    );
+    assert_eq!(out.integrity.level, IntegrityLevel::ByteFingerprint);
+    assert_eq!(out.integrity.mismatches, 0);
+}
+
 /// Pins the sha256 check's OWN contribution to `integrity.result`, distinct
 /// from the canary comparison: the canary side matches perfectly here, so a
 /// `Fail` can only have come from the sha256 mismatch. Guards against a

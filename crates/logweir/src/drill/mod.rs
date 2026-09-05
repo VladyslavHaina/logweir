@@ -523,6 +523,22 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
     // to produce `rto_excluding_preflight_seconds`. Measuring it anywhere
     // else would score the header sweep no incident responder performs.
     let plan = build_plan(&c.spec, &set, &admitted.topic_mapping, run_id);
+    // The engine writes its restore checkpoint to `plan.checkpoint_state` and
+    // does NOT create that file's parent directory. `context` creates the
+    // workdir it renders restore.yaml into (`logweir-<pid>`); the checkpoint
+    // lives beside it under `logweir-<run_id>`, which nothing created — so
+    // `kafka-backup restore` exited 1 with a bare
+    // `IO error: No such file or directory (os error 2)` on EVERY run, on any
+    // host. Found by Task 21c the first time the orchestrator was pointed at a
+    // real archive; before that, no test in the workspace ever reached the
+    // engine's `restore` subcommand with a real binary behind it.
+    //
+    // `Operational`, not a guard refusal: a scratch directory that cannot be
+    // created says nothing about the archive.
+    if let Some(dir) = plan.checkpoint_state.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
+    }
     let (verdict, report) = record(&mut sc, 5, "preflight", || {
         let r = c.engine.preflight(&plan)?;
         Ok((phase5_preflight::adjudicate(&r), r))

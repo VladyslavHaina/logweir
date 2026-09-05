@@ -146,7 +146,26 @@ impl DataEngine for OsoCliEngine {
                                 .segments
                                 .iter()
                                 .map(|s| SegmentFacts {
-                                    key: s.key.clone(),
+                                    // QUALIFIED, not the manifest's own
+                                    // relative key. A manifest body stores
+                                    // `{backup_id}/topics/...` relative to the
+                                    // configured storage prefix (see
+                                    // `Store::qualify`), and `SegmentFacts.key`
+                                    // is consumed by `phase7_verify::
+                                    // segment_evidence` as an argument to
+                                    // `Store::get`. Passing the relative key
+                                    // through made every segment of a real
+                                    // archive with a non-empty prefix 404 in
+                                    // `get` — so the byte-fingerprint segment
+                                    // lane could never verify anything against
+                                    // a real bucket, only against a
+                                    // `Filesystem` store (whose prefix is `""`)
+                                    // and the in-memory doubles. Found by Task
+                                    // 21c the first time phase 7 read segments
+                                    // out of MinIO; `segments_in_manifest` in
+                                    // storage.rs already carried the identical
+                                    // fix and this call site was missed.
+                                    key: self.store.qualify(&s.key),
                                     start_offset: s.start_offset,
                                     end_offset: s.end_offset,
                                     start_timestamp: s.start_timestamp,

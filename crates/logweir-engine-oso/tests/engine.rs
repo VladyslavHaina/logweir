@@ -915,3 +915,73 @@ fn oso_cli_engine_must_override_validation_run_once_docker_is_available() {
          subprocess override is owed here"
     );
 }
+
+/// REGRESSION (Task 21c, found against MinIO). A manifest body stores every
+/// segment key RELATIVE to the configured storage prefix
+/// (`{backup_id}/topics/...`), and `Store::get` operates in the fully-qualified
+/// key space. `describe()` copied the relative key straight into
+/// `SegmentFacts.key`, and `phase7_verify::segment_evidence` then handed that
+/// to `Store::get` — so on any archive with a non-empty prefix (which is every
+/// real one) phase 7 died with "object not found at
+/// drill-demo/topics/orders/partition=1/segment-…" before it could verify
+/// anything. `storage.rs`'s `segments_in_manifest` already carried this exact
+/// fix and its doc comment already described this exact failure; the
+/// `describe()` call site was simply missed.
+///
+/// The prefix here is `logweir` only because `put_create_only` refuses to seed
+/// an in-memory store anywhere else (Global Constraint 6); what the test needs
+/// is any prefix that is not empty.
+#[test]
+fn describe_returns_segment_keys_that_store_get_can_actually_resolve() {
+    let store = Store::in_memory("logweir");
+    let manifest = br#"{
+  "backup_id": "b1",
+  "created_at": 1756425600000,
+  "topics": [
+    {"name": "orders", "original_partition_count": 1, "partitions": [
+      {"partition_id": 0, "segments": [
+        {"key": "b1/topics/orders/partition=0/segment-00000000000000000000.bin",
+         "start_offset": 0, "end_offset": 4, "start_timestamp": 1756425600000,
+         "end_timestamp": 1756425600100, "record_count": 5,
+         "sha256": "abc", "uploaded_at": 1756425600200}
+      ]}
+    ]}
+  ]
+}"#;
+    store
+        .put_create_only("logweir/b1/manifest.json", manifest)
+        .unwrap();
+    let segment = b"segment bytes";
+    store
+        .put_create_only(
+            "logweir/b1/topics/orders/partition=0/segment-00000000000000000000.bin",
+            segment,
+        )
+        .unwrap();
+
+    let engine = engine_with("../../e2e/fixtures/fake-engine-clean.sh", store);
+    let facts = engine
+        .describe(&BackupSetRef {
+            backup_id: "b1".into(),
+            manifest_key: "logweir/b1/manifest.json".into(),
+        })
+        .unwrap();
+    let key = &facts.topics[0].partitions[0].segments[0].key;
+    assert_eq!(
+        key, "logweir/b1/topics/orders/partition=0/segment-00000000000000000000.bin",
+        "the key must be qualified into the store's key space, not the manifest's own \
+         relative form"
+    );
+
+    // The point of qualifying it: a consumer can `get` it. This is the call
+    // `phase7_verify::segment_evidence` makes.
+    let store2 = Store::in_memory("logweir");
+    store2
+        .put_create_only(
+            "logweir/b1/topics/orders/partition=0/segment-00000000000000000000.bin",
+            segment,
+        )
+        .unwrap();
+    let (bytes, _) = store2.get(key).unwrap();
+    assert_eq!(bytes, segment);
+}
