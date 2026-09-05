@@ -26,6 +26,15 @@ fn main() -> std::process::ExitCode {
     };
     let code = match args.command {
         cli::Command::Schema { which } => schema::run(&which),
+        cli::Command::Doctor {
+            spec,
+            allowed_clusters,
+            approver_key,
+        } => logweir::doctor::run(&logweir::doctor::DoctorArgs {
+            spec,
+            allowed_clusters,
+            approver_key,
+        }),
         cli::Command::Drill(cli::DrillCmd::Verify {
             scorecard,
             signature,

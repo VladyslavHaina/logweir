@@ -1,0 +1,53 @@
+# A copy of examples/drill.yaml whose source.storage cannot construct a
+# Store at all, for Task 14b's check_6 doctor test.
+#
+# The addendum's literal text asks for a `source.storage` "URL field" set to
+# `ftp://example.invalid/bucket`, written when StorageUrl was still assumed
+# to be a bare URL string. It is not: logweir_core::engine::StorageUrl is an
+# internally-tagged enum matching upstream kafka-backup's own
+# StorageBackendConfig shape (backend: s3 | azure | gcs | filesystem, each
+# with its own required fields), so a stray URL string in that position is a
+# *parse* failure (caught by check 3, "drill spec"), not a *storage
+# construction* failure (check 6, "storage"). Per the addendum's own
+# fallback instruction ("if ... `from_url` accepts unknown schemes, use
+# `::::` instead — do not weaken the check to make the fixture work"), this
+# fixture instead uses `backend: filesystem` with a `path` that cannot exist:
+# `Store::read_only_from_url` -> `LocalFileSystem::new_with_prefix` calls
+# `std::fs::canonicalize` on it and fails synchronously, with no network
+# involved, deterministically on every machine this fixture runs on.
+source:
+  storage:
+    backend: filesystem
+    path: /nonexistent/logweir-drill-bad-storage-fixture
+  backup: latestCompleted
+  topics: [orders, payments]
+
+target:
+  bootstrap_servers: [localhost:9092]
+  marker_topic: logweir.scratch
+  topic_mapping_prefix: "drill-"
+  default_replication_factor: 1
+  teardown: delete
+
+sample:
+  window_start: "2026-08-29T00:00:00Z"
+  window_end:   "2026-08-30T02:00:00Z"
+  records_per_partition: 25
+  anchor: random
+
+objectives:
+  rto_seconds: 900
+  rpo_seconds: 300
+  pass_rate: 1.0
+
+evidence:
+  backend: s3
+  bucket: logweir-evidence
+  prefix: logweir/
+  region: us-east-1
+  endpoint: http://localhost:9000
+  path_style: true
+  allow_http: true
+
+notifications:
+  webhooks: []
