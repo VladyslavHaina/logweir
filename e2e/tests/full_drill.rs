@@ -78,6 +78,17 @@ fn a_full_drill_produces_a_signed_scorecard_with_real_numbers() {
     assert_eq!(count_partitions("drill-orders"), 3);
     assert_eq!(sc["target_diff"]["level"], "full");
     assert!(sc["target_diff"]["would_create"].is_array());
+
+    // `sample.anchor` is a String in the signed document (GC12), so the closed
+    // set is not enforced by the type at that boundary — assert it here, against
+    // what the shipped binary actually wrote. The named unit sibling is
+    // `orchestrator.rs`'s
+    // `the_signed_scorecards_sample_anchor_is_always_one_of_the_closed_set`.
+    let anchor = sc["sample"]["anchor"].as_str().expect("sample.anchor");
+    assert!(
+        ["head", "tail", "random"].contains(&anchor),
+        "sample.anchor `{anchor}` is outside the closed set"
+    );
 }
 
 /// The signed artifact must be exactly the bytes that were signed. A verifier

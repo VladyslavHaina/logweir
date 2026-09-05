@@ -73,7 +73,12 @@ pub fn run(
     // not apply.
     if spec.sample.anchor != Anchor::Head {
         return Err(GuardRefusal(format!(
-            "sample.anchor `{}` is not supported in v0.1; only `head` is. Phase 7 reconciles              the restored topic by reading its FIRST sample.records_per_partition records,              while `{}` selects archive records from elsewhere in the window — the two would              compare different records and report a healthy backup as a failure. Set              `sample.anchor: head`, or omit the field (that is now its default). Refusing              rather than silently sampling `head` under a plan that asked for `{}`.",
+            "sample.anchor `{}` is not supported in v0.1; only `head` is. Phase 7 reconciles \
+             the restored topic by reading its FIRST sample.records_per_partition records, \
+             while `{}` selects archive records from elsewhere in the window — the two would \
+             compare different records and report a healthy backup as a failure. Set \
+             `sample.anchor: head`, or omit the field (that is now its default). Refusing \
+             rather than silently sampling `head` under a plan that asked for `{}`.",
             spec.sample.anchor, spec.sample.anchor, spec.sample.anchor
         ))
         .into());
@@ -369,6 +374,47 @@ mod tests {
                 }
                 other => panic!("expected a guard refusal (exit 3) for {anchor}, got {other:?}"),
             }
+        }
+    }
+
+    /// The refusal message is the ENTIRE explanation a refused operator gets,
+    /// and it is the shape of thing that breaks silently: a multi-line Rust
+    /// string literal without a trailing `\` bakes the source indentation into
+    /// the message, so it reaches the terminal as
+    /// "Phase 7 reconciles              the restored topic". That exact defect
+    /// shipped here, and shipped in `phase4_sample.rs` earlier in the build, so
+    /// it gets an assertion rather than a promise.
+    #[test]
+    fn the_anchor_refusal_message_is_single_spaced_prose_not_source_indentation() {
+        let mut spec = spec_with(&["orders"], "drill-");
+        spec.sample.anchor = Anchor::Random;
+        let reader = healthy_reader("ALLOWED0000000000000000", &spec.target.marker_topic);
+        let msg = match run(
+            &spec,
+            "restore: {}\n",
+            &allowed(&["ALLOWED0000000000000000"], None),
+            &reader,
+        )
+        .unwrap_err()
+        {
+            DrillError::Guard(GuardRefusal(m)) => m,
+            other => panic!("expected a guard refusal, got {other:?}"),
+        };
+        assert!(
+            !msg.contains("  "),
+            "the refusal message carries a run of spaces from the source \
+             indentation of its own string literal:\n{msg}"
+        );
+        assert!(!msg.contains('\n'), "it is one line: {msg}");
+        // …and it still says the things an operator needs: what was refused,
+        // what to do instead, and why.
+        for needle in [
+            "sample.anchor `random`",
+            "only `head` is",
+            "`sample.anchor: head`",
+            "report a healthy backup as a failure",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in:\n{msg}");
         }
     }
 

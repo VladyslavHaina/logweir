@@ -962,3 +962,37 @@ fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// FIX 3 (Task 21c fix round 2). `logweir_core::scorecard::SampleInfo.anchor`
+/// is a `String`, not `Anchor`: Global Constraint 12 freezes `format_version` at
+/// 1.0.0 and retyping a published field is not an optional addition. Only
+/// `Anchor::as_str()` writes it today, so it cannot drift in practice — but
+/// "cannot drift in practice" is an argument, not a check. This is the check.
+///
+/// It reads the SIGNED bytes, not the in-memory struct, because the signed
+/// document is the thing an auditor validates against the published schema.
+#[test]
+fn the_signed_scorecards_sample_anchor_is_always_one_of_the_closed_set() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("fixture drill passes");
+    let signed: serde_json::Value = serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    let anchor = signed["sample"]["anchor"]
+        .as_str()
+        .expect("sample.anchor is a JSON string");
+
+    // Round-tripping THROUGH the enum is the assertion: a value outside the
+    // closed set does not deserialize, whatever it is.
+    let parsed: logweir_core::spec::Anchor = serde_json::from_value(anchor.into())
+        .unwrap_or_else(|e| panic!("sample.anchor `{anchor}` is outside the closed set: {e}"));
+    assert_eq!(
+        parsed.as_str(),
+        anchor,
+        "the wire spelling must survive the round trip unchanged"
+    );
+    // Belt: the set itself, spelled out, so a variant added without thinking
+    // about the signed format has to come through here.
+    assert!(
+        ["head", "tail", "random"].contains(&anchor),
+        "sample.anchor `{anchor}` is not one of head|tail|random"
+    );
+}

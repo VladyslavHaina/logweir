@@ -108,6 +108,46 @@ this in the `build` job.
   `immutable`/`retain_until` today. A bucket genuinely under Object Lock will
   not be recognised as such until that API exists.
 
+### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
+
+`sample.anchor` chooses WHICH records in the sampled window a drill reconciles.
+The spec vocabulary is `head`, `tail` and `random`, and **v0.1 implements only
+`head`.** A plan naming either of the other two is REFUSED at phase 0 with
+**exit 3** — before anything runs, no scorecard written, nothing uploaded — and
+the message names the limitation.
+
+Why they are refused rather than run: phase 4 honours the anchor when choosing
+which ARCHIVE records to fingerprint, while phase 7 reconciles by reading the
+restored topic's FIRST `sample.records_per_partition` records. For `head` those
+are the same records. For `tail` and `random` they are not, so the drill would
+compare two different sets and report a healthy backup as a failure.
+
+The two are refused for different reasons, which matters if you are wondering
+how hard they are to add. `tail` is not expensive — reading the last N records
+of the target is a bounded read — it is **unsound**: the target's last N records
+are the last N of the RESTORED window, which match the archive's last N in the
+sampled window only if the restore wrote every in-window record contiguously,
+and that is the very property the drill is measuring. `random` is unsound in the
+same way and additionally unbounded, since reaching offsets spread across the
+window means reading the whole span between them. Measured on
+this repository's own compose stack (338 records per partition, 25 sampled):
+`random` overlapped in 2 offsets and scored `pass_rate_measured: 0.08` with
+`outcome: fail-integrity` against a byte-for-byte correct restore.
+
+Refusing is deliberate, and it is not the same as quietly substituting `head`:
+running a different sample than the approved plan named would make the signed
+scorecard record an anchor the drill never applied.
+
+**What to do:** set `sample.anchor: head`, or omit the field — `head` is the
+default. If you were relying on `random` to rotate coverage across runs, rotate
+the sampled WINDOW between drills instead; that varies which records are
+examined while keeping the anchor at `head`.
+
+An unrecognised spelling (`sample.anchor: sideways`) is a different failure: the
+spec does not parse, and the drill exits **1** naming the offending value. It
+can never degrade to head-like behaviour, because `anchor` is a closed enum
+rather than a free-form string.
+
 ### A compacted target topic is reported as a mismatch, not as `partial`
 
 `integrity.result: partial` exists for a sample the drill could not fully

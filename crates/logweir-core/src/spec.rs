@@ -116,15 +116,33 @@ fn n25() -> usize {
 /// and `Head` as the default removes (1) for everyone who does not ask for
 /// something else. `Tail` and `Random` remain SPELLABLE and are REFUSED by
 /// `phase0_admit::run` with exit 3, before anything runs, naming the
-/// limitation: they select archive offsets phase 7's leading-range read cannot
-/// reach, and making it reach them means either seeking the target by original
-/// offset (unsound — a scratch topic's offsets are window-relative, which is
-/// exactly why `phase7_verify::compare` reads `x-original-offset` instead of
-/// trusting positions) or consuming the whole span between the lowest and
-/// highest sampled offsets (unbounded — on a million-record partition a
-/// `random` sample would read the entire partition, which is the opposite of
-/// what sampling is for). Refusing is the honest answer until phase 7 gains a
-/// read strategy that can honour them.
+/// limitation. They are refused for DIFFERENT reasons, and the distinction
+/// matters to whoever lifts the refusal:
+///
+/// - **`Tail` is UNSOUND, not unbounded.** Reading the last `count` records of
+///   the target is perfectly bounded — phase 6 already reads the target's end
+///   offsets, so `consume_range(topic, partition, hi - count, count)` needs no
+///   new machinery. What it returns is the last `count` records OF THE RESTORED
+///   WINDOW, and phase 4's `Tail` selects the last `count` archive records IN
+///   THE SAMPLED WINDOW. Those coincide only if the restore wrote every
+///   in-window record contiguously with none dropped or filtered — which is
+///   exactly the property the drill exists to test, so it may not be assumed. A
+///   drill that assumed it would reconcile the wrong records precisely when the
+///   restore was faulty.
+/// - **`Random` is both.** Its offsets are spread across the window, so
+///   reaching them means either seeking the target by original offset (unsound
+///   for the same reason plus one more — a scratch topic's offsets are
+///   window-relative, which is why `phase7_verify::compare` reads
+///   `x-original-offset` instead of trusting positions) or consuming the whole
+///   span between the lowest and highest sampled offsets, which on a
+///   million-record partition reads the entire partition and is the opposite of
+///   what sampling is for.
+///
+/// Refusing is the honest answer until phase 7 gains a read strategy that can
+/// honour them. Note also that both lanes share `verdict_for_selection`'s one
+/// `consumed` vector — `records_restored` and the consume-only lane's "at least
+/// `claimed` records read back" obligation are computed from it — so changing
+/// the read strategy is a change to both, not to the fingerprint lane alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Anchor {
