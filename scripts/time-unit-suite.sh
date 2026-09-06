@@ -47,6 +47,47 @@ case "$SUITE_CMD" in
         ;;
 esac
 
+# ------------------------------------------------------- the toolchain pin
+# FIX ROUND 2 (review N1). This harness runs every test binary STANDALONE for
+# its attribution pass, and `crates/logweir-core/tests/fixture_regen.rs` — the
+# only test in the workspace that spawns a nested cargo — then builds into
+# `target/fixture-regen/`.
+#
+# Standalone, that child does NOT inherit the `RUSTUP_TOOLCHAIN` that `cargo
+# test` propagates. `env!("CARGO")` bakes in the real
+# `~/.rustup/toolchains/1.89.0-.../bin/cargo`, which is not a rustup proxy, so
+# the `rustc` it finds on PATH is rustup's shim with no toolchain selected —
+# and that resolved rustup's DEFAULT channel (`stable`, 1.97.1 here) rather
+# than this workspace's pin. MEASURED: `target/fixture-regen/` came out built
+# by rustc 1.97.1, after which every `cargo test --workspace` failed with
+# `E0514: found crate ... compiled by an incompatible version of rustc`, whose
+# only printed remedy is `cargo clean` — the one command this task exists to
+# make unnecessary. Worse, resolving `stable` made rustup SYNC THE CHANNEL FROM
+# THE NETWORK, from inside a lint gate (GC17).
+#
+# Exporting the pin fixes both at once: the child resolves the pinned rustc,
+# and rustup has nothing to fetch. VERIFIED: with the pin exported the
+# standalone run passes, writes rustc 1.89.0 artifacts, emits zero
+# "syncing channel updates" lines, and leaves `cargo test --workspace` green.
+if [ -f rust-toolchain.toml ]; then
+    PINNED_TOOLCHAIN="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)"
+    PIN_SOURCE="rust-toolchain.toml"
+else
+    # No pin file: fall back to the workspace's declared MSRV, and SAY so —
+    # `rust-version` is a floor, not a pin, so it is a weaker guarantee.
+    PINNED_TOOLCHAIN="$(sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+    PIN_SOURCE="Cargo.toml rust-version (no rust-toolchain.toml — an MSRV floor, not a pin)"
+fi
+if [ -z "$PINNED_TOOLCHAIN" ]; then
+    echo "time-unit-suite: cannot determine the pinned toolchain from rust-toolchain.toml or Cargo.toml." >&2
+    echo "time-unit-suite: REFUSING to run. Standalone test binaries here spawn a nested cargo, and" >&2
+    echo "  without a pin it resolves rustup's DEFAULT toolchain — which poisons target/fixture-regen" >&2
+    echo "  with artifacts from the wrong rustc and makes rustup fetch a channel from the network." >&2
+    exit 1
+fi
+export RUSTUP_TOOLCHAIN="$PINNED_TOOLCHAIN"
+echo "time-unit-suite: toolchain pinned to $RUSTUP_TOOLCHAIN (from $PIN_SOURCE)"
+
 # ---------------------------------------------------------------- clock
 # `date +%s` is whole seconds everywhere; python3 gives sub-second resolution
 # where it exists (two other gates in scripts/ already need a python3, so this
@@ -96,11 +137,16 @@ fi
 
 # ------------------------------------------------------------------ total
 echo "time-unit-suite: timing \`$SUITE_CMD\`"
+# Captured to a file rather than piped: the exit code must be read on its own
+# line, and the verdict below needs to quote the suite's FIRST real failure
+# instead of guessing at a cause (review, prerequisite finding).
+suite_log="$(mktemp)"
 t0="$(now)"
-$SUITE_CMD
+$SUITE_CMD > "$suite_log" 2>&1
 suite_rc=$?
 t1="$(now)"
 total="$(elapsed "$t0" "$t1")"
+cat "$suite_log"
 
 echo ""
 echo "time-unit-suite: command      $SUITE_CMD"
@@ -113,9 +159,26 @@ echo "time-unit-suite: budget_secs  $SUITE_BUDGET"
 # carries the time is the whole diagnosis — in the 20-minute regime EVERY
 # binary cost ~30 s regardless of content, which is what identified cargo's
 # fingerprint scan rather than any test as the cause.
+#
+# ONLY WHEN THE SUITE PASSED (fix round 2: review N1 and the prerequisite
+# finding). Timing a suite that is already failing measures the failure, not
+# the suite: with `.engine/kafka-backup` missing, this pass reported
+# `emit_fixture_reproduces_the_committed_scorecard_bytes (5.04s)` under the
+# heading "almost always dialling" — a test that neither dials nor is slow,
+# and was merely rebuilding a dependency tree. A gate that names the wrong
+# cause costs more than one that names none. When the suite fails the verdict
+# quotes the suite's own first panic and stops; nothing is left for a
+# stopwatch to add, and fixture_regen is never run standalone on that path.
+#
+# The block below is deliberately NOT indented under its `if`: it contains a
+# quoted heredoc, and an indented terminator does not terminate one.
+slowest_test=""
+slowest_test_secs=0
+over_budget=0
+if [ "$suite_rc" -eq 0 ]; then
 bins="$(mktemp)"
 arts="$(mktemp)"
-trap 'rm -f "$bins" "$arts" "$bins.tests"' EXIT
+trap 'rm -f "$bins" "$arts" "$bins.tests" "$suite_log"' EXIT
 cargo test --workspace --no-run --message-format=json > "$arts" 2>/dev/null
 # One TAB-separated `<test binary>\t<package dir>` line per test artifact.
 # python3 when it is there (two other gates in scripts/ already need one and
@@ -145,9 +208,6 @@ nbins="$(wc -l < "$bins" | tr -d ' ')"
 
 echo ""
 echo "time-unit-suite: per test binary, serial (--test-threads=1), $nbins binaries"
-slowest_test=""
-slowest_test_secs=0
-over_budget=0
 while IFS="	" read -r exe dir; do
     [ -n "$exe" ] || continue
     [ -x "$exe" ] || continue
@@ -163,7 +223,11 @@ while IFS="	" read -r exe dir; do
     bsecs="$(elapsed "$b0" "$b1")"
     printf '  %8ss  rc=%s  %s\n' "$bsecs" "$brc" "$(basename "$exe")"
     if [ "$brc" -ne 0 ]; then
-        echo "    ^ exited $brc run on its own — the timing below it is not trustworthy" >&2
+        # Do NOT drill in. A failing binary's per-test timings are the cost of
+        # whatever is failing, and reporting one of them as "over the per-test
+        # budget" blames an innocent test for a prerequisite problem.
+        echo "    ^ exited $brc on its own — timing skipped; that is a failure to fix, not a slow test" >&2
+        continue
     fi
 
     # A binary under the per-test budget cannot hold a test over it.
@@ -189,11 +253,32 @@ while IFS="	" read -r exe dir; do
         rm -f "$bins.tests"
     fi
 done < "$bins"
+else
+echo ""
+echo "time-unit-suite: the suite FAILED, so the per-binary attribution pass is SKIPPED."
+echo "time-unit-suite: fix the failure first — a stopwatch adds nothing to a red suite."
+fi
 
 # ------------------------------------------------------------------ verdict
 rc=0
 if [ "$suite_rc" -ne 0 ]; then
     echo "time-unit-suite: FAIL — \`$SUITE_CMD\` exited $suite_rc" >&2
+    # SAY WHAT ACTUALLY FAILED. The root message is usually excellent and
+    # usually ~600 lines above the verdict an operator reads, so it is quoted
+    # here. The prerequisite failures this most often surfaces say exactly what
+    # to run — `run \`just engine\` first: .../.engine/kafka-backup missing`
+    # is the common one — and repeating them costs two lines.
+    panic_at="$(grep -m1 -n 'panicked at' "$suite_log")"
+    if [ -n "$panic_at" ]; then
+        panic_line="${panic_at%%:*}"
+        echo "  first failure in the suite:" >&2
+        sed -n "${panic_line},$((panic_line + 1))p" "$suite_log" | sed 's/^/    /' >&2
+        echo "  (search the output above for 'panicked at' for the rest)" >&2
+    else
+        echo "  no 'panicked at' line found — the suite failed to build or was killed." >&2
+        echo "  The last lines of its output:" >&2
+        tail -n 5 "$suite_log" | sed 's/^/    /' >&2
+    fi
     rc=1
 fi
 if over "$total" "$SUITE_BUDGET"; then
@@ -203,12 +288,16 @@ if over "$total" "$SUITE_BUDGET"; then
     echo "  target/debug/deps, not the tests: run ./scripts/check-deps-count.sh." >&2
     rc=1
 fi
+# Only reachable when the suite PASSED — the attribution pass does not run
+# otherwise — so every test counted here ran green and its time is its own.
+# That is what makes the advice below safe to give.
 if [ "$over_budget" -ne 0 ]; then
     echo "time-unit-suite: FAIL — $over_budget test(s) over the ${TEST_BUDGET}s per-test budget." >&2
     echo "  slowest named: $slowest_test (${slowest_test_secs}s)" >&2
-    echo "  A single unit test that takes seconds is almost always dialling: the 20 s" >&2
-    echo "  const T in crates/logweir-kafka/src/rdkafka_reader.rs, or object_store's" >&2
-    echo "  unconfigured retry budget. Point it at a double — do NOT shorten T (O18)." >&2
+    echo "  This test PASSES and is simply slow, which for a unit test here almost" >&2
+    echo "  always means dialling: the 20 s const T in" >&2
+    echo "  crates/logweir-kafka/src/rdkafka_reader.rs, or object_store's unconfigured" >&2
+    echo "  retry budget. Point it at a double — do NOT shorten T (O18)." >&2
     rc=1
 fi
 

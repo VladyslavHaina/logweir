@@ -471,6 +471,61 @@ fn the_production_agent_gives_up_on_a_sink_that_never_replies() {
     );
 }
 
+/// The ureq entry points that carry the crate's DEFAULT configuration — no
+/// overall or read timeout — and are therefore forbidden in production code.
+///
+/// The workspace-wide audit in `crates/logweir/tests/no_network_in_unit_tests.rs`
+/// forbids the same six as part of its `DIAL_TOKENS`, and
+/// `the_two_ureq_token_lists_agree` below asserts that rather than asserting it
+/// in a comment. This file is allow-listed in that audit precisely so it can
+/// spell them out.
+const FORBIDDEN: [&str; 6] = [
+    "ureq::post(",
+    "ureq::get(",
+    "ureq::request(",
+    "ureq::Agent::new(",
+    "Agent::new(",
+    "ureq::agent(",
+];
+
+/// FIX ROUND 2 (re-review R1). The last round's audit carried a comment saying
+/// "The two lists now match." They did not — bare `Agent::new(` was in this
+/// file's list and missing from the workspace one, and a probe using it walked
+/// through both gates into `crates/logweir/tests/`, which the crate-local test
+/// does not walk.
+///
+/// A comment cannot hold that property, so this test does. It reads the audit's
+/// source and requires every token here to appear in its `DIAL_TOKENS` literal:
+/// the workspace-wide audit may be BROADER than this one, never narrower.
+#[test]
+fn the_two_ureq_token_lists_agree() {
+    let audit =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/no_network_in_unit_tests.rs");
+    let text =
+        std::fs::read_to_string(&audit).unwrap_or_else(|e| panic!("read {}: {e}", audit.display()));
+    let start = text
+        .find("const DIAL_TOKENS")
+        .expect("the audit must still declare DIAL_TOKENS");
+    let end = start
+        + text[start..]
+            .find("];")
+            .expect("DIAL_TOKENS must be a closed array literal");
+    let list = &text[start..end];
+
+    let missing: Vec<&str> = FORBIDDEN
+        .iter()
+        .filter(|t| !list.contains(&format!("\"{t}\"")))
+        .copied()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the workspace-wide audit's DIAL_TOKENS is NARROWER than this file's FORBIDDEN \
+         list, so a default-suite test outside crates/logweir/src/ can use these and be \
+         caught by neither gate: {missing:?}\n  add them to {}",
+        audit.display()
+    );
+}
+
 /// THE MUTANT KILLER, structural rather than behavioural. Every behavioural
 /// test above that exercises a timeout supplies its own agent, so reverting
 /// `notify` to an agentless builder would pass all of them.
@@ -496,17 +551,6 @@ fn the_production_agent_gives_up_on_a_sink_that_never_replies() {
 /// source rather than hope a behavioural test covers the next way someone adds.
 #[test]
 fn every_notification_post_goes_through_the_bounded_agent() {
-    /// Spelled apart so this file does not trip its own patterns, and so the
-    /// workspace-wide audit in `no_network_in_unit_tests.rs` — which forbids
-    /// the same set — can allow-list this file for naming them.
-    const FORBIDDEN: [&str; 6] = [
-        "ureq::post(",
-        "ureq::get(",
-        "ureq::request(",
-        "ureq::Agent::new(",
-        "Agent::new(",
-        "ureq::agent(",
-    ];
     const BUILDER: &str = "AgentBuilder::new()";
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

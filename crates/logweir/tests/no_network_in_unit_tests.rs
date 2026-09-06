@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 /// the two constructors, the compose stack's own endpoints, and ureq's
 /// AGENTLESS request builders (which carry no timeout — see
 /// `crates/logweir/tests/notify.rs`).
-const DIAL_TOKENS: [&str; 12] = [
+const DIAL_TOKENS: [&str; 13] = [
     "RdKafkaReader::connect(",
     "Store::from_url(",
     "Store::read_only_from_url(",
@@ -63,15 +63,23 @@ const DIAL_TOKENS: [&str; 12] = [
     "localhost:9000",
     "127.0.0.1:9000",
     // ureq entry points that carry the crate's DEFAULT configuration, i.e. no
-    // overall or read timeout. Fix round 1 (F6) squared this list with the
-    // crate-local one in `crates/logweir/tests/notify.rs`, which had three
-    // that this one lacked; the reviewer walked through the gap with
-    // `ureq::Agent::new()`. The two lists now match, and there is no reason
-    // for a workspace-wide audit to be narrower than a crate-local one.
+    // overall or read timeout.
+    //
+    // These six are EXACTLY the `FORBIDDEN` list in
+    // `crates/logweir/tests/notify.rs`, and `the_two_ureq_token_lists_agree`
+    // in that file now asserts it rather than a comment claiming it. Fix
+    // round 1 said "the two lists now match" and they did not: bare
+    // `Agent::new(` — `use ureq::Agent;` and then `Agent::new()` — was in the
+    // crate-local list and missing here, and the re-reviewer walked a probe
+    // straight through this gap into `crates/logweir/tests/`, which the
+    // crate-local test does not walk. An audit whose comment asserts a
+    // property it does not have is the defect F6 was raised about, arriving
+    // in the fix for F6.
     "ureq::post(",
     "ureq::get(",
     "ureq::request(",
     "ureq::Agent::new(",
+    "Agent::new(",
     "ureq::agent(",
 ];
 
