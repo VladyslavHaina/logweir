@@ -1368,6 +1368,56 @@ mod tests {
         assert!(valid_scorecard().validate_invariants().is_ok());
     }
 
+    // --- Two pre-existing arms that `uncovered-arms.json` records as carried
+    // by unit tests in BOTH readers. Fix round 1, F1: each was carried by a
+    // pytest case only — neither had a Rust unit test, so that file's own
+    // coverage claim was a written guarantee no code delivered, in the one
+    // file whose job is honest coverage accounting.
+    //
+    // The corpus walker cannot stand in for these.
+    // `every_invariant_arm_has_a_corpus_case` counts `return Err(...)`
+    // STATEMENTS and asserts `covered + uncovered == n`, so deleting an arm
+    // together with its entry drops both sides by one and the arithmetic
+    // re-balances silently. The per-arm unit test is the only thing that kills
+    // that mutant.
+
+    #[test]
+    fn invariants_refuse_a_met_objective_at_a_reduced_integrity_level() {
+        // `met: true` is a claim about a pass rate, and below byte-fingerprint
+        // level there is no measured rate to support it, so `null` is the
+        // honest value. Python sibling:
+        // `docs/test_verify_scorecard.py::test_met_true_is_refused_when_the_pass_rate_was_not_measurable`.
+        let mut sc = valid_scorecard();
+        sc.integrity.level = IntegrityLevel::ConsumeOnly;
+        sc.objectives.pass_rate = Some(1.0);
+        sc.objectives.met = Some(true);
+        let err = sc
+            .validate_invariants()
+            .expect_err("a met objective needs a measurable pass rate");
+        assert_eq!(
+            err.0,
+            "objectives.met must be null when pass_rate is not measurable"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_more_matching_records_than_were_sampled() {
+        // The base direction of the sampling pair: Task 5 added the CONVERSE
+        // (`matching != sampled` under a `pass`) and gave it a corpus case,
+        // but this older arm had no Rust test at all. `records_expected` moves
+        // with `records_sampled` so the coverage arm cannot be the reason the
+        // document is refused. Python sibling:
+        // `docs/test_verify_scorecard.py::test_more_matching_records_than_sampled_is_refused`.
+        let mut sc = valid_scorecard();
+        sc.integrity.records_sampled = 50;
+        sc.integrity.records_sampled_matching = 100;
+        sc.sample.records_expected = 50;
+        let err = sc
+            .validate_invariants()
+            .expect_err("more records matched than were ever sampled");
+        assert_eq!(err.0, "records_sampled_matching exceeds records_sampled");
+    }
+
     // --- T0-4: `outcome` is a claim entailed by the rest of the document ---
     //
     // One test per arm, each asserting the SPECIFIC message, so deleting a

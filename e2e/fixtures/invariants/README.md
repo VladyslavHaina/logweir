@@ -64,8 +64,19 @@ never neither.
 
 The unit is the statement, not the conceptual arm, because that is the unit a
 text scan can measure — Task 2's evidence arm is one idea and four statements.
-`occurrences` (default `1`) exists only for the case where two statements share
-an identical message literal.
+`occurrences` (default `1`) says how many statements share an identical message
+literal.
+
+`occurrences: 0` is the one entry that is **not** an arm. It records a
+**reader asymmetry** — a document the two readers decide differently for a
+reason that lives outside `validate_invariants`, so no corpus case can pin it
+and no statement count should include it. The walker adds `0` to the
+accounting and skips the body check, so such an entry can never close the
+arithmetic by lying. Two exist: a missing `evidence` block and a missing or
+mistyped `sample` block, both of which Rust refuses at *deserialisation* while
+Python's `check_invariants` either refuses with an invariant-shaped message or
+skips silently. Every entry, arm or asymmetry, names a successor task; "later"
+and "nobody" are not successors.
 
 ## Extending it
 
