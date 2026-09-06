@@ -543,6 +543,22 @@ def test_the_script_prints_its_version():
     assert f"verify_scorecard.py {_verifier_module().SCRIPT_VERSION}" in r.stdout
 
 
+def test_the_version_line_names_the_current_invariant_set():
+    # The literals below are deliberately HARD-CODED. Asserting
+    # f"...{SCRIPT_VERSION}" — as `test_the_script_prints_its_version` above
+    # does, on purpose, for a different reason — is constant-relative: it stays
+    # green while the printed claim about which checks ran goes stale. One
+    # small test holding the literal is what makes the constant load-bearing.
+    # See Task 4 addendum A1.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "verify_scorecard.py 1.3.0" in r.stdout, r.stdout
+        assert "redactions" in r.stdout, r.stdout
+        assert "trimmed-empty partial_reason" in r.stdout, r.stdout
+
+
 def test_the_script_version_is_not_the_format_version():
     # GC12: SCRIPT_VERSION tracks the invariant SET, FORMAT_VERSION tracks the
     # format. Collapsing the two would make a reader-only tightening look like
@@ -608,6 +624,72 @@ def test_a_last_phase_completed_outside_the_domain_is_refused():
             r = run(sc, sig, FIX / "public.pem")
             assert r.returncode == 1, f"{bad}: {r.stdout}"
             assert "-1..=9" in r.stderr
+
+
+def test_a_blank_partial_reason_is_refused():
+    # T0-6. Python already refused `""` by truthiness while Rust's `.is_none()`
+    # ACCEPTED AND SIGNED it — the live divergence in the file whose own
+    # docstring says the two readers mirror each other arm for arm. `"   "` is
+    # the other direction: a non-empty whitespace string is TRUTHY in Python,
+    # so both readers accepted it until Task 4 put `.strip()` / `.trim()` on
+    # both sides. This test pins Python's behaviour so a future "cleanup" to
+    # `is None` cannot silently re-open the divergence.
+    for blank in ("", "   ", "\t\n"):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(
+                d, **{"integrity.result": "partial", "integrity.partial_reason": blank})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{blank!r}: {r.stdout}"
+            assert "partial_reason is null" in r.stderr, f"{blank!r}: {r.stderr}"
+
+
+def test_a_partial_result_that_names_its_reason_is_accepted():
+    # The control for the test above. The arm narrows the accepted set; it does
+    # not close it. Without this, an arm refusing every `partial` document
+    # would pass for the wrong reason.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d, **{"integrity.result": "partial",
+                  "integrity.partial_reason": "only 2 of 3 partitions reached a conclusion"})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+
+
+def test_non_empty_redactions_is_refused():
+    # T0-3. `docs/formats/drill-scorecard.md` states "Always `[]` in v0.1" as a
+    # property of the format; nothing enforced it and nothing displayed it, so
+    # a document announcing that the field an auditor reads first had been
+    # removed still printed VALID from both readers.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, redactions=[
+            {"path": "/measured/rpo_seconds", "reason": "customer policy", "present": False}])
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "no way to produce one" in r.stderr, r.stderr
+        # The message names the DOCUMENT's own format_version, and is
+        # byte-identical to the Rust arm's — see
+        # crates/logweir/tests/two_reader_parity.rs, which compares the two.
+        assert (
+            "INVALID: redactions is non-empty but format_version 1.0.0 has no way to "
+            "produce one; --redact is a v0.1.1 feature" in r.stderr
+        ), r.stderr
+
+
+def test_the_redactions_arm_fires_after_the_partial_reason_arm():
+    # Ordering is part of the parity contract: a document violating BOTH must
+    # report the `partial_reason` message from both readers. Reordering the
+    # Python arms leaves both exit codes correct and breaks only the message,
+    # which is exactly what this asserts.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            redactions=[{"path": "/measured/rpo_seconds", "reason": "customer policy",
+                         "present": False}],
+            **{"integrity.result": "partial", "integrity.partial_reason": ""})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "partial_reason is null" in r.stderr, r.stderr
+        assert "redactions" not in r.stderr, r.stderr
 
 
 def test_the_captured_by_logweir_biconditional_is_enforced_in_both_directions():

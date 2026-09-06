@@ -1,10 +1,13 @@
 # The default recipe is the release gate (Task 22 step 8), so it must be able to
 # FAIL on formatting: it never runs the rewriting `fmt` recipe. Run `just fmt`
 # yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh,
-# check-pure-core.sh and check-verifier-parity.sh. That last one needs a
-# `python3` with the `cryptography` package (Task 3) — it FAILS rather than
-# skipping when the package is missing, because the two-reader parity claim is
-# not checkable without the second reader.
+# check-pure-core.sh, check-verifier-parity.sh and check-invariant-corpus.sh.
+# The last two need a `python3` with the `cryptography` package (Tasks 3 and 4)
+# — they FAIL rather than skipping when the package is missing, because the
+# two-reader parity claim is not checkable without the second reader.
+# check-invariant-corpus.sh is the auditor-side half: it walks
+# e2e/fixtures/invariants/index.json with the Python reader alone, so the
+# corpus is still checked where there is no Rust toolchain.
 default: lint test
 
 fmt:
@@ -16,6 +19,7 @@ lint:
     ./scripts/check-no-oso.sh
     ./scripts/check-pure-core.sh
     ./scripts/check-verifier-parity.sh
+    ./scripts/check-invariant-corpus.sh
 
 test:
     cargo test --workspace

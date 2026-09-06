@@ -155,12 +155,16 @@ FORMAT_VERSION = "1.0.0"
 #          needs the verifying key, which `check_invariants` has not got — but
 #          it changes the verdict on real documents, which is what the bump
 #          tracks.
+#   1.3.0  the `partial_reason` arm now refuses BLANK as well as null
+#          (`""` and `"   "`, T0-6 / ruling R-A — `""` was the live
+#          Rust/Python disagreement and `"   "` was accepted by both), and
+#          the `redactions` arm is new (T0-3). Two invariant arms.
 #
 # The general rule for when to bump, and where an auditor reads it, is not
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.3.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -341,7 +345,16 @@ def check_invariants(doc) -> str:
         if evidence.get("create_only_enforced"):
             return "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing"
 
-    if integrity.get("result") == "partial" and not integrity.get("partial_reason"):
+    # T0-6 / ruling R-A: `.strip()` on both sides. Python truthiness already
+    # refused `""` while the Rust arm's `.is_none()` accepted AND SIGNED it —
+    # a live disagreement in the file whose docstring above says a
+    # disagreement is impossible. Whitespace-only went the other way: `"   "`
+    # is truthy here, so both readers accepted it. The Rust arm is now
+    # `partial_reason.as_deref().unwrap_or("").trim().is_empty()` — the same
+    # predicate, the same message, the same position.
+    if integrity.get("result") == "partial" and not str(
+        integrity.get("partial_reason") or ""
+    ).strip():
         return "integrity.result is 'partial' but partial_reason is null"
 
     # The format's only two float fields.
@@ -412,6 +425,22 @@ def check_invariants(doc) -> str:
     # Global Constraint 18: ELEVEN phase slots, -1 through 9.
     if not (-1 <= last_phase <= 9):
         return "last_phase_completed outside -1..=9"
+
+    # T0-3, mirrored: see the `redactions` arm at the end of
+    # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
+    # for the full argument. `docs/formats/drill-scorecard.md` states "Always
+    # `[]` in v0.1" as a property of the format and nothing enforced it, so a
+    # document announcing that a field the auditor reads first had been removed
+    # still printed VALID from both readers.
+    #
+    # LAST, exactly as in the Rust reader, and mutant-tested for it: a document
+    # violating this and an earlier arm must report the earlier arm's message
+    # from BOTH readers.
+    if doc.get("redactions"):
+        return (
+            f"redactions is non-empty but format_version {version} has no way to "
+            "produce one; --redact is a v0.1.1 feature"
+        )
 
     return ""
 
@@ -613,13 +642,20 @@ def main(
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
-        # without this. 1.2.0 adds the second item for the same reason: the
-        # `approval:` line above is now a DERIVED finding, and a reader who
+        # without this. 1.2.0 adds the derivation clause for the same reason:
+        # the `approval:` line above is now a DERIVED finding, and a reader who
         # cannot tell a derived line from an echoed one is back where T0-1
-        # started.
+        # started. 1.3.0 names the two arms it added, so the parenthetical
+        # enumerates the whole invariant set rather than one member of it.
+        #
+        # `docs/test_verify_scorecard.py::
+        # test_the_version_line_names_the_current_invariant_set` asserts the
+        # literals in this line — NOT an f-string over SCRIPT_VERSION, which
+        # would stay green while the claim went stale (Task 4 addendum A1).
         print(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
-            "(evidence-zeroing arm; approval.self_attested derived, not echoed)"
+            "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions; "
+            "approval.self_attested derived, not echoed)"
         )
         return 0
 

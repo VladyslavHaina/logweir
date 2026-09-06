@@ -194,7 +194,7 @@ Copied verbatim from your spec, plus the verdict.
 | `target_diff.level` | string | `full` in v0.1. Becomes `shallow` only if spec §15 cut 0d is ever taken. |
 | `integrity.level` | enum | `byte-fingerprint` (full per-record check), `consume-only` (degraded), `not-attempted` (**no check ran** — an absence of evidence, never a pass). |
 | `integrity.result` | enum | `pass`, `fail`, `partial`. |
-| `integrity.partial_reason` | string \| null | **Required and non-empty when `result` is `partial`** — `verify_scorecard.py` refuses a `partial` without one. The `drill show` footer renders it. |
+| `integrity.partial_reason` | string \| null | **Required and non-BLANK when `result` is `partial`** — null, `""` and whitespace-only are all refused, by **both** readers, with the same message. See [`partial_reason` must SAY something](#partial_reason-must-say-something). The `drill show` footer renders it. |
 | `integrity.records_sampled` | integer | Measured against `sample.records_expected`. |
 | `integrity.records_sampled_matching` | integer | How many reconciled byte-for-byte. |
 | `integrity.mismatches` | integer | How many did not. A **compacted** target topic is reported through this path as a mismatch, not as `partial` — see [stability.md](../stability.md). |
@@ -202,6 +202,36 @@ Copied verbatim from your spec, plus the verdict.
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
 | `topic_parity.intentionally_deviated` | string[] | Config keys the drill deliberately set differently on the target. |
 | `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have. |
+
+### `partial_reason` must SAY something
+
+A `partial` integrity result is a statement that the check did not finish, and
+`partial_reason` is the only place the document says why. Until Task 4 the two
+readers disagreed about what counted as saying why:
+
+- **Rust** tested `partial_reason.is_none()`, so `""` — and `"   "` — was
+  accepted **and signed**.
+- **`docs/verify_scorecard.py`** tested Python truthiness, so `""` was refused
+  and `"   "`, being a truthy string, was accepted.
+
+So `partial_reason: ""` was a document Logweir would sign and the auditor's own
+verifier would refuse, in the exact file whose docstring says that if the two
+readers disagree "the signed-scorecard format is broken". Both now apply the
+same predicate — Rust
+`partial_reason.as_deref().unwrap_or("").trim().is_empty()`, Python
+`not str(integrity.get("partial_reason") or "").strip()` — in the same position
+with the byte-identical message
+`integrity.result is 'partial' but partial_reason is null`. `drill verify`
+exits **4** (GC11); the Python verifier exits **1**.
+
+Like the `evidence` arm below, this is a **retroactive tightening of the 1.0.0
+reader, not a format change**: no byte of the format changes, the accepted set
+narrows, and no document Logweir has ever written is refused —
+`crates/logweir/src/drill/phase7_verify.rs` builds the field as
+`(!notes.is_empty()).then(|| notes.join("; "))`, so it is either absent or says
+something. `crates/logweir/tests/two_reader_parity.rs` runs both readers over
+`e2e/fixtures/invariants/` and compares their refusal text, so the agreement is
+checked rather than asserted.
 
 ## `engine_subreport`
 
@@ -292,6 +322,54 @@ python3 docs/verify_scorecard.py --payload-type receipt \
 
 Always `[]` in v0.1. `--redact` is a v0.1.1 feature and the only redactable
 paths will be `/target/cluster_id` and `/approval/approver`.
+
+### That sentence is ENFORCED, and that is a reader tightening, not a format change
+
+For one release the sentence above was prose and nothing else. The field
+existed, no reader checked it and no surface displayed it, so a third party
+could hand an auditor a scorecard carrying
+
+```json
+"redactions": [{"path": "/measured/rpo_seconds", "reason": "customer policy", "present": false}]
+```
+
+and **both** readers printed `VALID` while the document itself said a field the
+auditor reads first had been removed.
+
+Both readers now refuse a non-empty `redactions`.
+`Scorecard::validate_invariants` (`crates/logweir-core/src/scorecard.rs`) and
+`docs/verify_scorecard.py::check_invariants` each carry the same arm, **last**,
+after every other rule, with the byte-identical message
+
+```
+redactions is non-empty but format_version <the document's own version> has no way to produce one; --redact is a v0.1.1 feature
+```
+
+`drill verify` exits **4** (GC11); the Python verifier exits **1**. The
+position is part of the contract and is mutant-tested: a document that violates
+this arm *and* an earlier one reports the **earlier** arm's message, from both
+readers.
+
+**This is a deliberate RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format
+change** — `format_version` stays `1.0.0` and **Global Constraint 12 holds**,
+by the identical argument recorded for the `evidence` arm above:
+
+- No byte of the format changes. No field is added, renamed or removed, and
+  `schemas/logweir-drill-scorecard-1.0.0.json` is untouched.
+- The accepted set **narrows**. Narrowing what a reader accepts is not a major
+  bump under GC12, which reserves a major for a changed *identity rule*.
+- **No document Logweir has ever written is refused**, because no v0.1 code
+  path constructs a `Redaction` — `redactions` is only ever `vec![]`. Every
+  committed fixture carries `[]` and none of them was re-minted for this
+  change.
+- A document from a **non-Logweir path** that carries a redaction **is** now
+  refused, and that is the intent: v0.1 has no writer that can produce one, so
+  a non-empty array means the document was edited after signing-time
+  construction or came from a reader-incompatible producer.
+
+A `2.x` document never reaches this arm — `refuse_unreadable_major` refuses it
+first. In **0.1.1**, `--redact` **replaces** this arm with a path whitelist
+(`/target/cluster_id`, `/approval/approver`); it does not delete it.
 
 ---
 

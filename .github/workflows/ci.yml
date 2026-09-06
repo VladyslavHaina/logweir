@@ -17,6 +17,14 @@ jobs:
         run: ./scripts/extract-engine.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `crates/logweir/tests/two_reader_parity.rs` runs BOTH readers over
+      # `e2e/fixtures/invariants/` inside the ordinary `cargo test --workspace`
+      # set, and the second reader is `docs/verify_scorecard.py`. That test
+      # PANICS rather than skipping when `cryptography` is missing — a parity
+      # check that quietly did not run is the exact "documented guarantee the
+      # code does not deliver" it exists to remove — so this install is
+      # load-bearing, not decoration. Same reason as the `e2e` job's copy.
+      - run: pip install cryptography
       - run: cargo test --workspace
       - name: pure-layer linkage guard (Global Constraint 2)
         run: ./scripts/check-no-oso.sh
@@ -129,6 +137,15 @@ jobs:
       # the Rust binary is missing.
       - name: two-verifier parity over the signed fixture corpus (T0-1)
         run: ./scripts/check-verifier-parity.sh
+      # The auditor-side half of the invariant-corpus gate (T0-6 / T0-3). The
+      # Rust walker `crates/logweir/tests/two_reader_parity.rs` runs both
+      # readers in the `build` job; this one runs the SECOND reader alone over
+      # the same `e2e/fixtures/invariants/index.json`, so the corpus stays
+      # checked on the machine an auditor actually has — python3 and no Rust
+      # toolchain. It is in `just lint` too; CI does not run `just lint`, which
+      # is how its sibling went a whole release unreachable.
+      - name: the invariant corpus, auditor's reader only (T0-6 / T0-3)
+        run: ./scripts/check-invariant-corpus.sh
 
   deny:
     runs-on: ubuntu-24.04

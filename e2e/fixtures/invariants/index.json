@@ -1,0 +1,41 @@
+[
+  {
+    "id": "unmodified_example",
+    "file": "unmodified_example.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": ""
+  },
+  {
+    "id": "partial_reason_empty_string",
+    "file": "partial_reason_empty_string.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.result is 'partial' but partial_reason is null",
+    "arm": "integrity.result is 'partial' but partial_reason is null"
+  },
+  {
+    "id": "partial_reason_whitespace",
+    "file": "partial_reason_whitespace.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.result is 'partial' but partial_reason is null",
+    "arm": "integrity.result is 'partial' but partial_reason is null"
+  },
+  {
+    "id": "redactions_non_empty",
+    "file": "redactions_non_empty.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "redactions is non-empty but format_version 1.0.0 has no way to produce one; --redact is a v0.1.1 feature",
+    "arm": "redactions is non-empty but format_version "
+  },
+  {
+    "id": "both_partial_reason_and_redactions",
+    "file": "both_partial_reason_and_redactions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.result is 'partial' but partial_reason is null",
+    "arm": "integrity.result is 'partial' but partial_reason is null"
+  }
+]

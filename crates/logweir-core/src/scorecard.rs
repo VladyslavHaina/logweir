@@ -516,8 +516,28 @@ impl Scorecard {
                 ));
             }
         }
+        // Ruling R-A / T0-6: `.is_none()` accepted `""` and `"   "`, which
+        // `docs/verify_scorecard.py`'s truthiness test refuses — the two
+        // readers disagreed in the very file whose docstring claims (`ARM FOR
+        // ARM, IN ORDER`) that they cannot. Trimmed-empty is the strict side:
+        // it narrows the accepted set and changes no byte of the format, so it
+        // is a RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format change
+        // (GC12). No document Logweir has written carries a blank reason —
+        // `crate::drill::phase7_verify` builds it as `(!notes.is_empty())
+        // .then(|| notes.join("; "))`, so it is either absent or says
+        // something.
+        //
+        // The message is byte-identical to `docs/verify_scorecard.py`'s and is
+        // not to be reworded: `crates/logweir/tests/two_reader_parity.rs`
+        // compares the two readers' refusal text, not merely that both refused.
         if self.integrity.result == IntegrityResult::Partial
-            && self.integrity.partial_reason.is_none()
+            && self
+                .integrity
+                .partial_reason
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
         {
             return Err(InvariantError(
                 "integrity.result is 'partial' but partial_reason is null".into(),
@@ -643,6 +663,38 @@ impl Scorecard {
         }
         if !(-1..=9).contains(&self.last_phase_completed) {
             return Err(InvariantError("last_phase_completed outside -1..=9".into()));
+        }
+        // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
+        // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
+        // now nothing enforced it and no surface displayed it — a third party
+        // could hand an auditor a scorecard carrying
+        // `redactions: [{"path": "/measured/rpo_seconds", …}]` and both readers
+        // printed VALID while the document itself said a field the auditor
+        // reads first had been removed.
+        //
+        // v0.1 has no writer that can produce a redaction (`redactions` is
+        // only ever constructed as `vec![]`), so a non-empty one means the
+        // document was edited after signing-time construction or came from a
+        // reader-incompatible producer. Like the evidence arm above, this is a
+        // RETROACTIVE TIGHTENING of the 1.0.0 reader rather than a format
+        // change (GC12): no byte of the format changes, the accepted set
+        // narrows, and no document Logweir has ever written is refused.
+        //
+        // LAST on purpose, and mutant-tested for it: a document violating this
+        // and an earlier arm must report the earlier arm's message, from BOTH
+        // readers. `docs/verify_scorecard.py::check_invariants` mirrors this
+        // arm in the same position with the same words, and the message
+        // interpolates the DOCUMENT's own `format_version` so a 1.0.1 document
+        // reads correctly. A 2.x document is already refused above by
+        // `refuse_unreadable_major`. When 0.1.1 adds `--redact`, this arm is
+        // REPLACED by a path whitelist (`/target/cluster_id`,
+        // `/approval/approver`) — it is not deleted.
+        if !self.redactions.is_empty() {
+            return Err(InvariantError(format!(
+                "redactions is non-empty but format_version {} has no way to produce one; \
+                 --redact is a v0.1.1 feature",
+                self.format_version
+            )));
         }
         Ok(())
     }
@@ -865,6 +917,72 @@ mod tests {
             .expect("a fully zeroed evidence block is what every Logweir scorecard carries");
     }
 
+    // --- T0-6: `partial_reason` must be non-BLANK, not merely non-null ----
+    //
+    // The message text below is byte-identical to
+    // `docs/verify_scorecard.py::check_invariants`'s. That is not a
+    // coincidence and must not be "improved": the two readers are documented
+    // as reaching the same verdict with the same words, and
+    // `crates/logweir/tests/two_reader_parity.rs` compares the two strings.
+
+    #[test]
+    fn invariants_refuse_null_partial_reason() {
+        // The case the arm ALWAYS refused. Kept alongside the two new ones so
+        // a predicate that stopped handling `None` — say
+        // `as_deref().unwrap_or("x")` — cannot slip through while the blank
+        // cases still pass.
+        let mut sc = valid_scorecard();
+        sc.integrity.result = IntegrityResult::Partial;
+        sc.integrity.partial_reason = None;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a partial result with no reason must be refused");
+        assert_eq!(
+            err.0,
+            "integrity.result is 'partial' but partial_reason is null"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_whitespace_partial_reason() {
+        let mut sc = valid_scorecard();
+        sc.integrity.result = IntegrityResult::Partial;
+        sc.integrity.partial_reason = Some("   ".into());
+        let err = sc
+            .validate_invariants()
+            .expect_err("a whitespace-only partial_reason says nothing and must be refused");
+        assert_eq!(
+            err.0,
+            "integrity.result is 'partial' but partial_reason is null"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_empty_string_partial_reason() {
+        let mut sc = valid_scorecard();
+        sc.integrity.result = IntegrityResult::Partial;
+        sc.integrity.partial_reason = Some(String::new());
+        let err = sc
+            .validate_invariants()
+            .expect_err("an empty partial_reason says nothing and must be refused");
+        assert_eq!(
+            err.0,
+            "integrity.result is 'partial' but partial_reason is null"
+        );
+    }
+
+    #[test]
+    fn invariants_accept_a_real_partial_reason() {
+        // The control for the three above: the arm narrows the accepted set,
+        // it does not close it. A document that says WHY it is partial is
+        // exactly what the format asks for.
+        let mut sc = valid_scorecard();
+        sc.integrity.result = IntegrityResult::Partial;
+        sc.integrity.partial_reason = Some("only 2 of 3 partitions reached a conclusion".into());
+        sc.validate_invariants()
+            .expect("a partial result that names its reason is a valid document");
+    }
+
     // --- Global Constraint 18(a), true branch -----------------------------
 
     #[test]
@@ -1059,6 +1177,17 @@ mod tests {
         // which would return the evidence message here instead of the
         // major-version one.
         sc.evidence.create_only_enforced = true;
+        // Task 4 addendum A4: a non-empty `redactions` makes the POSITION of
+        // the redactions arm load-bearing here. Unlike the evidence arm it
+        // carries no major scoping, so moving it above
+        // `refuse_unreadable_major()?;` makes this document return the
+        // redactions message and the `assert_eq!` below fails at assertion
+        // time (brief §7 M7). Without this line that mutant survives.
+        sc.redactions = vec![Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "addendum A4 mutant surface".into(),
+            present: false,
+        }];
         let err = sc
             .validate_invariants()
             .expect_err("a format_version from a future major must be refused");
@@ -1091,5 +1220,55 @@ mod tests {
             err.0,
             "format_version \"not-a-semver\" is not a parseable semver"
         );
+    }
+
+    // --- T0-3: `redactions` is documented as always `[]` in v0.1 ----------
+
+    #[test]
+    fn invariants_refuse_non_empty_redactions() {
+        let mut sc = valid_scorecard();
+        sc.redactions = vec![Redaction {
+            path: "/measured/rpo_seconds".into(),
+            reason: "customer policy".into(),
+            present: false,
+        }];
+        let err = sc
+            .validate_invariants()
+            .expect_err("v0.1 has no writer that can produce a redaction");
+        assert_eq!(
+            err.0,
+            "redactions is non-empty but format_version 1.0.0 has no way to produce one; \
+             --redact is a v0.1.1 feature"
+        );
+    }
+
+    #[test]
+    fn the_redactions_message_names_the_documents_own_format_version() {
+        // The message interpolates the DOCUMENT's version, so a 1.0.1 document
+        // reads correctly rather than being told about a version it does not
+        // claim. `1.0.1` is a same-major minor, so `refuse_unreadable_major`
+        // lets it through to this arm.
+        let mut sc = valid_scorecard();
+        sc.format_version = "1.0.1".into();
+        sc.redactions = vec![Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "customer policy".into(),
+            present: true,
+        }];
+        let err = sc
+            .validate_invariants()
+            .expect_err("a same-major minor reaches the redactions arm");
+        assert_eq!(
+            err.0,
+            "redactions is non-empty but format_version 1.0.1 has no way to produce one; \
+             --redact is a v0.1.1 feature"
+        );
+    }
+
+    #[test]
+    fn invariants_accept_empty_redactions() {
+        // The control: without it, an arm that refused every document would
+        // make the test above pass for the wrong reason.
+        assert!(valid_scorecard().validate_invariants().is_ok());
     }
 }
