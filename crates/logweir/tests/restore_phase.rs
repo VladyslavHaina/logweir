@@ -244,3 +244,38 @@ fn a_broker_failure_during_the_post_restore_read_surfaces_as_kafka_not_a_no_op()
         "a broker failure reading the target is operational-by-way-of-Kafka, not {e:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 6 (T0-14). ADDITIVE: nothing above this line is modified.
+
+/// Ruling **R-E**. A phase-5 / phase-6 `restore.yaml` divergence is detected
+/// inside `OsoCliEngine::restore`, i.e. AFTER phases 0-5 have run — the
+/// admission guard passed, the plan was rendered, and the engine's own
+/// `validate-restore` already executed. Global Constraint 11 reserves exit `3`
+/// for "plan refused by a guard, **before anything runs**", so it does not
+/// describe this at all. The refusal is `EngineError::Operational`, which the
+/// existing route at `crates/logweir/src/drill/mod.rs:105` maps through
+/// `DrillError::Engine` to exit `1` — operational error, no artifact. This
+/// test is the machine check on that route, and it is the kill for a mutant
+/// that re-points `DrillError::Engine(_)` at `ExitCode::GuardRefused`.
+///
+/// It lives here rather than beside the other three T0-14 tests in
+/// `crates/logweir-engine-oso/tests/render_equality.rs` because
+/// `logweir-engine-oso` does not depend on `logweir` and must not: adding the
+/// dependency would invert the crate graph.
+#[test]
+fn render_mismatch_is_operational_not_guard() {
+    let e = logweir::drill::DrillError::Engine(logweir_core::engine::EngineError::Operational(
+        "rendered restore.yaml diverged between phase 5 and phase 6: phase 5 validated \
+         sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, phase 6 \
+         would restore sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+         — refusing"
+            .into(),
+    ));
+    let code = logweir::exit::ExitCode::from(e);
+    assert_eq!(code as u8, 1, "R-E: operational (1), no artifact");
+    assert_ne!(
+        code as u8, 3,
+        "GC11's 3 is a guard refusal BEFORE anything runs; phases 0-5 have run"
+    );
+}

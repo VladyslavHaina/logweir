@@ -573,6 +573,16 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
     // record's own `duration_ms` is the number `compute_measured` subtracts
     // to produce `rto_excluding_preflight_seconds`. Measuring it anywhere
     // else would score the header sweep no incident responder performs.
+    //
+    // T0-14: this single `plan` binding, handed to both the phase-5 closure
+    // below and `phase6_restore::run` further down, USED to be the only reason
+    // the two rendered `restore.yaml` documents were the same document. It is
+    // no longer load-bearing: `OsoCliEngine::preflight` now hashes the exact
+    // bytes it writes and `OsoCliEngine::restore` re-renders, re-hashes and
+    // refuses a divergence (ruling R-E: `EngineError::Operational`, exit 1, no
+    // artifact — see `docs/stability.md`). Building the plan once is now a
+    // convenience, not the guarantee, so a future phase-5/phase-6 split cannot
+    // dissolve the identity by moving these two call sites apart.
     let plan = build_plan(&c.spec, &set, &admitted.topic_mapping, run_id);
     // The engine writes its restore checkpoint to `plan.checkpoint_state` and
     // does NOT create that file's parent directory. `context` creates the

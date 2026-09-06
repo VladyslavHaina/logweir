@@ -61,6 +61,11 @@ pub struct OsoCliEngine {
     /// 6) would otherwise refuse to build a handle over the archive prefix at
     /// all, since the archive is never under `logweir/`.
     store: crate::storage::Store,
+    /// The digest of the `restore.yaml` phase 5 wrote, memoised so phase 6 can
+    /// refuse a divergence. `Mutex`, not `RefCell`: `DataEngine`'s methods take
+    /// `&self` and the orchestrator holds this behind a trait object whose auto
+    /// traits must not narrow.
+    phase5_render: std::sync::Mutex<Option<String>>,
 }
 
 impl OsoCliEngine {
@@ -77,6 +82,7 @@ impl OsoCliEngine {
             digest,
             workdir,
             store,
+            phase5_render: std::sync::Mutex::new(None),
         }
     }
 
@@ -235,8 +241,19 @@ impl DataEngine for OsoCliEngine {
     }
 
     fn preflight(&self, plan: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        let doc = render_restore::render(plan);
+        let (doc, rendered_restore_sha256) = render_restore::render_and_digest(plan);
         let cfg = self.write("restore.yaml", &doc)?;
+        // T0-14. Memoised HERE, immediately after the write and before the
+        // engine is spawned, because the field's meaning is "the digest of the
+        // bytes that are now on disk as restore.yaml" — that is the document
+        // phase 6 would silently truncate, and the moment those bytes exist is
+        // the moment the claim becomes checkable. Memoising only on a
+        // successful return would be no stronger in production (`record(..)?`
+        // in `crates/logweir/src/drill/mod.rs` short-circuits, so phase 6 is
+        // unreachable after a phase-5 error) and would make the memo depend on
+        // the engine's behaviour rather than on our own write.
+        *self.phase5_render.lock().expect("phase5_render mutex") =
+            Some(rendered_restore_sha256.clone());
         let run = subprocess::run_engine(
             &self.binary,
             &[
@@ -342,6 +359,7 @@ impl DataEngine for OsoCliEngine {
             partitions,
             header_preflight_honoured: honoured,
             unknown_key_warnings: run.unknown_key_warnings,
+            rendered_restore_sha256,
         })
     }
 
@@ -350,7 +368,43 @@ impl DataEngine for OsoCliEngine {
         plan: &RestorePlan,
         obs: &mut dyn PhaseObserver,
     ) -> Result<RestoreFacts, EngineError> {
-        let doc = render_restore::render(plan); // the SAME document phase 5 validated
+        // T0-14. Phases 5 and 6 each render `restore.yaml` and `self.write`
+        // calls `std::fs::write`, which truncates — so phase 6 overwrites the
+        // document phase 5 validated. Until this comparison existed, "the SAME
+        // document" was true only because
+        // `crates/logweir/src/drill/mod.rs:576` happened to build `plan` once
+        // and hand the same value to both. That is a property of one call
+        // site, not a guarantee; it dissolves the moment phase 5 and phase 6
+        // are split.
+        //
+        // Ruling R-E: a divergence is `EngineError::Operational` and therefore
+        // EXIT 1 (no artifact) via `DrillError::Engine` at drill/mod.rs:105 —
+        // NOT exit 3. Global Constraint 11 reserves 3 for "plan refused by a
+        // guard, before anything runs", and by phase 6 phases 0-5 have run,
+        // including the engine's own `validate-restore`. The ADR that would
+        // carry this ruling is gated on open question O2 and is deferred; see
+        // docs/stability.md.
+        let (doc, six) = render_restore::render_and_digest(plan);
+        match self
+            .phase5_render
+            .lock()
+            .expect("phase5_render mutex")
+            .as_deref()
+        {
+            Some(five) if five != six => {
+                return Err(EngineError::Operational(format!(
+                    "rendered restore.yaml diverged between phase 5 and phase 6: \
+                     phase 5 validated {five}, phase 6 would restore {six} — refusing"
+                )));
+            }
+            Some(_) => {}
+            None => {
+                return Err(EngineError::Operational(
+                    "restore() called before preflight(): no phase-5 render to compare against"
+                        .into(),
+                ))
+            }
+        }
         let cfg = self.write("restore.yaml", &doc)?;
         let started_at = chrono::Utc::now();
         let run = subprocess::run_engine(

@@ -170,6 +170,12 @@ pub struct PreflightReport {
     pub header_preflight_honoured: bool,
     /// Paths the engine logged as `Ignoring unknown config key <path>`.
     pub unknown_key_warnings: Vec<String>,
+    /// `sha256:<hex>` over the exact bytes written as `restore.yaml` at phase 5.
+    /// Phase 6 re-renders, re-hashes and refuses on divergence (T0-14; ruling
+    /// R-E: the refusal is exit 1, operational, no artifact — by phase 6 the
+    /// guards have run and `validate-restore` has already executed, so GC11's
+    /// exit 3 "refused before anything runs" does not describe it).
+    pub rendered_restore_sha256: String,
 }
 
 /// Logweir-measured, never engine-reported: `restore` has no --format and

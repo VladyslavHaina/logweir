@@ -386,6 +386,20 @@ a firewall that DROPs, or a wedged sink, was. Notifications now go through
 logged exactly like any other transport failure, so the exit-code contract is
 unchanged.
 
+## Recorded rulings that have no ADR yet
+
+### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
+
+Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once
+for `kafka-backup restore` at phase 6. Since v0.1.x Logweir hashes the exact bytes it writes at
+phase 5 and refuses at phase 6 if the re-rendered document does not match, naming both digests.
+
+The refusal is **exit 1** — an operational error, no artifact written. It is deliberately not
+exit 3: the exit-code contract reserves `3` for a plan refused by a guard *before anything runs*,
+and by phase 6 the admission guard has passed, the plan has been rendered and the engine's own
+`validate-restore` has already executed. The ADR that would normally record this decision is gated
+on an open question and is deferred; this section is the record.
+
 ## Engine compatibility and support policy
 
 - **Engine version floors, and why each exists (spec §7.2).** `kafka-backup`

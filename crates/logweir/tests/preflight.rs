@@ -11,6 +11,11 @@ fn report(states: &[CoverageState], honoured: bool, valid: bool) -> PreflightRep
         time_range: Some((0, 1)),
         header_preflight_honoured: honoured,
         unknown_key_warnings: vec![],
+        // T0-14: `PreflightReport` carries the SHA-256 of the `restore.yaml`
+        // phase 5 wrote. These adjudication tests render no document, so the
+        // honest value is the all-zero placeholder; nothing here reads it.
+        rendered_restore_sha256:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         partitions: states
             .iter()
             .enumerate()
@@ -130,6 +135,11 @@ fn single(state: CoverageState, honoured: bool, valid: bool, detail: &str) -> Pr
         time_range: Some((0, 1)),
         header_preflight_honoured: honoured,
         unknown_key_warnings: vec![],
+        // T0-14: `PreflightReport` carries the SHA-256 of the `restore.yaml`
+        // phase 5 wrote. These adjudication tests render no document, so the
+        // honest value is the all-zero placeholder; nothing here reads it.
+        rendered_restore_sha256:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         partitions: vec![PartitionCoverage {
             topic: "orders".into(),
             partition: 0,

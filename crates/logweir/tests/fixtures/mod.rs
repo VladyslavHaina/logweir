@@ -933,6 +933,12 @@ impl DataEngine for FixtureEngine {
             }],
             header_preflight_honoured: self.header_honoured,
             unknown_key_warnings: self.preflight_unknown_keys.clone(),
+            // T0-14: this double never renders a `restore.yaml`, so it has no
+            // real digest to report; the all-zero placeholder says exactly
+            // that. The real seam is pinned in
+            // `crates/logweir-engine-oso/tests/render_equality.rs`.
+            rendered_restore_sha256:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         })
     }
     fn restore(

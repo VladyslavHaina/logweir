@@ -9,6 +9,17 @@
 //! exit 0, and a signed scorecard whose RTO was measured around nothing.
 use logweir_core::engine::{RestorePlan, StorageUrl};
 
+/// The rendered restore document and the SHA-256 of the EXACT bytes that
+/// `OsoCliEngine::write` hands to `std::fs::write`. T0-14: the document is
+/// rendered at phase 5 and again at phase 6, and `fs::write` truncates, so
+/// the digest — never a re-serialisation of `plan` — is the only thing that
+/// can prove the two are the same document.
+pub fn render_and_digest(plan: &RestorePlan) -> (String, String) {
+    let doc = render(plan);
+    let digest = logweir_core::ids::sha256_prefixed(doc.as_bytes());
+    (doc, digest)
+}
+
 pub fn render(plan: &RestorePlan) -> String {
     let mut s = String::new();
     s.push_str("# Rendered by logweir. Do not edit; regenerate with `logweir drill run`.\n");

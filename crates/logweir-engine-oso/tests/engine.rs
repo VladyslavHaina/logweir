@@ -170,6 +170,12 @@ fn restore_against_a_clean_engine_succeeds_with_no_warnings() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::in_memory("logweir"),
     );
+    // T0-14: `restore()` now refuses when there is no phase-5 render to
+    // compare its own against, so every caller must have run `preflight()` on
+    // the SAME engine value first — which is what the orchestrator does
+    // (`crates/logweir/src/drill/mod.rs:595` then `:643`). Nothing else about
+    // this test changed.
+    engine.preflight(&plan()).unwrap();
     let mut obs = RecordingObserver::default();
     let facts = engine.restore(&plan(), &mut obs).unwrap();
     assert_eq!(facts.exit_code, 0);
@@ -189,6 +195,13 @@ fn restore_maps_a_nonzero_exit_code_to_an_operational_error() {
         "../../e2e/fixtures/fake-engine-fail.sh",
         Store::in_memory("logweir"),
     );
+    // T0-14, as above. This stub deliberately fails `validate-restore` too
+    // (that is `preflight_reports_operational_error_on_malformed_stdout`), so
+    // the result is discarded: what is needed here is only that phase 5 wrote
+    // `restore.yaml` and recorded its digest, which happens before the stub is
+    // spawned. The assertions below are unchanged and still exercise the
+    // exit-code mapping in `restore()`.
+    let _ = engine.preflight(&plan());
     let mut obs = RecordingObserver::default();
     let err = engine.restore(&plan(), &mut obs).unwrap_err();
     let msg = err.to_string();
@@ -202,6 +215,8 @@ fn restore_points_config_at_the_file_it_just_wrote() {
         "../../e2e/fixtures/fake-engine-argv-check.sh",
         Store::in_memory("logweir"),
     );
+    // T0-14, as above.
+    engine.preflight(&plan()).unwrap();
     let mut obs = RecordingObserver::default();
     let facts = engine.restore(&plan(), &mut obs).unwrap();
     assert_eq!(facts.exit_code, 0);
