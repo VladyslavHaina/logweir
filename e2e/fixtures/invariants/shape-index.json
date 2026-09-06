@@ -1,0 +1,26 @@
+[
+  {
+    "id": "no_sample_block",
+    "file": "no_sample_block.json",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `sample`",
+    "python_reason": "the document has no sample block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_evidence_block",
+    "file": "no_evidence_block.json",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `evidence`",
+    "python_reason": "the document has no evidence block; it is not a drill scorecard"
+  },
+  {
+    "id": "records_expected_not_an_integer",
+    "file": "records_expected_not_an_integer.json",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"75\", expected u64",
+    "python_reason": "sample.records_expected is not an integer"
+  }
+]

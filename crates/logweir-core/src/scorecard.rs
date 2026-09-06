@@ -1418,6 +1418,105 @@ mod tests {
         assert_eq!(err.0, "records_sampled_matching exceeds records_sampled");
     }
 
+    // --- Task 5c: the three arms that were RUST-BARE ------------------------
+    //
+    // Task 5's re-review measured each of the three messages below occurring
+    // exactly ONCE in this crate — the arm itself — with only a pytest case
+    // behind it. That is the same defect the two tests above closed, and it is
+    // not one the corpus walker can close for us:
+    // `every_invariant_arm_has_a_corpus_case` counts `return Err(...)`
+    // STATEMENTS and asserts `covered + uncovered == n`, so deleting an arm
+    // together with its `uncovered-arms.json` entry (or flipping that entry to
+    // `occurrences: 0`) drops both sides by one and the arithmetic re-balances
+    // in silence. Measured under mutation, the walker, the corpus shell gate
+    // and pytest all stayed green on such a deletion; the per-arm assertion on
+    // the exact refusal text is the only thing that kills it. Each of the
+    // three now also has a corpus case, which is what turns a SILENT deletion
+    // into a walker-visible two-reader disagreement — the two protections
+    // answer different mutants and neither replaces the other.
+
+    #[test]
+    fn invariants_refuse_a_matrix_fail_without_a_reason() {
+        // A `fail` matrix verdict that does not say why is the one shape of
+        // matrix verdict an auditor cannot act on. One override: the baseline
+        // already carries `matrix_verdict_reason: None`, which is correct
+        // beside a `pass` and incoherent beside a `fail`. Python sibling:
+        // `docs/test_verify_scorecard.py::test_a_matrix_fail_without_a_reason_is_refused`.
+        let mut sc = valid_scorecard();
+        sc.engine.matrix_verdict = MatrixVerdict::Fail;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a `fail` matrix verdict must name its reason");
+        assert_eq!(
+            err.0,
+            "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_pass_rate_measured_without_byte_fingerprint() {
+        // A measured pass rate is a byte-fingerprint result; below that level
+        // there is nothing to measure it from, so a number there is a claim
+        // the drill was not in a position to make.
+        //
+        // `matrix_verdict` moves to `pass-degraded` because the matrix arm
+        // sits EARLIER in `validate_invariants` and would otherwise fire
+        // first: a `pass` matrix verdict at a reduced integrity level is
+        // exactly what that arm refuses. `pass-degraded` is the honest value
+        // for this document, not a weakening — the same override the corpus
+        // case `pass_rate_measured_without_byte_fingerprint` carries, and the
+        // same one Task 5 had to make to keep the pytest case isolated.
+        // Python sibling:
+        // `docs/test_verify_scorecard.py::test_a_pass_rate_measured_without_byte_fingerprint_is_refused`.
+        let mut sc = valid_scorecard();
+        sc.integrity.level = IntegrityLevel::ConsumeOnly;
+        sc.integrity.pass_rate_measured = Some(1.0);
+        sc.engine.matrix_verdict = MatrixVerdict::PassDegraded;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a measured pass rate below byte-fingerprint level has no source");
+        assert_eq!(
+            err.0,
+            "integrity.pass_rate_measured is set but the level is not byte-fingerprint"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_last_phase_completed_outside_the_domain() {
+        // Global Constraint 18: ELEVEN phase slots, -1 through 9. Both ends
+        // are exercised, so an arm narrowed to one side of the range — say
+        // `last_phase_completed > 9` alone — fails here rather than passing on
+        // the half it kept. Python sibling:
+        // `docs/test_verify_scorecard.py::test_a_last_phase_completed_outside_the_domain_is_refused`.
+        //
+        // `captured_by_logweir` stays FALSE, so the true-branch arm
+        // `last_phase_completed is below -1` is never reached and cannot steal
+        // the `-2` case's failure.
+        for outside in [-2, 10, 42] {
+            let mut sc = valid_scorecard();
+            sc.last_phase_completed = outside;
+            let err = sc.validate_invariants().expect_err(
+                "a last_phase_completed outside the eleven phase slots must be refused",
+            );
+            assert_eq!(err.0, "last_phase_completed outside -1..=9", "at {outside}");
+        }
+    }
+
+    #[test]
+    fn invariants_accept_every_phase_slot_including_both_ends() {
+        // The control for the test above: the domain is CLOSED at both ends,
+        // so an arm written `-1..9` (exclusive) or `0..=9` refuses a real
+        // document and this test says so.
+        for inside in [-1, 0, 5, 9] {
+            let mut sc = valid_scorecard();
+            sc.last_phase_completed = inside;
+            assert!(
+                sc.validate_invariants().is_ok(),
+                "last_phase_completed {inside} is one of the eleven slots"
+            );
+        }
+    }
+
     // --- T0-4: `outcome` is a claim entailed by the rest of the document ---
     //
     // One test per arm, each asserting the SPECIFIC message, so deleting a

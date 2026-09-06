@@ -240,6 +240,25 @@ Copied verbatim from your spec, plus the verdict.
 | `anchor` | string | The vocabulary is `head`, `tail`, `random`; **v0.1 implements only `head`** and REFUSES the other two at phase 0 with exit 3 rather than silently substituting. The scorecard field is a plain string (the closed enum lives on the input spec, `logweir_core::spec::Anchor`, which is where a bad value has to be caught); a v0.1.0 scorecard therefore always reads `head`. See [stability.md](../stability.md). |
 | `coverage_note` | string | What the drill itself says about how representative the window is. Read it. |
 
+### The block is REQUIRED, and both readers now enforce that
+
+`sample` is in the schema's top-level `required` list and none of its fields is
+nullable — reading rule 3 above says every optional field states what its null
+means, and none of these does. `records_expected` in particular is the canary
+size the whole `integrity` result is measured against, so a document without it
+cannot be checked at all.
+
+For one release only one reader acted on that. `logweir drill verify` refuses a
+missing `sample` block at parse time (the field is `SampleInfo`, not an
+`Option`), exiting **1** with ``signature verified but the payload is not a
+scorecard: missing field `sample` ``; `docs/verify_scorecard.py` skipped the
+block silently and printed **`VALID`**. Since `verify_scorecard.py` `1.5.0` it refuses
+the same document, exiting **1** with `INVALID: the document has no sample
+block; it is not a drill scorecard`, and refuses a `records_expected` that is
+not an integer with `INVALID: sample.records_expected is not an integer`. The
+pair is walked by both readers in
+`crates/logweir/tests/two_reader_parity.rs::two_reader_parity_on_documents_refused_before_the_invariants`.
+
 ## `target_diff`, `integrity`, `topic_parity`
 
 | Field | Type | Meaning |

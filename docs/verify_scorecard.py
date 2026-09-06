@@ -166,6 +166,17 @@ FORMAT_VERSION = "1.0.0"
 #          `false`, and every sampled record matching; `records_sampled`
 #          never exceeds `sample.records_expected`; and a `pass` matrix
 #          verdict implies the drill passed at byte-fingerprint level.
+#   1.5.0  SHAPE, not an invariant arm — and a bump for exactly the reason the
+#          paragraph above gives, because there are documents this script now
+#          decides differently. `sample` joins the required-block list and
+#          `sample.records_expected` must be an integer. Both are properties
+#          the Rust reader gets from its own types and refuses at
+#          deserialisation; here they were a silent skip, so a scorecard with
+#          no `sample` block at all — or with `"records_expected": "75"` —
+#          printed VALID from this script while `logweir drill verify` exited
+#          1 on the same bytes. Measured, at `0640240`, not argued. That is
+#          the two-reader disagreement this file's own module comment says is
+#          impossible, so it is closed rather than recorded (Task 5c).
 #
 # ANY task that adds or removes an arm in `check_invariants` bumps this minor
 # and updates the parenthetical in the success line below, IN THE SAME COMMIT.
@@ -176,7 +187,7 @@ FORMAT_VERSION = "1.0.0"
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.4.0"
+SCRIPT_VERSION = "1.5.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -320,8 +331,36 @@ def check_invariants(doc) -> str:
             f"understands (this script knows {FORMAT_VERSION})"
         )
 
+    # THE BLOCK-PRESENCE CHECKS ARE NOT INVARIANT ARMS. They are this script's
+    # stand-in for what the Rust reader gets from its own type: every one of
+    # these blocks is a NON-optional field of `logweir_core::scorecard::
+    # Scorecard`, so `serde_json` refuses a document missing one at
+    # DESERIALISATION — `drill verify` exits 1 with "signature verified but the
+    # payload is not a scorecard: missing field `sample`" and never reaches
+    # `validate_invariants` at all. Python has no such layer, so the shape has
+    # to be asserted here, FIRST, before any rule that would otherwise read a
+    # block that is not there.
+    #
+    # Task 5c: `sample` joins the list. Until now it was deliberately absent —
+    # Task 5's §10 and addendum A1 forbade adding it, on the ground that a loop
+    # entry here would be "a Python arm with no Rust counterpart". Measured at
+    # `0640240`, the cost of that omission was a REAL DISAGREEMENT and not a
+    # cosmetic one: on a scorecard with the whole `sample` block deleted,
+    # `drill verify` exited 1 and this script printed `VALID` and exited 0. The
+    # ground was also mistaken about the category — no entry in this loop is an
+    # arm of the arm-for-arm mirror below, and `evidence` had been sitting here
+    # since Task 2 for exactly the same reason `sample` does now. The whole
+    # loop is documented as shape, and `sample` is in it.
+    #
+    # `sample` is placed next to `objectives` because that is where it sits in
+    # the struct's own field order (measured, objectives, sample) and in the
+    # document's key order. The rest of the loop's order is Task 2's and is
+    # left alone: it decides only which block a document missing SEVERAL of
+    # them is named for, and no corpus case can pin that — neither reader
+    # reaches an invariant on such a document.
     integrity = doc.get("integrity")
     objectives = doc.get("objectives")
+    sample = doc.get("sample")
     measured = doc.get("measured")
     source = doc.get("source")
     engine = doc.get("engine")
@@ -329,6 +368,7 @@ def check_invariants(doc) -> str:
     for name, block in (
         ("integrity", integrity),
         ("objectives", objectives),
+        ("sample", sample),
         ("measured", measured),
         ("source", source),
         ("engine", engine),
@@ -336,6 +376,21 @@ def check_invariants(doc) -> str:
     ):
         if not isinstance(block, dict):
             return f"the document has no {name} block; it is not a drill scorecard"
+
+    # Also shape, and also the Rust reader's type doing the work over there:
+    # `sample.records_expected` is a `u64`, so `null`, a string or an absent
+    # key is a deserialisation refusal in Rust. Here it was a SILENT SKIP — the
+    # coverage arm below guarded with `isinstance(expected, int)` and simply
+    # did not run, so `"records_expected": "75"` printed VALID from this script
+    # and exited 1 from `drill verify`. Same wording convention as the
+    # `last_phase_completed is not an integer` check further down, which is the
+    # same situation on an `i32` field.
+    #
+    # `bool` is excluded explicitly: `isinstance(True, int)` is True in Python,
+    # and `"records_expected": true` is not an integer to any other reader.
+    expected = sample.get("records_expected")
+    if not isinstance(expected, int) or isinstance(expected, bool):
+        return "sample.records_expected is not an integer"
 
     # T0-2: the four post-put fields are zeroed BEFORE signing, because they
     # describe an upload that has not happened yet. Mirrors the arm that sits
@@ -435,14 +490,11 @@ def check_invariants(doc) -> str:
     # words, so a document violating two of them gets the SAME message from
     # both readers.
     #
-    # `sample` is deliberately NOT added to the block-presence loop above: Rust
-    # refuses a missing `sample` block at DESERIALISATION time (the field is
-    # `SampleInfo`, not `Option<SampleInfo>`), not at invariant time, so a loop
-    # entry here would be a Python arm with no Rust counterpart. The coverage
-    # arm below guards with `isinstance` instead, exactly as the
-    # `records_sampled` arm above does.
+    # `sample` and `sample.records_expected` are shape-checked at the top of
+    # this function (Task 5c), so the coverage arm below can read `expected`
+    # straight out rather than guarding with `isinstance` and skipping in
+    # silence, which is what let a mistyped `records_expected` print VALID.
     outcome = doc.get("outcome")
-    sample = doc.get("sample")
 
     if outcome == "pass" and integrity.get("result") != "pass":
         return "outcome is 'pass' but integrity.result is not 'pass'"
@@ -466,8 +518,7 @@ def check_invariants(doc) -> str:
     ):
         return f"outcome is 'pass' but only {matching} of {sampled} sampled records matched"
 
-    expected = sample.get("records_expected") if isinstance(sample, dict) else None
-    if isinstance(sampled, int) and isinstance(expected, int) and sampled > expected:
+    if isinstance(sampled, int) and sampled > expected:
         return f"records_sampled ({sampled}) exceeds sample.records_expected ({expected})"
 
     # Ruling R-F: `logweir::drill::phase8_score::matrix_verdict_for` returns
@@ -719,6 +770,11 @@ def main(
         # 1.4.0 adds outcome-entailment: six arms that make `outcome` — the
         # field an auditor reads first — a claim the rest of the document has
         # to support, where before it was read by neither reader (T0-4).
+        # 1.5.0 adds required-block shape: `sample` is now required and
+        # `sample.records_expected` must be an integer, which is what the Rust
+        # reader has always got from its own types. Named here because an
+        # auditor holding an older run's VALID cannot otherwise tell whether
+        # the document they were handed even had a `sample` block.
         #
         # `docs/test_verify_scorecard.py::
         # test_the_version_line_names_the_current_invariant_set` asserts the
@@ -727,7 +783,8 @@ def main(
         print(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
             "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, "
-            "outcome-entailment; approval.self_attested derived, not echoed)"
+            "outcome-entailment, required-block shape incl. sample; "
+            "approval.self_attested derived, not echoed)"
         )
         return 0
 

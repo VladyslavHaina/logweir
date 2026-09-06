@@ -31,7 +31,19 @@
 //! re-mint).
 //!
 //! Task 5 extends this by adding entries to `index.json`, never by editing
-//! this file.
+//! this file. Task 5c did the same for six more arms — six documents, six
+//! entries, no change to the walker's case handling.
+//!
+//! Task 5c DOES add a second walker,
+//! `two_reader_parity_on_documents_refused_before_the_invariants`, over
+//! `e2e/fixtures/invariants/shape-index.json`. That is not an extension of the
+//! corpus by other means; it is a different claim about a different class of
+//! document. A scorecard missing a whole required block is refused by Rust at
+//! DESERIALISATION, so `strip` below finds no invariant line and the walker
+//! above cannot express the case at all (measured: it reports "at least one
+//! reader produced no invariant refusal line — rust: None"). The second walker
+//! asserts what those documents CAN pin: both readers refuse, at the recorded
+//! exit codes, each with its own recorded text, and NEITHER on an invariant.
 
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
@@ -311,6 +323,181 @@ fn two_reader_parity_over_the_invariant_corpus() {
         "the two readers disagree on {} point(s) over {} corpus case(s):\n  - {}",
         failures.len(),
         entries.len(),
+        failures.join("\n  - ")
+    );
+}
+
+/// Sign `bytes` with the checked-in throwaway fixture key into a fresh temp
+/// dir and run BOTH readers over the pair. Returns (rust, python) `Output`s.
+///
+/// The signed payload is the file's bytes EXACTLY as written; nothing is
+/// re-serialised, or the two readers would verify different bytes. The
+/// `TempDir` is returned with them so the caller keeps it alive.
+fn run_both_readers(
+    key: &SigningKey,
+    py: &Path,
+    root: &Path,
+    bytes: &[u8],
+) -> (
+    tempfile::TempDir,
+    std::process::Output,
+    std::process::Output,
+) {
+    let sidecar = sign_detached(key, PAYLOAD_TYPE_SCORECARD, bytes).expect("sign the case");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sc_path = dir.path().join("case.json");
+    let sig_path = dir.path().join("case.sig");
+    std::fs::write(&sc_path, bytes).expect("write the case");
+    std::fs::write(&sig_path, serde_json::to_vec(&sidecar).expect("sidecar")).expect("write sig");
+    let pubkey = root.join("e2e/fixtures/signed/public.pem");
+
+    let rust = Command::new(env!("CARGO_BIN_EXE_logweir"))
+        .current_dir(root)
+        .args(["drill", "verify", "--scorecard"])
+        .arg(&sc_path)
+        .arg("--signature")
+        .arg(&sig_path)
+        .arg("--public-key")
+        .arg(&pubkey)
+        .output()
+        .expect("run drill verify");
+    let python = Command::new(py)
+        .current_dir(root)
+        .arg("docs/verify_scorecard.py")
+        .arg(&sc_path)
+        .arg(&sig_path)
+        .arg(&pubkey)
+        .output()
+        .expect("run docs/verify_scorecard.py");
+    (dir, rust, python)
+}
+
+/// TWO-READER PARITY ON DOCUMENTS NEITHER READER REACHES AN INVARIANT ON —
+/// the other half of the corpus, and the one `index.json` structurally cannot
+/// hold.
+///
+/// `sample` and `evidence` are NON-optional fields of
+/// `logweir_core::scorecard::Scorecard`, so a document missing one is refused
+/// by `serde_json` at DESERIALISATION: `drill verify` exits 1 with `signature
+/// verified but the payload is not a scorecard: missing field ...` and never
+/// calls `validate_invariants`. `docs/verify_scorecard.py` has no such layer
+/// and asserts the same shape in its block-presence loop instead.
+///
+/// Until Task 5c that loop listed `evidence` and NOT `sample`, and the gap was
+/// a real disagreement, not a cosmetic one: on the very document this test
+/// walks, `drill verify` exited 1 while the script printed `VALID` and exited
+/// 0 — the disagreement `docs/verify_scorecard.py`'s own module comment says
+/// is impossible. Task 5's §10 and addendum A1 forbade closing it and
+/// `uncovered-arms.json` recorded it as a READER ASYMMETRY "pinned by nothing
+/// in either direction". This test is that pin.
+///
+/// WHY IT IS NOT AN `index.json` CASE, measured rather than argued. Adding one
+/// and running `two_reader_parity_over_the_invariant_corpus` gives:
+///
+/// ```text
+/// probe_no_sample_block: index.json records a refusal reason, but at least one
+///     reader produced no invariant refusal line
+///     rust:   None
+///     python: Some("the document has no sample block; it is not a drill scorecard")
+/// ```
+///
+/// `strip` finds no line under the two Rust invariant prefixes, because there
+/// is no invariant refusal to find — and `every_invariant_arm_has_a_corpus_case`
+/// would additionally reject the entry's `arm`, since no such statement exists
+/// in `validate_invariants`'s body. So the claim these documents carry is a
+/// DIFFERENT claim, and it is asserted differently: both readers refuse, each
+/// with its own recorded text, and NEITHER on an invariant. That last clause is
+/// the load-bearing one — it is what says the two refusals really are the two
+/// shape layers agreeing, and it is what fails if some later change smuggles
+/// one of these into invariant space in only one reader.
+#[test]
+fn two_reader_parity_on_documents_refused_before_the_invariants() {
+    let py = require_python();
+    let root = root();
+    let key = SigningKey::from_pem_file(&root.join("e2e/fixtures/signed/signing.pem"))
+        .expect("the checked-in throwaway fixture signing key");
+
+    let cases: Vec<Value> = read_json(&corpus().join("shape-index.json"))
+        .as_array()
+        .expect("shape-index.json is a JSON array")
+        .clone();
+    assert!(
+        !cases.is_empty(),
+        "e2e/fixtures/invariants/shape-index.json is empty; a walker over nothing proves nothing"
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for entry in &cases {
+        let id = s(entry, "id");
+        let bytes = std::fs::read(corpus().join(s(entry, "file"))).unwrap_or_else(|e| {
+            panic!("the corpus is incomplete: case {id}'s document is unreadable: {e}")
+        });
+        let (_dir, rust, python) = run_both_readers(&key, &py, &root, &bytes);
+
+        // Never read through a pipe: `Output::status.code()` is the real status.
+        let rust_code = rust.status.code();
+        let python_code = python.status.code();
+        let rust_err = String::from_utf8_lossy(&rust.stderr).to_string();
+        let python_err = String::from_utf8_lossy(&python.stderr).to_string();
+
+        let want_rust = i(entry, "rust_exit");
+        let want_python = i(entry, "python_exit");
+        if rust_code != Some(want_rust as i32) {
+            failures.push(format!(
+                "{id}: drill verify exited {rust_code:?}, shape-index.json expects {want_rust}\n\
+                 \x20       rust stderr: {}",
+                rust_err.trim()
+            ));
+        }
+        if python_code != Some(want_python as i32) {
+            failures.push(format!(
+                "{id}: verify_scorecard.py exited {python_code:?}, shape-index.json expects \
+                 {want_python}\n        python stderr: {}",
+                python_err.trim()
+            ));
+        }
+
+        // The Rust half is serde's own message. Only the STABLE part is
+        // recorded — the reader, the verdict and the field it names. The
+        // trailing `at line N column M` is deliberately not pinned: it moves
+        // with the document's byte length and says nothing about the claim.
+        let want_rust_reason = s(entry, "rust_reason");
+        if !rust_err.lines().any(|l| l.starts_with(want_rust_reason)) {
+            failures.push(format!(
+                "{id}: drill verify's refusal is not the one shape-index.json records\n        \
+                 want prefix: {want_rust_reason:?}\n        got stderr:  {}",
+                rust_err.trim()
+            ));
+        }
+        // The Python half is this repository's own wording, so it is pinned
+        // WHOLE.
+        let want_python_reason = s(entry, "python_reason");
+        if strip(&python_err, &[PYTHON_PREFIX]).as_deref() != Some(want_python_reason) {
+            failures.push(format!(
+                "{id}: verify_scorecard.py's refusal is not the one shape-index.json records\n\
+                 \x20       want: {want_python_reason:?}\n        got stderr: {}",
+                python_err.trim()
+            ));
+        }
+
+        // NEITHER reader refuses these on an INVARIANT. If one ever does, the
+        // document belongs in `index.json` with an `arm`, under the walker
+        // above that compares the two texts byte for byte — and this test
+        // failing is how anybody finds out.
+        let rust_invariant = strip(&rust_err, &[RUST_OUTER_PREFIX, RUST_INNER_PREFIX]);
+        if rust_invariant.is_some() {
+            failures.push(format!(
+                "{id}: drill verify refused this on an INVARIANT ({rust_invariant:?}). It is now \
+                 an index.json case, not a shape case"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "the two readers disagree on {} point(s) over {} shape case(s):\n  - {}",
+        failures.len(),
+        cases.len(),
         failures.join("\n  - ")
     );
 }

@@ -663,7 +663,7 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.4.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment; approval.self_attested derived, not echoed)
+       verifier: verify_scorecard.py 1.5.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, required-block shape incl. sample; approval.self_attested derived, not echoed)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
@@ -685,6 +685,7 @@ far is such a move:
 | `1.2.0` | **Derives** `approval.self_attested` from the key that verified the signature and refuses a document whose claim disagrees, where `1.1.0` printed the document's own claim and returned `VALID`. |
 | `1.3.0` | Refuses a `partial` integrity result whose `partial_reason` is **blank** (`""` or whitespace) and not merely null, and refuses any document with a non-empty `redactions`. Both were `VALID` under `1.2.0`. |
 | `1.4.0` | Reads `outcome` **for the first time**. Refuses a document whose headline field contradicts the fields it summarises: `pass` beside a non-`pass` `integrity.result`, beside a non-blank `partial_reason`, beside `objectives.met: false`, or beside a sample where not every record matched; a `records_sampled` larger than `sample.records_expected`; and `engine.matrix_verdict: "pass"` on a drill that did not pass at `byte-fingerprint` level. All were `VALID` under `1.3.0`. |
+| `1.5.0` | Requires the `sample` block and an integer `sample.records_expected`. A scorecard with no `sample` block at all — or with `"records_expected": "75"` — printed `VALID` under `1.4.0` while `logweir drill verify` exited **1** on the same bytes, because Rust gets the shape from its own types and this script had no equivalent layer. Not an invariant arm; a bump all the same, because there are documents this script now decides differently. |
 
 The parenthetical on the `verifier:` line enumerates the current invariant set,
 so the line an auditor reads names the checks that actually produced the verdict
@@ -696,7 +697,7 @@ its sidecar — and you should have; a signature is over a fixed byte string and
 stays checkable forever — **re-run the current script over your retained
 documents.** Nothing about the artifact changed and no signature is affected;
 what changed is what this reader is willing to call `VALID`. A document that
-passed under an earlier version and is refused under `1.4.0` was always making a
+passed under an earlier version and is refused under `1.5.0` was always making a
 claim its signature could not support. The script was not catching it.
 
 `1.4.0` is the version worth re-running for. `outcome` is the field you read
@@ -704,6 +705,16 @@ first and the field that had never been checked against anything: a scorecard
 saying `pass` next to `integrity.result: fail` verified clean under every
 earlier version, from both readers. If you retained scorecards from an earlier
 run, that is the claim worth re-testing.
+
+`1.5.0` is worth re-running for a narrower reason, and it is the only version so
+far where **the two readers disagreed**. Every version up to `1.4.0` made this
+script stricter in step with `logweir drill verify`; `1.5.0` closes a case where
+they did not agree at all. A scorecard with the whole `sample` block removed —
+the block carrying the canary size the whole integrity result is measured
+against — was refused by `logweir drill verify` and called `VALID` by this
+script. If you hold a `VALID` printed by `1.4.0` or earlier and you cannot see a
+`sample` block in the document it was printed for, that `VALID` was wrong. Run
+`1.5.0` over it.
 
 Read the version line, not just the verdict. The verdict alone cannot tell you
 which rule produced it.

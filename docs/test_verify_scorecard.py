@@ -554,10 +554,11 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.4.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.5.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
+        assert "required-block shape incl. sample" in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -1089,4 +1090,94 @@ def test_a_matrix_pass_below_byte_fingerprint_is_refused():
         assert (
             "engine.matrix_verdict is 'pass' but the drill did not pass at "
             "byte-fingerprint level"
+        ) in r.stderr
+
+
+# --- Task 5c: the `sample` reader asymmetry, closed -------------------------
+#
+# Every block below is a NON-optional field of `logweir_core::scorecard::
+# Scorecard`, so the Rust reader refuses a document missing one at
+# DESERIALISATION and `drill verify` exits 1. This script has no such layer.
+# `evidence` has been in the block-presence loop since Task 2; `sample` was
+# deliberately left out, and the measured cost of that omission was a document
+# `drill verify` exited 1 on and this script printed VALID for — the exact
+# two-reader disagreement `verify_scorecard.py`'s own module comment calls
+# impossible. `crates/logweir/tests/two_reader_parity.rs::
+# two_reader_parity_on_documents_refused_before_the_invariants` is the other
+# half of these tests: it runs BOTH readers over the same two documents.
+
+
+def _signed_scorecard_without(d, block):
+    """The format example with one whole top-level block removed, signed."""
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    del doc[block]
+    return _write_signed(d, "case", SCORECARD_TYPE, doc)
+
+
+def test_a_document_with_no_sample_block_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard_without(d, "sample")
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "the document has no sample block; it is not a drill scorecard"
+        ) in r.stderr
+
+
+def test_a_document_with_no_evidence_block_is_still_refused():
+    # The twin, and the reason the loop exists at all. Pinned here so a
+    # "cleanup" that trims the loop cannot quietly re-open the `sample` gap on
+    # the block that was already covered.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard_without(d, "evidence")
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "the document has no evidence block; it is not a drill scorecard"
+        ) in r.stderr
+
+
+def test_a_records_expected_that_is_not_an_integer_is_refused():
+    # `sample.records_expected` is a `u64` in Rust, so a string, a null, a
+    # float or a bool is a deserialisation refusal there. Here it used to be a
+    # SILENT SKIP: the coverage arm guarded with `isinstance(expected, int)`
+    # and simply did not run, so `"records_expected": "75"` printed VALID.
+    #
+    # `True` is in the list because `isinstance(True, int)` is True in Python
+    # and in no other reader.
+    for bad in ("75", None, 75.0, True):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{"sample.records_expected": bad})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{bad!r}: {r.stdout}"
+            assert "sample.records_expected is not an integer" in r.stderr, bad
+
+
+def test_an_absent_records_expected_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        del doc["sample"]["records_expected"]
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "sample.records_expected is not an integer" in r.stderr
+
+
+def test_the_coverage_arm_still_fires_now_that_it_reads_expected_unguarded():
+    # The control for the change above: dropping the `isinstance(expected, int)`
+    # guard from the coverage arm must not have dropped the arm. A well-formed
+    # document whose `records_sampled` exceeds its `records_expected` is still
+    # refused with the same words.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.records_sampled": 100,
+                "integrity.records_sampled_matching": 100,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "records_sampled (100) exceeds sample.records_expected (75)"
         ) in r.stderr

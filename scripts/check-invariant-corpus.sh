@@ -9,6 +9,17 @@
 # written for. Task 5 inherits it unchanged: it adds cases to `index.json`, not
 # to this file.
 #
+# Task 5c: it also walks `shape-index.json`, whose documents neither reader
+# reaches an invariant on (a whole required block removed, or a mistyped
+# `sample.records_expected` — Rust refuses those at DESERIALISATION). The
+# TWO-READER claim on those is the cargo test's; the half checkable with the
+# second reader alone is this script's, and leaving it out would mean the
+# sentence above — "the corpus is still checked" — covered only part of the
+# corpus. Both files reduce to the same two assertions, `python_exit` and the
+# `INVALID: `-stripped reason, so they are walked by one loop; `shape-index`
+# spells the fields `python_reason` because its Rust half is recorded
+# separately and is not this script's business.
+#
 # The corpus cases are UNSIGNED on disk (see e2e/fixtures/invariants/README.md).
 # `verify_scorecard.py` checks the signature before it evaluates any invariant,
 # so each case is signed here, at test time, into a temp dir with the checked-in
@@ -81,15 +92,25 @@ keyid = hashlib.sha256(der).hexdigest()
 entries = json.loads((corpus / "index.json").read_text())
 if not entries:
     raise SystemExit("index.json is empty; a walk over nothing proves nothing")
+# The shape cases, normalised onto the same two fields. `python_reason` rather
+# than `reason` because those entries also record the RUST refusal, which is a
+# different reader's text and no business of this script's.
+shape = json.loads((corpus / "shape-index.json").read_text())
+if not shape:
+    raise SystemExit("shape-index.json is empty; a walk over nothing proves nothing")
+for e in shape:
+    entries.append({"id": e["id"], "file": e["file"],
+                    "python_exit": e["python_exit"], "reason": e["python_reason"]})
 # Every case is signed into ONE shared temp dir keyed by `id`, so a duplicate
 # id would silently overwrite an earlier case's files and then compare the
 # WRONG document against that earlier case's expected reason — a green walk
-# over a case that was never run. Task 5 adds cases, so this fails loudly
+# over a case that was never run. Checked ACROSS both index files, which is
+# what makes adding a third one safe. Task 5 adds cases, so this fails loudly
 # rather than staying latent.
 ids = [e["id"] for e in entries]
 dupes = sorted({i for i in ids if ids.count(i) > 1})
 if dupes:
-    raise SystemExit(f"index.json has duplicate id(s): {dupes}; every id must be unique")
+    raise SystemExit(f"the corpus indexes have duplicate id(s): {dupes}; every id must be unique")
 for e in entries:
     # The signed payload is the file's bytes EXACTLY as written. Nothing is
     # re-serialised, or the reader would verify different bytes.
@@ -145,4 +166,4 @@ done <<< "$(cat "$tmp/cases.tsv")"
 if [ "$count" -eq 0 ]; then
     fail "walked zero cases; e2e/fixtures/invariants/index.json is empty or unreadable"
 fi
-echo "check-invariant-corpus: the auditor's verifier agrees with index.json on all $count cases"
+echo "check-invariant-corpus: the auditor's verifier agrees with index.json + shape-index.json on all $count cases"

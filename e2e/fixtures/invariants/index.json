@@ -109,5 +109,53 @@
     "python_exit": 1,
     "reason": "outcome is 'pass' but integrity.result is not 'pass'",
     "arm": "outcome is 'pass' but integrity.result is not 'pass'"
+  },
+  {
+    "id": "objectives_met_at_a_reduced_level",
+    "file": "objectives_met_at_a_reduced_level.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "objectives.met must be null when pass_rate is not measurable",
+    "arm": "objectives.met must be null when pass_rate is not measurable"
+  },
+  {
+    "id": "negative_rpo_objective",
+    "file": "negative_rpo_objective.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "objectives.rpo_seconds is negative (-300); a recovery-point gap of less than zero is not a smaller gap, it is a meaningless one",
+    "arm": "{name} is negative ({v}); a recovery-point gap of less than zero"
+  },
+  {
+    "id": "more_matching_than_sampled",
+    "file": "more_matching_than_sampled.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "records_sampled_matching exceeds records_sampled",
+    "arm": "records_sampled_matching exceeds records_sampled"
+  },
+  {
+    "id": "matrix_fail_without_a_reason",
+    "file": "matrix_fail_without_a_reason.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null",
+    "arm": "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null"
+  },
+  {
+    "id": "pass_rate_measured_without_byte_fingerprint",
+    "file": "pass_rate_measured_without_byte_fingerprint.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.pass_rate_measured is set but the level is not byte-fingerprint",
+    "arm": "integrity.pass_rate_measured is set but the level is not byte-fingerprint"
+  },
+  {
+    "id": "last_phase_completed_out_of_domain",
+    "file": "last_phase_completed_out_of_domain.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "last_phase_completed outside -1..=9",
+    "arm": "last_phase_completed outside -1..=9"
   }
 ]
