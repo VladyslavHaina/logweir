@@ -5,14 +5,16 @@
 //! `e2e/fixtures/signed/scorecard.json` via `logweir-core`'s `emit_fixture`
 //! example (Task 3), then runs this binary from the workspace root.
 //!
-//! ALL key material this program generates is a THROWAWAY TEST FIXTURE — see
-//! `e2e/fixtures/signed/README.md`. The private key is written to disk
-//! (`signing.pem`, checked in per Task 1's `.gitignore` un-ignore) but is
-//! NEVER printed to stdout/stderr.
+//! This program does NOT normally produce a key: it READS the checked-in
+//! `e2e/fixtures/signed/signing.pem` (itself checked in per the `.gitignore`
+//! un-ignore) and mints one only in a tree where that file is absent. Either
+//! way the key is a THROWAWAY TEST FIXTURE — see
+//! `e2e/fixtures/signed/README.md` — and the private half is NEVER printed to
+//! stdout/stderr.
 
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::scorecard::Scorecard;
-use logweir_evidence::keys::SigningKey;
+use logweir_evidence::keys::{KeyOrigin, SigningKey};
 use logweir_evidence::sign::sign_detached;
 use logweir_evidence::PAYLOAD_TYPE_SCORECARD;
 use std::path::Path;
@@ -38,10 +40,28 @@ fn main() {
     sc.validate_invariants()
         .expect("scorecard.json must satisfy its own invariants before it is signed");
 
-    let key = SigningKey::generate_p256();
+    // Pinned, not minted (Task 1 / backlog T0-5 / Phase 1 item 1a). Minting a
+    // fresh key here orphaned the `917cf9a2…` fingerprint that
+    // docs/verify-a-scorecard.md teaches auditors to pin and that both committed
+    // .sig files carry. The key is now READ when e2e/fixtures/signed/signing.pem
+    // is present and minted only when it is absent, so a re-mint can change the
+    // DOCUMENT and never the KEY. Recipe: docs/keys.md.
+    let signing_key_path = dir.join("signing.pem");
+    let (key, origin) = SigningKey::load_or_generate(&signing_key_path)
+        .unwrap_or_else(|e| panic!("resolve {}: {e}", signing_key_path.display()));
+    if origin == KeyOrigin::Minted {
+        // Path only, never key material (brief §10 item 11). stderr, so `just
+        // fixtures-sign`'s stdout redirect at justfile:31 is untouched.
+        eprintln!(
+            "mint_fixture: no key at {}; minted a fresh P-256 keypair there",
+            signing_key_path.display()
+        );
+    }
 
     // Public key: checked in, read by `drill verify` (this task) and by
-    // later tasks' fixtures.
+    // later tasks' fixtures. Written unconditionally: it is derived from the
+    // key in hand, so on the READ path these bytes are the committed bytes and
+    // the write is a no-op in content.
     std::fs::write(
         dir.join("public.pem"),
         key.verifying_key()
@@ -49,15 +69,9 @@ fn main() {
             .expect("public key PEM-encodes"),
     )
     .expect("write public.pem");
-    // Private key: ALSO checked in — Task 1's `.gitignore` un-ignores exactly
-    // this directory's `*.pem` files because Task 14's `guard_cli.rs` passes
-    // `--signing-key ../../e2e/fixtures/signed/signing.pem` and Task 22's
-    // demo needs a worked example. A throwaway test key; never printed.
-    std::fs::write(
-        dir.join("signing.pem"),
-        key.to_pkcs8_pem().expect("private key PEM-encodes"),
-    )
-    .expect("write signing.pem");
+    // The private key is NOT written here. `load_or_generate` owns that file:
+    // it writes it on the mint path only, and leaves it untouched on the read
+    // path — which is what keeps `signing.pem` byte-identical across a re-mint.
 
     // scorecard.sig: sign the EXACT bytes read from scorecard.json — never a
     // re-serialisation (spec §6 C3, verify-as-read).

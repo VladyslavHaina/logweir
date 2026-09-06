@@ -94,6 +94,10 @@ an untold-you key rotation or a forgery attempt, and either way it is
 something to resolve with the publisher out of band, not something either
 verifier can adjudicate for you.
 
+For how a publisher generates the key behind that fingerprint, what the
+fingerprint is a digest of, and what a legitimate rotation looks like from
+the publisher's side, see [`keys.md`](keys.md).
+
 Record the pinned fingerprint somewhere durable (next to the publisher's
 name, alongside your own organization's other trusted keys) and reuse
 *that* retained copy of `public.pem` for every later scorecard from this

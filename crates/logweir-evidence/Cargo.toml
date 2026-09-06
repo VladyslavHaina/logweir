@@ -21,6 +21,11 @@ thiserror.workspace = true
 # re-serialises a `Scorecard` before signing it. Not a dependency of the
 # library.
 logweir-core = { path = "../logweir-core" }
+# `tests/key_provenance.rs` mints keys into throwaway directories to prove
+# `SigningKey::load_or_generate` mints only when the path is absent. Pulls no
+# OSO, AWS or Kubernetes crate (Global Constraint 1), and it is a DEV
+# dependency, so `--no-default-features` library builds never see it.
+tempfile = "3"
 
 [features]
 default = []

@@ -1,6 +1,6 @@
 # Signed test fixtures
 
-Everything in this directory, including `public.pem` and `signing.pem`, is a **throwaway test fixture**: the P-256 key pair here signs nothing outside this repository's own test suite, it is regenerated on demand by `just fixtures-sign`, and it must never be used to sign a real drill scorecard.
+Everything in this directory, including `public.pem` and `signing.pem`, is a **throwaway test fixture**: the P-256 key pair here signs nothing outside this repository's own test suite and must never be used to sign a real drill scorecard. The scorecard documents and their `.sig` sidecars are regenerated on demand by `just fixtures-sign`; the **keypair is pinned and read**, not regenerated — `mint_fixture` mints one only in a tree where `signing.pem` is absent. How the key was generated, how its fingerprint is computed, and how rotation works: [`docs/keys.md`](../../../docs/keys.md).
 
 ## What these fixtures show that v0.1 cannot produce
 
@@ -38,8 +38,10 @@ so would invalidate the signatures these fixtures exist to exercise:
   `e2e/fixtures/README.md`.
 
 Regenerating and re-signing the two files in this directory is release
-engineering's call, not a test's — and it is not free: `mint_fixture` generates
-a NEW key pair on every run, so `public.pem` and `signing.pem` change with them.
+engineering's call, not a test's. It no longer costs the keypair, though:
+`mint_fixture` READS `signing.pem` when it is present and mints only when it is
+absent, so `public.pem` and `signing.pem` are unchanged by a re-mint and the
+`917cf9a2…` fingerprint survives it.
 
 
 ---

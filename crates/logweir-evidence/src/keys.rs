@@ -17,6 +17,14 @@ pub enum SigningKey {
     Ed25519(ed25519_dalek::SigningKey),
 }
 
+/// Where the key in hand came from. An enum, not a bool: a caller cannot get
+/// `minted` backwards without the compiler noticing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOrigin {
+    LoadedFromFile,
+    Minted,
+}
+
 #[derive(Clone)]
 pub enum VerifyingKey {
     P256(p256::ecdsa::VerifyingKey),
@@ -48,6 +56,35 @@ impl SigningKey {
                     path.display()
                 ))
             })
+    }
+
+    /// Reads `path` as a PKCS#8 PEM private key if it exists; otherwise mints a
+    /// fresh P-256 key and writes it to `path` (parent directories must already
+    /// exist). Never prints key material.
+    ///
+    /// This is what pins the checked-in fixture key. A caller that minted
+    /// unconditionally orphaned the fingerprint `docs/verify-a-scorecard.md`
+    /// teaches auditors to pin every time it ran; here, a key that is already
+    /// on disk is READ and the file is left byte-identical, so re-running the
+    /// mint can change the DOCUMENT and never the KEY. Recipe and rotation
+    /// story: `docs/keys.md`.
+    ///
+    /// Errors: `Error::Key` if `path` exists but is not a P-256/Ed25519 PKCS#8
+    /// PEM (propagated verbatim from `from_pem_file`), or if the mint path
+    /// cannot write `path`. A path that exists but is unreadable or malformed
+    /// is an ERROR, never a silent re-mint — a silent re-mint over a corrupt
+    /// key file is the exact failure this function exists to prevent.
+    pub fn load_or_generate(path: &Path) -> Result<(SigningKey, KeyOrigin), Error> {
+        if path.exists() {
+            return Ok((Self::from_pem_file(path)?, KeyOrigin::LoadedFromFile));
+        }
+        let key = Self::generate_p256();
+        // `to_pkcs8_pem` returns PRIVATE key material: it is written to the
+        // path the caller named and never logged, printed or put in an error
+        // message. The error below names the PATH only.
+        std::fs::write(path, key.to_pkcs8_pem()?)
+            .map_err(|e| Error::Key(format!("{}: {e}", path.display())))?;
+        Ok((key, KeyOrigin::Minted))
     }
 
     pub fn alg(&self) -> KeyAlg {
