@@ -21,6 +21,7 @@ lint:
     ./scripts/check-verifier-parity.sh
     ./scripts/check-invariant-corpus.sh
     ./scripts/check-deps-count.sh
+    ./scripts/time-unit-suite.sh
 
 # Task 5b. The artifact-directory ceiling. `target/debug/deps` reached 873,349
 # files / 43.5 GiB across five tasks of mutation rounds that nobody cleaned up
@@ -54,14 +55,28 @@ mutant ARGS:
 mutant-clean:
     rm -rf target/mutants
 
-# Task 5b. The suite's OWN clock, and the check that keeps it honest. Refuses
-# to run while 9092 or 9000 answers — a timing number taken against a live
-# stack is about a different machine than the one this bound is for. Bounds the
-# whole default suite (LOGWEIR_UNIT_SUITE_BUDGET_SECS, default 120) AND every
-# individual test (LOGWEIR_UNIT_TEST_BUDGET_SECS, default 5); the per-test
-# bound is the one that catches a dialer, since a single unit test that waits
-# out rdkafka's 20 s `const T` blows it alone. NOT part of `lint`: it runs the
-# whole suite, and `just lint` must stay runnable while the stack is up.
+# Task 5b, wired into `lint` in fix round 1 (review F3). The suite's OWN clock,
+# and the check that keeps it honest. Bounds the whole default suite
+# (LOGWEIR_UNIT_SUITE_BUDGET_SECS, default 120) AND every individual test
+# (LOGWEIR_UNIT_TEST_BUDGET_SECS, default 5).
+#
+# THE PER-TEST BOUND IS THE ONLY THING THAT CATCHES A RE-ADDED DIALER. The
+# reviewer verified it: deleting the `#[cfg(feature = "e2e")]` from
+# `check_7_…` puts a 20 s broker wait back in the default suite, and the grep
+# audit does not see it (its address is `127.0.0.1:1`, and by ruling B1(a) no
+# address could usefully be a token, since every address costs the same 20 s).
+# This harness caught it — `FAIL 20.31s check_7_…`, exit 1 — while the 120 s
+# SUITE budget stayed green at 44 s. So the catcher has to run automatically,
+# and that means here.
+#
+# IT REFUSES TO RUN, EXIT 1, WHILE 9092 OR 9000 ANSWERS. A timing number taken
+# against a live stack is about a different machine than the one this bound is
+# for, and a gate that reports PASS without having measured anything is the
+# defect this whole task exists to remove. The consequence, stated plainly:
+# **`just lint` fails while the compose stack is up.** Run `just e2e-down`
+# first, or run `just e2e` (which wants the stack up) as the separate phase it
+# is. Exiting 0 with a "skipped" line was considered and rejected — that is a
+# check that cannot fail.
 time-unit-suite:
     ./scripts/time-unit-suite.sh
 
@@ -123,8 +138,18 @@ e2e-up:
 e2e-down:
     docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
+# AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
+# in the environment, `AmazonS3Builder::from_env()` falls through to the EC2
+# instance-metadata credential provider and object_store spends ten retries on
+# the link-local 169.254.169.254 before the configured endpoint is contacted at
+# all. MEASURED on `check_storage_skips_a_genuinely_unreachable_endpoint`:
+# 9.86 s without this variable, 4.21 s with it. It is off-loopback traffic from
+# a test (GC17) and it buys nothing — no test in this repository runs on an EC2
+# instance, and the MinIO credentials the e2e harness needs come from the
+# environment, never from IMDS. Set for the whole run rather than per test:
+# nothing here should ever probe it.
 e2e:
-    cargo test --workspace --features e2e -- --test-threads=1 --nocapture
+    AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e -- --test-threads=1 --nocapture
 
 # Produce, back up with the pinned engine, and refresh the two fixtures that
 # must come from a REAL archive. Needs a FRESH stack (`e2e-down` then `e2e-up`);

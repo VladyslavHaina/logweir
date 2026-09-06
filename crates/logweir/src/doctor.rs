@@ -621,6 +621,16 @@ mod tests {
     /// The `StorageUrl` is built from a YAML literal rather than from a new
     /// fixture file, the same way `spec_with_marker_topic` below builds a
     /// `DrillSpec` — the subject is one storage config, not a whole drill.
+    ///
+    /// Fix round 1 (review F7): `just e2e` now exports
+    /// `AWS_EC2_METADATA_DISABLED=true`, which takes this test from 9.86 s to
+    /// 4.21 s (measured). Without it, `AmazonS3Builder::from_env()` finds no
+    /// credentials, falls through to the EC2 instance-metadata provider, and
+    /// object_store spends ten retries on the link-local 169.254.169.254
+    /// before 127.0.0.1:1 is contacted at all — off-loopback traffic that
+    /// proves nothing about this test's subject. Run it OUTSIDE `just e2e`
+    /// (`cargo test -p logweir --features e2e --lib`) and you pay that ~5.6 s
+    /// again; export the variable yourself if it matters.
     #[cfg(feature = "e2e")]
     #[test]
     fn check_storage_skips_a_genuinely_unreachable_endpoint() {

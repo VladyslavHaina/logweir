@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 /// the two constructors, the compose stack's own endpoints, and ureq's
 /// AGENTLESS request builders (which carry no timeout — see
 /// `crates/logweir/tests/notify.rs`).
-const DIAL_TOKENS: [&str; 9] = [
+const DIAL_TOKENS: [&str; 12] = [
     "RdKafkaReader::connect(",
     "Store::from_url(",
     "Store::read_only_from_url(",
@@ -62,8 +62,17 @@ const DIAL_TOKENS: [&str; 9] = [
     "127.0.0.1:9092",
     "localhost:9000",
     "127.0.0.1:9000",
+    // ureq entry points that carry the crate's DEFAULT configuration, i.e. no
+    // overall or read timeout. Fix round 1 (F6) squared this list with the
+    // crate-local one in `crates/logweir/tests/notify.rs`, which had three
+    // that this one lacked; the reviewer walked through the gap with
+    // `ureq::Agent::new()`. The two lists now match, and there is no reason
+    // for a workspace-wide audit to be narrower than a crate-local one.
     "ureq::post(",
     "ureq::get(",
+    "ureq::request(",
+    "ureq::Agent::new(",
+    "ureq::agent(",
 ];
 
 /// Paths whose match is expected, each with the reason it is expected.

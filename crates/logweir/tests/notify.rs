@@ -244,46 +244,88 @@ fn the_notification_body_carries_an_empty_redactions_for_a_whole_document() {
 /// A listener that accepts connections and never writes a byte — the failure
 /// mode a refused port cannot reproduce, and the one with no bound.
 ///
-/// It is bound to `127.0.0.1:0`, so the kernel picks the port and nothing
-/// leaves the loopback interface (GC17). The accepted sockets are held in the
-/// thread rather than dropped, because dropping one closes it and hands the
-/// client an EOF — which is a completed request, not a hang.
-fn black_hole() -> (String, std::thread::JoinHandle<()>) {
+/// Bound to `127.0.0.1:0`, so the kernel picks the port and nothing leaves the
+/// loopback interface (GC17). Accepted sockets are pushed into a `Vec` and
+/// never dropped: dropping one closes it and hands the client an EOF, which is
+/// a completed request, not a hang.
+///
+/// The thread accepts FOREVER and is deliberately detached — it is never
+/// joined and there is no teardown to reach. Fix round 1, F2: the first
+/// version of this helper broke out of the accept loop after 8 connections
+/// and then slept, and a comment claimed it "holds the sockets open a moment
+/// past the caller's bound". With the single sink every test actually uses it
+/// blocked in `accept()` on connection two and never reached either line, so
+/// nothing bounded anything. The bound now lives in `within_deadline` below,
+/// where the test can see it; this thread's only job is to be a peer that
+/// never answers. libtest exits the process without joining detached threads,
+/// so an eternal accept loop costs nothing.
+fn black_hole() -> String {
     let l = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
     let addr = l.local_addr().unwrap();
-    let h = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut held = Vec::new();
         for s in l.incoming() {
             match s {
                 Ok(s) => held.push(s),
                 Err(_) => break,
             }
-            if held.len() >= 8 {
-                break;
-            }
         }
-        // Hold the sockets open a moment past the caller's bound so the
-        // client times out rather than being handed an EOF on teardown.
-        std::thread::sleep(std::time::Duration::from_secs(2));
     });
-    (format!("http://{addr}/hook"), h)
+    format!("http://{addr}/hook")
 }
 
-/// THE BOUND. A sink that accepts and never replies must make the POST FAIL,
-/// within the agent's timeout, rather than blocking forever.
+/// Run `f` on its own thread and refuse to wait longer than `deadline`.
+///
+/// **Fix round 1, F2 — this is the point of the whole helper.** Every test
+/// below drives a sink that never replies. If the bound under test is deleted,
+/// the call inside `f` never returns; without this the TEST BINARY hangs until
+/// the harness's 5-minute limit, cargo never prints its summary, and what a
+/// human or CI observes is a hang rather than a failure. That is precisely the
+/// failure mode this whole task exists to remove, and the first version of
+/// these tests re-created it inside the fix for it.
+///
+/// So the deadline is the test's own, independent of the bound being tested:
+/// the worker thread is abandoned (it is stuck by construction and cannot be
+/// joined), the assertion fires here, and the test goes RED in `deadline`.
+fn within_deadline<T: Send + 'static>(
+    deadline: std::time::Duration,
+    what: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> (T, std::time::Duration) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t0 = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let out = f();
+        // A send error just means the receiver already gave up and failed the
+        // test; there is nobody left to tell.
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(deadline) {
+        Ok(v) => (v, t0.elapsed()),
+        Err(_) => panic!(
+            "{what}: still running after {deadline:?}. A sink that accepts the \
+             connection and never replies must be GIVEN UP ON, not waited out. \
+             This is the unbounded-`ureq` defect: the POST has no timeout, so it \
+             would block forever and the test binary would hang instead of \
+             failing. Check `notify_agent()` still configures both bounds."
+        ),
+    }
+}
+
+/// THE BOUND, wired. A sink that accepts and never replies must make the POST
+/// fail, rather than blocking forever.
 ///
 /// The agent is injected at 300 ms rather than driving the production
-/// `NOTIFY_TIMEOUT` of 10 s, for one reason: a unit test that waits out a
-/// production timeout is the same defect this whole task exists to remove.
-/// What is being proved here is that the bound is WIRED — that `notify_with`
-/// gives up and returns — and the wiring is bound-independent. That the
-/// production numbers are the ones actually used is pinned by
-/// `the_production_notify_agent_is_bounded` and
-/// `every_notification_post_goes_through_the_bounded_agent` below; the three
-/// together leave no gap for a mutant.
+/// `NOTIFY_TIMEOUT` of 10 s, because a unit test that waits out a production
+/// timeout is the same defect this task exists to remove. What this proves is
+/// that the bound is WIRED — that `notify_with` gives up and returns — and the
+/// wiring is bound-independent. That the PRODUCTION agent carries the
+/// production numbers is proved separately and directly by
+/// `the_production_notify_agent_carries_its_configured_bounds`, and end to end
+/// by the `e2e`-gated twin below.
 #[test]
 fn a_sink_that_never_replies_fails_within_the_bound() {
-    let (url, h) = black_hole();
+    let url = black_hole();
     let bound = std::time::Duration::from_millis(300);
     let agent = logweir::drill::phase7_verify::notify_agent_with(bound, bound);
 
@@ -294,63 +336,182 @@ fn a_sink_that_never_replies_fails_within_the_bound() {
     };
     let sc = scorecard_pass();
 
-    let t0 = std::time::Instant::now();
-    logweir::drill::phase7_verify::notify_with(&agent, &n, &sc);
-    let took = t0.elapsed();
+    let (_, took) = within_deadline(
+        std::time::Duration::from_secs(3),
+        "a_sink_that_never_replies_fails_within_the_bound",
+        move || logweir::drill::phase7_verify::notify_with(&agent, &n, &sc),
+    );
 
     // Generous by 10x: the assertion is "bounded", not "bounded to the
-    // millisecond", and a loaded CI runner must not make it flake. Without a
-    // timeout this never returns at all, so any finite number here is the
-    // whole finding.
+    // millisecond", and a loaded runner must not make it flake.
     assert!(
         took < std::time::Duration::from_secs(3),
-        "a sink that accepts and never replies must be given up on, not waited \
-         out forever; the POST took {took:?} against a {bound:?} bound"
+        "the POST took {took:?} against a {bound:?} bound"
     );
-    drop(h);
 }
 
-/// The production agent's numbers, asserted where a reviewer reads them.
-/// A mutant that builds the agent with no timeout at all — the state this
-/// task found — cannot leave both constants bounded and non-zero.
+/// **Fix round 1, F1(a) — the mutant this task shipped without.** Replacing
+/// `notify_agent()`'s body with `ureq::AgentBuilder::new().build()` restores
+/// exactly the unbounded state §7 of the report describes FINDING, and every
+/// notification test passed anyway: the constants were pinned, and the wiring
+/// from `notify` to *an* agent was pinned, but the wiring of the constants
+/// into the PRODUCTION agent was pinned nowhere.
+///
+/// `ureq` 2.x exposes no getter for an `Agent`'s configured timeouts — but
+/// `Agent` derives `Debug` and holds an `Arc<AgentConfig>` that does too, so
+/// the configuration is directly observable. This asserts on the real
+/// `notify_agent()`, in microseconds, and the expected substrings are built
+/// FROM the constants, so changing a constant moves the assertion with it.
+///
+/// The negative control is what makes that safe. ureq's `Debug` rendering is
+/// not a stable API; if it ever stops emitting these fields the positive
+/// assertions fail loudly rather than passing vacuously, and the control below
+/// pins that an UNBOUNDED agent renders differently from a bounded one — which
+/// is the entire discriminating power being relied on. (Measured against ureq
+/// 2.12.1: a bare agent renders `timeout_connect: Some(30s)` and
+/// `timeout: None`. Note that the unbounded defect was never a missing CONNECT
+/// timeout — ureq defaults that to 30 s — it was the missing OVERALL/read
+/// bound, which is exactly the never-replies case.)
 #[test]
-fn the_production_notify_agent_is_bounded() {
-    use logweir::drill::phase7_verify::{NOTIFY_CONNECT_TIMEOUT, NOTIFY_TIMEOUT};
+fn the_production_notify_agent_carries_its_configured_bounds() {
+    use logweir::drill::phase7_verify::{notify_agent, NOTIFY_CONNECT_TIMEOUT, NOTIFY_TIMEOUT};
+
+    // The numbers themselves, where a reviewer reads them.
+    assert_eq!(
+        NOTIFY_CONNECT_TIMEOUT,
+        std::time::Duration::from_secs(5),
+        "the documented connect bound"
+    );
+    assert_eq!(
+        NOTIFY_TIMEOUT,
+        std::time::Duration::from_secs(10),
+        "the documented overall bound"
+    );
+
+    let want_connect = format!("timeout_connect: Some({NOTIFY_CONNECT_TIMEOUT:?})");
+    let want_overall = format!("timeout: Some({NOTIFY_TIMEOUT:?})");
+
+    let shown = format!("{:?}", notify_agent());
+    assert!(
+        shown.contains(&want_connect),
+        "the PRODUCTION agent does not carry {NOTIFY_CONNECT_TIMEOUT:?} as its connect \
+         bound. Expected to find `{want_connect}` in:\n{shown}"
+    );
+    assert!(
+        shown.contains(&want_overall),
+        "the PRODUCTION agent does not carry {NOTIFY_TIMEOUT:?} as its overall bound — a \
+         webhook that accepts and never replies would hang the drill forever, after the \
+         scorecard is signed and uploaded. Expected `{want_overall}` in:\n{shown}"
+    );
+
+    // THE NEGATIVE CONTROL: an unbounded agent must render differently, or the
+    // two assertions above prove nothing.
+    let unbounded = format!("{:?}", ureq::AgentBuilder::new().build());
+    assert!(
+        !unbounded.contains(&want_overall),
+        "an agent built with no timeouts renders the same overall bound as the \
+         production one, so this test cannot tell them apart. ureq's Debug format \
+         has changed and this test needs rewriting:\n{unbounded}"
+    );
+
+    // Ordering and sanity, kept from the original test.
     assert!(
         !NOTIFY_CONNECT_TIMEOUT.is_zero() && !NOTIFY_TIMEOUT.is_zero(),
         "a zero timeout is not a bound, it is an immediate failure"
-    );
-    assert!(
-        NOTIFY_TIMEOUT <= std::time::Duration::from_secs(30),
-        "the overall bound is what an operator waits through after the scorecard \
-         is already signed and uploaded: {NOTIFY_TIMEOUT:?}"
     );
     assert!(
         NOTIFY_CONNECT_TIMEOUT <= NOTIFY_TIMEOUT,
         "a connect budget larger than the overall budget cannot be reached: \
          {NOTIFY_CONNECT_TIMEOUT:?} > {NOTIFY_TIMEOUT:?}"
     );
-    // Construction must not panic — `AgentBuilder::build` is the only place
-    // the two constants meet ureq.
-    let _ = logweir::drill::phase7_verify::notify_agent();
 }
 
-/// THE MUTANT KILLER, structural rather than behavioural. Every test above
-/// that exercises a timeout supplies its own agent, so reverting `notify` to
-/// `ureq::post(&url)` — restoring the unbounded wait — would pass all of
-/// them. `ureq::post`/`ureq::get`/`ureq::request` are ureq's AGENTLESS
-/// builders: each one constructs a throwaway agent with ureq's defaults,
-/// which is to say with no timeout.
+/// **Fix round 1, F1(b)** — the same property end to end, with NOTHING
+/// injected: the real `notify()`, the real `notify_agent()`, the real
+/// constants, against a sink that accepts and never replies. It costs the
+/// production bound (~10 s), which is why it is behind `--features e2e` and
+/// not in the default suite.
 ///
-/// This is the same discipline `crates/logweir/tests/engine_resolution.rs`'s
+/// It needs no broker, no bucket and no compose stack — only a loopback
+/// listener — but the `e2e` feature is this repository's marker for "this test
+/// is allowed to be slow", and 10 s is four times over the 5 s per-test budget
+/// `scripts/time-unit-suite.sh` enforces on the default suite.
+#[cfg(feature = "e2e")]
+#[test]
+fn the_production_agent_gives_up_on_a_sink_that_never_replies() {
+    use logweir::drill::phase7_verify::NOTIFY_TIMEOUT;
+    let url = black_hole();
+    let n = logweir_core::spec::Notifications {
+        webhooks: vec![url],
+        slack_webhook: None,
+        pagerduty_routing_key: None,
+    };
+    let sc = scorecard_pass();
+
+    // The deadline is the production bound plus a wide margin, so a slow
+    // machine cannot flake it while an UNBOUNDED agent still fails here
+    // rather than hanging the binary (F2).
+    let (_, took) = within_deadline(
+        NOTIFY_TIMEOUT + std::time::Duration::from_secs(20),
+        "the_production_agent_gives_up_on_a_sink_that_never_replies",
+        move || logweir::drill::phase7_verify::notify(&n, &sc),
+    );
+    assert!(
+        took < NOTIFY_TIMEOUT + std::time::Duration::from_secs(10),
+        "the production agent must give up at about {NOTIFY_TIMEOUT:?}; it took {took:?}"
+    );
+    // And it must actually have SPENT the bound rather than failing instantly
+    // for some unrelated reason — a listener that refused the connection, or a
+    // zero timeout, would return in milliseconds and prove nothing about the
+    // never-replies case.
+    assert!(
+        took > std::time::Duration::from_secs(1),
+        "returned in {took:?}, far under the {NOTIFY_TIMEOUT:?} bound — the sink was \
+         not actually accepting-and-never-replying, so this proved nothing"
+    );
+}
+
+/// THE MUTANT KILLER, structural rather than behavioural. Every behavioural
+/// test above that exercises a timeout supplies its own agent, so reverting
+/// `notify` to an agentless builder would pass all of them.
+///
+/// Two families are forbidden, and fix round 1 (F5/F6) added the second after
+/// the reviewer walked straight through the first:
+///
+/// * **Agentless request builders** — `ureq::post(`, `ureq::get(`,
+///   `ureq::request(`. Each constructs a throwaway agent with ureq's defaults.
+/// * **Default-configured agents** — `ureq::Agent::new(`, `Agent::new(`,
+///   `ureq::agent(`. Same defect, spelled differently: the reviewer's mutant
+///   `agent.post(&url)` -> `ureq::Agent::new().post(&url)` restored the
+///   unbounded wait and survived the first version of this test.
+///
+/// And `AgentBuilder::new()` must occur EXACTLY ONCE under
+/// `crates/logweir/src/` — inside `notify_agent_with`, the one place the two
+/// constants meet ureq. A second builder anywhere is a second, unreviewed
+/// timeout policy, which is how the first one went missing.
+///
+/// This is the discipline `crates/logweir/tests/engine_resolution.rs`'s
 /// `the_engine_is_resolved_in_exactly_one_module` already uses in this crate:
-/// when the property is "there is exactly one way to do this", assert over
-/// the source rather than hope a behavioural test happens to cover the second
-/// way someone adds.
+/// when the property is "there is exactly one way to do this", assert over the
+/// source rather than hope a behavioural test covers the next way someone adds.
 #[test]
 fn every_notification_post_goes_through_the_bounded_agent() {
+    /// Spelled apart so this file does not trip its own patterns, and so the
+    /// workspace-wide audit in `no_network_in_unit_tests.rs` — which forbids
+    /// the same set — can allow-list this file for naming them.
+    const FORBIDDEN: [&str; 6] = [
+        "ureq::post(",
+        "ureq::get(",
+        "ureq::request(",
+        "ureq::Agent::new(",
+        "Agent::new(",
+        "ureq::agent(",
+    ];
+    const BUILDER: &str = "AgentBuilder::new()";
+
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut offenders = Vec::new();
+    let mut builders = Vec::new();
     let mut visited = 0usize;
     let mut stack = vec![src.clone()];
     while let Some(d) = stack.pop() {
@@ -361,16 +522,19 @@ fn every_notification_post_goes_through_the_bounded_agent() {
             } else if p.extension().is_some_and(|x| x == "rs") {
                 visited += 1;
                 let t = std::fs::read_to_string(&p).unwrap();
-                for needle in ["ureq::post(", "ureq::get(", "ureq::request("] {
+                for needle in FORBIDDEN {
                     if t.contains(needle) {
                         offenders.push(format!("{}: {needle}", p.display()));
                     }
+                }
+                for _ in t.matches(BUILDER) {
+                    builders.push(p.display().to_string());
                 }
             }
         }
     }
     // The walk must actually have walked: an empty file list makes the
-    // assertion below vacuously true forever.
+    // assertions below vacuously true forever.
     assert!(
         visited >= 20,
         "the walk visited only {visited} .rs files under {} — it is not looking \
@@ -379,9 +543,19 @@ fn every_notification_post_goes_through_the_bounded_agent() {
     );
     assert!(
         offenders.is_empty(),
-        "agentless ureq request builders carry NO timeout (ureq 2.12.1: \"requests \
-         may block forever on reads by default\"). Every notification POST must go \
-         through `notify_agent()`.\n  {}",
+        "these ureq entry points carry ureq's DEFAULT configuration, which has no \
+         overall or read timeout (2.12.1: \"requests may block forever on reads by \
+         default\") — a sink that accepts and never replies then hangs the drill. \
+         Every notification POST must go through `notify_agent()`.\n  {}",
         offenders.join("\n  ")
+    );
+    assert_eq!(
+        builders.len(),
+        1,
+        "`{BUILDER}` must appear EXACTLY ONCE under {} — in `notify_agent_with`, the \
+         single place the two timeout constants meet ureq. Found {}: {:?}",
+        src.display(),
+        builders.len(),
+        builders
     );
 }
