@@ -374,11 +374,23 @@ def test_the_unmodified_format_example_is_valid_under_the_full_invariant_set():
 
 def test_a_higher_major_format_version_is_refused():
     # Global Constraint 12. This script did not read `format_version` at all.
+    #
+    # The document ALSO violates the T0-2 evidence arm. That arm is scoped to
+    # major 1, so on a 2.0.0 document it must not fire: dropping its
+    # `if doc_major == 1:` guard makes this test report the evidence message
+    # instead of the major-version one (brief §7 M9).
     with tempfile.TemporaryDirectory() as d:
-        sc, sig = _signed_scorecard(d, format_version="2.0.0")
+        sc, sig = _signed_scorecard(
+            d,
+            format_version="2.0.0",
+            **{"evidence.create_only_enforced": True},
+        )
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 1, r.stdout
         assert "major version newer" in r.stderr
+        assert "post-put fields are zeroed" not in r.stderr, (
+            "the evidence arm is scoped to major 1 and must not fire on a 2.0.0 document"
+        )
 
 
 def test_a_higher_minor_format_version_is_still_accepted():
@@ -388,6 +400,156 @@ def test_a_higher_minor_format_version_is_still_accepted():
         sc, sig = _signed_scorecard(d, format_version="1.9.9")
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
+
+
+# ------------------------------------- the evidence block is zeroed before signing
+# T0-2. `verify_scorecard.py` printed "the four post-put fields are zeroed
+# before signing" on EVERY successful verification while nothing checked it,
+# over two committed fixtures that falsified it. One test per field, each
+# asserting the message BYTE-IDENTICALLY with the Rust arm's.
+
+def test_non_zeroed_evidence_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"evidence.create_only_enforced": True})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert ("evidence.create_only_enforced is true but the four post-put fields "
+                "are zeroed before signing") in r.stderr
+
+
+def test_a_set_evidence_version_id_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"evidence.version_id": "3HL4kqtJlcpXroDTDmJ"})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert ("evidence.version_id is set but the four post-put fields "
+                "are zeroed before signing") in r.stderr
+
+
+def test_a_set_evidence_retain_until_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"evidence.retain_until": "2027-01-01T00:00:00Z"})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert ("evidence.retain_until is set but the four post-put fields "
+                "are zeroed before signing") in r.stderr
+
+
+def test_a_true_evidence_immutable_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"evidence.immutable": True})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert ("evidence.immutable is true but the four post-put fields "
+                "are zeroed before signing") in r.stderr
+
+
+def test_a_lower_major_with_a_non_zeroed_evidence_block_is_accepted():
+    """The evidence arm's `doc_major == 1` guard, where it is actually
+    observable.
+
+    On a HIGHER major the guard is unobservable — the major-version refusal
+    above returns first, so removing the guard changes nothing (the brief names
+    `test_a_higher_major_format_version_is_refused` as this mutant's killer; it
+    is not, for the same reason M8 is an equivalent mutant on the Rust side).
+    On a LOWER major both readers must ACCEPT a non-zeroed block, because a
+    different major may define the block differently. `logweir-core`'s
+    `the_evidence_arm_is_scoped_to_major_1_and_does_not_touch_major_0` is this
+    test's other half; the two together are what keep the readers in step.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            format_version="0.9.9",
+            **{
+                "evidence.version_id": "v-from-another-major",
+                "evidence.immutable": True,
+                "evidence.create_only_enforced": True,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, (
+            "the evidence arm is scoped to major 1 and must not fire on a 0.x "
+            f"document; stderr was: {r.stderr}"
+        )
+
+
+def test_the_evidence_arm_matches_the_rust_arm_word_for_word_and_in_order():
+    """TWO-VERIFIER PARITY, proved rather than asserted in prose.
+
+    `docs/verify-a-scorecard.md` says the two routes "reach the same verdict"
+    and that a disagreement "is a bug in the format" — and stage 1 found them
+    disagreeing. This test reads the four message literals out of
+    `Scorecard::validate_invariants` itself (the CODE half of scorecard.rs, not
+    its test module) and drives this script's `check_invariants` with one
+    violating document per field, asserting the SAME verdict, the SAME message
+    and the SAME field order from both readers.
+    """
+    import re
+
+    rust = (ROOT / "crates" / "logweir-core" / "src" / "scorecard.rs").read_text()
+    code_half = rust.split("#[cfg(test)]")[0]
+    rust_messages = re.findall(r'"(evidence\.[^"]*zeroed before signing)"', code_half)
+    assert rust_messages == [
+        "evidence.version_id is set but the four post-put fields are zeroed before signing",
+        "evidence.retain_until is set but the four post-put fields are zeroed before signing",
+        "evidence.immutable is true but the four post-put fields are zeroed before signing",
+        "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing",
+    ], rust_messages
+
+    check = _verifier_module().check_invariants
+    base = json.loads(SCORECARD_PASS.read_bytes())
+    assert check(base) == "", "the control document must hold under both readers"
+
+    for field, value, expected in (
+        ("version_id", "3HL4kqtJlcpXroDTDmJ", rust_messages[0]),
+        ("retain_until", "2027-01-01T00:00:00Z", rust_messages[1]),
+        ("immutable", True, rust_messages[2]),
+        ("create_only_enforced", True, rust_messages[3]),
+    ):
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        doc["evidence"][field] = value
+        assert check(doc) == expected, field
+
+    # Two fields at once: the shared field ORDER is what makes the two readers
+    # produce the same message rather than merely both refusing.
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    doc["evidence"]["immutable"] = True
+    doc["evidence"]["create_only_enforced"] = True
+    assert check(doc) == rust_messages[2]
+
+
+def test_the_committed_signed_fixtures_carry_a_zeroed_evidence_block():
+    # The fixtures this repository ships as its worked example used to violate
+    # the sentence the success path prints. Both readers refuse such a document
+    # now, so a regression here is a re-mint that went wrong.
+    for name in ("scorecard.json", "scorecard-self-attested.json"):
+        doc = json.loads((FIX / name).read_bytes())
+        assert doc["evidence"] == {
+            "version_id": None,
+            "retain_until": None,
+            "immutable": False,
+            "create_only_enforced": False,
+        }, name
+        assert _verifier_module().check_invariants(doc) == "", name
+
+
+def test_the_script_prints_its_version():
+    # The success path states the evidence guarantee as a fact. An auditor
+    # reading that line needs to know whether the run that printed it also
+    # ENFORCED it — that is what the version line answers.
+    r = run(FIX / "scorecard.json", FIX / "scorecard.sig", FIX / "public.pem")
+    assert r.returncode == 0, r.stderr
+    assert f"verify_scorecard.py {_verifier_module().SCRIPT_VERSION}" in r.stdout
+
+
+def test_the_script_version_is_not_the_format_version():
+    # GC12: SCRIPT_VERSION tracks the invariant SET, FORMAT_VERSION tracks the
+    # format. Collapsing the two would make a reader-only tightening look like
+    # a format bump.
+    mod = _verifier_module()
+    assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
+    assert mod.FORMAT_VERSION == "1.0.0"
 
 
 def test_a_negative_rpo_is_refused():

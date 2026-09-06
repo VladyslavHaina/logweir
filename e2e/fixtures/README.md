@@ -34,7 +34,9 @@ output.**
   a divergence — the same treatment `create_only_enforced` got below, for the
   same reason. `drill run`'s stdout line quotes the artifact's value, so the
   console and the document cannot disagree about it. The signed fixtures under
-  `signed/` still read `9` and say so in their own README.
+  `signed/` were re-minted from the same generator and now read `7` too; the
+  `-1..=9` DOMAIN is untouched (Global Constraint 18) — only the pinned value
+  moved. See `signed/README.md`.
 
 - **`evidence.create_only_enforced` was `true` and is now `false`, matching the
   code.** Task 20 made phase 8 zero all four `evidence` fields immediately
@@ -46,9 +48,13 @@ output.**
   did not have to exist. The real post-put readback lives in the separately
   signed storage receipt.
 
-  The signed fixtures under `signed/` still read `true`, and there the stated
-  reason **does** apply: regenerating them would invalidate the signatures those
-  files exist to exercise. See `signed/README.md`.
+  The signed fixtures under `signed/` used to read `true` and no longer do: the
+  keypair is pinned, so re-minting them re-signs under the SAME key and the
+  stated reason stopped applying. `Scorecard::validate_invariants` and
+  `docs/verify_scorecard.py::check_invariants` now both REFUSE a `1.0.x`
+  scorecard with any of the four `evidence` fields set, so no signed document —
+  in this directory or anywhere — can carry the claim again. See
+  `signed/README.md`.
 
 ## `signed/`
 

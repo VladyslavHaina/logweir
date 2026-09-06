@@ -27,8 +27,21 @@ verify-py:
     python3 -m pytest docs/test_verify_scorecard.py -q
 
 # Mints the checked-in signed fixtures under e2e/fixtures/signed/. Task 6.
+#
+# NON-DESTRUCTIVE, deliberately. This used to redirect straight into the
+# tracked, signed, fingerprint-pinned e2e/fixtures/signed/scorecard.json — and
+# the shell truncates a redirect target BEFORE the program runs, while
+# `emit_fixture` itself ends with `sc.validate_invariants().expect(...)`. So a
+# generator that refuses its own document zeroed the committed fixture first
+# and panicked second. Emitting into target/ and `mv`-ing on success means a
+# failing generator leaves the tracked fixture byte-identical. `just` runs each
+# recipe line in its own shell, so the mkdir must be its own line and the
+# redirect and the mv must share one.
+# `crates/logweir-core/tests/fixture_regen.rs::fixtures_recipe_is_non_destructive`
+# keeps it that way.
 fixtures-sign:
-    cargo run -p logweir-core --example emit_fixture > e2e/fixtures/signed/scorecard.json
+    mkdir -p target/fixtures-tmp
+    cargo run -p logweir-core --example emit_fixture > target/fixtures-tmp/scorecard.json && mv target/fixtures-tmp/scorecard.json e2e/fixtures/signed/scorecard.json
     cargo run -p logweir-evidence --example mint_fixture
 
 # Bring the compose stack up, seed topics, produce, back up. See Task 21.

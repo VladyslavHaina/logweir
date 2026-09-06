@@ -481,6 +481,41 @@ impl Scorecard {
         // before any other invariant is evaluated against fields that build
         // may have changed the meaning of.
         self.refuse_unreadable_major()?;
+        // T0-2: the four post-put fields are zeroed BEFORE signing
+        // (`crate::drill::phase8_score` zeroes them unconditionally), because
+        // they describe an upload that has not happened yet. This is a
+        // RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format change: no
+        // byte of the format changes, the accepted set narrows, and because the
+        // writer's zeroing is unconditional, no document Logweir has ever
+        // written is refused. GC12 holds — format_version stays 1.0.0.
+        // Scoped to major 1 so a future major may redefine the block.
+        //
+        // Field order is the struct's own declaration order, and
+        // `docs/verify_scorecard.py::check_invariants` mirrors this arm in the
+        // same position with the same order and the same words, so a document
+        // violating two fields gets the SAME message from both readers.
+        if major_version(&self.format_version) == Some(1) {
+            if self.evidence.version_id.is_some() {
+                return Err(InvariantError(
+                    "evidence.version_id is set but the four post-put fields are zeroed before signing".into(),
+                ));
+            }
+            if self.evidence.retain_until.is_some() {
+                return Err(InvariantError(
+                    "evidence.retain_until is set but the four post-put fields are zeroed before signing".into(),
+                ));
+            }
+            if self.evidence.immutable {
+                return Err(InvariantError(
+                    "evidence.immutable is true but the four post-put fields are zeroed before signing".into(),
+                ));
+            }
+            if self.evidence.create_only_enforced {
+                return Err(InvariantError(
+                    "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing".into(),
+                ));
+            }
+        }
         if self.integrity.result == IntegrityResult::Partial
             && self.integrity.partial_reason.is_none()
         {
@@ -723,7 +758,7 @@ mod tests {
                 version_id: None,
                 retain_until: None,
                 immutable: false,
-                create_only_enforced: true,
+                create_only_enforced: false,
             },
             redactions: vec![],
         }
@@ -734,6 +769,100 @@ mod tests {
         valid_scorecard()
             .validate_invariants()
             .expect("the test baseline itself must satisfy every invariant");
+    }
+
+    // --- the evidence block is zeroed before signing (T0-2) ---------------
+    //
+    // One test per field, each asserting the SPECIFIC message, so deleting a
+    // single clause makes exactly that field's test fail. The field order
+    // matches the struct's declaration order and the Python mirror's, so a
+    // document violating two fields gets the same message from both readers.
+
+    #[test]
+    fn invariants_refuse_non_zeroed_evidence() {
+        let mut sc = valid_scorecard();
+        sc.evidence.create_only_enforced = true;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a non-zeroed evidence block must be refused");
+        assert_eq!(
+            err.0,
+            "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_set_version_id() {
+        let mut sc = valid_scorecard();
+        sc.evidence.version_id = Some("3HL4kqtJlcpXroDTDmJ".into());
+        let err = sc
+            .validate_invariants()
+            .expect_err("a set evidence.version_id must be refused");
+        assert_eq!(
+            err.0,
+            "evidence.version_id is set but the four post-put fields are zeroed before signing"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_set_retain_until() {
+        let mut sc = valid_scorecard();
+        sc.evidence.retain_until = Some(
+            DateTime::parse_from_rfc3339("2027-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        let err = sc
+            .validate_invariants()
+            .expect_err("a set evidence.retain_until must be refused");
+        assert_eq!(
+            err.0,
+            "evidence.retain_until is set but the four post-put fields are zeroed before signing"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_true_immutable() {
+        let mut sc = valid_scorecard();
+        sc.evidence.immutable = true;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a true evidence.immutable must be refused");
+        assert_eq!(
+            err.0,
+            "evidence.immutable is true but the four post-put fields are zeroed before signing"
+        );
+    }
+
+    /// The arm is SCOPED to major 1, and the scope is observable only on a
+    /// LOWER major: on a higher one `refuse_unreadable_major` has already
+    /// returned, so dropping the guard changes nothing there (brief §7 M8/M9
+    /// are equivalent mutants for a 9.9.9 document — this is the test that is
+    /// not). A future major may redefine the `evidence` block, and
+    /// `docs/verify_scorecard.py` must agree: its mirrored arm carries the same
+    /// `doc_major == 1` guard, and
+    /// `test_a_lower_major_with_a_non_zeroed_evidence_block_is_accepted` is
+    /// this test's other half.
+    #[test]
+    fn the_evidence_arm_is_scoped_to_major_1_and_does_not_touch_major_0() {
+        let mut sc = valid_scorecard();
+        sc.format_version = "0.9.9".into();
+        sc.evidence.version_id = Some("v-from-another-major".into());
+        sc.evidence.immutable = true;
+        sc.evidence.create_only_enforced = true;
+        sc.validate_invariants()
+            .expect("the evidence arm is scoped to major 1 and must not fire on a 0.x document");
+    }
+
+    #[test]
+    fn invariants_accept_zeroed_evidence() {
+        let mut sc = valid_scorecard();
+        sc.evidence.version_id = None;
+        sc.evidence.retain_until = None;
+        sc.evidence.immutable = false;
+        sc.evidence.create_only_enforced = false;
+        sc.validate_invariants()
+            .expect("a fully zeroed evidence block is what every Logweir scorecard carries");
     }
 
     // --- Global Constraint 18(a), true branch -----------------------------
@@ -921,6 +1050,15 @@ mod tests {
     fn format_version_with_a_higher_major_is_refused() {
         let mut sc = valid_scorecard();
         sc.format_version = "9.9.9".into();
+        // Deliberately ALSO violating the T0-2 evidence arm. The evidence arm
+        // is scoped to major 1, so on this document it is skipped whichever
+        // side of `refuse_unreadable_major` it sits on — the two orders are
+        // behaviourally identical and the reorder alone is an equivalent
+        // mutant (brief §7 M8). What this line does kill is the COMBINED
+        // mutant "drop the `Some(1)` scope guard AND move the arm first",
+        // which would return the evidence message here instead of the
+        // major-version one.
+        sc.evidence.create_only_enforced = true;
         let err = sc
             .validate_invariants()
             .expect_err("a format_version from a future major must be refused");

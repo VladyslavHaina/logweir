@@ -3,7 +3,7 @@
   "signatures": [
     {
       "keyid": "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd",
-      "sig": "MEYCIQC1lExm57Avmj6+BE8irM3sklUPckI3Bo91idp+Ith/mAIhAMuuoXoFAQ24Mqidf7IKLM6wMb2o4KB8y64tKYIRPa2i"
+      "sig": "MEUCIGyI2pQkXlRfrCEUPCgM4WiObsDV9iEHpAfw9k/Y57FMAiEA5+l7p/PjZKNHxmc0biDb4bgVl1qDZQBgbLVc9c9msN8="
     }
   ]
 }

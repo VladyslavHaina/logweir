@@ -2,7 +2,7 @@
   "format_version": "1.0.0",
   "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
   "outcome": "pass",
-  "last_phase_completed": 9,
+  "last_phase_completed": 7,
   "requested_at": "2026-09-03T09:00:00Z",
   "approval_validated_at": "2026-09-03T09:00:30Z",
   "triggered_by": "KPMG Q3",
@@ -112,7 +112,7 @@
     "version_id": null,
     "retain_until": null,
     "immutable": false,
-    "create_only_enforced": true
+    "create_only_enforced": false
   },
   "redactions": []
 }

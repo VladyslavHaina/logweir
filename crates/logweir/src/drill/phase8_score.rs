@@ -396,10 +396,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.engine.matrix_verdict = verdict;
     sc.engine.matrix_verdict_reason = reason;
 
-    // 3. Refuse to sign a self-contradicting document.
-    sc.validate_invariants().map_err(sig)?;
-
-    // 4. Never sign a claim that cannot be substantiated at signing time.
+    // 3. Never sign a claim that cannot be substantiated at signing time.
     //
     //    These four fields describe the upload that has NOT HAPPENED YET —
     //    whether the put was conditional, what version id it got, and what the
@@ -429,6 +426,21 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.evidence.immutable = false;
     sc.evidence.retain_until = None;
     sc.evidence.version_id = None;
+
+    // 4. Refuse to sign a self-contradicting document — over the EXACT document
+    //    step 5 serialises and step 6 signs, never a draft of it.
+    //
+    //    This CANNOT run before step 3, and the ordering is load-bearing rather
+    //    than incidental. The invariant set describes the SIGNED scorecard, so
+    //    validating ahead of the zeroing would check bytes that are never
+    //    signed — `validate_invariants` would never see what an auditor sees.
+    //    Concretely: `Scorecard::validate_invariants` refuses a 1.0.x document
+    //    whose four post-put fields are set (the T0-2 evidence-zeroing arm). A
+    //    caller's optimistic evidence block is NOT a self-contradiction to
+    //    reject; it is precisely what step 3 is contracted to overwrite, so
+    //    checking first would turn a claim phase 8 discards by design into an
+    //    exit-4 refusal.
+    sc.validate_invariants().map_err(sig)?;
 
     // 5. The EXACT bytes that will be stored.
     let bytes = logweir_core::det_json::to_deterministic_json(&sc).map_err(sig)?;
@@ -460,7 +472,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     //
     //    These assignments land on `Signed.scorecard` AFTER the bytes were
     //    signed, so they are deliberately NOT in the signed artifact — see
-    //    step 4, which zeroed all four fields precisely so the signed document
+    //    step 3, which zeroed all four fields precisely so the signed document
     //    carries no unsubstantiated claim about them. The signed bytes and
     //    `Signed.scorecard` therefore disagree here on purpose, and in the
     //    safe direction: the document under-claims, and the readback is the
@@ -471,7 +483,7 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.evidence.version_id = out.version_id.clone();
     // The two lines below are LIVE WIRING that is provably a no-op in v0.1, and
     // that is worth stating rather than discovering: `object_lock_readback`
-    // returns `None` on every backend `object_store` 0.14 can build, and step 4
+    // returns `None` on every backend `object_store` 0.14 can build, and step 3
     // already zeroed both fields, so both sides are equal today. Deleting them
     // therefore changes nothing observable and no test can catch it (Task 20
     // fix round 1, mutants M12/M16 — knowingly accepted survivors). They are

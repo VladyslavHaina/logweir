@@ -137,11 +137,15 @@ fn main() {
             body_b64: B64.encode(sub),
             body_sha256: sha256_prefixed(sub),
         }),
+        // All four zeroed, matching what `phase8_score` writes unconditionally
+        // and what `Scorecard::validate_invariants` now REFUSES to see set at
+        // format_version 1.0.x (T0-2). The `expect` at the bottom of this
+        // function is what makes that refusal a build-time failure here.
         evidence: EvidenceInfo {
             version_id: None,
             retain_until: None,
             immutable: false,
-            create_only_enforced: true,
+            create_only_enforced: false,
         },
         redactions: vec![],
     };

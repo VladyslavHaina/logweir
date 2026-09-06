@@ -98,11 +98,15 @@ pre-release ruling by accident.**
 
 - **The checked-in fixtures show one value the code cannot emit.**
   `e2e/fixtures/signed/*.json` carry a POPULATED `engine_subreport`, which no
-  v0.1 scorecard has; they are not regenerated because doing so would invalidate
-  the signatures they exist to exercise. `e2e/fixtures/scorecard-pass.json` is
-  unsigned and **was** corrected: its `evidence.create_only_enforced` now reads
-  `false`, matching what phase 8 emits. Both facts are stated beside the files
-  in [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
+  v0.1 scorecard has; it is kept because it is the only checked-in example of
+  that block. Their two OTHER divergences are closed, not documented:
+  `last_phase_completed` reads `7` and the `evidence` block is fully zeroed in
+  both. Regenerating them no longer invalidates anything — the fixture keypair
+  is pinned and read, so `just fixtures-sign` re-signs under the same key.
+  `e2e/fixtures/scorecard-pass.json` is unsigned and was corrected the same way:
+  its `evidence.create_only_enforced` reads `false`, matching what phase 8
+  emits. All of it is stated beside the files in
+  [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
 
 
 - **S3 credentials come from `object_store`'s own chain, not the AWS SDK's.**
@@ -290,11 +294,11 @@ Two consequences worth stating plainly:
   not "the engine reported nothing wrong".
 - The checked-in examples (`e2e/fixtures/signed/*.json`,
   `e2e/fixtures/scorecard-pass.json`) show a POPULATED block. They document the
-  format; they are not output the shipping code can produce. The `signed/` pair
-  cannot be regenerated without invalidating the signatures they exist to
-  exercise, which is why they stay as they are; `scorecard-pass.json` is
-  unsigned, so its OTHER divergence — `evidence.create_only_enforced: true` —
-  was corrected to `false` in Task 22 rather than documented. See
+  format; they are not output the shipping code can produce. This is the LAST
+  remaining divergence in those files: the `signed/` pair was re-minted under
+  the pinned keypair, so `last_phase_completed` reads `7` and the `evidence`
+  block is zeroed in both, and `scorecard-pass.json` — which is unsigned — was
+  corrected the same way in Task 22. See
   [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
 
 `crates/logweir-engine-oso/tests/engine.rs` carries an `#[ignore]`d marker test

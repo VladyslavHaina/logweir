@@ -2,7 +2,7 @@
   "format_version": "1.0.0",
   "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
   "outcome": "pass",
-  "last_phase_completed": 9,
+  "last_phase_completed": 7,
   "requested_at": "2026-09-03T09:00:00Z",
   "approval_validated_at": "2026-09-03T09:00:30Z",
   "triggered_by": "KPMG Q3",
@@ -37,7 +37,7 @@
     "ticket": "CHG-40881",
     "plan_hash": "sha256:a97cc3ee6dda1bff8c8a2a185e94c7f31e9f8a4f9ef6372a8efee9d784d5808d",
     "approved_at": "2026-09-02T17:40:00Z",
-    "key_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "key_id": "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd",
     "self_attested": true
   },
   "phases": [
@@ -112,7 +112,7 @@
     "version_id": null,
     "retain_until": null,
     "immutable": false,
-    "create_only_enforced": true
+    "create_only_enforced": false
   },
   "redactions": []
 }

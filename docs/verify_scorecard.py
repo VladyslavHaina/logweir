@@ -130,6 +130,11 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # test_the_format_version_matches_the_rust_constant` fails if they drift.
 FORMAT_VERSION = "1.0.0"
 
+# This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
+# "1.0.0"). Bumped when the invariant set changes, so an auditor can tell which
+# checks ran. 1.1.0 adds the evidence-zeroing arm (T0-2).
+SCRIPT_VERSION = "1.1.0"
+
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
 # PAYLOAD_TYPE_PUT_RECEIPT and PAYLOAD_TYPE_TEARDOWN; `docs/
@@ -277,15 +282,37 @@ def check_invariants(doc) -> str:
     measured = doc.get("measured")
     source = doc.get("source")
     engine = doc.get("engine")
+    evidence = doc.get("evidence")
     for name, block in (
         ("integrity", integrity),
         ("objectives", objectives),
         ("measured", measured),
         ("source", source),
         ("engine", engine),
+        ("evidence", evidence),
     ):
         if not isinstance(block, dict):
             return f"the document has no {name} block; it is not a drill scorecard"
+
+    # T0-2: the four post-put fields are zeroed BEFORE signing, because they
+    # describe an upload that has not happened yet. Mirrors the arm that sits
+    # immediately after `refuse_unreadable_major` in
+    # `Scorecard::validate_invariants` — same position, same field order
+    # (version_id, retain_until, immutable, create_only_enforced), same words —
+    # so a document violating two fields is refused with the SAME message by
+    # both readers. A retroactive tightening of the 1.0.0 reader, not a format
+    # change: no byte of the format changes, the accepted set narrows, and the
+    # writer's zeroing is unconditional, so no document Logweir has ever written
+    # is refused. Scoped to major 1 so a future major may redefine the block.
+    if doc_major == 1:
+        if evidence.get("version_id") is not None:
+            return "evidence.version_id is set but the four post-put fields are zeroed before signing"
+        if evidence.get("retain_until") is not None:
+            return "evidence.retain_until is set but the four post-put fields are zeroed before signing"
+        if evidence.get("immutable"):
+            return "evidence.immutable is true but the four post-put fields are zeroed before signing"
+        if evidence.get("create_only_enforced"):
+            return "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing"
 
     if integrity.get("result") == "partial" and not integrity.get("partial_reason"):
         return "integrity.result is 'partial' but partial_reason is null"
@@ -502,6 +529,13 @@ def main(
         print(
             "       evidence: the four post-put fields are zeroed before signing; "
             "the storage facts live in the receipt"
+        )
+        # Which invariant set actually ran. The sentence above is a GUARANTEE,
+        # and until SCRIPT_VERSION 1.1.0 nothing enforced it — an auditor
+        # reading an older run's output cannot tell the two apart without this.
+        print(
+            f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
+            "(invariant set includes the evidence-zeroing arm)"
         )
         return 0
 

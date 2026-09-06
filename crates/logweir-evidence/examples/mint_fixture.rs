@@ -84,6 +84,15 @@ fn main() {
     // hand-edited copy (addendum ruling A3).
     let mut self_attested = sc;
     self_attested.approval.self_attested = true;
+    // Task 2 / T0-5: a variant claiming self-attestation must BE self-attested —
+    // the approval key id is the signing key's. Task 3 derives `self_attested`
+    // from exactly this comparison instead of echoing the document's claim, so
+    // scorecard.json (approval.key_id = "a"*64, emit_fixture.rs) stays
+    // derivably-false and this variant stays derivably-true. `sign_detached`
+    // stamps the same value into the sidecar's `keyid`, which is what
+    // `fixture_regen.rs::self_attested_fixture_key_id_equals_the_signature_keyid`
+    // compares.
+    self_attested.approval.key_id = key.key_id();
     self_attested
         .validate_invariants()
         .expect("the self-attested variant must also satisfy every invariant");

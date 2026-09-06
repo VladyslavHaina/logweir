@@ -240,6 +240,44 @@ object is mutable" or "the put was not conditional". The document deliberately
 under-claims — which is what guarantees a valid Logweir signature can never
 cover an unsubstantiated WORM or create-only assertion.
 
+### The zeroing is ENFORCED, and that is a reader tightening, not a format change
+
+For one release the paragraph above was a sentence and nothing else: the writer
+zeroed the four fields, `docs/verify_scorecard.py` printed the guarantee on
+every successful verification, and no validator checked it — while the two
+signed fixtures this repository ships as its worked example carried
+`create_only_enforced: true` and verified `VALID`.
+
+Both readers now refuse it. `Scorecard::validate_invariants`
+(`crates/logweir-core/src/scorecard.rs`) and
+`docs/verify_scorecard.py::check_invariants` each carry the same arm,
+immediately after the Global-Constraint-12 major-version refusal and before
+every other rule, testing `version_id`, `retain_until`, `immutable` and
+`create_only_enforced` in that order with byte-identical messages. A `1.0.x`
+scorecard with any of the four set is refused by both — `drill verify` exits
+**4** (GC11), the Python verifier exits **1**.
+
+**This is a deliberate RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format
+change** — `format_version` stays `1.0.0` and **Global Constraint 12 holds**:
+
+- No byte of the format changes. No field is added, renamed or removed, and
+  `schemas/logweir-drill-scorecard-1.0.0.json` is untouched.
+- The accepted set **narrows**. Narrowing what a reader accepts is not a major
+  bump under GC12, which reserves a major for a changed *identity rule*.
+- The writer's zeroing at `crates/logweir/src/drill/phase8_score.rs` is
+  **unconditional**, so **no document Logweir has ever written is refused**.
+  The only documents this arm refused when it landed were the two committed
+  fixtures, which were re-minted in the same change.
+- A document written by a **non-Logweir path** that carries a post-put claim
+  **is** now refused, and that is precisely the intent: the guarantee is that a
+  valid signature over a 1.0.x scorecard cannot cover a storage claim the
+  signer was not in a position to make.
+
+The arm is scoped to major 1, so a future major remains free to redefine the
+block. `docs/verify_scorecard.py` reports which invariant set ran on its
+success path (`verifier: verify_scorecard.py <SCRIPT_VERSION>`); `SCRIPT_VERSION`
+tracks the invariant set and is **not** the format version.
+
 The real readback is published in a **second signed document**, the put receipt
 (`<run_id>.receipt.json` + `.sig`, payload type
 `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`). Verify it with
