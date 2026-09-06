@@ -20,6 +20,50 @@ lint:
     ./scripts/check-pure-core.sh
     ./scripts/check-verifier-parity.sh
     ./scripts/check-invariant-corpus.sh
+    ./scripts/check-deps-count.sh
+
+# Task 5b. The artifact-directory ceiling. `target/debug/deps` reached 873,349
+# files / 43.5 GiB across five tasks of mutation rounds that nobody cleaned up
+# after, and at that size cargo spends ~30 s PER TEST BINARY fingerprinting the
+# directory: `cargo test --workspace` took twenty minutes at 0% CPU and was
+# twice mistaken for a hang. Fails over 50,000 files and PRINTS THE COUNT on
+# every run, so the trend is readable long before it fails. Part of `lint`.
+deps-count:
+    ./scripts/check-deps-count.sh
+
+# Task 5b. THE RULE mutation rounds inherit.
+#
+# FIRST: a mutation round does not run in this working tree at all. It runs in
+# an isolated worktree or clone, because a round leaves mutated source behind
+# whenever it is interrupted, and "there were backups" is not a property anyone
+# can check afterwards.
+#
+# SECOND, wherever it does run: build it under a throwaway target dir, so it
+# never pollutes a shared artifact set —
+#
+#     just mutant "test --workspace --lib doctor"
+#     just mutant-clean
+#
+# — because five tasks of rounds that did not is what put 873,349 files in
+# target/debug/deps and turned a 13-second suite into a twenty-minute one.
+# `just deps-count` above is the detection for the round that forgot. See
+# docs/stability.md, "The unit suite dials nothing; the e2e suite dials".
+mutant ARGS:
+    CARGO_TARGET_DIR=target/mutants cargo {{ARGS}}
+
+mutant-clean:
+    rm -rf target/mutants
+
+# Task 5b. The suite's OWN clock, and the check that keeps it honest. Refuses
+# to run while 9092 or 9000 answers — a timing number taken against a live
+# stack is about a different machine than the one this bound is for. Bounds the
+# whole default suite (LOGWEIR_UNIT_SUITE_BUDGET_SECS, default 120) AND every
+# individual test (LOGWEIR_UNIT_TEST_BUDGET_SECS, default 5); the per-test
+# bound is the one that catches a dialer, since a single unit test that waits
+# out rdkafka's 20 s `const T` blows it alone. NOT part of `lint`: it runs the
+# whole suite, and `just lint` must stay runnable while the stack is up.
+time-unit-suite:
+    ./scripts/time-unit-suite.sh
 
 test:
     cargo test --workspace

@@ -314,6 +314,78 @@ restore process dies mid-run, there is no checkpoint to resume from: the drill r
 phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
 imply resumability, and Logweir does not offer it in v0.1.
 
+### The unit suite dials nothing; the e2e suite dials
+
+Recorded rulings from Task 5b. They bind every later task in this repository.
+
+**`cargo test --workspace` must open no connection, and no single test in it
+may take more than five seconds.** The default feature set is the run every
+contributor and every agent does dozens of times a day; a test in it that waits
+on a broker, a bucket or a webhook that is not there is paying for a dependency
+it does not have. The two bounds — 120 s for the whole suite, 5 s for any one
+test — are enforced by `just time-unit-suite`, which also refuses to run while
+9092 or 9000 answers, because a timing number taken against a live stack is
+about a different machine. `just e2e` is where dialling belongs, and it is a
+different check run at a different time.
+
+**An unroutable address is not a fast-failing mechanism for librdkafka.**
+MEASURED at Task 5b, through the compiled binary, with a local archive so only
+the target check was timed: `127.0.0.1:1`, `localhost:0`, `localhost:99999`, a
+syntactically invalid host, and an EMPTY broker list each cost **20.1 s**,
+which is `crates/logweir-kafka/src/rdkafka_reader.rs:16`'s
+`const T: Duration = Duration::from_secs(20)` to three significant figures. A
+refused connect does not shorten `T`; librdkafka retries the connection with
+backoff and the metadata *request* waits the constant out. So no test may use
+an address as its speed mechanism. Any test that needs "unreachable broker"
+behaviour in the default suite uses a `ClusterReader` double. Making `T`
+configurable is open decision **O18** (folded into G19) and is not any test's
+to take.
+
+**A well-formed S3 config with no credentials does not dial its endpoint
+first — it dials `169.254.169.254`.** `AmazonS3Builder::from_env()` falls
+through to the EC2 instance-metadata credential provider, and `object_store`
+0.14.1's unconfigured retry budget spends ten attempts against that link-local
+address — ~6.5 s — before the configured endpoint is ever contacted. On a
+workstation that is not an EC2 instance this is traffic off the loopback
+interface from a unit test (Global Constraint 17), and it is invisible in the
+error message unless you read the URL in it. A unit test that wants an
+unreachable *classification* calls the pure `evaluate_storage`; only the
+`e2e`-gated form dials.
+
+**A grep audit proves a constructor is absent, not that a socket is closed.**
+`crates/logweir/tests/no_network_in_unit_tests.rs` is the cheap always-on half
+and `just time-unit-suite`'s per-test bound is the independent second half.
+Neither alone is the acceptance.
+
+**Mutation rounds run in an isolated worktree, and build under a throwaway
+target directory.** A round leaves mutated source behind whenever it is
+interrupted, and "there were backups" is not a property anyone can verify
+afterwards — so it does not happen in a working tree that also holds work in
+progress. And wherever it runs, it builds somewhere disposable. Five tasks of
+mutants built into the shared `target/` and nothing cleaned up after them:
+`target/debug/deps` reached **873,349 files / 43.5 GiB**, and at that size
+cargo spends ~30 s per test binary fingerprinting the directory — the whole
+workspace suite took twenty minutes at 0% CPU and was twice mistaken for a
+hang. The pure-core binary cargo took 30 s over runs its tests in 17 ms when
+executed directly; the cost was never in the tests. So:
+
+    just mutant "test --workspace --lib doctor"   # CARGO_TARGET_DIR=target/mutants
+    just mutant-clean                             # when the round is done
+
+`just deps-count` (part of `just lint`) is the detection: it fails above
+**50,000** files in `target/debug/deps` and prints the count on every run so
+the trend is visible before it fails. The ceiling is measured, not guessed —
+5,608 files for a fresh clean-and-build, 10,026 after one ordinary task.
+
+**Every notification POST is bounded.** `phase7_verify::notify` had no timeout
+of any kind: ureq's agentless request builders carry none, so a sink that
+accepted the connection and never replied hung the drill indefinitely — after
+the scorecard was signed and uploaded. A refused connection was never the risk;
+a firewall that DROPs, or a wedged sink, was. Notifications now go through
+`notify_agent()` (connect 5 s, overall 10 s) and a timeout is swallowed and
+logged exactly like any other transport failure, so the exit-code contract is
+unchanged.
+
 ## Engine compatibility and support policy
 
 - **Engine version floors, and why each exists (spec §7.2).** `kafka-backup`

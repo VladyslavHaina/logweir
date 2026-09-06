@@ -13,6 +13,15 @@ path = "src/lib.rs"
 name = "logweir"
 path = "src/main.rs"
 
+# Task 5b. `logweir-kafka`, `logweir-engine-oso` and `e2e` already carried an
+# `e2e` feature; this crate did not, so the two tests here that can only get
+# their answer from a live dependency had nowhere to go but the default suite,
+# where they cost 33 s of every run. `default = []` is explicit so
+# `--no-default-features` means the same thing here as in the pure layer.
+[features]
+default = []
+e2e = []
+
 [dependencies]
 base64.workspace = true
 chrono.workspace = true

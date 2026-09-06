@@ -285,7 +285,35 @@ fn check_storage(spec: &std::path::Path) -> CheckResult {
         Ok(st) => st,
         Err(e) => return CheckResult::Failed(format!("storage: {e}")),
     };
-    match st.list_manifest_keys(sp.source.storage.prefix()) {
+    let keys = st.list_manifest_keys(sp.source.storage.prefix());
+    evaluate_storage(&loc, &sp.source.backup, keys)
+}
+
+/// The classification of a listing's RESULT, factored out of `check_storage`
+/// so it can be exercised directly against a synthesised `Result` — no
+/// bucket, no endpoint, no network — in `tests::` below. Task 5b.
+///
+/// PURE. It takes the result of a listing and never performs one. This is
+/// the exact split `check_target`/`evaluate_target` already made a few
+/// functions down, for the identical reason and stated in the identical
+/// words: the interesting behaviour is a decision about an outcome, and a
+/// decision about an outcome does not need the machine that produced it.
+/// `check_storage` never got that treatment when `check_target` did, so the
+/// one test that pins "unreachable must SKIP, never PASS" had to reach a
+/// real endpoint to get an unreachable answer — and paid `object_store`
+/// 0.14.1's unconfigured retry budget, ~12 s, on every `cargo test` run on
+/// every machine with no MinIO. Which is every machine, by default.
+///
+/// Only the ERROR half is a judgement call, and it is delegated to
+/// `classify_storage_error`; the two `Ok` arms are here because
+/// reachable-and-empty vs reachable-with-backups is the same kind of
+/// decision and belongs beside it.
+fn evaluate_storage(
+    loc: &str,
+    backup: &str,
+    keys: Result<Vec<String>, logweir_core::engine::EngineError>,
+) -> CheckResult {
+    match keys {
         // Fix round 2, M3: a reachable archive holding ZERO backup sets used
         // to print `ok`. `source.backup: latestCompleted` has nothing to
         // select from an empty archive and a drill against it fails in
@@ -295,13 +323,12 @@ fn check_storage(spec: &std::path::Path) -> CheckResult {
         // FAILURE, distinct from reachable-with-backups (`Passed`) and from
         // unreachable (`Skipped`, below).
         Ok(keys) if keys.is_empty() => CheckResult::Failed(format!(
-            "storage at {loc} is reachable but holds zero backup sets. `source.backup: {}` has \
-             nothing to select, and a drill against this configuration would fail in phase 1 — \
-             point --spec at an archive that has completed at least one backup.",
-            sp.source.backup
+            "storage at {loc} is reachable but holds zero backup sets. `source.backup: {backup}` \
+             has nothing to select, and a drill against this configuration would fail in phase 1 \
+             — point --spec at an archive that has completed at least one backup."
         )),
         Ok(keys) => CheckResult::Passed(format!("{} backup set(s) under {loc}", keys.len())),
-        Err(e) => classify_storage_error(&loc, &e.to_string()),
+        Err(e) => classify_storage_error(loc, &e.to_string()),
     }
 }
 
@@ -523,14 +550,92 @@ mod tests {
     }
 
     /// "Could not determine" must be distinguishable from "verified fine".
-    /// `examples/drill.yaml`'s source storage constructs fine (a well-formed
-    /// S3 config) but this process has no MinIO to reach (`just e2e-up`,
-    /// Task 7b, is not running under default `cargo test`) — that MUST be a
-    /// `Skipped`, structurally distinct from `Passed`, never folded into a
-    /// bare `Ok`/"ok" that a reader can't tell from a genuine pass.
+    /// A well-formed S3 config this process cannot reach MUST be a `Skipped`,
+    /// structurally distinct from `Passed`, never folded into a bare
+    /// `Ok`/"ok" that a reader can't tell from a genuine pass.
+    ///
+    /// Task 5b, addendum ruling B1(b): this used to run `check_storage`
+    /// against `examples/drill.yaml` and get its unreachable answer from the
+    /// network. **It cost 6.7 s of every `cargo test` run** — and not, as
+    /// everyone assumed, waiting on `localhost:9000`. MEASURED: with no AWS
+    /// credentials in the environment, `AmazonS3Builder::from_env()` falls
+    /// through to the EC2 instance-metadata credential provider and the
+    /// retries are against the LINK-LOCAL address `169.254.169.254`, ten of
+    /// them, before the endpoint is ever contacted. A unit test was reaching
+    /// off the loopback interface (GC17) to prove a classification.
+    ///
+    /// The property is about `check_storage`'s CLASSIFICATION of an
+    /// unreachable result, and classification is pure, so it is asserted
+    /// against `evaluate_storage` with a synthesised `Err` — the identical
+    /// discipline the three `classify_storage_error` tests below already use.
+    /// The dialling form is NOT deleted: see
+    /// `check_storage_skips_a_genuinely_unreachable_endpoint`, which runs the
+    /// original body under `--features e2e`.
+    ///
+    /// The input strings are `object_store` 0.14.1's own Display text,
+    /// CAPTURED VERBATIM from a real run of this check on this workstation
+    /// with no stack up (the first) and from the same generic form with the
+    /// configured endpoint in it (the second) — a synthesised error that does
+    /// not look like the real one proves nothing about the real one.
     #[test]
     fn check_storage_reports_skipped_not_passed_when_it_cannot_reach_a_well_formed_target() {
-        match check_storage(Path::new("../../examples/drill.yaml")) {
+        const UNREACHABLE: [&str; 2] = [
+            // Captured from `logweir doctor --spec examples/drill.yaml` with
+            // the compose stack down and no AWS credentials set.
+            "operational: Generic S3 error: Error performing PUT \
+             http://169.254.169.254/latest/api/token in 6.510238083s, after 10 retries, \
+             max_retries: 10, retry_timeout: 180s  - HTTP error: error sending request",
+            // The same shape once credentials resolve and the configured
+            // endpoint itself is the thing that is not there.
+            "operational: Generic S3 error: Error performing GET \
+             http://localhost:9000/kafka-backups?list-type=2 in 1.204s, after 10 retries, \
+             max_retries: 10, retry_timeout: 180s  - HTTP error: error sending request",
+        ];
+        for e in UNREACHABLE {
+            let keys = Err(logweir_core::engine::EngineError::Operational(e.into()));
+            match evaluate_storage("s3://kafka-backups/drill-demo", "latestCompleted", keys) {
+                CheckResult::Skipped(why) => assert!(!why.is_empty()),
+                CheckResult::Passed(d) => panic!(
+                    "a storage this process cannot reach must never report Passed \
+                     (undetectable false confidence): got Passed({d})"
+                ),
+                CheckResult::Failed(why) => panic!(
+                    "a well-formed but unreachable storage must Skip, not Fail: got Failed({why})"
+                ),
+            }
+        }
+    }
+
+    /// The dialling half of the test above, RETAINED rather than deleted
+    /// (Task 5b, addendum ruling B1(b)). Trading an end-to-end proof for a
+    /// unit proof would quietly lose the guarantee that `object_store`'s real
+    /// unreachable error still classifies as `Skipped` — the synthesised
+    /// strings above are only as good as the day they were captured, and a
+    /// dependency bump can reword them.
+    ///
+    /// It runs under `just e2e` and never in the default suite. That is where
+    /// a genuinely dead endpoint is arrangeable and honest: the compose stack
+    /// is up, so port 1 on loopback is dead because nothing listens there,
+    /// not because the whole machine has no object storage.
+    ///
+    /// The `StorageUrl` is built from a YAML literal rather than from a new
+    /// fixture file, the same way `spec_with_marker_topic` below builds a
+    /// `DrillSpec` — the subject is one storage config, not a whole drill.
+    #[cfg(feature = "e2e")]
+    #[test]
+    fn check_storage_skips_a_genuinely_unreachable_endpoint() {
+        let u: logweir_core::engine::StorageUrl = serde_yaml::from_str(
+            "backend: s3\nbucket: kafka-backups\nprefix: drill-demo\nregion: us-east-1\n\
+             endpoint: http://127.0.0.1:1\npath_style: true\nallow_http: true\n",
+        )
+        .expect("the storage fixture must parse");
+        let st = logweir_engine_oso::storage::Store::read_only_from_url(&u)
+            .expect("a well-formed S3 config must CONSTRUCT even when nothing answers");
+        match evaluate_storage(
+            "s3://kafka-backups/drill-demo",
+            "latestCompleted",
+            st.list_manifest_keys(u.prefix()),
+        ) {
             CheckResult::Skipped(why) => assert!(!why.is_empty()),
             CheckResult::Passed(d) => panic!(
                 "a storage this process cannot reach must never report Passed \
@@ -607,6 +712,56 @@ mod tests {
                     CheckResult::Skipped(w) => w,
                     CheckResult::Passed(_) => unreachable!(),
                 }
+            ),
+        }
+    }
+
+    /// Task 5b: the DEFAULT-SUITE half of check 7's property. An unreachable
+    /// target must produce a NAMED `target` failure, never a generic "doctor
+    /// failed" — an adopter with a firewall problem who reads only the latter
+    /// has been told nothing.
+    ///
+    /// `crates/logweir/tests/doctor.rs`'s
+    /// `check_7_an_unreachable_target_is_named_as_a_target_problem` proves
+    /// the same property through the compiled binary, and MEASURED 26.6 s to
+    /// do it: 20 s of `rdkafka_reader.rs:16`'s `const T` (a refused connect
+    /// does NOT shorten it — librdkafka retries the connection and the
+    /// metadata REQUEST waits out `T`, so the fixture's unroutable
+    /// `127.0.0.1:1` buys nothing) plus ~6.5 s of object_store retries on the
+    /// storage check ahead of it. It is now `--features e2e`; this is what
+    /// the default suite runs instead, in microseconds, against the stub
+    /// reader the file already has.
+    ///
+    /// The two halves together are the whole property: this one pins the
+    /// wording and the `Failed` verdict, and `run`'s check table — where
+    /// `("target", ...)` is the name printed beside it — is what makes it
+    /// reach the operator as `FAIL  target`. Shortening `T` to make the CLI
+    /// form fast is NOT the alternative: that constant is open decision O18's.
+    #[test]
+    fn evaluate_target_fails_and_names_the_target_when_the_cluster_is_unreachable() {
+        let sp = spec_with_marker_topic("logweir.scratch");
+        let al = allowed(&["ALLOWED0000000000000000"]);
+        let r = StubReader {
+            cluster_id: Err(KafkaError::Unreachable(
+                "Meta data fetch error: BrokerTransportFailure".into(),
+            )),
+            topics: Ok(vec![]),
+        };
+        match evaluate_target(&sp, &al, &r) {
+            CheckResult::Failed(why) => {
+                assert!(
+                    why.contains("target"),
+                    "the failure must NAME the target — an adopter behind a firewall reads this \
+                     line and nothing else: {why}"
+                );
+                assert!(why.contains("unreachable"), "got: {why}");
+            }
+            CheckResult::Passed(d) => {
+                panic!("a target that cannot be reached must never report Passed: got Passed({d})")
+            }
+            CheckResult::Skipped(w) => panic!(
+                "check 7 is ALWAYS a failure, never a skip — that is its whole contract \
+                 (`check_target`'s doc comment): got Skipped({w})"
             ),
         }
     }

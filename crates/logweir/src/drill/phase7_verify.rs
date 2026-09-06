@@ -219,6 +219,7 @@ use logweir_core::spec::Notifications;
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct VerifyOutcome {
@@ -1330,10 +1331,64 @@ pub fn notify_body(sc: &Scorecard) -> serde_json::Value {
     })
 }
 
+/// How long one notification POST may take before it is written off.
+///
+/// Task 5b. There was NO timeout here at all: every sink was posted with
+/// ureq 2.12.1's free-function request builder, which constructs a throwaway
+/// agent carrying that crate's defaults — no connect, read or overall timeout,
+/// in its own words *"requests may block forever on reads by default"*. (The
+/// spelling is not repeated here: `crates/logweir/tests/notify.rs` fails if
+/// those builders appear anywhere under `crates/logweir/src/`.) A webhook
+/// endpoint that ACCEPTS the
+/// connection and then never replies hung this function, and therefore the
+/// drill, forever — after the scorecard was signed and uploaded. The drill had
+/// already succeeded and produced its evidence; the process just never
+/// returned to say so, and the operator watching it had no way to tell a
+/// hung notification from a hung restore.
+///
+/// A refused connection was never the risk: the kernel answers a closed port
+/// with an RST in microseconds, which is why the existing tests were fast and
+/// why this went unnoticed. A firewall that DROPs instead of REJECTing, or a
+/// sink that is merely wedged, is the case with no bound.
+///
+/// The numbers. `timeout_connect` bounds the TCP handshake; `timeout` bounds
+/// the whole call, handshake included, and takes precedence over the
+/// per-socket read and write timeouts (ureq's own contract), so the two
+/// together are the complete bound: **no sink can cost more than
+/// `NOTIFY_TIMEOUT`, and the worst case for a spec with `w` webhooks, a Slack
+/// sink and a PagerDuty key is `(w + 2) * NOTIFY_TIMEOUT`.** Ten seconds is
+/// long enough that a merely slow sink is still notified — losing a page
+/// because PagerDuty took four seconds would be a worse failure than the one
+/// being fixed — and short enough that a wedged one is written off promptly.
+pub const NOTIFY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The overall bound on one notification POST. See `NOTIFY_CONNECT_TIMEOUT`.
+pub const NOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The agent every notification POST goes through. Public so a test can build
+/// one with a short bound and drive `notify_with` against a listener that
+/// accepts and never replies — the failure mode with no bound — without
+/// spending the production bound to do it.
+pub fn notify_agent_with(connect: Duration, overall: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(connect)
+        .timeout(overall)
+        .build()
+}
+
+/// The production agent: `NOTIFY_CONNECT_TIMEOUT` and `NOTIFY_TIMEOUT`.
+pub fn notify_agent() -> ureq::Agent {
+    notify_agent_with(NOTIFY_CONNECT_TIMEOUT, NOTIFY_TIMEOUT)
+}
+
 /// POSTs one JSON summary per configured sink. EVERY transport failure is
 /// logged and swallowed: the drill result is a measurement, and a webhook being
-/// down must never change it. `ureq` is blocking on purpose — it adds no async
-/// runtime to `crates/logweir`.
+/// down must never change it. A TIMEOUT is one of those transport failures and
+/// is swallowed identically — it arrives as `ureq::Error::Transport`, is
+/// logged as `transport error`, and changes neither the scorecard nor the exit
+/// code. The exit contract (GC11) is untouched: by the time this runs the
+/// scorecard is signed and uploaded, and a sink that would not answer is not
+/// a drill result. `ureq` is blocking on purpose — it adds no async runtime to
+/// `crates/logweir`.
 ///
 /// NO SINK URL REACHES A LOG LINE INTACT — see `redact_url`. That includes the
 /// error arm: `ureq::Error`'s own `Display` embeds the request URL, so
@@ -1343,6 +1398,17 @@ pub fn notify_body(sc: &Scorecard) -> serde_json::Value {
 /// The body it posts is `notify_body` next door, which is where the shape —
 /// and what it deliberately omits — is documented and tested.
 pub fn notify(n: &Notifications, sc: &Scorecard) {
+    notify_with(&notify_agent(), n, sc)
+}
+
+/// `notify` with the agent injected, so the timeout bound is a parameter of
+/// the test rather than a property the test has to wait out. Every POST in
+/// this module goes through the passed agent — `crates/logweir/tests/notify.rs`
+/// asserts structurally that no bare `ureq::post`/`ureq::get` survives
+/// anywhere in `crates/logweir/src/`, because a revert to one would restore
+/// the unbounded wait and pass every behavioural test that supplies its own
+/// agent.
+pub fn notify_with(agent: &ureq::Agent, n: &Notifications, sc: &Scorecard) {
     let body = notify_body(sc);
     let mut sinks: Vec<String> = n.webhooks.clone();
     if let Some(u) = &n.slack_webhook {
@@ -1350,7 +1416,7 @@ pub fn notify(n: &Notifications, sc: &Scorecard) {
     }
     for url in sinks {
         let sink = redact_url(&url);
-        match ureq::post(&url).send_json(&body) {
+        match agent.post(&url).send_json(&body) {
             Ok(_) => tracing::info!(target: "logweir::notify", sink = %sink, "notified"),
             // `error = %e` is NOT logged: `ureq::Error`'s `Display` embeds the
             // request URL, credential and all. What an operator needs from a
@@ -1371,7 +1437,10 @@ pub fn notify(n: &Notifications, sc: &Scorecard) {
                          "source": sc.target.cluster_id, "severity": "warning",
                          "custom_details": body },
         });
-        if let Err(e) = ureq::post("https://events.pagerduty.com/v2/enqueue").send_json(&ev) {
+        if let Err(e) = agent
+            .post("https://events.pagerduty.com/v2/enqueue")
+            .send_json(&ev)
+        {
             // The URL here is a fixed public endpoint and carries no secret,
             // but the routing key travels in the BODY and `ureq::Error` is
             // redacted for every sink alike rather than case by case — a
