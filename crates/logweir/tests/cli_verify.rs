@@ -394,3 +394,68 @@ fn verify_reports_self_contradiction_before_the_approval_claim() {
         "the approval arm must not pre-empt validate_invariants: {err}"
     );
 }
+
+/// The two-reader parity claim is only as real as the gate that runs it.
+///
+/// `scripts/check-verifier-parity.sh` is the artefact that makes "both
+/// verifiers reach the same verdict" mechanical rather than documented. On the
+/// commit that introduced it, it was invoked by the `justfile`'s `lint` recipe
+/// and by **no CI job at all** — its three sibling guards
+/// (`check-no-oso.sh`, `check-pure-core.sh`, `check-dod.sh`) each have a named
+/// step in `.github/workflows/ci.yml`, and CI has never run `just lint`. So
+/// deleting the script would have changed no CI result, and deleting the
+/// `justfile` line was caught by nothing.
+///
+/// This test is the cover. It reads both gate files from the repository — the
+/// same shape as
+/// `crates/logweir-evidence/tests/key_provenance.rs::keygen_recipe_is_documented_and_linked`
+/// and `crates/logweir-core/tests/fixture_regen.rs::fixtures_recipe_is_non_destructive`,
+/// both of which already assert on checked-in non-Rust files — and requires the
+/// script to be invoked by an EXECUTED line in each, never merely mentioned in
+/// a comment. Removing either wiring fails it at assertion time.
+#[test]
+fn the_verifier_parity_script_is_wired_into_lint_and_ci() {
+    const SCRIPT: &str = "check-verifier-parity.sh";
+
+    // Lines that actually run, with comments stripped. A comment naming the
+    // script is not a gate: without this filter, deleting the step and leaving
+    // the comment that explains it would keep this test green — which is the
+    // failure mode the test exists to prevent.
+    fn executed(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter(|l| !l.trim().is_empty())
+            .collect()
+    }
+
+    // 1. The `lint` recipe body invokes it.
+    let justfile = std::fs::read_to_string("../../justfile").expect("read justfile");
+    let mut lines = justfile.lines();
+    lines
+        .by_ref()
+        .find(|l| l.trim_end() == "lint:")
+        .expect("justfile has a `lint` recipe");
+    let recipe: String = lines
+        .take_while(|l| l.starts_with(' ') || l.starts_with('\t') || l.trim().is_empty())
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let body = executed(&recipe);
+    assert!(
+        body.iter().any(|l| l.contains(SCRIPT)),
+        "the `lint` recipe must invoke ./scripts/{SCRIPT}: it is the only mechanical \
+         check that the two verifiers agree, and `just lint` is the recipe a developer \
+         runs before pushing. Recipe body was: {body:?}"
+    );
+
+    // 2. A CI job runs it, on a line that is not a comment.
+    let ci = std::fs::read_to_string("../../.github/workflows/ci.yml")
+        .expect("read .github/workflows/ci.yml");
+    assert!(
+        executed(&ci).iter().any(|l| l.contains(SCRIPT)),
+        "no CI step runs ./scripts/{SCRIPT}. `just lint` is NOT the merge gate — \
+         ci.yml runs cargo fmt/clippy/test and the three sibling guard scripts as \
+         individual steps and never invokes just — so a parity script that only \
+         `just lint` calls is enforced on nobody's pull request. A comment naming \
+         the script does not count."
+    );
+}

@@ -663,13 +663,34 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.1.0 (invariant set includes the evidence-zeroing arm)
+       verifier: verify_scorecard.py 1.2.0 (evidence-zeroing arm; approval.self_attested derived, not echoed)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
 It is there so nobody reads the zeroed `evidence` block as a finding about
 their bucket — see [The `evidence` block is not a finding about your
 bucket](#the-evidence-block-is-not-a-finding-about-your-bucket).)
+
+### What the `verifier:` line means, and why its version moves
+
+The last line names the script's own version — **not** the scorecard's
+`format_version`, which is `1.0.0` and stays there. `verify_scorecard.py`'s
+version tracks its **verdict rule**: it moves whenever there is a document this
+script would now decide differently from the previous version. `1.2.0` is such a
+move — it derives `approval.self_attested` and refuses a document whose claim
+disagrees, where `1.1.0` printed the document's own claim and returned `VALID`.
+
+**What that means for you as an auditor.** A scorecard you verified with an
+earlier version was checked by a weaker rule. If you retained the document and
+its sidecar — and you should have; a signature is over a fixed byte string and
+stays checkable forever — **re-run the current script over your retained
+documents.** Nothing about the artifact changed and no signature is affected;
+what changed is what this reader is willing to call `VALID`. A document that
+passed under `1.1.0` and is refused under `1.2.0` was always making a claim its
+signature could not support. The script was not catching it.
+
+Read the version line, not just the verdict. The verdict alone cannot tell you
+which rule produced it.
 
 `logweir drill verify` prints the equivalent line as `approval:
 SELF-ATTESTED — the approval key equals the signing key` among its own

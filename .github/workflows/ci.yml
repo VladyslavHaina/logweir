@@ -94,14 +94,41 @@ jobs:
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
+  # The auditor's independent verifier, and — since T0-1 — the job that proves
+  # the TWO readers agree. That second claim needs BOTH readers, so this job
+  # builds the Rust one. It used to be pure-Python (checkout, setup-python, pip,
+  # pytest); `test_self_attested_parity` then arrived needing
+  # `target/debug/logweir` and REFUSING to skip without it, which is the correct
+  # instinct and made this job red on every push. A parity job that cannot run
+  # the first reader is a documented guarantee nothing enforces — exactly what
+  # T0-1 exists to eliminate — so the fix is to give the job the binary, never
+  # to let the test skip.
   python-verifier:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      # `logweir` -> `logweir-kafka` -> rdkafka's `cmake-build` feature. The e2e
+      # job installs this for the same reason; a plain `cargo build -p logweir`
+      # needs it too. No engine extraction: that is a RUNTIME dependency of the
+      # drill tests, and nothing here runs a drill.
+      - run: sudo apt-get update && sudo apt-get install -y cmake
       - run: pip install cryptography pytest
+      - name: Build the Rust reader (the parity check compares the two readers)
+        run: cargo build -p logweir
       - run: python3 -m pytest docs/test_verify_scorecard.py -q
+      # `scripts/check-verifier-parity.sh` was, on the commit that introduced it,
+      # the ONE guard script in `scripts/` that no CI job invoked — its three
+      # siblings each have a named step in `build`, and CI does not run
+      # `just lint`. So the mechanical two-reader claim held only on a
+      # developer's laptop. It runs here, next to the pytest suite that shares
+      # its fixtures, and it FAILS rather than skipping when `cryptography` or
+      # the Rust binary is missing.
+      - name: two-verifier parity over the signed fixture corpus (T0-1)
+        run: ./scripts/check-verifier-parity.sh
 
   deny:
     runs-on: ubuntu-24.04

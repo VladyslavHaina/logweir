@@ -141,9 +141,26 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 FORMAT_VERSION = "1.0.0"
 
 # This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
-# "1.0.0"). Bumped when the invariant set changes, so an auditor can tell which
-# checks ran. 1.1.0 adds the evidence-zeroing arm (T0-2).
-SCRIPT_VERSION = "1.1.0"
+# "1.0.0"). Bumped whenever this script's VERDICT RULE changes: when there is a
+# document it would decide differently from the previous version. That is
+# strictly wider than "the invariant set changed", and it has to be — the
+# `verifier:` line below is the only thing an auditor can read to learn which
+# checks produced the verdict in front of them, and a verifier whose answer
+# moves while its version string stays put is one nobody can reason about.
+#
+#   1.1.0  adds the evidence-zeroing arm (T0-2). An invariant arm.
+#   1.2.0  DERIVES `approval.self_attested` from the key that verified the
+#          signature instead of echoing the document's own claim, and refuses a
+#          document whose claim disagrees (T0-1). NOT an invariant arm — it
+#          needs the verifying key, which `check_invariants` has not got — but
+#          it changes the verdict on real documents, which is what the bump
+#          tracks.
+#
+# The general rule for when to bump, and where an auditor reads it, is not
+# written down anywhere yet; Task 23 owns writing it. Until it is, err towards
+# bumping: an unnecessary bump costs an auditor one question, a missing one
+# costs them a wrong answer.
+SCRIPT_VERSION = "1.2.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -593,12 +610,16 @@ def main(
             "       evidence: the four post-put fields are zeroed before signing; "
             "the storage facts live in the receipt"
         )
-        # Which invariant set actually ran. The sentence above is a GUARANTEE,
-        # and until SCRIPT_VERSION 1.1.0 nothing enforced it — an auditor
-        # reading an older run's output cannot tell the two apart without this.
+        # Which checks actually produced this verdict. The sentence above is a
+        # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
+        # auditor reading an older run's output cannot tell the two apart
+        # without this. 1.2.0 adds the second item for the same reason: the
+        # `approval:` line above is now a DERIVED finding, and a reader who
+        # cannot tell a derived line from an echoed one is back where T0-1
+        # started.
         print(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
-            "(invariant set includes the evidence-zeroing arm)"
+            "(evidence-zeroing arm; approval.self_attested derived, not echoed)"
         )
         return 0
 

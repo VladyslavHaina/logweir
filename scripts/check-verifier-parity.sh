@@ -53,12 +53,21 @@ if [ "$probe_rc" -ne 0 ]; then
     fail "python3 with the 'cryptography' package is required (pip install cryptography); the two-reader parity claim is not checkable without it. tried $PY — set \$LOGWEIR_PYTHON (or \$LOGWEIR_E2E_PYTHON, or create .e2e/venv) to point at an interpreter that has it"
 fi
 
-BIN="$ROOT/target/debug/logweir"
-if [ ! -x "$BIN" ]; then
-    BIN="$ROOT/target/release/logweir"
+# The Rust reader. `$LOGWEIR_BIN` first — the name `scripts/demo-approve.sh` and
+# `scripts/demo.sh` already use — then `$CARGO_TARGET_DIR` (or `target/`) for
+# either profile. `docs/test_verify_scorecard.py::logweir_bin` resolves it the
+# same way and in the same order, so the two parity checks can never disagree
+# about WHICH binary they are calling the first reader.
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+if [ -n "${LOGWEIR_BIN:-}" ]; then
+    BIN="$LOGWEIR_BIN"
+elif [ -x "$TARGET_DIR/debug/logweir" ]; then
+    BIN="$TARGET_DIR/debug/logweir"
+else
+    BIN="$TARGET_DIR/release/logweir"
 fi
 if [ ! -x "$BIN" ]; then
-    fail "no built logweir binary at target/debug/logweir or target/release/logweir; run 'cargo build -p logweir' first — the parity claim needs BOTH readers"
+    fail "no built logweir binary at $BIN; run 'cargo build -p logweir' first, or point \$LOGWEIR_BIN at it — the parity claim needs BOTH readers"
 fi
 
 # document<TAB>expected rust code<TAB>expected python code

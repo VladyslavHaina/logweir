@@ -1,4 +1,4 @@
-import json, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIX = ROOT / "e2e" / "fixtures" / "signed"
@@ -776,7 +776,55 @@ def test_a_sidecar_naming_only_another_key_is_refused_by_name():
 # equality — `test_one_flipped_byte_fails` above already asserts 1 for the case
 # `crates/logweir/tests/cli_verify.rs` asserts 4 for.
 
-LOGWEIR_BIN = ROOT / "target" / "debug" / "logweir"
+def _target_dir():
+    """Cargo's output directory — `$CARGO_TARGET_DIR` when set, else `target/`."""
+    override = os.environ.get("CARGO_TARGET_DIR")
+    return pathlib.Path(override) if override else ROOT / "target"
+
+
+def logweir_bin():
+    """The Rust reader, resolved the same way `scripts/check-verifier-parity.sh`
+    resolves it: `$LOGWEIR_BIN` first (the name `scripts/demo-approve.sh` and
+    `scripts/demo.sh` already use), then the build output for either profile.
+
+    Hardcoding `target/debug/logweir` made a release-only tree fail an assertion
+    that has nothing to do with release builds. The env var comes first so a
+    caller with the binary somewhere else — a CI job, a packaged build — can say
+    so instead of being told to rebuild.
+
+    Returns the path whether or not it exists; `require_logweir_bin` is what
+    turns "absent" into a loud failure.
+    """
+    override = os.environ.get("LOGWEIR_BIN")
+    if override:
+        return pathlib.Path(override)
+    target = _target_dir()
+    for profile in ("debug", "release"):
+        candidate = target / profile / "logweir"
+        if candidate.exists():
+            return candidate
+    return target / "debug" / "logweir"
+
+
+def require_logweir_bin():
+    """The Rust reader, or a loud failure. NEVER a skip.
+
+    A parity test that skips when one of the two readers is missing asserts
+    nothing while reporting green, which is the precise defect class T0-1
+    exists to eliminate: a documented guarantee nothing enforces. CI is
+    expected to build the binary (`.github/workflows/ci.yml`, the
+    `python-verifier` job), so an absent binary is a broken job, not a
+    tolerable condition.
+    """
+    b = logweir_bin()
+    if not b.exists():
+        raise AssertionError(
+            f"{b} is not built. The two-reader parity claim is the point of this "
+            "test and cannot be checked without both readers: build with "
+            "`cargo build -p logweir`, or point $LOGWEIR_BIN at the binary. "
+            "This is NOT skipped."
+        )
+    return b
 
 # document -> (rust exit code, python exit code)
 PARITY_MAPPING = {
@@ -792,7 +840,7 @@ def _rust_verify(sc, sig, pub):
     """`drill verify` on the compiled binary. The exit code is read from
     `returncode` directly — never parsed out of a pipeline."""
     return subprocess.run(
-        [str(LOGWEIR_BIN), "drill", "verify",
+        [str(require_logweir_bin()), "drill", "verify",
          "--scorecard", str(sc), "--signature", str(sig), "--public-key", str(pub)],
         capture_output=True, text=True,
     )
@@ -824,12 +872,7 @@ def test_bogus_self_attested_claim_refused():
 
 
 def test_self_attested_parity():
-    if not LOGWEIR_BIN.exists():
-        raise AssertionError(
-            f"{LOGWEIR_BIN} is not built. The two-reader parity claim is the point of "
-            "this test and cannot be checked without both readers; build with "
-            "`cargo build -p logweir`. This is NOT skipped."
-        )
+    require_logweir_bin()
     for name, (want_rust, want_py) in PARITY_MAPPING.items():
         sc = FIX / name
         sig = FIX / (name[: -len(".json")] + ".sig")
