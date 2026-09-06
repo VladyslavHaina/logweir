@@ -104,10 +104,42 @@ pub fn verify_scorecard(
         eprintln!("SIGNATURE VALID but the document is self-contradicting: {e}");
         return Err(ExitCode::SigningOrLock);
     }
+    // T0-1. `approval.self_attested` in the document is a CLAIM. The finding is
+    // derived from the key that actually verified this signature — the same
+    // comparison the writer makes at
+    // `crates/logweir/src/drill/phase1_approval.rs`'s
+    // `let self_attested = key_id == signing_key.key_id();`. A document that
+    // claims otherwise is refused: it is a provenance claim the signature
+    // cannot support, so it is the same class as a bad signature (Global
+    // Constraint 11, exit 4). NOT an invariant in `logweir-core` — that layer
+    // has no key. Position matters: this arm runs AFTER `validate_invariants`,
+    // so a self-contradicting document still gets the more fundamental
+    // finding above rather than this one.
+    let derived_self_attested = sc.approval.key_id == matched_key_id;
+    if derived_self_attested != sc.approval.self_attested {
+        if sc.approval.self_attested {
+            eprintln!(
+                "APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=true \
+                 but the approval key id {} does not match the verifying key id {}",
+                sc.approval.key_id, matched_key_id
+            );
+        } else {
+            // The other direction is a refusal too, and it needs its own
+            // sentence: a message that said "does not match" here would state
+            // a falsehood in the one line whose whole purpose is to be
+            // trustworthy.
+            eprintln!(
+                "APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=false \
+                 but the approval key id {} matches the verifying key id {}",
+                sc.approval.key_id, matched_key_id
+            );
+        }
+        return Err(ExitCode::SigningOrLock);
+    }
     Ok(VerifyReport {
         signature_valid: true,
         invariants_ok: true,
-        self_attested: sc.approval.self_attested,
+        self_attested: derived_self_attested,
         run_id: sc.run_id.clone(),
         outcome: sc.outcome,
         approver: sc.approval.approver.clone(),

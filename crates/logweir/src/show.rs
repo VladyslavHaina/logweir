@@ -55,7 +55,13 @@ pub fn render_table(sc: &Scorecard) -> String {
         &mut o,
         "approval",
         if sc.approval.self_attested {
-            "SELF-ATTESTED — the approval key equals the signing key".to_string()
+            // `drill show` never sees a signature or a key (this function takes
+            // only a Scorecard), so it can report the document's CLAIM and
+            // nothing more. `drill verify` derives the finding by comparing
+            // `approval.key_id` against the key that verified the signature and
+            // refuses a document whose claim disagrees. T0-1.
+            "SELF-ATTESTED (claimed; run 'drill verify' to check it against the signing key)"
+                .to_string()
         } else {
             format!("{} ({})", sc.approval.approver, sc.approval.ticket)
         },

@@ -1,7 +1,10 @@
 # The default recipe is the release gate (Task 22 step 8), so it must be able to
 # FAIL on formatting: it never runs the rewriting `fmt` recipe. Run `just fmt`
-# yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh
-# and check-pure-core.sh.
+# yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh,
+# check-pure-core.sh and check-verifier-parity.sh. That last one needs a
+# `python3` with the `cryptography` package (Task 3) — it FAILS rather than
+# skipping when the package is missing, because the two-reader parity claim is
+# not checkable without the second reader.
 default: lint test
 
 fmt:
@@ -12,6 +15,7 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
     ./scripts/check-no-oso.sh
     ./scripts/check-pure-core.sh
+    ./scripts/check-verifier-parity.sh
 
 test:
     cargo test --workspace
@@ -43,6 +47,12 @@ fixtures-sign:
     mkdir -p target/fixtures-tmp
     cargo run -p logweir-core --example emit_fixture > target/fixtures-tmp/scorecard.json && mv target/fixtures-tmp/scorecard.json e2e/fixtures/signed/scorecard.json
     cargo run -p logweir-evidence --example mint_fixture
+
+# The DELIBERATELY BOGUS fixture: a validly signed scorecard whose only defect
+# is its own self_attested claim. Additive — writes ONLY the two -bogus files
+# and re-mints nothing (ruling R-G, plan.md:60). Task 3.
+fixtures-sign-bogus:
+    cargo run -p logweir-evidence --example mint_bogus_fixture
 
 # Bring the compose stack up, seed topics, produce, back up. See Task 21.
 # `--wait` blocks until every non-profiled service reports HEALTHY, so this

@@ -101,7 +101,7 @@ v0.1.0 writer produces them.
 | `approval.plan_hash` | string | `sha256:` of the **exact spec bytes** the drill ran. Approving one document and running another is refused at phase 1. |
 | `approval.approved_at` | RFC 3339 | When. |
 | `approval.key_id` | string | Lowercase hex sha256 of the approver key's SPKI DER. |
-| `approval.self_attested` | bool | `true` when the approving key **equals** the signing key: the same party planned, ran and vouches for the result. Never refused, always labelled. Treat `true` as a reason to seek corroboration. |
+| `approval.self_attested` | bool | `true` when the approving key **equals** the signing key: the same party planned, ran and vouches for the result. Never refused, always labelled. Treat `true` as a reason to seek corroboration. **This field is a CLAIM: both verifiers derive the finding from `approval.key_id` against the key that verified the signature, and refuse a document whose claim disagrees (`drill verify` exit 4, `verify_scorecard.py` exit 1). That narrows the accepted set without changing the format — no field is added, removed or retyped, `format_version` stays `1.0.0`, and no document Logweir has ever written is refused, because the writer has always derived the field correctly.** |
 
 ## `phases`
 

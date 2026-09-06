@@ -45,6 +45,43 @@ engineering's call, not a test's. It no longer costs the keypair, though:
 absent, so `public.pem` and `signing.pem` are unchanged by a re-mint and the
 `917cf9a2…` fingerprint survives it.
 
+## The deliberately bogus fixture
+
+`scorecard-self-attested-bogus.json` and `scorecard-self-attested-bogus.sig`
+are a **validly signed** document whose **claim is false**. The signature is
+genuine — it is made by the same pinned `917cf9a2…` key as everything else
+here, over exactly these bytes — and the document says
+`approval.self_attested: true` while its `approval.key_id` is `"a"*64`, which
+is not that key. Nothing about the cryptography is wrong; the document is
+lying about its own provenance.
+
+**It exists to be refused.** `logweir drill verify` exits **4** over it (the
+same class as a bad signature: it is a provenance claim the signature cannot
+support) and `docs/verify_scorecard.py` exits **1**, and both print the same
+`APPROVAL CLAIM NOT VERIFIED: …` line byte for byte. Before T0-1 both readers
+printed `approval: SELF-ATTESTED — the approval key equals the signing key`
+over it and exited 0.
+
+It is minted by `just fixtures-sign-bogus`. **`just fixtures-sign-bogus`
+regenerates only the two `-bogus` files, loads the pinned `signing.pem`, and
+mints no key** — so regenerating it never touches the other five files in this
+directory (ruling R-G, `plan.md:60`). Its producer,
+`crates/logweir-evidence/examples/mint_bogus_fixture.rs`, uses
+`SigningKey::from_pem_file` rather than `load_or_generate` on purpose: a
+missing key must be a loud failure here, never a silent mint.
+
+## Running the checks over these fixtures
+
+`scripts/check-verifier-parity.sh` (a `just lint` arm) runs **both** verifiers
+over all three scorecard documents in this directory and compares the verdicts
+and the refusal text. It needs a `python3` with the
+[`cryptography`](https://cryptography.io/) package — `pip install
+cryptography`, or point `$LOGWEIR_PYTHON` (or `$LOGWEIR_E2E_PYTHON`, or a
+repo-local `.e2e/venv`) at an interpreter that has it. **It fails rather than
+skipping when the package is missing:** a skipped parity check is a documented
+guarantee nothing enforces, which is exactly what these fixtures exist to
+prevent. `docs/test_verify_scorecard.py` needs the same package plus `pytest`.
+
 
 ---
 

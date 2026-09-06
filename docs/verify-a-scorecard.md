@@ -618,9 +618,44 @@ self-attested run is not a forgery, but it is a materially weaker
 governance signal than one where a different approving party's key is on
 record).
 
-Both verifiers surface this rather than hiding it: `verify_scorecard.py`
-prints, verbatim (this is the actual output — compare your terminal
-against these exact characters, not a paraphrase of them):
+**The field in the document is a CLAIM. Both verifiers DERIVE the finding
+instead.** They compare `approval.key_id` against the key id of the signature
+that actually verified, which is the same comparison the writer makes when it
+fills the field in. Neither reader reports the document's own `self_attested`
+value, ever: for one release both did, so a document could assert or deny its
+own provenance — the single most damaging property in the artifact — and both
+verifiers would repeat the assertion under a `VALID` banner.
+
+A document whose claim disagrees with the derivation is **refused**, not
+annotated. `logweir drill verify` exits **4** — the same class as a bad
+signature, because it is a provenance claim the signature cannot support —
+and `docs/verify_scorecard.py` exits **1**, its own "INVALID" code. Both print
+the same line, byte for byte (the script prefixes its copy with `INVALID: `):
+
+```
+APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=true but the approval key id <a> does not match the verifying key id <b>
+APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=false but the approval key id <a> matches the verifying key id <b>
+```
+
+Both directions are refused. A document that *under*-reports its lack of
+separation of duties is as false as one that over-claims, and a message that
+said "does not match" in the second case would be stating a falsehood in the
+one line whose whole purpose is to be trustworthy.
+
+`logweir drill show` is the exception, and it says so on its own face: that
+command renders a table from the scorecard alone and is handed no signature
+and no key, so it cannot derive anything. Its approval row reads
+`SELF-ATTESTED (claimed; run 'drill verify' to check it against the signing
+key)`. Do not read `drill show` as a check.
+
+This narrows what a `1.0.0` reader accepts without changing the format: no
+field is added, removed or retyped, `format_version` stays `1.0.0`, and **no
+document Logweir has ever written is refused**, because the writer has always
+derived the field correctly.
+
+Both verifiers surface a derived `true` rather than hiding it:
+`verify_scorecard.py` prints, verbatim (this is the actual output — compare
+your terminal against these exact characters, not a paraphrase of them):
 
 ```
 VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
@@ -628,6 +663,7 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
+       verifier: verify_scorecard.py 1.1.0 (invariant set includes the evidence-zeroing arm)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
@@ -641,7 +677,7 @@ report fields. Either way, the line to look for ends in `SELF-ATTESTED —
 the approval key equals the signing key`.
 
 If you are an auditor deciding how much weight to give a passing scorecard,
-treat `self_attested: true` as a reason to seek additional corroboration —
+treat a **derived** `self_attested: true` as a reason to seek additional corroboration —
 an out-of-band record of the change ticket, a second reviewer, or a
 separate independent drill — rather than as a defect in the artifact
 itself.

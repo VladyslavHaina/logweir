@@ -156,9 +156,12 @@ PAE(payloadType, payload), never the bare bytes.
 
 **If the approver key equals the signing key**, Logweir does not refuse; it
 labels the scorecard `approval.self_attested: true`, and both verifiers print
-`SELF-ATTESTED`. A self-attested run is not a forgery, but it is a materially
-weaker governance signal, and an auditor is entitled to treat it as a reason to
-seek corroboration.
+`SELF-ATTESTED` — **because they derived it**, by comparing `approval.key_id`
+against the key that verified the signature, not because the document said so.
+A document whose claim disagrees with that derivation is refused (`drill
+verify` exits 4, `verify_scorecard.py` exits 1). A self-attested run is not a
+forgery, but it is a materially weaker governance signal, and an auditor is
+entitled to treat it as a reason to seek corroboration.
 
 ### 4. Run the drill
 

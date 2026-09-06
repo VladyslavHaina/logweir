@@ -81,6 +81,13 @@ fresh P-256 key and writes it there. A path that exists but is malformed is an
 `crates/logweir-evidence/examples/mint_fixture.rs`, which `just fixtures-sign`
 runs.
 
+A second program reads the same pinned private key:
+`crates/logweir-evidence/examples/mint_bogus_fixture.rs`, run by
+`just fixtures-sign-bogus`, which loads `e2e/fixtures/signed/signing.pem` with
+`SigningKey::from_pem_file` — never `load_or_generate` — so a missing key is a
+loud failure rather than a silent re-mint, and which writes only
+`e2e/fixtures/signed/scorecard-self-attested-bogus.json` and its `.sig`.
+
 The practical consequence: re-running the fixture recipe can change the signed
 **document** and never the **key**, so a diff in a `.sig` file means the
 payload moved, and nothing else.

@@ -19,6 +19,16 @@ told to trust MORE. Every arm below mirrors one arm of the Rust validator, in
 the same order and with the same wording, so a disagreement is a bug in the
 format rather than an artefact of one implementation being shorter.
 
+ONE CHECK DELIBERATELY SITS OUTSIDE `check_invariants`: the approval-claim
+derivation (T0-1). `approval.self_attested` is a claim the document makes about
+its own provenance, and deciding whether it is TRUE needs the verifying key —
+which `Scorecard::validate_invariants` does not have and never will. So the
+Rust puts that comparison in `crates/logweir/src/verify.rs`, after the
+invariant set and before the summary, and this script puts it in exactly the
+same place in `main`. It is still arm-for-arm with the Rust; it is just a
+different Rust function. Both readers refuse a document whose claim disagrees
+with the derivation, with the same message text.
+
 The DSSE core — `pae`, `verify_signature` and the signature check in `main` —
 is unchanged and is still about twenty lines. `check_invariants` is separate,
 runs only AFTER the signature has verified, and answers a different question:
@@ -514,6 +524,56 @@ def main(
             print(f"INVALID: {problem}", file=sys.stderr)
             return 1
 
+        # T0-1. `approval.self_attested` is a CLAIM the document makes about
+        # itself, and this script used to print it back verbatim under a VALID
+        # banner — so a document could assert or deny its own provenance and
+        # both verifiers would repeat the assertion. The finding is DERIVED
+        # instead: `approval.key_id` against the key id of the signature that
+        # actually verified.
+        #
+        # `want` is that key id. `verify_detached` in
+        # `crates/logweir-evidence/src/verify.rs` returns the matched sidecar
+        # entry's `keyid`, and it only ever considers entries whose `keyid`
+        # equals the presented key's `key_id()` — so the two quantities are
+        # equal by construction and this mirrors the Rust exactly. Both are the
+        # lowercase-hex sha256 of the key's SPKI DER (`key_id` above).
+        #
+        # This arm is NOT part of `check_invariants` and must not be moved into
+        # it: it needs the verifying key, and `check_invariants` mirrors
+        # `Scorecard::validate_invariants`, a layer that has no key. It sits
+        # here, after the invariant set and before the summary, exactly where
+        # `crates/logweir/src/verify.rs` puts its own — so a self-contradicting
+        # document still gets the more fundamental finding first.
+        approval = doc.get("approval")
+        if not isinstance(approval, dict) or not isinstance(approval.get("key_id"), str) \
+                or not isinstance(approval.get("self_attested"), bool):
+            # Logweir's Rust reader cannot even parse such a document into a
+            # `Scorecard`; it reports "the payload is not a scorecard". Same
+            # verdict here, rather than a KeyError or a silently skipped check.
+            print(
+                "INVALID: the signature verified but the document has no usable approval "
+                "block (approval.key_id and approval.self_attested are required)",
+                file=sys.stderr,
+            )
+            return 1
+        derived_self_attested = approval["key_id"] == want
+        if derived_self_attested != approval["self_attested"]:
+            # Byte-identical to the Rust message after the `INVALID: ` prefix —
+            # `docs/test_verify_scorecard.py::test_self_attested_parity` and
+            # `scripts/check-verifier-parity.sh` compare the two lines directly.
+            if approval["self_attested"]:
+                detail = (
+                    f"the document claims self_attested=true but the approval key id "
+                    f"{approval['key_id']} does not match the verifying key id {want}"
+                )
+            else:
+                detail = (
+                    f"the document claims self_attested=false but the approval key id "
+                    f"{approval['key_id']} matches the verifying key id {want}"
+                )
+            print(f"INVALID: APPROVAL CLAIM NOT VERIFIED: {detail}", file=sys.stderr)
+            return 1
+
         # Every field below is reachable: `check_invariants` returned "", which
         # required each of these blocks to be present and well-formed.
         integrity = doc["integrity"]
@@ -521,7 +581,10 @@ def main(
         print(f"VALID  run_id={doc.get('run_id')}  outcome={doc.get('outcome')}")
         print(f"       rto_seconds={measured.get('rto_seconds')}  rpo_seconds={measured.get('rpo_seconds')}")
         print(f"       integrity={integrity.get('level')}/{integrity.get('result')}")
-        if isinstance(doc.get("approval"), dict) and doc["approval"].get("self_attested"):
+        if derived_self_attested:
+            # Printed because it was DERIVED — never because the document said
+            # so. The wording is unchanged; what changed is what stands behind
+            # it.
             print("       approval: SELF-ATTESTED — the approval key equals the signing key")
         # The four `evidence` fields are zeroed BEFORE signing, because they
         # describe an upload that has not happened yet. Say so, so nobody reads

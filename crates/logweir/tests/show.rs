@@ -355,3 +355,28 @@ fn the_table_says_it_is_a_summary_of_a_signed_document() {
         "the table must point at the document that lists what it omits:\n{t}"
     );
 }
+
+// ------------------------------------------------------------------ T0-1
+// `drill show` renders from a `Scorecard` alone: this function is handed no
+// signature, no sidecar and no key, so it cannot check whether the approval
+// key is the signing key. Presenting the document's own `self_attested` field
+// as a FINDING was therefore a claim dressed as a check — the exact defect
+// `drill verify` had, in the one surface that has no way to close it.
+
+/// Guarantee: the table labels the row as CLAIMED and points at the reader
+/// that can actually derive it. A mutant that restores the unqualified
+/// sentence fails here at assertion time.
+#[test]
+fn show_marks_self_attested_as_claimed() {
+    let mut sc = fixtures::scorecard_pass();
+    sc.approval.self_attested = true;
+    let table = logweir::show::render_table(&sc);
+    assert!(
+        table.contains("claimed"),
+        "`drill show` has no key and must present the field as a claim: {table}"
+    );
+    assert!(
+        !table.contains("SELF-ATTESTED — the approval key equals the signing key"),
+        "the unqualified sentence is a FINDING, and this surface cannot make it: {table}"
+    );
+}

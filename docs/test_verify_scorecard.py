@@ -761,3 +761,91 @@ def test_a_sidecar_naming_only_another_key_is_refused_by_name():
         r = run(p, s, FIX / "public.pem")
         assert r.returncode == 1
         assert "no signature by key" in r.stderr
+
+
+# --------------------------------------------------------------------- T0-1
+# `approval.self_attested` is DERIVED by both readers — `approval.key_id`
+# compared against the key id of the signature that verified — never echoed
+# out of the document being checked. A document whose claim disagrees with the
+# derivation is refused by both.
+#
+# The two readers do NOT share an exit-code space and never have: this script's
+# contract is 0 VALID / 1 INVALID / 2 could-not-run, while `drill verify`
+# returns 4 for anything in the signing-or-lock class. Parity is asserted as a
+# VERDICT-CLASS mapping plus byte-identical message text, never as numeric
+# equality — `test_one_flipped_byte_fails` above already asserts 1 for the case
+# `crates/logweir/tests/cli_verify.rs` asserts 4 for.
+
+LOGWEIR_BIN = ROOT / "target" / "debug" / "logweir"
+
+# document -> (rust exit code, python exit code)
+PARITY_MAPPING = {
+    "scorecard.json": (0, 0),
+    "scorecard-self-attested.json": (0, 0),
+    "scorecard-self-attested-bogus.json": (4, 1),
+}
+
+APPROVAL_REFUSAL = "APPROVAL CLAIM NOT VERIFIED:"
+
+
+def _rust_verify(sc, sig, pub):
+    """`drill verify` on the compiled binary. The exit code is read from
+    `returncode` directly — never parsed out of a pipeline."""
+    return subprocess.run(
+        [str(LOGWEIR_BIN), "drill", "verify",
+         "--scorecard", str(sc), "--signature", str(sig), "--public-key", str(pub)],
+        capture_output=True, text=True,
+    )
+
+
+def _refusal_line(text):
+    for line in text.splitlines():
+        if APPROVAL_REFUSAL in line:
+            # The Python arm prefixes its one-line refusals with "INVALID: ";
+            # everything after that prefix must be byte-identical to Rust's.
+            return line.split("INVALID: ", 1)[-1]
+    return None
+
+
+def test_bogus_self_attested_claim_refused():
+    bogus = FIX / "scorecard-self-attested-bogus.json"
+    r = run(bogus, FIX / "scorecard-self-attested-bogus.sig", FIX / "public.pem")
+    both = r.stdout + r.stderr
+    assert "Traceback" not in both, both
+    assert "signature does not verify" not in both, (
+        "the signature over this fixture is genuine; the refusal must come from the "
+        "derivation, not from the cryptography: " + both
+    )
+    assert r.returncode == 1, both
+    assert (
+        "APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=true but the "
+        "approval key id "
+    ) in both, both
+
+
+def test_self_attested_parity():
+    if not LOGWEIR_BIN.exists():
+        raise AssertionError(
+            f"{LOGWEIR_BIN} is not built. The two-reader parity claim is the point of "
+            "this test and cannot be checked without both readers; build with "
+            "`cargo build -p logweir`. This is NOT skipped."
+        )
+    for name, (want_rust, want_py) in PARITY_MAPPING.items():
+        sc = FIX / name
+        sig = FIX / (name[: -len(".json")] + ".sig")
+        pub = FIX / "public.pem"
+        rr = _rust_verify(sc, sig, pub)
+        pr = run(sc, sig, pub)
+        assert rr.returncode == want_rust, f"{name}: rust {rr.returncode}\n{rr.stderr}"
+        assert pr.returncode == want_py, f"{name}: python {pr.returncode}\n{pr.stderr}"
+        rust_line = _refusal_line(rr.stdout + rr.stderr)
+        py_line = _refusal_line(pr.stdout + pr.stderr)
+        assert (rust_line is None) == (py_line is None), (
+            f"{name}: one reader refused the approval claim and the other did not.\n"
+            f"rust: {rust_line!r}\npython: {py_line!r}"
+        )
+        if rust_line is not None:
+            assert rust_line == py_line, (
+                f"{name}: the refusal line must be byte-identical across the two "
+                f"readers.\nrust:   {rust_line!r}\npython: {py_line!r}"
+            )
