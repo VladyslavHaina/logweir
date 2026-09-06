@@ -1301,6 +1301,35 @@ fn redact_ureq_error(e: &ureq::Error) -> String {
     }
 }
 
+/// The JSON summary posted to every sink and embedded in PagerDuty's
+/// `custom_details`.
+///
+/// Public, and separate from `notify`, so its SHAPE can be asserted without a
+/// network — `redact_url` next door is public for exactly the same reason, and
+/// `crates/logweir/tests/notify.rs` drives both directly.
+///
+/// This is **the only surface that reaches a human away from a terminal**, so
+/// what it omits is what an on-call reader never learns. T0-3: it carried no
+/// `redactions`, so a redacted scorecard notified as if whole.
+///
+/// `redactions` is always present — an empty array for the whole document
+/// every v0.1 run writes — so a sink can branch on it without having to tell
+/// "absent" from "none". The PATHS travel and the `reason` strings do NOT: a
+/// `reason` is free text arriving with a document that, by construction, no
+/// Logweir writer produced, and this body is pasted verbatim into Slack and
+/// PagerDuty. The path is the whole actionable signal.
+pub fn notify_body(sc: &Scorecard) -> serde_json::Value {
+    serde_json::json!({
+        "run_id": sc.run_id,
+        "outcome": sc.outcome,
+        "rto_excluding_preflight_seconds": sc.measured.rto_excluding_preflight_seconds,
+        "rpo_seconds": sc.measured.rpo_seconds,
+        "integrity": { "level": sc.integrity.level, "result": sc.integrity.result },
+        "self_attested": sc.approval.self_attested,
+        "redactions": sc.redactions.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+    })
+}
+
 /// POSTs one JSON summary per configured sink. EVERY transport failure is
 /// logged and swallowed: the drill result is a measurement, and a webhook being
 /// down must never change it. `ureq` is blocking on purpose — it adds no async
@@ -1310,15 +1339,11 @@ fn redact_ureq_error(e: &ureq::Error) -> String {
 /// error arm: `ureq::Error`'s own `Display` embeds the request URL, so
 /// `error = %e` leaked the same credential a second time, by a route a reader
 /// of the `url = %url` field alone would not have noticed.
+///
+/// The body it posts is `notify_body` next door, which is where the shape —
+/// and what it deliberately omits — is documented and tested.
 pub fn notify(n: &Notifications, sc: &Scorecard) {
-    let body = serde_json::json!({
-        "run_id": sc.run_id,
-        "outcome": sc.outcome,
-        "rto_excluding_preflight_seconds": sc.measured.rto_excluding_preflight_seconds,
-        "rpo_seconds": sc.measured.rpo_seconds,
-        "integrity": { "level": sc.integrity.level, "result": sc.integrity.result },
-        "self_attested": sc.approval.self_attested,
-    });
+    let body = notify_body(sc);
     let mut sinks: Vec<String> = n.webhooks.clone();
     if let Some(u) = &n.slack_webhook {
         sinks.push(u.clone());

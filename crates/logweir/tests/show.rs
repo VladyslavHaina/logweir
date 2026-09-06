@@ -380,3 +380,75 @@ fn show_marks_self_attested_as_claimed() {
         "the unqualified sentence is a FINDING, and this surface cannot make it: {table}"
     );
 }
+
+// ------------------------------------------------------------------- T0-3
+// `redactions[]` was documented as "Always `[]` in v0.1", enforced by nothing
+// and DISPLAYED BY NOTHING. Task 4 closed the enforcement half in both
+// verifiers; this pins the first of the three display surfaces. `show` does
+// not verify — it renders — so the exit code is unchanged and the fact appears
+// in the footer whose heading is literally "qualifiers the fourteen rows above
+// do not carry".
+
+/// Guarantee: a non-empty `redactions[]` is named, counted and its paths
+/// listed. A mutant that deletes the footer line — the surface "going quiet"
+/// again — fails here at assertion time.
+#[test]
+fn show_names_a_non_empty_redactions_in_the_qualifiers_footer() {
+    let mut sc = fixtures::scorecard_pass();
+    sc.redactions = vec![
+        logweir_core::scorecard::Redaction {
+            path: "/measured/rpo_seconds".into(),
+            reason: "customer policy".into(),
+            present: false,
+        },
+        logweir_core::scorecard::Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "customer policy".into(),
+            present: false,
+        },
+    ];
+    let table = logweir::show::render_table(&sc);
+    let line = footer_line(&table, "redactions");
+    assert!(
+        line.contains('2') && line.contains("REMOVED"),
+        "the footer must say how many fields were removed: {line:?}"
+    );
+    for p in ["/measured/rpo_seconds", "/target/cluster_id"] {
+        assert!(
+            line.contains(p),
+            "every removed path must be named; {p} is missing from {line:?}"
+        );
+    }
+    // The reader is told this table is not the check that refuses the document.
+    assert!(
+        table.contains("REFUSE it"),
+        "a redacted document must point at the two readers that refuse it:\n{table}"
+    );
+    // Document-controlled free text is NOT pasted into a surface a human reads
+    // to decide how much to trust the table.
+    assert!(
+        !table.contains("customer policy"),
+        "`reason` is attacker-controlled text on a document no Logweir writer produced:\n{table}"
+    );
+}
+
+/// The control. Without it, a footer that shouted about redactions on every
+/// document would make the test above pass for the wrong reason.
+#[test]
+fn show_renders_an_em_dash_when_nothing_was_redacted() {
+    let sc = fixtures::scorecard_pass();
+    assert!(
+        sc.redactions.is_empty(),
+        "the fixture is the whole document"
+    );
+    let table = logweir::show::render_table(&sc);
+    let line = footer_line(&table, "redactions");
+    assert!(
+        line.contains('—') && !line.contains("REMOVED"),
+        "a whole document must not be described as redacted: {line:?}"
+    );
+    assert!(
+        !table.contains("REFUSE it"),
+        "the refusal note belongs only on a redacted document:\n{table}"
+    );
+}

@@ -45,6 +45,7 @@ logweir drill scorecard  (01M1RZW1F5KQE6HANC41M91CS9 v1.0.0)
   qualifiers the fourteen rows above do not carry
     integrity.partial_reason  —
     engine_subreport          null — no engine sub-report was retained; this is NOT "the engine reported nothing wrong"
+    redactions                —
 
   This table is a SUMMARY of a signed document, not the document. `--format json`
   prints the signed bytes; docs/verify-a-scorecard.md lists what the summary omits.

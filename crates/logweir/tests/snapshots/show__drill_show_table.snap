@@ -33,6 +33,7 @@ logweir drill scorecard  (01J9X2QK7C4V0R8YB3ZP6MTS5A v1.0.0)
   qualifiers the fourteen rows above do not carry
     integrity.partial_reason  —
     engine_subreport.caveat   The engine's own integrity.checksums_valid is a hardcoded constant true and its restore start_time/end_time/duration_seconds are all null; this sub-report corroborates nothing Logweir claims.
+    redactions                —
 
   This table is a SUMMARY of a signed document, not the document. `--format json`
   prints the signed bytes; docs/verify-a-scorecard.md lists what the summary omits.

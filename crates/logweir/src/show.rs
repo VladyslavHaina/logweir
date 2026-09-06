@@ -144,6 +144,26 @@ pub fn render_table(sc: &Scorecard) -> String {
     o
 }
 
+/// The `redactions` footer value: an em dash for the whole document every v0.1
+/// run writes, and otherwise the count followed by every removed path.
+///
+/// The PATHS are printed and the `reason` strings are NOT. A `reason` is free
+/// text that arrives with the document, so on a redacted document — which by
+/// construction is one no Logweir writer produced — it is attacker-controlled
+/// text, and this footer is read by a human deciding how much to trust the
+/// table above. The path is the whole actionable signal.
+fn redactions_line(redactions: &[logweir_core::scorecard::Redaction]) -> String {
+    if redactions.is_empty() {
+        return "—".into();
+    }
+    let paths: Vec<&str> = redactions.iter().map(|r| r.path.as_str()).collect();
+    format!(
+        "{} path(s) REMOVED — {}",
+        redactions.len(),
+        paths.join(", ")
+    )
+}
+
 /// Task 22, carried obligation 3.
 ///
 /// The fourteen rows above are spec §13's frozen layout and are NOT touched
@@ -161,7 +181,8 @@ pub fn render_table(sc: &Scorecard) -> String {
 ///
 /// Every value below is read from the scorecard; nothing is inferred, and the
 /// closing line says plainly that the table is a summary of a signed document
-/// rather than the document.
+/// rather than the document. Task 4 fix round 1 adds the `redactions` line: a
+/// non-empty `redactions[]` is a qualifier in exactly this footer's sense.
 fn qualifiers(sc: &Scorecard) -> String {
     let mut o = String::new();
     o.push('\n');
@@ -202,6 +223,31 @@ fn qualifiers(sc: &Scorecard) -> String {
             "    engine_subreport          null — no engine sub-report was retained; \
              this is NOT \"the engine reported nothing wrong\"\n",
         ),
+    }
+    // T0-3, the display half. `redactions[]` is a qualifier in exactly the
+    // sense this footer's heading names: something the fourteen rows above
+    // silently omit that changes how the whole table should be read. It was
+    // displayed by NOTHING — this footer, the Prometheus textfile and the
+    // notification body were all silent — while
+    // `docs/formats/drill-scorecard.md` called it "Always `[]` in v0.1", so a
+    // document announcing that a field the reader is looking at had been
+    // removed rendered a clean table.
+    //
+    // `show` still does not VERIFY (see this module's argument above, and
+    // `refuse_unreadable_major` is the one refusal a renderer owes). A
+    // redaction is not a "this reader cannot honestly render this document"
+    // condition — it is a qualifier — so this RENDERS it and the exit code
+    // stays 0. The two verifiers are the ones that refuse.
+    o.push_str(&format!(
+        "    redactions                {}\n",
+        redactions_line(&sc.redactions)
+    ));
+    if !sc.redactions.is_empty() {
+        o.push_str(
+            "                              a redacted document is NOT what Logweir signs; \
+             `drill verify` and\n                              docs/verify_scorecard.py both \
+             REFUSE it. This table is not a check.\n",
+        );
     }
     o.push_str(
         "\n  This table is a SUMMARY of a signed document, not the document. \

@@ -768,9 +768,27 @@ pub fn python_verify(r: &Run) -> std::process::ExitStatus {
         .unwrap()
 }
 
+/// The interpreter that can run `docs/verify_scorecard.py`.
+///
+/// FOUR places in this repository resolve it and they must agree, or a
+/// developer who sets one variable gets one interpreter in the e2e harness and
+/// a DIFFERENT one in the parity gates — which is a two-reader claim checked
+/// against two different second readers. The order is
+/// `$LOGWEIR_PYTHON`, `$LOGWEIR_E2E_PYTHON`, `.e2e/venv/bin/python3`,
+/// `python3`, and the other three are
+/// `scripts/check-verifier-parity.sh`, `scripts/check-invariant-corpus.sh`
+/// and `crates/logweir/tests/two_reader_parity.rs::python`.
+///
+/// This function used to read `LOGWEIR_E2E_PYTHON` ONLY, so it was the outlier
+/// of the four: `$LOGWEIR_PYTHON` is the name the README and `scripts/demo.sh`
+/// document, and setting it moved every gate except this one.
 fn python() -> PathBuf {
-    if let Ok(p) = std::env::var("LOGWEIR_E2E_PYTHON") {
-        return PathBuf::from(p);
+    for var in ["LOGWEIR_PYTHON", "LOGWEIR_E2E_PYTHON"] {
+        if let Ok(p) = std::env::var(var) {
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
     }
     let venv = root().join(".e2e/venv/bin/python3");
     if venv.exists() {

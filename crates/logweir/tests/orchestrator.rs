@@ -71,6 +71,10 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
         // Task 22. Added by a later fix than the original eight and panelled in
         // `dashboards/logweir.json`, so it belongs in this list too.
         "logweir_drill_exit_code",
+        // Task 4 fix round 1 (T0-3, display surface 2). Nothing here carried a
+        // redaction signal, so a dashboard showed a clean drill over a document
+        // that says a field was removed.
+        "logweir_drill_redactions",
     ] {
         assert!(
             t.contains(m),
@@ -80,6 +84,61 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
     assert!(
         !t.contains("triggered_by"),
         "unbounded cardinality: it lives in the scorecard"
+    );
+}
+
+/// Task 4 fix round 1 (T0-3, display surface 2). The Prometheus textfile
+/// carried no redaction signal at all, so a dashboard rendered a clean drill
+/// over a document announcing that a field had been removed.
+///
+/// The series is emitted UNCONDITIONALLY, `0` included. That is the property
+/// this test pins hardest: a gauge that appears only when it is non-zero
+/// cannot be alerted on with `logweir_drill_redactions > 0`, because to PromQL
+/// an absent series and a whole document are the same thing.
+#[test]
+fn the_textfile_metrics_report_redactions_even_when_there_are_none() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // The whole document every v0.1 run writes: the series must still be here.
+    let whole = dir.path().join("whole.prom");
+    let sc = fixtures::scorecard_pass();
+    assert!(
+        sc.redactions.is_empty(),
+        "the fixture is the whole document"
+    );
+    logweir::metrics::write_textfile(&whole, &sc).unwrap();
+    let t = std::fs::read_to_string(&whole).unwrap();
+    assert!(
+        t.contains("logweir_drill_redactions{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 0"),
+        "an absent series and a whole document are indistinguishable to PromQL:\n{t}"
+    );
+
+    // A redacted document: the count is the alertable signal.
+    let redacted = dir.path().join("redacted.prom");
+    let mut sc = fixtures::scorecard_pass();
+    sc.redactions = vec![
+        logweir_core::scorecard::Redaction {
+            path: "/measured/rpo_seconds".into(),
+            reason: "customer policy".into(),
+            present: false,
+        },
+        logweir_core::scorecard::Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "customer policy".into(),
+            present: false,
+        },
+    ];
+    logweir::metrics::write_textfile(&redacted, &sc).unwrap();
+    let t = std::fs::read_to_string(&redacted).unwrap();
+    assert!(
+        t.contains("logweir_drill_redactions{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\"} 2"),
+        "the redaction count must reach the dashboard:\n{t}"
+    );
+    // A count, never a path label: `path` is document-controlled and would be
+    // unbounded cardinality, the same rule that keeps `triggered_by` out.
+    assert!(
+        !t.contains("/measured/rpo_seconds"),
+        "a document-controlled path must never become a label:\n{t}"
     );
 }
 

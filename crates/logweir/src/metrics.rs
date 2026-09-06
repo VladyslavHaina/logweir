@@ -158,6 +158,28 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         sc.evidence.immutable as u8
     ));
 
+    // T0-3, the display half. Nothing here carried a redaction signal, so a
+    // dashboard showed a clean drill over a document that says a field was
+    // removed. Emitted UNCONDITIONALLY, including the `0` every v0.1 run
+    // writes: a series that only appears when it is non-zero cannot be alerted
+    // on with `logweir_drill_redactions > 0`, because an absent series and a
+    // whole document look identical to PromQL. `logweir_drill_fingerprint_mismatches`
+    // above is unconditional for the same reason.
+    //
+    // A COUNT, not a path label: `redactions[].path` is document-controlled
+    // text and would be unbounded label cardinality — the same rule that keeps
+    // `triggered_by` out of this file. The paths are rendered by
+    // `drill show`'s qualifiers footer and carried in the notification body.
+    o.push_str(
+        "# HELP logweir_drill_redactions Scorecard fields removed before signing; 0 for a \
+         whole document. Non-zero means BOTH verifiers refuse this document.\n\
+         # TYPE logweir_drill_redactions gauge\n",
+    );
+    o.push_str(&format!(
+        "logweir_drill_redactions{{cluster=\"{cluster}\"}} {}\n",
+        sc.redactions.len()
+    ));
+
     o.push_str(
         "# HELP logweir_drill_exit_code The process exit code this result produced \
          (0 pass, 2 a signed drill result that is not a pass).\n\

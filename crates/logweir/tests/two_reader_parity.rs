@@ -54,10 +54,18 @@ fn corpus() -> PathBuf {
     root().join("e2e/fixtures/invariants")
 }
 
-/// The interpreter that can run the auditor's verifier, resolved in the SAME
-/// order and by the same names as `scripts/check-verifier-parity.sh` and
-/// `e2e/tests/harness/mod.rs::python`, so nobody has to discover a fourth name
-/// for the same thing.
+/// The interpreter that can run the auditor's verifier.
+///
+/// Order: `$LOGWEIR_PYTHON`, then `$LOGWEIR_E2E_PYTHON`, then
+/// `.e2e/venv/bin/python3`, then `python3` — the same names in the same order
+/// as `scripts/check-verifier-parity.sh`, `scripts/check-invariant-corpus.sh`
+/// and `e2e/tests/harness/mod.rs::python`, so nobody has to discover a fifth
+/// name for the same thing and no two gates can end up checking the parity
+/// claim against DIFFERENT second readers.
+///
+/// The harness was the outlier until Task 4 fix round 1: it read
+/// `LOGWEIR_E2E_PYTHON` only, so setting `$LOGWEIR_PYTHON` — the name the
+/// README and `scripts/demo.sh` document — moved every gate except that one.
 fn python() -> PathBuf {
     for var in ["LOGWEIR_PYTHON", "LOGWEIR_E2E_PYTHON"] {
         if let Ok(p) = std::env::var(var) {
@@ -109,10 +117,24 @@ fn read_json(path: &Path) -> Value {
 }
 
 fn entries() -> Vec<Value> {
-    read_json(&corpus().join("index.json"))
+    let entries: Vec<Value> = read_json(&corpus().join("index.json"))
         .as_array()
         .expect("index.json is a JSON array")
-        .clone()
+        .clone();
+    // Ids name cases in every failure message and key the temp files in
+    // `scripts/check-invariant-corpus.sh`, so a duplicate makes one gate report
+    // the wrong document under the other's expectations. Task 5 adds cases;
+    // this fails loudly rather than staying latent.
+    let mut seen: Vec<&str> = Vec::new();
+    for e in &entries {
+        let id = s(e, "id");
+        assert!(
+            !seen.contains(&id),
+            "index.json has a duplicate id {id:?}; every id must be unique"
+        );
+        seen.push(id);
+    }
+    entries
 }
 
 fn field<'a>(entry: &'a Value, key: &str) -> &'a Value {
@@ -293,6 +315,22 @@ fn two_reader_parity_over_the_invariant_corpus() {
     );
 }
 
+/// `validate_invariants`'s body with every whole-line `//` comment removed.
+///
+/// Fragment matching runs against THIS, not the raw slice. The raw slice
+/// carries the function's (deliberately quote-heavy) comments, so a fragment
+/// that survives only because a comment happens to quote it would count as a
+/// statement that exists. `n` is still derived from the raw slice exactly as
+/// addendum A2 specifies, and `every_invariant_arm_has_a_corpus_case` asserts
+/// the two bases agree on `n` — which is what proves no comment can inflate
+/// the count either.
+fn code_only(body: &str) -> String {
+    body.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The body of `Scorecard::validate_invariants`, sliced from the source text
 /// exactly as `awk '/pub fn validate_invariants/,/^    }$/'` does: from the
 /// line carrying the signature to the first subsequent line that is exactly
@@ -327,8 +365,19 @@ fn validate_invariants_body() -> String {
 /// This is the test that turns red when Task 5 adds an arm and forgets its case.
 #[test]
 fn every_invariant_arm_has_a_corpus_case() {
-    let body = validate_invariants_body();
-    let n = body.matches("return Err(InvariantError").count();
+    let raw = validate_invariants_body();
+    // Addendum A2 fixes how `n` is obtained: count the literal in the sliced
+    // body. Keep that, and additionally require that stripping comments does
+    // not change it — a comment that quoted the literal would otherwise inflate
+    // the target the corpus has to hit.
+    let n = raw.matches("return Err(InvariantError").count();
+    let body = code_only(&raw);
+    assert_eq!(
+        body.matches("return Err(InvariantError").count(),
+        n,
+        "a COMMENT in `validate_invariants` contains `return Err(InvariantError`, so the \
+         statement count is inflated by prose"
+    );
 
     let entries = entries();
     let mut arms: Vec<String> = entries
@@ -428,4 +477,131 @@ fn every_invariant_arm_has_a_corpus_case() {
         uncovered_total,
         n as i64 - (arms.len() + uncovered_total) as i64,
     );
+}
+
+/// One resolver's own body, sliced from the source text: from the line that is
+/// exactly `open` to the first subsequent line that is exactly `close`.
+///
+/// Exact, untrimmed equality on both ends — the same rule
+/// `validate_invariants_body` above uses, and for the same reason. A `trim()`
+/// here would close a Rust body at the first INNER `}`.
+fn resolver_body<'a>(text: &'a str, rel: &str, open: &str, close: &str) -> Vec<&'a str> {
+    let mut lines = text.lines().skip_while(|l| *l != open).peekable();
+    assert!(
+        lines.peek().is_some(),
+        "no line exactly {open:?} in {rel}; the interpreter resolution moved or was renamed"
+    );
+    let mut body: Vec<&str> = Vec::new();
+    for line in lines {
+        let end = !body.is_empty() && line == close;
+        body.push(line);
+        if end {
+            return body;
+        }
+    }
+    panic!("the resolver opened at {open:?} in {rel} is never closed by a line {close:?}");
+}
+
+/// THE INTERPRETER AGREEMENT, enforced structurally rather than by four doc
+/// comments hoping to stay in step.
+///
+/// Four places in this repository resolve "the python3 that can run the
+/// auditor's verifier", and each one's comment claimed all four agreed. Task
+/// 4's review found that claim FALSE: `e2e/tests/harness/mod.rs::python` read
+/// `$LOGWEIR_E2E_PYTHON` only, so a developer who set `$LOGWEIR_PYTHON` — the
+/// name `README.md` and `scripts/demo.sh` document — got one interpreter in
+/// the three parity gates and a DIFFERENT one in the e2e harness. A two-reader
+/// claim checked against two different second readers is not one claim.
+///
+/// That is the exact defect class this stage exists to remove (a documented
+/// guarantee the code does not deliver), so the fix is not "correct the
+/// comment" — it is a check. No behavioural test can reach this property: two
+/// of the four resolvers are shell, and the e2e harness's half needs a live
+/// stack. So each resolver's own body is read as TEXT and the four names are
+/// required to appear in the same order in all four.
+///
+/// Only executable lines are scanned. Prose about the old chain is the point of
+/// the fix and must stay readable.
+#[test]
+fn every_gate_resolves_the_auditors_interpreter_the_same_way() {
+    const ORDER: [&str; 4] = [
+        "LOGWEIR_PYTHON",
+        "LOGWEIR_E2E_PYTHON",
+        ".e2e/venv/bin/python3",
+        "python3",
+    ];
+    // Longest first: `.e2e/venv/bin/python3` ENDS WITH `python3`, so a
+    // shortest-first scan would report the fallback where the venv is.
+    let mut by_length: Vec<&str> = ORDER.to_vec();
+    by_length.sort_by_key(|n| std::cmp::Reverse(n.len()));
+
+    // (file, the line that opens the resolver, the line that closes it, the
+    // language's comment marker).
+    let resolvers: [(&str, &str, &str, &str); 4] = [
+        (
+            "crates/logweir/tests/two_reader_parity.rs",
+            "fn python() -> PathBuf {",
+            "}",
+            "//",
+        ),
+        (
+            "e2e/tests/harness/mod.rs",
+            "fn python() -> PathBuf {",
+            "}",
+            "//",
+        ),
+        (
+            "scripts/check-verifier-parity.sh",
+            "if [ -n \"${LOGWEIR_PYTHON:-}\" ]; then",
+            "fi",
+            "#",
+        ),
+        (
+            "scripts/check-invariant-corpus.sh",
+            "if [ -n \"${LOGWEIR_PYTHON:-}\" ]; then",
+            "fi",
+            "#",
+        ),
+    ];
+
+    for (rel, open, close, comment) in resolvers {
+        let text = std::fs::read_to_string(root().join(rel))
+            .unwrap_or_else(|e| panic!("{rel} is checked in: {e}"));
+        let body = resolver_body(&text, rel, open, close);
+
+        let mut seen: Vec<&str> = Vec::new();
+        for line in &body {
+            let code = line.trim_start();
+            if code.starts_with(comment) {
+                continue;
+            }
+            let mut i = 0usize;
+            while i < code.len() {
+                // `get` rather than `code[i..]`: a byte index that lands inside
+                // a multi-byte character returns None instead of panicking.
+                let hit = by_length
+                    .iter()
+                    .find(|n| code.get(i..).is_some_and(|t| t.starts_with(**n)));
+                match hit {
+                    Some(n) => {
+                        // Consecutive repeats are one step of the chain
+                        // mentioned twice (`elif [ -n "$X" ]; then PY="$X"`).
+                        if seen.last() != Some(n) {
+                            seen.push(*n);
+                        }
+                        i += n.len();
+                    }
+                    None => i += 1,
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            ORDER.to_vec(),
+            "{rel} resolves the auditor's interpreter as {seen:?}, but every other gate \
+             resolves it as {ORDER:?}. All four must agree, or the two-reader parity claim \
+             is checked against two different second readers.\nbody:\n{}",
+            body.join("\n")
+        );
+    }
 }

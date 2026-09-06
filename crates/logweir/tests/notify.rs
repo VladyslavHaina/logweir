@@ -159,3 +159,72 @@ fn the_notify_log_lines_carry_no_sink_credential() {
         "the sink must still be identifiable, or the log line is useless: {log}"
     );
 }
+
+/// The checked-in format example, loaded the same way
+/// `the_notify_log_lines_carry_no_sink_credential` above loads it.
+fn scorecard_pass() -> logweir_core::scorecard::Scorecard {
+    serde_json::from_str(include_str!("../../../e2e/fixtures/scorecard-pass.json")).unwrap()
+}
+
+// ------------------------------------------------------------------- T0-3
+// The notification body is the ONLY surface that reaches a human away from a
+// terminal — it is posted to every webhook and Slack sink and embedded in
+// PagerDuty's `custom_details`. It carried no `redactions`, so a redacted
+// scorecard notified as if whole. These pin the third of the three display
+// surfaces; `notify_body` is public so the shape can be asserted without a
+// network, exactly as `redact_url` is.
+
+/// Guarantee: a non-empty `redactions[]` reaches the on-call reader, by path.
+/// A mutant that drops the key — the surface going quiet again — fails here at
+/// assertion time.
+#[test]
+fn the_notification_body_names_every_redacted_path() {
+    let mut sc = scorecard_pass();
+    sc.redactions = vec![
+        logweir_core::scorecard::Redaction {
+            path: "/measured/rpo_seconds".into(),
+            reason: "customer policy".into(),
+            present: false,
+        },
+        logweir_core::scorecard::Redaction {
+            path: "/target/cluster_id".into(),
+            reason: "customer policy".into(),
+            present: false,
+        },
+    ];
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    let paths = body
+        .get("redactions")
+        .expect("the notification body must carry `redactions`")
+        .as_array()
+        .expect("`redactions` is an array");
+    assert_eq!(
+        paths.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
+        vec!["/measured/rpo_seconds", "/target/cluster_id"],
+        "every removed path must reach the sink: {body}"
+    );
+    // The `reason` strings do NOT travel. This body is pasted verbatim into
+    // Slack and PagerDuty, and on a redacted document — one no Logweir writer
+    // produced — `reason` is text that arrived with the document.
+    assert!(
+        !body.to_string().contains("customer policy"),
+        "document-controlled free text must not be posted to a sink: {body}"
+    );
+}
+
+/// The control, and the reason the key is always present: a sink that has to
+/// tell "absent" from "none" cannot branch on this field at all.
+#[test]
+fn the_notification_body_carries_an_empty_redactions_for_a_whole_document() {
+    let sc = scorecard_pass();
+    assert!(
+        sc.redactions.is_empty(),
+        "the fixture is the whole document"
+    );
+    let body = logweir::drill::phase7_verify::notify_body(&sc);
+    assert_eq!(
+        body.get("redactions").and_then(|v| v.as_array()),
+        Some(&vec![]),
+        "`redactions` must be present and empty, never absent: {body}"
+    );
+}

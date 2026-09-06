@@ -187,6 +187,31 @@
         }
       },
       "options": { "colorMode": "none", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Scorecard fields redacted",
+      "description": "Fields removed from the scorecard before signing. 0 is the whole document every v0.1 run writes — v0.1 has no writer that can produce a redaction, so ANY non-zero value means the document was edited after signing-time construction or came from a reader-incompatible producer, and BOTH verifiers refuse it (`logweir drill verify` exit 4, docs/verify_scorecard.py exit 1). The series is emitted unconditionally, so `logweir_drill_redactions > 0` is a valid alert — an absent series and a whole document are otherwise indistinguishable to PromQL. The removed PATHS are deliberately not labels (unbounded cardinality); read them from `drill show`'s qualifiers footer or the notification body.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_redactions{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "whole document", "color": "text", "index": 0 }
+            } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "text", "value": null },
+            { "color": "red", "value": 1 }
+          ] }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" }
     }
   ]
 }

@@ -25,9 +25,11 @@ ROOT="$PWD"
 CORPUS="$ROOT/e2e/fixtures/invariants"
 VERIFIER="$ROOT/docs/verify_scorecard.py"
 
-# Interpreter resolution: the SAME names, in the same order, as
+# Interpreter resolution: $LOGWEIR_PYTHON, then $LOGWEIR_E2E_PYTHON, then
+# .e2e/venv/bin/python3, then python3 — the same names in the same order as
 # scripts/check-verifier-parity.sh, e2e/tests/harness/mod.rs::python and
-# crates/logweir/tests/two_reader_parity.rs::python.
+# crates/logweir/tests/two_reader_parity.rs::python. All four agree, so no two
+# gates can check the two-reader claim against different second readers.
 if [ -n "${LOGWEIR_PYTHON:-}" ]; then
     PY="$LOGWEIR_PYTHON"
 elif [ -n "${LOGWEIR_E2E_PYTHON:-}" ]; then
@@ -79,6 +81,15 @@ keyid = hashlib.sha256(der).hexdigest()
 entries = json.loads((corpus / "index.json").read_text())
 if not entries:
     raise SystemExit("index.json is empty; a walk over nothing proves nothing")
+# Every case is signed into ONE shared temp dir keyed by `id`, so a duplicate
+# id would silently overwrite an earlier case's files and then compare the
+# WRONG document against that earlier case's expected reason — a green walk
+# over a case that was never run. Task 5 adds cases, so this fails loudly
+# rather than staying latent.
+ids = [e["id"] for e in entries]
+dupes = sorted({i for i in ids if ids.count(i) > 1})
+if dupes:
+    raise SystemExit(f"index.json has duplicate id(s): {dupes}; every id must be unique")
 for e in entries:
     # The signed payload is the file's bytes EXACTLY as written. Nothing is
     # re-serialised, or the reader would verify different bytes.
