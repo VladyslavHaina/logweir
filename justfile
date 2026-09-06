@@ -1,10 +1,12 @@
 # The default recipe is the release gate (Task 22 step 8), so it must be able to
 # FAIL on formatting: it never runs the rewriting `fmt` recipe. Run `just fmt`
-# yourself to fix formatting; `lint` checks it, and also runs check-no-oso.sh,
-# check-pure-core.sh, check-verifier-parity.sh and check-invariant-corpus.sh.
-# The last two need a `python3` with the `cryptography` package (Tasks 3 and 4)
-# — they FAIL rather than skipping when the package is missing, because the
-# two-reader parity claim is not checkable without the second reader.
+# yourself to fix formatting; `lint` checks it, and also runs the guard scripts
+# listed in the `lint` recipe below — read the recipe for the current set. This
+# comment deliberately does not enumerate them, so it cannot go stale.
+# check-verifier-parity.sh and check-invariant-corpus.sh need a `python3` with
+# the `cryptography` package (Tasks 3 and 4) — they FAIL rather than skipping
+# when the package is missing, because the two-reader parity claim is not
+# checkable without the second reader.
 # check-invariant-corpus.sh is the auditor-side half: it walks
 # e2e/fixtures/invariants/index.json with the Python reader alone, so the
 # corpus is still checked where there is no Rust toolchain.
@@ -22,6 +24,23 @@ lint:
     ./scripts/check-invariant-corpus.sh
     ./scripts/check-deps-count.sh
     ./scripts/time-unit-suite.sh
+    ./scripts/check-one-signer.sh
+
+# Task 7 (Phase 1 line item 1c). G2′: the set of workspace crates from which
+# the signing API is reachable is exactly {logweir, e2e}, computed from the
+# dependency graph rather than a text search.
+#
+# A LINK-TIME PROPERTY AND NOTHING MORE. It does NOT prove the control plane
+# cannot sign: the signing key is a Kubernetes Secret and `create pods` in its
+# namespace is equivalent to holding it. The stronger claim was withdrawn once
+# already and must not be restated here or in the script's output.
+#
+# Membership in `lint` above is what makes this a gate: ci.yml has never
+# executed on any commit, so the workflow step is documentation.
+# `crates/logweir/tests/one_signer_gate.rs::just_lint_runs_the_one_signer_gate`
+# keeps the membership honest.
+check-one-signer:
+    ./scripts/check-one-signer.sh
 
 # Task 5b. The artifact-directory ceiling. `target/debug/deps` reached 873,349
 # files / 43.5 GiB across five tasks of mutation rounds that nobody cleaned up

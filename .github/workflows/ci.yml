@@ -30,6 +30,13 @@ jobs:
         run: ./scripts/check-no-oso.sh
       - name: pure-layer purity guard (Global Constraint 1)
         run: ./scripts/check-pure-core.sh
+      # G2': no crate outside {logweir, e2e} LINKS the signing API. This proves a
+      # link-time property only — it does NOT prove the control plane cannot sign
+      # (the signing key is a Secret; `create pods` in its namespace is equivalent
+      # to holding it). Per line item 1g this workflow has never executed on any
+      # commit, so this step is DOCUMENTATION; `just lint` is the gate.
+      - name: single-signer linkage gate (G2')
+        run: ./scripts/check-one-signer.sh
       # `scripts/check-dod.sh` — the sole enforcer of the ASF attribution
       # footer (Global Constraint 14), the GC14 namespace rule and relative
       # link integrity. It existed, worked, printed an honest list of what it
