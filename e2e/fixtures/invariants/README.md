@@ -69,11 +69,32 @@ an identical message literal.
 
 ## Extending it
 
-Task 5 adds cases by editing `index.json` **only** — never the walker. When a
-new case first covers a statement, delete that statement's entry from
-`uncovered-arms.json` in the same change; the arithmetic in
-`every_invariant_arm_has_a_corpus_case` will not close otherwise, and that
-failure is the point.
+Cases are added by writing a document here and an entry in `index.json` —
+**never** by editing the walker. When a new case first covers a statement,
+delete that statement's entry from `uncovered-arms.json` in the same change;
+the arithmetic in `every_invariant_arm_has_a_corpus_case` will not close
+otherwise, and that failure is the point. Task 5 did exactly that and touched
+no walker code.
+
+## The `outcome` cases (T0-4, Task 5)
+
+Nine of them, for the six arms that make `outcome` an entailment of the rest of
+the document rather than a free-standing label. Six are one-per-arm:
+`outcome_pass_with_partial_integrity`, `outcome_pass_with_partial_reason`,
+`outcome_pass_with_unmet_objective`, `outcome_pass_with_incomplete_sample`,
+`sample_exceeding_expected` and `matrix_pass_without_byte_fingerprint`. The
+first four are the entailments a `pass` carries; the fifth says a drill cannot
+reconcile more records than it selected; the sixth says a `pass` matrix verdict
+means the drill passed **at byte-fingerprint level**.
+
+The other three exist because one case per arm is not enough for the matrix
+arm and for order:
+
+| case | what only it can catch |
+|---|---|
+| `matrix_pass_on_a_degraded_pass` | a real `pass` at `consume-only`, whose honest matrix value is `pass-degraded`. Kills a matrix arm with the `level == byte-fingerprint` conjunct dropped — which `matrix_pass_without_byte_fingerprint` does **not**, because that document's outcome is already not a `pass`. |
+| `matrix_pass_on_a_non_pass_at_byte_fingerprint` | the mirror: byte-fingerprint level, but the drill did not pass. Kills a matrix arm with the `outcome == pass` conjunct dropped. |
+| `pass_with_a_fail_result_and_a_matrix_pass` | ORDER. The document violates the first new arm and the last one at once, so reordering either reader changes the message and the walker's text comparison fails. |
 
 ---
 

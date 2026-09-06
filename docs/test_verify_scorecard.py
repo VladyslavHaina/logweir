@@ -554,9 +554,10 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.3.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.4.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
+        assert "outcome-entailment" in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -602,6 +603,11 @@ def test_a_matrix_fail_without_a_reason_is_refused():
 
 
 def test_a_pass_rate_measured_without_byte_fingerprint_is_refused():
+    # `engine.matrix_verdict` is moved to `pass-degraded` — the value
+    # `matrix_verdict_for` actually returns for a pass at a reduced integrity
+    # level — because T0-4's matrix arm sits EARLIER in both readers and would
+    # otherwise fire first and steal the failure. Same reason `objectives.met`
+    # is nulled: isolate the arm this case is about.
     with tempfile.TemporaryDirectory() as d:
         sc, sig = _signed_scorecard(
             d,
@@ -609,6 +615,7 @@ def test_a_pass_rate_measured_without_byte_fingerprint_is_refused():
                 "integrity.level": "consume-only",
                 "integrity.pass_rate_measured": 1.0,
                 "objectives.met": None,
+                "engine.matrix_verdict": "pass-degraded",
             },
         )
         r = run(sc, sig, FIX / "public.pem")
@@ -647,10 +654,22 @@ def test_a_partial_result_that_names_its_reason_is_accepted():
     # The control for the test above. The arm narrows the accepted set; it does
     # not close it. Without this, an arm refusing every `partial` document
     # would pass for the wrong reason.
+    #
+    # T0-4: the other three overrides are what a `partial` integrity result
+    # ACTUALLY travels with in a document Logweir can produce.
+    # `phase8_score::decide` maps a non-`pass` integrity result to
+    # `fail-integrity`, and `matrix_verdict_for` then returns `fail` with that
+    # sentence as its reason. Before the outcome arms existed this case left
+    # `outcome: "pass"` standing beside `integrity.result: "partial"` — a
+    # document no writer emits — and both readers accepted it.
     with tempfile.TemporaryDirectory() as d:
         sc, sig = _signed_scorecard(
-            d, **{"integrity.result": "partial",
-                  "integrity.partial_reason": "only 2 of 3 partitions reached a conclusion"})
+            d, **{"outcome": "fail-integrity",
+                  "integrity.result": "partial",
+                  "integrity.partial_reason": "only 2 of 3 partitions reached a conclusion",
+                  "engine.matrix_verdict": "fail",
+                  "engine.matrix_verdict_reason":
+                      "the drill ran and did not pass: outcome fail-integrity"})
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
 
@@ -974,3 +993,100 @@ def test_self_attested_parity():
                 f"{name}: the refusal line must be byte-identical across the two "
                 f"readers.\nrust:   {rust_line!r}\npython: {py_line!r}"
             )
+
+
+# ------------------------------------- `outcome` is entailed, not merely stated
+# T0-4. `self.outcome` appeared in no arm of either reader, so a document
+# saying `pass` beside its own contradicting evidence was accepted, signed and
+# verified at exit 0. Six arms, mirrored ARM FOR ARM, IN ORDER with
+# `Scorecard::validate_invariants`; each case below asserts the message
+# BYTE-IDENTICALLY with the Rust arm's, because
+# `crates/logweir/tests/two_reader_parity.rs` compares the two readers' refusal
+# TEXT and not merely that both refused.
+
+
+def test_a_pass_beside_a_non_pass_integrity_result_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.result": "partial",
+                "integrity.partial_reason": "orders/7 never reconciled",
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "outcome is 'pass' but integrity.result is not 'pass'" in r.stderr
+
+
+def test_a_pass_with_a_partial_reason_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d, **{"integrity.partial_reason": "orders/7 never reconciled"}
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "outcome is 'pass' but integrity.partial_reason is present" in r.stderr
+
+
+def test_a_pass_with_an_unmet_objective_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"objectives.met": False})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "outcome is 'pass' but objectives.met is false" in r.stderr
+
+
+def test_a_pass_with_an_incomplete_sample_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.records_sampled": 100,
+                "integrity.records_sampled_matching": 50,
+                "sample.records_expected": 100,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "outcome is 'pass' but only 50 of 100 sampled records matched" in r.stderr
+
+
+def test_sampling_more_records_than_were_expected_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "integrity.records_sampled": 100,
+                "integrity.records_sampled_matching": 100,
+                "sample.records_expected": 75,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "records_sampled (100) exceeds sample.records_expected (75)" in r.stderr
+
+
+def test_a_matrix_pass_below_byte_fingerprint_is_refused():
+    # `pass_rate_measured` and `objectives.met` are nulled because the base
+    # document carries `pass_rate_measured: 1.0` and `met: true`, and the
+    # pre-existing `pass_rate_measured => byte-fingerprint` and
+    # `met must be null when pass_rate is not measurable` arms would otherwise
+    # fire first and steal the failure.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "outcome": "fail-integrity",
+                "integrity.result": "fail",
+                "integrity.level": "consume-only",
+                "integrity.pass_rate_measured": None,
+                "objectives.met": None,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "engine.matrix_verdict is 'pass' but the drill did not pass at "
+            "byte-fingerprint level"
+        ) in r.stderr

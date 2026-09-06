@@ -663,7 +663,7 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.3.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions; approval.self_attested derived, not echoed)
+       verifier: verify_scorecard.py 1.4.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment; approval.self_attested derived, not echoed)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
@@ -684,6 +684,7 @@ far is such a move:
 | `1.1.0` | Refuses a `1.0.x` scorecard whose four post-put `evidence` fields are not zeroed. |
 | `1.2.0` | **Derives** `approval.self_attested` from the key that verified the signature and refuses a document whose claim disagrees, where `1.1.0` printed the document's own claim and returned `VALID`. |
 | `1.3.0` | Refuses a `partial` integrity result whose `partial_reason` is **blank** (`""` or whitespace) and not merely null, and refuses any document with a non-empty `redactions`. Both were `VALID` under `1.2.0`. |
+| `1.4.0` | Reads `outcome` **for the first time**. Refuses a document whose headline field contradicts the fields it summarises: `pass` beside a non-`pass` `integrity.result`, beside a non-blank `partial_reason`, beside `objectives.met: false`, or beside a sample where not every record matched; a `records_sampled` larger than `sample.records_expected`; and `engine.matrix_verdict: "pass"` on a drill that did not pass at `byte-fingerprint` level. All were `VALID` under `1.3.0`. |
 
 The parenthetical on the `verifier:` line enumerates the current invariant set,
 so the line an auditor reads names the checks that actually produced the verdict
@@ -695,8 +696,14 @@ its sidecar — and you should have; a signature is over a fixed byte string and
 stays checkable forever — **re-run the current script over your retained
 documents.** Nothing about the artifact changed and no signature is affected;
 what changed is what this reader is willing to call `VALID`. A document that
-passed under an earlier version and is refused under `1.3.0` was always making a
+passed under an earlier version and is refused under `1.4.0` was always making a
 claim its signature could not support. The script was not catching it.
+
+`1.4.0` is the version worth re-running for. `outcome` is the field you read
+first and the field that had never been checked against anything: a scorecard
+saying `pass` next to `integrity.result: fail` verified clean under every
+earlier version, from both readers. If you retained scorecards from an earlier
+run, that is the claim worth re-testing.
 
 Read the version line, not just the verdict. The verdict alone cannot tell you
 which rule produced it.

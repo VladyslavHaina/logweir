@@ -647,6 +647,89 @@ impl Scorecard {
                 "records_sampled_matching exceeds records_sampled".into(),
             ));
         }
+        // T0-4: `outcome` is not a label, it is a claim entailed by the rest of
+        // the document. Until this block existed, `self.outcome` appeared in no
+        // arm of either reader, so a document saying `pass` beside its own
+        // contradicting evidence was accepted, signed and verified at exit 0 —
+        // `outcome: "pass"` with `integrity.partial_reason` naming an
+        // unreconciled topic, and `outcome: "pass"` with
+        // `records_sampled_matching: 50` against `records_sampled: 100`, were
+        // both live and falsifiable. A RETROACTIVE TIGHTENING of the 1.0.0
+        // reader, not a format change (GC12): no field is added and the
+        // accepted set only narrows.
+        //
+        // Mirrored arm for arm, in this order, with this wording, in
+        // `docs/verify_scorecard.py::check_invariants`. The messages are not to
+        // be reworded: `crates/logweir/tests/two_reader_parity.rs` compares the
+        // two readers' refusal TEXT, not merely that both refused.
+        if self.outcome == Outcome::Pass && self.integrity.result != IntegrityResult::Pass {
+            return Err(InvariantError(
+                "outcome is 'pass' but integrity.result is not 'pass'".into(),
+            ));
+        }
+        // The converse of the `Partial => partial_reason` arm above, using Task
+        // 4's trimmed-empty predicate (ruling R-A) so `""` and `"   "` count as
+        // absent in both readers.
+        if self.outcome == Outcome::Pass
+            && !self
+                .integrity
+                .partial_reason
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            return Err(InvariantError(
+                "outcome is 'pass' but integrity.partial_reason is present".into(),
+            ));
+        }
+        // `met: None` is legitimate on a pass (no objective requested, or an
+        // unmeasurable pass rate — the arm above this block requires exactly
+        // that); only an explicit `false` contradicts the outcome.
+        if self.outcome == Outcome::Pass && self.objectives.met == Some(false) {
+            return Err(InvariantError(
+                "outcome is 'pass' but objectives.met is false".into(),
+            ));
+        }
+        if self.outcome == Outcome::Pass
+            && self.integrity.records_sampled_matching != self.integrity.records_sampled
+        {
+            return Err(InvariantError(format!(
+                "outcome is 'pass' but only {} of {} sampled records matched",
+                self.integrity.records_sampled_matching, self.integrity.records_sampled
+            )));
+        }
+        // `sample.records_expected` is THE CANARY SIZE this drill set out to
+        // reconcile (see its doc comment, which also warns it is not
+        // `phase4_sample::Selection::records_expected`); reconciling more
+        // records than were selected is not a stronger result, it is an
+        // incoherent one.
+        if self.integrity.records_sampled > self.sample.records_expected {
+            return Err(InvariantError(format!(
+                "records_sampled ({}) exceeds sample.records_expected ({})",
+                self.integrity.records_sampled, self.sample.records_expected
+            )));
+        }
+        // Ruling R-F, DISCHARGED against
+        // `logweir::drill::phase8_score::matrix_verdict_for` (phase8_score.rs —
+        // NOT phase7_verify.rs, which the backlog named and where the function
+        // does not exist): that function returns `Pass` on exactly one path,
+        // `(Outcome::Pass, IntegrityLevel::ByteFingerprint)`, reachable only
+        // when the phase-5 readback was itself `Pass`. Every other path returns
+        // `PassDegraded`, `Fail`, or the observed non-`Pass` value unchanged.
+        // The predicate therefore holds for every value the producer can emit,
+        // and this arm states it as a property of the DOCUMENT rather than of
+        // one call site. `pass-degraded` is the correct value for a pass at a
+        // reduced integrity level.
+        if self.engine.matrix_verdict == MatrixVerdict::Pass
+            && !(self.outcome == Outcome::Pass
+                && self.integrity.level == IntegrityLevel::ByteFingerprint)
+        {
+            return Err(InvariantError(
+                "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+                    .into(),
+            ));
+        }
         if self.engine.matrix_verdict == MatrixVerdict::Fail
             && self.engine.matrix_verdict_reason.is_none()
         {
@@ -976,9 +1059,22 @@ mod tests {
         // The control for the three above: the arm narrows the accepted set,
         // it does not close it. A document that says WHY it is partial is
         // exactly what the format asks for.
+        //
+        // T0-4: the other three fields are what a `partial` integrity result
+        // ACTUALLY travels with in a document Logweir can produce.
+        // `crate::drill::phase8_score::decide` maps a non-`pass` integrity
+        // result to `fail-integrity`, and `matrix_verdict_for` then returns
+        // `fail` carrying that sentence as its reason. Until the outcome arms
+        // existed this control left `outcome: Pass` standing beside
+        // `result: Partial` — a document no writer emits — and both readers
+        // accepted it.
         let mut sc = valid_scorecard();
+        sc.outcome = Outcome::FailIntegrity;
         sc.integrity.result = IntegrityResult::Partial;
         sc.integrity.partial_reason = Some("only 2 of 3 partitions reached a conclusion".into());
+        sc.engine.matrix_verdict = MatrixVerdict::Fail;
+        sc.engine.matrix_verdict_reason =
+            Some("the drill ran and did not pass: outcome fail-integrity".into());
         sc.validate_invariants()
             .expect("a partial result that names its reason is a valid document");
     }
@@ -1270,5 +1366,199 @@ mod tests {
         // The control: without it, an arm that refused every document would
         // make the test above pass for the wrong reason.
         assert!(valid_scorecard().validate_invariants().is_ok());
+    }
+
+    // --- T0-4: `outcome` is a claim entailed by the rest of the document ---
+    //
+    // One test per arm, each asserting the SPECIFIC message, so deleting a
+    // single arm makes exactly one test fail. Every case moves ONLY the fields
+    // that trip its own arm off `valid_scorecard()`, and each is mirrored by a
+    // document in `e2e/fixtures/invariants/` so
+    // `crates/logweir/tests/two_reader_parity.rs` decides the same case with
+    // BOTH readers.
+
+    #[test]
+    fn invariants_refuse_pass_with_partial_integrity() {
+        let mut sc = valid_scorecard();
+        // Both fields move: with `partial_reason` left null the pre-existing
+        // `Partial => partial_reason` arm above would fire first and steal the
+        // failure, and this test would pass while testing that arm instead.
+        sc.integrity.result = IntegrityResult::Partial;
+        sc.integrity.partial_reason = Some("orders/7 never reconciled".into());
+        let err = sc
+            .validate_invariants()
+            .expect_err("a `pass` cannot sit beside a non-`pass` integrity result");
+        assert_eq!(
+            err.0,
+            "outcome is 'pass' but integrity.result is not 'pass'"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_pass_with_partial_reason() {
+        // T0-4's first documented "before" case, verbatim: this document made
+        // `drill verify` exit 0 under both readers.
+        let mut sc = valid_scorecard();
+        sc.integrity.partial_reason = Some("orders/7 never reconciled".into());
+        let err = sc
+            .validate_invariants()
+            .expect_err("a named unreconciled topic contradicts a `pass`");
+        assert_eq!(
+            err.0,
+            "outcome is 'pass' but integrity.partial_reason is present"
+        );
+    }
+
+    #[test]
+    fn a_pass_with_a_blank_partial_reason_is_still_accepted() {
+        // Ruling R-A's trimmed-empty predicate, reused verbatim by the arm
+        // above: `""` and `"   "` count as ABSENT in both readers, so a blank
+        // reason is not the contradiction a named topic is. Dropping `.trim()`
+        // from the new arm makes this test fail.
+        for blank in ["", "   ", "\t\n "] {
+            let mut sc = valid_scorecard();
+            sc.integrity.partial_reason = Some(blank.into());
+            assert!(
+                sc.validate_invariants().is_ok(),
+                "a blank partial_reason ({blank:?}) is absent, not a contradiction"
+            );
+        }
+    }
+
+    #[test]
+    fn invariants_refuse_pass_with_unmet_objective() {
+        let mut sc = valid_scorecard();
+        sc.objectives.met = Some(false);
+        let err = sc
+            .validate_invariants()
+            .expect_err("a missed objective contradicts a `pass`");
+        assert_eq!(err.0, "outcome is 'pass' but objectives.met is false");
+    }
+
+    #[test]
+    fn a_pass_may_carry_a_null_or_true_objectives_met() {
+        // Only an explicit `false` contradicts the outcome. `null` is the
+        // legitimate value when no objective was requested or the pass rate was
+        // not measurable, and `true` is the ordinary case — an arm written as
+        // `met != Some(true)` refuses the first of those and this test says so.
+        let mut sc = valid_scorecard();
+        sc.objectives.met = None;
+        assert!(sc.validate_invariants().is_ok(), "met: null is legal");
+        let mut sc = valid_scorecard();
+        sc.objectives.met = Some(true);
+        assert!(sc.validate_invariants().is_ok(), "met: true is legal");
+    }
+
+    #[test]
+    fn invariants_refuse_pass_with_incomplete_sample() {
+        // T0-4's second documented "before" case. `records_expected` is raised
+        // to 100 so the coverage arm below cannot fire first.
+        let mut sc = valid_scorecard();
+        sc.integrity.records_sampled = 100;
+        sc.integrity.records_sampled_matching = 50;
+        sc.sample.records_expected = 100;
+        let err = sc
+            .validate_invariants()
+            .expect_err("half the sample not matching contradicts a `pass`");
+        assert_eq!(
+            err.0,
+            "outcome is 'pass' but only 50 of 100 sampled records matched"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_sample_exceeding_expected() {
+        let mut sc = valid_scorecard();
+        sc.integrity.records_sampled = 100;
+        sc.integrity.records_sampled_matching = 100;
+        sc.sample.records_expected = 75;
+        let err = sc
+            .validate_invariants()
+            .expect_err("reconciling more records than were selected is incoherent");
+        assert_eq!(
+            err.0,
+            "records_sampled (100) exceeds sample.records_expected (75)"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_pass_matrix_without_byte_fingerprint() {
+        // `outcome` is moved off `Pass` and `result` off `Pass` so the two
+        // arms above cannot fire first; `matrix_verdict` is left `Pass`.
+        let mut sc = valid_scorecard();
+        sc.integrity.level = IntegrityLevel::ConsumeOnly;
+        sc.outcome = Outcome::FailIntegrity;
+        sc.integrity.result = IntegrityResult::Fail;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a matrix `pass` claims a drill that passed at byte-fingerprint level");
+        assert_eq!(
+            err.0,
+            "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_matrix_pass_on_a_degraded_pass() {
+        // The `level == ByteFingerprint` conjunct, where it is the ONLY thing
+        // that fires: a real pass at a reduced integrity level, whose correct
+        // matrix value is `pass-degraded`. Dropping that conjunct from the arm
+        // leaves the test above green and this one failing.
+        let mut sc = valid_scorecard();
+        sc.integrity.level = IntegrityLevel::ConsumeOnly;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a pass at consume-only level is `pass-degraded`, not `pass`");
+        assert_eq!(
+            err.0,
+            "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_matrix_pass_on_a_non_pass_at_byte_fingerprint() {
+        // The `outcome == Pass` conjunct, where it is the ONLY thing that
+        // fires: byte-fingerprint level, but the drill did not pass. Dropping
+        // that conjunct leaves the two tests above green and this one failing.
+        let mut sc = valid_scorecard();
+        sc.outcome = Outcome::FailIntegrity;
+        sc.integrity.result = IntegrityResult::Fail;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a matrix `pass` cannot stand beside a drill that did not pass");
+        assert_eq!(
+            err.0,
+            "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+        );
+    }
+
+    #[test]
+    fn the_integrity_result_arm_reports_before_the_matrix_arm() {
+        // ORDER is part of the contract: `docs/verify_scorecard.py`'s docstring
+        // claims the two readers mirror each other "ARM FOR ARM, IN ORDER", and
+        // `crates/logweir/tests/two_reader_parity.rs` compares refusal TEXT, so
+        // a reordering in either reader is a parity failure rather than a
+        // cosmetic one. This document violates the first new arm and the last
+        // one at once and must report the first.
+        let mut sc = valid_scorecard();
+        sc.integrity.result = IntegrityResult::Fail;
+        sc.integrity.level = IntegrityLevel::ConsumeOnly;
+        let err = sc
+            .validate_invariants()
+            .expect_err("a `pass` beside a failed integrity result is refused");
+        assert_eq!(
+            err.0,
+            "outcome is 'pass' but integrity.result is not 'pass'"
+        );
+    }
+
+    #[test]
+    fn invariants_accept_a_coherent_pass() {
+        // The control for the six arms above: without it, an arm written
+        // backwards would refuse every document and every test above would
+        // pass for the wrong reason.
+        let sc = valid_scorecard();
+        assert_eq!(sc.outcome, Outcome::Pass, "the control really is a `pass`");
+        assert!(sc.validate_invariants().is_ok());
     }
 }

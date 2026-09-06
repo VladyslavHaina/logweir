@@ -159,12 +159,24 @@ FORMAT_VERSION = "1.0.0"
 #          (`""` and `"   "`, T0-6 / ruling R-A — `""` was the live
 #          Rust/Python disagreement and `"   "` was accepted by both), and
 #          the `redactions` arm is new (T0-3). Two invariant arms.
+#   1.4.0  `outcome` is READ FOR THE FIRST TIME (T0-4). Six arms make the
+#          headline field an entailment of the rest of the document rather
+#          than a free-standing label: `pass` implies a `pass` integrity
+#          result, no non-blank `partial_reason`, `objectives.met` not
+#          `false`, and every sampled record matching; `records_sampled`
+#          never exceeds `sample.records_expected`; and a `pass` matrix
+#          verdict implies the drill passed at byte-fingerprint level.
+#
+# ANY task that adds or removes an arm in `check_invariants` bumps this minor
+# and updates the parenthetical in the success line below, IN THE SAME COMMIT.
+# A version whose whole purpose is to tell an auditor which checks ran is worth
+# nothing if it can go stale silently.
 #
 # The general rule for when to bump, and where an auditor reads it, is not
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.3.0"
+SCRIPT_VERSION = "1.4.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -413,6 +425,63 @@ def check_invariants(doc) -> str:
     if isinstance(sampled, int) and isinstance(matching, int) and matching > sampled:
         return "records_sampled_matching exceeds records_sampled"
 
+    # T0-4: `outcome` is not a label, it is a claim entailed by the rest of the
+    # document. Until this block existed, `outcome` was read by NEITHER reader,
+    # so a document saying `pass` beside its own contradicting evidence printed
+    # VALID here and exited 0 from `logweir drill verify`. ARM FOR ARM, IN
+    # ORDER with the block that sits immediately after the
+    # `records_sampled_matching` arm in `Scorecard::validate_invariants`
+    # (crates/logweir-core/src/scorecard.rs) — same position, same order, same
+    # words, so a document violating two of them gets the SAME message from
+    # both readers.
+    #
+    # `sample` is deliberately NOT added to the block-presence loop above: Rust
+    # refuses a missing `sample` block at DESERIALISATION time (the field is
+    # `SampleInfo`, not `Option<SampleInfo>`), not at invariant time, so a loop
+    # entry here would be a Python arm with no Rust counterpart. The coverage
+    # arm below guards with `isinstance` instead, exactly as the
+    # `records_sampled` arm above does.
+    outcome = doc.get("outcome")
+    sample = doc.get("sample")
+
+    if outcome == "pass" and integrity.get("result") != "pass":
+        return "outcome is 'pass' but integrity.result is not 'pass'"
+
+    # The converse of the `partial => partial_reason` arm above, on the same
+    # trimmed-empty predicate (ruling R-A), so `""` and `"   "` count as absent
+    # in both readers.
+    if outcome == "pass" and str(integrity.get("partial_reason") or "").strip():
+        return "outcome is 'pass' but integrity.partial_reason is present"
+
+    # `met: null` is legitimate on a pass; only an explicit `false` contradicts
+    # the outcome.
+    if outcome == "pass" and objectives.get("met") is False:
+        return "outcome is 'pass' but objectives.met is false"
+
+    if (
+        outcome == "pass"
+        and isinstance(sampled, int)
+        and isinstance(matching, int)
+        and matching != sampled
+    ):
+        return f"outcome is 'pass' but only {matching} of {sampled} sampled records matched"
+
+    expected = sample.get("records_expected") if isinstance(sample, dict) else None
+    if isinstance(sampled, int) and isinstance(expected, int) and sampled > expected:
+        return f"records_sampled ({sampled}) exceeds sample.records_expected ({expected})"
+
+    # Ruling R-F: `logweir::drill::phase8_score::matrix_verdict_for` returns
+    # `pass` on exactly one path — a `pass` outcome at byte-fingerprint level,
+    # reachable only when the phase-5 readback was itself `pass`. A pass at a
+    # reduced integrity level is `pass-degraded`.
+    if engine.get("matrix_verdict") == "pass" and not (
+        outcome == "pass" and integrity.get("level") == "byte-fingerprint"
+    ):
+        return (
+            "engine.matrix_verdict is 'pass' but the drill did not pass at "
+            "byte-fingerprint level"
+        )
+
     if engine.get("matrix_verdict") == "fail" and engine.get("matrix_verdict_reason") is None:
         return "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null"
 
@@ -647,6 +716,9 @@ def main(
         # cannot tell a derived line from an echoed one is back where T0-1
         # started. 1.3.0 names the two arms it added, so the parenthetical
         # enumerates the whole invariant set rather than one member of it.
+        # 1.4.0 adds outcome-entailment: six arms that make `outcome` — the
+        # field an auditor reads first — a claim the rest of the document has
+        # to support, where before it was read by neither reader (T0-4).
         #
         # `docs/test_verify_scorecard.py::
         # test_the_version_line_names_the_current_invariant_set` asserts the
@@ -654,8 +726,8 @@ def main(
         # would stay green while the claim went stale (Task 4 addendum A1).
         print(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
-            "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions; "
-            "approval.self_attested derived, not echoed)"
+            "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, "
+            "outcome-entailment; approval.self_attested derived, not echoed)"
         )
         return 0
 

@@ -64,6 +64,62 @@ so the console and the document cannot disagree about it.
 `8` and `9` are in the DOMAIN — `validate_invariants` accepts `-1..=9` — and no
 v0.1.0 writer produces them.
 
+### `outcome` is ENTAILED by the rest of the document, and that is ENFORCED
+
+`outcome` is the field an auditor reads first, and until Task 5 it was read by
+**neither** verifier. `self.outcome` appeared in no arm of
+`Scorecard::validate_invariants` and `outcome` in no arm of
+`docs/verify_scorecard.py::check_invariants`, so a document claiming
+`outcome: "pass"` beside its own contradicting evidence was accepted, signed
+and verified at exit **0** by both readers. Two such documents were falsifiable
+on the shipped code: `pass` beside an `integrity.partial_reason` naming an
+unreconciled topic, and `pass` beside `records_sampled_matching: 50` against
+`records_sampled: 100`.
+
+Six rules now make `outcome` a claim the rest of the document has to support.
+They are checked **in this order** by both readers, and a document violating
+any of them is refused by `logweir drill verify` at exit **4** and by
+`docs/verify_scorecard.py` at exit **1**, with the **same message**:
+
+| # | Rule | Message |
+|---|---|---|
+| 1 | `outcome: "pass"` implies `integrity.result: "pass"` | `outcome is 'pass' but integrity.result is not 'pass'` |
+| 2 | `outcome: "pass"` implies no non-blank `integrity.partial_reason` | `outcome is 'pass' but integrity.partial_reason is present` |
+| 3 | `outcome: "pass"` implies `objectives.met` is not `false` | `outcome is 'pass' but objectives.met is false` |
+| 4 | `outcome: "pass"` implies `records_sampled_matching == records_sampled` | `outcome is 'pass' but only <m> of <n> sampled records matched` |
+| 5 | `integrity.records_sampled <= sample.records_expected`, on **every** outcome | `records_sampled (<n>) exceeds sample.records_expected (<e>)` |
+| 6 | `engine.matrix_verdict: "pass"` implies the drill passed at `byte-fingerprint` level | `engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level` |
+
+Two values stay legal and are easy to misread as violations:
+
+- **`objectives.met: null` remains legal on a pass.** Rule 3 fires only on an
+  explicit `false`. `null` means either no objective was requested or a
+  requested `pass_rate` could not be measured, and neither contradicts a pass —
+  see [`objectives`](#objectives).
+- **`matrix_verdict: "pass-degraded"` is the correct value for a pass at a
+  non-`byte-fingerprint` level.** Rule 6 does not say a degraded drill cannot
+  pass; it says such a drill's matrix row is `pass-degraded`, which is what
+  that value is for.
+
+Rule 5 is the one rule that binds on **every** outcome, not only a pass:
+`sample.records_expected` is the canary size the drill **set out** to
+reconcile, so reconciling more records than were selected is not a stronger
+result, it is an incoherent one.
+
+Rule 6 is stated as a property of the DOCUMENT rather than of one call site.
+`crates/logweir/src/drill/phase8_score.rs`'s `matrix_verdict_for` returns
+`pass` on exactly one path — a `pass` outcome at `byte-fingerprint` level,
+reachable only when the phase-5 lever readback was itself `pass` — so the rule
+holds for every value that writer can emit, and now also for every document an
+auditor can be handed.
+
+Like the `partial_reason`, `evidence` and `redactions` arms, this is a
+**retroactive tightening of the 1.0.0 reader, not a format change**: no field
+is added, `format_version` stays `1.0.0`, and the accepted set only narrows.
+`crates/logweir/tests/two_reader_parity.rs` runs both readers over
+`e2e/fixtures/invariants/` — nine documents for these six rules — and compares
+their refusal text, so the agreement is checked rather than asserted.
+
 ## `engine`
 
 | Field | Type | Meaning |
