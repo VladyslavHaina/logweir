@@ -554,11 +554,12 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.5.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.6.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
-        assert "required-block shape incl. sample" in r.stdout, r.stdout
+        assert "all eleven required blocks in serde order" in r.stdout, r.stdout
+        assert "u64 domain" in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -1181,3 +1182,169 @@ def test_the_coverage_arm_still_fires_now_that_it_reads_expected_unguarded():
         assert (
             "records_sampled (100) exceeds sample.records_expected (75)"
         ) in r.stderr
+
+
+# --------------------------------------------------------------------------
+# Task 5d — the shape layer, closed. Three things, all measured in Task 5c's
+# review and none of them theoretical:
+#
+#   1. The block-presence loop named seven of the ELEVEN required blocks. With
+#      any of the other four deleted from a document, `drill verify` exited 1
+#      and this script printed VALID — the same disagreement `sample` was in
+#      before 1.5.0, four more times.
+#   2. `isinstance(v, int)` mirrors serde's TYPE, not `u64`'s DOMAIN. Python's
+#      `int` is unbounded, so `records_expected: 2**64` printed VALID here and
+#      exited 1 from `drill verify`.
+#   3. The loop's ORDER decided which block a multi-missing document was named
+#      for, and it was not serde's order, so the two readers named different
+#      blocks on the same bytes.
+#
+# `crates/logweir/tests/two_reader_parity.rs::
+# every_required_block_has_a_shape_corpus_case` is the other half of these
+# tests: it reads the Rust struct, this script's `REQUIRED_BLOCKS` and
+# `shape-index.json` and refuses to let the three drift apart.
+
+
+def _required_blocks():
+    return list(_verifier_module().REQUIRED_BLOCKS)
+
+
+def test_every_required_block_of_the_rust_struct_is_checked():
+    # The list itself, pinned against the Rust struct's own field order. The
+    # order is not cosmetic: serde reports the FIRST missing field in
+    # declaration order, so any other order makes the two readers name
+    # different blocks on a document missing several.
+    assert _required_blocks() == [
+        "engine",
+        "source",
+        "target",
+        "approval",
+        "measured",
+        "objectives",
+        "sample",
+        "target_diff",
+        "integrity",
+        "topic_parity",
+        "evidence",
+    ]
+
+
+def test_a_document_missing_any_required_block_is_refused():
+    # One document per block, each `unmodified_example.json` with that one
+    # block removed and nothing else touched.
+    for block in _required_blocks():
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard_without(d, block)
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{block}: {r.stdout}"
+            assert (
+                f"the document has no {block} block; it is not a drill scorecard"
+            ) in r.stderr, block
+
+
+def test_two_missing_blocks_are_named_in_serde_struct_order():
+    # `measured` + `integrity` is the pair Task 5c's review measured diverging:
+    # `drill verify` named `measured` (struct field 13) and this script named
+    # `integrity` (17), on the same bytes. `measured` precedes `integrity` in
+    # the struct, so `measured` is the answer both readers must give.
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        del doc["measured"]
+        del doc["integrity"]
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "the document has no measured block; it is not a drill scorecard"
+        ) in r.stderr, r.stderr
+
+
+def test_a_records_expected_above_the_u64_ceiling_is_refused():
+    # `u64::MAX + 1`. `drill verify` exits 1 — `invalid type: floating point
+    # 1.8446744073709552e+19, expected u64` — and this script printed VALID for
+    # it under every version up to 1.5.0, because Python's `int` is unbounded
+    # and `isinstance(v, int)` says nothing about the domain.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"sample.records_expected": 2**64})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "sample.records_expected is outside the u64 domain (0 <= v < 2**64): "
+            "18446744073709551616"
+        ) in r.stderr, r.stderr
+
+
+def test_u64_max_itself_is_still_accepted():
+    # The boundary control. A domain check written `<= 2**64` or `< 2**64 - 1`
+    # would pass the test above and fail here.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"sample.records_expected": 2**64 - 1})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "VALID" in r.stdout
+
+
+def test_a_negative_records_expected_is_refused_as_shape_not_as_an_invariant():
+    # `-1` was refused by both readers before this change and STILL diverged:
+    # Rust refused at DESERIALISATION (`invalid value: integer -1, expected
+    # u64`) while this script reached an INVARIANT and reported
+    # `records_sampled (75) exceeds sample.records_expected (-1)` — the same
+    # verdict for a different reason. The domain check moves it to the shape
+    # layer, where Rust already had it.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"sample.records_expected": -1})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "sample.records_expected is outside the u64 domain (0 <= v < 2**64): -1"
+        ) in r.stderr, r.stderr
+        assert "exceeds sample.records_expected" not in r.stderr, r.stderr
+
+
+def test_every_u64_field_is_domain_checked_not_just_records_expected():
+    # A domain check on one field of a type is a reminder, not a rule. All
+    # eleven `u64` fields of the document are walked; `phases[].duration_ms` is
+    # included because it is a `u64` too, even though `phases` is a list rather
+    # than a block.
+    cases = {
+        "measured.rto_seconds": "measured.rto_seconds",
+        "measured.rto_requested_to_verified_seconds": "measured.rto_requested_to_verified_seconds",
+        "measured.rto_restore_only_seconds": "measured.rto_restore_only_seconds",
+        "measured.rto_excluding_preflight_seconds": "measured.rto_excluding_preflight_seconds",
+        "objectives.rto_seconds": "objectives.rto_seconds",
+        "sample.records_expected": "sample.records_expected",
+        "sample.records_restored": "sample.records_restored",
+        "integrity.records_sampled": "integrity.records_sampled",
+        "integrity.records_sampled_matching": "integrity.records_sampled_matching",
+        "integrity.mismatches": "integrity.mismatches",
+    }
+    for path, name in cases.items():
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{path: 2**64})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{path}: {r.stdout}"
+            assert f"{name} is outside the u64 domain" in r.stderr, path
+
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        assert doc["phases"], "the format example has phase records"
+        doc["phases"][0]["duration_ms"] = 2**64
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "phases[0].duration_ms is outside the u64 domain" in r.stderr, r.stderr
+
+
+def test_the_u64_field_list_matches_the_rust_struct():
+    # The list is derived from `crates/logweir-core/src/scorecard.rs` and has to
+    # stay derived: a `u64` field added there with no entry here is a field with
+    # no bound at all on the Python side. Counted from the Rust source, so this
+    # fails when the struct grows one.
+    import re
+
+    src = (ROOT / "crates" / "logweir-core" / "src" / "scorecard.rs").read_text()
+    rust_u64 = re.findall(r"^    pub ([a-z0-9_]+): (?:Option<)?u64>?,$", src, re.M)
+    # `phases[].duration_ms` is in `PhaseRecord` and is walked separately, so it
+    # is in the Rust list and not in U64_FIELDS.
+    listed = {key for _, key in _verifier_module().U64_FIELDS} | {"duration_ms"}
+    assert set(rust_u64) == listed, (sorted(set(rust_u64)), sorted(listed))

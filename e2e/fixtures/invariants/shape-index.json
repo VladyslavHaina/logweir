@@ -1,26 +1,137 @@
 [
   {
+    "id": "no_engine_block",
+    "file": "no_engine_block.json",
+    "check": "block:engine",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `engine`",
+    "python_reason": "the document has no engine block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_source_block",
+    "file": "no_source_block.json",
+    "check": "block:source",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `source`",
+    "python_reason": "the document has no source block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_target_block",
+    "file": "no_target_block.json",
+    "check": "block:target",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `target`",
+    "python_reason": "the document has no target block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_approval_block",
+    "file": "no_approval_block.json",
+    "check": "block:approval",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `approval`",
+    "python_reason": "the document has no approval block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_measured_block",
+    "file": "no_measured_block.json",
+    "check": "block:measured",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `measured`",
+    "python_reason": "the document has no measured block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_objectives_block",
+    "file": "no_objectives_block.json",
+    "check": "block:objectives",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `objectives`",
+    "python_reason": "the document has no objectives block; it is not a drill scorecard"
+  },
+  {
     "id": "no_sample_block",
     "file": "no_sample_block.json",
+    "check": "block:sample",
     "rust_exit": 1,
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: missing field `sample`",
     "python_reason": "the document has no sample block; it is not a drill scorecard"
   },
   {
+    "id": "no_target_diff_block",
+    "file": "no_target_diff_block.json",
+    "check": "block:target_diff",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `target_diff`",
+    "python_reason": "the document has no target_diff block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_integrity_block",
+    "file": "no_integrity_block.json",
+    "check": "block:integrity",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `integrity`",
+    "python_reason": "the document has no integrity block; it is not a drill scorecard"
+  },
+  {
+    "id": "no_topic_parity_block",
+    "file": "no_topic_parity_block.json",
+    "check": "block:topic_parity",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `topic_parity`",
+    "python_reason": "the document has no topic_parity block; it is not a drill scorecard"
+  },
+  {
     "id": "no_evidence_block",
     "file": "no_evidence_block.json",
+    "check": "block:evidence",
     "rust_exit": 1,
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: missing field `evidence`",
     "python_reason": "the document has no evidence block; it is not a drill scorecard"
   },
   {
+    "id": "no_measured_and_no_integrity_blocks",
+    "file": "no_measured_and_no_integrity_blocks.json",
+    "check": "order:measured,integrity",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `measured`",
+    "python_reason": "the document has no measured block; it is not a drill scorecard"
+  },
+  {
     "id": "records_expected_not_an_integer",
     "file": "records_expected_not_an_integer.json",
+    "check": "message:sample.records_expected is not an integer",
     "rust_exit": 1,
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"75\", expected u64",
     "python_reason": "sample.records_expected is not an integer"
+  },
+  {
+    "id": "records_expected_out_of_u64_domain",
+    "file": "records_expected_out_of_u64_domain.json",
+    "check": "message:is outside the u64 domain (0 <= v < 2**64)",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: floating point `1.8446744073709552e+19`, expected u64",
+    "python_reason": "sample.records_expected is outside the u64 domain (0 <= v < 2**64): 18446744073709551616"
+  },
+  {
+    "id": "records_expected_negative",
+    "file": "records_expected_negative.json",
+    "check": "message:is outside the u64 domain (0 <= v < 2**64)",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid value: integer `-1`, expected u64",
+    "python_reason": "sample.records_expected is outside the u64 domain (0 <= v < 2**64): -1"
   }
 ]

@@ -44,6 +44,20 @@
 //! reader produced no invariant refusal line — rust: None"). The second walker
 //! asserts what those documents CAN pin: both readers refuse, at the recorded
 //! exit codes, each with its own recorded text, and NEITHER on an invariant.
+//! (Only the RUST half of "neither on an invariant" is prefix-checked; the
+//! script emits one `INVALID: ` prefix for both classes, so the Python half is
+//! pinned by the whole-string `python_reason` equality on the line above it
+//! rather than by a prefix scan. Same property, different mechanism.)
+//!
+//! Task 5d adds a THIRD walker, `every_required_block_has_a_shape_corpus_case`,
+//! which runs no reader at all. It is the shape layer's
+//! `every_invariant_arm_has_a_corpus_case`: `Scorecard`'s required blocks,
+//! `docs/verify_scorecard.py`'s `REQUIRED_BLOCKS` and `shape-index.json` must
+//! be the same list in the same order, with one corpus case each. It exists
+//! because Task 5c's review deleted a shape check, its corpus case and its
+//! pytest in ONE edit and every gate stayed green — and it catches that where
+//! the invariant corpus cannot, because its fixed point is the Rust struct
+//! rather than the file the check was deleted from.
 
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
@@ -417,10 +431,7 @@ fn two_reader_parity_on_documents_refused_before_the_invariants() {
     let key = SigningKey::from_pem_file(&root.join("e2e/fixtures/signed/signing.pem"))
         .expect("the checked-in throwaway fixture signing key");
 
-    let cases: Vec<Value> = read_json(&corpus().join("shape-index.json"))
-        .as_array()
-        .expect("shape-index.json is a JSON array")
-        .clone();
+    let cases = shape_entries();
     assert!(
         !cases.is_empty(),
         "e2e/fixtures/invariants/shape-index.json is empty; a walker over nothing proves nothing"
@@ -499,6 +510,318 @@ fn two_reader_parity_on_documents_refused_before_the_invariants() {
         failures.len(),
         cases.len(),
         failures.join("\n  - ")
+    );
+}
+
+/// The `shape-index.json` entries, deduplicated on `id` exactly as `entries()`
+/// does for `index.json` — the two indexes are signed into one shared temp dir
+/// by `scripts/check-invariant-corpus.sh`, so a duplicate id there compares one
+/// document against another's expectations.
+fn shape_entries() -> Vec<Value> {
+    let cases: Vec<Value> = read_json(&corpus().join("shape-index.json"))
+        .as_array()
+        .expect("shape-index.json is a JSON array")
+        .clone();
+    let mut seen: Vec<&str> = Vec::new();
+    for e in &cases {
+        let id = s(e, "id");
+        assert!(
+            !seen.contains(&id),
+            "shape-index.json has a duplicate id {id:?}; every id must be unique"
+        );
+        seen.push(id);
+    }
+    cases
+}
+
+/// The lines of `text` between the first line that is exactly `open` and the
+/// first subsequent line that is exactly `close`, both excluded.
+///
+/// Untrimmed equality on both ends, the same rule `validate_invariants_body`
+/// and `resolver_body` use and for the same reason: a `trim()` would close a
+/// block at the first INNER delimiter.
+fn between<'a>(text: &'a str, what: &str, open: &str, close: &str) -> Vec<&'a str> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| *l == open)
+        .unwrap_or_else(|| panic!("no line exactly {open:?} in {what}; it moved or was renamed"));
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| *l == close)
+        .map(|i| start + 1 + i)
+        .unwrap_or_else(|| {
+            panic!("{what}: the block opened at {open:?} is never closed by {close:?}")
+        });
+    lines[start + 1..end].to_vec()
+}
+
+/// THE REQUIRED BLOCKS OF `logweir_core::scorecard::Scorecard`, IN DECLARATION
+/// ORDER, read out of the struct itself.
+///
+/// A "block" is a field whose type is EXACTLY one of the structs declared
+/// beside it in `crates/logweir-core/src/scorecard.rs`. That rule is what
+/// excludes `format_version` (a `String`), `last_phase_completed` (an `i8`),
+/// `outcome` (an enum declared in another module), `requested_at` (a
+/// `DateTime<Utc>`), `phases` (a `Vec<PhaseRecord>`) and the three `Option`
+/// fields — none of which is a JSON object — while keeping the eleven that are.
+/// None of the eleven carries `#[serde(default)]`, so `serde_json` refuses a
+/// document missing any one of them at deserialisation.
+///
+/// This is the FIXED POINT the shape corpus is measured against, and it is the
+/// whole reason the walker below can catch a coordinated deletion. Deleting a
+/// check from `docs/verify_scorecard.py` together with its corpus case and its
+/// pytest leaves the struct untouched, so the count no longer closes and the
+/// walker fails — which is exactly what `uncovered-arms.json`'s own README says
+/// the invariant corpus cannot do, because there `n` is counted from the same
+/// file the arm is deleted from.
+fn required_blocks() -> Vec<String> {
+    let src = std::fs::read_to_string(root().join("crates/logweir-core/src/scorecard.rs"))
+        .expect("read scorecard.rs");
+    let declared: Vec<&str> = src
+        .lines()
+        .filter_map(|l| l.strip_prefix("pub struct "))
+        .filter_map(|rest| {
+            rest.split(|c: char| c == '{' || c == '(' || c == '<' || c.is_whitespace())
+                .find(|t| !t.is_empty())
+        })
+        .collect();
+    assert!(
+        declared.contains(&"Scorecard"),
+        "crates/logweir-core/src/scorecard.rs no longer declares `pub struct Scorecard`"
+    );
+
+    let mut blocks: Vec<String> = Vec::new();
+    for line in between(&src, "scorecard.rs", "pub struct Scorecard {", "}") {
+        let code = line.trim();
+        let Some(decl) = code.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some((name, ty)) = decl.split_once(": ") else {
+            continue;
+        };
+        let Some(ty) = ty.strip_suffix(',') else {
+            continue;
+        };
+        if declared.contains(&ty) {
+            blocks.push(name.to_string());
+        }
+    }
+    assert!(
+        blocks.len() >= 7,
+        "only {} block field(s) found in `Scorecard`; the field-parsing rule in \
+         `required_blocks` no longer matches the struct's formatting: {blocks:?}",
+        blocks.len()
+    );
+    blocks
+}
+
+/// `docs/verify_scorecard.py`'s `REQUIRED_BLOCKS` tuple, in source order — the
+/// block-presence loop's list, hoisted to a constant so both this walker and
+/// `scripts/check-invariant-corpus.sh` can read it without parsing a `for`.
+fn python_required_blocks() -> Vec<String> {
+    let src = std::fs::read_to_string(root().join("docs/verify_scorecard.py"))
+        .expect("read verify_scorecard.py");
+    between(&src, "verify_scorecard.py", "REQUIRED_BLOCKS = (", ")")
+        .iter()
+        .filter_map(|l| {
+            let code = l.trim();
+            code.strip_prefix('"')
+                .and_then(|r| r.strip_suffix("\","))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// `check_invariants`'s body with every whole-line `#` comment removed, for the
+/// same reason `code_only` strips `//` from the Rust: a fragment that survives
+/// only because a comment quotes it is not a check that exists.
+fn check_invariants_body() -> String {
+    let src = std::fs::read_to_string(root().join("docs/verify_scorecard.py"))
+        .expect("read verify_scorecard.py");
+    let lines: Vec<&str> = src.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("def check_invariants("))
+        .expect("verify_scorecard.py declares `def check_invariants(`");
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with("def "))
+        .map(|i| start + 1 + i)
+        .unwrap_or(lines.len());
+    lines[start..end]
+        .iter()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// CLOSED ARITHMETIC FOR `shape-index.json` — the mirror of
+/// `every_invariant_arm_has_a_corpus_case` over the shape layer (Task 5d, from
+/// Task 5c's review finding F2).
+///
+/// The invariant arms have closed arithmetic and a per-arm Rust unit test; the
+/// shape checks had neither, and the review measured what that cost: deleting
+/// the `records_expected` type check from `docs/verify_scorecard.py` TOGETHER
+/// WITH its corpus case and both of its pytest tests left the walker at 0, the
+/// corpus shell gate at 0 (reporting "agrees … on all 22 cases", one fewer than
+/// before and no complaint), pytest at 0 and `just lint` green. Deleting the
+/// `integrity`, `measured` or `engine` entry from the block-presence loop was
+/// silent on its own, because no corpus document was missing those blocks.
+///
+/// THE FIXED POINT IS THE RUST STRUCT, not either index — that is what makes
+/// this catch a coordinated deletion where the invariant corpus cannot.
+/// `Scorecard` declares eleven required blocks; `REQUIRED_BLOCKS` in
+/// `docs/verify_scorecard.py` must name all eleven, in the same order, and
+/// `shape-index.json` must carry exactly one `block:` case for each. Delete a
+/// loop entry, its corpus case and its pytest in one edit and the struct still
+/// says eleven: the count no longer closes and this test says so, with both
+/// lists printed.
+///
+/// The order is asserted too, and it is not cosmetic. serde reports the first
+/// missing field in declaration order, so on a document missing several blocks
+/// the two readers name the same one only if this order holds — measured in the
+/// review as `measured` from `drill verify` and `integrity` from the script on
+/// one document. `no_measured_and_no_integrity_blocks` is the case that pins
+/// it, and its `check` records which pair it is about.
+///
+/// `check` on a shape case says WHAT the case protects, in one of three forms:
+///
+/// * `block:<name>` — one of the eleven. Exactly one case per block, both ways.
+/// * `message:<fragment>` — a literal that must appear in `check_invariants`'s
+///   code (comments stripped). Several cases may name one fragment; a check
+///   deleted out from under them fails here. This is the `arm` field of
+///   `index.json`, playing the same role on the shape layer.
+/// * `order:<a>,<b>[,…]` — a multi-missing document. Every name must be a
+///   block, and the two recorded refusals must name the SAME block: the first
+///   of them in the struct's declaration order.
+#[test]
+fn every_required_block_has_a_shape_corpus_case() {
+    let blocks = required_blocks();
+    let loop_blocks = python_required_blocks();
+    let body = check_invariants_body();
+    let cases = shape_entries();
+
+    // (a) the two lists are the same list, in the same order. Printed in full
+    //     on a mismatch: a bare count tells nobody which block moved or went.
+    assert_eq!(
+        loop_blocks,
+        blocks,
+        "docs/verify_scorecard.py's REQUIRED_BLOCKS and \
+         `logweir_core::scorecard::Scorecard` disagree.\n  python ({}): {loop_blocks:?}\n  \
+         rust   ({}): {blocks:?}\nEvery non-optional block field of the struct must be named \
+         by the block-presence loop, in the struct's own declaration order — serde reports \
+         the FIRST missing field in that order, so any other order makes the two readers \
+         name different blocks on a document missing several.",
+        loop_blocks.len(),
+        blocks.len(),
+    );
+
+    // (b) exactly one `block:` case per block, and no `block:` case naming
+    //     something that is not one.
+    let mut covered: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for entry in &cases {
+        let id = s(entry, "id");
+        let check = entry
+            .get("check")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("shape-index.json entry {id:?} has no string `check`"));
+        let (kind, rest) = check
+            .split_once(':')
+            .unwrap_or_else(|| panic!("{id}: `check` {check:?} is not <kind>:<value>"));
+        match kind {
+            "block" => {
+                if !blocks.iter().any(|b| b == rest) {
+                    failures.push(format!(
+                        "{id}: `check` names block {rest:?}, which `Scorecard` does not \
+                         declare as a required block"
+                    ));
+                } else if covered.iter().any(|b| b == rest) {
+                    failures.push(format!(
+                        "{id}: block {rest:?} already has a shape case; exactly one per block"
+                    ));
+                } else {
+                    covered.push(rest.to_string());
+                }
+            }
+            "message" => {
+                if !body.contains(rest) {
+                    failures.push(format!(
+                        "{id}: `check` names the fragment {rest:?}, which appears nowhere in \
+                         `check_invariants`'s code"
+                    ));
+                }
+            }
+            "order" => {
+                let named: Vec<&str> = rest.split(',').collect();
+                if named.len() < 2 {
+                    failures.push(format!(
+                        "{id}: an `order:` case is about a document missing SEVERAL blocks; \
+                         {rest:?} names {}",
+                        named.len()
+                    ));
+                }
+                let unknown: Vec<&&str> = named
+                    .iter()
+                    .filter(|n| !blocks.iter().any(|b| b == *n))
+                    .collect();
+                if !unknown.is_empty() {
+                    failures.push(format!("{id}: `check` names non-blocks {unknown:?}"));
+                } else {
+                    // The first of them in the STRUCT's order is the block both
+                    // readers must name. This asserts the recorded pair says so;
+                    // `two_reader_parity_on_documents_refused_before_the_invariants`
+                    // is what proves the readers really do.
+                    let first = blocks
+                        .iter()
+                        .find(|b| named.contains(&b.as_str()))
+                        .expect("at least one named block");
+                    let want_python =
+                        format!("the document has no {first} block; it is not a drill scorecard");
+                    if s(entry, "python_reason") != want_python {
+                        failures.push(format!(
+                            "{id}: the recorded python_reason does not name {first:?}, the \
+                             first of {named:?} in the struct's declaration order\n        \
+                             got:  {:?}\n        want: {want_python:?}",
+                            s(entry, "python_reason")
+                        ));
+                    }
+                    if !s(entry, "rust_reason").ends_with(&format!("missing field `{first}`")) {
+                        failures.push(format!(
+                            "{id}: the recorded rust_reason does not name {first:?}: {:?}",
+                            s(entry, "rust_reason")
+                        ));
+                    }
+                }
+            }
+            other => failures.push(format!(
+                "{id}: unknown `check` kind {other:?}; use block:, message: or order:"
+            )),
+        }
+    }
+
+    let mut uncovered: Vec<&String> = blocks
+        .iter()
+        .filter(|b| !covered.iter().any(|c| c == *b))
+        .collect();
+    uncovered.sort();
+    assert!(
+        failures.is_empty() && uncovered.is_empty(),
+        "the shape corpus does not account for `Scorecard`'s required blocks.\n  \
+         required ({}): {blocks:?}\n  covered  ({}): {covered:?}\n  MISSING a shape case: \
+         {uncovered:?}\nEvery required block needs a `shape-index.json` case whose `check` is \
+         \"block:<name>\", and every such case needs a block. Deleting a check from \
+         docs/verify_scorecard.py together with its case and its pytest is what this \
+         arithmetic exists to catch.{}",
+        blocks.len(),
+        covered.len(),
+        if failures.is_empty() {
+            String::new()
+        } else {
+            format!("\n  - {}", failures.join("\n  - "))
+        }
     );
 }
 

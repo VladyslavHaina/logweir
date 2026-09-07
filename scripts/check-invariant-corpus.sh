@@ -20,6 +20,13 @@
 # spells the fields `python_reason` because its Rust half is recorded
 # separately and is not this script's business.
 #
+# Task 5d: it also checks that the shape corpus ACCOUNTS FOR EVERY REQUIRED
+# BLOCK of `logweir_core::scorecard::Scorecard` before it walks anything. Task
+# 5c's review deleted a shape check, its corpus case and its pytest in one edit
+# and this gate stayed green, reporting one fewer case and no complaint. The
+# arithmetic below is what makes that fail: the block list comes from the Rust
+# struct, which the deletion does not touch.
+#
 # The corpus cases are UNSIGNED on disk (see e2e/fixtures/invariants/README.md).
 # `verify_scorecard.py` checks the signature before it evaluates any invariant,
 # so each case is signed here, at test time, into a temp dir with the checked-in
@@ -69,6 +76,63 @@ fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# CLOSED ARITHMETIC FOR THE SHAPE CORPUS (Task 5d, from Task 5c's review finding
+# F2), run BEFORE anything is signed, because a corpus that does not account for
+# every required block is not worth walking.
+#
+# The same three lists the Rust walker `every_required_block_has_a_shape_corpus_
+# case` compares, and for the same reason: the FIXED POINT is
+# `crates/logweir-core/src/scorecard.rs`, so deleting a check from
+# verify_scorecard.py together with its corpus case and its pytest — the
+# coordinated deletion Task 5c's review got past every gate — no longer balances.
+# Re-derived here from the source text rather than imported, exactly as PAE is
+# below: a gate that asks the thing it is checking cannot fail.
+set +e
+"$PY" - "$ROOT" <<'PYEOF'
+import json, pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+rust = (root / "crates/logweir-core/src/scorecard.rs").read_text()
+py = (root / "docs/verify_scorecard.py").read_text()
+corpus = root / "e2e/fixtures/invariants"
+
+# Every type the file declares. A `Scorecard` field whose type is EXACTLY one of
+# them is a block; a String, an i8, a Vec<..> or an Option<..> is not.
+declared = set(re.findall(r"^pub struct ([A-Za-z0-9_]+)", rust, re.M))
+body = rust.split("pub struct Scorecard {", 1)[1].split("\n}", 1)[0]
+blocks = [m.group(1) for m in re.finditer(r"^    pub ([a-z0-9_]+): ([A-Za-z0-9_]+),$", body, re.M)
+          if m.group(2) in declared]
+
+loop = re.search(r"^REQUIRED_BLOCKS = \(\n(.*?)^\)$", py, re.M | re.S)
+if loop is None:
+    raise SystemExit("docs/verify_scorecard.py has no REQUIRED_BLOCKS tuple")
+named = re.findall(r'^    "([a-z0-9_]+)",$', loop.group(1), re.M)
+
+if named != blocks:
+    raise SystemExit(
+        "docs/verify_scorecard.py's REQUIRED_BLOCKS and Scorecard disagree.\n"
+        f"  python ({len(named)}): {named}\n  rust   ({len(blocks)}): {blocks}\n"
+        "Every non-optional block field of the struct must be named by the "
+        "block-presence loop, in the struct's own declaration order.")
+
+shape = json.loads((corpus / "shape-index.json").read_text())
+covered = [e["check"].split(":", 1)[1] for e in shape
+           if e.get("check", "").startswith("block:")]
+if sorted(covered) != sorted(blocks):
+    raise SystemExit(
+        "the shape corpus does not account for Scorecard's required blocks.\n"
+        f"  required ({len(blocks)}): {blocks}\n  covered  ({len(covered)}): {covered}\n"
+        "Every required block needs a shape-index.json case whose `check` is "
+        '"block:<name>", and every such case needs a block.')
+print(f"check-invariant-corpus: {len(blocks)} required blocks, "
+      f"{len(blocks)} block-presence checks, {len(covered)} shape cases — closed")
+PYEOF
+arith_rc=$?
+set -e
+if [ "$arith_rc" -ne 0 ]; then
+    fail "the shape corpus arithmetic does not close (see above)"
+fi
 
 # Sign every case into $tmp and emit one TAB-separated line per case:
 #   id <TAB> python_exit <TAB> reason

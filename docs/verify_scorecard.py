@@ -177,6 +177,23 @@ FORMAT_VERSION = "1.0.0"
 #          1 on the same bytes. Measured, at `0640240`, not argued. That is
 #          the two-reader disagreement this file's own module comment says is
 #          impossible, so it is closed rather than recorded (Task 5c).
+#   1.6.0  SHAPE again, and again a bump for documents this script now decides
+#          differently (Task 5d, from Task 5c's review). Three changes, no arm
+#          weakened and no check removed. (a) THE u64 DOMAIN: every field the
+#          Rust reader types as `u64` must satisfy `0 <= v < 2**64`, where
+#          `isinstance(v, int)` mirrored serde's TYPE and left Python's
+#          unbounded `int` unbounded — `sample.records_expected:
+#          18446744073709551616` printed VALID here and exited 1 from `drill
+#          verify`, and `-1` was refused by both but on an INVARIANT here and at
+#          DESERIALISATION there. (b) `REQUIRED_BLOCKS` IS NOW THE WHOLE STRUCT:
+#          `target`, `approval`, `target_diff` and `topic_parity` join the
+#          block-presence loop, closing four more instances of the same
+#          disagreement `sample` was in 1.5.0 — with any one of them deleted,
+#          `drill verify` exited 1 and this script printed VALID. (c) THE ORDER
+#          IS PINNED to serde's declaration order, so a document missing several
+#          blocks is named for the SAME block by both readers; `measured` +
+#          `integrity` missing together used to be named `measured` by Rust and
+#          `integrity` here.
 #
 # ANY task that adds or removes an arm in `check_invariants` bumps this minor
 # and updates the parenthetical in the success line below, IN THE SAME COMMIT.
@@ -187,7 +204,7 @@ FORMAT_VERSION = "1.0.0"
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.5.0"
+SCRIPT_VERSION = "1.6.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -294,6 +311,104 @@ def _finite(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and abs(x) != float("inf")
 
 
+# EVERY REQUIRED BLOCK OF `logweir_core::scorecard::Scorecard`, IN SERDE'S
+# STRUCT DECLARATION ORDER. Both halves of that sentence are load-bearing and
+# both are machine-checked by `crates/logweir/tests/two_reader_parity.rs::
+# every_required_block_has_a_shape_corpus_case`, which reads THIS tuple and the
+# struct and fails if they drift.
+#
+# WHICH BLOCKS. A "block" is a field of `Scorecard` whose type is one of the
+# structs declared beside it in `crates/logweir-core/src/scorecard.rs` — so
+# `format_version` (a String), `last_phase_completed` (an i8), `phases` (a Vec)
+# and the three `Option` fields are not blocks, and the eleven below are. None
+# carries `#[serde(default)]`, so `serde_json` refuses a document missing any
+# one of them at DESERIALISATION and `drill verify` never reaches
+# `validate_invariants`.
+#
+# Task 5c put `sample` in this list and closed a measured disagreement by doing
+# it. Task 5d completed the list: `target`, `approval`, `target_diff` and
+# `topic_parity` were still absent, and their absence was the SAME live
+# two-reader disagreement, measured at `6619090` on documents derived from
+# `e2e/fixtures/invariants/unmodified_example.json` — with any one of the four
+# deleted, `drill verify` exited 1 (`missing field ...`) and this script printed
+# `VALID` and exited 0. Nothing here reads those four blocks, which is exactly
+# why they were missed: an arm-for-arm mirror only ever grows the blocks its
+# arms happen to need. The list is now taken from the struct instead, and the
+# walker named above is what keeps it there — which is also what makes deleting
+# an entry from this tuple, together with its corpus case and its pytest, fail
+# at assertion time instead of silently. (Task 5c's review, finding F2: the
+# shape corpus had no closed arithmetic and five of seven checks were protected
+# by nothing at all.)
+#
+# WHY THE ORDER. serde reports the FIRST missing field in declaration order, so
+# a document missing several blocks is named for its first one. Task 5c judged
+# that unpinnable — "no corpus case can pin that" — and its review measured the
+# opposite: `measured` + `integrity` missing together was named `measured` by
+# `drill verify` and `integrity` by this script, and such a document is exactly
+# what `shape-index.json` exists to record, since neither reader reaches an
+# invariant on it. In this order the two readers name the same block on every
+# multi-missing document; `no_measured_and_no_integrity_blocks` is the case that
+# proves it.
+REQUIRED_BLOCKS = (
+    "engine",
+    "source",
+    "target",
+    "approval",
+    "measured",
+    "objectives",
+    "sample",
+    "target_diff",
+    "integrity",
+    "topic_parity",
+    "evidence",
+)
+
+# EVERY FIELD `logweir_core::scorecard::Scorecard` TYPES AS `u64`, as
+# (dotted name, value) pairs — the list `check_invariants`'s domain check walks.
+#
+# It is a list and not a single field on purpose. Task 5c's review found the
+# domain gap on `sample.records_expected`; fixing that one field alone would
+# leave ten others whose Python side accepts `2**64` and whose Rust side refuses
+# it, which is the same defect with a different name. Grep the Rust for `u64` in
+# `crates/logweir-core/src/scorecard.rs` and this list is what comes back, minus
+# `major_version`'s return type, which is not a document field.
+#
+# `phases` is a `Vec<PhaseRecord>` rather than a block, so it is NOT in the
+# block-presence loop and cannot be assumed present here: a non-list, or an
+# element that is not a dict, is skipped rather than raising. Rust refuses such
+# a document at deserialisation; this function's contract is that no field
+# access ever surfaces as a traceback.
+U64_FIELDS = (
+    ("measured", "rto_seconds"),
+    ("measured", "rto_requested_to_verified_seconds"),
+    ("measured", "rto_restore_only_seconds"),
+    ("measured", "rto_excluding_preflight_seconds"),
+    ("objectives", "rto_seconds"),
+    ("sample", "records_expected"),
+    ("sample", "records_restored"),
+    ("integrity", "records_sampled"),
+    ("integrity", "records_sampled_matching"),
+    ("integrity", "mismatches"),
+)
+
+
+def _u64_fields(doc, measured, objectives, sample, integrity):
+    """(dotted name, value) for every `u64` field of the document."""
+    blocks = {
+        "measured": measured,
+        "objectives": objectives,
+        "sample": sample,
+        "integrity": integrity,
+    }
+    for block, key in U64_FIELDS:
+        yield f"{block}.{key}", blocks[block].get(key)
+    phases = doc.get("phases")
+    if isinstance(phases, list):
+        for n, phase in enumerate(phases):
+            if isinstance(phase, dict):
+                yield f"phases[{n}].duration_ms", phase.get("duration_ms")
+
+
 def check_invariants(doc) -> str:
     """The scorecard's self-consistency rules, or "" when the document holds.
 
@@ -341,41 +456,21 @@ def check_invariants(doc) -> str:
     # to be asserted here, FIRST, before any rule that would otherwise read a
     # block that is not there.
     #
-    # Task 5c: `sample` joins the list. Until now it was deliberately absent —
-    # Task 5's §10 and addendum A1 forbade adding it, on the ground that a loop
-    # entry here would be "a Python arm with no Rust counterpart". Measured at
-    # `0640240`, the cost of that omission was a REAL DISAGREEMENT and not a
-    # cosmetic one: on a scorecard with the whole `sample` block deleted,
-    # `drill verify` exited 1 and this script printed `VALID` and exited 0. The
-    # ground was also mistaken about the category — no entry in this loop is an
-    # arm of the arm-for-arm mirror below, and `evidence` had been sitting here
-    # since Task 2 for exactly the same reason `sample` does now. The whole
-    # loop is documented as shape, and `sample` is in it.
-    #
-    # `sample` is placed next to `objectives` because that is where it sits in
-    # the struct's own field order (measured, objectives, sample) and in the
-    # document's key order. The rest of the loop's order is Task 2's and is
-    # left alone: it decides only which block a document missing SEVERAL of
-    # them is named for, and no corpus case can pin that — neither reader
-    # reaches an invariant on such a document.
-    integrity = doc.get("integrity")
-    objectives = doc.get("objectives")
-    sample = doc.get("sample")
-    measured = doc.get("measured")
-    source = doc.get("source")
-    engine = doc.get("engine")
-    evidence = doc.get("evidence")
-    for name, block in (
-        ("integrity", integrity),
-        ("objectives", objectives),
-        ("sample", sample),
-        ("measured", measured),
-        ("source", source),
-        ("engine", engine),
-        ("evidence", evidence),
-    ):
-        if not isinstance(block, dict):
+    # `REQUIRED_BLOCKS` is the whole list and its order is load-bearing; both
+    # are argued at the constant's own definition above.
+    for name in REQUIRED_BLOCKS:
+        if not isinstance(doc.get(name), dict):
             return f"the document has no {name} block; it is not a drill scorecard"
+
+    # Bound only after the loop above has proved each one is a dict, so the
+    # arms below can read through them without a second guard.
+    engine = doc["engine"]
+    source = doc["source"]
+    measured = doc["measured"]
+    objectives = doc["objectives"]
+    sample = doc["sample"]
+    integrity = doc["integrity"]
+    evidence = doc["evidence"]
 
     # Also shape, and also the Rust reader's type doing the work over there:
     # `sample.records_expected` is a `u64`, so `null`, a string or an absent
@@ -391,6 +486,42 @@ def check_invariants(doc) -> str:
     expected = sample.get("records_expected")
     if not isinstance(expected, int) or isinstance(expected, bool):
         return "sample.records_expected is not an integer"
+
+    # THE u64 DOMAIN, not merely the JSON type (Task 5d, from Task 5c's review
+    # finding F1). `isinstance(v, int)` mirrors serde's TYPE and not `u64`'s
+    # DOMAIN, and the gap was a live two-reader disagreement of exactly the
+    # class the check above exists to close: on `sample.records_expected:
+    # 18446744073709551616` (`u64::MAX + 1`), `drill verify` exited 1 —
+    # `invalid type: floating point 1.8446744073709552e+19, expected u64` —
+    # while this script printed `VALID` and exited 0. `-1` diverged the other
+    # way: Rust refused at DESERIALISATION (`invalid value: integer -1,
+    # expected u64`) and this script reached an INVARIANT and reported
+    # `records_sampled (75) exceeds sample.records_expected (-1)` — the same
+    # verdict by a route that says something else entirely. Both are measured
+    # at `6619090`, not argued.
+    #
+    # Python's `int` is unbounded, so every field the Rust reader types as
+    # `u64` needs the bound stated here or it has no bound at all. ALL ELEVEN
+    # are listed — not just the one the review found — because a domain check
+    # on one field of a type is a reminder, not a rule. The list is the `u64`
+    # fields of `logweir_core::scorecard::Scorecard` and its blocks:
+    # `sample.records_expected`, `sample.records_restored`,
+    # `integrity.records_sampled`, `integrity.records_sampled_matching`,
+    # `integrity.mismatches`, the four `measured.rto_*_seconds`,
+    # `objectives.rto_seconds` and `phases[].duration_ms`. The `rpo` fields are
+    # `i64` and are NOT here; their own arm below refuses a negative gap.
+    #
+    # The refusal wording is this repository's own, so `shape-index.json`
+    # records it WHOLE, and Rust's half — serde's text, which cannot be matched
+    # byte-for-byte from Python — is recorded there as a prefix, exactly as the
+    # missing-`sample` case does it.
+    for name, value in _u64_fields(doc, measured, objectives, sample, integrity):
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool):
+            return f"{name} is not an integer"
+        if not 0 <= value < 2**64:
+            return f"{name} is outside the u64 domain (0 <= v < 2**64): {value}"
 
     # T0-2: the four post-put fields are zeroed BEFORE signing, because they
     # describe an upload that has not happened yet. Mirrors the arm that sits
@@ -783,8 +914,8 @@ def main(
         print(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
             "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, "
-            "outcome-entailment, required-block shape incl. sample; "
-            "approval.self_attested derived, not echoed)"
+            "outcome-entailment, all eleven required blocks in serde order, "
+            "u64 domain; approval.self_attested derived, not echoed)"
         )
         return 0
 

@@ -259,6 +259,34 @@ not an integer with `INVALID: sample.records_expected is not an integer`. The
 pair is walked by both readers in
 `crates/logweir/tests/two_reader_parity.rs::two_reader_parity_on_documents_refused_before_the_invariants`.
 
+### EVERY required block, and the `u64` domain (`1.6.0`)
+
+`sample` was one of eleven, and until `verify_scorecard.py` `1.6.0` the script
+checked seven of them. Measured at `6619090` on documents derived from
+`e2e/fixtures/invariants/unmodified_example.json`, a scorecard with `target`,
+`target_diff` or `topic_parity` deleted was refused by `logweir drill verify`
+(exit **1**, ``missing field `target` ``) and printed **`VALID`** here — the
+same divergence `sample` was in, three more times. `1.6.0` takes the block list
+from the struct instead of growing it one arm at a time, and
+`crates/logweir/tests/two_reader_parity.rs::every_required_block_has_a_shape_corpus_case`
+refuses to let the two drift apart.
+
+The list is also **in the struct's declaration order**, because that is the
+order `serde` reports a missing field in. On a document missing several blocks
+the two readers named different ones — `measured` from `drill verify` and
+`integrity` from the script; they now both name `measured`.
+
+`1.6.0` also bounds the **domain** of every integer field the Rust reader types
+as `u64`: the four `measured.rto_*_seconds`, `objectives.rto_seconds`,
+`sample.records_expected`, `sample.records_restored`,
+`integrity.records_sampled`, `integrity.records_sampled_matching`,
+`integrity.mismatches` and `phases[].duration_ms`. Python's `int` is unbounded,
+so `isinstance(v, int)` mirrored serde's *type* and not its domain, and
+`"records_expected": 18446744073709551616` — one past `u64::MAX` — printed
+`VALID` here while `drill verify` exited **1**. Both readers now refuse it, and
+both refuse a negative value; the Rust texts are serde's own and are recorded
+per-reader in `e2e/fixtures/invariants/shape-index.json`.
+
 ## `target_diff`, `integrity`, `topic_parity`
 
 | Field | Type | Meaning |

@@ -163,24 +163,64 @@ arm *and* its `uncovered-arms.json` entry in the same edit.
 
 ## `shape-index.json` — parity BEFORE the invariants
 
-Three documents that neither reader reaches an invariant on:
-`no_sample_block.json` and `no_evidence_block.json`, each
-`unmodified_example.json` with one whole top-level block removed and nothing
-else touched, and `records_expected_not_an_integer.json`, which is the same
-document with the single override `sample.records_expected: 75 → "75"`.
+Fifteen documents that neither reader reaches an invariant on. Eleven are
+`unmodified_example.json` with one whole required block removed and nothing else
+touched; one has two removed at once; three override
+`sample.records_expected` alone.
 
-The third is not decoration. Under mutation, deleting the
-`records_expected` type check from `verify_scorecard.py` and leaving the two
-block cases as the only shape cases left the walker **green**: no corpus
-document had a mistyped `records_expected`, so nothing ran the check. It is
-here because the mutant survived without it.
+Every required block of `logweir_core::scorecard::Scorecard` is a non-optional
+field, so `serde_json` refuses a document missing one at **deserialisation** —
+`drill verify` exits `1` with `signature verified but the payload is not a
+scorecard: missing field ...` and never calls `validate_invariants`.
+`docs/verify_scorecard.py` has no such layer and asserts the same shape in its
+`REQUIRED_BLOCKS` loop.
 
-`sample` and `evidence` are non-optional fields of
-`logweir_core::scorecard::Scorecard`, so `serde_json` refuses a document
-missing one at **deserialisation** — `drill verify` exits `1` with `signature
-verified but the payload is not a scorecard: missing field ...` and never calls
-`validate_invariants`. `docs/verify_scorecard.py` has no such layer and asserts
-the same shape in its block-presence loop.
+### The `check` field, and the arithmetic it closes (Task 5d)
+
+Task 5c's review measured what this index could not do. Deleting a shape check
+from `verify_scorecard.py` **together with** its corpus case and its pytest left
+every gate green — the walker at 0, this directory's shell gate at 0 (reporting
+one fewer case, with no complaint) and `just lint` green — because nothing
+pinned the case count and nothing outside the deleted files knew the check had
+existed. Five of the seven block checks then had no corpus case at all, so
+deleting any of those loop entries was silent on its own.
+
+Every entry now carries a `check` saying what it protects, and
+`crates/logweir/tests/two_reader_parity.rs::every_required_block_has_a_shape_corpus_case`
+plus `scripts/check-invariant-corpus.sh` require the arithmetic to close against
+**the Rust struct**, which a deletion in the Python and the corpus does not
+touch:
+
+| `check` | what it binds |
+|---|---|
+| `block:<name>` | exactly one case per required block of `Scorecard`, and exactly one block per case. `REQUIRED_BLOCKS` in `verify_scorecard.py` must name all eleven, **in the struct's declaration order**. |
+| `message:<fragment>` | a literal that must appear in `check_invariants`'s code, comments stripped — the shape layer's version of `index.json`'s `arm`. Several cases may name one fragment. |
+| `order:<a>,<b>` | a document missing several blocks. Both recorded refusals must name the same block: the first of them in the struct's declaration order. |
+
+That is the one thing the invariant corpus cannot do (see the `occurrences: 0`
+paragraph above): there `n` is counted from the same function the arm is deleted
+from, so a coordinated deletion re-balances. Here `n` is counted from
+`crates/logweir-core/src/scorecard.rs`.
+
+### Why each odd one is here
+
+* `records_expected_not_an_integer.json` (`75 → "75"`) is not decoration. Under
+  mutation, deleting the `records_expected` type check while the two block cases
+  were the only shape cases left the walker **green**: no corpus document had a
+  mistyped `records_expected`, so nothing ran the check. It is here because the
+  mutant survived without it (Task 5c).
+* `records_expected_out_of_u64_domain.json` (`75 → 18446744073709551616`) and
+  `records_expected_negative.json` (`75 → -1`) are Task 5c's review finding F1,
+  measured at `6619090`: on the first, `drill verify` exited `1` and
+  `verify_scorecard.py` printed `VALID`; on the second both refused, but Rust at
+  deserialisation and Python on an *invariant* (`records_sampled (75) exceeds
+  sample.records_expected (-1)`) — the same verdict for a different reason.
+* `no_measured_and_no_integrity_blocks.json` is finding F3, and it is the pair
+  that actually diverged: `drill verify` named `measured` and
+  `verify_scorecard.py` named `integrity`. (The review's own probe — `sample`
+  and `evidence` — agrees under either order, because `sample` precedes
+  `evidence` both ways.) Pinning the loop to the struct's declaration order is
+  what makes both readers name `measured`.
 
 These cannot be `index.json` entries, and that is measured rather than assumed:
 an entry for `no_sample_block.json` makes
@@ -197,7 +237,10 @@ invariant space alone.
 
 Until Task 5c the `sample` half was a live disagreement, not a formality: on
 `no_sample_block.json`, `drill verify` exited `1` and `verify_scorecard.py`
-printed `VALID` and exited `0`.
+printed `VALID` and exited `0`. Task 5d found three more of exactly that shape —
+`target`, `target_diff` and `topic_parity`, each measured the same way at
+`6619090` — which is what the closed arithmetic above is for: the block list is
+now taken from the struct rather than grown one arm at a time.
 
 ---
 

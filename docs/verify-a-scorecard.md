@@ -663,7 +663,7 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.5.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, required-block shape incl. sample; approval.self_attested derived, not echoed)
+       verifier: verify_scorecard.py 1.6.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, u64 domain; approval.self_attested derived, not echoed)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
@@ -686,6 +686,7 @@ far is such a move:
 | `1.3.0` | Refuses a `partial` integrity result whose `partial_reason` is **blank** (`""` or whitespace) and not merely null, and refuses any document with a non-empty `redactions`. Both were `VALID` under `1.2.0`. |
 | `1.4.0` | Reads `outcome` **for the first time**. Refuses a document whose headline field contradicts the fields it summarises: `pass` beside a non-`pass` `integrity.result`, beside a non-blank `partial_reason`, beside `objectives.met: false`, or beside a sample where not every record matched; a `records_sampled` larger than `sample.records_expected`; and `engine.matrix_verdict: "pass"` on a drill that did not pass at `byte-fingerprint` level. All were `VALID` under `1.3.0`. |
 | `1.5.0` | Requires the `sample` block and an integer `sample.records_expected`. A scorecard with no `sample` block at all — or with `"records_expected": "75"` — printed `VALID` under `1.4.0` while `logweir drill verify` exited **1** on the same bytes, because Rust gets the shape from its own types and this script had no equivalent layer. Not an invariant arm; a bump all the same, because there are documents this script now decides differently. |
+| `1.6.0` | Completes the shape layer and pins its order. All **eleven** required blocks are checked, not seven — `target`, `approval`, `target_diff` and `topic_parity` join the list, and a document missing any of the first three printed `VALID` under `1.5.0` while `logweir drill verify` exited **1**. Every field the Rust reader types as `u64` must satisfy `0 <= v < 2**64`, where `isinstance(v, int)` mirrored serde's *type* and not its *domain*: `sample.records_expected: 18446744073709551616` was `VALID` under `1.5.0` and exit **1** from `drill verify`. And the block list is now in the struct's declaration order, so a document missing several blocks is named for the same block by both readers. |
 
 The parenthetical on the `verifier:` line enumerates the current invariant set,
 so the line an auditor reads names the checks that actually produced the verdict
@@ -715,6 +716,21 @@ against — was refused by `logweir drill verify` and called `VALID` by this
 script. If you hold a `VALID` printed by `1.4.0` or earlier and you cannot see a
 `sample` block in the document it was printed for, that `VALID` was wrong. Run
 `1.5.0` over it.
+
+`1.6.0` is worth re-running for the same reason, three more times over. `1.5.0`
+closed the `sample` block; `1.6.0` closed `target`, `target_diff` and
+`topic_parity`, each of which was the identical divergence — a document with the
+block deleted, refused by `logweir drill verify` and called `VALID` here — and
+each of which was missed because this script's arms never read those blocks. The
+block list is now taken from the Rust struct rather than grown one arm at a time,
+and a test refuses to let the two drift apart, so this class of gap is closed
+rather than reduced.
+
+`1.6.0` also bounds every `u64` field. Python integers have no upper limit, so
+`"records_expected": 18446744073709551616` — one past `u64::MAX` — satisfied an
+`isinstance(v, int)` check that `logweir drill verify` refuses outright. If you
+hold a `VALID` for a document whose record counts are implausibly large, re-run
+it.
 
 Read the version line, not just the verdict. The verdict alone cannot tell you
 which rule produced it.
