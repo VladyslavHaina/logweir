@@ -7,6 +7,13 @@
 #
 #     docker build --platform linux/amd64 -t logweir:v0.1.0 .
 #
+# TO BUILD *AND VERIFY*, WHICH IS THE ONLY WAY THIS FILE'S DEFECTS HAVE EVER
+# BEEN FOUND, run `just smoke` — `just image` builds the tag `logweir:check`
+# with the platform above, and `scripts/check-image.sh logweir:check` then
+# asserts the linkage, both CLIs, the approval round-trip and both licences.
+# Every comment below records a defect that a successful `docker build` did not
+# catch, so do not treat a green build as a verified image.
+#
 # Upstream publishes `osodevops/kafka-backup` for linux/amd64 ONLY. On an arm64
 # host a plain `docker build` fails at the `engine` stage below with
 # "no match for platform in manifest: not found" — verified on darwin/arm64,

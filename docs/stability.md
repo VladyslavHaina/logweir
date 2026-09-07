@@ -386,6 +386,34 @@ a firewall that DROPs, or a wedged sink, was. Notifications now go through
 logged exactly like any other transport failure, so the exit-code contract is
 unchanged.
 
+- **The image smoke gate (`just smoke`) — what it needs, what it proves, what it costs.**
+  `just smoke` needs `docker` and `openssl` on the host and builds a `linux/amd64`
+  image; on an arm64 host that build runs under emulation.
+  `scripts/check-image.sh <image-ref>` proves five things about the image: the
+  `logweir` binary's dynamic linkage resolves (`ldd`, GC10), `kafka-backup --version`
+  runs, `logweir --version` runs, `drill approve` mints a signed approval over
+  `examples/drill.yaml`, and both redistributed licences are present (GC15). It proves
+  **nothing** about a real drill: no broker, no bucket, no cluster and no archive is
+  touched.
+
+  Measured on the development host on 2026-09-06, arm64, from a **single emulated
+  `linux/amd64` run — a floor, not a support statement**. Task 17 sizes CronJob
+  `requests` from these numbers and must not read them as a guarantee.
+  - `docker build --platform linux/amd64`, cold: `00:50:44`; warm: `00:00:05`.
+  - `bash scripts/check-image.sh logweir:check`: `00:18`.
+  - resulting image size (`docker image inspect --format '{{.Size}}'`): `54450704` bytes.
+  - peak RSS: `not observed`.
+
+  Read "cold" narrowly, because it is the number most likely to be quoted at
+  something it does not cover. In that run the two `apt-get` layers and both base
+  images were already in the local BuildKit cache; what ran cold was
+  `RUN cargo build --release -p logweir`, and it alone took **3027 s of the 3044 s**.
+  A machine with an empty cache pays more, and the "warm" figure is a full cache hit
+  that compiles nothing — it is what a re-run costs when no file in the build context
+  has changed, and **any** edit to a tracked file invalidates it back to ~50 minutes,
+  because `COPY . .` precedes the cargo layer. There is no cargo cache mount in the
+  builder stage, so the compile never resumes; it restarts.
+
 ## Recorded rulings that have no ADR yet
 
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3

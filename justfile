@@ -219,3 +219,32 @@ links:
 # check as UNVERIFIED rather than skipping it silently.
 dod:
     ./scripts/check-dod.sh
+
+# Task 8. Build the runtime image into the LOCAL daemon, linux/amd64 explicitly:
+# the engine layer (Dockerfile:46) has no arm64 manifest, and `imagePullPolicy:
+# Never` (Tasks 16/17) needs the image in the daemon, not in a registry. On an
+# arm64 host this runs under emulation and is SLOW — see the wall-clock in
+# docs/stability.md, under "Known limitations of v0.1".
+#
+# THE NAMED PRODUCER of the local `logweir:check` tag. Tasks 16, 17 and 19 need
+# a locally built image and must call this recipe rather than open-code a
+# `docker build`, so there is one place where the platform is stated.
+image:
+    docker build --platform linux/amd64 -t logweir:check .
+
+# Task 8 / Phase 1 line item 1f. THE gate for the image, replacing the release
+# workflow that has never executed on any commit including the tag. One
+# implementation (scripts/check-image.sh), two callers: this recipe and
+# release.yml (Task 9).
+#
+# EVERY EXIT CODE BELOW IS READ DIRECTLY. `just` runs each line in its own
+# shell and aborts on the first non-zero status, so nothing here is piped and
+# no status is swallowed — which is the failure this whole extraction is about.
+#
+# DELIBERATELY NOT PART OF `lint`, `test`, `default` OR `e2e`: an emulated
+# amd64 image build must never become a precondition of the Docker-free test
+# run. The image tests are `#[ignore]`d for the same reason and are run here,
+# explicitly, with `--ignored`. Task 22 decides where `smoke` sits in `just gate`.
+smoke: image
+    bash scripts/check-image.sh logweir:check
+    cargo test -p e2e --features e2e --test check_image -- --ignored --test-threads=1
