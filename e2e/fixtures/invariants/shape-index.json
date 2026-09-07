@@ -133,5 +133,86 @@
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: invalid value: integer `-1`, expected u64",
     "python_reason": "sample.records_expected is outside the u64 domain (0 <= v < 2**64): -1"
+  },
+  {
+    "id": "no_format_version_field",
+    "file": "no_format_version_field.json",
+    "check": "field:format_version",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `format_version`",
+    "python_reason": "format_version None is not a parseable semver"
+  },
+  {
+    "id": "no_run_id_field",
+    "file": "no_run_id_field.json",
+    "check": "field:run_id",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `run_id`",
+    "python_reason": "the document has no run_id field; it is not a drill scorecard"
+  },
+  {
+    "id": "no_outcome_field",
+    "file": "no_outcome_field.json",
+    "check": "field:outcome",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `outcome`",
+    "python_reason": "the document has no outcome field; it is not a drill scorecard"
+  },
+  {
+    "id": "no_last_phase_completed_field",
+    "file": "no_last_phase_completed_field.json",
+    "check": "field:last_phase_completed",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `last_phase_completed`",
+    "python_reason": "the document has no last_phase_completed field; it is not a drill scorecard"
+  },
+  {
+    "id": "no_requested_at_field",
+    "file": "no_requested_at_field.json",
+    "check": "field:requested_at",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `requested_at`",
+    "python_reason": "the document has no requested_at field; it is not a drill scorecard"
+  },
+  {
+    "id": "no_phases_field",
+    "file": "no_phases_field.json",
+    "check": "field:phases",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: missing field `phases`",
+    "python_reason": "the document has no phases field; it is not a drill scorecard"
+  },
+  {
+    "id": "records_restored_null",
+    "file": "records_restored_null.json",
+    "check": "message:if optional and value is None:",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+    "python_reason": "sample.records_restored is not an integer"
+  },
+  {
+    "id": "mismatches_null",
+    "file": "mismatches_null.json",
+    "check": "message:if optional and value is None:",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+    "python_reason": "integrity.mismatches is not an integer"
+  },
+  {
+    "id": "duration_ms_null",
+    "file": "duration_ms_null.json",
+    "check": "message:if optional and value is None:",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+    "python_reason": "phases[0].duration_ms is not an integer"
   }
 ]

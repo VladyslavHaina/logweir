@@ -196,6 +196,29 @@ FORMAT_VERSION = "1.0.0"
 #          blocks is named for the SAME block by both readers; `measured` +
 #          `integrity` missing together used to be named `measured` by Rust and
 #          `integrity` here.
+#   1.7.0  SHAPE a third time (Task 5e, from Task 5d's review findings F1, F3
+#          and F4), and a bump for the same reason as 1.5.0 and 1.6.0: there are
+#          documents this script now decides differently. No arm weakened, no
+#          check removed. (a) THE REQUIRED NON-BLOCK FIELDS. `Scorecard` has six
+#          required fields whose type is not one of the blocks —
+#          `format_version`, `run_id`, `outcome`, `last_phase_completed`,
+#          `requested_at` and `phases` — and the block-presence loop covered
+#          none of them, because a block is a JSON object and these are not.
+#          With `run_id`, `requested_at` or `phases` absent, `drill verify`
+#          exited 1 (`missing field ...`) and this script printed `VALID`; with
+#          `outcome` absent it refused, but on an INVARIANT about
+#          `engine.matrix_verdict`, which tells an auditor something that is not
+#          what is wrong with the document. `REQUIRED_FIELDS` is the whole list,
+#          in the struct's declaration order. (b) `null` IS NO LONGER SKIPPED ON
+#          A NON-`Option` u64. `if value is None: continue` treated all eleven
+#          `u64` fields as nullable; only five are `Option<u64>` in Rust. On
+#          `sample.records_restored: null`, `integrity.mismatches: null` and
+#          `phases[].duration_ms: null`, `drill verify` exited 1 (`invalid type:
+#          null, expected u64`) and this script printed `VALID`. Every
+#          `U64_FIELDS` entry now carries the Rust optionality and the five
+#          `Option<u64>` fields still accept null. (c) THE u64 LIST IS IN THE
+#          STRUCT'S DECLARATION ORDER and has closed arithmetic OUTSIDE this
+#          file, which 1.6.0's did not — argued at `U64_FIELDS`.
 #
 # ANY task that adds or removes an arm in `check_invariants` bumps this minor
 # and updates the parenthetical in the success line below, IN THE SAME COMMIT.
@@ -206,7 +229,7 @@ FORMAT_VERSION = "1.0.0"
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.6.0"
+SCRIPT_VERSION = "1.7.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -365,8 +388,65 @@ REQUIRED_BLOCKS = (
     "evidence",
 )
 
-# EVERY FIELD `logweir_core::scorecard::Scorecard` TYPES AS `u64`, as
-# (dotted name, value) pairs — the list `check_invariants`'s domain check walks.
+# EVERY REQUIRED FIELD OF `logweir_core::scorecard::Scorecard` THAT IS NOT A
+# BLOCK, IN SERDE'S STRUCT DECLARATION ORDER. Machine-checked against the struct
+# by `crates/logweir/tests/two_reader_parity.rs::
+# every_required_non_block_field_has_a_shape_corpus_case` and by
+# `scripts/check-invariant-corpus.sh`, both of which read the struct rather than
+# this tuple — the same fixed point, and for the same reason, as the block list
+# above.
+#
+# WHICH FIELDS. Every field of `Scorecard` carrying no `#[serde(default)]` whose
+# type is NOT one of the structs declared beside it: a `String`, an enum from
+# another module, an `i8`, a `DateTime<Utc>` and a `Vec<PhaseRecord>`. None
+# deserialises from a missing key, so `serde_json` refuses a document missing any
+# one of them at DESERIALISATION exactly as it does for a block, and `drill
+# verify` exits 1 with `missing field ...` without reaching
+# `validate_invariants`.
+#
+# Task 5d's review, finding F3, measured what their absence cost, on documents
+# derived from `e2e/fixtures/invariants/unmodified_example.json` and signed:
+# with `run_id`, `requested_at` or `phases` deleted, `drill verify` exited 1 and
+# this script printed `VALID` and exited 0 — the same live two-reader
+# disagreement the block loop closed, three more times. `phases` is the one that
+# also defeated 1.6.0's order claim: it sits BETWEEN `approval` and `measured` in
+# the struct, so serde reaches it before `measured` and this script did not reach
+# it at all.
+#
+# PRESENCE ONLY, and deliberately so. The block loop can assert a TYPE as well
+# (`isinstance(..., dict)`) because every block is a JSON object; these six carry
+# five different Rust types and share no JSON shape, so the honest common claim
+# is that the key is there. A `phases` that is present but not a list is still
+# refused by Rust and not here — recorded as a residual in
+# `docs/verify-a-scorecard.md` rather than closed by a check that would have to
+# guess at five types.
+#
+# `format_version` is in the list and its check here is UNREACHABLE: the Global
+# Constraint 12 rule at the top of `check_invariants` runs first and refuses an
+# absent one as `format_version None is not a parseable semver`. It stays,
+# because the list is DERIVED from the struct and an exception is a hole in the
+# derivation; the corpus case `no_format_version_field` records the refusal that
+# actually happens.
+#
+# WHERE THE LOOP RUNS: AFTER the block loop, never before. serde names the FIRST
+# missing field in declaration order over blocks and non-blocks alike, and
+# `phases` sits between `approval` and `measured`; running this loop first would
+# make a document missing `phases` AND `engine` named `phases` here and `engine`
+# there — turning a pair the two readers agree on today into one they do not.
+# Running it after preserves every answer this script already gives on a
+# multi-missing document and adds the six single-field ones.
+REQUIRED_FIELDS = (
+    "format_version",
+    "run_id",
+    "outcome",
+    "last_phase_completed",
+    "requested_at",
+    "phases",
+)
+
+# EVERY FIELD `logweir_core::scorecard::Scorecard` AND ITS BLOCKS TYPE AS `u64`,
+# as (dotted name, the field is `Option<u64>` in Rust) pairs, IN SERDE'S
+# DECLARATION ORDER — the list `check_invariants`'s domain check walks.
 #
 # It is a list and not a single field on purpose. Task 5c's review found the
 # domain gap on `sample.records_expected`; fixing that one field alone would
@@ -375,40 +455,74 @@ REQUIRED_BLOCKS = (
 # `crates/logweir-core/src/scorecard.rs` and this list is what comes back, minus
 # `major_version`'s return type, which is not a document field.
 #
-# `phases` is a `Vec<PhaseRecord>` rather than a block, so it is NOT in the
-# block-presence loop and cannot be assumed present here: a non-list, or an
-# element that is not a dict, is skipped rather than raising. Rust refuses such
-# a document at deserialisation; this function's contract is that no field
-# access ever surfaces as a traceback.
+# CLOSED ARITHMETIC, AND IT LIVES OUTSIDE `docs/` (Task 5e, from Task 5d's
+# review finding F1). 1.6.0 derived this list from the struct in ONE place — a
+# `def test_*` in `docs/test_verify_scorecard.py` — which is the same file an
+# attacker deletes from. Measured at `e807376`: deleting `integrity.mismatches`
+# from this tuple TOGETHER WITH its pytest case and
+# `test_the_u64_field_list_matches_the_rust_struct` left pytest at 0, the parity
+# walker at 0 and `scripts/check-invariant-corpus.sh` at 0 — and
+# `integrity.mismatches: 2**64` was `drill verify` exit 1 against `VALID` here
+# again. `crates/logweir/tests/two_reader_parity.rs::
+# every_u64_field_has_the_same_domain_check_in_both_readers` and the arithmetic
+# block in `scripts/check-invariant-corpus.sh` now re-derive this whole list —
+# names, order AND optionality — from `crates/logweir-core/src/scorecard.rs`,
+# which that deletion does not touch. Both print the two lists on a mismatch.
+#
+# THE SECOND ELEMENT IS THE RUST OPTIONALITY, and it decides what `null` means.
+# `Option<u64>` accepts null; a plain `u64` does not, and `serde_json` says
+# `invalid type: null, expected u64`. 1.6.0 skipped `None` for all eleven, so
+# `sample.records_restored: null` printed `VALID` here and exited 1 there (Task
+# 5d's review, finding F4). Five of the eleven are `Option<u64>` and are marked
+# `True`; the six plain `u64` fields are marked `False` and refuse null.
+#
+# `phases[]` is the one entry whose block is not a block: `phases` is a
+# `Vec<PhaseRecord>`, so the entry expands to one triple per record with the
+# record's index substituted into the name. It is FIRST because `phases` is
+# declared before `measured` in `Scorecard` and serde reports fields in
+# declaration order.
 U64_FIELDS = (
-    ("measured", "rto_seconds"),
-    ("measured", "rto_requested_to_verified_seconds"),
-    ("measured", "rto_restore_only_seconds"),
-    ("measured", "rto_excluding_preflight_seconds"),
-    ("objectives", "rto_seconds"),
-    ("sample", "records_expected"),
-    ("sample", "records_restored"),
-    ("integrity", "records_sampled"),
-    ("integrity", "records_sampled_matching"),
-    ("integrity", "mismatches"),
+    ("phases[].duration_ms", False),
+    ("measured.rto_seconds", True),
+    ("measured.rto_requested_to_verified_seconds", True),
+    ("measured.rto_restore_only_seconds", True),
+    ("measured.rto_excluding_preflight_seconds", True),
+    ("objectives.rto_seconds", True),
+    ("sample.records_expected", False),
+    ("sample.records_restored", False),
+    ("integrity.records_sampled", False),
+    ("integrity.records_sampled_matching", False),
+    ("integrity.mismatches", False),
 )
 
 
 def _u64_fields(doc, measured, objectives, sample, integrity):
-    """(dotted name, value) for every `u64` field of the document."""
+    """(dotted name, value, the field is `Option<u64>` in Rust) for every `u64`
+    field of the document.
+
+    `phases` is a `Vec<PhaseRecord>` rather than a block, so it is NOT in the
+    block-presence loop and cannot be assumed well-formed here: a non-list, or
+    an element that is not a dict, is skipped rather than raising. Rust refuses
+    such a document at deserialisation; this function's contract is that no
+    field access ever surfaces as a traceback. (`phases` being ABSENT is a
+    different claim and is refused by the `REQUIRED_FIELDS` loop.)
+    """
     blocks = {
         "measured": measured,
         "objectives": objectives,
         "sample": sample,
         "integrity": integrity,
     }
-    for block, key in U64_FIELDS:
-        yield f"{block}.{key}", blocks[block].get(key)
     phases = doc.get("phases")
-    if isinstance(phases, list):
-        for n, phase in enumerate(phases):
-            if isinstance(phase, dict):
-                yield f"phases[{n}].duration_ms", phase.get("duration_ms")
+    for path, optional in U64_FIELDS:
+        block, key = path.split(".", 1)
+        if block == "phases[]":
+            if isinstance(phases, list):
+                for n, phase in enumerate(phases):
+                    if isinstance(phase, dict):
+                        yield f"phases[{n}].{key}", phase.get(key), optional
+            continue
+        yield path, blocks[block].get(key), optional
 
 
 def check_invariants(doc) -> str:
@@ -464,6 +578,18 @@ def check_invariants(doc) -> str:
         if not isinstance(doc.get(name), dict):
             return f"the document has no {name} block; it is not a drill scorecard"
 
+    # THE REQUIRED NON-BLOCK FIELDS — the same layer, the same claim, for the six
+    # required fields of `Scorecard` whose type is not a block and which the loop
+    # above therefore structurally cannot hold (Task 5e, from Task 5d's review
+    # finding F3: with `run_id`, `requested_at` or `phases` absent, `drill
+    # verify` exited 1 and this script printed `VALID`).
+    #
+    # AFTER the block loop and never before it — the reason is argued in full at
+    # `REQUIRED_FIELDS`. Presence only, for the reason argued there too.
+    for name in REQUIRED_FIELDS:
+        if name not in doc:
+            return f"the document has no {name} field; it is not a drill scorecard"
+
     # Bound only after the loop above has proved each one is a dict, so the
     # arms below can read through them without a second guard.
     engine = doc["engine"]
@@ -517,8 +643,18 @@ def check_invariants(doc) -> str:
     # records it WHOLE, and Rust's half — serde's text, which cannot be matched
     # byte-for-byte from Python — is recorded there as a prefix, exactly as the
     # missing-`sample` case does it.
-    for name, value in _u64_fields(doc, measured, objectives, sample, integrity):
-        if value is None:
+    #
+    # `null` IS SKIPPED ONLY WHERE RUST HAS AN `Option<u64>` (Task 5e, from Task
+    # 5d's review finding F4). 1.6.0 skipped it for all eleven; six of them are
+    # plain `u64`, where `serde_json` says `invalid type: null, expected u64`. On
+    # `sample.records_restored: null`, `integrity.mismatches: null` and
+    # `phases[0].duration_ms: null`, `drill verify` exited 1 and this script
+    # printed `VALID` — measured at `e807376`, not argued. An ABSENT key arrives
+    # here as `None` as well and is refused by the same line, which is the same
+    # claim by a different route: Rust says `missing field ...`, and either way
+    # the document does not carry the integer it promises.
+    for name, value, optional in _u64_fields(doc, measured, objectives, sample, integrity):
+        if optional and value is None:
             continue
         if not isinstance(value, int) or isinstance(value, bool):
             return f"{name} is not an integer"
@@ -917,7 +1053,8 @@ def main(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
             "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, "
             "outcome-entailment, all eleven required blocks in serde order, "
-            "u64 domain; approval.self_attested derived, not echoed)"
+            "the six required non-block fields, u64 domain with null refused where "
+            "Rust has no Option; approval.self_attested derived, not echoed)"
         )
         return 0
 

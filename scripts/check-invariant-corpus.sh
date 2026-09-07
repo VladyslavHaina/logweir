@@ -27,6 +27,14 @@
 # arithmetic below is what makes that fail: the block list comes from the Rust
 # struct, which the deletion does not touch.
 #
+# Task 5e: the same arithmetic now closes over TWO more lists that had none —
+# the required NON-block fields of `Scorecard` (`REQUIRED_FIELDS`) and every
+# field it types as `u64`, with its optionality (`U64_FIELDS`). Task 5d's review
+# measured the second gap the same way: deleting one `U64_FIELDS` entry, its
+# pytest case and `test_the_u64_field_list_matches_the_rust_struct` — all three
+# inside `docs/` — left this gate at 0 and put `integrity.mismatches: 2**64`
+# back to `drill verify` exit 1 against `VALID` from the script.
+#
 # The corpus cases are UNSIGNED on disk (see e2e/fixtures/invariants/README.md).
 # `verify_scorecard.py` checks the signature before it evaluates any invariant,
 # so each case is signed here, at test time, into a temp dir with the checked-in
@@ -125,8 +133,122 @@ if sorted(covered) != sorted(blocks):
         f"  required ({len(blocks)}): {blocks}\n  covered  ({len(covered)}): {covered}\n"
         "Every required block needs a shape-index.json case whose `check` is "
         '"block:<name>", and every such case needs a block.')
+
+# --- Task 5e (a): the required NON-BLOCK fields -----------------------------
+# A field is REQUIRED when it carries no `#[serde(default)]`; it is a BLOCK when
+# its type is one of the structs declared in the same file. The complement is
+# what `REQUIRED_FIELDS` must name, in the same order, and what the shape corpus
+# must carry one `field:` case for. Attribute lines are read, not just field
+# lines, so `#[schemars(...)]` is not mistaken for a default and the flag is
+# cleared at every field.
+required, defaulted = [], False
+for line in body.splitlines():
+    code = line.strip()
+    if not code or code.startswith("//"):
+        continue
+    if code.startswith("#"):
+        if "serde(default" in code:
+            defaulted = True
+        continue
+    m = re.match(r"^pub ([a-z0-9_]+): (.+),$", code)
+    if m and not defaulted:
+        required.append((m.group(1), m.group(2)))
+    defaulted = False
+non_block = [n for n, t in required if t not in declared]
+if not non_block:
+    raise SystemExit("Scorecard has no required non-block field; the parsing rule "
+                     "in check-invariant-corpus.sh no longer matches the struct")
+
+fields = re.search(r"^REQUIRED_FIELDS = \(\n(.*?)^\)$", py, re.M | re.S)
+if fields is None:
+    raise SystemExit("docs/verify_scorecard.py has no REQUIRED_FIELDS tuple")
+named_fields = re.findall(r'^    "([a-z0-9_]+)",$', fields.group(1), re.M)
+if named_fields != non_block:
+    raise SystemExit(
+        "docs/verify_scorecard.py's REQUIRED_FIELDS and Scorecard disagree.\n"
+        f"  python ({len(named_fields)}): {named_fields}\n"
+        f"  rust   ({len(non_block)}): {non_block}\n"
+        "Every required field of the struct that is NOT a block must be named by "
+        "the field-presence loop, in the struct's own declaration order.")
+
+field_cases = [e["check"].split(":", 1)[1] for e in shape
+               if e.get("check", "").startswith("field:")]
+if sorted(field_cases) != sorted(non_block):
+    raise SystemExit(
+        "the shape corpus does not account for Scorecard's required non-block "
+        f"fields.\n  required ({len(non_block)}): {non_block}\n"
+        f"  covered  ({len(field_cases)}): {field_cases}\n"
+        "Every required non-block field needs a shape-index.json case whose "
+        '`check` is "field:<name>".')
+
+# --- Task 5e (b): the u64 fields, with their optionality ---------------------
+# Walk Scorecard's own fields in declaration order; a field whose type is a
+# struct declared here contributes that struct's u64 fields under the field's
+# name, a Vec<T> of one under `<field>[]` and an Option<T> of one under
+# `<field>`. Every u64 line in the file must be reached that way, counted a
+# second and independent way off the raw text.
+u64_of, current = {}, None
+for line in rust.splitlines():
+    m = re.match(r"^pub struct ([A-Za-z0-9_]+)", line)
+    if m:
+        current = m.group(1)
+        u64_of.setdefault(current, [])
+        continue
+    if line == "}":
+        current = None
+        continue
+    if current is None:
+        continue
+    m = re.match(r"^    pub ([a-z0-9_]+): (u64|Option<u64>),$", line)
+    if m:
+        u64_of[current].append((m.group(1), m.group(2) == "Option<u64>"))
+
+rust_u64, reached = [], set()
+for name, ty in [(n, t) for n, t in
+                 re.findall(r"^    pub ([a-z0-9_]+): (.+),$", body, re.M)]:
+    inner = re.fullmatch(r"(?:Vec|Option)<([A-Za-z0-9_]+)>", ty)
+    if ty in declared:
+        owner, prefix = ty, name
+    elif inner and inner.group(1) in declared:
+        owner = inner.group(1)
+        prefix = f"{name}[]" if ty.startswith("Vec<") else name
+    else:
+        continue
+    reached.add(owner)
+    for field, optional in u64_of.get(owner, []):
+        rust_u64.append([f"{prefix}.{field}", optional])
+
+flat = len(re.findall(r"^    pub [a-z0-9_]+: (?:u64|Option<u64>),$", rust, re.M))
+if len(rust_u64) != flat:
+    unreached = sorted(s for s, f in u64_of.items() if f and s not in reached)
+    raise SystemExit(
+        f"crates/logweir-core/src/scorecard.rs declares {flat} u64 document field(s) "
+        f"but only {len(rust_u64)} are reachable from Scorecard by a struct field, a "
+        f"Vec<T> or an Option<T>. Unreached struct(s): {unreached}.")
+
+u64_tuple = re.search(r"^U64_FIELDS = \(\n(.*?)^\)$", py, re.M | re.S)
+if u64_tuple is None:
+    raise SystemExit("docs/verify_scorecard.py has no U64_FIELDS tuple")
+py_u64 = [[n, o == "True"] for n, o in
+          re.findall(r'^    \("([A-Za-z0-9_.\[\]]+)", (True|False)\),$',
+                     u64_tuple.group(1), re.M)]
+if py_u64 != rust_u64:
+    raise SystemExit(
+        "docs/verify_scorecard.py's U64_FIELDS and Scorecard disagree.\n"
+        f"  python ({len(py_u64)}): {py_u64}\n  rust   ({len(rust_u64)}): {rust_u64}\n"
+        "Every u64 field of the document needs an entry, in the struct's "
+        "declaration order, and the second element must be True exactly for "
+        "Option<u64>. Python's int is unbounded, so a field with no entry has no "
+        "domain check at all.")
+
 print(f"check-invariant-corpus: {len(blocks)} required blocks, "
       f"{len(blocks)} block-presence checks, {len(covered)} shape cases — closed")
+print(f"check-invariant-corpus: {len(non_block)} required non-block fields, "
+      f"{len(named_fields)} field-presence checks, {len(field_cases)} shape cases "
+      f"— closed")
+print(f"check-invariant-corpus: {len(rust_u64)} u64 document fields "
+      f"({sum(1 for _, o in rust_u64 if o)} Option<u64>), "
+      f"{len(py_u64)} domain checks — closed")
 PYEOF
 arith_rc=$?
 set -e

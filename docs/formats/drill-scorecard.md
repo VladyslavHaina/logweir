@@ -287,6 +287,38 @@ so `isinstance(v, int)` mirrored serde's *type* and not its domain, and
 both refuse a negative value; the Rust texts are serde's own and are recorded
 per-reader in `e2e/fixtures/invariants/shape-index.json`.
 
+### Every required field that is NOT a block, and `null` on a plain `u64` (`1.7.0`)
+
+Blocks were half the shape. `Scorecard` has **six** required fields whose type is
+not a block — `format_version`, `run_id`, `outcome`, `last_phase_completed`,
+`requested_at` and `phases` — and none carries `#[serde(default)]`, so
+`serde_json` refuses a document missing one at parse time exactly as it does for
+a block. Measured at `7e85937` on documents derived from
+`e2e/fixtures/invariants/unmodified_example.json`: with `run_id`, `requested_at`
+or `phases` absent, `logweir drill verify` exited **1** (``missing field
+`run_id` ``) and `docs/verify_scorecard.py` printed **`VALID`**; with `outcome`
+absent the script refused, but on an *invariant* about `engine.matrix_verdict`
+rather than on the missing field. Since `1.7.0` it refuses each with `INVALID:
+the document has no <name> field; it is not a drill scorecard`, and
+`crates/logweir/tests/two_reader_parity.rs::every_required_non_block_field_has_a_shape_corpus_case`
+keeps that list derived from the struct.
+
+`1.7.0` also stops treating every `u64` as nullable. Five of the eleven are
+`Option<u64>` in Rust — the four `measured.rto_*_seconds` and
+`objectives.rto_seconds` — and those accept `null` from both readers. The other
+six are plain `u64`, where `serde_json` says `invalid type: null, expected u64`;
+the script skipped them, so `sample.records_restored: null`,
+`integrity.records_sampled: null`, `integrity.records_sampled_matching: null`,
+`integrity.mismatches: null` and `phases[].duration_ms: null` each printed
+`VALID` here against exit **1** there. The optionality is now part of the list
+the walker re-derives from the struct, so it cannot drift.
+
+**What neither reader claims.** The field check is PRESENCE, not type: a
+`phases` that is present but is not a list is refused by `drill verify` and not
+by the script. And the script's field loop runs after its block loop, so a
+document missing a plain field *and* a block is named for the block here and for
+whichever comes first in the struct there. Both are recorded rather than closed.
+
 ## `target_diff`, `integrity`, `topic_parity`
 
 | Field | Type | Meaning |

@@ -163,17 +163,18 @@ arm *and* its `uncovered-arms.json` entry in the same edit.
 
 ## `shape-index.json` — parity BEFORE the invariants
 
-Fifteen documents that neither reader reaches an invariant on. Eleven are
+Twenty-four documents that neither reader reaches an invariant on. Eleven are
 `unmodified_example.json` with one whole required block removed and nothing else
-touched; one has two removed at once; three override
-`sample.records_expected` alone.
+touched; one has two removed at once; six have one required NON-block field
+removed; three override `sample.records_expected` alone; three set a
+non-`Option` `u64` field to `null`.
 
-Every required block of `logweir_core::scorecard::Scorecard` is a non-optional
-field, so `serde_json` refuses a document missing one at **deserialisation** —
-`drill verify` exits `1` with `signature verified but the payload is not a
-scorecard: missing field ...` and never calls `validate_invariants`.
-`docs/verify_scorecard.py` has no such layer and asserts the same shape in its
-`REQUIRED_BLOCKS` loop.
+Every required field of `logweir_core::scorecard::Scorecard` — block or not —
+carries no `#[serde(default)]`, so `serde_json` refuses a document missing one at
+**deserialisation**: `drill verify` exits `1` with `signature verified but the
+payload is not a scorecard: missing field ...` and never calls
+`validate_invariants`. `docs/verify_scorecard.py` has no such layer and asserts
+the same shape in its `REQUIRED_BLOCKS` and `REQUIRED_FIELDS` loops.
 
 ### The `check` field, and the arithmetic it closes (Task 5d)
 
@@ -194,8 +195,23 @@ touch:
 | `check` | what it binds |
 |---|---|
 | `block:<name>` | exactly one case per required block of `Scorecard`, and exactly one block per case. `REQUIRED_BLOCKS` in `verify_scorecard.py` must name all eleven, **in the struct's declaration order**. |
+| `field:<name>` | exactly one case per required NON-block field of `Scorecard`, and exactly one field per case (Task 5e). `REQUIRED_FIELDS` in `verify_scorecard.py` must name all six, **in the struct's declaration order**. A required field is one carrying no `#[serde(default)]`; a block is one whose type is a struct declared in the same file, so these six are the complement. |
 | `message:<fragment>` | a literal that must appear in `check_invariants`'s code, comments stripped — the shape layer's version of `index.json`'s `arm`. Several cases may name one fragment. |
 | `order:<a>,<b>` | a document missing several blocks. Both recorded refusals must name the same block: the first of them in the struct's declaration order. |
+
+Task 5e added a THIRD closed list beside those two, and it is not a `check`
+kind because it is not about documents at all: `U64_FIELDS` in
+`verify_scorecard.py` — every field the Rust reader types as `u64`, with its
+dotted name, in the struct's declaration order, and a flag that is `True`
+exactly for `Option<u64>`. It is re-derived from
+`crates/logweir-core/src/scorecard.rs` by
+`crates/logweir/tests/two_reader_parity.rs::every_u64_field_has_the_same_domain_check_in_both_readers`
+and by `scripts/check-invariant-corpus.sh`. Task 5d's review, finding F1,
+measured why that mattered: the list's only struct-derived check lived in
+`docs/test_verify_scorecard.py`, so deleting one entry, its pytest case and that
+test in one edit left pytest, the walker and this directory's shell gate all
+green — and put `integrity.mismatches: 2**64` back to `drill verify` exit `1`
+against `VALID` from the script.
 
 That is the one thing the invariant corpus cannot do (see the `occurrences: 0`
 paragraph above): there `n` is counted from the same function the arm is deleted
@@ -215,7 +231,29 @@ from, so a coordinated deletion re-balances. Here `n` is counted from
   `verify_scorecard.py` printed `VALID`; on the second both refused, but Rust at
   deserialisation and Python on an *invariant* (`records_sampled (75) exceeds
   sample.records_expected (-1)`) — the same verdict for a different reason.
-* `no_measured_and_no_integrity_blocks.json` is finding F3, and it is the pair
+* `no_format_version_field.json`, `no_run_id_field.json`,
+  `no_outcome_field.json`, `no_last_phase_completed_field.json`,
+  `no_requested_at_field.json` and `no_phases_field.json` are Task 5d's review
+  finding F3, measured at `7e85937`: with `run_id`, `requested_at` or `phases`
+  absent, `drill verify` exited `1` and `verify_scorecard.py` printed `VALID`
+  and exited `0`; with `outcome` absent it refused on an *invariant* about
+  `engine.matrix_verdict`, which is the same verdict for a reason that is not
+  what is wrong with the document. `no_format_version_field.json` is the one
+  whose recorded `python_reason` is not the field loop's message: the Global
+  Constraint 12 rule runs first and says `format_version None is not a parseable
+  semver`. It is in the corpus anyway, because the arithmetic is derived from
+  the struct and an exception would be a hole in it.
+* `records_restored_null.json`, `mismatches_null.json` and
+  `duration_ms_null.json` are finding F4, measured the same way: `null` on a
+  field Rust types as a plain `u64` was `invalid type: null, expected u64` from
+  `drill verify` and `VALID` here, because `if value is None: continue` skipped
+  all eleven `u64` fields when only five are `Option<u64>`. One per shape the
+  walk takes — a block field, another block field, and the `phases[]` branch.
+  The control lives in `index.json` as `option_rto_seconds_null.json`
+  (`measured.rto_seconds → null`), an ACCEPT case both readers exit `0` on:
+  without it, refusing null everywhere would look like a fix.
+* `no_measured_and_no_integrity_blocks.json` is finding F3 of Task 5c's review,
+  and it is the pair
   that actually diverged: `drill verify` named `measured` and
   `verify_scorecard.py` named `integrity`. (The review's own probe — `sample`
   and `evidence` — agrees under either order, because `sample` precedes
@@ -240,7 +278,9 @@ Until Task 5c the `sample` half was a live disagreement, not a formality: on
 printed `VALID` and exited `0`. Task 5d found three more of exactly that shape —
 `target`, `target_diff` and `topic_parity`, each measured the same way at
 `6619090` — which is what the closed arithmetic above is for: the block list is
-now taken from the struct rather than grown one arm at a time.
+now taken from the struct rather than grown one arm at a time. Task 5e found
+three more outside the block list entirely (`run_id`, `requested_at`, `phases`)
+and five more on `null`, and closed both by widening the same derivation.
 
 ---
 

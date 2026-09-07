@@ -157,5 +157,12 @@
     "python_exit": 1,
     "reason": "last_phase_completed outside -1..=9",
     "arm": "last_phase_completed outside -1..=9"
+  },
+  {
+    "id": "option_rto_seconds_null",
+    "file": "option_rto_seconds_null.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": ""
   }
 ]

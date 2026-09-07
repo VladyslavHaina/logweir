@@ -554,12 +554,13 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.6.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.7.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
         assert "all eleven required blocks in serde order" in r.stdout, r.stdout
-        assert "u64 domain" in r.stdout, r.stdout
+        assert "the six required non-block fields" in r.stdout, r.stdout
+        assert "u64 domain with null refused where Rust has no Option" in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -1340,11 +1341,167 @@ def test_the_u64_field_list_matches_the_rust_struct():
     # stay derived: a `u64` field added there with no entry here is a field with
     # no bound at all on the Python side. Counted from the Rust source, so this
     # fails when the struct grows one.
+    #
+    # THIS TEST IS NOT THE ANCHOR and must not be mistaken for one. It lives in
+    # the same file a coordinated deletion touches, which is Task 5d's review
+    # finding F1 exactly: deleting one `U64_FIELDS` entry, its case in the test
+    # above and this function in one edit left pytest, the parity walker and
+    # `scripts/check-invariant-corpus.sh` all green. The anchor is
+    # `crates/logweir/tests/two_reader_parity.rs::
+    # every_u64_field_has_the_same_domain_check_in_both_readers` plus the
+    # arithmetic block in that shell gate — both outside `docs/`. This stays as
+    # the fast local check.
     import re
 
     src = (ROOT / "crates" / "logweir-core" / "src" / "scorecard.rs").read_text()
-    rust_u64 = re.findall(r"^    pub ([a-z0-9_]+): (?:Option<)?u64>?,$", src, re.M)
-    # `phases[].duration_ms` is in `PhaseRecord` and is walked separately, so it
-    # is in the Rust list and not in U64_FIELDS.
-    listed = {key for _, key in _verifier_module().U64_FIELDS} | {"duration_ms"}
-    assert set(rust_u64) == listed, (sorted(set(rust_u64)), sorted(listed))
+    rust_u64 = re.findall(r"^    pub ([a-z0-9_]+): (Option<)?u64>?,$", src, re.M)
+    rust = {(name, bool(opt)) for name, opt in rust_u64}
+    listed = {(path.split(".")[-1], optional)
+              for path, optional in _verifier_module().U64_FIELDS}
+    assert rust == listed, (sorted(rust), sorted(listed))
+    # The optionality is half the claim: five `Option<u64>` accept null and the
+    # six plain `u64` do not. Counted over the TUPLE, never over `listed` — the
+    # set above collapses `rto_seconds`, which `Measured` and `Objectives` both
+    # declare, and a count taken from it reads 4 where the answer is 5. That
+    # collapse is also why the dotted name, and not the bare key, is what the
+    # anchor in `crates/logweir/tests/two_reader_parity.rs` compares.
+    entries = list(_verifier_module().U64_FIELDS)
+    assert sum(1 for _, optional in entries if optional) == 5, entries
+    assert sum(1 for _, optional in entries if not optional) == 6, entries
+
+
+def test_null_is_refused_on_every_non_option_u64_field():
+    # Task 5d's review, finding F4. `if value is None: continue` skipped the
+    # domain check for all eleven `u64` fields, and only five of them are
+    # `Option<u64>` in Rust. Measured at `7e85937`: on
+    # `sample.records_restored: null`, `integrity.records_sampled: null`,
+    # `integrity.records_sampled_matching: null`, `integrity.mismatches: null`
+    # and `phases[0].duration_ms: null`, `drill verify` exited 1 with `invalid
+    # type: null, expected u64` and this script printed VALID and exited 0.
+    # (`sample.records_expected` was the sixth, already covered by the older
+    # `is not an integer` check that runs before the loop.)
+    for path in (
+        "sample.records_expected",
+        "sample.records_restored",
+        "integrity.records_sampled",
+        "integrity.records_sampled_matching",
+        "integrity.mismatches",
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{path: None})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{path}: {r.stdout}"
+            assert f"{path} is not an integer" in r.stderr, path
+
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        assert doc["phases"], "the format example has phase records"
+        doc["phases"][0]["duration_ms"] = None
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "phases[0].duration_ms is not an integer" in r.stderr, r.stderr
+
+
+def test_an_absent_non_option_u64_field_is_refused_too():
+    # An absent key reaches the loop as `None` exactly as an explicit null does,
+    # and Rust refuses it too — `missing field ...` rather than `invalid type`.
+    # Same claim, so the same refusal.
+    for block, key in (("sample", "records_restored"), ("integrity", "mismatches")):
+        with tempfile.TemporaryDirectory() as d:
+            doc = json.loads(SCORECARD_PASS.read_bytes())
+            del doc[block][key]
+            sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{block}.{key}: {r.stdout}"
+            assert f"{block}.{key} is not an integer" in r.stderr, f"{block}.{key}"
+
+
+def test_the_option_u64_fields_still_accept_null():
+    # THE CONTROL for the change above, and the reason the flag exists at all.
+    # These five are `Option<u64>` in Rust: `serde_json` accepts a null and so
+    # must this script, or the fix would have traded one two-reader divergence
+    # for five others in the opposite direction. Each is set to null on its own,
+    # over a document that is otherwise the unmodified format example.
+    for path in (
+        "measured.rto_seconds",
+        "measured.rto_requested_to_verified_seconds",
+        "measured.rto_restore_only_seconds",
+        "measured.rto_excluding_preflight_seconds",
+        "objectives.rto_seconds",
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{path: None})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 0, f"{path}: {r.stderr}"
+            assert "VALID" in r.stdout, path
+
+
+# --------------------------------------------------------------------------
+# Task 5e — the required NON-BLOCK fields (Task 5d's review, finding F3).
+#
+# `Scorecard` has six required fields whose type is not a block, so the
+# block-presence loop structurally could not hold them. Measured at `7e85937`:
+# with `run_id`, `requested_at` or `phases` absent, `drill verify` exited 1 with
+# `missing field ...` and this script printed VALID and exited 0; with `outcome`
+# absent it refused, but on an INVARIANT about `engine.matrix_verdict`.
+#
+# `crates/logweir/tests/two_reader_parity.rs::
+# every_required_non_block_field_has_a_shape_corpus_case` is the anchor: it
+# reads the Rust struct, this script's `REQUIRED_FIELDS` and `shape-index.json`
+# and refuses to let the three drift apart.
+
+
+def _required_fields():
+    return list(_verifier_module().REQUIRED_FIELDS)
+
+
+def test_every_required_non_block_field_of_the_rust_struct_is_checked():
+    # The list itself, pinned against the struct's own field order.
+    assert _required_fields() == [
+        "format_version",
+        "run_id",
+        "outcome",
+        "last_phase_completed",
+        "requested_at",
+        "phases",
+    ]
+
+
+def test_a_document_missing_any_required_non_block_field_is_refused():
+    # One document per field, each the format example with that one key removed
+    # and nothing else touched. `format_version` is the one exception and it is
+    # deliberate: the Global Constraint 12 rule runs before this loop and
+    # refuses an absent one as `not a parseable semver`, so the loop's own
+    # message is unreachable there — argued at `REQUIRED_FIELDS`.
+    for name in _required_fields():
+        with tempfile.TemporaryDirectory() as d:
+            doc = json.loads(SCORECARD_PASS.read_bytes())
+            del doc[name]
+            sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{name}: {r.stdout}"
+            want = (
+                "format_version None is not a parseable semver"
+                if name == "format_version"
+                else f"the document has no {name} field; it is not a drill scorecard"
+            )
+            assert want in r.stderr, f"{name}: {r.stderr}"
+
+
+def test_the_field_loop_runs_after_the_block_loop():
+    # NOT cosmetic. serde names the FIRST missing field in declaration order
+    # over blocks and non-blocks alike, and `phases` sits between `approval` and
+    # `measured`. On a document missing `phases` AND `engine`, `drill verify`
+    # names `engine`; running the field loop first would make this script name
+    # `phases` and turn a pair the two readers agree on into one they do not.
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        del doc["phases"]
+        del doc["engine"]
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            "the document has no engine block; it is not a drill scorecard"
+        ) in r.stderr, r.stderr

@@ -616,6 +616,267 @@ fn required_blocks() -> Vec<String> {
     blocks
 }
 
+/// EVERY REQUIRED FIELD OF `logweir_core::scorecard::Scorecard`, IN DECLARATION
+/// ORDER, as (name, type) — read out of the struct itself.
+///
+/// "Required" here means exactly what it means to serde: the field carries no
+/// `#[serde(default)]`, so `serde_json` refuses a document that omits it at
+/// DESERIALISATION. `required_blocks()` above is the subset whose type is a
+/// struct declared in the same file; `required_non_block_fields()` below is the
+/// complement, and Task 5e exists because that complement was checked by
+/// neither reader (Task 5d's review, finding F3: `run_id`, `requested_at` or
+/// `phases` absent was `drill verify` exit 1 against `VALID` from the script).
+///
+/// The `#[serde(default)]` test is on the ATTRIBUTE LINES that precede a field,
+/// which is why this cannot reuse `required_blocks`'s one-line rule: a
+/// `#[schemars(...)]` line must not be mistaken for one, and the flag has to be
+/// cleared at each field.
+fn scorecard_required_fields() -> Vec<(String, String)> {
+    let src = std::fs::read_to_string(root().join("crates/logweir-core/src/scorecard.rs"))
+        .expect("read scorecard.rs");
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut defaulted = false;
+    for line in between(&src, "scorecard.rs", "pub struct Scorecard {", "}") {
+        let code = line.trim();
+        if code.is_empty() || code.starts_with("//") {
+            continue;
+        }
+        if code.starts_with('#') {
+            // `#[serde(default)]` and `#[serde(default, rename = ...)]` both mark
+            // a field serde will synthesise, so a document may omit it.
+            if code.contains("serde(default") {
+                defaulted = true;
+            }
+            continue;
+        }
+        if let Some(decl) = code.strip_prefix("pub ") {
+            if let Some((name, ty)) = decl.split_once(": ") {
+                if let Some(ty) = ty.strip_suffix(',') {
+                    if !defaulted {
+                        out.push((name.to_string(), ty.to_string()));
+                    }
+                }
+            }
+        }
+        defaulted = false;
+    }
+    assert!(
+        out.len() >= 12,
+        "only {} required field(s) found in `Scorecard`; the field-parsing rule in \
+         `scorecard_required_fields` no longer matches the struct's formatting: {out:?}",
+        out.len()
+    );
+    out
+}
+
+/// The required fields of `Scorecard` that are NOT blocks, in declaration order.
+///
+/// The fixed point `REQUIRED_FIELDS` in `docs/verify_scorecard.py` is measured
+/// against, exactly as `required_blocks()` is the one `REQUIRED_BLOCKS` is
+/// measured against. Every block must also be a required field — asserted here,
+/// because the two parsers read the same struct by different rules and a silent
+/// disagreement between them would weaken both lists at once.
+fn required_non_block_fields() -> Vec<String> {
+    let blocks = required_blocks();
+    let fields = scorecard_required_fields();
+    for b in &blocks {
+        assert!(
+            fields.iter().any(|(n, _)| n == b),
+            "`required_blocks` calls {b:?} a required block but \
+             `scorecard_required_fields` does not list it as a required field; the two \
+             parsers disagree about `Scorecard`"
+        );
+    }
+    let out: Vec<String> = fields
+        .into_iter()
+        .map(|(n, _)| n)
+        .filter(|n| !blocks.contains(n))
+        .collect();
+    assert!(
+        !out.is_empty(),
+        "`Scorecard` has no required non-block field; the parsing rule no longer matches \
+         the struct"
+    );
+    out
+}
+
+/// EVERY `u64` FIELD THE DOCUMENT CARRIES, as (dotted name, the Rust type is
+/// `Option<u64>`), IN SERDE'S DECLARATION ORDER — derived from
+/// `crates/logweir-core/src/scorecard.rs`.
+///
+/// THIS IS THE FIXED POINT `U64_FIELDS` DID NOT HAVE (Task 5d's review, finding
+/// F1). 1.6.0's only struct-derived check on that list was a `def test_*` in
+/// `docs/test_verify_scorecard.py` — the same file a coordinated deletion
+/// touches — so deleting one entry, its pytest case and that test in one edit
+/// left pytest, this walker and the corpus shell gate all green, with
+/// `integrity.mismatches: 2**64` back to `drill verify` exit 1 against `VALID`
+/// from the script. Read here instead, out of a file the deletion does not
+/// touch.
+///
+/// HOW THE DOTTED NAME IS BUILT: walk `Scorecard`'s own fields in declaration
+/// order; a field whose type is a struct declared in this file contributes that
+/// struct's `u64` fields under the field's name, a `Vec<T>` of one contributes
+/// them under `<field>[]`, and an `Option<T>` of one under `<field>`. Every
+/// `u64` declared anywhere in the file must be reached by one of those three
+/// shapes — a `u64` added to a struct the document reaches some other way fails
+/// the closure assertion below rather than silently going unbounded on the
+/// Python side.
+fn rust_u64_fields() -> Vec<(String, bool)> {
+    let src = std::fs::read_to_string(root().join("crates/logweir-core/src/scorecard.rs"))
+        .expect("read scorecard.rs");
+    let declared: Vec<&str> = src
+        .lines()
+        .filter_map(|l| l.strip_prefix("pub struct "))
+        .filter_map(|rest| {
+            rest.split(|c: char| c == '{' || c == '(' || c == '<' || c.is_whitespace())
+                .find(|t| !t.is_empty())
+        })
+        .collect();
+
+    // (struct, its `u64` fields in declaration order, each with its optionality)
+    let mut u64_of: Vec<(&str, Vec<(String, bool)>)> = Vec::new();
+    let mut current: Option<&str> = None;
+    for line in src.lines() {
+        if let Some(rest) = line.strip_prefix("pub struct ") {
+            current = rest
+                .split(|c: char| c == '{' || c == '(' || c == '<' || c.is_whitespace())
+                .find(|t| !t.is_empty());
+            if let Some(name) = current {
+                u64_of.push((name, Vec::new()));
+            }
+            continue;
+        }
+        if line == "}" {
+            current = None;
+            continue;
+        }
+        if current.is_none() {
+            continue;
+        }
+        let code = line.trim();
+        let Some(decl) = code.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some((name, ty)) = decl.split_once(": ") else {
+            continue;
+        };
+        let Some(ty) = ty.strip_suffix(',') else {
+            continue;
+        };
+        let optional = match ty {
+            "u64" => false,
+            "Option<u64>" => true,
+            _ => continue,
+        };
+        u64_of
+            .last_mut()
+            .expect("a struct is open")
+            .1
+            .push((name.to_string(), optional));
+    }
+
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut reached: Vec<&str> = Vec::new();
+    for line in between(&src, "scorecard.rs", "pub struct Scorecard {", "}") {
+        let code = line.trim();
+        let Some(decl) = code.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some((name, ty)) = decl.split_once(": ") else {
+            continue;
+        };
+        let Some(ty) = ty.strip_suffix(',') else {
+            continue;
+        };
+        let (owner, prefix) = if declared.contains(&ty) {
+            (ty, name.to_string())
+        } else if let Some(inner) = ty.strip_prefix("Vec<").and_then(|t| t.strip_suffix('>')) {
+            if !declared.contains(&inner) {
+                continue;
+            }
+            (inner, format!("{name}[]"))
+        } else if let Some(inner) = ty.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
+            if !declared.contains(&inner) {
+                continue;
+            }
+            (inner, name.to_string())
+        } else {
+            continue;
+        };
+        reached.push(owner);
+        if let Some((_, fields)) = u64_of.iter().find(|(s, _)| *s == owner) {
+            for (field, optional) in fields {
+                out.push((format!("{prefix}.{field}"), *optional));
+            }
+        }
+    }
+
+    // CLOSURE, counted a second and independent way off the raw text: if a `u64`
+    // is declared in a struct no `Scorecard` field reaches by one of the three
+    // shapes above, it is a document field with no bound on the Python side and
+    // this is where that is said out loud.
+    let flat = src
+        .lines()
+        .filter(|l| {
+            let c = l.trim();
+            c.starts_with("pub ") && (c.ends_with(": u64,") || c.ends_with(": Option<u64>,"))
+        })
+        .count();
+    let unreached: Vec<&str> = u64_of
+        .iter()
+        .filter(|(s, fields)| !fields.is_empty() && !reached.contains(s))
+        .map(|(s, _)| *s)
+        .collect();
+    assert_eq!(
+        out.len(),
+        flat,
+        "crates/logweir-core/src/scorecard.rs declares {flat} `u64` document field(s) but \
+         only {} are reachable from `Scorecard` by a struct field, a `Vec<T>` or an \
+         `Option<T>`. Unreached struct(s): {unreached:?}. Extend `rust_u64_fields` (and \
+         `docs/verify_scorecard.py`'s `_u64_fields`) to reach them, or the new field has \
+         no domain check in the Python reader at all.",
+        out.len(),
+    );
+    out
+}
+
+/// `docs/verify_scorecard.py`'s `U64_FIELDS` tuple, in source order, parsed into
+/// the same (dotted name, optional) shape `rust_u64_fields` returns.
+fn python_u64_fields() -> Vec<(String, bool)> {
+    let src = std::fs::read_to_string(root().join("docs/verify_scorecard.py"))
+        .expect("read verify_scorecard.py");
+    between(&src, "verify_scorecard.py", "U64_FIELDS = (", ")")
+        .iter()
+        .filter_map(|l| {
+            let code = l.trim();
+            let inner = code.strip_prefix('(')?.strip_suffix("),")?;
+            let (name, optional) = inner.split_once(", ")?;
+            let name = name.strip_prefix('"')?.strip_suffix('"')?;
+            let optional = match optional {
+                "True" => true,
+                "False" => false,
+                _ => return None,
+            };
+            Some((name.to_string(), optional))
+        })
+        .collect()
+}
+
+/// `docs/verify_scorecard.py`'s `REQUIRED_FIELDS` tuple, in source order.
+fn python_required_fields() -> Vec<String> {
+    let src = std::fs::read_to_string(root().join("docs/verify_scorecard.py"))
+        .expect("read verify_scorecard.py");
+    between(&src, "verify_scorecard.py", "REQUIRED_FIELDS = (", ")")
+        .iter()
+        .filter_map(|l| {
+            let code = l.trim();
+            code.strip_prefix('"')
+                .and_then(|r| r.strip_suffix("\","))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 /// `docs/verify_scorecard.py`'s `REQUIRED_BLOCKS` tuple, in source order — the
 /// block-presence loop's list, hoisted to a constant so both this walker and
 /// `scripts/check-invariant-corpus.sh` can read it without parsing a `for`.
@@ -699,6 +960,7 @@ fn check_invariants_body() -> String {
 #[test]
 fn every_required_block_has_a_shape_corpus_case() {
     let blocks = required_blocks();
+    let non_block = required_non_block_fields();
     let loop_blocks = python_required_blocks();
     let body = check_invariants_body();
     let cases = shape_entries();
@@ -796,8 +1058,20 @@ fn every_required_block_has_a_shape_corpus_case() {
                     }
                 }
             }
+            "field" => {
+                // The coverage arithmetic for this kind lives in
+                // `every_required_non_block_field_has_a_shape_corpus_case`; what
+                // is checked here is that the name is a real required non-block
+                // field, so a typo cannot sit in the index looking covered.
+                if !non_block.iter().any(|f| f == rest) {
+                    failures.push(format!(
+                        "{id}: `check` names field {rest:?}, which `Scorecard` does not \
+                         declare as a required non-block field"
+                    ));
+                }
+            }
             other => failures.push(format!(
-                "{id}: unknown `check` kind {other:?}; use block:, message: or order:"
+                "{id}: unknown `check` kind {other:?}; use block:, field:, message: or order:"
             )),
         }
     }
@@ -822,6 +1096,127 @@ fn every_required_block_has_a_shape_corpus_case() {
         } else {
             format!("\n  - {}", failures.join("\n  - "))
         }
+    );
+}
+
+/// CLOSED ARITHMETIC FOR THE REQUIRED NON-BLOCK FIELDS (Task 5e, from Task 5d's
+/// review finding F3) — the mirror of `every_required_block_has_a_shape_corpus_
+/// case` over the half of `Scorecard`'s required fields that are not blocks.
+///
+/// `Scorecard` has six: `format_version`, `run_id`, `outcome`,
+/// `last_phase_completed`, `requested_at` and `phases`. A "block" is a field
+/// whose type is a struct declared beside it, so none of these could ever join
+/// `REQUIRED_BLOCKS` — and the review measured what that cost: with `run_id`,
+/// `requested_at` or `phases` deleted from `unmodified_example.json` and signed,
+/// `drill verify` exited 1 with `missing field ...` and
+/// `docs/verify_scorecard.py` printed `VALID` and exited 0.
+///
+/// The fixed point is the struct, for the same reason as the block walker:
+/// deleting a name from `REQUIRED_FIELDS` together with its corpus case and its
+/// pytest leaves `Scorecard` saying six, so the count no longer closes and this
+/// test says so with both lists printed.
+#[test]
+fn every_required_non_block_field_has_a_shape_corpus_case() {
+    let fields = required_non_block_fields();
+    let named = python_required_fields();
+    let cases = shape_entries();
+
+    assert_eq!(
+        named,
+        fields,
+        "docs/verify_scorecard.py's REQUIRED_FIELDS and \
+         `logweir_core::scorecard::Scorecard` disagree.\n  python ({}): {named:?}\n  \
+         rust   ({}): {fields:?}\nEvery required field of the struct that is NOT a block \
+         must be named by the field-presence loop, in the struct's own declaration order. \
+         A required field is one carrying no `#[serde(default)]`: serde refuses a document \
+         missing it at deserialisation, so a reader that does not check it prints VALID \
+         over bytes `drill verify` exits 1 on.",
+        named.len(),
+        fields.len(),
+    );
+
+    let mut covered: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for entry in &cases {
+        let id = s(entry, "id");
+        let check = entry
+            .get("check")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("shape-index.json entry {id:?} has no string `check`"));
+        let Some(name) = check.strip_prefix("field:") else {
+            continue;
+        };
+        if !fields.iter().any(|f| f == name) {
+            failures.push(format!(
+                "{id}: `check` names field {name:?}, which `Scorecard` does not declare as \
+                 a required non-block field"
+            ));
+        } else if covered.iter().any(|f| f == name) {
+            failures.push(format!(
+                "{id}: field {name:?} already has a shape case; exactly one per field"
+            ));
+        } else {
+            covered.push(name.to_string());
+        }
+    }
+
+    let mut uncovered: Vec<&String> = fields
+        .iter()
+        .filter(|f| !covered.iter().any(|c| c == *f))
+        .collect();
+    uncovered.sort();
+    assert!(
+        failures.is_empty() && uncovered.is_empty(),
+        "the shape corpus does not account for `Scorecard`'s required non-block fields.\n  \
+         required ({}): {fields:?}\n  covered  ({}): {covered:?}\n  MISSING a shape case: \
+         {uncovered:?}\nEvery required non-block field needs a `shape-index.json` case whose \
+         `check` is \"field:<name>\".{}",
+        fields.len(),
+        covered.len(),
+        if failures.is_empty() {
+            String::new()
+        } else {
+            format!("\n  - {}", failures.join("\n  - "))
+        }
+    );
+}
+
+/// CLOSED ARITHMETIC FOR THE u64 DOMAIN CHECKS (Task 5e, from Task 5d's review
+/// finding F1), and for their NULLABILITY (finding F4).
+///
+/// Deliverable 2 of Task 5d bounded all eleven `u64` fields but anchored the
+/// list only in `docs/test_verify_scorecard.py`, which is inside the blast
+/// radius of the deletion it was meant to catch. This test reads
+/// `crates/logweir-core/src/scorecard.rs` instead. Delete an entry from
+/// `U64_FIELDS`, its pytest case and `test_the_u64_field_list_matches_the_rust_
+/// struct` in one edit and the struct still declares eleven: the lists differ
+/// and both are printed.
+///
+/// The `Option<u64>` flag is part of the comparison and not decoration. It is
+/// what decides whether `null` is accepted, and it is the only thing standing
+/// between `sample.records_restored: null` and a `VALID` banner over a document
+/// `drill verify` refuses with `invalid type: null, expected u64`.
+#[test]
+fn every_u64_field_has_the_same_domain_check_in_both_readers() {
+    let rust = rust_u64_fields();
+    let python = python_u64_fields();
+    assert!(
+        !rust.is_empty(),
+        "no `u64` document field found in crates/logweir-core/src/scorecard.rs; \
+         `rust_u64_fields`'s parsing rule no longer matches the file"
+    );
+    assert_eq!(
+        python,
+        rust,
+        "docs/verify_scorecard.py's U64_FIELDS and `logweir_core::scorecard::Scorecard` \
+         disagree.\n  python ({}): {python:?}\n  rust   ({}): {rust:?}\nEvery `u64` field of \
+         the document needs an entry, in the struct's declaration order, and the second \
+         element must be `True` exactly for `Option<u64>`. Python's `int` is unbounded, so \
+         a field with no entry has NO domain check at all; and a non-`Option` field marked \
+         optional accepts a `null` that `serde_json` refuses with `invalid type: null, \
+         expected u64`.",
+        python.len(),
+        rust.len(),
     );
 }
 

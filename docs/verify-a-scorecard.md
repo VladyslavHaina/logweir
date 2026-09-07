@@ -663,7 +663,7 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.6.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, u64 domain; approval.self_attested derived, not echoed)
+       verifier: verify_scorecard.py 1.7.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, the six required non-block fields, u64 domain with null refused where Rust has no Option; approval.self_attested derived, not echoed)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
@@ -686,7 +686,18 @@ far is such a move:
 | `1.3.0` | Refuses a `partial` integrity result whose `partial_reason` is **blank** (`""` or whitespace) and not merely null, and refuses any document with a non-empty `redactions`. Both were `VALID` under `1.2.0`. |
 | `1.4.0` | Reads `outcome` **for the first time**. Refuses a document whose headline field contradicts the fields it summarises: `pass` beside a non-`pass` `integrity.result`, beside a non-blank `partial_reason`, beside `objectives.met: false`, or beside a sample where not every record matched; a `records_sampled` larger than `sample.records_expected`; and `engine.matrix_verdict: "pass"` on a drill that did not pass at `byte-fingerprint` level. All were `VALID` under `1.3.0`. |
 | `1.5.0` | Requires the `sample` block and an integer `sample.records_expected`. A scorecard with no `sample` block at all — or with `"records_expected": "75"` — printed `VALID` under `1.4.0` while `logweir drill verify` exited **1** on the same bytes, because Rust gets the shape from its own types and this script had no equivalent layer. Not an invariant arm; a bump all the same, because there are documents this script now decides differently. |
-| `1.6.0` | Completes the shape layer and pins its order. All **eleven** required blocks are checked, not seven — `target`, `approval`, `target_diff` and `topic_parity` join the list; a document missing `target`, `target_diff` or `topic_parity` printed `VALID` under `1.5.0` while `logweir drill verify` exited **1** (`approval` absent was already refused by both, in Python by `main`'s approval derivation rather than the block loop, which now names it consistently). Every field the Rust reader types as `u64` must satisfy `0 <= v < 2**64`, where `isinstance(v, int)` mirrored serde's *type* and not its *domain*: `sample.records_expected: 18446744073709551616` was `VALID` under `1.5.0` and exit **1** from `drill verify`. And the block list is now in the struct's declaration order, so a document missing several blocks is named for the same block by both readers. |
+| `1.6.0` | Completes the *block* shape layer and pins its order. All **eleven** required blocks are checked, not seven — `target`, `approval`, `target_diff` and `topic_parity` join the list; a document missing `target`, `target_diff` or `topic_parity` printed `VALID` under `1.5.0` while `logweir drill verify` exited **1** (`approval` absent was already refused by both, in Python by `main`'s approval derivation rather than the block loop, which now names it consistently). Every field the Rust reader types as `u64` must satisfy `0 <= v < 2**64`, where `isinstance(v, int)` mirrored serde's *type* and not its *domain*: `sample.records_expected: 18446744073709551616` was `VALID` under `1.5.0` and exit **1** from `drill verify`. And the block list is now in the struct's declaration order, so a document missing several *blocks* is named for the same block by both readers. |
+| `1.7.0` | Finishes the shape layer on the fields that are **not** blocks, and stops treating every `u64` as nullable. `Scorecard` has six required fields whose type is not a block — `format_version`, `run_id`, `outcome`, `last_phase_completed`, `requested_at` and `phases` — and `1.6.0` checked none of them: with `run_id`, `requested_at` or `phases` absent, `logweir drill verify` exited **1** (`missing field ...`) and this script printed `VALID`; with `outcome` absent it refused, but on an *invariant* about `engine.matrix_verdict`, which is not what is wrong with the document. And `null` was skipped for all eleven `u64` fields although only five are `Option<u64>` in Rust: `sample.records_restored: null`, `integrity.records_sampled: null`, `integrity.records_sampled_matching: null`, `integrity.mismatches: null` and `phases[].duration_ms: null` were each `VALID` under `1.6.0` and exit **1** (`invalid type: null, expected u64`) from `drill verify`. The five `Option<u64>` fields still accept null. |
+
+**What `1.7.0` does not claim.** The field-presence loop runs *after* the block
+loop and asserts presence only. Two consequences, both deliberate and both
+measured. A document missing a plain field **and** a block is still named for
+the block here and for whichever comes first in the struct there — `run_id` plus
+`engine` absent is `engine` from this script and `run_id` from `drill verify`.
+And a field that is present but of the wrong type — `phases: "none"` — is
+refused by `drill verify` and not by this script: the six fields carry five
+different Rust types and share no JSON shape, so a type check here would be five
+guesses rather than one rule. Both are recorded rather than closed.
 
 The parenthetical on the `verifier:` line enumerates the current invariant set,
 so the line an auditor reads names the checks that actually produced the verdict
