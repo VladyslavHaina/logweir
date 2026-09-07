@@ -35,12 +35,21 @@ pub fn outcome_str(o: &Outcome) -> &'static str {
 /// operator — and the second is the most valuable result this product
 /// produces.
 ///
-/// So the metrics file states it explicitly. Note what its ABSENCE means as
-/// well: this file is written only from `crate::drill::finish`, which runs on
-/// the exit-0 and exit-2 paths only. An operational failure (1), a guard
-/// refusal (3) and a signing failure (4) leave no metrics file at all, so a
-/// stale-or-missing `logweir_drill_exit_code` is itself the signal that no
-/// drill result was produced.
+/// So the metrics file states it explicitly. Since T0-7, EVERY terminal path
+/// writes it — exits 1, 3 and 4 through `write_minimal_textfile`, exits 0 and 2
+/// through `write_textfile` — so the file's own existence no longer carries any
+/// information. Two things replace it:
+///
+/// * **Staleness is the absence signal.** node_exporter publishes the file's
+///   mtime as `node_textfile_mtime_seconds`, which carries no Logweir label at
+///   all; `time() - node_textfile_mtime_seconds{file=~".*logweir.*"} > 8d` is
+///   therefore the query that catches a CronJob whose pod never started, and it
+///   works identically on the paths where the cluster id was never learned.
+/// * **Absence of `logweir_drill_runs_total` INSIDE a present file** means the
+///   run ended before a scorecard existed. That family, and every other
+///   scorecard-derived one, is written only by `write_textfile`.
+///
+/// See [docs/metrics.md](../../../docs/metrics.md).
 fn exit_code_for(o: &Outcome) -> u8 {
     match o {
         Outcome::Pass => crate::exit::ExitCode::Ok as u8,
@@ -56,6 +65,12 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
     let mut o = String::new();
     let cluster = &sc.target.cluster_id;
     let outcome = outcome_str(&sc.outcome);
+    // R-11a: a COMMENT, not a label. A ULID is unbounded cardinality — strictly
+    // worse than `triggered_by`, which this file's own header already refuses —
+    // and node_exporter's textfile collector passes comment lines over. The
+    // minimal shape carries the identical line, so an operator reading either
+    // file with `cat` sees which run wrote it.
+    o.push_str(&format!("# logweir run_id={}\n", sc.run_id));
     o.push_str("# HELP logweir_drill_runs_total Drill runs by outcome.\n");
     o.push_str("# TYPE logweir_drill_runs_total counter\n");
     o.push_str(&format!(
@@ -180,21 +195,87 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         sc.redactions.len()
     ));
 
+    push_exit_code(&mut o, cluster, exit_code_for(&sc.outcome));
+    push_last_run_timestamp(&mut o, cluster);
+
+    write_atomically(path, &o)
+}
+
+/// The two families BOTH shapes of the file carry, written once so the shapes
+/// cannot drift. A metric name must have exactly one `# HELP` text, and two
+/// copies of that string is two chances for the minimal file to describe
+/// `logweir_drill_exit_code` differently from the full one.
+fn push_exit_code(o: &mut String, cluster: &str, code: u8) {
     o.push_str(
-        "# HELP logweir_drill_exit_code The process exit code this result produced \
-         (0 pass, 2 a signed drill result that is not a pass).\n\
+        "# HELP logweir_drill_exit_code The process exit code this run produced \
+         (0 pass, 1 operational with no artifact, 2 a signed drill result that is not a \
+         pass, 3 refused by a guard, 4 signing or lock proof failed).\n\
          # TYPE logweir_drill_exit_code gauge\n",
     );
     o.push_str(&format!(
-        "logweir_drill_exit_code{{cluster=\"{cluster}\"}} {}\n",
-        exit_code_for(&sc.outcome)
+        "logweir_drill_exit_code{{cluster=\"{cluster}\"}} {code}\n"
     ));
+}
 
-    // Write-then-rename: node_exporter must never read a half-written file.
+/// T0-7 rung 2. The one series that says a drill ran AT ALL, and when.
+///
+/// The value is read from the clock at emit time on every call — never a
+/// constant, never a field carried in from elsewhere — because the whole point
+/// is that it moves when a run happens and stops moving when runs stop.
+/// (Global Constraint 1: the clock is read in `crates/logweir`, and this is in
+/// `crates/logweir`.)
+fn push_last_run_timestamp(o: &mut String, cluster: &str) {
+    o.push_str(
+        "# HELP logweir_drill_last_run_timestamp_seconds Unix seconds at which this drill run \
+         finished and wrote this file.\n\
+         # TYPE logweir_drill_last_run_timestamp_seconds gauge\n",
+    );
+    o.push_str(&format!(
+        "logweir_drill_last_run_timestamp_seconds{{cluster=\"{cluster}\"}} {}\n",
+        chrono::Utc::now().timestamp()
+    ));
+}
+
+/// The textfile a terminal path with NO scorecard leaves behind (exits 1, 3, 4).
+///
+/// It is deliberately a SUBSET of `write_textfile`'s output, never a different
+/// vocabulary: the same two metric names with the same label, so a dashboard
+/// panel does not have to know which path produced the file. Everything derived
+/// from a scorecard is absent, because no scorecard exists — and absence of
+/// `logweir_drill_runs_total` is itself the signal that no drill result was
+/// produced.
+///
+/// `cluster` is `None` when the run never reached phase 2, which is where the
+/// id is learned from the live broker (`phase2_target.rs`). It is then emitted
+/// as the literal `unknown`: the spec file does not carry a cluster id and is
+/// not parsed here (R-11b — a new failure surface at the exact moment the
+/// process is already failing), and the label is never omitted, because a
+/// series that sometimes has a label and sometimes does not is a Prometheus
+/// modelling error.
+pub fn write_minimal_textfile(
+    path: &Path,
+    cluster: Option<&str>,
+    run_id: &str,
+    code: crate::exit::ExitCode,
+) -> std::io::Result<()> {
+    let cluster = cluster.unwrap_or("unknown");
+    let mut o = String::new();
+    // R-11a: a comment, not a label. See `write_textfile`.
+    o.push_str(&format!("# logweir run_id={run_id}\n"));
+    push_exit_code(&mut o, cluster, code as u8);
+    push_last_run_timestamp(&mut o, cluster);
+    write_atomically(path, &o)
+}
+
+/// Write-then-rename: node_exporter must never read a half-written file.
+///
+/// ONE atomic writer for both shapes. Two copies of the rename dance is two
+/// chances to lose it.
+fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("prom.tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(o.as_bytes())?;
+        f.write_all(body.as_bytes())?;
         f.sync_all()?;
     }
     std::fs::rename(tmp, path)

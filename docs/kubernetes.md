@@ -199,10 +199,17 @@ which looks exactly like Logweir never running.
 pod mounted the same volume and read it back:
 
 ```
-hostPath /var/lib/node_exporter/textfile   ->  logweir_drill_last_run_timestamp_seconds 1757000000
+hostPath /var/lib/node_exporter/textfile   ->  logweir_drill_last_run_timestamp_seconds{cluster="unknown"} 1757000000
 emptyDir                                   ->  total 0
                                                cat: can't open '/metrics/logweir.prom'
 ```
+
+The sample above is emitted by `crates/logweir/src/metrics.rs` — `write_textfile`
+on a drill result, `write_minimal_textfile` on exits 1, 3 and 4. The `cluster`
+label is always present: it is the scorecard's `target.cluster_id`, or the
+literal `unknown` on a terminal path that never learned it (see
+[metrics.md](metrics.md)). The value is that run's own `Utc::now().timestamp()`
+at emit time, never a constant.
 
 Three facts decide the shape, each of them run:
 
@@ -239,6 +246,34 @@ Three facts decide the shape, each of them run:
   profile, **delete both the `--metrics-file` argument and the `metrics`
   volume** rather than pointing the flag at an emptyDir. No metrics is an honest
   state; a dashboard fed by a deleted file is not.
+
+  That is what the **`restricted` manifest variant** does: it ships without the
+  `hostPath` volume, without its mount and without `--metrics-file`. It
+  therefore emits **no textfile on any exit path** — not on a pass, not on a
+  drill result, and not on the exits 1, 3 and 4 that now write a minimal record
+  everywhere else. Nothing below rescues it: there is no PVC, no sidecar, no
+  push route and no HTTP surface in v0.1, so a `restricted` namespace gets its
+  drill results from the signed scorecard and the pod's exit code alone. This
+  gap is a known regression, recorded rather than fixed, and it is written up
+  with the hardened manifests; do not close it by adding a volume back.
+
+### Is the drill still running at all?
+
+Every terminal path now writes the textfile, so the file's *existence* says
+nothing. Its **mtime** does:
+
+```promql
+time() - node_textfile_mtime_seconds{file=~".*logweir.*"} > 8d
+```
+
+This is mtime-based and not `time() - logweir_drill_last_run_timestamp_seconds{cluster=~".+"}`
+on purpose. A metric Logweir writes cannot report that Logweir did not run, and
+node_exporter's `node_textfile_mtime_seconds` carries **no Logweir label at
+all** — so it still matches on the terminal paths where the cluster id was never
+learned and every Logweir series is labelled `cluster="unknown"`. `8d` is one
+day of slack over the weekly schedule in `examples/cronjob-drill.yaml`; the
+dashboard's "Time since the last drill reported" panel thresholds at the same
+`691200` seconds. Full metric reference: [metrics.md](metrics.md).
 
 **Unverified:** a shared PVC read by a node_exporter sidecar, and any push-based
 route (Pushgateway, OTLP). Neither was tested, and v0.1 emits nothing but the

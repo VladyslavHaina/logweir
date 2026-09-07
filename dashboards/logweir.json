@@ -1,5 +1,5 @@
 {
-  "__comment": "Logweir v0.1. Every panel below reads ONLY a metric name crates/logweir/src/metrics.rs actually writes, and crates/logweir/tests/orchestrator.rs::the_textfile_metrics_carry_every_name_the_dashboard_reads asserts that every one of those names is emitted. If a panel is added here, add its metric there in the same commit — otherwise this repository ships a dashboard over a metric nothing writes. v0.1 has NO HTTP surface: the CLI writes a Prometheus TEXTFILE at --metrics-file and node_exporter's textfile collector scrapes it. `triggered_by` is deliberately NOT a label (unbounded cardinality) and lives in the scorecard.",
+  "__comment": "Logweir v0.1. Every panel below reads ONLY a metric name crates/logweir/src/metrics.rs actually writes, and crates/logweir/tests/orchestrator.rs::the_textfile_metrics_carry_every_name_the_dashboard_reads asserts that every one of those names is emitted. If a panel is added here, add its metric there in the same commit — otherwise this repository ships a dashboard over a metric nothing writes. v0.1 has NO HTTP surface: the CLI writes a Prometheus TEXTFILE at --metrics-file and node_exporter's textfile collector scrapes it. `triggered_by` is deliberately NOT a label (unbounded cardinality) and lives in the scorecard, and so does `run_id`, which rides the textfile as a leading `# logweir run_id=` COMMENT line. ONE CARVE-OUT: the freshness panel \"Time since the last drill reported\" reads node_exporter's own node_textfile_mtime_seconds, not a Logweir series, and deliberately so \u2014 a metric Logweir writes cannot report that Logweir did not run, and that series carries no cluster label, so absence detection works identically on the terminal paths where the cluster id was never learned. Every OTHER panel still reads only a name crates/logweir/src/metrics.rs writes.",
   "title": "Logweir — restore drills",
   "uid": "logweir-drills",
   "schemaVersion": 39,
@@ -212,6 +212,47 @@
         }
       },
       "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    { "id": 14, "type": "row", "title": "Is the programme still running?", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 } },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Time since the last drill reported",
+      "description": "Seconds since the metrics file was last written, from node_exporter's own file mtime rather than from anything Logweir emits — a metric Logweir writes cannot report that Logweir did not run. Red past 8 days, which is the same threshold as the documented alert `time() - node_textfile_mtime_seconds{file=~\".*logweir.*\"} > 8d` (see docs/metrics.md). Every terminal path writes the file, so a value that stops advancing means the drill did not run or did not finish — not that it failed.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        { "refId": "A", "expr": "time() - node_textfile_mtime_seconds{file=~\".*logweir.*\"}", "legendFormat": "{{file}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no textfile has ever been scraped — either no drill has run or --metrics-file is not mounted",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 691200 }
+          ] }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Last drill run (wall clock)",
+      "description": "The wall-clock second at which the last drill run ended and wrote this file. Emitted on EVERY terminal path, including the ones that produce no scorecard, so it answers \"when did anything last happen\" rather than \"when did anything last pass\". On a path that never reached the target cluster the label reads `unknown`.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_last_run_timestamp_seconds{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "noValue": "no drill has reported"
+        }
+      },
+      "options": { "colorMode": "none", "graphMode": "none", "textMode": "value" }
     }
   ]
 }

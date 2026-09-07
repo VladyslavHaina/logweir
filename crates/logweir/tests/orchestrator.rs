@@ -75,6 +75,9 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
         // redaction signal, so a dashboard showed a clean drill over a document
         // that says a field was removed.
         "logweir_drill_redactions",
+        // Task 11 (T0-7 rung 2). The metric `docs/kubernetes.md` rendered
+        // inside a "Verified live" transcript and no code emitted.
+        "logweir_drill_last_run_timestamp_seconds",
     ] {
         assert!(
             t.contains(m),
@@ -923,7 +926,7 @@ fn the_metrics_file_distinguishes_a_pass_from_a_signed_non_pass() {
     assert!(t.contains("logweir_drill_integrity_level{cluster=\"MkU3OEVBNTcwNTJENDM2Qk\",level=\"not-attempted\"} 1"), "{t}");
 }
 
-/// The eight names have to be present as SAMPLES, not merely inside the
+/// Every name below has to be present as a SAMPLE, not merely inside the
 /// `# HELP` / `# TYPE` comment lines that mention them. A metric whose value
 /// line is deleted still leaves its name in the comments, so a bare
 /// `contains(name)` check — which is what the brief's own test performs —
@@ -948,6 +951,9 @@ fn every_metric_name_is_emitted_as_a_sample_not_only_as_a_help_comment() {
         "logweir_drill_integrity_result",
         "logweir_evidence_lock_verified",
         "logweir_drill_exit_code",
+        // Task 11 (T0-7 rung 2). This entry is what kills the "emit the
+        // HELP/TYPE block and no sample line" mutant.
+        "logweir_drill_last_run_timestamp_seconds",
     ] {
         assert!(
             samples.iter().any(|l| l.starts_with(m)),

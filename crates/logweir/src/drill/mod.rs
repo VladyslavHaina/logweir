@@ -76,12 +76,16 @@ pub enum DrillError {
     SigningOrLock(String),
 }
 
-/// Global Constraint 11 / spec §6 C5, in ONE place. A blanket `map_err` at any
-/// call site would move the exit-4 contract out of here, so nothing else in
-/// the crate may map a `DrillError` to an `ExitCode`.
-impl From<DrillError> for ExitCode {
-    fn from(e: DrillError) -> Self {
-        match e {
+impl DrillError {
+    /// Global Constraint 11 / spec §6 C5, in ONE place — the match body that
+    /// used to live in `impl From<DrillError> for ExitCode`, moved here so a
+    /// caller can know the code while still BORROWING the scorecard a
+    /// `NotPass` carries. The `From` impl below delegates, so the by-value and
+    /// by-reference forms can never disagree. A blanket `map_err` at any call
+    /// site would move the exit-4 contract out of here, so nothing else in the
+    /// crate may map a `DrillError` to an `ExitCode`.
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
             // A guard refused the plan before anything ran.
             DrillError::Guard(_) => ExitCode::GuardRefused, // 3
             // A drill RESULT that is not a pass. A scorecard IS written and
@@ -106,6 +110,12 @@ impl From<DrillError> for ExitCode {
                 ExitCode::Operational // 1
             }
         }
+    }
+}
+
+impl From<DrillError> for ExitCode {
+    fn from(e: DrillError) -> Self {
+        e.exit_code()
     }
 }
 
@@ -178,31 +188,62 @@ pub fn run(args: RunArgs) -> ExitCode {
 /// one decision with no coverage.
 ///
 /// NOTE the shape: no arm here names an `ExitCode` literal except `Ok`.
-/// `impl From<DrillError> for ExitCode` is the single place the contract
-/// lives (its own doc comment says so), and a second mapping written out here
-/// — `Err(NotPass(..)) => ExitCode::DrillNotPass` — would be exactly the
+/// `DrillError::exit_code` is the single place the contract lives (its own doc
+/// comment says so), and a second mapping written out here —
+/// `Err(NotPass(..)) => ExitCode::DrillNotPass` — would be exactly the
 /// duplication that comment forbids: two places to keep in step, and only one
 /// of them under the exit-code tests. So this function decides only what to
 /// PRINT and whether a drill result exists to finish; the code comes from the
 /// conversion.
 fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) -> ExitCode {
-    match outcome {
-        Ok(sc) => {
-            finish(args, &sc);
-            exiting(run_id, ExitCode::Ok)
+    let code = match &outcome {
+        Ok(_) => ExitCode::Ok,
+        Err(e) => e.exit_code(),
+    };
+    let sc: Option<&Scorecard> = match &outcome {
+        Ok(sc) => Some(sc),
+        // A drill RESULT: the scorecard was signed and uploaded by phase 8, so
+        // the metrics and the summary line are owed.
+        Err(DrillError::NotPass(sc)) => Some(sc),
+        Err(_) => None,
+    };
+    if sc.is_none() {
+        // The no-scorecard branch: exits 1, 3 and 4. This replaces the `_ =>`
+        // arm of the `3e448da` inner `match &e` — there is no `_ =>` arm any
+        // more, and no second place where a DrillError becomes an ExitCode
+        // (R-11d). `run_id` is in scope here and stays in scope.
+        if let Err(e) = &outcome {
+            tracing::error!(error = %e, "drill failed");
+            eprintln!("{e}");
         }
-        Err(e) => {
-            match &e {
-                // A drill RESULT: the scorecard was signed and uploaded by
-                // phase 8, so the metrics and the summary line are owed.
-                DrillError::NotPass(sc) => finish(args, sc),
-                _ => {
-                    tracing::error!(error = %e, "drill failed");
-                    eprintln!("{e}");
-                }
+    }
+    // ONE call site for every terminal path. Exhaustiveness is structural: a
+    // path that does not flow through here is a path that does not return an
+    // ExitCode from `report`, which the compiler will not let you write.
+    publish(args, run_id, code, sc);
+    exiting(run_id, code)
+}
+
+/// Everything a terminal path owes the outside world, whether or not a
+/// scorecard exists. This does not sign, does not upload, and does not touch
+/// the exit code — GC11 is decided above and passed in.
+///
+/// T0-7: before this existed, exits 1, 3 and 4 wrote nothing at all, so a
+/// CronJob whose pod died and a CronJob that was never scheduled produced the
+/// same observation — none — and the dashboard's `1`/`3`/`4` value mappings
+/// were unreachable by any code path.
+fn publish(args: &RunArgs, run_id: &str, code: ExitCode, sc: Option<&Scorecard>) {
+    match sc {
+        Some(sc) => finish(args, sc),
+        None => {
+            // No `--metrics-file`, no file: never a default path (M13).
+            let Some(p) = &args.metrics_file else { return };
+            if let Err(e) = crate::metrics::write_minimal_textfile(p, None, run_id, code) {
+                // GC11 discipline: a metrics write is a local operational
+                // side-channel. Its failure is logged and swallowed; it never
+                // changes the exit code the drill already decided.
+                tracing::warn!(error = %e, path = %p.display(), "metrics textfile not written");
             }
-            let code = ExitCode::from(e);
-            exiting(run_id, code)
         }
     }
 }
@@ -1192,6 +1233,63 @@ mod tests {
         );
     }
 
+    /// The other half of "no `--metrics-file` means no file, not a default
+    /// path", and the half `finish_writes_no_metrics_file_when_the_flag_is_absent`
+    /// structurally cannot see: that test inspects a tempdir the writer was
+    /// never told about, so a default invented RELATIVE TO THE WORKING
+    /// DIRECTORY — `PathBuf::from("logweir.prom")`, which is how anyone would
+    /// actually write this bug — walks straight past it and lands in the
+    /// process's CWD instead. This watches the working directory itself, and
+    /// it watches it across `finish` AND across every terminal path of
+    /// `report`, because since T0-7 there are two places that read the flag.
+    #[test]
+    fn no_terminal_path_invents_a_metrics_file_when_the_flag_is_absent() {
+        fn cwd_entries() -> std::collections::BTreeSet<PathBuf> {
+            std::fs::read_dir(".")
+                .expect("the test's working directory is readable")
+                .map(|e| e.expect("a readable directory entry").path())
+                .collect()
+        }
+        let before = cwd_entries();
+
+        finish(&args_with(None), &a_scorecard());
+        let mut notpass = a_scorecard();
+        notpass.outcome = Outcome::FailIntegrity;
+        for outcome in [
+            Ok(a_scorecard()),
+            Err(DrillError::NotPass(Box::new(notpass))),
+            Err(DrillError::Operational("x".into())),
+            Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
+                "x".into(),
+            ))),
+            Err(DrillError::SigningOrLock("x".into())),
+        ] {
+            report(&args_with(None), "01TEST", outcome);
+        }
+
+        let after = cwd_entries();
+        let appeared: Vec<_> = after.difference(&before).collect();
+        assert!(
+            appeared.is_empty(),
+            "no --metrics-file means no file, not a default path. These appeared in \
+             the working directory: {appeared:?}"
+        );
+        // The difference alone is not enough on a second run: a textfile a
+        // previous run of this test left behind is in BOTH snapshots and
+        // cancels out. A `.prom` in the crate root is the defect either way.
+        let stray: Vec<_> = after
+            .iter()
+            .filter(|p| {
+                p.to_string_lossy().ends_with(".prom") || p.to_string_lossy().ends_with(".prom.tmp")
+            })
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "a Prometheus textfile in the crate root is an invented default path, \
+             whichever run wrote it: {stray:?}"
+        );
+    }
+
     /// `drill run` must not be silent, and the line must carry the three
     /// facts an operator reads off a terminated pod: which run, what it
     /// concluded, and how far it got.
@@ -1208,8 +1306,10 @@ mod tests {
 
     /// THE routing, and the product's primary output. A drill RESULT must
     /// reach exit 2 with its metrics written; an operational failure must
-    /// reach exit 1 with NO metrics file, because on the exit-1 path no
-    /// scorecard exists to describe.
+    /// reach exit 1 — and, since T0-7, must ALSO leave a record. The file no
+    /// longer distinguishes the paths by its existence; `logweir_drill_exit_code`
+    /// inside it does, and the absence of `logweir_drill_runs_total` says no
+    /// scorecard was ever built.
     #[test]
     fn a_drill_result_reports_exit_2_and_an_operational_failure_reports_exit_1() {
         let dir = tempfile::tempdir().unwrap();
@@ -1249,21 +1349,152 @@ mod tests {
             ExitCode::Operational
         );
         assert!(
-            !op.exists(),
-            "there is no scorecard on the exit-1 path, so there is nothing to publish"
+            op.exists(),
+            "T0-7: exit 1 must leave a minimal textfile. \"the drill did not run\" and \"the \
+             drill failed operationally\" were the same observation until this line changed"
         );
 
-        for (e, want) in [
+        for (e, want, name) in [
             (
                 DrillError::Guard(logweir_core::guard::GuardRefusal("x".into())),
                 ExitCode::GuardRefused,
+                "guard.prom",
             ),
             (
                 DrillError::SigningOrLock("x".into()),
                 ExitCode::SigningOrLock,
+                "signing.prom",
             ),
         ] {
-            assert_eq!(report(&args_with(None), "01TEST", Err(e)), want);
+            let p = dir.path().join(name);
+            assert_eq!(report(&args_with(Some(p.clone())), "01TEST", Err(e)), want);
+            assert!(
+                p.exists(),
+                "T0-7: exit {} leaves no scorecard, which is exactly why it owes a record",
+                want as u8
+            );
+        }
+    }
+
+    /// T0-7. Exit 1 wrote nothing at all, so a CronJob whose broker was
+    /// unreachable and a CronJob that never ran produced the same observation:
+    /// none.
+    #[test]
+    fn metrics_written_on_operational_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("op.prom");
+        assert_eq!(
+            report(
+                &args_with(Some(p.clone())),
+                "01TEST",
+                Err(DrillError::Operational("broker unreachable".into()))
+            ),
+            ExitCode::Operational
+        );
+        let t = std::fs::read_to_string(&p).expect("exit 1 must leave a minimal textfile");
+        assert!(
+            t.contains("logweir_drill_exit_code{cluster=\"unknown\"} 1"),
+            "R-11b: the label is always present and is the literal `unknown` on a path \
+             that never reached phase 2 — a series that sometimes has a label and \
+             sometimes does not is a Prometheus modelling error:\n{t}"
+        );
+    }
+
+    /// A guard refusal is the earliest terminal path there is: phase 0, before
+    /// the target cluster id exists to label anything with.
+    #[test]
+    fn metrics_written_on_guard_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("guard.prom");
+        assert_eq!(
+            report(
+                &args_with(Some(p.clone())),
+                "01TEST",
+                Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
+                    "x".into()
+                )))
+            ),
+            ExitCode::GuardRefused
+        );
+        let t = std::fs::read_to_string(&p).expect("exit 3 must leave a minimal textfile");
+        assert!(
+            t.contains("logweir_drill_exit_code{cluster=\"unknown\"} 3"),
+            "{t}"
+        );
+    }
+
+    /// Exit 4 is the one an operator most needs told: the drill ran, and its
+    /// result is unattested. Nothing was uploaded, so the textfile is the only
+    /// thing there is to find.
+    #[test]
+    fn metrics_written_on_signing_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("signing.prom");
+        assert_eq!(
+            report(
+                &args_with(Some(p.clone())),
+                "01TEST",
+                Err(DrillError::SigningOrLock("x".into()))
+            ),
+            ExitCode::SigningOrLock
+        );
+        let t = std::fs::read_to_string(&p).expect("exit 4 must leave a minimal textfile");
+        assert!(
+            t.contains("logweir_drill_exit_code{cluster=\"unknown\"} 4"),
+            "{t}"
+        );
+    }
+
+    /// EVERY terminal path, enumerated by the compiler rather than by whoever
+    /// last edited this file. `representative` matches exhaustively on
+    /// `ExitCode`, so a sixth variant stops this test compiling until someone
+    /// says what terminal path produces it and what record it leaves.
+    #[test]
+    fn metrics_terminal_paths_are_exhaustive() {
+        // `DrillError::RestoreNoOp` is deliberately not represented: reaching
+        // the ExitCode conversion with it is an `unreachable!` (ruling A8), and
+        // this task does not change that.
+        fn representative(code: ExitCode) -> Result<Scorecard, DrillError> {
+            match code {
+                ExitCode::Ok => Ok(a_scorecard()),
+                ExitCode::DrillNotPass => {
+                    let mut sc = a_scorecard();
+                    sc.outcome = Outcome::FailIntegrity;
+                    Err(DrillError::NotPass(Box::new(sc)))
+                }
+                ExitCode::Operational => Err(DrillError::Operational("x".into())),
+                ExitCode::GuardRefused => Err(DrillError::Guard(
+                    logweir_core::guard::GuardRefusal("x".into()),
+                )),
+                ExitCode::SigningOrLock => Err(DrillError::SigningOrLock("x".into())),
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        for code in [
+            ExitCode::Ok,
+            ExitCode::Operational,
+            ExitCode::DrillNotPass,
+            ExitCode::GuardRefused,
+            ExitCode::SigningOrLock,
+        ] {
+            let p = dir.path().join(format!("exit-{}.prom", code as u8));
+            assert_eq!(
+                report(&args_with(Some(p.clone())), "01TEST", representative(code)),
+                code
+            );
+            let t = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+                panic!(
+                    "exit {} is a terminal path and left no metrics record at all: {e}",
+                    code as u8
+                )
+            });
+            assert!(
+                t.lines()
+                    .any(|l| l.starts_with("logweir_drill_last_run_timestamp_seconds")),
+                "exit {} left a record with no timestamp, so nothing says WHEN:\n{t}",
+                code as u8
+            );
         }
     }
 
