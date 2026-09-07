@@ -196,10 +196,6 @@ pub fn run(args: RunArgs) -> ExitCode {
 /// PRINT and whether a drill result exists to finish; the code comes from the
 /// conversion.
 fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) -> ExitCode {
-    let code = match &outcome {
-        Ok(_) => ExitCode::Ok,
-        Err(e) => e.exit_code(),
-    };
     let sc: Option<&Scorecard> = match &outcome {
         Ok(sc) => Some(sc),
         // A drill RESULT: the scorecard was signed and uploaded by phase 8, so
@@ -217,6 +213,17 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) 
             eprintln!("{e}");
         }
     }
+    // The diagnostics above are emitted BEFORE the code is derived, which is
+    // the order `aae4c3b` had (the conversion ran last there). `exit_code()`
+    // PANICS on a `RestoreNoOp` that leaked past the orchestrator's
+    // interception, so deriving the code first would silently swallow the
+    // "drill failed" line and the stderr message an operator gets ahead of the
+    // panic. Nothing between the two statements emits anything, so this
+    // ordering is observable only on that path (review fix round 1, F3).
+    let code = match &outcome {
+        Ok(_) => ExitCode::Ok,
+        Err(e) => e.exit_code(),
+    };
     // ONE call site for every terminal path. Exhaustiveness is structural: a
     // path that does not flow through here is a path that does not return an
     // ExitCode from `report`, which the compiler will not let you write.
@@ -1231,6 +1238,133 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().next().is_none(),
             "no --metrics-file means no file, not a default path"
         );
+    }
+
+    /// A `tracing` sink for one test, scoped to the calling thread.
+    ///
+    /// `tracing::subscriber::with_default` sets a THREAD-LOCAL dispatcher, so
+    /// this captures the warning without touching the global subscriber other
+    /// tests (and `run()`) install, and without serialising the suite.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("the log buffer is not poisoned"))
+                .into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log buffer is not poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// GC11's swallow discipline, which nothing asserted: a metrics write that
+    /// FAILS is logged and swallowed, and never moves the exit code the drill
+    /// already decided. The textfile is a local operational side-channel on a
+    /// node-local volume — it is not the artifact and not the upload — so a
+    /// full disk, a read-only mount or a deleted `hostPath` must not turn a
+    /// pass into an operational error, and must not turn a guard refusal into
+    /// one either.
+    ///
+    /// Both writers are driven, because the mutant that matters makes `publish`
+    /// report failure and `report` demote the code on it: `finish` ->
+    /// `write_textfile` on exits 0 and 2, and `publish` -> `write_minimal_textfile`
+    /// on 1, 3 and 4. A test that drove only one arm would let the other half
+    /// through.
+    ///
+    /// The unwritable sink is a path UNDER A FILE, not a `chmod 500`
+    /// directory: `ENOTDIR` comes back whoever the process is, so this does not
+    /// quietly stop testing anything when it runs as root.
+    #[test]
+    fn a_failed_metrics_write_is_swallowed_and_never_moves_the_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(
+            &blocker,
+            b"this is a file, so nothing can be created beneath it",
+        )
+        .unwrap();
+        let sink = blocker.join("logweir.prom");
+
+        let mut notpass = a_scorecard();
+        notpass.outcome = Outcome::FailIntegrity;
+        let cases: Vec<(ExitCode, Result<Scorecard, DrillError>)> = vec![
+            (ExitCode::Ok, Ok(a_scorecard())),
+            (
+                ExitCode::DrillNotPass,
+                Err(DrillError::NotPass(Box::new(notpass))),
+            ),
+            (
+                ExitCode::Operational,
+                Err(DrillError::Operational("broker unreachable".into())),
+            ),
+            (
+                ExitCode::GuardRefused,
+                Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
+                    "x".into(),
+                ))),
+            ),
+            (
+                ExitCode::SigningOrLock,
+                Err(DrillError::SigningOrLock("x".into())),
+            ),
+        ];
+
+        for (want, outcome) in cases {
+            let logs = CapturedLogs::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            let got = tracing::subscriber::with_default(subscriber, || {
+                report(&args_with(Some(sink.clone())), "01TEST", outcome)
+            });
+
+            assert_eq!(
+                got, want,
+                "a metrics textfile that could not be written moved the exit code from {} to {}. \
+                 The textfile is an operational side-channel, not the artifact: GC11 says exit 1 \
+                 means \"no artifact\" and exit 4 means \"nothing uploaded\", and neither claim \
+                 is affected by a file that failed to land on a node-local volume.",
+                want as u8, got as u8
+            );
+            assert!(
+                !sink.exists(),
+                "the sink was supposed to be unwritable; this test is not testing anything"
+            );
+
+            let text = logs.text();
+            assert!(
+                text.contains("metrics textfile not written"),
+                "exit {} swallowed the failure SILENTLY. Swallowed is right; silent is not — \
+                 the operator has no other way to learn the file they are alerting on was \
+                 never written.\ncaptured logs:\n{text}",
+                want as u8
+            );
+            assert!(
+                text.contains("WARN"),
+                "the failure must be a WARNING, not an error line an alert would treat as a \
+                 failed drill:\n{text}"
+            );
+        }
     }
 
     /// The other half of "no `--metrics-file` means no file, not a default
