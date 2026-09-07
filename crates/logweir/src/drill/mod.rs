@@ -164,6 +164,29 @@ pub struct RunArgs {
 pub fn run(args: RunArgs) -> ExitCode {
     // Spec §13: structured JSON logs on stdout with run_id on every line.
     let run_id = crate::ids::new_run_id();
+    // T0-10. `EnvFilter::from_default_env()` builds with
+    // `.with_default_directive(LevelFilter::ERROR)` [VERIFIED
+    // tracing-subscriber-0.3.23 `filter/env/mod.rs:289-293`], so with RUST_LOG
+    // unset the effective level is ERROR. The `drill` span carrying `run_id` is
+    // an INFO span, so at ERROR it is never entered and `with_current_span`
+    // below has nothing to render; and `exiting()`'s INFO line — the only place
+    // the exit-code MEANING reaches a log aggregator, see its doc comment —
+    // disappeared entirely. That is this comment's line breaking the guarantee
+    // stated two lines above it.
+    //
+    // So the default is computed here and RUST_LOG still wins whenever it is
+    // set to anything non-blank. `try_from_default_env()` is NOT used: for a
+    // BLANK RUST_LOG (`env: - name: RUST_LOG` with an empty `value:`, a
+    // Kubernetes-manifest reality) `env::var` returns `Ok("")`, which parses to
+    // the empty directive set — Ok, not Err — so an `unwrap_or_else` fallback
+    // never fires and the level silently stays ERROR. Blank is treated as
+    // unset here instead. `EnvFilter::new` is `parse_lossy` [VERIFIED
+    // `filter/env/mod.rs:350-354`]: a malformed RUST_LOG is dropped with a note
+    // on stderr, never unwrapped into a panic.
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(v) if !v.trim().is_empty() => tracing_subscriber::EnvFilter::new(v),
+        _ => tracing_subscriber::EnvFilter::new("info"),
+    };
     // `try_init`, not `init`: `init` PANICS when a global subscriber is
     // already installed, and `run` is a library entry point a test or an
     // embedder may call more than once in one process. A logger that is
@@ -171,7 +194,7 @@ pub fn run(args: RunArgs) -> ExitCode {
     let _ = tracing_subscriber::fmt()
         .json()
         .with_current_span(true)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .try_init();
     let _span = tracing::info_span!("drill", run_id = %run_id).entered();
 
@@ -209,7 +232,12 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) 
         // more, and no second place where a DrillError becomes an ExitCode
         // (R-11d). `run_id` is in scope here and stays in scope.
         if let Err(e) = &outcome {
-            tracing::error!(error = %e, "drill failed");
+            // `run_id` on the EVENT, not only on the entered span: an operator
+            // at `RUST_LOG=warn` has the INFO span disabled, and any
+            // single-line consumer (`jq '.fields.run_id'`, a log-aggregator
+            // field extractor) reads the event object and not its span. The
+            // identity has to be on the line that survives both.
+            tracing::error!(run_id = %run_id, error = %e, "drill failed");
             eprintln!("{e}");
         }
     }

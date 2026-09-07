@@ -270,6 +270,22 @@ pub trait DataEngine {
     fn list_backup_sets(&self, loc: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError>;
     fn describe(&self, set: &BackupSetRef) -> Result<BackupSetFacts, EngineError>;
     fn preflight(&self, plan: &RestorePlan) -> Result<PreflightReport, EngineError>;
+    /// PRECONDITION: `preflight(plan)` must have been called on this same
+    /// engine value first, and `restore` must be given the same `plan`.
+    ///
+    /// This is not merely a phase ordering the orchestrator happens to follow.
+    /// Phase 5 records the digest of the exact bytes it wrote as `restore.yaml`
+    /// (`PreflightReport::rendered_restore_sha256`), and phase 6 re-renders,
+    /// re-hashes and REFUSES on divergence (T0-14) — so `restore` needs that
+    /// digest to compare against, and an implementation that memoises it on the
+    /// engine value has nothing to compare when `preflight` never ran. An
+    /// implementor MUST fail with `EngineError::Operational` in that case
+    /// (`OsoCliEngine::restore`: "restore() called before preflight(): no
+    /// phase-5 render to compare against") and MUST NOT silently skip the
+    /// comparison, which would restore bytes nothing validated.
+    ///
+    /// Calling `restore` first is therefore a caller bug, never a drill result:
+    /// it is exit 1 with no artifact, not exit 2.
     fn restore(
         &self,
         plan: &RestorePlan,

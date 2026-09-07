@@ -96,6 +96,46 @@ and would express "code 2 is a real result, do not retry; code 1 may be
 retried" declaratively. It was **not** tested live and is recorded here as an
 option to evaluate, not as a recommendation.
 
+### 1b. The log line is how you correlate a drill, and it works at the shipped default
+
+The mitigation above gets you the code off one pod. Tying that pod to the
+archive it read, to the metrics textfile it wrote (§5) and to the scorecard in
+the bucket is the log's job.
+
+`drill run` writes structured JSON to **stdout**, one object per line. The
+default level is **`info` even with `RUST_LOG` unset**, so a pod nobody
+configured still emits a correlatable log. Three facts follow:
+
+- Every line carries the run id — on the event as `fields.run_id`, or on the
+  entered span as `span.run_id`. It is the same id as the scorecard's `run_id`
+  and the same id the `--metrics-file` textfile carries as a leading
+  `# logweir run_id=…` comment, so one grep joins all three.
+- Every terminal path emits `drill finished` with `fields.exit_code` and a
+  `fields.meaning` string. That line is the one place the §1 distinction —
+  "could not run" versus "ran and did not pass" — survives into a log
+  aggregator at all.
+- `RUST_LOG` overrides the default whenever it is set to anything non-blank.
+  `RUST_LOG=warn` keeps the error line and its run id and drops everything
+  else. A blank `value:` is treated as unset, not as "log nothing".
+
+`examples/cronjob-drill.yaml` pins `RUST_LOG: info` in the container's `env:`
+anyway. That is belt-and-braces rather than the mechanism: it holds the level
+where a cluster-wide policy or a base image might otherwise inject a quieter
+one, and it makes the level visible in `kubectl get cronjob -o yaml` without
+reading Logweir's source.
+
+Pulling the run id out of a failed pod, from your laptop:
+
+```bash
+kubectl logs job/<job> > drill.log
+jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
+```
+
+`jq` is a laptop-side tool here — it is **not** in the runtime image (§2), and
+the redirect is deliberate: `kubectl logs … | jq` would work, but piping
+`logweir` itself into `jq` replaces the drill's exit code with `jq`'s, and §1
+is about not losing that code.
+
 ## 2. The engine image is linux/amd64 only
 
 **Verified.** Upstream publishes `osodevops/kafka-backup` for **linux/amd64

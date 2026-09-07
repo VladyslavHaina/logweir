@@ -93,6 +93,32 @@ overlaps no segment is refused rather than reported as a pass. See
 [docs/quickstart.md](docs/quickstart.md) to run it against a cluster you
 already have.
 
+## Logging
+
+`logweir drill run` writes structured JSON to **stdout**, one object per line;
+stderr stays the human channel and carries the failure message on its own. The
+default level is **`info` even when `RUST_LOG` is unset**, so a drill you did
+not configure still emits a correlatable log: every line carries the run id —
+on the event as `fields.run_id`, or on the entered span as `span.run_id` — and
+every terminal path emits `drill finished` with the exit code and what it
+means, which is the one place that meaning survives into a log aggregator (on
+Kubernetes the code itself is buried; see
+[docs/kubernetes.md](docs/kubernetes.md) §1).
+
+`RUST_LOG` still wins whenever it is set to anything non-blank
+(`RUST_LOG=warn` keeps the error line and its run id and drops the rest;
+`RUST_LOG=debug,ureq=warn` works as usual). A blank value is treated as unset
+rather than as "log nothing". The run id is the same id in the signed
+scorecard and, as a leading comment, in the `--metrics-file` textfile:
+
+```bash
+# Capture, then read: a pipe would replace `drill run`'s exit code with jq's,
+# and the exit code is the contract (0/1/2/3/4 — docs/stability.md).
+logweir drill run … > drill.log
+echo $?
+jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
+```
+
 ## What Logweir is **not**
 
 | Non-goal | Why, and what does it instead |

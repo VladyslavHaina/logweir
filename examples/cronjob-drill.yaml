@@ -108,6 +108,16 @@ spec:
                 # resumable in v0.1 (docs/stability.md).
                 - name: TMPDIR
                   value: /scratch
+                # Logweir's binary defaults to `info` on its own (see README
+                # §Logging), so this line is belt-and-braces, not the mechanism:
+                # it pins the level where a cluster-wide policy or a base image
+                # might otherwise inject a quieter one, and it makes the level
+                # visible in `kubectl get cronjob -o yaml` without reading the
+                # source. Below `info` the run id and the exit-code meaning line
+                # are lost, and the exit code is otherwise readable only from the
+                # terminated pod's containerStatuses.
+                - name: RUST_LOG
+                  value: info
                 # object_store's OWN credential chain, not the AWS SDK's:
                 # ~/.aws/credentials, AWS_PROFILE and SSO are unsupported.
                 # On EKS, drop these two and use IRSA / Pod Identity instead.

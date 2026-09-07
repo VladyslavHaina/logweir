@@ -530,9 +530,15 @@ impl Run {
         }
         let both = format!("{}{}", self.out.stdout_utf8(), self.out.stderr_utf8());
         // `drill::summary_line`: "run <id> — outcome … — last phase completed …".
-        // Present on every run that produced a drill result, and the only
-        // stdout Logweir emits when RUST_LOG is unset (its JSON subscriber is
-        // built with `EnvFilter::from_default_env()`, which defaults to ERROR).
+        // Present on every run that produced a drill result. It used to be the
+        // ONLY stdout Logweir emitted with RUST_LOG unset, because its JSON
+        // subscriber was built with `EnvFilter::from_default_env()`, whose
+        // default level is ERROR. That is no longer true (T0-10): the default
+        // is now `info`, so the JSON lines below are emitted at the shipped
+        // default too, and an operational failure that produces no summary line
+        // still leaves a `run_id` for the last branch to find. This branch is
+        // kept because it is the cheaper and more direct read on the runs that
+        // do produce a drill result.
         for line in both.lines() {
             if let Some(rest) = line.strip_prefix("run ") {
                 if let Some(id) = rest.split_whitespace().next() {
