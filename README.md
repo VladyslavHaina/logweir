@@ -98,18 +98,27 @@ already have.
 `logweir drill run` writes structured JSON to **stdout**, one object per line;
 stderr stays the human channel and carries the failure message on its own. The
 default level is **`info` even when `RUST_LOG` is unset**, so a drill you did
-not configure still emits a correlatable log: every line carries the run id —
-on the event as `fields.run_id`, or on the entered span as `span.run_id` — and
-every terminal path emits `drill finished` with the exit code and what it
-means, which is the one place that meaning survives into a log aggregator (on
-Kubernetes the code itself is buried; see
+not configure still emits a correlatable log: **every line Logweir emits at the
+default level carries the run id** — on the event as `fields.run_id`, or on the
+entered span as `span.run_id` — and every terminal path emits `drill finished`
+with the exit code and what it means, which is the one place that meaning
+survives into a log aggregator (on Kubernetes the code itself is buried; see
 [docs/kubernetes.md](docs/kubernetes.md) §1).
+
+That scope is enforced, not just worded. The default directive puts Logweir at
+`info` and pins the dependencies that emit `tracing` — `h2`, `hyper_util`,
+`object_store` and the `quinn` crates — to `warn`, because they log from
+worker threads that never entered the run's span and their lines therefore
+could not carry the id. A test re-derives that list from `Cargo.lock`, so a
+future dependency bump cannot quietly widen the stream.
 
 `RUST_LOG` still wins whenever it is set to anything non-blank
 (`RUST_LOG=warn` keeps the error line and its run id and drops the rest;
-`RUST_LOG=debug,ureq=warn` works as usual). A blank value is treated as unset
-rather than as "log nothing". The run id is the same id in the signed
-scorecard and, as a leading comment, in the `--metrics-file` textfile:
+`RUST_LOG=debug,ureq=warn` works as usual) — and an explicit `RUST_LOG` replaces
+the scoping above, so a value like `debug` will show dependency lines with no
+run id on them. A blank value is treated as unset rather than as "log nothing".
+The run id is the same id in the signed scorecard and, as a leading comment, in
+the `--metrics-file` textfile:
 
 ```bash
 # Capture, then read: a pipe would replace `drill run`'s exit code with jq's,

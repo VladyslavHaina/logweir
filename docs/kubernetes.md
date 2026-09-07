@@ -106,10 +106,15 @@ the bucket is the log's job.
 default level is **`info` even with `RUST_LOG` unset**, so a pod nobody
 configured still emits a correlatable log. Three facts follow:
 
-- Every line carries the run id — on the event as `fields.run_id`, or on the
-  entered span as `span.run_id`. It is the same id as the scorecard's `run_id`
-  and the same id the `--metrics-file` textfile carries as a leading
-  `# logweir run_id=…` comment, so one grep joins all three.
+- **Every line Logweir emits at the default level carries the run id** — on the
+  event as `fields.run_id`, or on the entered span as `span.run_id`. It is the
+  same id as the scorecard's `run_id` and the same id the `--metrics-file`
+  textfile carries as a leading `# logweir run_id=…` comment, so one grep joins
+  all three. The scope is real: the default directive pins the dependencies
+  that emit `tracing` (`h2`, `hyper_util`, `object_store`, the `quinn` crates)
+  to `warn`, because they log from worker threads that never entered the run's
+  span and so could not carry the id. Setting `RUST_LOG` yourself replaces that
+  scoping — `RUST_LOG=debug` will show dependency lines with no run id.
 - Every terminal path emits `drill finished` with `fields.exit_code` and a
   `fields.meaning` string. That line is the one place the §1 distinction —
   "could not run" versus "ran and did not pass" — survives into a log

@@ -436,6 +436,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
     }
 }
 
+/// `directive` is passed in rather than read from `run()`'s
+/// `DEFAULT_LOG_DIRECTIVE`, which is module-private. `"info"` here stands for
+/// that constant's effect on Logweir's OWN targets, which the constant pins at
+/// `info`; the constant itself is exercised by
+/// `drill::tests::a_dependency_info_event_is_filtered_at_the_default_directive`
+/// and `drill::tests::the_phase_observer_the_orchestrator_builds_carries_the_runs_id`,
+/// which live beside it and can see it.
 fn observe(directive: &str) -> Vec<serde_json::Value> {
     use logweir_core::engine::PhaseObserver;
     let logs = Captured::default();

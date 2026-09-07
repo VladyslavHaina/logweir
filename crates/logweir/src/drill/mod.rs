@@ -161,6 +161,47 @@ pub struct RunArgs {
     pub metrics_file: Option<PathBuf>,
 }
 
+/// The log filter used when `RUST_LOG` is unset or blank.
+///
+/// SCOPED ON PURPOSE, and the scope is the documented guarantee. A bare
+/// `"info"` sets the default level for EVERY target, not only Logweir's, and
+/// the third-party crates that emit `tracing` here run on tokio worker
+/// threads. The `drill` span carrying `run_id` is entered with
+/// `info_span!(..).entered()`, and an `EnteredSpan` is THREAD-LOCAL — so an
+/// INFO event from a worker thread would render with neither `fields.run_id`
+/// nor (with `.with_current_span(true)`, which renders only the CURRENT span)
+/// `span.run_id`. README's and `docs/kubernetes.md`'s "every line Logweir
+/// emits at the default level carries the run id" would then be a universal
+/// claim over a stream containing lines that cannot carry it — exactly the
+/// documented-guarantee-versus-code defect this stage exists to close.
+/// `task-12-brief.md` §5 step 2a blesses this narrowing by name.
+///
+/// The WARN list is not a guess: it is every crate in `Cargo.lock` that
+/// depends DIRECTLY on `tracing` (and can therefore emit an event), minus this
+/// workspace's own crates and `tracing-subscriber`, which is the subscriber
+/// and emits nothing. Target names are MODULE paths, so hyphens become
+/// underscores. `hyper` and `reqwest` are deliberately absent: neither depends
+/// on `tracing` in this lockfile (hyper 1.x dropped it), and naming a crate
+/// that cannot emit would be decoration.
+///
+/// `every_tracing_emitting_dependency_in_the_lockfile_is_pinned_to_warn`
+/// re-derives that set from `Cargo.lock` on every run, so a new emitter
+/// arriving with a future dependency bump fails a test instead of silently
+/// widening the stream.
+const DEFAULT_LOG_DIRECTIVE: &str =
+    "info,h2=warn,hyper_util=warn,object_store=warn,quinn=warn,quinn_proto=warn,quinn_udp=warn";
+
+/// The observer phase 6 hands to the engine, carrying THIS run's id.
+///
+/// A named function rather than an inline `PhaseLogger::new(run_id)` at the
+/// call site so the join between the run's identity and the engine's captured
+/// output — the line that makes §2.6's stream real in production — is
+/// reachable from a test without a live broker. `PhaseLogger` re-emits every
+/// captured child line under this id; the child is never told it (GC3).
+fn phase_observer(run_id: &str) -> crate::metrics::PhaseLogger {
+    crate::metrics::PhaseLogger::new(run_id)
+}
+
 pub fn run(args: RunArgs) -> ExitCode {
     // Spec §13: structured JSON logs on stdout with run_id on every line.
     let run_id = crate::ids::new_run_id();
@@ -185,7 +226,7 @@ pub fn run(args: RunArgs) -> ExitCode {
     // on stderr, never unwrapped into a panic.
     let filter = match std::env::var("RUST_LOG") {
         Ok(v) if !v.trim().is_empty() => tracing_subscriber::EnvFilter::new(v),
-        _ => tracing_subscriber::EnvFilter::new("info"),
+        _ => tracing_subscriber::EnvFilter::new(DEFAULT_LOG_DIRECTIVE),
     };
     // `try_init`, not `init`: `init` PANICS when a global subscriber is
     // already installed, and `run` is a library entry point a test or an
@@ -725,7 +766,7 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
 
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
-    let mut obs = crate::metrics::PhaseLogger::new(run_id);
+    let mut obs = phase_observer(run_id);
     let restored = match record(&mut sc, 6, "restore", || {
         phase6_restore::run(
             c.engine.as_ref(),
@@ -1301,6 +1342,146 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 12 fix round 1. These three need `DEFAULT_LOG_DIRECTIVE` and
+    // `phase_observer`, both module-private, so they live here rather than in
+    // `crates/logweir/tests/logging.rs` with their eleven siblings.
+    // -----------------------------------------------------------------------
+
+    /// Runs `body` under a thread-local JSON subscriber built with the SAME
+    /// directive `run()` uses when `RUST_LOG` is unset, and returns the lines
+    /// it emitted. Not a copy of the directive — the constant itself, so a
+    /// change to it changes what these tests observe.
+    fn under_the_default_directive(body: impl FnOnce()) -> Vec<serde_json::Value> {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(logs.clone())
+            .with_env_filter(tracing_subscriber::EnvFilter::new(DEFAULT_LOG_DIRECTIVE))
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        logs.text()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    /// Review finding M1. A dependency's INFO event must NOT reach the stream
+    /// the documentation makes a universal claim about.
+    ///
+    /// Those crates emit from tokio worker threads, where the `drill`
+    /// `EnteredSpan` is not current, so such a line could carry neither
+    /// `fields.run_id` nor `span.run_id`. The fix is to keep it out of the
+    /// stream rather than to weaken the claim. A bare `"info"` directive lets
+    /// it through and fails here.
+    #[test]
+    fn a_dependency_info_event_is_filtered_at_the_default_directive() {
+        let lines = under_the_default_directive(|| {
+            tracing::info!(target: "h2::client", "third-party chatter at INFO");
+            tracing::info!(target: "object_store::aws", "third-party chatter at INFO");
+            tracing::info!(target: "hyper_util::client::pool", "third-party chatter at INFO");
+            tracing::warn!(target: "h2::client", "third-party WARN still passes");
+            tracing::info!(target: "logweir::drill", run_id = "01TEST", "our own INFO line");
+        });
+        let messages: Vec<&str> = lines
+            .iter()
+            .filter_map(|v| v["fields"]["message"].as_str())
+            .collect();
+        assert!(
+            !messages.contains(&"third-party chatter at INFO"),
+            "a dependency's INFO event reached the default stream, where it would carry no run id \
+             on the event and none on the span either (its thread never entered `drill`), while \
+             README and docs/kubernetes.md claim every line Logweir emits at the default level \
+             carries the id. Directive under test: {DEFAULT_LOG_DIRECTIVE:?}; lines: {messages:?}"
+        );
+        assert!(
+            messages.contains(&"our own INFO line"),
+            "narrowing must not silence Logweir's own INFO lines: {messages:?}"
+        );
+        assert!(
+            messages.contains(&"third-party WARN still passes"),
+            "a dependency at WARN is quieted, not muted — a real warning from the storage or HTTP \
+             layer is still an operator's business: {messages:?}"
+        );
+    }
+
+    /// Closed arithmetic over the WARN list, in this repository's established
+    /// idiom: the expected set is DERIVED from `Cargo.lock`, never hand-listed
+    /// twice. A dependency bump that introduces a new `tracing` emitter fails
+    /// here instead of silently widening the default stream a year from now.
+    #[test]
+    fn every_tracing_emitting_dependency_in_the_lockfile_is_pinned_to_warn() {
+        let lock = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+        )
+        .expect("Cargo.lock");
+        // Our own crates are the ones that MUST stay at info; `tracing-subscriber`
+        // is the subscriber and emits no events of its own.
+        let ours = |n: &str| n == "logweir" || n.starts_with("logweir-");
+        let mut emitters: Vec<String> = vec![];
+        for pkg in lock.split("[[package]]") {
+            let Some(name) = pkg.lines().find_map(|l| {
+                l.strip_prefix("name = \"")
+                    .and_then(|r| r.strip_suffix('"'))
+            }) else {
+                continue;
+            };
+            if ours(name) || name == "tracing-subscriber" {
+                continue;
+            }
+            // The `dependencies = [ … ]` block of THIS package only.
+            let deps = pkg
+                .split_once("\ndependencies = [")
+                .and_then(|(_, rest)| rest.split_once("\n]"))
+                .map(|(d, _)| d)
+                .unwrap_or("");
+            if deps.lines().any(|l| l.trim() == "\"tracing\",") {
+                emitters.push(name.to_string());
+            }
+        }
+        assert!(
+            !emitters.is_empty(),
+            "the lockfile walk found no tracing emitters at all — the parse broke, and this test \
+             would then pass vacuously forever"
+        );
+        for e in &emitters {
+            // EnvFilter targets are module paths: `hyper-util` is `hyper_util`.
+            let target = e.replace('-', "_");
+            assert!(
+                DEFAULT_LOG_DIRECTIVE.contains(&format!("{target}=warn")),
+                "`{e}` depends directly on `tracing` and so can emit at INFO, but the default \
+                 directive does not pin it to warn. Add `{target}=warn` to DEFAULT_LOG_DIRECTIVE \
+                 (and say so in its doc comment), or the default stream gains lines that cannot \
+                 carry the run id. Emitters found: {emitters:?}; directive: {DEFAULT_LOG_DIRECTIVE:?}"
+            );
+        }
+    }
+
+    /// Review finding M2: the line that joins the run's identity to the
+    /// engine's captured output — `phase_observer(run_id)`, handed to phase 6
+    /// — was referenced by no test, so an observer built with the wrong id
+    /// could not be killed without a live broker.
+    #[test]
+    fn the_phase_observer_the_orchestrator_builds_carries_the_runs_id() {
+        use logweir_core::engine::PhaseObserver;
+        // A real id from the real generator, exactly as `run()` mints it, so
+        // this cannot pass by matching a literal against itself.
+        let run_id = crate::ids::new_run_id();
+        let mut obs = phase_observer(&run_id);
+        let lines = under_the_default_directive(|| {
+            obs.engine_line("stdout", "Restoring topic orders-restored partition 0");
+        });
+        let line = lines
+            .iter()
+            .find(|v| v["fields"]["message"] == "engine output")
+            .unwrap_or_else(|| panic!("the observer emitted no engine line: {lines:?}"));
+        assert_eq!(
+            line["fields"]["run_id"].as_str(),
+            Some(run_id.as_str()),
+            "the observer phase 6 is handed must carry THIS run's id, not a fresh one: {line}"
+        );
     }
 
     /// GC11's swallow discipline, which nothing asserted: a metrics write that
