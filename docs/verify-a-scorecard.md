@@ -663,7 +663,7 @@ VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
        integrity=byte-fingerprint/pass
        approval: SELF-ATTESTED — the approval key equals the signing key
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.7.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, the six required non-block fields, u64 domain with null refused where Rust has no Option; approval.self_attested derived, not echoed)
+       verifier: verify_scorecard.py 1.8.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, the six required non-block fields present and of the type their Rust type implies, u64 domain with null refused where Rust has no Option; approval.self_attested derived, not echoed)
 ```
 
 (The `evidence:` line is printed on **every** scorecard, self-attested or not.
@@ -688,16 +688,22 @@ far is such a move:
 | `1.5.0` | Requires the `sample` block and an integer `sample.records_expected`. A scorecard with no `sample` block at all — or with `"records_expected": "75"` — printed `VALID` under `1.4.0` while `logweir drill verify` exited **1** on the same bytes, because Rust gets the shape from its own types and this script had no equivalent layer. Not an invariant arm; a bump all the same, because there are documents this script now decides differently. |
 | `1.6.0` | Completes the *block* shape layer and pins its order. All **eleven** required blocks are checked, not seven — `target`, `approval`, `target_diff` and `topic_parity` join the list; a document missing `target`, `target_diff` or `topic_parity` printed `VALID` under `1.5.0` while `logweir drill verify` exited **1** (`approval` absent was already refused by both, in Python by `main`'s approval derivation rather than the block loop, which now names it consistently). Every field the Rust reader types as `u64` must satisfy `0 <= v < 2**64`, where `isinstance(v, int)` mirrored serde's *type* and not its *domain*: `sample.records_expected: 18446744073709551616` was `VALID` under `1.5.0` and exit **1** from `drill verify`. And the block list is now in the struct's declaration order, so a document missing several *blocks* is named for the same block by both readers. |
 | `1.7.0` | Finishes the shape layer on the fields that are **not** blocks, and stops treating every `u64` as nullable. `Scorecard` has six required fields whose type is not a block — `format_version`, `run_id`, `outcome`, `last_phase_completed`, `requested_at` and `phases` — and `1.6.0` checked none of them: with `run_id`, `requested_at` or `phases` absent, `logweir drill verify` exited **1** (`missing field ...`) and this script printed `VALID`; with `outcome` absent it refused, but on an *invariant* about `engine.matrix_verdict`, which is not what is wrong with the document. And `null` was skipped for all eleven `u64` fields although only five are `Option<u64>` in Rust: `sample.records_restored: null`, `integrity.records_sampled: null`, `integrity.records_sampled_matching: null`, `integrity.mismatches: null` and `phases[].duration_ms: null` were each `VALID` under `1.6.0` and exit **1** (`invalid type: null, expected u64`) from `drill verify`. The five `Option<u64>` fields still accept null. |
+| `1.8.0` | Type-checks the six required non-block fields, and derives the two lists that were still hand-written. `1.7.0` asserted PRESENCE only and recorded the rest as a residual; measured at `b99239a` over the release binary, `run_id: 42` was `logweir drill verify` exit **1** (``invalid type: integer `42`, expected a string``) against `VALID` here, `phases: "x"` was exit **1** (`invalid type: string "x", expected a sequence`) against `VALID`, `requested_at: 5` was exit **1** against `VALID`, and `outcome: 7` refused here on an *invariant* about `engine.matrix_verdict` rather than on the type. Each Rust type implies exactly one JSON type — `String`, `DateTime<Utc>` and the `Outcome` enum are strings, `i8` is a number, `Vec<PhaseRecord>` is an array — so the check is one rule read off the struct, not five guesses. |
 
-**What `1.7.0` does not claim.** The field-presence loop runs *after* the block
-loop and asserts presence only. Two consequences, both deliberate and both
-measured. A document missing a plain field **and** a block is still named for
-the block here and for whichever comes first in the struct there — `run_id` plus
-`engine` absent is `engine` from this script and `run_id` from `drill verify`.
-And a field that is present but of the wrong type — `phases: "none"` — is
-refused by `drill verify` and not by this script: the six fields carry five
-different Rust types and share no JSON shape, so a type check here would be five
-guesses rather than one rule. Both are recorded rather than closed.
+**What `1.8.0` does not claim.** The field loop runs *after* the block loop, and
+one consequence survives: a document missing a plain field **and** a block is
+still named for the block here and for whichever comes first in the struct there
+— `run_id` plus `engine` absent is `engine` from this script and `run_id` from
+`drill verify`. Full order parity needs one merged loop over all seventeen
+required fields in declaration order, which is a change to three parsers rather
+than a clause. It is recorded rather than closed.
+
+(`1.7.0` recorded a second residual here — a field present but of the wrong
+type, `phases: "none"`, refused by `drill verify` and not by this script — on the
+grounds that "the six fields carry five different Rust types and share no JSON
+shape, so a type check here would be five guesses rather than one rule". They
+share no JSON shape, but each Rust type *implies* one, which is a rule and not a
+guess. `1.8.0` closes it and derives the five implications from the struct.)
 
 The parenthetical on the `verifier:` line enumerates the current invariant set,
 so the line an auditor reads names the checks that actually produced the verdict

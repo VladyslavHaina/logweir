@@ -191,7 +191,7 @@
   {
     "id": "records_restored_null",
     "file": "records_restored_null.json",
-    "check": "message:if optional and value is None:",
+    "check": "null:sample.records_restored",
     "rust_exit": 1,
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
@@ -200,7 +200,7 @@
   {
     "id": "mismatches_null",
     "file": "mismatches_null.json",
-    "check": "message:if optional and value is None:",
+    "check": "null:integrity.mismatches",
     "rust_exit": 1,
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
@@ -209,10 +209,91 @@
   {
     "id": "duration_ms_null",
     "file": "duration_ms_null.json",
-    "check": "message:if optional and value is None:",
+    "check": "null:phases[].duration_ms",
     "rust_exit": 1,
     "python_exit": 1,
     "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
     "python_reason": "phases[0].duration_ms is not an integer"
+  },
+  {
+    "id": "format_version_not_a_string",
+    "file": "format_version_not_a_string.json",
+    "check": "type:format_version",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+    "python_reason": "format_version 1 is not a parseable semver"
+  },
+  {
+    "id": "run_id_not_a_string",
+    "file": "run_id_not_a_string.json",
+    "check": "type:run_id",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `42`, expected a string",
+    "python_reason": "run_id is not a string"
+  },
+  {
+    "id": "outcome_not_a_string",
+    "file": "outcome_not_a_string.json",
+    "check": "type:outcome",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: expected value",
+    "python_reason": "outcome is not a string"
+  },
+  {
+    "id": "last_phase_completed_not_an_integer",
+    "file": "last_phase_completed_not_an_integer.json",
+    "check": "type:last_phase_completed",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"7\", expected i8",
+    "python_reason": "last_phase_completed is not an integer"
+  },
+  {
+    "id": "requested_at_not_a_string",
+    "file": "requested_at_not_a_string.json",
+    "check": "type:requested_at",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `5`, expected an RFC 3339 formatted date and time string",
+    "python_reason": "requested_at is not a string"
+  },
+  {
+    "id": "phases_not_a_list",
+    "file": "phases_not_a_list.json",
+    "check": "type:phases",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"x\", expected a sequence",
+    "python_reason": "phases is not an array"
+  },
+  {
+    "id": "records_expected_null",
+    "file": "records_expected_null.json",
+    "check": "null:sample.records_expected",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+    "python_reason": "sample.records_expected is not an integer"
+  },
+  {
+    "id": "records_sampled_null",
+    "file": "records_sampled_null.json",
+    "check": "null:integrity.records_sampled",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+    "python_reason": "integrity.records_sampled is not an integer"
+  },
+  {
+    "id": "records_sampled_matching_null",
+    "file": "records_sampled_matching_null.json",
+    "check": "null:integrity.records_sampled_matching",
+    "rust_exit": 1,
+    "python_exit": 1,
+    "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected u64",
+    "python_reason": "integrity.records_sampled_matching is not an integer"
   }
 ]

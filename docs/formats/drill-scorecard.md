@@ -313,11 +313,39 @@ the script skipped them, so `sample.records_restored: null`,
 `VALID` here against exit **1** there. The optionality is now part of the list
 the walker re-derives from the struct, so it cannot drift.
 
-**What neither reader claims.** The field check is PRESENCE, not type: a
-`phases` that is present but is not a list is refused by `drill verify` and not
-by the script. And the script's field loop runs after its block loop, so a
-document missing a plain field *and* a block is named for the block here and for
-whichever comes first in the struct there. Both are recorded rather than closed.
+### The TYPE of every required non-block field (`1.8.0`)
+
+`1.7.0` checked those six fields for PRESENCE and said so plainly: "the six
+fields carry five different Rust types and share no JSON shape, so a type check
+here would be five guesses rather than one rule". They share no JSON shape, but
+each Rust type implies exactly one — `String` and `DateTime<Utc>` are strings on
+the wire, the `Outcome` enum is a kebab-case string, `i8` is a number, and
+`Vec<PhaseRecord>` is an array — so the implication is a rule, read off the
+struct, and `1.8.0` reads it.
+
+Measured at `b99239a` over the release binary, on documents derived from
+`e2e/fixtures/invariants/unmodified_example.json` and signed:
+
+| document | `drill verify` | `verify_scorecard.py` `1.7.0` | `1.8.0` |
+|---|---|---|---|
+| `run_id: 42` | **1** — ``invalid type: integer `42`, expected a string`` | **0 `VALID`** | 1 — `run_id is not a string` |
+| `phases: "x"` | **1** — `invalid type: string "x", expected a sequence` | **0 `VALID`** | 1 — `phases is not an array` |
+| `requested_at: 5` | **1** — ``invalid type: integer `5`, expected an RFC 3339 formatted date and time string`` | **0 `VALID`** | 1 — `requested_at is not a string` |
+| `outcome: 7` | **1** — `expected value` | 1, on the `engine.matrix_verdict` *invariant* | 1 — `outcome is not a string` |
+| `last_phase_completed: "7"` | **1** — `invalid type: string "7", expected i8` | 1 — `is not an integer` | unchanged |
+| `format_version: 1` | **1** — ``invalid type: integer `1`, expected a string`` | 1 — `not a parseable semver` | unchanged (GC12 runs first) |
+
+The mapping from Rust type to JSON type lives in
+`crates/logweir/tests/two_reader_parity.rs::json_type_of` and in
+`scripts/check-invariant-corpus.sh`, both outside `docs/`, and a required
+non-block field of an unmapped Rust type fails those gates loudly rather than
+arriving at the script untyped.
+
+**What neither reader claims.** The script's field loop still runs after its
+block loop, so a document missing a plain field *and* a block is named for the
+block here and for whichever comes first in the struct there. Recorded rather
+than closed: full order parity needs one merged loop over all seventeen required
+fields.
 
 ## `target_diff`, `integrity`, `topic_parity`
 

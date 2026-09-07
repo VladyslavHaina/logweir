@@ -109,8 +109,60 @@ corpus = root / "e2e/fixtures/invariants"
 # them is a block; a String, an i8, a Vec<..> or an Option<..> is not.
 declared = set(re.findall(r"^pub struct ([A-Za-z0-9_]+)", rust, re.M))
 body = rust.split("pub struct Scorecard {", 1)[1].split("\n}", 1)[0]
-blocks = [m.group(1) for m in re.finditer(r"^    pub ([a-z0-9_]+): ([A-Za-z0-9_]+),$", body, re.M)
-          if m.group(2) in declared]
+
+# `check_invariants`'s body with whole-line `#` comments removed, for the same
+# reason `code_only` strips `//` from the Rust in the walker: a fragment that
+# survives only because a comment quotes it is not a check that exists.
+ci = py.split("def check_invariants(", 1)[1].split("\ndef ", 1)[0]
+ci_code = "\n".join(l for l in ci.splitlines() if not l.strip().startswith("#"))
+
+# EVERY REQUIRED FIELD of `Scorecard`, ATTRIBUTE-AWARE: a field is REQUIRED when
+# it carries no `#[serde(default)]`. Attribute lines are read, not just field
+# lines, so `#[schemars(...)]` is not mistaken for a default and the flag is
+# cleared at every field. Hoisted above the block list by Task 5f — see the
+# cross-check immediately below.
+required, defaulted = [], False
+for line in body.splitlines():
+    code = line.strip()
+    if not code or code.startswith("//"):
+        continue
+    if code.startswith("#"):
+        if "serde(default" in code:
+            defaulted = True
+        continue
+    m = re.match(r"^pub ([a-z0-9_]+): (.+),$", code)
+    if m and not defaulted:
+        required.append((m.group(1), m.group(2)))
+    defaulted = False
+
+# --- Task 5f (f): the block list is `#[serde(default)]`-aware ----------------
+# Task 5e's review, finding F3: this gate's block list was a one-line rule with
+# no attribute awareness, while the `required` loop immediately below it WAS
+# attribute-aware — the two lists in one file reading one struct by rules that
+# could disagree. Task 5e closed the Rust side (`required_non_block_fields`
+# asserts every name `required_blocks` calls a block is also a required field);
+# the shell gate had no equivalent, so marking a block `#[serde(default)]` failed
+# the walker at 101 and passed here at 0.
+#
+# `blocks` is now derived from the attribute-aware list, and the one-line rule is
+# kept as an INDEPENDENT second parser that must agree — the same shape as the
+# Rust guard, and for the reason stated there: two parsers reading one struct by
+# different rules must not disagree silently, or both lists weaken at once.
+blocks = [n for n, t in required if t in declared]
+block_lines = [m.group(1) for m in
+               re.finditer(r"^    pub ([a-z0-9_]+): ([A-Za-z0-9_]+),$", body, re.M)
+               if m.group(2) in declared]
+if block_lines != blocks:
+    defaulted_blocks = [n for n in block_lines if n not in blocks]
+    raise SystemExit(
+        "this gate's two block parsers disagree about Scorecard.\n"
+        f"  by field type only            ({len(block_lines)}): {block_lines}\n"
+        f"  by field type AND no default  ({len(blocks)}): {blocks}\n"
+        f"  block field(s) carrying #[serde(default)]: {defaulted_blocks}\n"
+        "A block that gained a `#[serde(default)]` is no longer required: serde "
+        "synthesises it, a document may omit it, and REQUIRED_BLOCKS must not "
+        "demand it. crates/logweir/tests/two_reader_parity.rs fails such an edit "
+        "at `required_non_block_fields`; since Task 5f this gate fails it too.")
 
 loop = re.search(r"^REQUIRED_BLOCKS = \(\n(.*?)^\)$", py, re.M | re.S)
 if loop is None:
@@ -134,52 +186,88 @@ if sorted(covered) != sorted(blocks):
         "Every required block needs a shape-index.json case whose `check` is "
         '"block:<name>", and every such case needs a block.')
 
-# --- Task 5e (a): the required NON-BLOCK fields -----------------------------
-# A field is REQUIRED when it carries no `#[serde(default)]`; it is a BLOCK when
-# its type is one of the structs declared in the same file. The complement is
-# what `REQUIRED_FIELDS` must name, in the same order, and what the shape corpus
-# must carry one `field:` case for. Attribute lines are read, not just field
-# lines, so `#[schemars(...)]` is not mistaken for a default and the flag is
-# cleared at every field.
-required, defaulted = [], False
-for line in body.splitlines():
-    code = line.strip()
-    if not code or code.startswith("//"):
-        continue
-    if code.startswith("#"):
-        if "serde(default" in code:
-            defaulted = True
-        continue
-    m = re.match(r"^pub ([a-z0-9_]+): (.+),$", code)
-    if m and not defaulted:
-        required.append((m.group(1), m.group(2)))
-    defaulted = False
-non_block = [n for n, t in required if t not in declared]
+# --- Task 5e (a): the required NON-BLOCK fields, with their TYPES (Task 5f) ---
+# A field is REQUIRED when it carries no `#[serde(default)]` (derived above); it
+# is a BLOCK when its type is one of the structs declared in the same file. The
+# complement is what `REQUIRED_FIELDS` must name, in the same order, and what the
+# shape corpus must carry one `field:` case (absent) and one `type:` case (present
+# but wrongly typed) for.
+#
+# THE TYPE IS DERIVED FROM THE RUST TYPE, not chosen. Byte-for-byte the same
+# mapping as `crates/logweir/tests/two_reader_parity.rs::json_type_of`, keyed on
+# the struct's own type text, so a required non-block field of an unmapped type
+# fails loudly here rather than reaching the Python reader untyped. 1.7.0 checked
+# presence only, and Task 5e's review measured what that cost at `78bf570`:
+# `run_id: 42`, `phases: "x"` and `requested_at: 5` were each `drill verify`
+# exit 1 against `VALID` from the script.
+def json_type_of(name, ty):
+    if ty in ("String", "DateTime<Utc>", "Outcome"):
+        return "string"       # chrono writes RFC 3339; Outcome is a unit enum
+    if ty in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"):
+        return "integer"
+    if ty == "bool":
+        return "boolean"
+    if ty.startswith("Vec<"):
+        return "array"
+    raise SystemExit(
+        f"Scorecard's required non-block field {name!r} has Rust type {ty!r}, which "
+        "this gate does not map to a JSON type. Add the mapping here AND in "
+        "crates/logweir/tests/two_reader_parity.rs::json_type_of, and give "
+        "docs/verify_scorecard.py's REQUIRED_FIELDS the matching entry — a field "
+        "with no mapping is type-checked by guesswork or not at all.")
+
+non_block = [[n, json_type_of(n, t)] for n, t in required if t not in declared]
 if not non_block:
     raise SystemExit("Scorecard has no required non-block field; the parsing rule "
                      "in check-invariant-corpus.sh no longer matches the struct")
+non_block_names = [n for n, _ in non_block]
 
 fields = re.search(r"^REQUIRED_FIELDS = \(\n(.*?)^\)$", py, re.M | re.S)
 if fields is None:
     raise SystemExit("docs/verify_scorecard.py has no REQUIRED_FIELDS tuple")
-named_fields = re.findall(r'^    "([a-z0-9_]+)",$', fields.group(1), re.M)
+named_fields = [[n, t] for n, t in
+                re.findall(r'^    \("([a-z0-9_]+)", "([a-z]+)"\),$',
+                           fields.group(1), re.M)]
 if named_fields != non_block:
     raise SystemExit(
         "docs/verify_scorecard.py's REQUIRED_FIELDS and Scorecard disagree.\n"
         f"  python ({len(named_fields)}): {named_fields}\n"
         f"  rust   ({len(non_block)}): {non_block}\n"
         "Every required field of the struct that is NOT a block must be named by "
-        "the field-presence loop, in the struct's own declaration order.")
+        "the field loop, in the struct's own declaration order, with the JSON "
+        "type its Rust type implies.")
+
+# The loop must actually READ the type. Asserted on the comment-stripped body,
+# so a fragment quoted in prose does not count as a check that exists.
+for fragment in ("for name, want in REQUIRED_FIELDS:", "_JSON_TYPES[want]",
+                 "_JSON_TYPE_WORDS[want]"):
+    if fragment not in ci_code:
+        raise SystemExit(
+            f"docs/verify_scorecard.py's check_invariants no longer contains "
+            f"{fragment!r}, so the required non-block fields are no longer "
+            "TYPE-checked; every type: case below is a document it prints VALID "
+            "over while drill verify exits 1.")
 
 field_cases = [e["check"].split(":", 1)[1] for e in shape
                if e.get("check", "").startswith("field:")]
-if sorted(field_cases) != sorted(non_block):
+if sorted(field_cases) != sorted(non_block_names):
     raise SystemExit(
         "the shape corpus does not account for Scorecard's required non-block "
-        f"fields.\n  required ({len(non_block)}): {non_block}\n"
+        f"fields.\n  required ({len(non_block_names)}): {non_block_names}\n"
         f"  covered  ({len(field_cases)}): {field_cases}\n"
         "Every required non-block field needs a shape-index.json case whose "
         '`check` is "field:<name>".')
+
+type_cases = [e["check"].split(":", 1)[1] for e in shape
+              if e.get("check", "").startswith("type:")]
+if sorted(type_cases) != sorted(non_block_names):
+    raise SystemExit(
+        "the shape corpus does not account for the TYPE of Scorecard's required "
+        f"non-block fields.\n  required ({len(non_block_names)}): {non_block_names}\n"
+        f"  covered  ({len(type_cases)}): {type_cases}\n"
+        "Every required non-block field needs a shape-index.json case whose "
+        '`check` is "type:<name>": one document carrying that field at a JSON '
+        "type its Rust type refuses.")
 
 # --- Task 5e (b): the u64 fields, with their optionality ---------------------
 # Walk Scorecard's own fields in declaration order; a field whose type is a
@@ -241,14 +329,48 @@ if py_u64 != rust_u64:
         "Option<u64>. Python's int is unbounded, so a field with no entry has no "
         "domain check at all.")
 
+# --- Task 5f (d): closed arithmetic for the optionality flag's USE -----------
+# Task 5e gave U64_FIELDS closed arithmetic on its LIST. Its USE had none, and
+# its review measured that in one edit: revert `if optional and value is None:`
+# to `if value is None:` — every flag left present and correct — and delete the
+# three null corpus cases and both null pytests, and the walker, this gate and
+# pytest were all still 0, with `sample.records_restored: null` back to `drill
+# verify` exit 1 against VALID from the script. The null cases are now COUNTED,
+# against the struct's own plain-`u64` set, and the guard line is asserted.
+plain_u64 = [n for n, o in rust_u64 if not o]
+null_cases = [e["check"].split(":", 1)[1] for e in shape
+              if e.get("check", "").startswith("null:")]
+if sorted(null_cases) != sorted(plain_u64):
+    raise SystemExit(
+        "the shape corpus does not account for null on Scorecard's plain u64 "
+        f"fields.\n  plain u64 ({len(plain_u64)}): {plain_u64}\n"
+        f"  covered   ({len(null_cases)}): {null_cases}\n"
+        "Every non-Option u64 field needs a shape-index.json case whose `check` "
+        'is "null:<dotted name>": one document setting it to null, which '
+        "serde_json refuses with `invalid type: null, expected u64`.")
+accepting = [e["id"] for e in shape if e.get("check", "").startswith("null:")
+             and (e["rust_exit"] == 0 or e["python_exit"] == 0)]
+if accepting:
+    raise SystemExit(
+        f"null: case(s) recorded as an ACCEPT: {accepting}. A plain u64 set to "
+        "null must be REFUSED by both readers; an accept closes the arithmetic "
+        "while asserting the opposite of the claim.")
+if "if optional and value is None:" not in ci_code:
+    raise SystemExit(
+        "docs/verify_scorecard.py's check_invariants no longer contains `if "
+        "optional and value is None:`, so the Option<u64> flag is derived, "
+        "compared and never read. Every null: case above is then a document it "
+        "prints VALID over while drill verify exits 1.")
+
 print(f"check-invariant-corpus: {len(blocks)} required blocks, "
       f"{len(blocks)} block-presence checks, {len(covered)} shape cases — closed")
 print(f"check-invariant-corpus: {len(non_block)} required non-block fields, "
-      f"{len(named_fields)} field-presence checks, {len(field_cases)} shape cases "
-      f"— closed")
+      f"{len(named_fields)} field-presence checks, {len(field_cases)} absent-field "
+      f"shape cases, {len(type_cases)} wrong-type shape cases — closed")
 print(f"check-invariant-corpus: {len(rust_u64)} u64 document fields "
       f"({sum(1 for _, o in rust_u64 if o)} Option<u64>), "
-      f"{len(py_u64)} domain checks — closed")
+      f"{len(py_u64)} domain checks, {len(null_cases)} null shape cases for the "
+      f"{len(plain_u64)} plain u64 — closed")
 PYEOF
 arith_rc=$?
 set -e

@@ -219,6 +219,31 @@ FORMAT_VERSION = "1.0.0"
 #          `Option<u64>` fields still accept null. (c) THE u64 LIST IS IN THE
 #          STRUCT'S DECLARATION ORDER and has closed arithmetic OUTSIDE this
 #          file, which 1.6.0's did not — argued at `U64_FIELDS`.
+#   1.8.0  SHAPE a fourth time (Task 5f, from Task 5e's review findings F1, F2
+#          and F3 and the wrong-type residual 1.7.0 recorded rather than
+#          closed), and a bump for the same reason as 1.5.0, 1.6.0 and 1.7.0:
+#          there are documents this script now decides differently. No arm
+#          weakened, no check removed. (a) THE REQUIRED NON-BLOCK FIELDS ARE
+#          TYPE-CHECKED, not merely counted. 1.7.0 asserted presence and said so
+#          in as many words; the cost was measured by that review at `78bf570`
+#          and re-measured at `b99239a`, on documents derived from
+#          `e2e/fixtures/invariants/unmodified_example.json`:
+#          `run_id: 42`, `phases: "x"` and `requested_at: 5` were each `drill
+#          verify` exit 1 (`invalid type: integer 42, expected a string`, and so
+#          on) against `VALID` here, and `outcome: 7` refused here on an
+#          INVARIANT about `engine.matrix_verdict` rather than on the type.
+#          `REQUIRED_FIELDS` now carries the JSON type each field's Rust type
+#          implies, and the same arithmetic that keeps the NAMES derived from
+#          the struct keeps the TYPES derived too. (b) THE u64 BLOCK MAP IS
+#          DERIVED, not hand-written (`_u64_fields`): the four-entry literal
+#          could `KeyError` on the first document the moment a `u64` was added
+#          to a struct outside it, in a function whose stated contract is that
+#          no field access surfaces as a traceback. (c) THE NULL CASES ARE
+#          DERIVED FROM THE NON-`Option` u64 SET. Nothing changes in this file
+#          for (c) — the guard line is 1.7.0's — but the shape corpus now owes
+#          one `null:` case per non-`Option` `u64` field, so reverting the guard
+#          and deleting the cases in one edit fails at assertion rather than
+#          silently.
 #
 # ANY task that adds or removes an arm in `check_invariants` bumps this minor
 # and updates the parenthetical in the success line below, IN THE SAME COMMIT.
@@ -229,7 +254,7 @@ FORMAT_VERSION = "1.0.0"
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.7.0"
+SCRIPT_VERSION = "1.8.0"
 
 # The three payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -413,20 +438,52 @@ REQUIRED_BLOCKS = (
 # the struct, so serde reaches it before `measured` and this script did not reach
 # it at all.
 #
-# PRESENCE ONLY, and deliberately so. The block loop can assert a TYPE as well
-# (`isinstance(..., dict)`) because every block is a JSON object; these six carry
-# five different Rust types and share no JSON shape, so the honest common claim
-# is that the key is there. A `phases` that is present but not a list is still
-# refused by Rust and not here — recorded as a residual in
-# `docs/verify-a-scorecard.md` rather than closed by a check that would have to
-# guess at five types.
+# PRESENCE **AND TYPE** SINCE 1.8.0, and the second element is the type (Task
+# 5f, from Task 5e's review). 1.7.0 asserted presence only and said so plainly:
+# "these six carry five different Rust types and share no JSON shape, so the
+# honest common claim is that the key is there". That was true of a list of bare
+# names and false of the format — a Rust type implies a JSON type, and the
+# implication is a rule rather than a guess:
 #
-# `format_version` is in the list and its check here is UNREACHABLE: the Global
-# Constraint 12 rule at the top of `check_invariants` runs first and refuses an
-# absent one as `format_version None is not a parseable semver`. It stays,
+#     String           -> "string"   `run_id`, `format_version`
+#     DateTime<Utc>    -> "string"   `requested_at`, RFC 3339 on the wire
+#     Outcome          -> "string"   a unit enum with `#[serde(rename_all = ...)]`
+#     i8               -> "integer"  `last_phase_completed`
+#     Vec<PhaseRecord> -> "array"    `phases`
+#
+# The names are JSON Schema's own ("string", "integer", "array", "boolean"), not
+# Python's. "list" in particular is NOT used: `scripts/check-no-oso.sh` greps
+# every .rs file under `crates/` for the quoted token "list", which is a
+# kafka-backup subcommand under Global Constraint 3, and the mapping lives in one
+# of those files.
+#
+# The mapping lives in `crates/logweir/tests/two_reader_parity.rs::
+# json_type_of` and in `scripts/check-invariant-corpus.sh` — both OUTSIDE
+# `docs/`, both keyed on the struct's own type text, so a new required non-block
+# field of an unmapped Rust type fails loudly instead of arriving here with a
+# guessed type or no type at all.
+#
+# What the presence-only version cost — measured by Task 5e's review at
+# `78bf570` and re-measured here at `b99239a`, on documents derived from
+# `e2e/fixtures/invariants/unmodified_example.json` and signed, over the release
+# binary: `run_id: 42` was `drill verify`
+# exit 1 (`invalid type: integer 42, expected a string`) against `VALID` here;
+# `phases: "x"` was exit 1 (`invalid type: string "x", expected a sequence`)
+# against `VALID`; `requested_at: 5` was exit 1 against `VALID`; and `outcome: 7`
+# refused here on an INVARIANT about `engine.matrix_verdict`, which is the same
+# verdict for a reason that is not what is wrong with the document.
+#
+# `bool` is excluded from `"integer"` explicitly, exactly as the u64 loop does it:
+# `isinstance(True, int)` is True in Python and `"last_phase_completed": true`
+# is not an integer to any other reader.
+#
+# `format_version` is in the list and BOTH its checks here are UNREACHABLE: the
+# Global Constraint 12 rule at the top of `check_invariants` runs first and
+# refuses an absent one as `format_version None is not a parseable semver`, and a
+# non-string one as `format_version 1 is not a parseable semver`. Both stay,
 # because the list is DERIVED from the struct and an exception is a hole in the
-# derivation; the corpus case `no_format_version_field` records the refusal that
-# actually happens.
+# derivation; the corpus cases `no_format_version_field` and
+# `format_version_not_a_string` record the refusals that actually happen.
 #
 # WHERE THE LOOP RUNS: AFTER the block loop, never before. serde names the FIRST
 # missing field in declaration order over blocks and non-blocks alike, and
@@ -435,14 +492,34 @@ REQUIRED_BLOCKS = (
 # there — turning a pair the two readers agree on today into one they do not.
 # Running it after preserves every answer this script already gives on a
 # multi-missing document and adds the six single-field ones.
+#
+# PRESENCE AND TYPE ARE CHECKED PER FIELD, IN ONE PASS, not in two passes over
+# the whole list. serde aborts at the FIRST fault it meets while visiting the
+# document, so on a document whose first fault is a wrong type and whose second
+# is an absent key — `format_version: 1` with `run_id` deleted — Rust names the
+# type. A presence-only sweep followed by a type sweep would name `run_id` here.
+# One pass in declaration order is the arrangement that agrees.
 REQUIRED_FIELDS = (
-    "format_version",
-    "run_id",
-    "outcome",
-    "last_phase_completed",
-    "requested_at",
-    "phases",
+    ("format_version", "string"),
+    ("run_id", "string"),
+    ("outcome", "string"),
+    ("last_phase_completed", "integer"),
+    ("requested_at", "string"),
+    ("phases", "array"),
 )
+
+# The JSON type names `REQUIRED_FIELDS` uses, and the words the refusal uses for
+# each. The names are JSON Schema's; the words are this file's own convention,
+# already set by `last_phase_completed is not an integer` and
+# `sample.records_expected is not an integer` — which is why the refusal reads
+# "is not an integer" rather than naming a Python type.
+_JSON_TYPES = {"string": str, "integer": int, "array": list, "boolean": bool}
+_JSON_TYPE_WORDS = {
+    "string": "a string",
+    "integer": "an integer",
+    "array": "an array",
+    "boolean": "a boolean",
+}
 
 # EVERY FIELD `logweir_core::scorecard::Scorecard` AND ITS BLOCKS TYPE AS `u64`,
 # as (dotted name, the field is `Option<u64>` in Rust) pairs, IN SERDE'S
@@ -496,7 +573,7 @@ U64_FIELDS = (
 )
 
 
-def _u64_fields(doc, measured, objectives, sample, integrity):
+def _u64_fields(doc):
     """(dotted name, value, the field is `Option<u64>` in Rust) for every `u64`
     field of the document.
 
@@ -506,13 +583,22 @@ def _u64_fields(doc, measured, objectives, sample, integrity):
     such a document at deserialisation; this function's contract is that no
     field access ever surfaces as a traceback. (`phases` being ABSENT is a
     different claim and is refused by the `REQUIRED_FIELDS` loop.)
+
+    THE OWNER MAP IS DERIVED FROM `REQUIRED_BLOCKS`, not written out (Task 5f,
+    from Task 5e's review finding F2). It used to be a four-entry literal —
+    `measured`, `objectives`, `sample`, `integrity` — passed in as four
+    positional arguments, which was true of the `U64_FIELDS` of the day and is
+    not a property of the format. Task 5e made the walker and the shell gate
+    DERIVE `U64_FIELDS` from `Scorecard`, so the moment a `u64` is added to, say,
+    `TargetInfo`, both gates REQUIRE an entry named `target.<field>` — and
+    `blocks["target"]` would then raise `KeyError` on every document, in the one
+    function whose docstring promises that no field access ever surfaces as a
+    traceback. Reading `REQUIRED_BLOCKS` instead makes the map exactly as wide as
+    the block list the same file already keeps derived. Safe without a guard:
+    the caller runs the block-presence loop first, so every name here is already
+    proved to be a dict.
     """
-    blocks = {
-        "measured": measured,
-        "objectives": objectives,
-        "sample": sample,
-        "integrity": integrity,
-    }
+    blocks = {name: doc[name] for name in REQUIRED_BLOCKS}
     phases = doc.get("phases")
     for path, optional in U64_FIELDS:
         block, key = path.split(".", 1)
@@ -522,7 +608,18 @@ def _u64_fields(doc, measured, objectives, sample, integrity):
                     if isinstance(phase, dict):
                         yield f"phases[{n}].{key}", phase.get(key), optional
             continue
-        yield path, blocks[block].get(key), optional
+        # `.get` with the document itself as the fallback, never `[...]`. Two
+        # owners are possible and neither may raise: a REQUIRED block, which the
+        # map above carries and the block loop has already proved is a dict; and
+        # an OPTIONAL struct field such as `engine_subreport`, which
+        # `rust_u64_fields` also expands and which a document may legitimately
+        # omit or null. The first is read from the map, the second from the
+        # document, and anything that is not a dict is skipped rather than
+        # traced back — the same contract `phases` is held to above.
+        owner = blocks.get(block, doc.get(block))
+        if not isinstance(owner, dict):
+            continue
+        yield path, owner.get(key), optional
 
 
 def check_invariants(doc) -> str:
@@ -585,10 +682,22 @@ def check_invariants(doc) -> str:
     # verify` exited 1 and this script printed `VALID`).
     #
     # AFTER the block loop and never before it — the reason is argued in full at
-    # `REQUIRED_FIELDS`. Presence only, for the reason argued there too.
-    for name in REQUIRED_FIELDS:
+    # `REQUIRED_FIELDS`.
+    #
+    # PRESENCE AND TYPE since 1.8.0 (Task 5f, from Task 5e's review). The type
+    # each field must carry is the second element of its `REQUIRED_FIELDS` entry
+    # and is derived from the field's Rust type by the two gates outside `docs/`;
+    # measured at `78bf570`, `run_id: 42`, `phases: "x"` and `requested_at: 5`
+    # were `drill verify` exit 1 against `VALID` here. `bool` is excluded from
+    # `"integer"` for the same reason the u64 loop excludes it.
+    for name, want in REQUIRED_FIELDS:
         if name not in doc:
             return f"the document has no {name} field; it is not a drill scorecard"
+        value = doc[name]
+        if not isinstance(value, _JSON_TYPES[want]) or (
+            want == "integer" and isinstance(value, bool)
+        ):
+            return f"{name} is not {_JSON_TYPE_WORDS[want]}"
 
     # Bound only after the loop above has proved each one is a dict, so the
     # arms below can read through them without a second guard.
@@ -653,7 +762,7 @@ def check_invariants(doc) -> str:
     # here as `None` as well and is refused by the same line, which is the same
     # claim by a different route: Rust says `missing field ...`, and either way
     # the document does not carry the integer it promises.
-    for name, value, optional in _u64_fields(doc, measured, objectives, sample, integrity):
+    for name, value, optional in _u64_fields(doc):
         if optional and value is None:
             continue
         if not isinstance(value, int) or isinstance(value, bool):
@@ -1053,8 +1162,9 @@ def main(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
             "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, "
             "outcome-entailment, all eleven required blocks in serde order, "
-            "the six required non-block fields, u64 domain with null refused where "
-            "Rust has no Option; approval.self_attested derived, not echoed)"
+            "the six required non-block fields present and of the type their Rust type "
+            "implies, u64 domain with null refused where Rust has no Option; "
+            "approval.self_attested derived, not echoed)"
         )
         return 0
 

@@ -669,14 +669,60 @@ fn scorecard_required_fields() -> Vec<(String, String)> {
     out
 }
 
-/// The required fields of `Scorecard` that are NOT blocks, in declaration order.
+/// THE JSON TYPE A RUST TYPE IMPLIES, for a required non-block field of
+/// `Scorecard` (Task 5f, from Task 5e's review's wrong-type residual).
+///
+/// This is the whole of the type half of the derivation, and it lives HERE — in
+/// a file outside `docs/`, keyed on the struct's own type text — for the same
+/// reason the name half does. `docs/verify_scorecard.py`'s `REQUIRED_FIELDS`
+/// carries these strings as its second element and is compared against them; a
+/// required non-block field of a Rust type this function does not map fails
+/// loudly rather than reaching the Python reader with a guessed type or none.
+///
+/// 1.7.0 declined the type check on the grounds that "these six carry five
+/// different Rust types and share no JSON shape". They share no JSON shape, but
+/// each Rust type implies exactly one, which is the difference between a guess
+/// and a rule: `String` and `DateTime<Utc>` are strings on the wire, `Outcome`
+/// is a unit enum with `#[serde(rename_all = "kebab-case")]` and is therefore
+/// also a string, `i8` is a number, and a `Vec<T>` is an array.
+fn json_type_of(name: &str, rust_ty: &str) -> &'static str {
+    match rust_ty {
+        "String" => "string",
+        // chrono serialises an RFC 3339 string; `requested_at: 5` is
+        // `invalid type: integer `5`, expected ...` from serde.
+        "DateTime<Utc>" => "string",
+        // Declared in crates/logweir-core/src/outcome.rs, not beside `Scorecard`
+        // — which is exactly why it is not a "block" — with unit variants and
+        // `#[serde(rename_all = "kebab-case")]`.
+        "Outcome" => "string",
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => "integer",
+        "bool" => "boolean",
+        t if t.starts_with("Vec<") => "array",
+        other => panic!(
+            "`Scorecard`'s required non-block field {name:?} has Rust type {other:?}, which \
+             `json_type_of` does not map to a JSON type. Add the mapping here AND in \
+             `scripts/check-invariant-corpus.sh`, and give \
+             `docs/verify_scorecard.py`'s REQUIRED_FIELDS the matching entry — a field \
+             with no mapping is a field the Python reader type-checks by guesswork or not \
+             at all."
+        ),
+    }
+}
+
+/// The required fields of `Scorecard` that are NOT blocks, in declaration order,
+/// as (name, the JSON type its Rust type implies).
 ///
 /// The fixed point `REQUIRED_FIELDS` in `docs/verify_scorecard.py` is measured
 /// against, exactly as `required_blocks()` is the one `REQUIRED_BLOCKS` is
 /// measured against. Every block must also be a required field — asserted here,
 /// because the two parsers read the same struct by different rules and a silent
-/// disagreement between them would weaken both lists at once.
-fn required_non_block_fields() -> Vec<String> {
+/// disagreement between them would weaken both lists at once. (That assertion is
+/// also the ONLY thing that makes either list `#[serde(default)]`-aware where
+/// `required_blocks`'s one-line rule is not: a block that gained a default would
+/// leave `required_blocks` and enter neither list. `scripts/check-invariant-
+/// corpus.sh` carries the same guard since Task 5f — before it, the shell gate
+/// would have passed that edit while this walker failed it.)
+fn required_non_block_fields() -> Vec<(String, String)> {
     let blocks = required_blocks();
     let fields = scorecard_required_fields();
     for b in &blocks {
@@ -687,10 +733,13 @@ fn required_non_block_fields() -> Vec<String> {
              parsers disagree about `Scorecard`"
         );
     }
-    let out: Vec<String> = fields
+    let out: Vec<(String, String)> = fields
         .into_iter()
-        .map(|(n, _)| n)
-        .filter(|n| !blocks.contains(n))
+        .filter(|(n, _)| !blocks.contains(n))
+        .map(|(n, ty)| {
+            let json = json_type_of(&n, &ty).to_string();
+            (n, json)
+        })
         .collect();
     assert!(
         !out.is_empty(),
@@ -862,17 +911,25 @@ fn python_u64_fields() -> Vec<(String, bool)> {
         .collect()
 }
 
-/// `docs/verify_scorecard.py`'s `REQUIRED_FIELDS` tuple, in source order.
-fn python_required_fields() -> Vec<String> {
+/// `docs/verify_scorecard.py`'s `REQUIRED_FIELDS` tuple, in source order, parsed
+/// into the same (name, JSON type) shape `required_non_block_fields` returns.
+///
+/// The second element arrived in 1.8.0 (Task 5f). Before it the tuple was bare
+/// names and the loop asserted presence only, which left `run_id: 42`,
+/// `phases: "x"` and `requested_at: 5` at `drill verify` exit 1 against `VALID`
+/// from the script.
+fn python_required_fields() -> Vec<(String, String)> {
     let src = std::fs::read_to_string(root().join("docs/verify_scorecard.py"))
         .expect("read verify_scorecard.py");
     between(&src, "verify_scorecard.py", "REQUIRED_FIELDS = (", ")")
         .iter()
         .filter_map(|l| {
             let code = l.trim();
-            code.strip_prefix('"')
-                .and_then(|r| r.strip_suffix("\","))
-                .map(str::to_string)
+            let inner = code.strip_prefix('(')?.strip_suffix("),")?;
+            let (name, ty) = inner.split_once(", ")?;
+            let name = name.strip_prefix('"')?.strip_suffix('"')?;
+            let ty = ty.strip_prefix('"')?.strip_suffix('"')?;
+            Some((name.to_string(), ty.to_string()))
         })
         .collect()
 }
@@ -950,10 +1007,25 @@ fn check_invariants_body() -> String {
 /// `check` on a shape case says WHAT the case protects, in one of three forms:
 ///
 /// * `block:<name>` — one of the eleven. Exactly one case per block, both ways.
+/// * `field:<name>` — one of the required NON-block fields, ABSENT. Exactly one
+///   case per field, both ways (`every_required_non_block_field_has_a_shape_
+///   corpus_case`).
+/// * `type:<name>` — one of the required NON-block fields, present but of the
+///   wrong JSON type. Exactly one case per field, both ways
+///   (`every_required_non_block_field_has_a_type_shape_corpus_case`, Task 5f).
+/// * `null:<dotted name>` — one of the non-`Option` `u64` fields set to `null`.
+///   Exactly one case per field, both ways
+///   (`every_non_option_u64_field_has_a_null_shape_corpus_case`, Task 5f). This
+///   is the kind that replaced three `message:` cases sharing one fragment,
+///   which is Task 5e's review finding F1: the fragment pinned the LINE and
+///   nothing pinned the CASES, so reverting the line and deleting all three in
+///   one edit balanced.
 /// * `message:<fragment>` — a literal that must appear in `check_invariants`'s
 ///   code (comments stripped). Several cases may name one fragment; a check
 ///   deleted out from under them fails here. This is the `arm` field of
-///   `index.json`, playing the same role on the shape layer.
+///   `index.json`, playing the same role on the shape layer. It is the WEAKEST
+///   kind, because it closes over the code and not over the corpus; prefer a
+///   kind with its own arithmetic wherever the struct can supply one.
 /// * `order:<a>,<b>[,…]` — a multi-missing document. Every name must be a
 ///   block, and the two recorded refusals must name the SAME block: the first
 ///   of them in the struct's declaration order.
@@ -961,6 +1033,11 @@ fn check_invariants_body() -> String {
 fn every_required_block_has_a_shape_corpus_case() {
     let blocks = required_blocks();
     let non_block = required_non_block_fields();
+    let non_option_u64: Vec<String> = rust_u64_fields()
+        .into_iter()
+        .filter(|(_, optional)| !*optional)
+        .map(|(n, _)| n)
+        .collect();
     let loop_blocks = python_required_blocks();
     let body = check_invariants_body();
     let cases = shape_entries();
@@ -1058,20 +1135,35 @@ fn every_required_block_has_a_shape_corpus_case() {
                     }
                 }
             }
-            "field" => {
-                // The coverage arithmetic for this kind lives in
-                // `every_required_non_block_field_has_a_shape_corpus_case`; what
-                // is checked here is that the name is a real required non-block
-                // field, so a typo cannot sit in the index looking covered.
-                if !non_block.iter().any(|f| f == rest) {
+            "field" | "type" => {
+                // The coverage arithmetic for these two kinds lives in
+                // `every_required_non_block_field_has_a_shape_corpus_case` and
+                // `every_required_non_block_field_has_a_type_shape_corpus_case`;
+                // what is checked here is that the name is a real required
+                // non-block field, so a typo cannot sit in the index looking
+                // covered.
+                if !non_block.iter().any(|(f, _)| f == rest) {
                     failures.push(format!(
                         "{id}: `check` names field {rest:?}, which `Scorecard` does not \
                          declare as a required non-block field"
                     ));
                 }
             }
+            "null" => {
+                // Likewise: the arithmetic is
+                // `every_non_option_u64_field_has_a_null_shape_corpus_case`, and
+                // what is checked here is that the dotted name really is a
+                // non-`Option` `u64` field of the struct.
+                if !non_option_u64.iter().any(|f| f == rest) {
+                    failures.push(format!(
+                        "{id}: `check` names {rest:?}, which `Scorecard` does not declare \
+                         as a plain (non-`Option`) `u64` document field"
+                    ));
+                }
+            }
             other => failures.push(format!(
-                "{id}: unknown `check` kind {other:?}; use block:, field:, message: or order:"
+                "{id}: unknown `check` kind {other:?}; use block:, field:, type:, null:, \
+                 message: or order:"
             )),
         }
     }
@@ -1127,56 +1219,231 @@ fn every_required_non_block_field_has_a_shape_corpus_case() {
         "docs/verify_scorecard.py's REQUIRED_FIELDS and \
          `logweir_core::scorecard::Scorecard` disagree.\n  python ({}): {named:?}\n  \
          rust   ({}): {fields:?}\nEvery required field of the struct that is NOT a block \
-         must be named by the field-presence loop, in the struct's own declaration order. \
-         A required field is one carrying no `#[serde(default)]`: serde refuses a document \
-         missing it at deserialisation, so a reader that does not check it prints VALID \
-         over bytes `drill verify` exits 1 on.",
+         must be named by the field-presence loop, in the struct's own declaration order, \
+         WITH the JSON type its Rust type implies (`json_type_of`). A required field is \
+         one carrying no `#[serde(default)]`: serde refuses a document missing it — or \
+         carrying it at the wrong type — at deserialisation, so a reader that does not \
+         check it prints VALID over bytes `drill verify` exits 1 on.",
         named.len(),
         fields.len(),
     );
 
-    let mut covered: Vec<String> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-    for entry in &cases {
-        let id = s(entry, "id");
-        let check = entry
-            .get("check")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("shape-index.json entry {id:?} has no string `check`"));
-        let Some(name) = check.strip_prefix("field:") else {
-            continue;
-        };
-        if !fields.iter().any(|f| f == name) {
-            failures.push(format!(
-                "{id}: `check` names field {name:?}, which `Scorecard` does not declare as \
-                 a required non-block field"
-            ));
-        } else if covered.iter().any(|f| f == name) {
-            failures.push(format!(
-                "{id}: field {name:?} already has a shape case; exactly one per field"
-            ));
-        } else {
-            covered.push(name.to_string());
-        }
-    }
-
-    let mut uncovered: Vec<&String> = fields
-        .iter()
-        .filter(|f| !covered.iter().any(|c| c == *f))
-        .collect();
-    uncovered.sort();
+    let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+    let (covered, failures, uncovered) = shape_coverage(&cases, "field", &names);
     assert!(
         failures.is_empty() && uncovered.is_empty(),
         "the shape corpus does not account for `Scorecard`'s required non-block fields.\n  \
-         required ({}): {fields:?}\n  covered  ({}): {covered:?}\n  MISSING a shape case: \
+         required ({}): {names:?}\n  covered  ({}): {covered:?}\n  MISSING a shape case: \
          {uncovered:?}\nEvery required non-block field needs a `shape-index.json` case whose \
          `check` is \"field:<name>\".{}",
-        fields.len(),
+        names.len(),
         covered.len(),
         if failures.is_empty() {
             String::new()
         } else {
             format!("\n  - {}", failures.join("\n  - "))
+        }
+    );
+}
+
+/// Exactly one `shape-index.json` case per member of `universe` under `check`
+/// kind `kind`, and no case under that kind naming something outside it.
+///
+/// Returns (covered, failures, uncovered). Three `check` kinds want precisely
+/// this arithmetic over three different struct-derived universes, and writing it
+/// three times is how the three drift.
+fn shape_coverage(
+    cases: &[Value],
+    kind: &str,
+    universe: &[String],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let prefix = format!("{kind}:");
+    let mut covered: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for entry in cases {
+        let id = s(entry, "id");
+        let check = entry
+            .get("check")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("shape-index.json entry {id:?} has no string `check`"));
+        let Some(name) = check.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if !universe.iter().any(|f| f == name) {
+            failures.push(format!(
+                "{id}: `check` names {name:?}, which is not one of the {} name(s) \
+                 `crates/logweir-core/src/scorecard.rs` supplies for kind {kind:?}",
+                universe.len()
+            ));
+        } else if covered.iter().any(|f| f == name) {
+            failures.push(format!(
+                "{id}: {name:?} already has a {kind}: shape case; exactly one per name"
+            ));
+        } else {
+            covered.push(name.to_string());
+        }
+    }
+    let mut uncovered: Vec<String> = universe
+        .iter()
+        .filter(|f| !covered.iter().any(|c| c == *f))
+        .cloned()
+        .collect();
+    uncovered.sort();
+    (covered, failures, uncovered)
+}
+
+/// CLOSED ARITHMETIC FOR THE WRONG-TYPE CASES (Task 5f, from the wrong-type
+/// paragraph of Task 5e's review) — one `type:` case per required non-block
+/// field, the type half of what `every_required_non_block_field_has_a_shape_
+/// corpus_case` does for the presence half.
+///
+/// 1.7.0 checked presence and recorded the type gap as a residual, and the
+/// review measured it at `78bf570` on documents derived from
+/// `unmodified_example.json` and signed: `run_id: 42` was `drill verify` exit 1
+/// (`invalid type: integer 42, expected a string`) against `VALID` from the
+/// script, `phases: "x"` and `requested_at: 5` likewise, and `outcome: 7`
+/// refused here on an INVARIANT about `engine.matrix_verdict`.
+///
+/// The list comparison that carries the TYPES lives in the test above (they are
+/// the second element of the same tuple). What this test adds is that every one
+/// of them is EXERCISED by a document both readers refuse: deleting the type
+/// check from `check_invariants` leaves six corpus documents printing `VALID`,
+/// and deleting the six cases with it no longer balances, because `Scorecard`
+/// still declares six required non-block fields.
+#[test]
+fn every_required_non_block_field_has_a_type_shape_corpus_case() {
+    let fields = required_non_block_fields();
+    let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+    let cases = shape_entries();
+    let body = check_invariants_body();
+
+    let (covered, mut failures, uncovered) = shape_coverage(&cases, "type", &names);
+
+    // The loop must actually READ the type. A `for name in REQUIRED_FIELDS:`
+    // over the pair tuple would iterate two-element tuples and every `name not
+    // in doc` would be False, which is a check that passes on every document —
+    // so the unpack is checked, not assumed. Collected rather than asserted on
+    // its own, so a coordinated edit reports the missing cases as well as the
+    // missing line.
+    for fragment in [
+        "for name, want in REQUIRED_FIELDS:",
+        "_JSON_TYPES[want]",
+        "_JSON_TYPE_WORDS[want]",
+    ] {
+        if !body.contains(fragment) {
+            failures.push(format!(
+                "docs/verify_scorecard.py's `check_invariants` no longer contains \
+                 {fragment:?}, so the required non-block fields are no longer TYPE-checked. \
+                 Every `type:` case is then a document this script prints VALID over while \
+                 `drill verify` exits 1."
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty() && uncovered.is_empty(),
+        "the shape corpus does not account for the TYPE of `Scorecard`'s required \
+         non-block fields.\n  required ({}): {fields:?}\n  covered  ({}): {covered:?}\n  \
+         MISSING a wrong-type shape case: {uncovered:?}\nEvery required non-block field \
+         needs a `shape-index.json` case whose `check` is \"type:<name>\": one document \
+         carrying that field at a JSON type its Rust type refuses.{}",
+        names.len(),
+        covered.len(),
+        if failures.is_empty() {
+            String::new()
+        } else {
+            format!("\n  - {}", failures.join("\n  - "))
+        }
+    );
+}
+
+/// CLOSED ARITHMETIC FOR THE OPTIONALITY FLAG'S **USE** (Task 5f, from Task 5e's
+/// review finding F1) — one `null:` case per non-`Option` `u64` field.
+///
+/// Task 5e gave `U64_FIELDS` closed arithmetic on its LIST: the names, the order
+/// and the `Option<u64>` flag are all re-derived from
+/// `crates/logweir-core/src/scorecard.rs` by
+/// `every_u64_field_has_the_same_domain_check_in_both_readers`. Its USE had
+/// none, and the review measured exactly that. One edit at `78bf570` — revert
+/// `if optional and value is None:` to `if value is None:`, leaving every flag
+/// present and correct, and delete the three `null` corpus cases and both null
+/// pytests — left the walker at 0, the shell gate at 0 ("all 42 cases", three
+/// fewer and no complaint) and pytest at 0, with `sample.records_restored: null`
+/// back to `drill verify` exit 1 against `VALID` from the script.
+///
+/// The three cases were `message:` cases sharing one fragment, and a `message:`
+/// case closes over the CODE only: delete the line and the cases together and
+/// nothing counts what went. This test counts them against the struct instead —
+/// six plain `u64` fields, six `null:` cases — so the same edit fails here, with
+/// the missing ones printed by name.
+#[test]
+fn every_non_option_u64_field_has_a_null_shape_corpus_case() {
+    let plain: Vec<String> = rust_u64_fields()
+        .into_iter()
+        .filter(|(_, optional)| !*optional)
+        .map(|(n, _)| n)
+        .collect();
+    assert!(
+        !plain.is_empty(),
+        "`Scorecard` declares no plain (non-`Option`) `u64` field; `rust_u64_fields`'s \
+         parsing rule no longer matches the struct"
+    );
+    let cases = shape_entries();
+
+    let (covered, mut more, uncovered) = shape_coverage(&cases, "null", &plain);
+
+    // The guard the cases exist to exercise. A `null:` case whose line is gone
+    // is a document that prints VALID, so the fragment is checked here and not
+    // left to the three `message:` cases that used to carry it. Collected into
+    // the same failure list rather than asserted on its own, so the one-edit
+    // revert reports BOTH halves — the line that went and the cases that went
+    // with it — in one message.
+    let body = check_invariants_body();
+    if !body.contains("if optional and value is None:") {
+        more.push(
+            "docs/verify_scorecard.py's `check_invariants` no longer contains `if optional \
+             and value is None:`, so the `Option<u64>` flag is derived, compared, printed \
+             on a mismatch — and never read. That is the one-edit revert Task 5e's review \
+             measured: every `null:` case is then a document this script prints VALID over \
+             while `drill verify` exits 1 with `invalid type: null, expected u64`."
+                .to_string(),
+        );
+    }
+    // Both readers must REFUSE, and the pair is recorded here so
+    // `two_reader_parity_on_documents_refused_before_the_invariants` can prove
+    // it against the real readers. A `null:` case recorded as an accept would
+    // close the arithmetic while asserting the opposite of the claim.
+    for entry in &cases {
+        let id = s(entry, "id");
+        let check = entry.get("check").and_then(Value::as_str).unwrap_or("");
+        if !check.starts_with("null:") {
+            continue;
+        }
+        if i(entry, "rust_exit") == 0 || i(entry, "python_exit") == 0 {
+            more.push(format!(
+                "{id}: a null: case records an ACCEPT (rust_exit {}, python_exit {}); a \
+                 plain `u64` field set to null must be REFUSED by both readers",
+                i(entry, "rust_exit"),
+                i(entry, "python_exit"),
+            ));
+        }
+    }
+
+    assert!(
+        more.is_empty() && uncovered.is_empty(),
+        "the shape corpus does not account for `null` on `Scorecard`'s plain `u64` \
+         fields.\n  plain u64 ({}): {plain:?}\n  covered   ({}): {covered:?}\n  MISSING a \
+         null shape case: {uncovered:?}\nEvery non-`Option` `u64` field needs a \
+         `shape-index.json` case whose `check` is \"null:<dotted name>\": one document \
+         setting that field to null, which `serde_json` refuses with `invalid type: null, \
+         expected u64`. This is what makes the optionality flag's USE checkable, not just \
+         its list.{}",
+        plain.len(),
+        covered.len(),
+        if more.is_empty() {
+            String::new()
+        } else {
+            format!("\n  - {}", more.join("\n  - "))
         }
     );
 }

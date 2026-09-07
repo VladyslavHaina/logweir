@@ -554,12 +554,15 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.7.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.8.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
         assert "all eleven required blocks in serde order" in r.stdout, r.stdout
-        assert "the six required non-block fields" in r.stdout, r.stdout
+        assert (
+            "the six required non-block fields present and of the type their Rust "
+            "type implies"
+        ) in r.stdout, r.stdout
         assert "u64 domain with null refused where Rust has no Option" in r.stdout, r.stdout
 
 
@@ -1457,14 +1460,18 @@ def _required_fields():
 
 
 def test_every_required_non_block_field_of_the_rust_struct_is_checked():
-    # The list itself, pinned against the struct's own field order.
+    # The list itself, pinned against the struct's own field order — and, since
+    # 1.8.0, against the JSON type each field's Rust type implies. The second
+    # element arrived with Task 5f; the anchor for both halves is
+    # `crates/logweir/tests/two_reader_parity.rs`, which derives them from
+    # `crates/logweir-core/src/scorecard.rs`.
     assert _required_fields() == [
-        "format_version",
-        "run_id",
-        "outcome",
-        "last_phase_completed",
-        "requested_at",
-        "phases",
+        ("format_version", "string"),        # String
+        ("run_id", "string"),                # String
+        ("outcome", "string"),               # Outcome, a kebab-case unit enum
+        ("last_phase_completed", "integer"), # i8
+        ("requested_at", "string"),          # DateTime<Utc>, an RFC 3339 string
+        ("phases", "array"),                 # Vec<PhaseRecord>
     ]
 
 
@@ -1474,7 +1481,7 @@ def test_a_document_missing_any_required_non_block_field_is_refused():
     # deliberate: the Global Constraint 12 rule runs before this loop and
     # refuses an absent one as `not a parseable semver`, so the loop's own
     # message is unreachable there — argued at `REQUIRED_FIELDS`.
-    for name in _required_fields():
+    for name, _type in _required_fields():
         with tempfile.TemporaryDirectory() as d:
             doc = json.loads(SCORECARD_PASS.read_bytes())
             del doc[name]
@@ -1505,3 +1512,118 @@ def test_the_field_loop_runs_after_the_block_loop():
         assert (
             "the document has no engine block; it is not a drill scorecard"
         ) in r.stderr, r.stderr
+
+
+# --------------------------------------------------------------------------
+# Task 5f — the wrong-type residual `1.7.0` recorded rather than closed (Task
+# 5e's review), and the two derivations its findings F1 and F2 asked for.
+#
+# Measured at `b99239a` over the release binary and documents derived from
+# `e2e/fixtures/invariants/unmodified_example.json`: `run_id: 42` was `drill
+# verify` exit 1 (`invalid type: integer 42, expected a string`) against `VALID`
+# from `verify_scorecard.py` 1.7.0; `phases: "x"` and `requested_at: 5` the same;
+# `outcome: 7` refused here, but on an INVARIANT about `engine.matrix_verdict`.
+#
+# The anchors are outside this file, as always:
+# `crates/logweir/tests/two_reader_parity.rs::every_required_non_block_field_has_
+# a_type_shape_corpus_case` and `::every_non_option_u64_field_has_a_null_shape_
+# corpus_case`, plus the matching arithmetic in
+# `scripts/check-invariant-corpus.sh`.
+
+
+def test_a_required_non_block_field_of_the_wrong_type_is_refused():
+    # One document per field, each the format example with that ONE key retyped
+    # to something its Rust type refuses. `format_version` is again the
+    # exception, and for the same reason its absent case is: the Global
+    # Constraint 12 rule runs first and reports the semver, not the type.
+    wrong = {
+        "string": 42,
+        "integer": "7",
+        "array": "x",
+        "boolean": "yes",
+    }
+    words = {"string": "a string", "integer": "an integer", "array": "an array",
+             "boolean": "a boolean"}
+    for name, want in _required_fields():
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{name: wrong[want]})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{name}: {r.stdout}"
+            expected = (
+                "format_version 42 is not a parseable semver"
+                if name == "format_version"
+                else f"{name} is not {words[want]}"
+            )
+            assert expected in r.stderr, f"{name}: {r.stderr}"
+
+
+def test_a_bool_is_not_an_integer_for_last_phase_completed():
+    # `isinstance(True, int)` is True in Python, so the `int` arm excludes
+    # `bool` explicitly — the same trap the u64 loop guards against, on the one
+    # required non-block field whose JSON type is a number.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"last_phase_completed": True})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "last_phase_completed is not an integer" in r.stderr, r.stderr
+
+
+def test_the_wrong_type_check_runs_in_declaration_order_with_the_presence_check():
+    # Presence and type are checked per field in ONE pass, not in two sweeps.
+    # serde aborts at the first fault it meets while visiting, so on a document
+    # whose first fault is a wrong type and whose second is an absent key, Rust
+    # names the type. Two sweeps would name the absent key here.
+    with tempfile.TemporaryDirectory() as d:
+        doc = json.loads(SCORECARD_PASS.read_bytes())
+        doc["format_version"] = "1.0.0"
+        doc["run_id"] = 42
+        del doc["phases"]
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, doc)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "run_id is not a string" in r.stderr, r.stderr
+
+
+def test_the_u64_block_map_is_the_derived_required_block_set():
+    # Task 5e's review, finding F2. `_u64_fields`' owner map was a four-entry
+    # literal — `measured`, `objectives`, `sample`, `integrity` — inside a task
+    # whose whole thesis is that hand-written lists drift. It is now
+    # `{name: doc[name] for name in REQUIRED_BLOCKS}`, and this is the test that
+    # the map really is that derived set: every owner `U64_FIELDS` names is a
+    # required block (or `phases[]`, which is a `Vec` and takes its own branch).
+    import inspect
+
+    mod = _verifier_module()
+    # (a) the map is BUILT from `REQUIRED_BLOCKS`, not written out. Asserted on
+    #     the source, because a literal that happens to list today's four blocks
+    #     is behaviourally identical until the day a `u64` lands in a fifth —
+    #     which is the day it raises `KeyError` instead.
+    src = inspect.getsource(mod._u64_fields)
+    assert "blocks = {name: doc[name] for name in REQUIRED_BLOCKS}" in src, src
+    assert "blocks[block]" not in src, src
+    # (b) and every owner the u64 list names really is one of those blocks
+    #     (`phases[]` is a `Vec` and takes its own branch).
+    owners = {path.split(".", 1)[0] for path, _ in mod.U64_FIELDS}
+    owners.discard("phases[]")
+    assert owners <= set(mod.REQUIRED_BLOCKS), (
+        sorted(owners), list(mod.REQUIRED_BLOCKS))
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    got = {name for name, _v, _o in mod._u64_fields(doc)}
+    assert "sample.records_expected" in got and "integrity.mismatches" in got, got
+    assert "phases[0].duration_ms" in got, got
+
+
+def test_a_u64_owned_by_a_block_outside_the_old_literal_does_not_raise():
+    # The regression F2 named: Task 5e's derivation walks ALL of `Scorecard`'s
+    # struct-typed fields, so a `u64` added to (say) `TargetInfo` is REQUIRED by
+    # the walker and the shell gate to appear in `U64_FIELDS` as
+    # `target.<name>` — and `blocks["target"]` raised `KeyError` on every
+    # document, out of the one function whose docstring promises that no field
+    # access ever surfaces as a traceback. Simulated here by adding exactly that
+    # entry to a freshly loaded module.
+    mod = _verifier_module()
+    mod.U64_FIELDS = tuple(mod.U64_FIELDS) + (("target.topic_mapping_entries", False),)
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    got = dict((name, value) for name, value, _o in mod._u64_fields(doc))
+    assert got["target.topic_mapping_entries"] == doc["target"]["topic_mapping_entries"]
+    assert mod.check_invariants(doc) == "", "the added entry must not change the verdict"
