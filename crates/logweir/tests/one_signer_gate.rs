@@ -1,4 +1,4 @@
-//! G2′ — the link-time single-signer gate, and the four tests that keep it a
+//! G2′ — the link-time single-signer gate, and the five tests that keep it a
 //! gate rather than a comment. Task 7 (Phase 1 line item 1c).
 //!
 //! `scripts/check-one-signer.sh` proves ONE narrow, mechanical property: the
@@ -11,7 +11,7 @@
 //!
 //! Why a Rust test at all, when the script is the gate: because the script's
 //! RED side is the half that decays. A gate nobody has ever seen fail is
-//! indistinguishable from `exit 0`, so two of the four tests build a throwaway
+//! indistinguishable from `exit 0`, so three of the five tests build a throwaway
 //! workspace overlay in `std::env::temp_dir()`, drop a probe crate into it that
 //! reaches the signer, and require the script to name that crate on stderr.
 //! The overlay — rather than a probe written into `crates/`, which the
