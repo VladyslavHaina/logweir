@@ -133,6 +133,17 @@ impl Overlay {
     /// name is not what such a wildcard swallows. The transitive test
     /// therefore plants one of each.
     fn probe(&self, name: &str, dep_name: &str, dep_path: &str, lib_src: &str) {
+        self.probe_raw(
+            name,
+            &format!("{dep_name} = {{ path = \"{dep_path}\" }}"),
+            lib_src,
+        );
+    }
+
+    /// The same, with the dependency written out in full — so a probe can take
+    /// a REGISTRY dependency (on a signing primitive) rather than a path
+    /// dependency on a workspace crate.
+    fn probe_raw(&self, name: &str, dep_line: &str, lib_src: &str) {
         let dir = self.path.join("crates").join(name);
         std::fs::create_dir_all(dir.join("src")).expect("the probe directory is creatable");
         std::fs::write(
@@ -145,7 +156,7 @@ impl Overlay {
                  publish = false\n\
                  \n\
                  [dependencies]\n\
-                 {dep_name} = {{ path = \"{dep_path}\" }}\n"
+                 {dep_line}\n"
             ),
         )
         .expect("the probe manifest is writable");
@@ -267,6 +278,55 @@ fn one_signer_script_detects_a_transitive_signer() {
              swallow it. stderr was:\n{stderr}"
         );
     }
+}
+
+/// The red side of check 2 — the leg that had none until fix round 1, where
+/// the reviewer deleted the whole primitives block and all four tests still
+/// passed.
+///
+/// This probe depends on `p256` **directly**, from the registry, and on
+/// nothing else. That is a backdoor the other two legs cannot see: it never
+/// reaches `logweir-evidence`, so check 1 stays green (asserted below, so the
+/// test cannot start passing for the wrong reason), and it names nothing in
+/// source, so check 3 stays green. Only the primitive walk can catch it — a
+/// crate that reimplements ECDSA P-256 signing against the same primitive the
+/// evidence crate uses, without ever linking the evidence crate.
+///
+/// The `"0.13"` requirement is the one `crates/logweir-evidence/Cargo.toml`
+/// carries; it resolves to the version already in `Cargo.lock`, so the overlay
+/// needs no network.
+#[test]
+fn one_signer_script_detects_a_direct_primitive_dependency() {
+    let ov = Overlay::new("primitive");
+    ov.probe_raw("zz-one-signer-primitive-probe", "p256 = \"0.13\"", "");
+    let out = ov.run_gate();
+    let stderr = text(&out.stderr);
+    let stdout = text(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "the gate must go red when a crate takes a signing primitive directly; status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.contains(
+            "zz-one-signer-primitive-probe reaches the signing primitive p256 over a normal \
+             edge and is not on the allowlist"
+        ),
+        "check 2 must report the probe by its own message; stderr was:\n{stderr}"
+    );
+    // Check 1 is GREEN here, and that is the point: if this ever starts
+    // failing, the probe has begun reaching the signer and this test would be
+    // proving check 1 rather than check 2.
+    assert!(
+        stdout.contains("ok: the crates reaching logweir-evidence are exactly {e2e,logweir}"),
+        "check 1 must stay green for this probe — otherwise this test no longer isolates \
+         check 2; stdout was:\n{stdout}"
+    );
+    // A check that FAILED must not also print its `ok:` line in the same run.
+    assert!(
+        !stdout.contains("ok: p256 reaches"),
+        "check 2 printed an `ok:` line for the primitive it just failed on; stdout was:\n{stdout}"
+    );
 }
 
 /// `just lint` is the Phase-1 gate (line item 1g): `ci.yml` has never executed

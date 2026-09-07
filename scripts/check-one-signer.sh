@@ -227,16 +227,23 @@ for prim in $PRIMITIVES; do
              ' \
            | sed -n 's/^[0-9][0-9]*\([A-Za-z0-9_.+-][A-Za-z0-9_.+-]*\) v[0-9][^ ]* (\/.*/\1/p' \
            | sort -u)"
+  # Per-primitive, so an `ok:` line is never printed for a primitive that just
+  # FAILED: a run that says both at once reads as green to anyone skimming
+  # stdout, and check 1 above already guards its `ok:` the same way.
+  prim_fail=0
   for c in $names; do
     case " $ALLOWED_PRIMITIVE " in
       *" $c "*) ;;
       *)
         echo "FAIL: $c reaches the signing primitive $prim over a normal edge and is not on the allowlist" >&2
+        prim_fail=1
         fail=1
         ;;
     esac
   done
-  echo "ok: $prim reaches {$(echo $names | tr ' ' ',')}"
+  if [ "$prim_fail" -eq 0 ]; then
+    echo "ok: $prim reaches {$(echo $names | tr ' ' ',')}"
+  fi
 done
 
 # ---------------------------------------------------------------- check 3
@@ -295,6 +302,7 @@ if [ -n "$hits" ]; then
     esac
   done
 fi
+src_fail=0
 for c in $named; do
   case " $ALLOWED_SOURCE " in
     *" $c "*) ;;
@@ -305,10 +313,14 @@ for c in $named; do
           printf '  %s\n' "$p" >&2
         fi
       done
+      src_fail=1
       fail=1
       ;;
   esac
 done
-echo "ok: the crates naming the signing API are {$(echo $named | tr ' ' ',')}"
+# Same guard as checks 1 and 2: no `ok:` line for a check that just failed.
+if [ "$src_fail" -eq 0 ]; then
+  echo "ok: the crates naming the signing API are {$(echo $named | tr ' ' ',')}"
+fi
 
 exit "$fail"
