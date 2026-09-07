@@ -5,7 +5,7 @@
 #
 #   * the WHOLE default suite, `cargo test --workspace`, under
 #     $LOGWEIR_UNIT_SUITE_BUDGET_SECS (default 120); and
-#   * NO SINGLE TEST over $LOGWEIR_UNIT_TEST_BUDGET_SECS (default 5).
+#   * NO SINGLE TEST over $LOGWEIR_UNIT_TEST_BUDGET_SECS (default 15). The budget exists to catch a 20 s dial timeout hiding in the unit suite; the two-reader parity and shape walkers legitimately take 5–12 s over 15+ signed documents (measured at base, no load), so 5 was red on its own.
 #
 # The second bound is what actually catches a dialer. A test that waits out
 # `rdkafka_reader.rs`'s 20 s `const T`, or object_store's unconfigured retry
@@ -32,7 +32,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 SUITE_BUDGET="${LOGWEIR_UNIT_SUITE_BUDGET_SECS:-120}"
-TEST_BUDGET="${LOGWEIR_UNIT_TEST_BUDGET_SECS:-5}"
+TEST_BUDGET="${LOGWEIR_UNIT_TEST_BUDGET_SECS:-15}"
 
 # THE COMMAND UNDER TEST, as one string, so it can be printed and checked
 # (mutant M9: a harness that quietly times `cargo test -p logweir-core`
