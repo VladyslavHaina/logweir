@@ -187,9 +187,11 @@ FORMAT_VERSION = "1.0.0"
 #          verify`, and `-1` was refused by both but on an INVARIANT here and at
 #          DESERIALISATION there. (b) `REQUIRED_BLOCKS` IS NOW THE WHOLE STRUCT:
 #          `target`, `approval`, `target_diff` and `topic_parity` join the
-#          block-presence loop, closing four more instances of the same
-#          disagreement `sample` was in 1.5.0 — with any one of them deleted,
-#          `drill verify` exited 1 and this script printed VALID. (c) THE ORDER
+#          block-presence loop, closing three more live instances of the same
+#          disagreement `sample` was in 1.5.0 — `target`, `target_diff` or
+#          `topic_parity` deleted: `drill verify` exited 1 and this script
+#          printed VALID. `approval` absent was already refused by both, here by
+#          `main`'s approval derivation; the loop now names it too. (c) THE ORDER
 #          IS PINNED to serde's declaration order, so a document missing several
 #          blocks is named for the SAME block by both readers; `measured` +
 #          `integrity` missing together used to be named `measured` by Rust and
