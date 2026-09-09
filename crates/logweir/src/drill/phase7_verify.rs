@@ -209,6 +209,7 @@
 //! by `a_failing_engine_validation_run_never_fails_or_aborts_the_drill`
 //! (`verify_phase.rs`).
 use crate::drill::DrillError;
+use crate::exit::ExitCode;
 use logweir_core::engine::{
     BackupSetFacts, DataEngine, EngineError, EngineRun, RecordFingerprint, RestorePlan,
     SampleSelection, SegmentFacts,
@@ -1380,6 +1381,262 @@ pub fn notify_agent() -> ureq::Agent {
     notify_agent_with(NOTIFY_CONNECT_TIMEOUT, NOTIFY_TIMEOUT)
 }
 
+/// PagerDuty's Events v2 enqueue endpoint for the **US** service region — the
+/// default when `notifications.pagerduty_endpoint` is absent.
+///
+/// This was a bare string literal inside the POST. An adopter whose PagerDuty
+/// account lives on the EU service region therefore enqueued into a region
+/// that does not hold their account and never saw a page; the non-2xx was
+/// swallowed into a warning. The literal now exists exactly once, here, and
+/// `pagerduty_endpoint` below is the only thing that decides what is posted to.
+pub const PAGERDUTY_US_ENDPOINT: &str = "https://events.pagerduty.com/v2/enqueue";
+
+/// The one line an operator greps for when a page did not arrive.
+///
+/// Emitted whenever a configured PagerDuty route produced NO incident — the
+/// endpoint was refused before a request, or the request itself failed. A
+/// silenced alert that logs nothing is indistinguishable from a drill nobody
+/// configured an alert for, which is the whole defect this task closes: the
+/// route must either deliver an event that describes *this* drill or say, by
+/// name, that it did not.
+pub const PAGERDUTY_SILENCED: &str = "pagerduty alert NOT delivered";
+
+/// The seam every outbound notification POST goes through.
+///
+/// It exists so a test can observe the exact payload — `event_action`,
+/// `dedup_key`, the endpoint URL — without opening a socket, which GC17
+/// requires: no test in this repository may reach `events.pagerduty.com` or
+/// any other public host. The production implementation is `UreqSink`, which
+/// posts through `notify_agent()` and therefore keeps Task 5b's bound; the
+/// structural test `every_notification_post_goes_through_the_bounded_agent`
+/// still forbids a bare `ureq::post` anywhere under `crates/logweir/src/`.
+pub trait EventSink {
+    /// `Err` carries an **already-redacted** description: no URL, no
+    /// credential, no `ureq::Error` `Display` (which embeds the request URL).
+    fn post(&self, url: &str, body: &serde_json::Value) -> Result<(), String>;
+}
+
+/// The production `EventSink`: one bounded `ureq::Agent`, reused for every
+/// sink in a run so the timeout policy is decided in exactly one place.
+pub struct UreqSink {
+    agent: ureq::Agent,
+}
+
+impl UreqSink {
+    /// The production sink, carrying `notify_agent()`'s bounds.
+    pub fn new() -> Self {
+        Self {
+            agent: notify_agent(),
+        }
+    }
+
+    /// A sink over a caller-supplied agent, so a test can inject a short bound
+    /// instead of waiting out the production one.
+    pub fn with_agent(agent: ureq::Agent) -> Self {
+        Self { agent }
+    }
+}
+
+impl Default for UreqSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventSink for UreqSink {
+    fn post(&self, url: &str, body: &serde_json::Value) -> Result<(), String> {
+        self.agent
+            .post(url)
+            .send_json(body)
+            .map(|_| ())
+            // Redacted HERE, at the boundary, so no caller can reach a
+            // `ureq::Error` whose `Display` embeds the request URL.
+            .map_err(|e| redact_ureq_error(&e))
+    }
+}
+
+/// Which endpoint this spec's PagerDuty events go to, or why none will be sent.
+///
+/// `Ok(url)` is the endpoint to POST to; `Err(reason)` means the route is
+/// REFUSED before any request is made and the caller must log
+/// `PAGERDUTY_SILENCED`.
+///
+/// Only `https://` is accepted. The routing key travels in the request body,
+/// so a plaintext endpoint would put a bearer credential on the wire, and a
+/// misconfigured scheme is a configuration error a human must fix rather than
+/// something to attempt and let fail. The refusal names the SCHEME and nothing
+/// else: the rest of the URL may carry whatever the adopter typed, and this
+/// string reaches a log.
+pub fn pagerduty_endpoint(n: &Notifications) -> Result<String, String> {
+    match &n.pagerduty_endpoint {
+        None => Ok(PAGERDUTY_US_ENDPOINT.to_string()),
+        Some(u) if u.starts_with("https://") => Ok(u.clone()),
+        Some(u) => {
+            let scheme = match u.split_once("://") {
+                Some((s, _)) if !s.is_empty() => s,
+                _ => "<no scheme>",
+            };
+            Err(format!(
+                "notifications.pagerduty_endpoint must be an https:// URL; \
+                 refusing scheme `{scheme}`"
+            ))
+        }
+    }
+}
+
+/// R-D's interim dedup key for a drill that produced a scorecard.
+///
+/// PagerDuty's Events v2 API keys an incident by `dedup_key`. This was
+/// `format!("logweir-drill-{}", sc.target.cluster_id)`, so every drill spec
+/// pointed at one cluster shared ONE incident — and because a passing drill
+/// sends `event_action: resolve`, a nightly smoke drill passing at 03:00
+/// silently closed the weekly full drill's open page. Two different outcomes
+/// must produce two different incidents.
+///
+/// The identity is the spec's own `name` when it has one. When it does not,
+/// the fallback is the first 12 hex characters of the approval's `plan_hash`
+/// — a sha256 over the approved plan bytes, so it is distinct per spec and
+/// stable across re-runs of the same spec, which is exactly what a dedup key
+/// has to be. The run id would be distinct but NOT stable, and a key
+/// containing it never dedups at all.
+///
+/// Ruling **R-D**. The durable fix is an artifact-side `drill_id` (backlog
+/// T1-8), which §12 assigns to decision **O16** with default *not funded*; the
+/// residual is recorded in `docs/stability.md`.
+pub fn dedup_key(spec_name: Option<&str>, sc: &Scorecard) -> String {
+    let ident = match spec_name {
+        Some(n) => n.to_string(),
+        None => sc
+            .approval
+            .plan_hash
+            .trim_start_matches("sha256:")
+            .chars()
+            .take(12)
+            .collect(),
+    };
+    format!("logweir-drill-{ident}-{}", sc.target.cluster_id)
+}
+
+/// The dedup key for a drill that produced NO scorecard — exits 1, 3 and 4.
+///
+/// There is no cluster id to key on: `TargetSpec` does not carry one, and
+/// `Scorecard::target.cluster_id` is discovered at runtime in phase 0, which
+/// on these paths may never have run. So the key is the spec name alone.
+///
+/// It is DELIBERATELY distinct from `dedup_key`'s, and that is a property, not
+/// an accident: "logweir could not run this drill" and "this drill ran and did
+/// not pass" are different facts about different things, and a later passing
+/// run's `resolve` must not automatically close an operational-failure
+/// incident that nobody has looked at. An unnamed spec collapses to one
+/// incident per Logweir install — the second half of the residual recorded in
+/// `docs/stability.md`, and the reason to give a spec a `name`.
+pub fn failure_dedup_key(spec_name: Option<&str>) -> String {
+    format!("logweir-drill-{}-preflight", spec_name.unwrap_or("unnamed"))
+}
+
+/// Resolve the endpoint, POST, and make a silenced alert visible either way.
+///
+/// GC11: every outcome here is logged and swallowed. A refused endpoint, a
+/// down PagerDuty and a timeout all leave the exit code exactly as the drill
+/// decided it.
+fn enqueue_pagerduty(
+    n: &Notifications,
+    ev: &serde_json::Value,
+    dedup_key: &str,
+    run_id: &str,
+    sink: &dyn EventSink,
+) {
+    let url = match pagerduty_endpoint(n) {
+        Ok(u) => u,
+        Err(reason) => {
+            tracing::warn!(target: "logweir::notify", run_id = %run_id,
+                           dedup_key = %dedup_key, reason = %reason,
+                           silenced = true, "{PAGERDUTY_SILENCED}");
+            return;
+        }
+    };
+    // The endpoint is NOT redacted: it is not a secret (see the spec field's
+    // doc comment), and an operator who cannot see which region the events
+    // went to cannot diagnose the very failure this field exists to fix. The
+    // routing key travels in the BODY and is never logged.
+    if let Err(e) = sink.post(&url, ev) {
+        tracing::warn!(target: "logweir::notify", run_id = %run_id,
+                       dedup_key = %dedup_key, endpoint = %url, error = %e,
+                       silenced = true, "{PAGERDUTY_SILENCED}");
+    } else {
+        tracing::info!(target: "logweir::notify", run_id = %run_id,
+                       dedup_key = %dedup_key, endpoint = %url,
+                       "pagerduty event enqueued");
+    }
+}
+
+/// The exit-1 / exit-3 / exit-4 page: a drill that produced no scorecard.
+///
+/// The PagerDuty route used to fire from exactly one place — phase 8, AFTER
+/// the scorecard was signed and uploaded — so it was loud when the drill had
+/// already succeeded at producing evidence and SILENT in the three situations
+/// that need a human: an operational failure with no artifact (1), a plan a
+/// guard refused (3), and a result nobody could attest (4).
+///
+/// It sends nothing to `webhooks` / `slack_webhook` on purpose. Those are the
+/// scorecard-summary route: their body is `notify_body(sc)` and there is no
+/// scorecard here. Inventing a scorecard-shaped body without a scorecard is
+/// how a dashboard starts reporting drills that never ran.
+pub fn notify_failure(
+    n: &Notifications,
+    spec_name: Option<&str>,
+    run_id: &str,
+    code: ExitCode,
+    message: &str,
+) {
+    notify_failure_with(n, spec_name, run_id, code, message, &UreqSink::new())
+}
+
+/// `notify_failure` with the sink injected — see `EventSink`.
+pub fn notify_failure_with(
+    n: &Notifications,
+    spec_name: Option<&str>,
+    run_id: &str,
+    code: ExitCode,
+    message: &str,
+    sink: &dyn EventSink,
+) {
+    // Opt-in, exactly as `notify_with_sink` is: no routing key, no route.
+    let Some(key) = &n.pagerduty_routing_key else {
+        return;
+    };
+    let dedup = failure_dedup_key(spec_name);
+    let severity = match code {
+        // A guard refusing a plan BEFORE anything ran is a configuration
+        // finding, not an outage: nothing was touched and nothing is at risk.
+        ExitCode::GuardRefused => "warning",
+        // 1 and 4 both mean the drill's evidence does not exist. Anything else
+        // reaching here would be a bug, and "critical" is the safe default for
+        // a case nobody anticipated.
+        _ => "critical",
+    };
+    let ev = serde_json::json!({
+        "routing_key": key,
+        // NEVER `resolve`. This path has no result to clear.
+        "event_action": "trigger",
+        "dedup_key": dedup,
+        "payload": {
+            "summary": format!(
+                "logweir drill {run_id}: no scorecard (exit {}) — {message}",
+                code as u8
+            ),
+            "source": spec_name.unwrap_or("unnamed"),
+            "severity": severity,
+            "custom_details": {
+                "run_id": run_id,
+                "exit_code": code as u8 as i64,
+                "error": message,
+            },
+        },
+    });
+    enqueue_pagerduty(n, &ev, &dedup, run_id, sink);
+}
+
 /// POSTs one JSON summary per configured sink. EVERY transport failure is
 /// logged and swallowed: the drill result is a measurement, and a webhook being
 /// down must never change it. A TIMEOUT is one of those transport failures and
@@ -1397,8 +1654,8 @@ pub fn notify_agent() -> ureq::Agent {
 ///
 /// The body it posts is `notify_body` next door, which is where the shape —
 /// and what it deliberately omits — is documented and tested.
-pub fn notify(n: &Notifications, sc: &Scorecard) {
-    notify_with(&notify_agent(), n, sc)
+pub fn notify(n: &Notifications, spec_name: Option<&str>, sc: &Scorecard) {
+    notify_with(&notify_agent(), n, spec_name, sc)
 }
 
 /// `notify` with the agent injected, so the timeout bound is a parameter of
@@ -1408,46 +1665,59 @@ pub fn notify(n: &Notifications, sc: &Scorecard) {
 /// anywhere in `crates/logweir/src/`, because a revert to one would restore
 /// the unbounded wait and pass every behavioural test that supplies its own
 /// agent.
-pub fn notify_with(agent: &ureq::Agent, n: &Notifications, sc: &Scorecard) {
+pub fn notify_with(
+    agent: &ureq::Agent,
+    n: &Notifications,
+    spec_name: Option<&str>,
+    sc: &Scorecard,
+) {
+    notify_with_sink(n, spec_name, sc, &UreqSink::with_agent(agent.clone()))
+}
+
+/// `notify` with the SINK injected rather than the agent, so a test can read
+/// the exact `event_action`, `dedup_key` and endpoint URL off the recorded
+/// payload without opening a socket (GC17).
+///
+/// This is the brief's `notify_with(n, spec_name, sc, sink)` under a different
+/// name: `notify_with` was already taken by Task 5b's agent-injected variant
+/// above, whose behavioural tests must keep working unchanged.
+pub fn notify_with_sink(
+    n: &Notifications,
+    spec_name: Option<&str>,
+    sc: &Scorecard,
+    sink: &dyn EventSink,
+) {
     let body = notify_body(sc);
     let mut sinks: Vec<String> = n.webhooks.clone();
     if let Some(u) = &n.slack_webhook {
         sinks.push(u.clone());
     }
     for url in sinks {
-        let sink = redact_url(&url);
-        match agent.post(&url).send_json(&body) {
-            Ok(_) => tracing::info!(target: "logweir::notify", sink = %sink, "notified"),
+        let shown = redact_url(&url);
+        match sink.post(&url, &body) {
+            Ok(()) => tracing::info!(target: "logweir::notify", sink = %shown, "notified"),
             // `error = %e` is NOT logged: `ureq::Error`'s `Display` embeds the
             // request URL, credential and all. What an operator needs from a
             // failed notification is which sink and what kind of failure, and
-            // both survive `redact_url` + the variant name.
-            Err(e) => tracing::warn!(target: "logweir::notify", sink = %sink,
-                                     error = %redact_ureq_error(&e),
+            // both survive `redact_url` + the variant name — `EventSink::post`
+            // hands back an already-redacted description for that reason.
+            Err(e) => tracing::warn!(target: "logweir::notify", sink = %shown,
+                                     error = %e,
                                      "notification failed; continuing"),
         }
     }
     if let Some(key) = &n.pagerduty_routing_key {
+        let dedup = dedup_key(spec_name, sc);
         let ev = serde_json::json!({
             "routing_key": key,
             "event_action": if sc.outcome == logweir_core::outcome::Outcome::Pass
                             { "resolve" } else { "trigger" },
-            "dedup_key": format!("logweir-drill-{}", sc.target.cluster_id),
+            "dedup_key": dedup,
             "payload": { "summary": format!("logweir drill {}: {:?}", sc.run_id, sc.outcome),
                          "source": sc.target.cluster_id, "severity": "warning",
                          "custom_details": body },
         });
-        if let Err(e) = agent
-            .post("https://events.pagerduty.com/v2/enqueue")
-            .send_json(&ev)
-        {
-            // The URL here is a fixed public endpoint and carries no secret,
-            // but the routing key travels in the BODY and `ureq::Error` is
-            // redacted for every sink alike rather than case by case — a
-            // per-sink exemption is how the next credential reaches a log.
-            tracing::warn!(target: "logweir::notify", error = %redact_ureq_error(&e),
-                           "pagerduty enqueue failed");
-        }
+        enqueue_pagerduty(n, &ev, &dedup, &sc.run_id, sink);
     }
 }
 

@@ -290,7 +290,40 @@ pub fn run(args: RunArgs) -> ExitCode {
     let _span = tracing::info_span!("drill", run_id = %run_id).entered();
 
     let outcome = execute(&args, &run_id);
-    report(&args, &run_id, outcome)
+    // Read for notification purposes ONLY, and read here rather than taken
+    // from `execute`'s `Ctx`: `execute` returning `Err` is exactly the exit-1
+    // path, and on that path there is no `Ctx` to take anything from.
+    let spec = notification_spec(&args);
+    report(&args, &run_id, spec.as_ref(), outcome)
+}
+
+/// Re-read `args.spec` so the failure paths can reach the notification
+/// configuration. **Best-effort and never fatal.**
+///
+/// `report` is reached on paths where the spec never parsed at all — a
+/// malformed spec IS an exit-1 operational failure — so every error here is a
+/// `debug!` and a `None`, and the drill's exit code is decided elsewhere and
+/// stays decided (GC11). This must never be used for anything but
+/// notification: the drill's own copy of the spec is the one `context()`
+/// parsed and guarded, and a second parse that fed a phase would be a second
+/// source of truth.
+fn notification_spec(args: &RunArgs) -> Option<DrillSpec> {
+    let text = match std::fs::read_to_string(&args.spec) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!(error = %e, path = %args.spec.display(),
+                            "spec not readable for notification purposes");
+            return None;
+        }
+    };
+    match serde_yaml::from_str::<DrillSpec>(&text) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::debug!(error = %e, path = %args.spec.display(),
+                            "spec not parseable for notification purposes");
+            None
+        }
+    }
 }
 
 /// Everything `run` does with `execute`'s answer, split out so it can be
@@ -309,7 +342,24 @@ pub fn run(args: RunArgs) -> ExitCode {
 /// of them under the exit-code tests. So this function decides only what to
 /// PRINT and whether a drill result exists to finish; the code comes from the
 /// conversion.
-fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) -> ExitCode {
+fn report(
+    args: &RunArgs,
+    run_id: &str,
+    spec: Option<&DrillSpec>,
+    outcome: Result<Scorecard, DrillError>,
+) -> ExitCode {
+    report_with(args, run_id, spec, outcome, &phase7_verify::UreqSink::new())
+}
+
+/// Split from `report` for the same reason `run`/`execute` are split: the test
+/// needs to observe the outbound event without a socket (GC17).
+fn report_with(
+    args: &RunArgs,
+    run_id: &str,
+    spec: Option<&DrillSpec>,
+    outcome: Result<Scorecard, DrillError>,
+    sink: &dyn phase7_verify::EventSink,
+) -> ExitCode {
     let sc: Option<&Scorecard> = match &outcome {
         Ok(sc) => Some(sc),
         // A drill RESULT: the scorecard was signed and uploaded by phase 8, so
@@ -317,6 +367,10 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) 
         Err(DrillError::NotPass(sc)) => Some(sc),
         Err(_) => None,
     };
+    // Task 14: `sc.is_none()` is exactly `Err(non-NotPass)`, which is exactly
+    // the set the pre-Task-11 `_ =>` arm carried — exits 1, 3 and 4, the three
+    // codes on which the PagerDuty route used to say nothing at all.
+    let mut failure_message: Option<String> = None;
     if sc.is_none() {
         // The no-scorecard branch: exits 1, 3 and 4. This replaces the `_ =>`
         // arm of the `3e448da` inner `match &e` — there is no `_ =>` arm any
@@ -330,6 +384,7 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) 
             // identity has to be on the line that survives both.
             tracing::error!(run_id = %run_id, error = %e, "drill failed");
             eprintln!("{e}");
+            failure_message = Some(e.to_string());
         }
     }
     // The diagnostics above are emitted BEFORE the code is derived, which is
@@ -347,6 +402,24 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<Scorecard, DrillError>) 
     // path that does not flow through here is a path that does not return an
     // ExitCode from `report`, which the compiler will not let you write.
     publish(args, run_id, code, sc);
+    // Task 14: AFTER `publish`, so a hung, refusing or misconfigured alerting
+    // endpoint can never delay or prevent Task 11's metrics record — the one
+    // artifact the exit-1/3/4 paths are now guaranteed to leave. BEFORE
+    // `exiting`, so "drill finished" stays the last line on the stream.
+    // `ExitCode` is `Copy`, so passing `code` to both this call and `exiting`
+    // is fine. GC11: `notify_failure_with` returns nothing and swallows every
+    // transport failure — the code is already decided above and is not
+    // reachable from here.
+    if let (Some(msg), Some(s)) = (failure_message.as_deref(), spec) {
+        phase7_verify::notify_failure_with(
+            &s.notifications,
+            s.name.as_deref(),
+            run_id,
+            code,
+            msg,
+            sink,
+        );
+    }
     exiting(run_id, code)
 }
 
@@ -1112,7 +1185,11 @@ fn sign_and_publish(
         // signal (`docs/stability.md` says so in those words).
         tracing::warn!(error = %e, "post-put evidence receipt not persisted");
     }
-    phase7_verify::notify(&c.spec.notifications, &signed.scorecard);
+    phase7_verify::notify(
+        &c.spec.notifications,
+        c.spec.name.as_deref(),
+        &signed.scorecard,
+    );
     Ok(signed)
 }
 
@@ -1750,7 +1827,7 @@ mod tests {
                 .with_ansi(false)
                 .finish();
             let got = tracing::subscriber::with_default(subscriber, || {
-                report(&args_with(Some(sink.clone())), "01TEST", outcome)
+                report(&args_with(Some(sink.clone())), "01TEST", None, outcome)
             });
 
             assert_eq!(
@@ -1813,7 +1890,7 @@ mod tests {
             ))),
             Err(DrillError::SigningOrLock("x".into())),
         ] {
-            report(&args_with(None), "01TEST", outcome);
+            report(&args_with(None), "01TEST", None, outcome);
         }
 
         let after = cwd_entries();
@@ -1865,7 +1942,12 @@ mod tests {
 
         let pass = dir.path().join("pass.prom");
         assert_eq!(
-            report(&args_with(Some(pass.clone())), "01TEST", Ok(a_scorecard())),
+            report(
+                &args_with(Some(pass.clone())),
+                "01TEST",
+                None,
+                Ok(a_scorecard())
+            ),
             ExitCode::Ok
         );
         assert!(pass.exists(), "a pass writes its metrics");
@@ -1877,6 +1959,7 @@ mod tests {
             report(
                 &args_with(Some(notpass.clone())),
                 "01TEST",
+                None,
                 Err(DrillError::NotPass(Box::new(sc)))
             ),
             ExitCode::DrillNotPass,
@@ -1893,6 +1976,7 @@ mod tests {
             report(
                 &args_with(Some(op.clone())),
                 "01TEST",
+                None,
                 Err(DrillError::Operational("broker unreachable".into()))
             ),
             ExitCode::Operational
@@ -1916,7 +2000,10 @@ mod tests {
             ),
         ] {
             let p = dir.path().join(name);
-            assert_eq!(report(&args_with(Some(p.clone())), "01TEST", Err(e)), want);
+            assert_eq!(
+                report(&args_with(Some(p.clone())), "01TEST", None, Err(e)),
+                want
+            );
             assert!(
                 p.exists(),
                 "T0-7: exit {} leaves no scorecard, which is exactly why it owes a record",
@@ -1936,6 +2023,7 @@ mod tests {
             report(
                 &args_with(Some(p.clone())),
                 "01TEST",
+                None,
                 Err(DrillError::Operational("broker unreachable".into()))
             ),
             ExitCode::Operational
@@ -1959,6 +2047,7 @@ mod tests {
             report(
                 &args_with(Some(p.clone())),
                 "01TEST",
+                None,
                 Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
                     "x".into()
                 )))
@@ -1983,6 +2072,7 @@ mod tests {
             report(
                 &args_with(Some(p.clone())),
                 "01TEST",
+                None,
                 Err(DrillError::SigningOrLock("x".into()))
             ),
             ExitCode::SigningOrLock
@@ -2029,7 +2119,12 @@ mod tests {
         ] {
             let p = dir.path().join(format!("exit-{}.prom", code as u8));
             assert_eq!(
-                report(&args_with(Some(p.clone())), "01TEST", representative(code)),
+                report(
+                    &args_with(Some(p.clone())),
+                    "01TEST",
+                    None,
+                    representative(code)
+                ),
                 code
             );
             let t = std::fs::read_to_string(&p).unwrap_or_else(|e| {
@@ -2138,5 +2233,142 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen, vec![0, 1, 2, 3, 4]);
+    }
+
+    // ---------------------------------------------------------------- T0-15
+    // The notification half of the terminal paths. `report_with` and
+    // `notification_spec` are private, so these live here rather than in
+    // `crates/logweir/tests/notify.rs`, where the rest of T0-15's coverage is.
+
+    /// An `EventSink` that records instead of dialling (GC17).
+    #[derive(Default)]
+    struct RecordingSink {
+        posts: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl phase7_verify::EventSink for RecordingSink {
+        fn post(&self, url: &str, body: &serde_json::Value) -> Result<(), String> {
+            self.posts
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.clone()));
+            Ok(())
+        }
+    }
+
+    /// The checked-in example spec, plus the notification config a drill that
+    /// wants to be paged would carry.
+    fn spec_with_a_routing_key() -> DrillSpec {
+        let mut spec: DrillSpec =
+            serde_yaml::from_str(include_str!("../../../../examples/drill.yaml")).unwrap();
+        spec.name = Some("nightly".into());
+        spec.notifications.pagerduty_routing_key = Some("R0FAKEFAKEFAKEFAKEFAKEFAKEFAKE0".into());
+        spec
+    }
+
+    /// **M1.** The exit-1 path pages. This is the whole of T0-15: before it,
+    /// `report`'s no-scorecard branch logged and printed and did nothing else,
+    /// so the three codes that mean "a human is needed and there is no
+    /// artifact to read instead" notified nobody, while the one code that
+    /// meant "the drill finished and signed its own scorecard" was loud.
+    ///
+    /// `metrics_file: None` on purpose: `publish` returns early on that arm,
+    /// so this asserts the notification and nothing about Task 11's textfile.
+    #[test]
+    fn report_pages_on_an_operational_failure() {
+        let spec = spec_with_a_routing_key();
+        let sink = RecordingSink::default();
+        let code = report_with(
+            &args_with(None),
+            "01TEST",
+            Some(&spec),
+            Err(DrillError::Operational("broker unreachable".into())),
+            &sink,
+        );
+
+        assert_eq!(
+            code,
+            ExitCode::Operational,
+            "GC11: the notification must not touch the exit code"
+        );
+        let posts = sink.posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "exit 1 left no page: {posts:?}");
+        assert_eq!(posts[0].0, phase7_verify::PAGERDUTY_US_ENDPOINT);
+        assert_eq!(posts[0].1["event_action"], "trigger");
+        assert_eq!(
+            posts[0].1["dedup_key"],
+            serde_json::json!(phase7_verify::failure_dedup_key(Some("nightly")))
+        );
+    }
+
+    /// The other side of the same branch, in both directions.
+    ///
+    /// A drill RESULT (exit 0 and exit 2) is phase 8's to notify — it has a
+    /// scorecard, and `report` must not page a second time — and a spec that
+    /// configured no route is never paged at all.
+    #[test]
+    fn report_pages_only_where_there_is_no_scorecard() {
+        let spec = spec_with_a_routing_key();
+
+        for outcome in [
+            Ok(a_scorecard()),
+            Err(DrillError::NotPass(Box::new(a_scorecard()))),
+        ] {
+            let sink = RecordingSink::default();
+            report_with(&args_with(None), "01TEST", Some(&spec), outcome, &sink);
+            assert!(
+                sink.posts.lock().unwrap().is_empty(),
+                "a drill RESULT was paged from `report`; phase 8 already notified with the \
+                 scorecard in hand, and this would be a second, scorecard-less page for one \
+                 drill"
+            );
+        }
+
+        // No spec reachable at all (an unreadable or unparseable spec file is
+        // itself an exit-1 operational failure): nothing to page with, and the
+        // drill still exits 1.
+        let sink = RecordingSink::default();
+        let code = report_with(
+            &args_with(None),
+            "01TEST",
+            None,
+            Err(DrillError::Operational("spec unreadable".into())),
+            &sink,
+        );
+        assert_eq!(code, ExitCode::Operational);
+        assert!(sink.posts.lock().unwrap().is_empty());
+    }
+
+    /// **M8.** `notification_spec` actually reads the spec file, and its
+    /// failures are silent and non-fatal.
+    ///
+    /// It is the only thing standing between `report`'s failure paths and the
+    /// notification config: `RunArgs` carries paths, not a parsed spec, and
+    /// on the exit-1 path `execute` returned `Err` so there is no `Ctx` to
+    /// take one from.
+    #[test]
+    fn notification_spec_reads_the_spec_and_never_aborts() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("drill.yaml");
+        let mut text = include_str!("../../../../examples/drill.yaml").to_string();
+        text.insert_str(0, "name: nightly\n");
+        std::fs::write(&p, &text).unwrap();
+
+        let mut args = args_with(None);
+        args.spec = p.clone();
+        let got = notification_spec(&args).expect("a readable, parseable spec must be returned");
+        assert_eq!(got.name.as_deref(), Some("nightly"));
+
+        // Unreadable and unparseable are both `None`, never a panic and never
+        // an error that could reach an exit code.
+        let mut missing = args_with(None);
+        missing.spec = dir.path().join("does-not-exist.yaml");
+        assert!(notification_spec(&missing).is_none());
+
+        let bad = dir.path().join("bad.yaml");
+        std::fs::write(&bad, b"this: [is not, a drill spec").unwrap();
+        let mut args_bad = args_with(None);
+        args_bad.spec = bad;
+        assert!(notification_spec(&args_bad).is_none());
     }
 }

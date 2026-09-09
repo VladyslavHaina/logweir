@@ -158,6 +158,7 @@ mod tests {
 
     fn spec_with(topics: &[&str], prefix: &str) -> DrillSpec {
         DrillSpec {
+            name: None,
             source: SourceSpec {
                 storage: StorageUrl::Filesystem {
                     path: "/tmp/src".into(),

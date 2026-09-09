@@ -3,6 +3,24 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrillSpec {
+    /// This drill's own stable identity, per ruling **R-D**.
+    ///
+    /// It exists so two drill specs pointed at ONE cluster do not share a
+    /// PagerDuty incident: the dedup key is built from this plus the target
+    /// cluster id (`crate::drill::phase7_verify::dedup_key` in the `logweir`
+    /// crate). Before it existed the key was `logweir-drill-{cluster_id}`, so
+    /// a passing nightly drill RESOLVED a failing weekly drill's open page.
+    ///
+    /// Optional, so every spec written before this field existed still parses;
+    /// when it is absent the key falls back to a prefix of the approval's
+    /// `plan_hash`, which is distinct per spec and stable across re-runs.
+    ///
+    /// It is NOT `drill_id`. An artifact-side identity that travels ON the
+    /// scorecard is backlog T1-8, assigned to decision O16 with default *not
+    /// funded*; this field is the interim, spec-side half and is deliberately
+    /// never written to a scorecard (that would be a GC12 format change).
+    #[serde(default)]
+    pub name: Option<String>,
     pub source: SourceSpec,
     pub target: TargetSpec,
     pub sample: SampleSpec,
@@ -31,11 +49,30 @@ pub struct Notifications {
     pub slack_webhook: Option<String>,
     #[serde(default)]
     pub pagerduty_routing_key: Option<String>,
+    /// PagerDuty's Events v2 enqueue endpoint. `None` means the US default,
+    /// `crate::…::PAGERDUTY_US_ENDPOINT` in the `logweir` crate.
+    ///
+    /// This existed as a string LITERAL in the POST, so an adopter whose
+    /// PagerDuty account is on the EU service region posted every event into a
+    /// region that does not hold their account, got a non-2xx, and the failure
+    /// was swallowed into a warning. The EU value is
+    /// `https://events.eu.pagerduty.com/v2/enqueue`.
+    ///
+    /// NOT A SECRET, and that is why it is the one field of this struct the
+    /// `Debug` impl below prints in full: a misdirected endpoint is exactly
+    /// what an operator has to be able to read off a log line, and redacting
+    /// it would reproduce the defect the field exists to fix. Only `https://`
+    /// is accepted; anything else is refused before a request is made, because
+    /// the routing key travels in the request BODY and plaintext HTTP would
+    /// put a bearer credential on the wire.
+    #[serde(default)]
+    pub pagerduty_endpoint: Option<String>,
 }
 
 /// HAND-WRITTEN, not derived, and for the same reason
-/// `logweir_kafka::reader::AuthConfig` writes its own: all three fields are
-/// secrets. A Slack incoming-webhook URL is a bearer credential — whoever
+/// `logweir_kafka::reader::AuthConfig` writes its own: the three SINK fields
+/// are secrets (`pagerduty_endpoint`, added later, is not — see its doc
+/// comment). A Slack incoming-webhook URL is a bearer credential — whoever
 /// holds it can post as the integration — and so is a PagerDuty routing key.
 /// `DrillSpec` derives `Debug`, so a derived impl here would put all three
 /// into any `{:?}` of the spec, and this struct sits one field away from an
@@ -57,6 +94,11 @@ impl std::fmt::Debug for Notifications {
                 "pagerduty_routing_key",
                 &self.pagerduty_routing_key.as_ref().map(|_| "***"),
             )
+            // IN FULL, and on purpose — see the field's own doc comment. It is
+            // an endpoint URL, not a credential, and the whole point of the
+            // field is that an operator can tell which region their events
+            // went to. The three fields above stay redacted.
+            .field("pagerduty_endpoint", &self.pagerduty_endpoint)
             .finish()
     }
 }

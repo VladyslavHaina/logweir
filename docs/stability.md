@@ -31,6 +31,36 @@ pre-release ruling by accident.**
 
 ## Known limitations of v0.1
 
+- **The PagerDuty `dedup_key` is an interim key, not a durable drill
+  identity.** PagerDuty's Events v2 API keys an incident by `dedup_key`, and
+  v0.1's key was `logweir-drill-{cluster_id}` — so two drill specs pointed at
+  one scratch cluster shared a single incident, and because a passing drill
+  sends `event_action: resolve`, a nightly smoke drill passing at 03:00 closed
+  the weekly full drill's open page. The key is now
+  `logweir-drill-{name-or-plan-hash-prefix}-{cluster_id}`, built from the drill
+  spec's **optional** `name` (`notifications` is documented in
+  [`docs/formats/drill-spec.md`](formats/drill-spec.md)) falling back to the
+  first 12 hex characters of the approval's `plan_hash` when the spec has no
+  name — a sha256 over the approved plan bytes, so it is distinct per spec and
+  stable across re-runs.
+
+  Two residuals, both deliberate:
+
+  - **The durable fix is an artifact-side `drill_id`** that travels on the
+    scorecard itself (backlog **T1-8**), which §12 assigns to decision **O16**
+    with default *not funded*. Until that lands, a drill's identity for
+    alerting purposes is spec-side only: rename a spec and its open incidents
+    are orphaned; copy a spec to a second file without changing its `name` and
+    the two share an incident again. Give every spec a distinct, stable `name`.
+  - **The operational-failure key is separate from the drill-result key, on
+    purpose.** Exits 1, 3 and 4 page under
+    `logweir-drill-{name-or-"unnamed"}-preflight`, never under the result key,
+    so a later passing run's `resolve` does **not** automatically close an
+    incident that says "logweir could not run this drill at all" — those are
+    different facts about different things. The cost is that a spec with no
+    `name` collapses every operational failure on the install to one incident,
+    which is the second reason to set `name`.
+
 - **`--from-cluster` (phase −1) has no execution path in v0.1.0.** This is the
   most consequential gap on this page, and it is a *scheduling* gap, not a
   scope decision: `--from-cluster` **is** in v0.1's scope, funded and decided —
