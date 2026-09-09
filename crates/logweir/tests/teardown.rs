@@ -239,6 +239,16 @@ fn teardown_failure_names_the_topics() {
         "the leftover warning must carry the run id as a FIELD on the event: {warning}"
     );
 
+    // The count travels as a FIELD too (`fields.count`), and it is asserted
+    // here because the review found that deleting the `count = …` field from
+    // the `warn!` left every test green: a claimed field nobody asserts is a
+    // field that can vanish. One refused topic ⇒ count 1.
+    assert_eq!(
+        warning["fields"]["count"].as_u64(),
+        Some(1),
+        "the leftover warning must carry the failed-topic count as a FIELD on the event: {warning}"
+    );
+
     // The emitted message and the pure function that produces it can never
     // drift: the function is testable without a subscriber, the event is
     // testable with one, and these are asserted to be the same string.
