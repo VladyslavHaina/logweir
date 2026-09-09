@@ -361,6 +361,143 @@ fn teardown_failure_does_not_change_the_exit_code() {
     );
 }
 
+/// R-C in its OTHER direction, and the reason it is a separate test: mutant M8
+/// is "make `phase9_teardown::persist`'s `Err` at the call site propagate
+/// instead of warning", and on a fixture where `persist` SUCCEEDS that mutant
+/// changes nothing and survives. The brief says to strengthen the test rather
+/// than accept the survivor, so this one makes `persist` actually fail.
+///
+/// It fails the way it would in production: the evidence store's puts are
+/// create-only (Global Constraint 6's segregation), so an object already
+/// sitting at the teardown key makes both puts refuse. Squatting the key before
+/// the run needs no fixture shape, no `#[cfg]` hook in `src/` and no second
+/// store — the run id is known before `execute_with` is called, because the
+/// caller mints it.
+///
+/// What must hold: the drill still returns `Ok`, phase 9's record still reads
+/// `ok`, and the operator is nonetheless TOLD. The attestation's absence from
+/// the bucket is the durable signal (`docs/stability.md`), and the warning is
+/// the only live one.
+#[test]
+fn a_teardown_attestation_that_cannot_be_persisted_does_not_change_the_exit_code() {
+    let f = fixtures::orchestrator_fixture(Drill::Passes);
+    f.ctx
+        .store
+        .put_create_only(
+            &format!("logweir/drills/{}.teardown.json", f.run_id),
+            b"an object is already here",
+        )
+        .expect("the key is free before the drill runs");
+
+    let lines = under_a_capturing_subscriber(|| {
+        let sc = execute_with(&f.args, &f.run_id, &f.ctx).expect(
+            "R-C: a teardown attestation that could not be persisted is not a failed drill",
+        );
+        assert_eq!(
+            sc.outcome,
+            Outcome::Pass,
+            "R-C: phase 8 signed and uploaded the drill result before phase 9 ran"
+        );
+        let p9 = sc
+            .phases
+            .iter()
+            .find(|p| p.phase == 9)
+            .expect("phase 9 ran");
+        assert_eq!(
+            p9.outcome, "ok",
+            "R-C: a failed teardown attestation is a WARNING at the call site, never an \
+             outcome: {p9:?}"
+        );
+    });
+
+    let warned = lines.iter().any(|v| {
+        v["level"] == "WARN"
+            && v["fields"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("teardown attestation not persisted"))
+    });
+    assert!(
+        warned,
+        "the exit code is unchanged, so the WARN is the only live signal that the teardown \
+         document never reached the bucket. Losing it makes the failure silent.\nlines: {lines:#?}"
+    );
+}
+
+// ------------------------------------------- what a clean phase 9 looks like
+
+/// The answer to "what does an operator see when phase 9 has NOTHING to
+/// report", and the caller-side test for `PhaseObserver`.
+///
+/// On a clean teardown the gauge reads `0`, the summary line is unchanged, and
+/// the engine child — spawned with `RUST_LOG=warn` pinned — contributes nothing
+/// to the stream. What is left is phase 9's own `phase started` / `phase
+/// finished` pair, and that pair is the whole of it: without it a clean phase 9
+/// would be indistinguishable in the log from a phase 9 that never ran.
+///
+/// Which makes this the test that keeps `PhaseObserver::phase_started` /
+/// `phase_finished` wired. Before Task 13 they were live code with no caller
+/// from the orchestrator — `PhaseLogger` implemented them and only a test in
+/// `logging.rs` invoked them directly, so what the pair proves about a
+/// production run was nothing at all. Deleting the two calls from `record` is
+/// the mutant; the closed arithmetic below (EVERY phase record has a pair, not
+/// just phase 9) is what fails.
+#[test]
+fn every_phase_the_orchestrator_runs_says_so_including_a_clean_teardown() {
+    let f = fixtures::orchestrator_fixture(Drill::Passes);
+    let mut scorecard = None;
+    let lines = under_a_capturing_subscriber(|| {
+        scorecard =
+            Some(execute_with(&f.args, &f.run_id, &f.ctx).expect("the fixture drill passes"));
+    });
+    let sc = scorecard.expect("the drill produced a scorecard");
+
+    let pairs = |message: &str| -> Vec<i64> {
+        lines
+            .iter()
+            .filter(|v| {
+                v["level"] == "INFO"
+                    && v["fields"]["message"].as_str() == Some(message)
+                    && v["fields"]["run_id"].as_str() == Some(f.run_id.as_str())
+            })
+            .filter_map(|v| v["fields"]["phase"].as_i64())
+            .collect()
+    };
+    let started = pairs("phase started");
+    let finished = pairs("phase finished");
+
+    for p in &sc.phases {
+        let n = i64::from(p.phase);
+        assert!(
+            started.contains(&n),
+            "phase {n} ({}) is in the scorecard and said nothing when it started. The observer \
+             hooks carry the run id and are the only per-phase progress an operator has; \
+             unwired, they are live code with no caller.\nstarted: {started:?}",
+            p.name
+        );
+        assert!(
+            finished.contains(&n),
+            "phase {n} ({}) is in the scorecard and said nothing when it finished.\nfinished: \
+             {finished:?}",
+            p.name
+        );
+    }
+    assert!(
+        started.contains(&9) && finished.contains(&9),
+        "phase 9 above all: on a CLEAN teardown these two lines are the entire log record that \
+         it ran. started: {started:?}, finished: {finished:?}"
+    );
+
+    // …and nothing more. A clean teardown says nothing special anywhere: no
+    // WARN, and (asserted in its own test) no clause on the summary line.
+    assert!(
+        !lines.iter().any(|v| v["level"] == "WARN"
+            && v["fields"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("teardown left"))),
+        "a clean teardown must not warn about leftovers.\nlines: {lines:#?}"
+    );
+}
+
 // ---------------------------------------------------------------- the false sentence
 
 /// The documented guarantee the code does not deliver, deleted and kept deleted.
