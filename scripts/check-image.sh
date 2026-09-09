@@ -2,7 +2,7 @@
 # THE IMAGE SMOKE GATE — the single implementation. Phase 1 line item 1f,
 # Tier 0 item T0-17 (the refactor half).
 #
-# These five assertions were lifted VERBATIM IN BEHAVIOUR out of
+# Five of these assertions were lifted VERBATIM IN BEHAVIOUR out of
 # `.github/workflows/release.yml:136-182`, where they had lived since Task 22
 # and where they have NEVER EXECUTED on any commit, including the v0.1.0 tag —
 # there is no git remote and not one of the five workflows has ever run. A gate
@@ -23,12 +23,20 @@
 # Neither may keep a private copy of the logic; that is the whole point of the
 # extraction.
 #
-# WHAT IT PROVES about the image, in fail-fast order:
+# WHAT IT PROVES about the image, in the order the checks RUN:
+#   6. `/usr/local/bin/logweir` is an x86-64 ELF (STANDING RULE 10);
 #   1. every dynamic dependency of `/usr/local/bin/logweir` RESOLVES (GC10);
 #   2. the engine answers `kafka-backup --version`;
 #   3. the CLI answers `logweir --version`;
 #   4. the image alone can mint a signed approval over `examples/drill.yaml`;
-#   5. both redistributed licences are present (GC15).
+#   5. both redistributed licences are present (GC15) — TWO assertions, one per
+#      file, so a failure names WHICH licence is missing.
+#
+# CHECK 6 IS SIXTH BY NUMBER AND FIRST BY POSITION, and the reason is written
+# out beside it below. In short: the numbers 1-5 are matched in stderr by
+# `e2e/tests/check_image.rs`, so renumbering them would silently re-point five
+# tests; and the ELF read is both the cheapest check here and the only one that
+# gives the right answer when the binary is the wrong architecture.
 #
 # WHAT IT PROVES ABOUT A DRILL: nothing. No broker, no bucket, no cluster and
 # no archive is touched. See docs/stability.md.
@@ -38,7 +46,9 @@
 # checks passed. 1 = a check failed, the reference is not in the local daemon,
 # or a prerequisite is missing. A missing prerequisite is a FAILURE WITH A
 # NAMED REASON, never a green "skipped" run — a check that cannot fail is the
-# defect class this gate exists to remove, not to repeat.
+# defect class this gate exists to remove, not to repeat. Every check here has
+# a test in `e2e/tests/check_image.rs` that BREAKS an image and watches this
+# script reject it, check 6 included.
 #
 # COSTS: one `docker run` per check plus one for the round-trip, all against an
 # image that must already be in the local daemon. It builds nothing and pushes
@@ -124,7 +134,7 @@ if ! docker image inspect "$ref" >/dev/null 2>&1; then
 fi
 
 # EVERY `docker run` BELOW CARRIES `--platform linux/amd64`, and the reason is
-# not tidiness: the engine layer (Dockerfile:46) has no arm64 manifest, so the
+# not tidiness: the engine layer (Dockerfile:164) has no arm64 manifest, so the
 # image is linux/amd64 and on the arm64 development host every one of these
 # runs is emulated. Stating the platform makes the emulation intentional rather
 # than a warning nobody reads, and it makes a run against an accidentally
@@ -132,6 +142,66 @@ fi
 PLATFORM="linux/amd64"
 
 echo "== check-image: $ref =="
+
+# ------------------------------------------------------------------ check 6
+# THE SHIPPED BINARY IS x86-64. STANDING RULE 10 made the builder stage
+# cross-compile (`FROM --platform=$BUILDPLATFORM`, `--target
+# x86_64-unknown-linux-gnu`), which removed a 50-minute emulated compile and
+# introduced exactly one new way to be wrong: a builder that quietly produced a
+# HOST-architecture binary, or a `COPY --from=builder` pointed back at
+# `target/release/`. Task 8 verified this property BY HAND — `od` on the first
+# 20 bytes of the shipped binary — and its review asked for the assertion. This
+# is the assertion.
+#
+# WHY IT IS NUMBERED 6 AND RUNS FIRST. The NUMBER is 6 because checks 1-5 are
+# pinned to their symptoms by `e2e/tests/check_image.rs`, which matches the
+# check number in stderr; renumbering them would silently re-point five tests
+# for a cosmetic gain. The POSITION is first because this is the only check
+# that gives the right answer when the binary is the wrong architecture: `ldd`
+# on a foreign ELF reports "not a dynamic executable" and `logweir --version`
+# dies with "exec format error", so checks 1 and 3 both fail for a reason that
+# names neither the architecture nor the cause. It is also the cheapest check
+# in the file — one `docker run` that reads 20 bytes and EXECUTES NOTHING from
+# the image, which is the right thing to do before running anything from it.
+#
+# `--entrypoint /usr/bin/od`, NOT A SHELL, and that is deliberate: an image
+# with no `/bin/sh` must still be caught by CHECK 1, which is where
+# `check_image_rejects_an_image_with_no_shell` says the missing shell is found.
+# Reading the header through `sh -c` would move that failure up here and
+# quietly re-point that test.
+#
+# THE FIELDS, from the ELF header (little-endian, class 64):
+#   bytes 0-3    7f 45 4c 46   the magic, "\x7fELF"
+#   byte  4      02            EI_CLASS = ELFCLASS64
+#   bytes 18-19  3e 00         e_machine = 0x003e = EM_X86_64
+echo "-- check 6 (ELF): /usr/local/bin/logweir is an x86-64 ELF"
+if ! elf_out=$(docker run --rm --platform "$PLATFORM" --entrypoint /usr/bin/od "$ref" \
+                 -An -tx1 -N20 /usr/local/bin/logweir 2>&1); then
+  fail "check 6 (ELF): could not read the ELF header of /usr/local/bin/logweir in $ref:" \
+       "$elf_out" \
+       "  This check runs \`od\` from the image itself (coreutils, present in" \
+       "  debian:bookworm-slim) rather than a shell, so that an image with no" \
+       "  /bin/sh is still reported by check 1."
+fi
+# od prints 16 bytes per line, space-separated, with a leading indent; flatten
+# to one space-separated list so the fields can be addressed by position.
+elf_bytes="$(printf '%s' "$elf_out" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
+elf_magic="$(printf '%s' "$elf_bytes" | cut -d' ' -f1-5)"
+elf_machine="$(printf '%s' "$elf_bytes" | cut -d' ' -f19-20)"
+if [ "$elf_magic" != "7f 45 4c 46 02" ]; then
+  fail "check 6 (ELF): /usr/local/bin/logweir in $ref is not a 64-bit ELF." \
+       "  expected the first five bytes to be \`7f 45 4c 46 02\` (\\x7fELF, ELFCLASS64)" \
+       "  header read: $elf_bytes"
+fi
+if [ "$elf_machine" != "3e 00" ]; then
+  fail "check 6 (ELF): /usr/local/bin/logweir in $ref is NOT an x86-64 binary." \
+       "  e_machine at offset 18 is \`$elf_machine\`, expected \`3e 00\` (0x003e," \
+       "  EM_X86_64). The builder stage cross-compiles to x86_64-unknown-linux-gnu" \
+       "  (Dockerfile:158) and the runtime stage copies from" \
+       "  target/x86_64-unknown-linux-gnu/release (Dockerfile:185); a" \
+       "  host-architecture binary here means one of those two was changed." \
+       "  header read: $elf_bytes"
+fi
 
 # ------------------------------------------------------------------ check 1
 # EVERY DYNAMIC DEPENDENCY MUST RESOLVE (GC10). Task 22 shipped an image whose
@@ -161,12 +231,12 @@ fi
 # three-subcommand contract (restore, validate-restore, validation run) does
 # not reach it, and scripts/check-no-oso.sh:54 matches subcommand tokens only,
 # never the binary name or a flag. Reaching the engine needs an explicit
-# --entrypoint because Dockerfile:69 makes `logweir` the entrypoint.
+# --entrypoint because Dockerfile:190 makes `logweir` the entrypoint.
 echo "-- check 2: kafka-backup --version"
 docker run --rm --platform "$PLATFORM" --entrypoint /usr/local/bin/kafka-backup "$ref" --version \
   || fail "check 2: kafka-backup --version failed inside $ref" \
           "  The image carries the engine at /usr/local/bin/kafka-backup" \
-          "  (Dockerfile:63) and LOGWEIR_ENGINE_BIN points at it (Dockerfile:67)."
+          "  (Dockerfile:181) and LOGWEIR_ENGINE_BIN points at it (Dockerfile:188)."
 
 # ------------------------------------------------------------------ check 3
 echo "-- check 3: logweir --version"
@@ -190,29 +260,49 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 echo "-- check 4 (drill approve): the image can mint a signed approval"
-# 0777 on the directory and 0644 on the key are LOAD-BEARING, not sloppy:
-# Dockerfile:68 runs the container as uid 65532, which cannot read a
-# 0600 root-owned key nor write into a 0700 host directory.
+# 0777 on the directory is LOAD-BEARING, not sloppy: Dockerfile:189 runs the
+# container as uid 65532, which cannot write its output into a 0700 host
+# directory.
 chmod 0777 "$work"
 
 # The key is generated ON THE HOST and lives only inside this mktemp -d, which
 # the trap above removes on every exit path. No key material is ever written
 # into the repository. Split into two invocations rather than piped, so each
 # openssl's exit status is read on its own line.
+#
+# MINTED UNDER `umask 077` (Task 8b, carried from Task 8's review). Until then
+# openssl created both files 0644 inside a 0777 directory. On macOS the
+# per-user 0700 $TMPDIR hides that, but on a shared Linux CI runner `mktemp -d`
+# lands under a world-traversable /tmp and any local user could read a P-256
+# private key for as long as the gate ran.
+#
+# THE RESIDUAL WINDOW IS STATED, NOT HIDDEN. uid 65532 is not the host user, so
+# the key must be world-readable for the ONE `docker run` that consumes it; the
+# `chmod 0644` therefore sits immediately before that run and the key is
+# removed immediately after it, rather than living until the trap fires.
+# Closing the last window would need either `--user "$(id -u)"` on that run —
+# which would stop the check exercising the uid the image actually ships with,
+# the property Dockerfile:189 is about — or minting the key inside the
+# container, which carries no openssl (see the prerequisite loop above).
+# Neither is a trade this gate should make silently.
+old_umask="$(umask)"
+umask 077
 openssl ecparam -genkey -name prime256v1 -noout -out "$work/ec.pem" \
   || fail "check 4 (drill approve): openssl could not generate a P-256 key"
 openssl pkcs8 -topk8 -nocrypt -in "$work/ec.pem" -out "$work/approver.pem" \
   || fail "check 4 (drill approve): openssl could not write the PKCS#8 approver key"
+umask "$old_umask"
 rm -f "$work/ec.pem"
-chmod 0644 "$work/approver.pem"
 
 cp examples/drill.yaml "$work/drill.yaml" \
   || fail "check 4 (drill approve): examples/drill.yaml is not readable from $(pwd)"
 
+chmod 0644 "$work/approver.pem"
 docker run --rm --platform "$PLATFORM" -v "$work:/w" -w /w "$ref" \
   drill approve --spec drill.yaml --key approver.pem \
   --approver ci@example.com --ticket REL-CHECK --out approval.json \
   || fail "check 4 (drill approve): the image could not mint an approval over examples/drill.yaml"
+rm -f "$work/approver.pem"
 
 test -s "$work/approval.json" \
   || fail "check 4 (drill approve): approval.json is missing or empty"
@@ -227,14 +317,29 @@ grep -q "sha256:$spec_digest" "$work/approval.json" \
 
 # ------------------------------------------------------------------ check 5
 # GC15, and release.yml:178-179 says so: the upstream MIT licence must be IN
-# the image that redistributes the upstream binary. Both paths, because the
-# image redistributes two licensed things — upstream's engine and Logweir.
+# the image that redistributes the upstream binary. The image redistributes TWO
+# licensed things — upstream's engine and Logweir — so this is TWO ASSERTIONS,
+# one per file, each naming the file it did not find.
+#
+# THEY WERE ONE `test -s A && test -s B` UNTIL TASK 8b. A combined test tells a
+# reader that a licence is missing but not WHICH, and "the licence file is
+# missing" is a legal-exposure failure whose remedy differs entirely by file:
+# the upstream MIT copy comes from `third_party/LICENSE-MIT` and Logweir's own
+# from the repository root. Both keep the number 5 because they are the same
+# check on two files, and because `e2e/tests/check_image.rs` matches that
+# number.
 echo "-- check 5 (licence): both redistributed licences are present"
 docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$ref" -c \
-  'test -s /usr/share/licenses/kafka-backup/LICENSE && test -s /usr/share/licenses/logweir/LICENSE' \
-  || fail "check 5 (licence): $ref is missing a redistributed licence" \
-          "  Expected both /usr/share/licenses/kafka-backup/LICENSE (upstream MIT," \
-          "  Dockerfile:65) and /usr/share/licenses/logweir/LICENSE (Dockerfile:66)." \
+  'test -s /usr/share/licenses/kafka-backup/LICENSE' \
+  || fail "check 5 (licence): $ref is missing the UPSTREAM licence" \
+          "  /usr/share/licenses/kafka-backup/LICENSE (upstream MIT, copied from" \
+          "  third_party/LICENSE-MIT by Dockerfile:186) is absent or empty." \
           "  GC15: the licence ships in the image that redistributes the binary."
+docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$ref" -c \
+  'test -s /usr/share/licenses/logweir/LICENSE' \
+  || fail "check 5 (licence): $ref is missing LOGWEIR'S OWN licence" \
+          "  /usr/share/licenses/logweir/LICENSE (Apache-2.0, copied with NOTICE" \
+          "  by Dockerfile:187) is absent or empty. GC15 governs Logweir's own" \
+          "  redistribution exactly as it governs upstream's."
 
-echo "ok: engine, CLI, approval minting and both licences are present in $ref"
+echo "ok: x86-64 binary, engine, CLI, approval minting and both licences are present in $ref"

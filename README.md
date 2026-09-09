@@ -226,8 +226,11 @@ engine image for linux/amd64 only, so on an arm64 host a plain `docker build`
 fails at the engine stage with `no match for platform in manifest: not found`.
 The whole image is built for one platform deliberately: pinning only the engine
 stage would put an amd64 binary inside an arm64 runtime, which fails at drill
-time instead of at build time. On arm64 the build runs under emulation and is
-slow.
+time instead of at build time. **The Rust compile is not emulated**: the
+builder stage runs on the build machine's own architecture and cross-compiles
+to `x86_64-unknown-linux-gnu`, so on arm64 only the runtime stage's `apt-get`
+and `COPY`s go through QEMU. `scripts/check-image.sh` asserts the shipped
+binary's ELF `e_machine` rather than trusting that.
 
 It is built `FROM debian:bookworm-slim` with `ca-certificates` and `libssl3` —
 never musl or distroless, because the extracted engine is dynamically linked

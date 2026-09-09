@@ -221,9 +221,12 @@ dod:
     ./scripts/check-dod.sh
 
 # Task 8. Build the runtime image into the LOCAL daemon, linux/amd64 explicitly:
-# the engine layer (Dockerfile:46) has no arm64 manifest, and `imagePullPolicy:
-# Never` (Tasks 16/17) needs the image in the daemon, not in a registry. On an
-# arm64 host this runs under emulation and is SLOW — see the wall-clock in
+# the engine layer (Dockerfile:164) has no arm64 manifest, and `imagePullPolicy:
+# Never` (Tasks 16/17) needs the image in the daemon, not in a registry.
+#
+# Task 8b: THE RUST COMPILE IS NO LONGER EMULATED. The builder stage runs on
+# `$BUILDPLATFORM` and cross-compiles to x86_64, so on an arm64 host this costs
+# minutes rather than the 3044 s Task 8 measured — see the wall-clocks in
 # docs/stability.md, under "Known limitations of v0.1".
 #
 # THE NAMED PRODUCER of the local `logweir:check` tag. Tasks 16, 17 and 19 need
@@ -241,9 +244,11 @@ image:
 # shell and aborts on the first non-zero status, so nothing here is piped and
 # no status is swallowed — which is the failure this whole extraction is about.
 #
-# DELIBERATELY NOT PART OF `lint`, `test`, `default` OR `e2e`: an emulated
-# amd64 image build must never become a precondition of the Docker-free test
-# run. The image tests are `#[ignore]`d for the same reason and are run here,
+# DELIBERATELY NOT PART OF `lint`, `test`, `default` OR `e2e`: an amd64 image
+# build must never become a precondition of the Docker-free test run. That was
+# true when the build was emulated and stays true now that it is cross-compiled
+# — it is still a whole-workspace release compile plus a docker daemon. The
+# image tests are `#[ignore]`d for the same reason and are run here,
 # explicitly, with `--ignored`. Task 22 decides where `smoke` sits in `just gate`.
 smoke: image
     bash scripts/check-image.sh logweir:check

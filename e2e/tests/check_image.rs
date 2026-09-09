@@ -2,20 +2,30 @@
 #![cfg(feature = "e2e")]
 //! `scripts/check-image.sh` — the image smoke gate, tested by BREAKING the image.
 //!
-//! The five assertions this file exercises are the ones that catch a runtime
-//! image whose `docker images` row looks healthy and whose engine runs, while
+//! The assertions this file exercises are the ones that catch a runtime image
+//! whose `docker images` row looks healthy and whose engine runs, while
 //! `logweir` itself dies at the dynamic loader. That has actually happened
-//! here (`Dockerfile:49-59` pastes the failure text), and the assertions that
+//! here (`Dockerfile:167-177` pastes the failure text), and the assertions that
 //! catch it lived only in `.github/workflows/release.yml`, a workflow that has
 //! never executed on any commit including the tag. A gate that has never run
 //! is not a gate; these tests are how it is observed to fail.
 //!
-//! EVERY TEST THAT NEEDS AN IMAGE IS `#[ignore]`d. Building a `linux/amd64`
-//! image under emulation on an arm64 host is a tens-of-minutes cost and must
-//! not be dragged into `just e2e` or `cargo test --workspace`. `just smoke`
-//! runs them explicitly with `--ignored`. The one test that needs no image —
-//! `check_image_refuses_a_wrong_argument_count` — is deliberately NOT ignored,
-//! so the script's argument contract is checked on every `just e2e`.
+//! CHECK 6 (Task 8b) IS THE ONE ASSERTION WITH NO PRE-HISTORY IN release.yml.
+//! It asserts the shipped `logweir` is an x86-64 ELF, which became a thing that
+//! could go wrong the moment the builder stage stopped being emulated and
+//! started cross-compiling (STANDING RULE 10). It is numbered 6 and runs first;
+//! `scripts/check-image.sh` explains both, and
+//! `check_image_rejects_an_image_whose_logweir_is_not_x86_64` is how it is
+//! observed to fail.
+//!
+//! EVERY TEST THAT NEEDS AN IMAGE IS `#[ignore]`d. Building the `linux/amd64`
+//! image is a whole-workspace `cargo build` and must not be dragged into
+//! `just e2e` or `cargo test --workspace`; it was tens of minutes under
+//! emulation before Task 8b and is minutes after it, which is still not a unit
+//! test. `just smoke` runs them explicitly with `--ignored`. The one test that
+//! needs no image — `check_image_refuses_a_wrong_argument_count` — is
+//! deliberately NOT ignored, so the script's argument contract is checked on
+//! every `just e2e`.
 //!
 //! GR2: the `#![cfg(feature = "e2e")]` gate above keeps the default,
 //! Docker-free `cargo test` green, and `e2e/Cargo.toml` gains no `[[test]]`
@@ -86,7 +96,7 @@ fn temp_dir(label: &str) -> PathBuf {
 /// either fail or (worse) produce something whose architecture nobody stated.
 ///
 /// Every overlay body must `USER root` before its `RUN` and restore
-/// `USER 65532:65532` after, because `Dockerfile:68` runs the image as an
+/// `USER 65532:65532` after, because `Dockerfile:189` runs the image as an
 /// unprivileged uid and the round-trip check depends on that staying true.
 fn build_overlay(tag: &str, body: &str) {
     let base = require_base();
@@ -177,6 +187,43 @@ fn assert_rejected(tag: &str, needle: &str) {
     assert_rejected_naming(tag, &[needle]);
 }
 
+// ------------------------------------------------------------------ check 6
+
+/// TASK 8b's ASSERTION, observed failing. STANDING RULE 10 made the builder
+/// stage run on `$BUILDPLATFORM` and cross-compile to
+/// `x86_64-unknown-linux-gnu`, which removed a 3027-second emulated compile and
+/// created exactly one new way to ship a broken image: a `logweir` built for
+/// the BUILD machine's architecture instead of the target's.
+///
+/// THE OVERLAY WRITES A 20-BYTE ELF HEADER, not a real foreign binary, and
+/// that is deliberate. A real aarch64 binary cannot be smuggled into an amd64
+/// image on this host — `docker build --platform linux/amd64` will not pull an
+/// arm64 base, and a real cross-architecture binary would also fail checks 1
+/// and 3, so the test could not tell which check caught it. A synthetic header
+/// isolates check 6 exactly: valid magic, valid ELFCLASS64, `e_machine` =
+/// 0x00b7 (EM_AARCH64) at offset 18. Delete check 6 and this test fails,
+/// because check 1 then rejects the file for being unreadable by `ldd` and
+/// says nothing about the architecture. Loosen check 6 to the magic alone and
+/// it fails too, because the magic here is correct.
+///
+/// The bytes, in order: `7f 45 4c 46` (magic), `02` (ELFCLASS64), `01` (LSB),
+/// `01` (EI_VERSION), seven zero bytes of OSABI/ABIVERSION/pad plus two more,
+/// `02 00` (ET_EXEC), `b7 00` (EM_AARCH64).
+#[test]
+#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+fn check_image_rejects_an_image_whose_logweir_is_not_x86_64() {
+    let tag = "logweir-check-broken:wrong-arch";
+    build_overlay(
+        tag,
+        "USER root\n\
+         RUN printf '\\177ELF\\002\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\267\\000' \
+         > /usr/local/bin/logweir\n\
+         USER 65532:65532",
+    );
+    assert_rejected_naming(tag, &["check 6 (ELF)", "e_machine", "b7 00"]);
+    remove_overlay(tag);
+}
+
 // ------------------------------------------------------------------ check 1
 
 /// The shipped defect, reproduced. `libsasl2.so.2` is a dynamic dependency of
@@ -262,6 +309,12 @@ fn check_image_rejects_an_image_that_cannot_mint_an_approval() {
 
 /// GC15: the upstream MIT licence must be IN the image that redistributes the
 /// upstream binary.
+///
+/// `kafka-backup/LICENSE` IS ASSERTED IN THE MESSAGE, not just "a licence".
+/// Check 5 was one `test -s A && test -s B` until Task 8b, so its failure said
+/// a licence was missing without saying which — and the remedy differs by
+/// file. The split is only real if the message names the file, so the test
+/// requires the path.
 #[test]
 #[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
 fn check_image_rejects_an_image_missing_the_upstream_licence() {
@@ -270,7 +323,33 @@ fn check_image_rejects_an_image_missing_the_upstream_licence() {
         tag,
         "USER root\nRUN rm -f /usr/share/licenses/kafka-backup/LICENSE\nUSER 65532:65532",
     );
-    assert_rejected_naming(tag, &["licence", "check 5"]);
+    assert_rejected_naming(
+        tag,
+        &[
+            "licence",
+            "check 5",
+            "/usr/share/licenses/kafka-backup/LICENSE",
+        ],
+    );
+    remove_overlay(tag);
+}
+
+/// The other half of the split (Task 8b). GC15 governs Logweir's own
+/// redistribution as much as upstream's, and before the split an image that
+/// carried the upstream MIT copy but had lost `LICENSE`/`NOTICE` failed with a
+/// message that pointed at the wrong file.
+#[test]
+#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+fn check_image_rejects_an_image_missing_the_logweir_licence() {
+    let tag = "logweir-check-broken:no-own-licence";
+    build_overlay(
+        tag,
+        "USER root\nRUN rm -f /usr/share/licenses/logweir/LICENSE\nUSER 65532:65532",
+    );
+    assert_rejected_naming(
+        tag,
+        &["licence", "check 5", "/usr/share/licenses/logweir/LICENSE"],
+    );
     remove_overlay(tag);
 }
 

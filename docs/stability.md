@@ -68,7 +68,10 @@ pre-release ruling by accident.**
 
 - **No musl release target.** `rdkafka` vendors and compiles `librdkafka` from
   C, which does not cross-compile to musl without substantially more work than
-  v0.1 has ([ADR 0004](adr/0004-kafka-client.md)). `release.yml` *attempts* the
+  v0.1 has ([ADR 0004](adr/0004-kafka-client.md)). This is not contradicted by
+  the `Dockerfile` cross-compiling to `x86_64-unknown-linux-gnu`: that target
+  has a one-package Debian toolchain and multiarch `:amd64` copies of every
+  C library librdkafka wants, and musl has neither. `release.yml` *attempts* the
   build in a `continue-on-error` job and the release does not block on it, so a
   musl binary may or may not be attached to a given release. Do not assume one.
 
@@ -388,31 +391,57 @@ unchanged.
 
 - **The image smoke gate (`just smoke`) — what it needs, what it proves, what it costs.**
   `just smoke` needs `docker` and `openssl` on the host and builds a `linux/amd64`
-  image; on an arm64 host that build runs under emulation.
-  `scripts/check-image.sh <image-ref>` proves five things about the image: the
-  `logweir` binary's dynamic linkage resolves (`ldd`, GC10), `kafka-backup --version`
-  runs, `logweir --version` runs, `drill approve` mints a signed approval over
-  `examples/drill.yaml`, and both redistributed licences are present (GC15). It proves
+  image. **The Rust compile in that build is not emulated**: the builder stage runs on
+  the build machine's own architecture and cross-compiles to
+  `x86_64-unknown-linux-gnu`, so on an arm64 host only the runtime stage's `apt-get`
+  and its four `COPY`s go through QEMU.
+  `scripts/check-image.sh <image-ref>` proves six things about the image: the shipped
+  `/usr/local/bin/logweir` is an **x86-64 ELF** (`e_machine` 0x3e, which is what keeps
+  the cross-compile honest), its dynamic linkage resolves (`ldd`, GC10),
+  `kafka-backup --version` runs, `logweir --version` runs, `drill approve` mints a
+  signed approval over `examples/drill.yaml`, and both redistributed licences are
+  present (GC15 — asserted one file at a time, so a failure names which). It proves
   **nothing** about a real drill: no broker, no bucket, no cluster and no archive is
   touched.
 
-  Measured on the development host on 2026-09-06, arm64, from a **single emulated
-  `linux/amd64` run — a floor, not a support statement**. Task 17 sizes CronJob
+  Measured on the development host on 2026-09-09, arm64, with the host otherwise
+  quiet — load average `2.16` at the start of the build and `5.79` at its end. **A
+  floor, not a support statement**, and in particular not a budget: build time here
+  scales with how many other compiles share the machine. Task 17 sizes CronJob
   `requests` from these numbers and must not read them as a guarantee.
-  - `docker build --platform linux/amd64`, cold: `00:50:44`; warm: `00:00:05`.
-  - `bash scripts/check-image.sh logweir:check`: `00:18`.
-  - resulting image size (`docker image inspect --format '{{.Size}}'`): `54450704` bytes.
+  - `docker build --platform linux/amd64` with the WHOLE builder stage forced cold
+    (`--no-cache-filter builder`, i.e. packages, rustup target and compile all re-run):
+    **`00:02:01`**, of which `20.8s` was the `apt-get` layer, `7.7s` `rustup target add`,
+    `0.1s` `COPY . .` and **`92.1s`** the cargo layer (267 crates, `librdkafka` compiled
+    from C among them). An ordinary edit-and-rebuild pays only the last of those,
+    because the two layers above `COPY . .` stay cached.
+  - Fully warm, nothing recompiled and every layer `CACHED`: `00:00:04`.
+  - `bash scripts/check-image.sh logweir:check`: `00:02`.
+  - `just smoke` end to end (cached build + gate + the eleven `#[ignore]`d image
+    tests): `00:29`, of which the eleven tests were `25.5s`.
+  - resulting image size (`docker image inspect --format '{{.Size}}'`): `54453404` bytes.
   - peak RSS: `not observed`.
 
-  Read "cold" narrowly, because it is the number most likely to be quoted at
-  something it does not cover. In that run the two `apt-get` layers and both base
-  images were already in the local BuildKit cache; what ran cold was
-  `RUN cargo build --release -p logweir`, and it alone took **3027 s of the 3044 s**.
-  A machine with an empty cache pays more, and the "warm" figure is a full cache hit
-  that compiles nothing — it is what a re-run costs when no file in the build context
-  has changed, and **any** edit to a tracked file invalidates it back to ~50 minutes,
-  because `COPY . .` precedes the cargo layer. There is no cargo cache mount in the
-  builder stage, so the compile never resumes; it restarts.
+  Read those figures narrowly, because they are the ones most likely to be quoted at
+  something they do not cover.
+  - **They are a quiet-host floor.** The cargo layer is a 267-crate release compile
+    and takes whatever share of the CPU it is left; on a machine running other builds
+    it costs multiples of the figure above. Size against the slow case, never this one.
+  - **Any** edit to a tracked file invalidates `COPY . .` and re-runs
+    `RUN cargo build --release --target x86_64-unknown-linux-gnu -p logweir` from
+    scratch: there is no cargo cache mount in the builder stage, so the compile
+    never resumes, it restarts. That is the `92.1s`, not the `00:00:04`.
+  - A machine with an empty BuildKit cache pays more than any of these — it also
+    downloads both base images — and a machine whose builder architecture is already
+    amd64 pays less, because there the "cross" build is a native one.
+
+  **For contrast, and to keep the reason for the shape of the Dockerfile legible:**
+  until 2026-09-07 the builder stage was emulated, and the same cargo layer took
+  `3027s` of a `3044s` build on this host. That is **33x** the cross-compiled cargo
+  layer above, and the emulated run had its `apt-get` layers already cached while the
+  run above did not. The `FROM --platform=$BUILDPLATFORM` line and the `--target` flag
+  are what removed it; check 6 of the smoke gate is what proves the resulting binary
+  is still the right architecture.
 
 ## Recorded rulings that have no ADR yet
 
