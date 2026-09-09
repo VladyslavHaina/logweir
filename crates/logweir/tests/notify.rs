@@ -675,6 +675,21 @@ impl RecordingSink {
     }
 }
 
+/// An `EventSink` whose POST fails the way a down or misdirected PagerDuty
+/// does. The error it returns is already redacted, as `EventSink::post`'s
+/// contract requires.
+#[derive(Default)]
+struct FailingSink {
+    attempts: std::sync::Mutex<Vec<String>>,
+}
+
+impl logweir::drill::phase7_verify::EventSink for FailingSink {
+    fn post(&self, url: &str, _body: &serde_json::Value) -> Result<(), String> {
+        self.attempts.lock().unwrap().push(url.to_string());
+        Err("status code 502".into())
+    }
+}
+
 fn pagerduty_only(endpoint: Option<&str>) -> logweir_core::spec::Notifications {
     logweir_core::spec::Notifications {
         webhooks: Vec::new(),
@@ -1086,6 +1101,66 @@ fn a_silenced_pagerduty_alert_says_so_on_the_log() {
     assert!(
         log.contains("\"level\":\"WARN\""),
         "a page that did not go out is not an INFO: {log}"
+    );
+    assert!(
+        !log.contains(TEST_ROUTING_KEY),
+        "the routing key reached a log line: {log}"
+    );
+
+    // THE OTHER WAY AN ALERT IS SILENCED: the endpoint was accepted, the POST
+    // was made, and it failed. GC11 keeps that a swallowed warning — a down
+    // PagerDuty must never change a drill's exit code — which is exactly why
+    // the warning has to be findable. This arm and the refusal arm above emit
+    // the SAME message on purpose: an operator asking "why did no page
+    // arrive?" greps one string, not two.
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(Buf(captured.clone()))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let n = pagerduty_only(Some("https://events.eu.pagerduty.com/v2/enqueue"));
+    let failing = FailingSink::default();
+    tracing::subscriber::with_default(subscriber, || {
+        notify_failure_with(
+            &n,
+            Some("nightly"),
+            "01TESTRUNID0000000000000",
+            ExitCode::Operational,
+            "broker unreachable",
+            &failing,
+        );
+    });
+
+    let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        failing.attempts.lock().unwrap().len(),
+        1,
+        "the endpoint was https, so the POST must have been attempted"
+    );
+    assert!(
+        log.contains(PAGERDUTY_SILENCED),
+        "the enqueue FAILED and the log does not say the alert was not delivered — the \
+         failure is swallowed by design (GC11), so the log line is the only trace it \
+         leaves: {log}"
+    );
+    assert!(
+        log.contains(&failure_dedup_key(Some("nightly"))),
+        "the silenced line must name WHICH incident did not open: {log}"
+    );
+    assert!(
+        log.contains("\"level\":\"WARN\""),
+        "a page that did not go out is not an INFO: {log}"
+    );
+    assert!(
+        log.contains("status code 502"),
+        "the already-redacted failure kind is the whole diagnostic payload: {log}"
+    );
+    assert!(
+        log.contains("https://events.eu.pagerduty.com/v2/enqueue"),
+        "the endpoint is not a secret, and WHICH region was posted to is the thing an \
+         operator debugging a missing page needs most: {log}"
     );
     assert!(
         !log.contains(TEST_ROUTING_KEY),
