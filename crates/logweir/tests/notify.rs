@@ -143,6 +143,7 @@ fn the_notify_log_lines_carry_no_sink_credential() {
     }
 
     let captured = Arc::new(Mutex::new(Vec::new()));
+    ensure_global_subscriber();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_writer(Buf(captured.clone()))
@@ -1135,6 +1136,7 @@ fn a_silenced_pagerduty_alert_says_so_on_the_log() {
     }
 
     let captured = Arc::new(Mutex::new(Vec::new()));
+    ensure_global_subscriber();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_writer(Buf(captured.clone()))
@@ -1188,6 +1190,7 @@ fn a_silenced_pagerduty_alert_says_so_on_the_log() {
     // the SAME message on purpose: an operator asking "why did no page
     // arrive?" greps one string, not two.
     let captured = Arc::new(Mutex::new(Vec::new()));
+    ensure_global_subscriber();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_writer(Buf(captured.clone()))
@@ -1276,6 +1279,41 @@ fn a_silenced_pagerduty_alert_says_so_on_the_log() {
 /// fourth copy is where the copies start to disagree. Those two are left as
 /// they were reviewed — rewriting a passing mutant-killer to save twenty lines
 /// is not a trade worth making — but nothing new duplicates it.
+/// Install one permissive global subscriber, once per test binary, before any
+/// thread-local capture below.
+///
+/// Why this exists (root cause of a 1-in-6 red on the merged tree, 2026-09-09):
+/// tracing caches each callsite's `Interest` process-wide, and a callsite's
+/// FIRST registration computes it from `DISPATCHERS.rebuilder()`. With no
+/// global default installed, the registry's `has_just_one` flag is true
+/// whenever exactly one scoped dispatcher is live — i.e. while ONE test here
+/// holds a `with_default` capture — and in that state the rebuilder consults
+/// the *registering thread's* current dispatcher (`Rebuilder::JustOne` →
+/// `dispatcher::get_default`, tracing-core 0.1.36 `callsite.rs:562-567`).
+/// An uncaptured test (one that drives `notify_failure_with` with no
+/// subscriber) hitting the success-arm INFO callsite for the first time from
+/// a thread with no default therefore caches `Interest::never()` for it
+/// (`NoSubscriber` → never; `callsite.rs:508`), and the capturing test's
+/// entire INFO log comes back empty until the next `Dispatch::new` rebuilds
+/// the cache. With a global default that enables every level, the
+/// registering thread always resolves to a subscriber that says `always`,
+/// and a live capture makes the registry hold two dispatchers, which routes
+/// rebuilds through the full list. The thread-local captures below still
+/// override it on their own thread; every other thread's events go to a
+/// sink. Same mechanism and same cure as `teardown.rs`.
+fn ensure_global_subscriber() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        // Another helper in this binary may already have installed one; the
+        // guarantee we need is "some permissive global exists", not "ours".
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
 fn capture_json_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -1299,6 +1337,7 @@ fn capture_json_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
     }
 
     let captured = Arc::new(Mutex::new(Vec::new()));
+    ensure_global_subscriber();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_writer(Buf(captured.clone()))
