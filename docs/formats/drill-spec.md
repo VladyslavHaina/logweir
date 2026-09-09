@@ -27,6 +27,10 @@ share a PagerDuty incident. The alert dedup key is
 `logweir-drill-{name}-{cluster_id}`; when `name` is absent it falls back to the
 first 12 hex characters of the approval's `plan_hash` — a sha256 over the
 approved plan bytes, distinct per spec and stable across re-runs of that spec.
+Should that hash ever be too short to supply 12 characters, the key uses
+`unnamed` rather than an empty identity, so it can never collapse back to
+`logweir-drill-{cluster_id}` — one incident per cluster is the defect this key
+exists to fix.
 
 Set it. The fallback is correct but opaque, and the operational-failure route
 (below) has no cluster id to fall back on at all: a spec with no `name` reports
@@ -132,11 +136,13 @@ decision **O17**, default *not funded*. Until it is funded:
 - Prefer a webhook or routing key scoped narrowly enough that its disclosure is
   a rotation and not an incident.
 
-`pagerduty_endpoint` is **not** a credential. It is the only key of this block
-that Logweir prints in full — in `Debug` output and on the log line above —
-because an operator who cannot see which region their events went to cannot
-diagnose the misdirection the key exists to fix. The other three are redacted
-everywhere: presence is reported, values never are.
+`pagerduty_endpoint` is **not** a credential — but it is free-form input, and
+that is a different thing. Logweir reduces it to `scheme://host/…` wherever it
+reaches a display surface: the WARN line above and `Debug` output both. The
+host is what says *which region*, which is the whole reason the key exists, so
+nothing diagnostic is lost; what is dropped is the userinfo, path and query,
+which is where a token lives in a URL somebody pasted. The other three keys are
+redacted more strongly still — presence is reported, values never are.
 
 ---
 

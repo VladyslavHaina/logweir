@@ -58,13 +58,21 @@ pub struct Notifications {
     /// was swallowed into a warning. The EU value is
     /// `https://events.eu.pagerduty.com/v2/enqueue`.
     ///
-    /// NOT A SECRET, and that is why it is the one field of this struct the
-    /// `Debug` impl below prints in full: a misdirected endpoint is exactly
-    /// what an operator has to be able to read off a log line, and redacting
-    /// it would reproduce the defect the field exists to fix. Only `https://`
-    /// is accepted; anything else is refused before a request is made, because
-    /// the routing key travels in the request BODY and plaintext HTTP would
-    /// put a bearer credential on the wire.
+    /// NOT A SECRET — but FREE-FORM ADOPTER INPUT, which is not the same
+    /// thing, and fix round 1 (finding F1) corrects the conclusion that was
+    /// drawn from it here. This field was logged and `Debug`-printed in full
+    /// on the argument that "redacting it would reproduce the defect the field
+    /// exists to fix". `redact_url` refutes that: it keeps `scheme://host/…`,
+    /// which IS the whole diagnostic — the region — and drops the userinfo,
+    /// path and query, which are exactly where an adopter who pastes a signed
+    /// or tokenised URL puts a credential. A `?token=…` or a `user:pass@` in
+    /// this field reached a WARN line and any `{:?}` of the spec. That was a
+    /// per-sink exemption from the rule the three fields above obey, and a
+    /// per-sink exemption is how the next credential reaches a log.
+    ///
+    /// Only `https://` is accepted; anything else is refused before a request
+    /// is made, because the routing key travels in the request BODY and
+    /// plaintext HTTP would put a bearer credential on the wire.
     #[serde(default)]
     pub pagerduty_endpoint: Option<String>,
 }
@@ -94,13 +102,75 @@ impl std::fmt::Debug for Notifications {
                 "pagerduty_routing_key",
                 &self.pagerduty_routing_key.as_ref().map(|_| "***"),
             )
-            // IN FULL, and on purpose — see the field's own doc comment. It is
-            // an endpoint URL, not a credential, and the whole point of the
-            // field is that an operator can tell which region their events
-            // went to. The three fields above stay redacted.
-            .field("pagerduty_endpoint", &self.pagerduty_endpoint)
+            // REDACTED TO `scheme://host/…`, like every sink URL that reaches
+            // a display surface (fix round 1, F1). The host is the whole
+            // diagnostic — it is what says US region or EU region — and the
+            // tail that is dropped is the only part an adopter could have put
+            // a credential in. `None` still renders as `None`: "no endpoint
+            // configured" and "an endpoint configured and misdirected" are
+            // different findings.
+            .field(
+                "pagerduty_endpoint",
+                &self.pagerduty_endpoint.as_deref().map(redact_url),
+            )
             .finish()
     }
+}
+
+/// A webhook URL reduced to the part that identifies the SINK, never the part
+/// that authorises posting to it.
+///
+/// `notifications.slack_webhook` is a `https://hooks.slack.com/services/T…/B…/…`
+/// URL, and that URL **is** a bearer credential: whoever holds it can post as
+/// the integration, with no other secret. It was logged verbatim at INFO on
+/// the success path and again on the error path, to the JSON subscriber
+/// intended for a log aggregator — while `pagerduty_routing_key`, four lines
+/// below, was deliberately never logged. The asymmetry was the tell.
+///
+/// `notifications.pagerduty_endpoint` is not a credential but IS free-form
+/// adopter input, and the same reasoning reaches the same place: the region is
+/// the diagnostic, the tail is where a token would be. Fix round 1, F1.
+///
+/// Only scheme and host survive. The path, the query, the fragment and any
+/// `user:password@` userinfo are all dropped, because the secret can live in
+/// any of them (Slack puts it in the path; a signed webhook puts it in the
+/// query). An operator can still tell WHICH sink a line is about — that is the
+/// whole diagnostic value of the field — without the line being enough to use
+/// it. A URL that will not parse is reported as `<unparseable url>` rather
+/// than echoed, because "it did not look like a URL to me" is not a reason to
+/// print a secret.
+///
+/// It lives HERE, in the pure core, rather than beside its first caller in
+/// `crates/logweir`, because `Notifications`' hand-written `Debug` above is a
+/// second site that has to redact and this crate cannot depend on that one.
+/// Fix round 1 (F1) moved it; `logweir::drill::phase7_verify::redact_url`
+/// re-exports it, so every caller keeps its path. Two copies of a redactor is
+/// how the two copies come to disagree about what a credential looks like.
+///
+/// It reads no clock, no file and no socket — GC1 is untouched.
+///
+/// Pinned by `crates/logweir/tests/notify.rs`.
+pub fn redact_url(url: &str) -> String {
+    // Hand-parsed rather than pulled in as a dependency: the pure core
+    // carries no URL crate, and the rule is "keep the prefix up to the first
+    // '/' after the scheme, minus any userinfo", which is four lines.
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<unparseable url>".into();
+    };
+    if scheme.is_empty() || rest.is_empty() {
+        return "<unparseable url>".into();
+    }
+    // Everything before the first `/`, `?` or `#` is the authority.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .expect("split always yields at least one element");
+    // `user:password@host` — the credential half is dropped, the host kept.
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host.is_empty() {
+        return "<unparseable url>".into();
+    }
+    format!("{scheme}://{host}/…")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

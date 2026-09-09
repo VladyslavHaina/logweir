@@ -66,8 +66,11 @@ fn debugging_a_notifications_block_prints_no_secret() {
             "https://hooks.slack.com/services/T0/B0/XXXXXXXXXXXXXXXXXXXXXXXX".into(),
         ),
         pagerduty_routing_key: Some("R000000000000000000000000000000".into()),
-        // Task 14. NOT a secret and NOT redacted — the assertions below say so
-        // in both directions.
+        // Task 14, fix round 1 (F1). Not a credential, but free-form adopter
+        // input: reduced to `scheme://host/…` like every other URL that
+        // reaches a display surface. `the_pagerduty_endpoint_is_redacted_\
+        // wherever_it_is_displayed` below drives the two shapes that carry a
+        // secret; this one keeps the ordinary case honest.
         pagerduty_endpoint: Some("https://events.eu.pagerduty.com/v2/enqueue".into()),
     };
     let shown = format!("{n:?}");
@@ -85,14 +88,24 @@ fn debugging_a_notifications_block_prints_no_secret() {
     // failed" are different findings.
     assert!(shown.contains("1 configured"), "{shown}");
     assert!(shown.contains("***"), "{shown}");
-    // Task 14, the other direction: the endpoint is deliberately shown IN
-    // FULL. It is a routing destination, not a credential, and an operator who
-    // cannot read which PagerDuty region their events went to cannot diagnose
-    // the misdirection the field exists to fix. Redacting it here would
-    // reproduce the defect.
+    // Task 14, the other direction, as corrected by fix round 1 (F1): the
+    // endpoint is still IDENTIFIABLE — the host is what says which PagerDuty
+    // region the events went to, and an operator who cannot read that cannot
+    // diagnose the misdirection the field exists to fix — but it is no longer
+    // VERBATIM. The two are not the same requirement, and the first version of
+    // this test asserted the stronger one.
+    // The leak assertion first: a verbatim URL contains the host as well, so
+    // asserting the redacted form first makes a raw-endpoint mutant report a
+    // missing host rather than the path that got out.
     assert!(
-        shown.contains("https://events.eu.pagerduty.com/v2/enqueue"),
-        "the endpoint is not a secret and must be readable off a Debug line: {shown}"
+        !shown.contains("/v2/enqueue"),
+        "the endpoint's PATH reached a Debug rendering — a token in a pasted \
+         URL lives exactly there: {shown}"
+    );
+    assert!(
+        shown.contains("https://events.eu.pagerduty.com/…"),
+        "the endpoint must stay identifiable by host, or the Debug line is \
+         useless for the very misdirection the field exists to fix: {shown}"
     );
 }
 
@@ -769,6 +782,67 @@ fn two_specs_one_cluster_have_distinct_dedup_keys() {
     assert_eq!(dedup_key(None, &a_rerun), k3, "same, for an unnamed spec");
 }
 
+/// **Fix round 1, finding F3.** An unnamed spec whose `plan_hash` cannot
+/// supply an identity must NOT fall back to the shape R-D exists to abolish.
+///
+/// With an empty `plan_hash`, `dedup_key(None, &sc)` returned
+/// `logweir-drill--c1`: one incident per CLUSTER, which is exactly the
+/// pre-fix key with a stray hyphen — a nightly drill passing at 03:00 resolves
+/// the weekly drill's open page again. It is unreachable today (phase 1
+/// recomputes the hash and refuses on mismatch before any scorecard exists),
+/// which is precisely why nothing would have noticed it coming back: the only
+/// symptom is a page that stops arriving.
+///
+/// Mutant: delete the `if h.len() < PLAN_HASH_IDENT_LEN` fallback. This test
+/// fails at assertion time on the first case.
+#[test]
+fn an_unusable_plan_hash_never_degenerates_to_the_per_cluster_key() {
+    use logweir::drill::phase7_verify::dedup_key;
+
+    // A hash long enough to identify the spec is untouched by the guard — the
+    // control, without which this test could pass on a function that always
+    // returns the sentinel.
+    let mut good = scorecard_pass();
+    good.target.cluster_id = "c1".into();
+    good.approval.plan_hash =
+        "sha256:aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111".into();
+    assert_eq!(
+        dedup_key(None, &good),
+        "logweir-drill-aaaaaaaaaaaa-c1",
+        "a real plan hash must still identify the spec"
+    );
+
+    // Every way the hash can fail to identify anything: absent, prefix only,
+    // and shorter than the identity it is supposed to supply.
+    for hash in ["", "sha256:", "sha256:abc", "abc"] {
+        let mut sc = scorecard_pass();
+        sc.target.cluster_id = "c1".into();
+        sc.approval.plan_hash = hash.into();
+        let k = dedup_key(None, &sc);
+
+        assert_eq!(
+            k, "logweir-drill-unnamed-c1",
+            "plan_hash {hash:?} must fall back to the same sentinel `failure_dedup_key` \
+             uses, not to a truncation of nothing"
+        );
+        assert_ne!(
+            k, "logweir-drill--c1",
+            "plan_hash {hash:?} produced the pre-fix key with a stray hyphen: one \
+             PagerDuty incident per cluster, every drill resolving every other drill's \
+             page — the defect R-D closes"
+        );
+        // Said the other way, without naming the shape: whatever identity is
+        // used, the key must not be a function of the cluster alone.
+        let mut other_cluster = sc.clone();
+        other_cluster.target.cluster_id = "c2".into();
+        assert!(
+            k.len() > format!("logweir-drill--{}", sc.target.cluster_id).len(),
+            "the identity segment is empty: {k}"
+        );
+        assert_ne!(k, dedup_key(None, &other_cluster), "{k}");
+    }
+}
+
 /// **M5 and M6.** `resolve` on a pass, `trigger` on anything else — and the
 /// two share a key, so the pass actually closes the page the failure opened
 /// **for that same drill** and for no other.
@@ -1157,14 +1231,448 @@ fn a_silenced_pagerduty_alert_says_so_on_the_log() {
         log.contains("status code 502"),
         "the already-redacted failure kind is the whole diagnostic payload: {log}"
     );
+    // Fix round 1, F1. Identifiable, not verbatim: the tail is dropped even
+    // here, where the URL is a perfectly ordinary one, because a redactor that
+    // is applied case by case is not a redactor. This one is asserted FIRST —
+    // a verbatim URL contains the host too, so with the region assertion first
+    // the raw-endpoint mutant complained that the host was missing.
     assert!(
-        log.contains("https://events.eu.pagerduty.com/v2/enqueue"),
-        "the endpoint is not a secret, and WHICH region was posted to is the thing an \
-         operator debugging a missing page needs most: {log}"
+        !log.contains("/v2/enqueue"),
+        "the endpoint's path reached the WARN line: {log}"
+    );
+    assert!(
+        log.contains("https://events.eu.pagerduty.com/…"),
+        "WHICH region was posted to is the thing an operator debugging a missing page \
+         needs most, and the host carries it: {log}"
     );
     assert!(
         !log.contains(TEST_ROUTING_KEY),
         "the routing key reached a log line: {log}"
+    );
+}
+
+// ------------------------------------------------- Fix round 1, finding F1
+// THE ENDPOINT IS FREE-FORM ADOPTER INPUT.
+//
+// `notifications.pagerduty_endpoint` is not a credential, and Task 14 drew the
+// wrong conclusion from that: it logged the value verbatim on the
+// `PAGERDUTY_SILENCED` WARN and printed it verbatim from `Notifications`'
+// `Debug`, arguing that "redacting it would reproduce the defect the field
+// exists to fix". The redactor this codebase already owns refutes that.
+// `redact_url` keeps `scheme://host/…` — the region, which IS the diagnostic —
+// and drops the userinfo, path and query, which is where a token lives in a URL
+// somebody pasted out of a runbook.
+//
+// The same file argues, one screen away and about the same event, that "a
+// per-sink exemption is how the next credential reaches a log". These two tests
+// close the exemption Task 14 opened, on both display surfaces and for both
+// shapes a secret takes in a URL.
+
+/// Runs `f` with a JSON `tracing` subscriber installed on this thread and hands
+/// back what it wrote, so a test can assert on the bytes an operator would
+/// actually have in their aggregator.
+///
+/// Fix round 1. The two tests above spell this writer out inline; a third and
+/// fourth copy is where the copies start to disagree. Those two are left as
+/// they were reviewed — rewriting a passing mutant-killer to save twenty lines
+/// is not a trade worth making — but nothing new duplicates it.
+fn capture_json_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(Buf(captured.clone()))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    (out, log)
+}
+
+/// Drive one endpoint through every surface it can be displayed on and hand
+/// back what each one showed: the failed-POST WARN, the successful-enqueue
+/// INFO, the `Debug` rendering — and the URL that was actually POSTed to.
+///
+/// That last one is the control, and it is the reason this returns four things
+/// rather than three. Redaction that reaches the REQUEST is not a redaction,
+/// it is a bug: the events would go to `https://host/…`, which is not an
+/// endpoint. Every test below asserts the posted URL is the adopter's, intact.
+fn endpoint_surfaces(endpoint: &str) -> (String, String, String, String) {
+    use logweir::drill::phase7_verify::notify_failure_with;
+    use logweir::exit::ExitCode;
+
+    let n = pagerduty_only(Some(endpoint));
+
+    let failing = FailingSink::default();
+    let ((), warn_log) = capture_json_logs(|| {
+        notify_failure_with(
+            &n,
+            Some("nightly"),
+            "01TESTRUNID0000000000000",
+            ExitCode::Operational,
+            "broker unreachable",
+            &failing,
+        );
+    });
+
+    let recording = RecordingSink::default();
+    let ((), info_log) = capture_json_logs(|| {
+        notify_failure_with(
+            &n,
+            Some("nightly"),
+            "01TESTRUNID0000000000000",
+            ExitCode::Operational,
+            "broker unreachable",
+            &recording,
+        );
+    });
+    let posted = recording
+        .pagerduty()
+        .first()
+        .map(|(u, _)| u.clone())
+        .expect("an https endpoint must have been posted to");
+
+    let debug = format!("{n:?}");
+    (warn_log, info_log, debug, posted)
+}
+
+/// **F1, shape one: a token in the query string.** A signed or tokenised
+/// enqueue URL is the ordinary way this happens — the adopter pastes the whole
+/// thing into the spec, and every WARN line thereafter carries the token.
+///
+/// Mutant: restore `endpoint = %url` on the WARN (and on the INFO). This test
+/// and its `user:pass@` twin below both fail here, at assertion time.
+#[test]
+fn an_endpoint_carrying_a_query_token_is_redacted_on_every_surface() {
+    use logweir::drill::phase7_verify::PAGERDUTY_SILENCED;
+
+    const ENDPOINT: &str = "https://events.eu.pagerduty.com/v2/enqueue?token=s3cr3t";
+    let (warn_log, info_log, debug, posted) = endpoint_surfaces(ENDPOINT);
+
+    // The control first: what is displayed changed, what is REQUESTED did not.
+    assert_eq!(
+        posted, ENDPOINT,
+        "the redaction reached the request itself — the events would be enqueued to a \
+         URL the adopter never configured"
+    );
+
+    assert!(
+        warn_log.contains(PAGERDUTY_SILENCED),
+        "the test proves nothing unless the silenced WARN was actually emitted: {warn_log}"
+    );
+    for (surface, shown) in [
+        ("the WARN line", &warn_log),
+        ("the INFO line", &info_log),
+        ("the Debug rendering", &debug),
+    ] {
+        // THE LEAK ASSERTIONS COME FIRST, on purpose. The mutant this test
+        // exists to kill is "log the endpoint verbatim", and a verbatim URL
+        // still CONTAINS the host — so with the positive assertion first, the
+        // raw-endpoint mutant failed with "lost the host", which is the one
+        // thing that had not happened. Ordered this way, the message a future
+        // engineer reads names the secret that got out.
+        assert!(
+            !shown.contains("s3cr3t"),
+            "a token in the endpoint's query string reached {surface}: {shown}"
+        );
+        assert!(
+            !shown.contains("token="),
+            "the endpoint's query string reached {surface} — the secret is IN it: {shown}"
+        );
+        assert!(
+            !shown.contains("/v2/enqueue"),
+            "the endpoint's path reached {surface}: {shown}"
+        );
+        // And the other direction: redacting the host too would leave the
+        // operator unable to tell WHICH region the events went to, which is
+        // the whole reason the field is displayed at all.
+        assert!(
+            shown.contains("https://events.eu.pagerduty.com/…"),
+            "{surface} lost the host, which is the region and the whole diagnostic: {shown}"
+        );
+    }
+    assert!(
+        !warn_log.contains(TEST_ROUTING_KEY) && !info_log.contains(TEST_ROUTING_KEY),
+        "the routing key reached a log line"
+    );
+}
+
+/// **F1, shape two: `user:password@` userinfo.** The other place a URL hides a
+/// credential, and the one `redact_url` was written for — an endpoint behind a
+/// proxy that takes basic auth is the realistic way it arrives here.
+///
+/// Same mutant, same failure: this is the twin of the test above.
+#[test]
+fn an_endpoint_carrying_userinfo_is_redacted_on_every_surface() {
+    use logweir::drill::phase7_verify::PAGERDUTY_SILENCED;
+
+    const ENDPOINT: &str = "https://pdbot:hunter2@events.eu.pagerduty.com/v2/enqueue";
+    let (warn_log, info_log, debug, posted) = endpoint_surfaces(ENDPOINT);
+
+    assert_eq!(
+        posted, ENDPOINT,
+        "the redaction reached the request itself — the events would be enqueued to a \
+         URL the adopter never configured"
+    );
+
+    assert!(
+        warn_log.contains(PAGERDUTY_SILENCED),
+        "the test proves nothing unless the silenced WARN was actually emitted: {warn_log}"
+    );
+    for (surface, shown) in [
+        ("the WARN line", &warn_log),
+        ("the INFO line", &info_log),
+        ("the Debug rendering", &debug),
+    ] {
+        // Leak assertions first — see the twin above for why the order is
+        // load-bearing on the mutant's failure message.
+        assert!(
+            !shown.contains("hunter2"),
+            "a password in the endpoint's userinfo reached {surface}: {shown}"
+        );
+        assert!(
+            !shown.contains("pdbot"),
+            "the userinfo's user half reached {surface} — half a credential is still \
+             half a credential, and it names the account: {shown}"
+        );
+        assert!(
+            !shown.contains("/v2/enqueue"),
+            "the endpoint's path reached {surface}: {shown}"
+        );
+        assert!(
+            shown.contains("https://events.eu.pagerduty.com/…"),
+            "{surface} lost the host, which is the region and the whole diagnostic: {shown}"
+        );
+    }
+    assert!(
+        !warn_log.contains(TEST_ROUTING_KEY) && !info_log.contains(TEST_ROUTING_KEY),
+        "the routing key reached a log line"
+    );
+}
+
+// ------------------------------------------------- Fix round 1, finding F2
+// THE PRODUCTION SINK NEVER RAN.
+//
+// Every PagerDuty test above drives `RecordingSink` or `FailingSink`, and the
+// one pre-existing test that touches a real socket
+// (`the_notify_log_lines_carry_no_sink_credential`) sets
+// `pagerduty_routing_key: None`, so it skips the branch. `UreqSink`'s
+// PagerDuty path — the endpoint resolution, the POST, the `PAGERDUTY_SILENCED`
+// WARN, the routing key's non-disclosure — was therefore pinned only on a
+// double, and a refactor of `UreqSink` could have reintroduced a silent
+// silence with the whole suite green.
+//
+// This closes it on the real transport, against loopback only (GC17): one
+// event a listener accepts, one connection the kernel refuses.
+
+/// A loopback listener that ACCEPTS, reads the whole request, and answers
+/// `202 Accepted` — PagerDuty's own success status for an enqueue.
+///
+/// It is the opposite of `black_hole` above, and both are needed: a peer that
+/// never answers proves the bound, a peer that answers proves the POST.
+/// Returns the URL to post to and the bytes it received, so a test can assert
+/// what actually went over the wire rather than what a double was told.
+///
+/// `127.0.0.1:0` — the kernel picks the port, nothing leaves the loopback
+/// interface. The accept loop is detached and eternal for the same reason
+/// `black_hole`'s is; the read carries its own socket timeout so a client that
+/// sends a partial request cannot wedge the thread.
+fn accepting_listener() -> (String, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// The request is complete once the head has arrived and the body is as
+    /// long as the head said it would be. `send_json` always sets
+    /// `Content-Length`; a request without one is treated as complete at the
+    /// head, which is enough for the assertions and cannot hang.
+    fn complete(acc: &[u8]) -> bool {
+        let Some(head_end) = acc.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&acc[..head_end]).to_ascii_lowercase();
+        let len = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        acc.len() >= head_end + 4 + len
+    }
+
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+    let addr = l.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { break };
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
+            let mut acc = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        acc.extend_from_slice(&buf[..n]);
+                        if complete(&acc) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Recorded BEFORE the reply, so that by the time the client's
+            // `post` returns the bytes are already readable by the test.
+            sink.lock().unwrap().extend_from_slice(&acc);
+            let _ = s.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            let _ = s.flush();
+        }
+    });
+    (format!("http://{addr}/v2/enqueue"), seen)
+}
+
+/// **F2.** The production `UreqSink`, on a real socket, on both arms.
+///
+/// Arm one, ACCEPTED: the real sink posts a real Events v2 body to a listener
+/// that answers `202`, and `post` reports success. The listener's own bytes
+/// then say what an operator's PagerDuty account would have received — and
+/// that the routing key travelled in the BODY, which is the reason it is
+/// allowed nowhere near a log line.
+///
+/// Arm two, REFUSED: the real sink inside the real `notify_failure_with`, at a
+/// loopback port nothing listens on. The connection is refused, no page opens,
+/// and the WARN is the only trace the failure leaves — GC11 swallows the error
+/// itself, so a WARN that went missing here would be a page that vanished with
+/// nothing at all to grep for. The exit code the caller decided is untouched:
+/// `notify_failure_with` returns `()` and cannot return one.
+///
+/// Both arms run under their own deadline rather than the sink's. The
+/// production bound is 5 s to connect and 10 s overall, and a test that WAITS
+/// OUT a production timeout to discover it exists is the defect Task 5b
+/// removed; more to the point, a regression in the bound must make this test
+/// go RED in seconds instead of hanging the binary until libtest gives up.
+#[test]
+fn the_production_sink_enqueues_on_a_real_socket_and_says_silenced_when_refused() {
+    use logweir::drill::phase7_verify::{
+        failure_dedup_key, notify_failure_with, EventSink, UreqSink, PAGERDUTY_SILENCED,
+    };
+    use logweir::exit::ExitCode;
+    use std::time::Duration;
+
+    const RUN_ID: &str = "01TESTRUNID0000000000000";
+    // Four seconds: comfortably over a loopback round trip, comfortably under
+    // both the production bound and the 15 s per-test budget
+    // `scripts/time-unit-suite.sh` enforces, with two arms to pay for.
+    const DEADLINE: Duration = Duration::from_secs(4);
+
+    // ---------------------------------------------------------- accepted
+    let (url, seen) = accepting_listener();
+    let posted_to = url.clone();
+    let ev = serde_json::json!({
+        "routing_key": TEST_ROUTING_KEY,
+        "event_action": "trigger",
+        "dedup_key": failure_dedup_key(Some("nightly")),
+        "payload": { "summary": "logweir drill test", "source": "nightly",
+                     "severity": "critical" },
+    });
+    let (result, took) = within_deadline(
+        DEADLINE,
+        "the production sink posting to a listener that answers 202",
+        move || UreqSink::new().post(&posted_to, &ev),
+    );
+    assert_eq!(
+        result,
+        Ok(()),
+        "a listener that answers 202 must be a successful enqueue — this is the only \
+         place in the suite where the production sink's POST actually executes"
+    );
+    let wire = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+    assert!(
+        wire.starts_with("POST /v2/enqueue "),
+        "the sink must POST to the path it was given: {wire:?}"
+    );
+    assert!(
+        wire.contains(TEST_ROUTING_KEY),
+        "the routing key must travel in the request BODY — that is the whole reason it \
+         is never allowed on a log line: {wire:?}"
+    );
+
+    // ---------------------------------------------------------- refused
+    // Port 1 on loopback: nothing listens, the kernel refuses immediately, and
+    // no packet leaves the machine (GC17).
+    let n = pagerduty_only(Some("https://127.0.0.1:1/v2/enqueue"));
+    let code = ExitCode::Operational;
+    let (((), log), refused_took) = within_deadline(
+        DEADLINE,
+        "the production sink giving up on a refused endpoint",
+        move || {
+            capture_json_logs(|| {
+                notify_failure_with(
+                    &n,
+                    Some("nightly"),
+                    RUN_ID,
+                    code,
+                    "broker unreachable",
+                    &UreqSink::new(),
+                )
+            })
+        },
+    );
+    assert!(
+        log.contains(PAGERDUTY_SILENCED),
+        "the real sink could not deliver and the log does not say so — from a log \
+         stream that is indistinguishable from a drill with no PagerDuty route: {log}"
+    );
+    assert!(
+        log.contains("\"level\":\"WARN\""),
+        "a page that did not go out is not an INFO: {log}"
+    );
+    assert!(
+        log.contains(&failure_dedup_key(Some("nightly"))),
+        "the silenced line must name WHICH incident did not open: {log}"
+    );
+    assert!(
+        log.contains(RUN_ID),
+        "the silenced line must carry the run id, like every other line: {log}"
+    );
+    assert!(
+        !log.contains(TEST_ROUTING_KEY),
+        "the routing key reached a log line from the PRODUCTION sink — the branch no \
+         other test in this file executes: {log}"
+    );
+    // GC11, at this seam: a notification that failed cannot move an exit code,
+    // because `notify_failure_with` has no way to return one.
+    assert_eq!(
+        code,
+        ExitCode::Operational,
+        "the exit code the drill decided must survive a silenced page"
+    );
+
+    // The whole test, both arms, well inside the per-test budget.
+    assert!(
+        took + refused_took < Duration::from_secs(10),
+        "the real-socket arms took {took:?} + {refused_took:?}; the per-test budget is 15 s"
     );
 }
 

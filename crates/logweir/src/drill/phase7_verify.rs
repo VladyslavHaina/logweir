@@ -1250,45 +1250,15 @@ pub fn run(
 /// A webhook URL reduced to the part that identifies the SINK, never the part
 /// that authorises posting to it.
 ///
-/// `notifications.slack_webhook` is a `https://hooks.slack.com/services/T…/B…/…`
-/// URL, and that URL **is** a bearer credential: whoever holds it can post as
-/// the integration, with no other secret. It was logged verbatim at INFO on
-/// the success path and again on the error path, to the JSON subscriber
-/// intended for a log aggregator — while `pagerduty_routing_key`, four lines
-/// below, was deliberately never logged. The asymmetry was the tell.
-///
-/// Only scheme and host survive. The path, the query, the fragment and any
-/// `user:password@` userinfo are all dropped, because the secret can live in
-/// any of them (Slack puts it in the path; a signed webhook puts it in the
-/// query). An operator can still tell WHICH sink a line is about — that is the
-/// whole diagnostic value of the field — without the line being enough to use
-/// it. A URL that will not parse is reported as `<unparseable url>` rather
-/// than echoed, because "it did not look like a URL to me" is not a reason to
-/// print a secret.
-///
-/// Pinned by `crates/logweir/tests/notify.rs`.
-pub fn redact_url(url: &str) -> String {
-    // Hand-parsed rather than pulled in as a dependency: `crates/logweir`
-    // carries no URL crate, and the rule is "keep the prefix up to the first
-    // '/' after the scheme, minus any userinfo", which is four lines.
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return "<unparseable url>".into();
-    };
-    if scheme.is_empty() || rest.is_empty() {
-        return "<unparseable url>".into();
-    }
-    // Everything before the first `/`, `?` or `#` is the authority.
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .expect("split always yields at least one element");
-    // `user:password@host` — the credential half is dropped, the host kept.
-    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    if host.is_empty() {
-        return "<unparseable url>".into();
-    }
-    format!("{scheme}://{host}/…")
-}
+/// The implementation moved to `logweir_core::spec::redact_url` in fix round 1
+/// (finding F1) and is re-exported here so that every existing caller and
+/// every test keeps the path it already uses. It had to move because the
+/// second site that has to redact — `Notifications`' hand-written `Debug` —
+/// lives in `logweir-core`, which cannot depend on this crate; a second copy
+/// of a redactor is how the two copies come to disagree. The function is pure
+/// string arithmetic and reads no clock, no file and no socket, so it costs
+/// the pure layer nothing (GC1; `scripts/check-pure-core.sh` passes).
+pub use logweir_core::spec::redact_url;
 
 /// What a failed notification may say about itself, with the URL taken out.
 ///
@@ -1500,19 +1470,44 @@ pub fn pagerduty_endpoint(n: &Notifications) -> Result<String, String> {
 /// has to be. The run id would be distinct but NOT stable, and a key
 /// containing it never dedups at all.
 ///
+/// **`PLAN_HASH_IDENT_LEN` is a guard, not a length calculation** (fix round 1,
+/// finding F3). A `plan_hash` too short to supply 12 characters — an empty one
+/// above all — collapsed this to `logweir-drill--{cluster_id}`, which is the
+/// PRE-FIX SHAPE with a stray hyphen: one incident per cluster, every drill
+/// resolving every other drill's page, the exact defect R-D closes. It is not
+/// reachable today, because `phase1_approval::verify` recomputes
+/// `sha256(spec_text)` and refuses before any scorecard exists, so the field is
+/// always a real digest by the time this runs. But it was SILENT, and a
+/// degenerate dedup key does not announce itself: the page simply stops
+/// arriving. So a hash that cannot identify anything falls back to `"unnamed"`,
+/// the same sentinel `failure_dedup_key` uses for a spec with no name — a key
+/// that is honest about having no identity, and structurally incapable of being
+/// the old one.
+///
 /// Ruling **R-D**. The durable fix is an artifact-side `drill_id` (backlog
 /// T1-8), which §12 assigns to decision **O16** with default *not funded*; the
 /// residual is recorded in `docs/stability.md`.
 pub fn dedup_key(spec_name: Option<&str>, sc: &Scorecard) -> String {
+    /// How much of the `plan_hash` identifies the spec. 12 hex characters is
+    /// 48 bits — collision-free across any plausible number of drill specs.
+    const PLAN_HASH_IDENT_LEN: usize = 12;
+
     let ident = match spec_name {
         Some(n) => n.to_string(),
-        None => sc
-            .approval
-            .plan_hash
-            .trim_start_matches("sha256:")
-            .chars()
-            .take(12)
-            .collect(),
+        None => {
+            let h: String = sc
+                .approval
+                .plan_hash
+                .trim_start_matches("sha256:")
+                .chars()
+                .take(PLAN_HASH_IDENT_LEN)
+                .collect();
+            if h.len() < PLAN_HASH_IDENT_LEN {
+                "unnamed".to_string()
+            } else {
+                h
+            }
+        }
     };
     format!("logweir-drill-{ident}-{}", sc.target.cluster_id)
 }
@@ -1555,17 +1550,23 @@ fn enqueue_pagerduty(
             return;
         }
     };
-    // The endpoint is NOT redacted: it is not a secret (see the spec field's
-    // doc comment), and an operator who cannot see which region the events
-    // went to cannot diagnose the very failure this field exists to fix. The
-    // routing key travels in the BODY and is never logged.
+    // THE POST GOES TO `url`; ONLY THE LOG SEES `shown`. Fix round 1, F1: this
+    // logged the endpoint verbatim, on the argument that it is not a secret.
+    // It is not — but it is free-form adopter input, and `redact_url` keeps
+    // `scheme://host/…`, which is 100 % of the stated diagnostic (WHICH region
+    // the events went to) while dropping the userinfo, path and query, which
+    // is where a token in a pasted URL lives. The failure arm and the success
+    // arm are redacted identically: a credential that is safe on one and
+    // logged on the other is still logged. The routing key travels in the BODY
+    // and is never logged at all.
+    let shown = redact_url(&url);
     if let Err(e) = sink.post(&url, ev) {
         tracing::warn!(target: "logweir::notify", run_id = %run_id,
-                       dedup_key = %dedup_key, endpoint = %url, error = %e,
+                       dedup_key = %dedup_key, endpoint = %shown, error = %e,
                        silenced = true, "{PAGERDUTY_SILENCED}");
     } else {
         tracing::info!(target: "logweir::notify", run_id = %run_id,
-                       dedup_key = %dedup_key, endpoint = %url,
+                       dedup_key = %dedup_key, endpoint = %shown,
                        "pagerduty event enqueued");
     }
 }
