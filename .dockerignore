@@ -9,3 +9,14 @@
 /.git
 /upstream
 **/*.tar.gz
+
+# Task 9, carried from Task 8b's review. `COPY . .` is the last thing before
+# `RUN cargo build` (Dockerfile:144-151), so ANY file that reaches the build
+# context invalidates the cargo layer — including the two files that describe
+# the build itself. Editing a comment in the Dockerfile therefore re-ran a
+# 92-second release compile that could not possibly differ. Neither file is
+# read from inside the builder stage: BuildKit takes the Dockerfile through the
+# frontend, not through the context tar, so excluding it here changes what
+# `COPY . .` copies and nothing else.
+/Dockerfile
+/.dockerignore

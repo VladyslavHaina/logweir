@@ -84,6 +84,25 @@ pre-release ruling by accident.**
   are **UNVERIFIED**, not green. Run them via `workflow_dispatch` before
   announcing the tag. `docs/support-matrix.md` says the same about its own rows.
 
+- **The release image is built once and pushed only after the gate returns 0 —
+  a lint-proved shape, not an observed run.** `.github/workflows/release.yml`
+  produces the runtime image a single time, into the runner's own daemon
+  (`docker/build-push-action` with `load: true`, `push: false`, tagged
+  `logweir:check`); runs `scripts/check-image.sh logweir:check` against it; and
+  only then tags and pushes those same bytes to `ghcr.io`. Nothing is
+  recompiled between the assertion and the upload, so the bytes the gate
+  interrogated are the bytes an operator pulls. The repository digest is read
+  back from the daemon after the upload and republished in the release notes,
+  so a consumer can pin by digest instead of by a mutable tag (Global
+  Constraint 7). What is machine-checked is what the workflow *says*:
+  `crates/logweir/tests/workflow_lint.rs` parses the YAML on a laptop and
+  asserts the shape, in the default `cargo test`. **The workflow itself has
+  still never executed on any commit, including the v0.1.0 tag** (the entry
+  above), so its first run will also be its first debugging session. The digest
+  in the release notes is also **not** the digest the Kubernetes manifests pin:
+  those name a locally built image, which is a different artifact from a
+  different machine.
+
 - **The sample window in `examples/drill.yaml` is illustrative and will not
   match your archive.** `sample.window_start` / `sample.window_end` name the
   point-in-time range you are recovering to, so a checked-in example cannot
@@ -428,9 +447,11 @@ unchanged.
   the build machine's own architecture and cross-compiles to
   `x86_64-unknown-linux-gnu`, so on an arm64 host only the runtime stage's `apt-get`
   and its four `COPY`s go through QEMU.
-  `scripts/check-image.sh <image-ref>` proves six things about the image: the shipped
-  `/usr/local/bin/logweir` is an **x86-64 ELF** (`e_machine` 0x3e, which is what keeps
-  the cross-compile honest), its dynamic linkage resolves (`ldd`, GC10),
+  `scripts/check-image.sh <image-ref>` proves six things about the image: **both**
+  shipped binaries — `/usr/local/bin/logweir` and `/usr/local/bin/kafka-backup` — are
+  **x86-64 ELFs** (`e_machine` 0x3e, which is what keeps the cross-compile honest for
+  the one and the digest pin honest for the other), the CLI's dynamic linkage resolves
+  (`ldd`, GC10),
   `kafka-backup --version` runs, `logweir --version` runs, `drill approve` mints a
   signed approval over `examples/drill.yaml`, and both redistributed licences are
   present (GC15 — asserted one file at a time, so a failure names which). It proves
@@ -450,8 +471,18 @@ unchanged.
     because the two layers above `COPY . .` stay cached.
   - Fully warm, nothing recompiled and every layer `CACHED`: `00:00:04`.
   - `bash scripts/check-image.sh logweir:check`: `00:02`.
-  - `just smoke` end to end (cached build + gate + the eleven `#[ignore]`d image
-    tests): `00:29`, of which the eleven tests were `25.5s`.
+  - `just smoke` end to end (cached build + gate + the `#[ignore]`d image tests):
+    `00:29`, of which the tests were `25.5s`. **That is a RE-RUN figure, and it
+    assumes the e2e test binary is already compiled.** `just smoke`'s last line is
+    `cargo test -p e2e --features e2e --test check_image`, and on a tree where that
+    target has never been built the compile is part of the wall clock: measured
+    separately on 2026-09-09 at `37.4s` for the compile alone (`Finished test
+    profile ... in 37.40s`), on a host under load average ~9. Quote `00:29` for a
+    second run and nothing else. There are now **twelve** such tests, not eleven —
+    Task 9 added `check_image_rejects_an_image_whose_engine_is_not_x86_64` with
+    check 6's engine arm — and each builds a one-layer overlay image, so the test
+    figure moves with the docker daemon and the host's load, not with the code:
+    the same twelve took `100.7s` on a loaded host the same day.
   - resulting image size (`docker image inspect --format '{{.Size}}'`): `54453404` bytes.
   - peak RSS: `not observed`.
 

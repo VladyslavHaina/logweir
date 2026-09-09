@@ -224,6 +224,39 @@ fn check_image_rejects_an_image_whose_logweir_is_not_x86_64() {
     remove_overlay(tag);
 }
 
+/// THE OTHER SHIPPED ELF. Task 9 (carried from Task 8b's review) extended check
+/// 6 to `/usr/local/bin/kafka-backup`, which until then was the only binary in
+/// the image whose architecture nothing read. It arrives by `COPY --from=engine`
+/// out of an amd64-only image pinned by digest (`Dockerfile:164`, `:181`), so
+/// the way it goes wrong is a repin at a multi-arch tag or a redirected COPY,
+/// not a compiler flag.
+///
+/// SAME SYNTHETIC HEADER, SAME REASON as the test above: a real aarch64 engine
+/// cannot be smuggled into an amd64 image on this host, and a real one would
+/// also fail check 2, so the test could not tell which check caught it. The
+/// bytes are `7f 45 4c 46` (magic), `02` (ELFCLASS64), then `b7 00`
+/// (EM_AARCH64) at offset 18.
+///
+/// THIS TEST IS WHAT KEEPS THE NEW ARM FROM BEING A CHECK THAT CANNOT FAIL.
+/// The arm deliberately does NOT fail when the header is unreadable — a MISSING
+/// engine belongs to check 2, and `check_image_rejects_an_image_whose_engine_is_missing`
+/// pins that. A present, readable, foreign header is the case this arm owns,
+/// and this is it.
+#[test]
+#[ignore = "needs a locally built linux/amd64 image; run `just smoke`"]
+fn check_image_rejects_an_image_whose_engine_is_not_x86_64() {
+    let tag = "logweir-check-broken:engine-wrong-arch";
+    build_overlay(
+        tag,
+        "USER root\n\
+         RUN printf '\\177ELF\\002\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\267\\000' \
+         > /usr/local/bin/kafka-backup\n\
+         USER 65532:65532",
+    );
+    assert_rejected_naming(tag, &["check 6 (ELF)", "kafka-backup", "b7 00"]);
+    remove_overlay(tag);
+}
+
 // ------------------------------------------------------------------ check 1
 
 /// The shipped defect, reproduced. `libsasl2.so.2` is a dynamic dependency of

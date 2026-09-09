@@ -24,7 +24,8 @@
 # extraction.
 #
 # WHAT IT PROVES about the image, in the order the checks RUN:
-#   6. `/usr/local/bin/logweir` is an x86-64 ELF (STANDING RULE 10);
+#   6. BOTH shipped binaries are x86-64 ELFs (STANDING RULE 10) —
+#      `/usr/local/bin/logweir` and `/usr/local/bin/kafka-backup`;
 #   1. every dynamic dependency of `/usr/local/bin/logweir` RESOLVES (GC10);
 #   2. the engine answers `kafka-backup --version`;
 #   3. the CLI answers `logweir --version`;
@@ -174,7 +175,7 @@ echo "== check-image: $ref =="
 #   bytes 0-3    7f 45 4c 46   the magic, "\x7fELF"
 #   byte  4      02            EI_CLASS = ELFCLASS64
 #   bytes 18-19  3e 00         e_machine = 0x003e = EM_X86_64
-echo "-- check 6 (ELF): /usr/local/bin/logweir is an x86-64 ELF"
+echo "-- check 6 (ELF): logweir and kafka-backup are x86-64 ELFs"
 if ! elf_out=$(docker run --rm --platform "$PLATFORM" --entrypoint /usr/bin/od "$ref" \
                  -An -tx1 -N20 /usr/local/bin/logweir 2>&1); then
   fail "check 6 (ELF): could not read the ELF header of /usr/local/bin/logweir in $ref:" \
@@ -201,6 +202,44 @@ if [ "$elf_machine" != "3e 00" ]; then
        "  target/x86_64-unknown-linux-gnu/release (Dockerfile:185); a" \
        "  host-architecture binary here means one of those two was changed." \
        "  header read: $elf_bytes"
+fi
+
+# THE ENGINE'S ARCHITECTURE IS ASSERTED TOO (Task 9, carried from Task 8b's
+# review). Check 6 read the CLI's e_machine and stopped there, which left the
+# OTHER shipped ELF unread. The image is meant to be uniformly x86-64: the CLI
+# is cross-compiled to x86_64-unknown-linux-gnu and the engine is copied out of
+# an amd64-only image pinned BY DIGEST (Dockerfile:164) into
+# /usr/local/bin/kafka-backup (Dockerfile:181). Repin that line at a multi-arch
+# tag, or point the COPY at another stage, and a foreign binary can land beside
+# a correct one. Check 2 does fail on it — with "exec format error", which names
+# neither the architecture nor the cause. That is exactly the argument that put
+# the CLI's header read first, and it applies to both binaries or to neither.
+#
+# AN UNREADABLE HEADER IS NOT THIS ARM'S FAILURE, AND THAT IS DELIBERATE. A
+# MISSING engine is check 2's to report: `e2e/tests/check_image.rs`'s
+# check_image_rejects_an_image_whose_engine_is_missing pins that message to
+# "check 2" and "kafka-backup --version", and failing here on an absent file
+# would move the failure up and silently re-point that test. So this arm says
+# only what it can see — it refuses a header that IS readable and IS the wrong
+# machine, and says out loud when it could not read one. It is not a check that
+# cannot fail: `check_image_rejects_an_image_whose_engine_is_not_x86_64` breaks
+# an image exactly this way and watches this arm reject it.
+if engine_elf_out=$(docker run --rm --platform "$PLATFORM" --entrypoint /usr/bin/od "$ref" \
+                      -An -tx1 -N20 /usr/local/bin/kafka-backup 2>&1); then
+  engine_bytes="$(printf '%s' "$engine_elf_out" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
+  engine_machine="$(printf '%s' "$engine_bytes" | cut -d' ' -f19-20)"
+  if [ "$engine_machine" != "3e 00" ]; then
+    fail "check 6 (ELF): /usr/local/bin/kafka-backup in $ref is NOT an x86-64 binary." \
+         "  e_machine at offset 18 is \`$engine_machine\`, expected \`3e 00\` (0x003e," \
+         "  EM_X86_64). The engine is copied from the amd64-only image pinned by" \
+         "  digest at Dockerfile:164 into /usr/local/bin/kafka-backup" \
+         "  (Dockerfile:181); a foreign binary here means that pin or that COPY" \
+         "  was changed." \
+         "  header read: $engine_bytes"
+  fi
+else
+  echo "-- check 6 (ELF): /usr/local/bin/kafka-backup's header could not be read;" \
+       "check 2 below is where a missing or unrunnable engine is reported"
 fi
 
 # ------------------------------------------------------------------ check 1
@@ -276,6 +315,15 @@ chmod 0777 "$work"
 # lands under a world-traversable /tmp and any local user could read a P-256
 # private key for as long as the gate ran.
 #
+# `umask 077` IS NOT THE WHOLE STORY AND MUST NEVER BE QUOTED AS IF IT WERE
+# (Task 9, carried from Task 8b's review, whose report stated the umask without
+# the window it leaves). THE KEY'S MODE OVER ITS LIFETIME IS 0600 THEN 0644,
+# NOT 0600: it is created 0600 by the umask below, `chmod 0644` widens it for
+# the one `docker run` that must read it as uid 65532, and it is `rm -f`ed on
+# the next line. The world-readable window is those two lines wide — one
+# container start — and on this host it is inside a per-user 0700 $TMPDIR,
+# while on a shared CI runner it is inside a world-traversable /tmp.
+#
 # THE RESIDUAL WINDOW IS STATED, NOT HIDDEN. uid 65532 is not the host user, so
 # the key must be world-readable for the ONE `docker run` that consumes it; the
 # `chmod 0644` therefore sits immediately before that run and the key is
@@ -342,4 +390,4 @@ docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$ref" -c \
           "  by Dockerfile:187) is absent or empty. GC15 governs Logweir's own" \
           "  redistribution exactly as it governs upstream's."
 
-echo "ok: x86-64 binary, engine, CLI, approval minting and both licences are present in $ref"
+echo "ok: x86-64 binaries, engine, CLI, approval minting and both licences are present in $ref"

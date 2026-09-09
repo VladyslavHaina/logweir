@@ -119,6 +119,13 @@ jobs:
 
   image:
     runs-on: ubuntu-24.04
+    # THE DIGEST OF THE BYTES THIS JOB ASSERTED. It is captured in the `push`
+    # step and nowhere else, because that is the only step where a REPOSITORY
+    # digest exists: the build below has no registry exporter, so its own
+    # `outputs.digest` would be a local image config digest, not the digest a
+    # `docker pull` resolves. `publish:` reads this for the release notes.
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Extract the pinned engine
@@ -126,80 +133,92 @@ jobs:
         # pin and the MIT licence redistribution both matter here.
         run: ./scripts/extract-engine.sh
       - uses: docker/setup-buildx-action@v3
-      # THE CHECKS RUN BEFORE THE PUSH, and that ordering is the point. They
-      # used to run after `build-push-action` with `push: true`, so an image
-      # that failed every assertion below was already published to ghcr under
-      # the release tag before anything looked at it — a gate downstream of the
-      # thing it gates. Now the image is built and interrogated locally first,
-      # and only a verified image is pushed.
+      # THE CHECKS RUN BEFORE THE PUSH, and that ordering is the point — and as
+      # of T0-17 the image that is checked IS the image that is pushed. There
+      # used to be two independent builds here: one local tag that every
+      # assertion ran against, and a second `build-push-action` with
+      # `push: true` whose bytes nothing had ever looked at. `logweir:check` was
+      # never referenced again after the last assertion and its digest was never
+      # captured, so the image an operator pulled had passed no check at all —
+      # while this comment already claimed "only a verified image is pushed".
+      # `crates/logweir/tests/workflow_lint.rs` is what keeps that from
+      # returning; the shape below is machine-checked, the RUN is not (this
+      # workflow has still never executed — see the header).
+      - id: build
+        name: Build the release image once, into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          # linux/amd64 ONLY, and stated rather than defaulted: the engine layer
+          # has no arm64 manifest (Global Constraint 10, Dockerfile:10-15).
+          platforms: linux/amd64
+          tags: logweir:check
       - name: The image must carry the engine, the licences and a working CLI
-        run: |
-          docker build --platform linux/amd64 -t logweir:check .
-          # EVERY dynamic dependency must resolve. Task 22 shipped an image
-          # whose ENGINE ran, whose licences were present and whose `docker
-          # images` row looked healthy — while `logweir` itself died at the
-          # dynamic loader on a missing `libsasl2.so.2`, because the runtime
-          # stage installed `libssl3` but not `libsasl2-2`. `--version` below
-          # catches it too, but this line NAMES the missing library.
-          missing=$(docker run --rm --entrypoint /bin/sh logweir:check \
-                      -c 'ldd /usr/local/bin/logweir' | grep "not found" || true)
-          if [ -n "$missing" ]; then
-            echo "the image's logweir binary has unresolved libraries:" >&2
-            echo "$missing" >&2
-            exit 1
-          fi
-          docker run --rm --entrypoint /usr/local/bin/kafka-backup logweir:check --version
-          docker run --rm logweir:check --version
-          # The image must be able to produce the approval `drill run` will not
-          # start without. `--approval` is mandatory and, until `drill approve`
-          # existed, the only producer in the tree was a cargo EXAMPLE that this
-          # image does not contain: an operator with nothing but the image could
-          # not mint one at all. Minted here over the image's OWN spec example
-          # and read back, so a regression fails the release.
-          #
-          # The key and the spec are made on the RUNNER and mounted in: the
-          # runtime image is debian:bookworm-slim plus three libraries and
-          # carries no `openssl` CLI, which is exactly the situation an
-          # operator is in.
-          mkdir -p .imgcheck && chmod 0777 .imgcheck
-          openssl ecparam -genkey -name prime256v1 -noout \
-            | openssl pkcs8 -topk8 -nocrypt -out .imgcheck/approver.pem
-          chmod 0644 .imgcheck/approver.pem
-          cp examples/drill.yaml .imgcheck/drill.yaml
-          docker run --rm -v "$PWD/.imgcheck:/w" -w /w logweir:check \
-            drill approve --spec drill.yaml --key approver.pem \
-            --approver ci@example.com --ticket REL-CHECK --out approval.json
-          test -s .imgcheck/approval.json
-          test -s .imgcheck/approval.sig
-          grep -q 'drill-approval' .imgcheck/approval.sig
-          grep -q "sha256:$(sha256sum .imgcheck/drill.yaml | cut -d' ' -f1)" \
-            .imgcheck/approval.json
-          rm -rf .imgcheck
-          # Global Constraint 15: the upstream MIT licence must be IN the image
-          # that redistributes the upstream binary.
-          docker run --rm --entrypoint /bin/sh logweir:check -c \
-            'test -s /usr/share/licenses/kafka-backup/LICENSE && test -s /usr/share/licenses/logweir/LICENSE'
-          echo "ok: engine, CLI, approval minting and both licences are present"
+        # ONE implementation, TWO callers: `just smoke` on a laptop and this
+        # job. `.engine/kafka-backup --version` inside the script is a flag, not
+        # a subcommand — global ruling GR8, so Global Constraint 3 is untouched.
+        #
+        # A SINGLE COMMAND WHOSE EXIT CODE THE RUNNER READS DIRECTLY: no pipe,
+        # no `|| true`, no `set +e`. The script's contract is exit 0 or 1.
+        run: bash scripts/check-image.sh logweir:check
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          # linux/amd64 ONLY, and stated rather than defaulted: the engine layer
-          # has no arm64 manifest, so any other platform fails at the `engine`
-          # stage. See the Dockerfile's own comment.
-          platforms: linux/amd64
-          # ghcr.io under THIS repository's own namespace. Global Constraint 14:
-          # Logweir never publishes under `osodevops/`, `kafkabackup.com` or
-          # `oso.sh`. Pulling upstream's image to extract the engine is a
-          # different act and is permitted (global ruling GR6).
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+      - id: push
+        name: Push the image that was just asserted, and capture its digest
+        # `shell: bash` is not decoration: the runner's default for `run:` on
+        # Linux is `bash -e {0}` WITHOUT pipefail, and this shell is
+        # `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
+        # ghcr.io under THIS repository's own namespace. Global Constraint 14:
+        # Logweir never publishes under `osodevops/`, `kafkabackup.com` or
+        # `oso.sh`. Pulling upstream's image to extract the engine is a
+        # different act and is permitted (global ruling GR6).
+        #
+        # NOTHING IS REBUILT HERE. `docker tag` renames the bytes the step above
+        # asserted; `docker push` uploads those exact bytes.
+        run: |
+          ver="ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
+          # TASK 10 (T0-18) DELETES THE NEXT THREE LINES AND NOTHING ELSE IN THIS
+          # STEP: `:latest` moves from here into a new `latest:` job gated on `publish`.
+          latest="ghcr.io/${{ github.repository }}:latest"
+          docker tag logweir:check "$latest"
+          docker push "$latest"
+          docker tag logweir:check "$ver"
+          docker push "$ver"
+          # RepoDigests is populated by the push above. No pipe: the exit code
+          # that matters is `docker inspect`'s, and `${rd##*@}` is shell
+          # expansion, not a process.
+          #
+          # THE ENTRY IS SELECTED BY REPOSITORY, NOT BY POSITION, and that is a
+          # correction made from a measurement rather than from taste. T0-17's
+          # own fix text said `{{index .RepoDigests 0}}`; on a daemon backed by
+          # the containerd image store (Docker Desktop 4.4x, and the runner
+          # image once `containerd-snapshotter` is on) the same image carries
+          # one RepoDigests entry PER repository name it has ever been tagged
+          # with, and index 0 was MEASURED here to be `logweir@sha256:...` — the
+          # throwaway local tag — not the ghcr one. Publishing "the digest of
+          # `ghcr.io/<repo>`" from an entry that names a different repository is
+          # the same class of mistake as asserting one image and pushing
+          # another, even on the days the two digests happen to agree.
+          rd=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ver")
+          repo="${ver%:*}"
+          digest=""
+          for entry in $rd; do
+            case "$entry" in
+              "$repo"@sha256:*) digest="${entry##*@}" ;;
+            esac
+          done
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "no repository digest for $ver after push: '$rd'" >&2; exit 1 ;;
+          esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $ver at $digest"
 
   publish:
     needs: [plan, build, image]
@@ -217,6 +236,12 @@ jobs:
             `kafka-backup` of the pinned digest on `$PATH`, plus
             `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`. The container
             image carries both.
+
+            Container image:
+            `ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}`
+            — this is the digest of the image the release job asserted
+            (`scripts/check-image.sh`), pushed without rebuilding. Pull by
+            digest, never by tag (Global Constraint 7).
 
             Apache Kafka® and Kafka® are registered trademarks of the Apache
             Software Foundation. Logweir is not affiliated with or endorsed by
