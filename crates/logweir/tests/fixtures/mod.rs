@@ -745,6 +745,18 @@ pub enum Drill {
     /// its archive fingerprint. Reaches the same final gate by the other
     /// route. Scores `fail-integrity`.
     ReconcilesWithMismatches,
+    /// The drill PASSES every phase and then phase 9's deletion of the one
+    /// scratch topic is refused by the broker, per topic — `delete_topics`
+    /// returns `Ok(vec![("drill-orders", Err("BROKER: TOPIC_DELETION_DISABLED"))])`.
+    ///
+    /// This is the T0-11 shape: a drill that verified correctly and could not
+    /// clean up. It is the PARTIAL failure (`phase9_teardown::run`'s per-topic
+    /// branch), deliberately not `score.rs`'s `RefusingDeleter`, whose whole
+    /// call fails and exercises the other branch. The deleter a drill uses
+    /// comes from the target client (`c.client.as_deleter()`), not from a
+    /// parameter of `execute_with`, so there is no way to run a WHOLE drill
+    /// against a refusing deleter without this shape.
+    LeavesATopicBehind,
 }
 
 pub const FIXTURE_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
@@ -974,6 +986,10 @@ pub struct FixtureClient {
     pub configs: BTreeMap<String, BTreeMap<String, String>>,
     pub records: BTreeMap<String, Vec<ConsumedRecord>>,
     pub deleted: std::sync::Mutex<Vec<String>>,
+    /// Topic names whose deletion the broker refuses, and the error string it
+    /// refuses with. Empty for every shape but `Drill::LeavesATopicBehind`, so
+    /// every other fixture drill tears down exactly as it always did.
+    pub refuses_deletion_of: BTreeMap<String, String>,
 }
 
 impl ClusterReader for FixtureClient {
@@ -1015,8 +1031,17 @@ impl TopicDeleter for FixtureClient {
         &self,
         names: &[String],
     ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        // Every name is still RECORDED as attempted; only the ANSWER differs.
+        // A refusal the fixture hid from `deleted` would make the double
+        // disagree with a real broker, which does receive the request.
         self.deleted.lock().unwrap().extend_from_slice(names);
-        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
+        Ok(names
+            .iter()
+            .map(|n| match self.refuses_deletion_of.get(n) {
+                Some(e) => (n.clone(), Err(e.clone())),
+                None => (n.clone(), Ok(())),
+            })
+            .collect())
     }
 }
 
@@ -1153,10 +1178,15 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             engine.preflight_unknown_keys = vec!["restore.header_preflight".into()];
             engine.restore_unknown_keys = vec!["restore.checkpoint_interval_secs".into()];
         }
+        // `LeavesATopicBehind` differs from `Passes` in the TARGET CLIENT's
+        // deleter only (see `refuses_deletion_of` below); the engine it runs
+        // against is byte-for-byte the passing one, which is what makes "the
+        // drill verified correctly and could not clean up" the single variable.
         Drill::Passes
         | Drill::RestoresNothing
         | Drill::MissesTheRpoObjective
-        | Drill::ReconcilesWithMismatches => {}
+        | Drill::ReconcilesWithMismatches
+        | Drill::LeavesATopicBehind => {}
     }
 
     // ---- the target cluster ----
@@ -1184,6 +1214,18 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             .into_iter()
             .collect(),
         deleted: std::sync::Mutex::new(Vec::new()),
+        // T0-11. The one shape whose broker refuses a deletion; every other
+        // shape gets an empty map and the deleter it always had.
+        refuses_deletion_of: if shape == Drill::LeavesATopicBehind {
+            [(
+                "drill-orders".to_string(),
+                "BROKER: TOPIC_DELETION_DISABLED".to_string(),
+            )]
+            .into_iter()
+            .collect()
+        } else {
+            BTreeMap::new()
+        },
     };
 
     let spec: logweir_core::spec::DrillSpec = serde_yaml::from_str(&spec_text).unwrap();

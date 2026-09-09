@@ -138,6 +138,31 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         sc.integrity.mismatches
     ));
 
+    // T0-11. Beside `fingerprint_mismatches` because the two answer the same
+    // question — what went wrong that the outcome alone does not say.
+    //
+    // UNCONDITIONAL, `0` included, for the reason `logweir_drill_redactions`
+    // above is: a gauge that appears only when it is non-zero cannot be alerted
+    // on with `> 0`, because to PromQL an absent series and a clean teardown
+    // are the same thing. Emitting the zero keeps the two absences distinct —
+    // `0` means phase 9 ran and cleaned up; the series missing from a PRESENT
+    // file means the run ended before a scorecard existed (the minimal shape
+    // `write_minimal_textfile` writes on exits 1, 3 and 4).
+    //
+    // A COUNT, not a topic label: topic names are cluster-controlled text and
+    // would be unbounded label cardinality — the same rule that keeps
+    // `triggered_by` and `redactions[].path` out of this file. The names are on
+    // the WARN line, on the summary line and in the signed teardown
+    // attestation, all three of which have a reader who can hold them.
+    o.push_str(
+        "# HELP logweir_drill_teardown_topics_failed Scratch topics phase 9 could not delete.\n\
+         # TYPE logweir_drill_teardown_topics_failed gauge\n",
+    );
+    o.push_str(&format!(
+        "logweir_drill_teardown_topics_failed{{cluster=\"{cluster}\"}} {}\n",
+        crate::drill::phase9_teardown::failed_count(sc)
+    ));
+
     let level = match sc.integrity.level {
         IntegrityLevel::ByteFingerprint => "byte-fingerprint",
         IntegrityLevel::ConsumeOnly => "consume-only",

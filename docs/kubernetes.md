@@ -256,6 +256,18 @@ literal `unknown` on a terminal path that never learned it (see
 [metrics.md](metrics.md)). The value is that run's own `Utc::now().timestamp()`
 at emit time, never a constant.
 
+One series in that file is about the cluster this CronJob runs against rather
+than about the drill: `logweir_drill_teardown_topics_failed{cluster}` counts the
+scratch topics phase 9 created on the target and could not delete, because the
+broker refused. It is emitted on every scorecard-carrying path, `0` included, so
+`0` means phase 9 ran and cleaned up while *absence of the series inside a
+present file* means the run ended before a scorecard existed. A non-zero value
+leaves real topics on a real cluster and does not change the pod's exit code —
+phase 8 has already signed and uploaded by the time phase 9 runs — so this is
+the one series worth an alert even though the drill "passed". The full metric
+reference, including which names the failed topics are reported under, is
+[metrics.md](metrics.md).
+
 Three facts decide the shape, each of them run:
 
 - **`type: Directory`, not `DirectoryOrCreate`.** `DirectoryOrCreate` makes

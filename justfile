@@ -15,6 +15,15 @@ default: lint test
 fmt:
     cargo fmt --all
 
+# The last line of `lint` is T0-11's, and it is a grep rather than a script
+# because what it guards is a DOC COMMENT — the one kind of claim no unit test
+# reads. `phase9_teardown::persist` promised "a teardown that cannot be attested
+# is exit 4 rather than a silent success" one sentence away from the sentence
+# that contradicts it, and the call site proved the promise false. The claim is
+# deleted; this keeps it deleted. `test -f` runs first so a renamed file fails
+# here rather than passing on grep's exit 2, and
+# `crates/logweir/tests/teardown.rs::the_false_exit_4_guarantee_is_gone_and_the_gate_keeps_it_gone`
+# keeps this line's membership in the recipe honest.
 lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
@@ -25,6 +34,7 @@ lint:
     ./scripts/check-deps-count.sh
     ./scripts/time-unit-suite.sh
     ./scripts/check-one-signer.sh
+    test -f crates/logweir/src/drill/phase9_teardown.rs && ! grep -q 'exit 4 rather than a silent success' crates/logweir/src/drill/phase9_teardown.rs
 
 # Task 7 (Phase 1 line item 1c). G2′: the set of workspace crates from which
 # the signing API is reachable is exactly {logweir, e2e}, computed from the

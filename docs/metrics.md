@@ -76,11 +76,24 @@ there is no scorecard to read.
 | `logweir_drill_integrity_level` | gauge | `cluster`, `level` | no scorecard exists. `level` is `byte-fingerprint`, `consume-only` or `not-attempted`. |
 | `logweir_drill_integrity_result` | gauge | `cluster`, `result` | no scorecard exists. `result` is `pass`, `partial` or `fail`. |
 | `logweir_drill_redactions` | gauge | `cluster` | no scorecard exists. Emitted unconditionally otherwise, `0` included, so `> 0` is a valid alert — an absent series and a whole document are otherwise indistinguishable to PromQL. |
+| `logweir_drill_teardown_topics_failed` | gauge | `cluster` | no scorecard exists — the run ended on exit 1, 3 or 4, before phase 9. Emitted unconditionally otherwise: `0` means phase 9 ran and cleaned up, and a non-zero value is the count of scratch topics the broker refused to delete. |
 | `logweir_evidence_lock_verified` | gauge | `cluster` | no scorecard exists. `0` means no proof was obtainable, **not** that the bucket is unprotected. |
 
 The removed redaction **paths** are deliberately not labels (document-controlled
 text, unbounded cardinality); read them from `drill show`'s qualifiers footer or
-the notification body.
+the notification body. The **names** of the scratch topics teardown could not
+delete are left off `logweir_drill_teardown_topics_failed` for the same reason —
+topic names are cluster-controlled text — and are carried instead by the run's
+`WARN` line, by the `drill run` summary line and by the signed teardown
+attestation, all three of which have a reader who can hold them.
+
+`logweir_drill_teardown_topics_failed > 0` does **not** mean the drill failed.
+Phase 9 runs after phase 8 has signed and uploaded the drill result, so a run
+that verified correctly and could not clean up still exits `0` and still counts
+as a pass in `logweir_drill_runs_total`. What it means is that scratch topics
+are still on the target cluster and someone has to remove them by hand. Whether
+it *should* also change the exit code is an open question, recorded under
+"Known limitations" in [stability.md](stability.md).
 
 ## Is the drill still running at all?
 

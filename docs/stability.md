@@ -99,6 +99,39 @@ pre-release ruling by accident.**
   Full details, and the retry behaviour that is actively harmful, in
   [kubernetes.md](kubernetes.md).
 
+- **A drill that verified correctly and could not clean up still exits `0`.**
+  Phase 9 deletes the scratch topics the restore created on your cluster, and it
+  runs *after* phase 8 has signed and uploaded the drill result. A broker that
+  refuses a deletion — `TOPIC_DELETION_DISABLED`, an ACL, a topic held open —
+  therefore leaves real topics on a real cluster on a run the exit code calls a
+  pass. What v0.1 guarantees is that it **says so**, on all three surfaces, on
+  the run that left them:
+  - the metric `logweir_drill_teardown_topics_failed{cluster}`, emitted on every
+    scorecard-carrying path, `0` included, so `> 0` is a valid alert
+    ([metrics.md](metrics.md));
+  - a `WARN` on that run's log naming every failed topic, carrying the run id as
+    a field on the event; and
+  - a clause on `drill run`'s summary line naming the count and the topics. A
+    clean run's line is unchanged.
+
+  The signed teardown attestation
+  (`logweir/drills/{run_id}.teardown.json`) has always been honest about this —
+  a refused topic goes in `topics_failed` and never in `topics_deleted` — and
+  remains the durable record. **Whether a leftover topic should also change the
+  process exit code is an open question this release does not answer** (stage-2
+  ruling R-C): making it exit 4 would be a behaviour change after the result has
+  already been signed and uploaded, and it is deferred to its own decision
+  rather than made in passing. `teardown_failure_does_not_change_the_exit_code`
+  pins the current behaviour in both directions, so the question cannot be
+  answered by accident.
+
+  The same holds, with one surface fewer, for a teardown attestation that could
+  not be **persisted**: it is a `WARN` at the call site and nothing else, the
+  exit code is unchanged, and **the durable signal is the document's absence
+  from the bucket** — there is no metric for it in v0.1. An operator who wants
+  to detect it checks for the `.teardown.json` key beside each drill's
+  scorecard.
+
 - **The checked-in fixtures show one value the code cannot emit.**
   `e2e/fixtures/signed/*.json` carry a POPULATED `engine_subreport`, which no
   v0.1 scorecard has; it is kept because it is the only checked-in example of

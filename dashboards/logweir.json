@@ -3,7 +3,7 @@
   "title": "Logweir — restore drills",
   "uid": "logweir-drills",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "5m",
   "time": { "from": "now-30d", "to": "now" },
@@ -253,6 +253,32 @@
         }
       },
       "options": { "colorMode": "none", "graphMode": "none", "textMode": "value" }
+    },
+    { "id": 17, "type": "row", "title": "Cleanup", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 } },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Scratch topics teardown left behind",
+      "description": "Scratch topics phase 9 created on the target cluster and could not delete, because the broker refused. Emitted on every scorecard-carrying path, 0 included, so 0 means phase 9 ran and cleaned up and only the absence of the whole textfile means no drill result was produced. A non-zero value does NOT mean the drill failed: the restore is verified and signed before phase 9 runs, so a run that leaves topics behind still exits 0. The topic names are on the run's WARN line and in the signed teardown attestation; they are deliberately not a label here, because topic names are cluster-controlled text and would be unbounded cardinality.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 42 },
+      "targets": [
+        { "refId": "A", "expr": "logweir_drill_teardown_topics_failed{cluster=~\"$cluster\"}", "legendFormat": "{{cluster}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "cleaned up", "color": "text", "index": 0 }
+            } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "text", "value": null },
+            { "color": "red", "value": 1 }
+          ] }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" }
     }
   ]
 }

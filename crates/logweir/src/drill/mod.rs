@@ -122,12 +122,30 @@ impl From<DrillError> for ExitCode {
 /// Runs one phase and pushes its `PhaseRecord` BEFORE returning, so a crash or
 /// an error leaves a truthful partial record. `last_phase_completed` is updated
 /// in exactly one place, which is why it can never drift from `phases`.
+///
+/// This is also the ONE caller of `PhaseObserver::phase_started` /
+/// `phase_finished`. Before Task 13 those two methods were live code with no
+/// caller anywhere in the product: `PhaseLogger` implemented them, a test
+/// invoked them directly, and no production path ever did — so the per-phase
+/// progress an operator was documented to see did not exist. Wiring them here
+/// rather than at fifteen call sites is what keeps `record`'s signature and
+/// every caller unchanged: the run id the lines carry is `sc.run_id`, which
+/// `record` already has in hand, and which is the same id `run()` minted and
+/// put on the `drill` span.
+///
+/// The pair is what an operator sees on a phase that has NOTHING to report —
+/// phase 9 on a clean teardown, most obviously, where the metric reads `0` and
+/// the summary line says nothing. Without these lines a clean phase 9 is
+/// indistinguishable in the log from a phase 9 that never ran.
 pub fn record<T>(
     sc: &mut Scorecard,
     phase: i8,
     name: &str,
     f: impl FnOnce() -> Result<T, DrillError>,
 ) -> Result<T, DrillError> {
+    use logweir_core::engine::PhaseObserver;
+    let mut obs = crate::metrics::PhaseLogger::new(&sc.run_id);
+    obs.phase_started(phase, name);
     // Global Constraint 1: the clock is read HERE, in `crates/logweir`.
     let at = chrono::Utc::now();
     let t0 = std::time::Instant::now();
@@ -136,6 +154,9 @@ pub fn record<T>(
         Ok(_) => "ok".to_string(),
         Err(e) => format!("failed: {e}"),
     };
+    // The SAME string the `PhaseRecord` carries, so the log and the scorecard
+    // can never disagree about how a phase ended.
+    obs.phase_finished(phase, &outcome);
     sc.phases.push(PhaseRecord {
         phase,
         name: name.to_string(),
@@ -176,20 +197,49 @@ pub struct RunArgs {
 /// documented-guarantee-versus-code defect this stage exists to close.
 /// `task-12-brief.md` §5 step 2a blesses this narrowing by name.
 ///
-/// The WARN list is not a guess: it is every crate in `Cargo.lock` that
-/// depends DIRECTLY on `tracing` (and can therefore emit an event), minus this
-/// workspace's own crates and `tracing-subscriber`, which is the subscriber
-/// and emits nothing. Target names are MODULE paths, so hyphens become
-/// underscores. `hyper` and `reqwest` are deliberately absent: neither depends
-/// on `tracing` in this lockfile (hyper 1.x dropped it), and naming a crate
-/// that cannot emit would be decoration.
+/// The WARN list is not a guess. It is every crate in `Cargo.lock` that can
+/// put an event into THIS stream, and there are TWO ways to do that, not one:
+///
+/// * a direct `tracing` dependency (`h2`, `hyper_util`, `object_store`); and
+/// * a direct `log` dependency (`rdkafka`, `reqwest`, `rustls`,
+///   `rustls_platform_verifier`, `ureq`, `iana_time_zone`). `try_init()` below
+///   installs `tracing_log::LogTracer` — tracing-subscriber 0.3's `try_init`
+///   does it under `#[cfg(feature = "tracing-log")]`, and that feature is on
+///   through `tracing-subscriber`'s default features — so every `log` record
+///   is converted into a `tracing` event carrying the emitting crate's target
+///   and then passes through this same `EnvFilter`. The earlier version of
+///   this list closed over `tracing` dependants only, so `rustls` and `rdkafka`
+///   INFO chatter reached the default stream from tokio worker threads with no
+///   `fields.run_id` and no `span` object at all.
+///
+/// Excluded: this workspace's own crates (they MUST stay at `info`),
+/// `tracing-subscriber` (the subscriber, which emits nothing) and
+/// `tracing-log` (the bridge itself, likewise). Target names are MODULE paths,
+/// so hyphens become underscores.
+///
+/// Also excluded, and this is the second half of the derivation: a crate that
+/// is in `Cargo.lock` but **not in the resolved graph**. The lockfile records
+/// optional dependencies no feature activates — `quinn`, `quinn-proto` and
+/// `quinn-udp` arrive through `reqwest`'s HTTP/3 feature and are compiled by
+/// nothing (`cargo tree -p logweir -i quinn -e normal` prints "nothing to
+/// print"), and `jni` likewise. They were pinned here and are now gone: naming
+/// a crate that is not in the binary is decoration, and decoration in a
+/// security-adjacent constant reads as coverage it does not provide.
 ///
 /// `every_tracing_emitting_dependency_in_the_lockfile_is_pinned_to_warn`
-/// re-derives that set from `Cargo.lock` on every run, so a new emitter
-/// arriving with a future dependency bump fails a test instead of silently
-/// widening the stream.
-const DEFAULT_LOG_DIRECTIVE: &str =
-    "info,h2=warn,hyper_util=warn,object_store=warn,quinn=warn,quinn_proto=warn,quinn_udp=warn";
+/// re-derives the whole set — both bridges, narrowed to what this build
+/// actually compiled — on every run, so a new emitter arriving with a future
+/// dependency bump fails a test instead of silently widening the stream.
+const DEFAULT_LOG_DIRECTIVE: &str = "info,\
+     h2=warn,\
+     hyper_util=warn,\
+     iana_time_zone=warn,\
+     object_store=warn,\
+     rdkafka=warn,\
+     reqwest=warn,\
+     rustls=warn,\
+     rustls_platform_verifier=warn,\
+     ureq=warn";
 
 /// The observer phase 6 hands to the engine, carrying THIS run's id.
 ///
@@ -405,15 +455,34 @@ pub fn signed_last_phase_completed(sc: &Scorecard) -> i8 {
 /// spelling: `outcome_str` is `Outcome::wire_name`, and the phase number is
 /// `signed_last_phase_completed`. A console line an operator cannot reconcile
 /// with the artifact it just wrote is worse than no console line.
+///
+/// T0-11's clause is CONDITIONAL, and that is a requirement rather than a
+/// convenience. An unconditional suffix — "teardown left 0 scratch topics
+/// behind" — would change the console line of EVERY clean run, which is churn
+/// a reviewer cannot distinguish from a regression, and would put a reassuring
+/// sentence in front of an operator on the ninety-nine runs where nothing was
+/// wrong, teaching them to skim past it on the hundredth. The metric is the
+/// surface that must be unconditional (an absent Prometheus series and a clean
+/// run are indistinguishable to PromQL); a console line has a reader who is
+/// already looking, and for them silence means clean.
 pub fn summary_line(sc: &Scorecard) -> String {
-    format!(
+    let mut line = format!(
         "run {} — outcome {} — last phase completed {} (as signed; \
          phase 8's own record and phase 9's teardown are written after the \
          bytes are frozen, and teardown is attested separately)",
         sc.run_id,
         crate::metrics::outcome_str(&sc.outcome),
         signed_last_phase_completed(sc)
-    )
+    );
+    let failed = phase9_teardown::failed_count(sc);
+    if failed > 0 {
+        line.push_str(&format!(
+            " — teardown left {failed} scratch {} behind ({})",
+            if failed == 1 { "topic" } else { "topics" },
+            phase9_teardown::failed_topic_names_from_notes(sc).join(", ")
+        ));
+    }
+    line
 }
 
 /// The local artifact is the EXACT byte string phase 8 signed, so `drill verify`
@@ -952,7 +1021,7 @@ fn teardown(
     mapping: &BTreeMap<String, String>,
     scorecard_sha256: &str,
 ) {
-    let _ = record(sc, 9, "teardown", || {
+    let attested = record(sc, 9, "teardown", || {
         let a = phase9_teardown::run(
             deleter,
             mapping,
@@ -960,11 +1029,42 @@ fn teardown(
             run_id,
             scorecard_sha256,
         );
+        // T0-11, channel 2 of 3. `topics_failed` was correct from the day it
+        // was written and reached no `tracing::` call, no `metrics.rs` and no
+        // `summary_line()` — so a drill that left five scratch topics on a
+        // production broker printed the same line and exited 0 as one that
+        // cleaned up.
+        //
+        // The names travel in the `topics` FIELD and in the message both: a
+        // JSON-line consumer reads `fields.topics`, a plain-text consumer reads
+        // the message, and a mutant that emits a count without the names must
+        // fail on both. `run_id` is on the EVENT and not only on the entered
+        // `drill` span, for Task 12's reason — a single-line consumer reads the
+        // event object, never its span.
+        if let Some(msg) = phase9_teardown::teardown_warning(&a) {
+            tracing::warn!(
+                run_id = %run_id,
+                topics = %phase9_teardown::failed_topic_names(&a).join(","),
+                count = a.topics_failed.len(),
+                "{msg}"
+            );
+        }
         if let Err(e) = phase9_teardown::persist(&a, &args.signing_key, &c.store) {
             tracing::warn!(error = %e, "teardown attestation not persisted");
         }
         Ok(a)
     });
+    // The notes go on AFTER `record` returns, because `record` pushes the
+    // `PhaseRecord` only once the closure has finished — the same shape phase
+    // 6's `RestoreNoOp` interception uses to annotate its own record.
+    if let Ok(att) = attested {
+        let notes = phase9_teardown::failure_notes(&att);
+        if !notes.is_empty() {
+            if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 9) {
+                p.notes = notes;
+            }
+        }
+    }
 }
 
 /// Phase 8, and everything that must happen with the signed bytes still in
@@ -1368,20 +1468,33 @@ mod tests {
             .collect()
     }
 
-    /// Review finding M1. A dependency's INFO event must NOT reach the stream
-    /// the documentation makes a universal claim about.
+    /// Review finding M1, widened by Task 12's re-review finding N1 to the
+    /// `log` bridge. A dependency's INFO event must NOT reach the stream the
+    /// documentation makes a universal claim about.
     ///
     /// Those crates emit from tokio worker threads, where the `drill`
     /// `EnteredSpan` is not current, so such a line could carry neither
     /// `fields.run_id` nor `span.run_id`. The fix is to keep it out of the
     /// stream rather than to weaken the claim. A bare `"info"` directive lets
     /// it through and fails here.
+    ///
+    /// The last three emissions are the `log`-bridge half. `LogTracer`
+    /// converts a `log` record into a `tracing` event whose TARGET is the log
+    /// record's target — `rustls::client` for a `log::info!` inside `rustls` —
+    /// and that event then meets this same `EnvFilter`. Emitting with an
+    /// explicit `target:` is therefore the bridged line as the filter sees it,
+    /// and it needs no globally-installed `LogTracer` (`log::set_logger` is
+    /// once-per-process and a unit test cannot own it).
     #[test]
     fn a_dependency_info_event_is_filtered_at_the_default_directive() {
         let lines = under_the_default_directive(|| {
             tracing::info!(target: "h2::client", "third-party chatter at INFO");
             tracing::info!(target: "object_store::aws", "third-party chatter at INFO");
             tracing::info!(target: "hyper_util::client::pool", "third-party chatter at INFO");
+            // The `log`-crate emitters, as `LogTracer` presents them.
+            tracing::info!(target: "rustls::client::hs", "third-party chatter at INFO");
+            tracing::info!(target: "rdkafka::client", "third-party chatter at INFO");
+            tracing::info!(target: "ureq::stream", "third-party chatter at INFO");
             tracing::warn!(target: "h2::client", "third-party WARN still passes");
             tracing::info!(target: "logweir::drill", run_id = "01TEST", "our own INFO line");
         });
@@ -1407,20 +1520,90 @@ mod tests {
         );
     }
 
+    /// Every crate name this build actually COMPILED, read from the artifact
+    /// directory the running test binary lives in.
+    ///
+    /// `Cargo.lock` is not the resolved graph: it records optional
+    /// dependencies that no enabled feature activates, which is why `quinn`,
+    /// `quinn-proto`, `quinn-udp` (through `reqwest`'s HTTP/3 feature) and
+    /// `jni` appear there while `cargo tree -p logweir -i quinn -e normal`
+    /// prints "nothing to print". A crate cargo never compiled cannot emit,
+    /// and `DEFAULT_LOG_DIRECTIVE`'s own doc comment refuses to name crates
+    /// that cannot emit — so the closure below narrows the lockfile set by
+    /// this one.
+    ///
+    /// Reading the artifact directory rather than shelling out to
+    /// `cargo tree` is deliberate: `cargo tree` takes the package-cache lock,
+    /// and three agents building concurrently would turn a 15 s per-test
+    /// budget into a lock wait. This is a filesystem listing and is instant.
+    /// Artifact names are `lib<crate_name>-<16 hex>.<ext>` with the crate name
+    /// already in module spelling, so no hyphen mapping is needed here.
+    fn crates_compiled_into_this_build() -> std::collections::BTreeSet<String> {
+        let exe = std::env::current_exe().expect("the running test binary has a path");
+        let deps = exe
+            .parent()
+            .expect("a test binary lives in <target>/<profile>/deps");
+        let mut out = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(deps).expect("the deps directory is readable") {
+            let Ok(entry) = entry else { continue };
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            let stem = file.split('.').next().unwrap_or("");
+            let Some((name, hash)) = stem.rsplit_once('-') else {
+                continue;
+            };
+            if hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            // Both spellings: a crate literally named `libc` produces
+            // `liblibc-<hash>.rlib`, and blindly stripping `lib` would hide it.
+            out.insert(name.to_string());
+            if let Some(rest) = name.strip_prefix("lib") {
+                out.insert(rest.to_string());
+            }
+        }
+        // Anti-vacuity, and it must PANIC rather than silently narrow to
+        // nothing: an oracle that returns an empty set would let every
+        // assertion below pass without checking anything.
+        for certain in ["tracing", "serde_json"] {
+            assert!(
+                out.contains(certain),
+                "the compiled-crate scan of {} did not find `{certain}`, which this very binary \
+                 links — the scan is broken, and every narrowing below would be vacuous. \
+                 Found {} names.",
+                deps.display(),
+                out.len()
+            );
+        }
+        out
+    }
+
     /// Closed arithmetic over the WARN list, in this repository's established
-    /// idiom: the expected set is DERIVED from `Cargo.lock`, never hand-listed
-    /// twice. A dependency bump that introduces a new `tracing` emitter fails
-    /// here instead of silently widening the default stream a year from now.
+    /// idiom: the expected set is DERIVED, never hand-listed twice. A
+    /// dependency bump that introduces a new emitter fails here instead of
+    /// silently widening the default stream a year from now.
+    ///
+    /// The name says `tracing_emitting` for the history; the set is wider than
+    /// that, because there are TWO routes into this stream. Task 12 closed over
+    /// direct `tracing` dependants only, and its own re-review (N1) showed with
+    /// a live subscriber that `rustls` and `rdkafka` INFO records arrive
+    /// anyway, through the `tracing_log::LogTracer` that `try_init()` installs.
+    /// A `log` dependency is therefore counted exactly as a `tracing` one.
     #[test]
     fn every_tracing_emitting_dependency_in_the_lockfile_is_pinned_to_warn() {
         let lock = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
         )
         .expect("Cargo.lock");
-        // Our own crates are the ones that MUST stay at info; `tracing-subscriber`
-        // is the subscriber and emits no events of its own.
+        // Our own crates are the ones that MUST stay at info. `tracing-subscriber`
+        // is the subscriber and `tracing-log` is the bridge; neither emits an
+        // event of its own, and `tracing-log` would otherwise be counted purely
+        // for depending on `log`.
         let ours = |n: &str| n == "logweir" || n.starts_with("logweir-");
+        let plumbing = |n: &str| n == "tracing-subscriber" || n == "tracing-log";
+        let compiled = crates_compiled_into_this_build();
         let mut emitters: Vec<String> = vec![];
+        let mut skipped_unresolved: Vec<String> = vec![];
         for pkg in lock.split("[[package]]") {
             let Some(name) = pkg.lines().find_map(|l| {
                 l.strip_prefix("name = \"")
@@ -1428,7 +1611,7 @@ mod tests {
             }) else {
                 continue;
             };
-            if ours(name) || name == "tracing-subscriber" {
+            if ours(name) || plumbing(name) {
                 continue;
             }
             // The `dependencies = [ … ]` block of THIS package only.
@@ -1437,24 +1620,47 @@ mod tests {
                 .and_then(|(_, rest)| rest.split_once("\n]"))
                 .map(|(d, _)| d)
                 .unwrap_or("");
-            if deps.lines().any(|l| l.trim() == "\"tracing\",") {
-                emitters.push(name.to_string());
+            let emits = deps
+                .lines()
+                .any(|l| l.trim() == "\"tracing\"," || l.trim() == "\"log\",");
+            if !emits {
+                continue;
+            }
+            // EnvFilter targets are module paths: `hyper-util` is `hyper_util`.
+            let target = name.replace('-', "_");
+            if compiled.contains(&target) {
+                emitters.push(target);
+            } else {
+                skipped_unresolved.push(target);
             }
         }
         assert!(
             !emitters.is_empty(),
-            "the lockfile walk found no tracing emitters at all — the parse broke, and this test \
-             would then pass vacuously forever"
+            "the lockfile walk found no emitters at all — the parse broke, and this test would \
+             then pass vacuously forever"
         );
-        for e in &emitters {
-            // EnvFilter targets are module paths: `hyper-util` is `hyper_util`.
-            let target = e.replace('-', "_");
+        for target in &emitters {
             assert!(
                 DEFAULT_LOG_DIRECTIVE.contains(&format!("{target}=warn")),
-                "`{e}` depends directly on `tracing` and so can emit at INFO, but the default \
-                 directive does not pin it to warn. Add `{target}=warn` to DEFAULT_LOG_DIRECTIVE \
-                 (and say so in its doc comment), or the default stream gains lines that cannot \
-                 carry the run id. Emitters found: {emitters:?}; directive: {DEFAULT_LOG_DIRECTIVE:?}"
+                "`{target}` depends directly on `tracing` or on `log` and so can emit at INFO \
+                 into this stream — the `log` route through `tracing_log::LogTracer`, which \
+                 `try_init()` installs — but the default directive does not pin it to warn. Add \
+                 `{target}=warn` to DEFAULT_LOG_DIRECTIVE (and say so in its doc comment), or the \
+                 default stream gains lines that cannot carry the run id. Emitters in the \
+                 resolved graph: {emitters:?}; in the lockfile but not compiled: \
+                 {skipped_unresolved:?}; directive: {DEFAULT_LOG_DIRECTIVE:?}"
+            );
+        }
+        // The other direction: the directive names nothing that is not an
+        // emitter in the resolved graph. Without this, `quinn=warn` could
+        // return tomorrow and read as coverage it does not provide.
+        for pinned in DEFAULT_LOG_DIRECTIVE.split(',').skip(1) {
+            let target = pinned.trim_end_matches("=warn");
+            assert!(
+                emitters.iter().any(|e| e == target),
+                "DEFAULT_LOG_DIRECTIVE pins `{target}`, which is not a `tracing`/`log` emitter in \
+                 this build's resolved graph. Naming a crate that cannot emit is decoration, and \
+                 decoration reads as coverage. Emitters found: {emitters:?}"
             );
         }
     }
