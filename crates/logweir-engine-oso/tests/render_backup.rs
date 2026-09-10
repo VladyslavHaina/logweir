@@ -145,34 +145,82 @@ fn backup_document_names_no_write_key() {
     assert!(!doc.contains("consumer-group"), "{doc}");
 }
 
-/// Spec §6.1 M5/N1: `strip_offset_headers: false` is rendered EXPLICITLY in
-/// both modes, never inherited. `include_offset_headers: true` stamps
-/// `x-original-offset`/`x-original-timestamp` on every archived record, and
-/// that header is the ONLY key phase 7 reconciles on
-/// (`crates/logweir/src/drill/phase7_verify.rs:243-265`); an archive written
-/// without it, or a restore that strips it, makes a windowed restore
-/// unverifiable while still exiting 0.
+/// Spec §6.1 M5/N1: `include_offset_headers: true` is rendered EXPLICITLY,
+/// never inherited. It stamps `x-original-offset`/`x-original-timestamp` on
+/// every archived record, and that header is the ONLY key phase 7 reconciles
+/// on (`crates/logweir/src/drill/phase7_verify.rs:243-265`); an archive
+/// written without it makes a windowed restore unverifiable while still
+/// exiting 0.
 ///
 /// The EXACT line, indentation included, so a key emitted at the wrong nesting
 /// level fails too.
+///
+/// **NAME RETAINED ON PURPOSE.** Task 4's fix round 1 (review finding F-1)
+/// removed `backup.strip_offset_headers` from this document — it is a RESTORE
+/// key the pinned engine drops as unknown, see
+/// `the_backup_document_names_no_restore_side_offset_key` below — and the
+/// plan's test-name gate is additions-only against the base commit, so this
+/// row keeps the name it was landed under and now asserts the surviving half
+/// of the invariant plus the value bound on it.
 #[test]
 fn backup_document_renders_strip_offset_headers_false() {
     let doc = render_backup::render(&plan()).expect("the fixture renders");
-    assert!(
-        doc.lines().any(|l| l == "  strip_offset_headers: false"),
-        "expected the exact line `  strip_offset_headers: false`; got:\n{doc}"
-    );
     assert!(
         doc.lines().any(|l| l == "  include_offset_headers: true"),
         "expected the exact line `  include_offset_headers: true`; got:\n{doc}"
     );
     assert!(
-        !doc.contains("strip_offset_headers: true"),
-        "the only permitted value is false:\n{doc}"
-    );
-    assert!(
         !doc.contains("include_offset_headers: false"),
         "the only permitted value is true:\n{doc}"
+    );
+    // The restore-side twin, at ANY value, is refused by the row below; the
+    // value bound is kept here so a re-added key at the wrong value fails on
+    // both rows rather than only on the golden.
+    assert!(
+        !doc.contains("strip_offset_headers: true"),
+        "`strip_offset_headers` is not a key of the engine's BACKUP config at \
+         any value:\n{doc}"
+    );
+}
+
+/// **Task 4 review, F-1 — the key this document must NOT carry.**
+///
+/// `strip_offset_headers` is a field of `RestoreOptions`
+/// [U:crates/kafka-backup-core/src/config.rs:793-801] and of nothing else.
+/// `BackupOptions` (`:404-541`) has exactly ONE offset-header field,
+/// `include_offset_headers` (`:455-458`). So the engine at the GC8 floor
+/// (`kafka-backup` 0.21.0, the digest in
+/// `third_party/kafka-backup-binary.digest`) reads `backup.strip_offset_headers`
+/// as an unknown key and drops it with *"Ignoring unknown config key"*
+/// [U:crates/kafka-backup-cli/src/commands/config.rs:46] — whereupon
+/// `OsoCliEngine`'s `assert_no_dropped_logweir_key` correctly aborts, and
+/// `logweir backup run` exited **1 after a complete archive had been
+/// written**. Spec §6.1's "kept in both modes" is about the RESTORE document,
+/// which still renders it (`render_restore.rs:131-143`) at a key the engine
+/// accepts.
+///
+/// Asserted over the KEY at any nesting and any value, because the failure was
+/// never about the value. The end-to-end half — the real, digest-pinned engine
+/// accepting this exact document — is
+/// `e2e/tests/backup_argv.rs::the_real_engine_accepts_the_rendered_backup_document`;
+/// no stub can reject a document, so no stub-based row could ever close this
+/// class.
+#[test]
+fn the_backup_document_names_no_restore_side_offset_key() {
+    let doc = render_backup::render(&plan()).expect("the fixture renders");
+    assert!(
+        !doc.contains("strip_offset_headers"),
+        "the backup document names `strip_offset_headers`, which is a RESTORE key: the pinned \
+         engine drops it as unknown and assert_no_dropped_logweir_key then aborts the run AFTER \
+         the archive has been written (review F-1):\n{doc}"
+    );
+    // And the restore document is unaffected — the key belongs there, so this
+    // is a MOVE of one invariant's other end, not its deletion.
+    assert!(
+        render_backup::render(&plan())
+            .expect("the fixture renders")
+            .contains("include_offset_headers: true"),
+        "the backup-side half of the invariant must still be rendered explicitly"
     );
 }
 

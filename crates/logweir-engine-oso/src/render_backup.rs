@@ -217,24 +217,41 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
         "  max_concurrent_partitions: {}\n",
         plan.max_concurrent_partitions
     ));
-    // RENDERED EXPLICITLY, IN BOTH MODES (spec §6.1 M5/N1). Upstream defaults
-    // `include_offset_headers` true and `strip_offset_headers` false
-    // [U/kafka-backup/config/example-backup.yaml,
-    // U/kafka-backup/config/example-restore.yaml]; these two lines write the
-    // defaults out so the invariant is an assertion in this document and in
+    // RENDERED EXPLICITLY (spec §6.1 M5/N1). Upstream defaults
+    // `include_offset_headers` true
+    // [U/kafka-backup/config/example-backup.yaml]; this line writes the
+    // default out so the invariant is an assertion in this document and in
     // this golden rather than an upstream default we are trusting.
     //
-    // They are the SAME invariant seen from the two ends. `x-original-offset`
-    // and `x-original-timestamp` are stamped on every archived record by the
-    // backup, and `crates/logweir/src/drill/phase7_verify.rs:243-265`
-    // reconciles the restored records BY that header. So an archive written
-    // with `include_offset_headers: false`, or restored with
-    // `strip_offset_headers: true`, carries nothing phase 7 can key on and a
+    // `x-original-offset` and `x-original-timestamp` are stamped on every
+    // archived record by the backup, and
+    // `crates/logweir/src/drill/phase7_verify.rs:243-265` reconciles the
+    // restored records BY that header. So an archive written with
+    // `include_offset_headers: false` carries nothing phase 7 can key on and a
     // windowed restore stops being verifiable at all — while still exiting 0.
     // Global Constraint 4's sibling failure mode: a signed scorecard measured
     // around nothing.
+    //
+    // **THE OTHER END OF THAT INVARIANT IS A RESTORE KEY, AND IS NOT RENDERED
+    // HERE** (Task 4 review, F-1). `strip_offset_headers` is a field of
+    // `RestoreOptions` [U:crates/kafka-backup-core/src/config.rs:793-801] and
+    // of nothing else; `BackupOptions` (`:404-541`) has exactly one
+    // offset-header field, `include_offset_headers` (`:455-458`). The engine
+    // at the GC8 floor (`kafka-backup` 0.21.0, the digest in
+    // `third_party/kafka-backup-binary.digest`) therefore reads
+    // `backup.strip_offset_headers` as an UNKNOWN key and drops it with
+    // *"Ignoring unknown config key"*
+    // [U:crates/kafka-backup-cli/src/commands/config.rs:46] — and
+    // `OsoCliEngine`'s `assert_no_dropped_logweir_key` correctly aborts on any
+    // key of ours the engine ignored (spec §7.2(a)), so rendering it made
+    // `logweir backup run` exit 1 AFTER a complete archive had been written.
+    // `render_restore` still renders it, at `restore.strip_offset_headers`,
+    // where the engine accepts it — see `render_restore.rs:131-143`. The
+    // absence here is asserted by
+    // `the_backup_document_names_no_restore_side_offset_key` and by both
+    // backup goldens, and is closed end-to-end against the real engine by
+    // `e2e/tests/backup_argv.rs::the_real_engine_accepts_the_rendered_backup_document`.
     s.push_str("  include_offset_headers: true\n");
-    s.push_str("  strip_offset_headers: false\n");
     // GC18(c) rail 2, the read-only assertion, is the ABSENCE of everything
     // below and is asserted by `backup_document_names_no_write_key`:
     // `reset_consumer_offsets`, `auto_consumer_groups`, `create_topics`,

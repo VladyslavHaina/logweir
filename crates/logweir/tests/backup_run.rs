@@ -762,6 +762,63 @@ fn asking_for_a_receipt_exits_1_naming_task_5bs_contract() {
     }
 }
 
+/// **Task 4 review, F-3.** The I6 refusal is phase −1's LOCAL step 4, so it
+/// does not need a reachable broker — and therefore does not open a socket to
+/// the SOURCE cluster to answer a question about a command-line flag.
+///
+/// The reader here is `unreachable()`, the same double
+/// `a_local_refusal_does_not_need_a_reachable_broker` uses: with the check
+/// after phase −1's NETWORK step, `cluster_id()` fails FIRST and the error is
+/// `BackupError::Kafka` carrying *"no broker answered"* — which is exactly the
+/// mutant this row kills, at assertion time on the message. Both placements
+/// exit 1, so the exit code alone cannot tell them apart; the message can.
+///
+/// The process-level half — zero librdkafka lines and no 20 s metadata timeout
+/// — is `e2e/tests/backup_argv.rs::a_receipt_flag_is_refused_without_opening_a_socket`.
+#[test]
+fn asking_for_a_receipt_refuses_before_the_network_step() {
+    for flag in ["receipt", "out"] {
+        let mut f = ok_fixture("mvp-demo");
+        let p = f._dir.path().join("receipt.json");
+        if flag == "receipt" {
+            f.args.receipt_out = Some(p);
+        } else {
+            f.args.out = Some(p);
+        }
+        let reader = StubReader::unreachable();
+        let engine = RecordingEngine::one_topic();
+        let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+
+        assert_eq!(
+            run_with(&f.args, &reader, &engine, &store),
+            ExitCode::Operational,
+            "flag {flag}"
+        );
+        let err = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("interface I6"),
+            "the I6 refusal must be raised BEFORE phase −1's network step, so an unreachable \
+             broker cannot pre-empt it (flag {flag}); got: {msg}"
+        );
+        assert!(
+            !msg.contains("no broker answered"),
+            "the broker was dialled before a flag this build cannot honour was refused \
+             (flag {flag}): {msg}"
+        );
+        // And it is `Operational`, not `Kafka`: the refusal is about the flag,
+        // and nothing was observed about any cluster.
+        match err {
+            BackupError::Operational(_) => {}
+            other => panic!("expected BackupError::Operational, got {other:?}"),
+        }
+        assert!(
+            engine.plans.lock().unwrap().is_empty(),
+            "the engine must not run when the document cannot be written"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Structural claims, read off this directory's own source
 // ---------------------------------------------------------------------------
@@ -807,6 +864,15 @@ fn the_backup_path_never_scopes_a_deleter() {
 /// file (`rdkafka_reader.rs:16`), which is what Global Constraint 22's 15 s
 /// per-test bound and `scripts/time-unit-suite.sh` exist to catch — but a
 /// timing gate reports a symptom, and this reports the cause.
+///
+/// **Widened in fix round 1 (review F-4).** The row as landed inspected
+/// `pub fn run_with`'s body ALONE, and the reviewer's mutant C put
+/// `RdKafkaReader::connect(` inside `execute_with` — the function `run_with`
+/// delegates to — and survived both source-shape guards. The claim is now
+/// stated as it was always meant: **exactly one function in this directory
+/// constructs a client, and it is `pub fn run`.** Every OTHER function's body
+/// in `mod.rs` is checked, not an enumerated three, so a new seam added
+/// tomorrow is covered without editing this list.
 #[test]
 fn only_the_wrapper_constructs_a_client() {
     const CONSTRUCTORS: [&str; 2] = ["RdKafkaReader::connect(", "Store::read_only_from_url("];
@@ -828,11 +894,70 @@ fn only_the_wrapper_constructs_a_client() {
             );
         }
     }
-    // And `run_with` itself names neither — the seam every named test calls.
-    let body = fn_body(&mod_rs, "pub fn run_with");
+
+    // The wrapper DOES construct both — a guard that only said "not here"
+    // would pass on a directory that constructs nothing at all.
+    let wrapper = fn_body(&mod_rs, "pub fn run(");
     for c in CONSTRUCTORS {
-        assert!(!body.contains(c), "`pub fn run_with` names `{c}`:\n{body}");
+        assert!(
+            wrapper.contains(c),
+            "`pub fn run` is the wrapper and must be the function that names `{c}`"
+        );
     }
+
+    // Every named entry point below it names neither. `run_with` is the seam
+    // every named test calls; `execute_with` is the seam's outcome-returning
+    // half and is what mutant C reached through.
+    for sig in ["pub fn run_with(", "pub fn execute_with("] {
+        let body = fn_body(&mod_rs, sig);
+        for c in CONSTRUCTORS {
+            assert!(
+                !body.contains(c),
+                "`{sig}` names `{c}` — the seam must construct nothing, or every test that \
+                 calls it inherits a 20 s rdkafka metadata timeout (rdkafka_reader.rs:16):\n\
+                 {body}"
+            );
+        }
+    }
+
+    // EXACTLY ONE FUNCTION. Every occurrence of either constructor in this
+    // file's CODE lies inside `pub fn run`'s body — so a third entry point
+    // that constructed a client would fail here even if it were named neither
+    // `run_with` nor `execute_with`. Line comments are stripped first because
+    // this module's prose names both constructors on purpose (the module doc
+    // and `run`'s own doc comment say `run` is the only place); a doc comment
+    // sits OUTSIDE the body `fn_body` returns, so counting raw text would
+    // compare a file total against a body total and never agree.
+    let code = strip_line_comments(&mod_rs);
+    let wrapper_code = strip_line_comments(&wrapper);
+    for c in CONSTRUCTORS {
+        let in_file = code.matches(c).count();
+        let in_wrapper = wrapper_code.matches(c).count();
+        assert!(in_wrapper > 0, "`pub fn run` does not name `{c}` in code");
+        assert_eq!(
+            in_file, in_wrapper,
+            "`{c}` is constructed in more than one function: {in_file} occurrence(s) in \
+             crates/logweir/src/backup/mod.rs's code, but only {in_wrapper} inside \
+             `pub fn run`. GC18(c) rail 2 and Global Constraint 22 both rest on `run` being \
+             the ONLY constructor (review F-4)."
+        );
+    }
+}
+
+/// Source text with every `//`-prefixed line removed. Crude for the same
+/// reason `fn_body` is: the property being stated is "which function contains
+/// this token", and a test that needed a lexer to say so would be a test with
+/// a lexer bug in its future. `mod.rs` carries no block comments — asserted
+/// here, so this helper cannot start lying if one is added.
+fn strip_line_comments(src: &str) -> String {
+    assert!(
+        !src.contains("/*"),
+        "strip_line_comments only handles line comments, and a block comment has appeared"
+    );
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The text of one `fn`, from its signature to its closing brace, by brace

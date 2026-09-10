@@ -26,4 +26,3 @@ backup:
   segment_max_bytes: 10485760
   max_concurrent_partitions: 3
   include_offset_headers: true
-  strip_offset_headers: false

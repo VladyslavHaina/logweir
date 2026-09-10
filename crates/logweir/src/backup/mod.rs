@@ -231,33 +231,6 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
     })
 }
 
-/// Interface **I6** is Task 5b's. Until it lands, an operator who asked for
-/// the receipt gets a message naming the contract that owes it — never a
-/// silent exit 0 after a real backup with no document to show for it.
-///
-/// It runs AFTER phase −1, on the tree's own precedent: `assert_engine_identity`
-/// (`drill/mod.rs:854`) is placed after phase 0 "so a plan the admission guard
-/// REFUSES still exits 3 on a host with no engine environment". A guard
-/// refusal must win over an unimplemented flag; both must win over the run.
-fn refuse_unwritable_document(args: &BackupRunArgs) -> Result<(), BackupError> {
-    for (flag, path) in [
-        ("--receipt-out", args.receipt_out.as_ref()),
-        ("--out", args.out.as_ref()),
-    ] {
-        if let Some(p) = path {
-            return Err(BackupError::Operational(format!(
-                "{flag} {} was given, but this build writes no backup receipt: the receipt bytes \
-                 and their `.sig` sidecar are interface I6, owned by Task 5b. NO backup was \
-                 taken: this refusal is raised before the engine is spawned, so an operator who \
-                 asked for a document cannot be handed an archive instead. Re-run without \
-                 {flag}.",
-                p.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// The TESTABLE seam's inner half: everything one `backup run` does, over
 /// handles it does not build, returning the OUTCOME rather than an exit code.
 ///
@@ -279,10 +252,17 @@ pub fn execute_with(
     // written. The reader is already built by the time this function is
     // called — `run` builds it — but the refusals that do not need it come
     // first inside `phase_minus1_admit::run`, so a locally-refusable plan
-    // never reaches a metadata call.
-    let admitted =
-        phase_minus1_admit::run(&inputs.spec, &inputs.spec_text, &inputs.allowed, reader)?;
-    refuse_unwritable_document(args)?;
+    // never reaches a metadata call. **Interface I6's refusal is one of
+    // them**: it is `local`'s step 4 (review F-3), so `--out`/`--receipt-out`
+    // is answered with no I/O of any kind rather than after a 20 s metadata
+    // timeout against the source cluster.
+    let admitted = phase_minus1_admit::run(
+        args,
+        &inputs.spec,
+        &inputs.spec_text,
+        &inputs.allowed,
+        reader,
+    )?;
 
     // **I10.** The derived id is the spec's own `backup_id`; the override
     // replaces it in the plan AND in the outcome, from this one binding.
@@ -476,9 +456,15 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     // list predicates over data already in memory (microseconds), and running
     // them twice is what lets BOTH entry points be correct on their own: the
     // seam is complete without this call, and this call makes the wrapper
-    // ordering observable — `backup_run_refuses_without_opening_a_socket`
-    // asserts a refusal emits no rdkafka line at all.
-    if let Err(e) = phase_minus1_admit::local(&inputs.spec, &inputs.spec_text) {
+    // ordering observable — `backup_run_refuses_without_opening_a_socket` and
+    // `a_receipt_flag_is_refused_without_opening_a_socket` each assert a
+    // refusal emits no rdkafka line at all.
+    //
+    // `args` is passed because `local`'s step 4 is interface I6's refusal
+    // (review F-3): `--out`/`--receipt-out` is a flag this build cannot
+    // honour, knowable with zero I/O, and it must not cost a metadata
+    // timeout against the SOURCE cluster to say so.
+    if let Err(e) = phase_minus1_admit::local(args, &inputs.spec, &inputs.spec_text) {
         return report(&run_id, Err(e));
     }
 

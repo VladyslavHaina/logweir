@@ -10,7 +10,7 @@
 //! a client at all. On the backup path the cluster in question is the SOURCE
 //! — the production one — which is the last cluster a refused plan should
 //! open a socket to.
-use crate::backup::BackupError;
+use crate::backup::{BackupError, BackupRunArgs};
 use logweir_core::guard::{scan_forbidden_keys, GuardRefusal};
 use logweir_core::spec::{AllowedClusters, BackupSpec};
 use logweir_kafka::reader::ClusterReader;
@@ -21,11 +21,15 @@ pub struct Admitted {
     pub source_cluster_id: String,
 }
 
-/// Steps 1–3: everything refusable with no network round trip.
+/// Steps 1–4: everything refusable with no network round trip.
 ///
 /// Returns `BackupError`, not a bare `GuardRefusal`, so the caller's `?` keeps
 /// the GC11 mapping in one place.
-pub fn local(spec: &BackupSpec, spec_text: &str) -> Result<(), BackupError> {
+///
+/// `args` is taken so step 4 — interface **I6**'s refusal — can be raised
+/// here: it is a property of the FLAGS alone and needs no cluster, no bucket
+/// and no engine (Task 4 review, F-3).
+pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result<(), BackupError> {
     // 1. `?` on purpose: the scan FAILS CLOSED. A spec text this scanner
     //    cannot parse is a spec it did not scan, and that is a refusal (exit
     //    3), never an empty result silently treated as clean. Same predicate
@@ -100,6 +104,45 @@ pub fn local(spec: &BackupSpec, spec_text: &str) -> Result<(), BackupError> {
         .into());
     }
 
+    // 4. Interface **I6**'s refusal, LAST among the local checks.
+    //
+    //    Ordering, both ways round. It is AFTER steps 1–3 because a guard
+    //    refusal must win over an unimplemented flag: a spec carrying
+    //    `purge_topics` and `--receipt-out` is exit 3, on the key, not exit 1
+    //    on the flag. It is inside the LOCAL stage — not after `network`,
+    //    where fix round 1 found it — because a flag this build cannot honour
+    //    is knowable with ZERO I/O, and refusing it after step 5 cost a
+    //    measured 20.1 s and ~360 librdkafka lines against the SOURCE
+    //    cluster, i.e. the production one (review F-3). The tree's own
+    //    precedent (`assert_engine_identity`, `drill/mod.rs:854`, placed
+    //    after phase 0) justifies "after the local guards"; it does not
+    //    require "after the network read".
+    refuse_unwritable_document(args)
+}
+
+/// Interface **I6** is Task 5b's. Until it lands, an operator who asked for
+/// the receipt gets a message naming the contract that owes it — never a
+/// silent exit 0 after a real backup with no document to show for it.
+///
+/// Exit 1, not 3: nothing about the PLAN was found wanting, and GC11 reserves
+/// 3 for a refused plan. Task 5b deletes this function and the flag starts
+/// working.
+fn refuse_unwritable_document(args: &BackupRunArgs) -> Result<(), BackupError> {
+    for (flag, path) in [
+        ("--receipt-out", args.receipt_out.as_ref()),
+        ("--out", args.out.as_ref()),
+    ] {
+        if let Some(p) = path {
+            return Err(BackupError::Operational(format!(
+                "{flag} {} was given, but this build writes no backup receipt: the receipt bytes \
+                 and their `.sig` sidecar are interface I6, owned by Task 5b. NO backup was \
+                 taken: this refusal is raised before the engine is spawned AND before any \
+                 broker client exists, so an operator who asked for a document cannot be handed \
+                 an archive instead. Re-run without {flag}.",
+                p.display()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -161,11 +204,12 @@ pub fn network(
 /// Local checks first, network second — the whole guard, in the order GC11's
 /// exit-3 contract requires.
 pub fn run(
+    args: &BackupRunArgs,
     spec: &BackupSpec,
     spec_text: &str,
     allowed: &AllowedClusters,
     reader: &dyn ClusterReader,
 ) -> Result<Admitted, BackupError> {
-    local(spec, spec_text)?;
+    local(args, spec, spec_text)?;
     network(allowed, reader)
 }

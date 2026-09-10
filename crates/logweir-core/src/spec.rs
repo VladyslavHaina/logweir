@@ -388,11 +388,14 @@ pub struct BackupSourceSpec {
     pub topics: Vec<String>,
 }
 
-/// The `backup:` block's tunables. The three keys the rendered document
-/// pins unconditionally — `continuous: false`, `include_offset_headers: true`,
-/// `strip_offset_headers: false` — are deliberately NOT fields: they are
-/// invariants of what a Logweir-driven backup is, not settings (see
-/// `render_backup::render`'s comments for what each one costs if flipped).
+/// The `backup:` block's tunables. The two keys the rendered document pins
+/// unconditionally — `continuous: false` and `include_offset_headers: true` —
+/// are deliberately NOT fields: they are invariants of what a Logweir-driven
+/// backup is, not settings (see `render_backup::render`'s comments for what
+/// each one costs if flipped). `strip_offset_headers` is the other end of the
+/// same invariant and is pinned in the RESTORE document only: it is a field of
+/// the engine's `RestoreOptions` and of nothing else, so a backup config
+/// naming it is dropped as an unknown key (Task 4 review, F-1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupSettings {
     #[serde(default = "zstd")]
