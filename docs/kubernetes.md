@@ -1389,6 +1389,45 @@ the pod. Closing the gap means a fourth machine-read stdout line, which is the
 runner's interface to change. An absent field is truthful; a guessed one is
 not.
 
+### `REASON` reads `status.reason`, not `status.exitReason`
+
+`Restore.status` carries **two** reason fields, because they answer two
+questions:
+
+| Field | Vocabulary | Answers |
+|---|---|---|
+| `status.exitReason` | GC11's wire strings (`ok`, `operational`, `drill-not-pass`, …) plus the runner's own CamelCase terminal state off `refusal-reason=` | *What did the run exit with?* |
+| `status.reason` | the CamelCase `reason` of the condition describing the object's terminal or current state, **verbatim** | *What state is this object in?* |
+
+The `REASON` printer column reads **`status.reason`**, and that is a fix rather
+than a preference. `exitReason` is written from an exit code, and the four
+admission refusals plus `NameTooLong` happen **before any `POST`** — no run, no
+code, so the only wire string GC11 offers is `operational`. Measured live at the
+Task 20 review on two objects: `kubectl get restore` printed `operational` for
+both an empty `approvalRef` and an unreachable cluster, while the actual states
+(`ApprovalNotReceived`, `ClusterNotReachable`) existed only inside
+`status.conditions`. For a `Restore` those are exactly the states an operator
+scans a list for.
+
+```bash
+kubectl --context docker-desktop get restores
+# NAME  MODE     PHASE    EXIT  REASON                OUTCOME ...
+# r1    scratch  Pending        ApprovalNotVerified
+# r2    scratch  Failed   3     GuardRefused
+```
+
+`status.reason` is **not a third vocabulary** beside errata E5b's two: it is
+always the `reason` of the condition the same patch writes, so it is CamelCase
+everywhere and never one of `exitReason`'s hyphenated wire strings.
+`every_status_write_sets_the_scalar_reason` asserts the equality for every
+status-patch builder and, by a source scan of `controllers/restore.rs`, that a
+patch writing `conditions` without a `reason` cannot be added.
+
+**The `Backup` kind is unaffected and unchanged:** its printer columns are
+`PHASE/EXIT/RECORDS/SIGNED/AGE` with **no `REASON` column**, so nothing on that
+path was reading `exitReason` for a state it could not express. §10's table is
+the `Backup` contract and stands as written.
+
 ### A green `Restore`
 
 ```bash

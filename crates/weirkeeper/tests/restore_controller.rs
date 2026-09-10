@@ -34,15 +34,16 @@ use weirkeeper::conditions::{
 use weirkeeper::controllers::backup::SIGNING_VOLUME;
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY};
 use weirkeeper::controllers::restore::{
-    action_for, admit, approval_plan_hash, approver_key_ids, observe_scorecard,
-    plan_config_map_name, recomputed_plan_hash, reconcile_restore, restore_evidence_keys,
-    runner_argv, runner_job_spec, scorecard_observation, topic_mapping, triggered_by,
-    unobserved_scorecard, window_not_covered, Requeue, RestoreAdmission, RestoreEvidenceKeys,
-    ScorecardObservation, ADMISSION_REQUEUE_SECS, ALLOWED_CLUSTERS_FILE, APPROVAL_BUNDLE_SECRET,
-    APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE, OFFSET_REPORT_KEY_PREFIX,
-    OFFSET_REPORT_OUT_PATH, OUTCOME_FAIL_COVERAGE, PLAN_SPEC_KEY, REFERENT_NOT_FOUND_REASON,
-    SCORECARD_KEY_PREFIX, SCORECARD_OUT_PATH, SIDECAR_KEY_PREFIX, TARGET_PASSWORD_ENV,
-    TARGET_PASSWORD_SECRET_KEY,
+    action_for, admission_hold_patch, admit, approval_plan_hash, approver_key_ids,
+    crashed_status_patch, finished_status_patch, observe_scorecard, plan_config_map_name,
+    recomputed_plan_hash, reconcile_restore, refused_status_patch, restore_evidence_keys,
+    runner_argv, runner_job_spec, running_status_patch, scorecard_observation, topic_mapping,
+    triggered_by, unobserved_scorecard, window_not_covered, Requeue, RestoreAdmission,
+    RestoreEvidenceKeys, ScorecardObservation, ADMISSION_REQUEUE_SECS, ALLOWED_CLUSTERS_FILE,
+    APPROVAL_BUNDLE_SECRET, APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE,
+    OFFSET_REPORT_KEY_PREFIX, OFFSET_REPORT_OUT_PATH, OUTCOME_FAIL_COVERAGE, PLAN_SPEC_KEY,
+    REFERENT_NOT_FOUND_REASON, SCORECARD_KEY_PREFIX, SCORECARD_OUT_PATH, SIDECAR_KEY_PREFIX,
+    TARGET_PASSWORD_ENV, TARGET_PASSWORD_SECRET_KEY,
 };
 use weirkeeper::crds::restore::Restore;
 use weirkeeper::job::{self, APPROVAL_MOUNT_PATH, APPROVAL_VOLUME};
@@ -2428,6 +2429,269 @@ fn the_restore_green_rule_reads_the_outcome() {
     assert!(
         props.get("objectives").is_some() && props.get("integrity").is_some(),
         "…and interface I34's two blocks"
+    );
+}
+
+// ===========================================================================
+// `status.reason` — the REASON printer column. FIX ROUND 1, review finding M2
+// ===========================================================================
+
+/// **The `REASON` column reads `.status.reason`, and every status this
+/// reconciler writes sets it.**
+///
+/// THE DEFECT THIS PINS, MEASURED LIVE AT THE TASK 20 REVIEW. The column read
+/// `.status.exitReason`, which [`refused_status_patch`] can only write as
+/// `operational` — Global Constraint 11 has no code for "the controller
+/// refused before anything ran", and no run means no code to lift. So
+/// `kubectl get restore` printed the identical `operational` for
+/// `ApprovalNotReceived`, `ApprovalNotVerified`, `PlanHashMismatch`,
+/// `ClusterNotReachable` and `NameTooLong` — five different facts under one
+/// word, with the specific state visible only to `kubectl describe`. For a
+/// `Restore` those are exactly the states an operator scans a list for.
+///
+/// THREE ARMS, AND THE THIRD IS THE ONE THAT CANNOT ROT.
+/// 1. The SHIPPED CRD's `REASON` column names `.status.reason`, and the status
+///    schema declares the field. (`Backup` is asserted UNAFFECTED in the same
+///    arm: it has no `REASON` column at all, so nothing on that kind read
+///    `.status.exitReason` and nothing there was changed.)
+/// 2. All five status-patch builders set `reason`, VERBATIM the reason of the
+///    condition each writes about the run's terminal or current state — so
+///    this is not a third vocabulary beside errata **E5b**'s two, and it is
+///    never one of GC11's lowercase-hyphenated wire strings. One arm drives a
+///    real `reconcile_restore` so the field is proven to reach the wire
+///    through `patch_status` and not merely to exist in a builder's return.
+/// 3. A SOURCE SCAN over `controllers/restore.rs`: every `"conditions"` key
+///    written into a status object has a `"reason"` key in the same builder.
+///    A sixth patch shape added later without one fails here, which is the
+///    only way "every status write" stays true of a file that grows.
+#[tokio::test]
+async fn every_status_write_sets_the_scalar_reason() {
+    // ---- ARM 1: the column, and the field it names ------------------------
+    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let columns = shipped["spec"]["versions"][0]["additionalPrinterColumns"]
+        .as_sequence()
+        .expect("the Restore CRD declares printer columns");
+    let reason_column = columns
+        .iter()
+        .find(|c| c["name"].as_str() == Some("REASON"))
+        .expect("the Restore CRD has a REASON column");
+    assert_eq!(
+        reason_column["jsonPath"].as_str(),
+        Some(".status.reason"),
+        "the REASON column must read the scalar condition reason. `.status.exitReason` is \
+         `operational` for every refusal this controller makes itself, which is what review \
+         finding M2 measured live on two objects"
+    );
+    assert!(
+        shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+            ["properties"]
+            .get("reason")
+            .is_some(),
+        "…and the shipped status schema declares the field the column reads, or the column \
+         renders blank forever"
+    );
+    // `exitReason` IS NOT REMOVED. It is the honest home of GC11's wire string
+    // and of the runner's own `refusal-reason=` terminal state.
+    assert!(
+        shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+            ["properties"]
+            .get("exitReason")
+            .is_some(),
+        "this fix ADDS a field; it does not take GC11's vocabulary away"
+    );
+    // `Backup` IS UNAFFECTED, and this says so mechanically.
+    let backup_columns: Vec<String> = workspace_yaml("config/crd/backups.yaml")["spec"]["versions"]
+        [0]["additionalPrinterColumns"]
+        .as_sequence()
+        .expect("the Backup CRD declares printer columns")
+        .iter()
+        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        !backup_columns.contains(&"REASON".to_string()),
+        "the `Backup` CRD does NOT have this defect and was NOT changed: it has no REASON column \
+         to repoint (PHASE/EXIT/RECORDS/SIGNED/AGE). If a later task adds one, it reads \
+         `.status.reason` and adds the field the same way. Got: {backup_columns:?}"
+    );
+
+    // ---- ARM 2: every builder, and the condition it must agree with -------
+    let r = restore();
+    let hold = RestoreAdmission::ApprovalNotVerified {
+        approval: "a1".to_string(),
+    };
+    let keys = RestoreEvidenceKeys::default();
+    // (label, the status, the index of the condition `reason` must equal)
+    let cases: Vec<(&str, Value, usize)> = vec![
+        (
+            "admission_hold_patch",
+            admission_hold_patch(&r, &hold, now())["status"].clone(),
+            0,
+        ),
+        (
+            "refused_status_patch",
+            refused_status_patch(&r, TERMINAL_STATE_NAME_TOO_LONG, "too long", now())["status"]
+                .clone(),
+            0,
+        ),
+        (
+            "running_status_patch (the creating pass, two conditions)",
+            // THE CURRENT CONDITION IS `JobCreated`, THE ARRAY'S SECOND
+            // ELEMENT. `Admitted` is first and is about a check that already
+            // finished, so a scalar taken from the array's head would print
+            // `Admitted` once and `JobCreated` on every later pass over an
+            // object whose state never changed.
+            running_status_patch(&r, "r1", true, now())["status"].clone(),
+            1,
+        ),
+        (
+            "running_status_patch (a later pass, one condition)",
+            running_status_patch(&r, "r1", false, now())["status"].clone(),
+            0,
+        ),
+        (
+            "finished_status_patch exit 0 (two conditions)",
+            // `Complete` is first and `EvidenceRecorded` is appended after it;
+            // the TERMINAL condition is the one the column must show.
+            finished_status_patch(&r, 0, &keys, None, None, None, now())["status"].clone(),
+            0,
+        ),
+        (
+            "finished_status_patch exit 3",
+            finished_status_patch(
+                &r,
+                3,
+                &keys,
+                Some(TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON),
+                None,
+                None,
+                now(),
+            )["status"]
+                .clone(),
+            0,
+        ),
+        (
+            "crashed_status_patch",
+            crashed_status_patch(&r, "NoExitCode", "r1", now())["status"].clone(),
+            0,
+        ),
+    ];
+    assert_eq!(
+        cases.len(),
+        7,
+        "five builders over seven shapes; a builder added without a case here is caught by ARM 3"
+    );
+    for (label, status, primary) in &cases {
+        let reason = status["reason"].as_str().unwrap_or_else(|| {
+            panic!("[{label}] every status write sets a scalar `reason`. Got: {status}")
+        });
+        assert!(
+            !reason.is_empty(),
+            "[{label}] and it is never the empty string, which renders as a blank column"
+        );
+        let conditions = conditions_of(status);
+        assert_eq!(
+            reason, conditions[*primary].2,
+            "[{label}] `status.reason` is VERBATIM the reason of the condition describing this \
+             run's terminal or current state (index {primary} of {conditions:?}) — not a third \
+             vocabulary beside errata E5b's two"
+        );
+        // NEVER GC11'S WIRE VOCABULARY. This is the assertion that fails if
+        // anyone repoints this field at `exitReason` again: `operational`,
+        // `ok`, `drill-not-pass`, `guard-refused` and `signing-or-lock` are
+        // all excluded, the first by name and the rest by the shape.
+        assert_ne!(
+            reason, REASON_OPERATIONAL,
+            "[{label}] `operational` in this column is the whole of review finding M2"
+        );
+        let first = reason.chars().next().expect("non-empty");
+        assert!(
+            first.is_ascii_uppercase() && !reason.contains('-'),
+            "[{label}] a condition reason is CamelCase with no `-` (errata E5b, and \
+             metav1.Condition's own pattern). Got: {reason}"
+        );
+    }
+
+    // …AND IT REACHES THE WIRE. One real reconcile, the exit-3 path.
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(3),
+        log_body(&format!(
+            "refusal-reason={TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED}\n"
+        )),
+        "Failed",
+    ));
+    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    assert_eq!(
+        status["reason"].as_str(),
+        Some(CONDITION_REASON_GUARD_REFUSED),
+        "the field reaches the API server through `patch_status`, not only a builder's return \
+         value. Got: {status}"
+    );
+    assert_eq!(
+        status["exitReason"].as_str(),
+        Some(TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED),
+        "and `exitReason` still carries the runner's own more specific terminal state — two \
+         fields, two questions"
+    );
+
+    // ---- ARM 3: no sixth patch shape can omit it -------------------------
+    let src = this_module_source();
+    let mut offences: Vec<String> = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        if !line.contains("\"conditions\"") {
+            continue;
+        }
+        // The builder this line belongs to: back up to the enclosing `fn`.
+        let mut start: Option<(usize, String)> = None;
+        for (j, candidate) in src.lines().take(i).enumerate() {
+            if candidate.starts_with("pub fn ") || candidate.starts_with("fn ") {
+                start = Some((j, candidate.to_string()));
+            }
+        }
+        let Some((from, signature)) = start else {
+            continue;
+        };
+        // The body runs to the next top-level `fn`, or to the end.
+        let to = src
+            .lines()
+            .enumerate()
+            .skip(i + 1)
+            .find(|(_, l)| l.starts_with("pub fn ") || l.starts_with("fn "))
+            .map_or(src.lines().count(), |(j, _)| j);
+        let body: String = src
+            .lines()
+            .skip(from)
+            .take(to - from)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !body.contains("\"reason\"") {
+            offences.push(format!(
+                "line {} in `{}` writes `\"conditions\"` into a status with no `\"reason\"` \
+                 beside it",
+                i + 1,
+                signature.trim()
+            ));
+        }
+    }
+    assert!(
+        offences.is_empty(),
+        "review finding M2: EVERY status this reconciler writes carries the scalar \
+         `status.reason` the REASON printer column reads, because a status with conditions and \
+         no scalar is a row that renders blank in `kubectl get restore` while `describe` knows \
+         the answer.\n  {}",
+        offences.join("\n  ")
+    );
+    assert!(
+        src.matches("\"conditions\"").count() >= 5,
+        "the scan found {} `\"conditions\"` writes; there are five patch builders, so a lower \
+         count means this walk found nothing and asserts nothing",
+        src.matches("\"conditions\"").count()
     );
 }
 

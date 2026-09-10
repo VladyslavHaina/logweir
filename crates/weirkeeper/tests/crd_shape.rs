@@ -433,6 +433,17 @@ type Column = (&'static str, &'static str, &'static str);
 /// `just crds`, and 16 of 16 tests passed with all six CI diffs green.
 /// `kubectl get restore` is the operator's whole view of a run and Task 26's UI
 /// reads these columns, so the table is an interface and not decoration.
+///
+/// `Restore`'s `REASON` READS `.status.reason`, NOT `.status.exitReason`, since
+/// Task 20 fix round 1 (review finding M2). `exitReason` is written from an
+/// exit code, and a refusal the CONTROLLER makes before any `POST` has no code
+/// — so all four admission refusals and `NameTooLong` printed the identical
+/// `operational` in this column, measured live on two objects. `status.reason`
+/// is the condition's own reason promoted to a scalar; the field's doc comment
+/// in `crds/restore.rs` carries the measurement.
+/// **`Backup`'s table is unchanged and was never affected: it has no `REASON`
+/// column at all** (PHASE/EXIT/RECORDS/SIGNED/AGE), so there was nothing
+/// reading `.status.exitReason` on that kind to repoint.
 const PRINTER_COLUMNS: [(&str, &[Column]); 6] = [
     (
         "KafkaCluster",
@@ -474,7 +485,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 6] = [
             ("MODE", ".spec.target.mode", "string"),
             ("PHASE", ".status.phase", "string"),
             ("EXIT", ".status.exitCode", "integer"),
-            ("REASON", ".status.exitReason", "string"),
+            ("REASON", ".status.reason", "string"),
             ("OUTCOME", ".status.outcome", "string"),
             ("INTEGRITY", ".status.integrity.result", "string"),
             ("RTO", ".status.measured.rtoSeconds", "integer"),

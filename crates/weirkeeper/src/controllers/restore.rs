@@ -1219,6 +1219,9 @@ pub fn admission_hold_patch(
     json!({
         "status": {
             "phase": PHASE_PENDING,
+            // The scalar the `REASON` column reads — review finding M2. The
+            // hold's own state, VERBATIM the condition's `reason` below.
+            "reason": admission.reason(),
             "conditions": [condition(
                 restore,
                 CONDITION_ADMITTED,
@@ -1257,6 +1260,13 @@ pub fn refused_status_patch(
         "status": {
             "phase": PHASE_FAILED,
             "exitReason": REASON_OPERATIONAL,
+            // THIS IS THE PATCH REVIEW FINDING M2 IS ABOUT. `exitReason` above
+            // is `operational` for every self-decided refusal, because GC11
+            // has no code for "refused before anything ran" — so the `REASON`
+            // column printed `operational` for `ApprovalNotReceived`,
+            // `PlanHashMismatch`, `ClusterNotReachable` and `NameTooLong`
+            // alike. `reason` is the SUB-CASE, verbatim the condition's own.
+            "reason": reason,
             "conditions": [condition(restore, CONDITION_FAILED, "True", reason, message, now)],
         }
     })
@@ -1303,6 +1313,14 @@ pub fn running_status_patch(
         "status": {
             "phase": PHASE_RUNNING,
             "jobRef": { "name": job_name },
+            // THE *CURRENT* CONDITION, WHICH IS `JobCreated` ON BOTH PASSES —
+            // not `Admitted`, which is the FIRST element of `conditions` on
+            // the creating pass only. A scalar that read the array's head
+            // would print `Admitted` once and `JobCreated` for every later
+            // reconcile of an unchanged running object; the run's state is
+            // "the Job exists and has not finished" throughout. Verbatim the
+            // `JobCreated` condition's own `reason` (review finding M2).
+            "reason": CONDITION_JOB_CREATED,
             "conditions": conditions,
         }
     })
@@ -1411,6 +1429,13 @@ pub fn finished_status_patch(
     status.insert("phase".to_string(), json!(phase));
     status.insert("exitCode".to_string(), json!(exit_code));
     status.insert("exitReason".to_string(), json!(exit_reason));
+    // The scalar the `REASON` column reads (review finding M2): the reason of
+    // the TERMINAL condition — `conditions[0]`, the `Complete`/`Failed` one —
+    // and never the `EvidenceRecorded` condition appended after it. On this
+    // path `exitReason` is genuinely informative (it carries the runner's own
+    // `refusal-reason=` state), so the two fields agree in spirit and differ
+    // in vocabulary exactly as errata E5b requires.
+    status.insert("reason".to_string(), json!(cond_reason));
     status.insert("conditions".to_string(), json!(conditions));
 
     let mut evidence = serde_json::Map::new();
@@ -1543,6 +1568,11 @@ pub fn crashed_status_patch(
             "phase": PHASE_FAILED,
             "exitReason": REASON_OPERATIONAL,
             "jobRef": { "name": job_name },
+            // Review finding M2 again: with no exit code there is no wire
+            // reason but `operational`, so `DisruptedMidDrill`,
+            // `PodUnschedulable` and `NoExitCode` were indistinguishable in
+            // the `REASON` column. Verbatim the condition's own `reason`.
+            "reason": terminal_state,
             "conditions": [condition(
                 restore,
                 CONDITION_FAILED,

@@ -197,7 +197,7 @@ pub struct RestoreEvidence {
     printcolumn = r#"{"name":"MODE","type":"string","jsonPath":".spec.target.mode","description":"scratch is a drill"}"#,
     printcolumn = r#"{"name":"PHASE","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"EXIT","type":"integer","jsonPath":".status.exitCode","description":"0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed"}"#,
-    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.exitReason","description":"the terminal state, for exit 3"}"#,
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.reason","description":"the terminal or current condition reason - ApprovalNotVerified, PlanHashMismatch, GuardRefused, Ok, ...; NOT exitReason, which is `operational` for every admission refusal"}"#,
     printcolumn = r#"{"name":"OUTCOME","type":"string","jsonPath":".status.outcome"}"#,
     printcolumn = r#"{"name":"INTEGRITY","type":"string","jsonPath":".status.integrity.result"}"#,
     printcolumn = r#"{"name":"RTO","type":"integer","jsonPath":".status.measured.rtoSeconds"}"#,
@@ -252,6 +252,42 @@ pub struct RestoreStatus {
     /// selector, so nothing on stderr is distinguishable by a controller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_reason: Option<String>,
+    /// The reason of the condition that describes this run RIGHT NOW —
+    /// `ApprovalNotVerified`, `ApprovalNotReceived`, `PlanHashMismatch`,
+    /// `ClusterNotReachable`, `NameTooLong`, `JobCreated`, `Ok`,
+    /// `GuardRefused`, `DrillNotPass`, `SigningOrLock`, `Operational`, … —
+    /// and the field the `REASON` printer column reads.
+    ///
+    /// # Why this exists beside `exitReason`, which looks like it says the
+    /// same thing
+    ///
+    /// IT DOES NOT SAY THE SAME THING, AND FOR THE FOUR STATES AN OPERATOR
+    /// MOST NEEDS IT SAID NOTHING AT ALL. `exitReason` is Global Constraint
+    /// 11's vocabulary about a RUN: it is written from an exit code, and a
+    /// refusal this controller makes ITSELF — before any `POST`, so with no
+    /// run and no code — can only spell it `operational`, which is GC11's
+    /// "could not be attempted". All four admission refusals
+    /// (`ApprovalNotReceived`, `ApprovalNotVerified`, `PlanHashMismatch`,
+    /// `ClusterNotReachable`) and `NameTooLong` therefore printed the SAME
+    /// `operational` in the `REASON` column, and the specific state existed
+    /// only inside `status.conditions` — measured live at the Task 20 review
+    /// (finding M2) on two objects that both printed `operational`.
+    ///
+    /// So this field is the CONDITION's answer, promoted to a scalar. It is
+    /// not a third vocabulary: it is always **verbatim** the `reason` of the
+    /// condition this patch writes about the run's current or terminal state,
+    /// which makes it CamelCase everywhere by errata **E5b**, and
+    /// `every_status_write_sets_the_scalar_reason` asserts the equality for
+    /// every patch builder plus, by source scan, that a patch which writes
+    /// `conditions` and no `reason` cannot be added.
+    ///
+    /// `exitReason` is UNCHANGED and still the honest home of GC11's wire
+    /// string and of the runner's own `refusal-reason=` terminal state, which
+    /// is the more specific answer whenever a pod actually ran. Two fields,
+    /// two questions: *what did the run exit with* and *what state is this
+    /// object in*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// The last phase slot that completed, `-1` through `9`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_phase_completed: Option<i32>,
