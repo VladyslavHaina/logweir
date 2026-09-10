@@ -14,6 +14,13 @@ use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicDele
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// What `FixtureEngine::restore` writes to `plan.offset_report`, standing in
+/// for the engine's `serde_json::to_string_pretty(&offset_mapping)`
+/// [U:crates/kafka-backup-core/src/restore/engine.rs:1382-1388]. An EMPTY
+/// mapping is the honest shape for a run rendered
+/// `consumer_group_strategy: skip`, which is every run tag 1 performs.
+pub const OFFSET_REPORT_BYTES: &[u8] = b"{}\n";
+
 pub fn ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
@@ -134,6 +141,7 @@ pub fn plan() -> RestorePlan {
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
+        offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
 }
 
@@ -972,6 +980,18 @@ impl DataEngine for FixtureEngine {
         *self.restored.lock().unwrap() = true;
         o.phase_started(6, "restore");
         let started_at = Utc::now();
+        // The offset-mapping report, written EXACTLY where the real engine
+        // writes it (Task 9b): from the `Ok` arm of a completed restore, to
+        // `plan.offset_report`, with a bare write whose failure it does not
+        // escalate [U:crates/kafka-backup-core/src/restore/engine.rs:417-427,
+        // :1382-1388]. Without this the double would make phase 8's upload
+        // untestable in process — the seam would only ever see an absent file.
+        //
+        // `unwrap()`-free on purpose: mirroring the engine's own `warn!` means
+        // a fixture whose workdir was not created behaves like the engine
+        // rather than panicking, which is what lets a test assert the
+        // presence-tolerant branch too.
+        let _ = std::fs::write(&_p.offset_report, OFFSET_REPORT_BYTES);
         o.phase_finished(6, "ok");
         Ok(RestoreFacts {
             started_at,
@@ -1314,6 +1334,11 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             triggered_by: Some("fixture".into()),
             out: Some(out.clone()),
             metrics_file: Some(metrics.clone()),
+            // `None` — so the plan's DEFAULT applies and the offset report
+            // lands beside the checkpoint in this run's own workdir, which is
+            // the directory `execute_with_outcome` creates and the one
+            // `FixtureEngine::restore` writes into (Task 9b).
+            offset_report_out: None,
         },
         run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {

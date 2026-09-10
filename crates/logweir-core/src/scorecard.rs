@@ -471,6 +471,44 @@ pub struct EvidenceInfo {
     /// NOT evidence that the object could have been overwritten — the two
     /// cases are indistinguishable in the signed document by design.
     pub create_only_enforced: bool,
+    /// The object key of the ENGINE's offset-mapping report for this run,
+    /// `logweir/drills/<run_id>.offsets.json` (Task 9b, spec §6.1 N9).
+    ///
+    /// **A NESTED OPTIONAL FIELD, which is the only kind Global Constraint 12
+    /// as amended permits.** The scorecard stays at its frozen 21 top-level
+    /// properties and 17 required ones; this is the third such field in tag 1
+    /// (after `target.auth`) and it pays GC12's full price in the same commit:
+    /// both readers, a `SCRIPT_VERSION` bump, a corpus case with closed
+    /// arithmetic, and the regenerated schema.
+    ///
+    /// `skip_serializing_if` is load-bearing, not tidiness: without it every
+    /// document would gain a `"offset_report_key": null` line and the three
+    /// checked-in signed fixtures under `e2e/fixtures/signed/` would stop
+    /// verifying against their own sidecars. Absent means this run recorded no
+    /// report — see `crate::drill::phase8_score::Signed::offset_report_key` in
+    /// the `logweir` crate for the paths on which that is the truthful answer.
+    ///
+    /// # Why the report is uploaded at all
+    ///
+    /// The engine writes it to a POD-LOCAL path
+    /// [U:crates/kafka-backup-core/src/config.rs:857-858] and the pod is then
+    /// deleted, so without this upload the one artefact describing what the
+    /// restore's offsets map to would exist only for the lifetime of a
+    /// container. It is evidence, not an instruction: Global Constraint 20
+    /// makes no offset commit anywhere in tag 1 and constraint 35 says tag 1
+    /// renders the report and applies nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_report_key: Option<String>,
+    /// `sha256:<hex>` of the EXACT offset-report bytes uploaded at
+    /// `offset_report_key`, so a reader can bind the object to this signed
+    /// document rather than trusting that the key still holds what the run
+    /// wrote.
+    ///
+    /// **Present exactly when `offset_report_key` is.** The pair is checked by
+    /// `validate_invariants` in both readers: a key with no digest names bytes
+    /// nothing binds, and a digest with no key binds bytes nobody can fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_report_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -570,6 +608,46 @@ impl Scorecard {
             if self.evidence.create_only_enforced {
                 return Err(InvariantError(
                     "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing".into(),
+                ));
+            }
+            // `evidence.offset_report_*` (Task 9b — Global Constraint 12's
+            // price for two nested optional fields). ABSENT IS LEGAL and means
+            // this run recorded no offset-mapping report; the arm fires only
+            // on a document carrying ONE of the pair.
+            //
+            // BOTH DIRECTIONS, one statement, because the incoherence is
+            // symmetric: a key with no digest names bytes nothing binds, and a
+            // digest with no key binds bytes nobody can fetch. Neither is a
+            // document Logweir can write — `phase8_score::run` sets both from
+            // one `Option` — so this arm exists for the documents this tree
+            // did not write, which is every document a reader is handed.
+            //
+            // BLANK COUNTS AS ABSENT (ruling R-A: `trim().is_empty()` here,
+            // `.strip()` in `docs/verify_scorecard.py`). Without it the two
+            // readers would disagree on `""`: Rust's `is_some()` is true for
+            // `Some("")` while Python's truthiness test is false, which is
+            // exactly the class of split the parity gate exists to catch.
+            //
+            // Scoped to major 1 like the four arms above, so a future major
+            // may redefine the block. NOT INTERPOLATED: the message is joined
+            // to `index.json`'s `arm` field by literal substring
+            // (`crates/logweir/tests/two_reader_parity.rs::
+            // every_invariant_arm_has_a_corpus_case`), and a key in a refusal
+            // line would be an adopter-influenced string in a refusal line.
+            let offset_key_named = self
+                .evidence
+                .offset_report_key
+                .as_deref()
+                .is_some_and(|k| !k.trim().is_empty());
+            let offset_digest_named = self
+                .evidence
+                .offset_report_sha256
+                .as_deref()
+                .is_some_and(|d| !d.trim().is_empty());
+            if offset_key_named != offset_digest_named {
+                return Err(InvariantError(
+                    "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch"
+                        .into(),
                 ));
             }
         }
@@ -1029,6 +1107,8 @@ mod tests {
                 retain_until: None,
                 immutable: false,
                 create_only_enforced: false,
+                offset_report_key: None,
+                offset_report_sha256: None,
             },
             redactions: vec![],
         }
@@ -1122,6 +1202,99 @@ mod tests {
         sc.evidence.create_only_enforced = true;
         sc.validate_invariants()
             .expect("the evidence arm is scoped to major 1 and must not fire on a 0.x document");
+    }
+
+    // --- the offset report's key and digest travel together (Task 9b) ----
+    //
+    // GC12's price for two nested optional fields, this reader's per-arm
+    // coverage. The corpus's own README names these unit tests as the only
+    // thing that survives a fully coordinated deletion across
+    // `docs/verify_scorecard.py`, `e2e/fixtures/invariants/` and the pytest
+    // suite — so BOTH directions get a row and each asserts the SPECIFIC
+    // message, byte-identically with the Python mirror's.
+
+    #[test]
+    fn invariants_refuse_an_offset_report_key_without_its_sha256() {
+        let mut sc = valid_scorecard();
+        sc.evidence.offset_report_key = Some("logweir/drills/RUN.offsets.json".into());
+        let err = sc
+            .validate_invariants()
+            .expect_err("a key with no digest names bytes nothing binds");
+        assert_eq!(
+            err.0,
+            "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_an_offset_report_sha256_without_its_key() {
+        let mut sc = valid_scorecard();
+        sc.evidence.offset_report_sha256 = Some(format!("sha256:{}", "0".repeat(64)));
+        let err = sc
+            .validate_invariants()
+            .expect_err("a digest with no key binds bytes nobody can fetch");
+        assert_eq!(
+            err.0,
+            "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch"
+        );
+    }
+
+    /// Ruling R-A: BLANK counts as ABSENT, on both sides, so the two readers
+    /// cannot disagree on `""` — Rust's `is_some()` is true for `Some("")`
+    /// while Python's truthiness test is false, and that split is exactly what
+    /// T0-6 found in the `partial_reason` arm.
+    #[test]
+    fn a_blank_offset_report_pair_counts_as_absent() {
+        let mut sc = valid_scorecard();
+        sc.evidence.offset_report_key = Some("   ".into());
+        sc.evidence.offset_report_sha256 = Some(String::new());
+        sc.validate_invariants()
+            .expect("two blank fields are two ABSENT fields, not two present ones");
+
+        // …and a blank key beside a REAL digest is still the refusal.
+        let mut sc = valid_scorecard();
+        sc.evidence.offset_report_key = Some("  ".into());
+        sc.evidence.offset_report_sha256 = Some(format!("sha256:{}", "a".repeat(64)));
+        sc.validate_invariants()
+            .expect_err("a blank key beside a real digest is a digest with no key");
+    }
+
+    #[test]
+    fn invariants_accept_both_offset_report_fields_or_neither() {
+        // Neither — every scorecard this tree wrote before Task 9b.
+        valid_scorecard()
+            .validate_invariants()
+            .expect("an absent pair is the state of every document written before it existed");
+        // Both — what phase 8 writes when the engine produced a report.
+        let mut sc = valid_scorecard();
+        sc.evidence.offset_report_key = Some("logweir/drills/RUN.offsets.json".into());
+        sc.evidence.offset_report_sha256 = Some(format!("sha256:{}", "b".repeat(64)));
+        sc.validate_invariants()
+            .expect("both present is what a completed restore records");
+    }
+
+    /// The two fields serialise to NOTHING when absent, which is what keeps
+    /// the three checked-in signed fixtures under `e2e/fixtures/signed/`
+    /// byte-identical — GC12's price, paid without re-minting them.
+    #[test]
+    fn an_absent_offset_report_adds_no_json_key_at_all() {
+        let sc = valid_scorecard();
+        let v = serde_json::to_value(&sc).expect("a scorecard serialises");
+        let ev = &v["evidence"];
+        assert!(
+            ev.get("offset_report_key").is_none() && ev.get("offset_report_sha256").is_none(),
+            "an absent pair must add no key, not a null one: {ev}"
+        );
+        // And the four fields that WERE there are still there, so this is a
+        // statement about the two new ones and not about the block.
+        for name in [
+            "version_id",
+            "retain_until",
+            "immutable",
+            "create_only_enforced",
+        ] {
+            assert!(ev.get(name).is_some(), "{name} must still be present: {ev}");
+        }
     }
 
     #[test]

@@ -154,6 +154,13 @@ fn main() {
             retain_until: None,
             immutable: false,
             create_only_enforced: false,
+            // Task 9b's two nested optional fields, ABSENT — which is what
+            // keeps this fixture byte-identical (both carry
+            // `skip_serializing_if = "Option::is_none"`). The three signed
+            // fixtures under e2e/fixtures/signed/ are never re-minted (GC12's
+            // price, paid without touching them).
+            offset_report_key: None,
+            offset_report_sha256: None,
         },
         redactions: vec![],
     };

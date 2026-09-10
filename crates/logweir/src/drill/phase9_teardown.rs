@@ -32,6 +32,7 @@
 //! child is spawned with `RUST_LOG=warn` pinned and contributes nothing to a
 //! clean run's stream, so those two lines are the whole of it.)
 use crate::drill::DrillError;
+use logweir_core::spec::TargetMode;
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::TopicDeleter;
 use std::collections::BTreeMap;
@@ -39,6 +40,20 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TeardownAttestation {
     pub run_id: String,
+    /// WHICH restore this was — `scratch` or `newTopic` (interface **I33**).
+    ///
+    /// It is on the attestation because the attestation's whole job is to say
+    /// honestly what phase 9 did, and "nothing, and nothing was owed" is a
+    /// different fact from "nothing, and the policy said keep". Without it, an
+    /// auditor reading `{topics_deleted: [], topics_failed: []}` cannot tell a
+    /// point-in-time recovery — where deleting the restored topic would delete
+    /// the recovery — from a scratch drill whose teardown silently did nothing.
+    ///
+    /// `#[serde(default)]` so a teardown document written before this field
+    /// existed still parses, defaulting to `scratch`, which is what every such
+    /// document was.
+    #[serde(default)]
+    pub target_mode: TargetMode,
     /// `sha256:<hex>` of the SIGNED scorecard bytes — not the run id again.
     /// Binding the attestation to `run_id` twice would carry no independent
     /// information and could not identify WHICH signed document this teardown
@@ -59,12 +74,32 @@ pub fn run(
     deleter: &dyn TopicDeleter,
     mapping: &BTreeMap<String, String>,
     policy: &str,
+    mode: TargetMode,
     run_id: &str,
     scorecard_sha256: &str,
 ) -> TeardownAttestation {
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
-    if policy == "delete" {
+    // **PHASE 9 TEARS DOWN IN `scratch` MODE AND NOWHERE ELSE** (Global
+    // Constraint 19: "tag 1 deletes nothing but the scratch topics a
+    // `mode: scratch` restore created, in phase 9"; spec §6.1).
+    //
+    // The mode is checked BEFORE the policy, and it is not an `&&` inside the
+    // existing condition, because the two conditions mean different things and
+    // an operator reading this has to be able to tell them apart: `policy`
+    // is the adopter's choice for a scratch drill, while the mode is a
+    // structural fact about what phase 9 is even allowed to do. In `newTopic`
+    // mode the mapped topics ARE the recovery — deleting them at any value of
+    // `target.teardown` would delete the thing the restore was run to produce,
+    // on a real cluster, immediately after signing a document saying it
+    // succeeded.
+    //
+    // `deleter` is untouched on this path, which is what
+    // `crates/logweir/tests/restore_mode.rs::
+    // a_new_topic_restore_tears_nothing_down` asserts through a recording
+    // double: `calls` empty after a `newTopic` run, non-empty after a
+    // `scratch` one.
+    if mode == TargetMode::Scratch && policy == "delete" {
         let names: Vec<String> = mapping.values().cloned().collect();
         match deleter.delete_topics(&names) {
             Ok(results) => {
@@ -87,6 +122,7 @@ pub fn run(
     }
     TeardownAttestation {
         run_id: run_id.into(),
+        target_mode: mode,
         scorecard_sha256: scorecard_sha256.into(),
         teardown_policy: policy.into(),
         topics_deleted: deleted,

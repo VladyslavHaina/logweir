@@ -60,6 +60,12 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
         target: TargetSpec {
             bootstrap_servers: vec!["localhost:9092".into()],
             auth: logweir_core::spec::AuthSpec::Plaintext,
+            // Task 9b: `scratch` is the default and is what every row in this
+            // file is about — the marker and allowlist checks below ARE the
+            // scratch segregation proof. `newTopic`'s skips are asserted in
+            // `crates/logweir/tests/restore_mode.rs`.
+            mode: logweir_core::spec::TargetMode::Scratch,
+            topic_naming: None,
             marker_topic: MARKER.into(),
             topic_mapping_prefix: PREFIX.into(),
             default_replication_factor: 1,

@@ -292,7 +292,21 @@ FORMAT_VERSION = "1.0.0"
 # `FORMAT_VERSION` stays `1.0.0` for both documents (only a `description`
 # changed in the receipt's schema), which is exactly the distinction
 # `test_the_script_version_is_not_the_format_version` exists to keep.
-SCRIPT_VERSION = "1.10.0"
+# 1.11.0 (Task 9b) adds ONE arm: `evidence.offset_report_key` and
+# `evidence.offset_report_sha256` are present or absent TOGETHER. They are two
+# new NESTED OPTIONAL fields on the scorecard's evidence block — Global
+# Constraint 12 as amended permits that kind and no other, and the document
+# stays at its frozen 21 top-level properties and 17 required ones. They record
+# the object key and digest of the ENGINE's offset-mapping report, which the
+# runner uploads beside the scorecard because the engine writes it to a
+# pod-local path [U:crates/kafka-backup-core/src/config.rs:857-858] and the pod
+# is then deleted. Tag 1 RENDERS that report and applies nothing (Global
+# Constraints 20 and 35): no consumer-group offset is committed anywhere.
+#
+# NOTE FOR ANY LATER TASK QUOTING A BRIEF: task-9b-brief.md says "1.9.0 ->
+# 1.10.0". 1.10.0 was already taken, by Task 5b's fix round, which closed the
+# auth mode's value set. The brief's number is the error, not this constant.
+SCRIPT_VERSION = "1.11.0"
 
 # The FOUR payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -870,6 +884,27 @@ def check_invariants(doc) -> str:
             return "evidence.immutable is true but the four post-put fields are zeroed before signing"
         if evidence.get("create_only_enforced"):
             return "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing"
+        # `evidence.offset_report_*` (Task 9b — Global Constraint 12's price
+        # for two nested optional fields), mirrored ARM FOR ARM and IN THIS
+        # POSITION from `Scorecard::validate_invariants`, inside the same
+        # `major == 1` scope, with the same words.
+        #
+        # ABSENT IS LEGAL and means this run recorded no offset-mapping report.
+        # BOTH DIRECTIONS in ONE arm, because the incoherence is symmetric.
+        #
+        # BLANK COUNTS AS ABSENT (ruling R-A): `.strip()` here,
+        # `trim().is_empty()` there. Without it the two readers would disagree
+        # on `""` — Rust's `is_some()` is true for `Some("")` while Python's
+        # truthiness is false — which is the class of split the parity gate
+        # exists to catch, and the one T0-6 actually found.
+        offset_key_named = bool(str(evidence.get("offset_report_key") or "").strip())
+        offset_digest_named = bool(str(evidence.get("offset_report_sha256") or "").strip())
+        if offset_key_named != offset_digest_named:
+            return (
+                "evidence.offset_report_key and evidence.offset_report_sha256 are present or "
+                "absent together; a key with no digest names bytes nothing binds, and a digest "
+                "with no key binds bytes nobody can fetch"
+            )
 
     # T0-6 / ruling R-A: `.strip()` on both sides. Python truthiness already
     # refused `""` while the Rust arm's `.is_none()` accepted AND SIGNED it —
@@ -1466,6 +1501,20 @@ def main(
             "       evidence: the four post-put fields are zeroed before signing; "
             "the storage facts live in the receipt"
         )
+        # THE OFFSET REPORT, read PRESENCE-TOLERANTLY (Task 9b). Two nested
+        # optional fields: absent means this run recorded no offset-mapping
+        # report, which is the truthful answer for a run that signed a document
+        # without having completed a restore. Printed only when present, so an
+        # older run's output is byte-identical to what it was — and the DIGEST
+        # is printed beside the key, because a key alone tells an auditor where
+        # to look and not whether what they find is what was signed.
+        offsets_key = str(doc["evidence"].get("offset_report_key") or "").strip()
+        if offsets_key:
+            print(f"       offsets:  {offsets_key}")
+            print(
+                f"                 {doc['evidence'].get('offset_report_sha256')} "
+                "— the engine's offset MAPPING, uploaded as evidence and applied to nothing"
+            )
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -1495,6 +1544,7 @@ def main(
             "implies, u64 domain with null refused where Rust has no Option, "
             "target.auth's mode present, not blank, and one of the two values the "
             "format defines when the block is; "
+            "evidence.offset_report_key and its sha256 present or absent together; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

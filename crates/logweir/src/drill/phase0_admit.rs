@@ -3,7 +3,7 @@ use logweir_core::guard::{
     check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
 };
-use logweir_core::spec::{AllowedClusters, Anchor, DrillSpec};
+use logweir_core::spec::{target_topic_prefix, AllowedClusters, Anchor, DrillSpec, TargetMode};
 use logweir_kafka::reader::{
     ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, TARGET_TOPIC_CONFIGS,
 };
@@ -13,6 +13,19 @@ use std::collections::BTreeMap;
 pub struct Admitted {
     pub target_cluster_id: String,
     pub topic_mapping: BTreeMap<String, String>,
+    /// The prefix every key in `topic_mapping` was actually mapped through —
+    /// `logweir_core::spec::target_topic_prefix` of this spec, i.e.
+    /// `target.topic_mapping_prefix` in `scratch` mode and the `newTopic`
+    /// naming rule in `newTopic` mode.
+    ///
+    /// Carried out rather than re-derived by whoever needs to name it, for the
+    /// same reason `phase8_score::Signed::key` is: the signed scorecard's
+    /// `target.topic_mapping_prefix` is supposed to say what this run mapped
+    /// through, and re-reading `spec.target.topic_mapping_prefix` at the
+    /// scorecard end would report the SCRATCH prefix over a `newTopic` run —
+    /// a false claim in the one field an auditor uses to re-derive the
+    /// mapping.
+    pub topic_mapping_prefix: String,
     /// **Guard G-TS.** What phase 0 read off the broker, and the config set it
     /// will apply to every target topic. `topics_created` is filled in by
     /// `create_target_topics` — see that function for why the creation itself
@@ -127,16 +140,18 @@ pub fn run(
     // local refusal should not need a reachable broker, and putting them first
     // is what lets `guard_cli.rs` distinguish "refused by the mapping guard"
     // from "refused because the broker was down".
+    //
+    // **THE NAMING, PER MODE** (spec §6.1 "New-topic naming", interface I33).
+    // `target_topic_prefix` is the one place the rule lives and it is in the
+    // pure core: `scratch` maps through `target.topic_mapping_prefix`,
+    // `newTopic` through `target.topic_naming.prefix` or, absent that,
+    // `default_topic_prefix(<the recovery point>)`.
+    let prefix = target_topic_prefix(spec);
     let topic_mapping: BTreeMap<String, String> = spec
         .source
         .topics
         .iter()
-        .map(|t| {
-            (
-                t.clone(),
-                format!("{}{t}", spec.target.topic_mapping_prefix),
-            )
-        })
+        .map(|t| (t.clone(), format!("{prefix}{t}")))
         .collect();
     // `check_topic_mapping_coverage` returns `Result<(), GuardRefusal>`; `?`
     // converts it into `DrillError::Guard` via the `#[from]` impl.
@@ -245,49 +260,92 @@ pub fn run(
     // refusal, and `?` converts it into `DrillError::Kafka` (exit 1), not
     // `DrillError::Guard` (exit 3).
     let target_cluster_id = reader.cluster_id()?;
-    if !allowed.allowed_cluster_ids.contains(&target_cluster_id) {
-        return Err(GuardRefusal(format!(
-            "target cluster id {target_cluster_id} is not in allowedClusterIds"
-        ))
-        .into());
-    }
-    if allowed.source_cluster_id.as_deref() == Some(target_cluster_id.as_str()) {
-        return Err(GuardRefusal(format!(
-            "target cluster id {target_cluster_id} equals the source cluster id"
-        ))
-        .into());
-    }
-
+    // The cluster id is read in BOTH modes and never skipped: the signed
+    // scorecard's `target.cluster_id` is the only thing that says WHICH
+    // cluster this restore wrote to, and the refusal below names it.
     let topics = reader.list_topics()?;
-    // The marker topic must be CONFIRMED HEALTHY, not merely named in the
-    // list: `logweir_kafka::reader::TopicMeta`'s own doc comment assigns this
-    // caller the job of checking `error.is_none()` rather than trusting bare
-    // presence — a topic mid-leader-election or one this principal cannot
-    // describe still appears in `list_topics`'s output (by that same
-    // contract) carrying `partitions: 0` and an `error`, and admitting on
-    // name alone would let that meaningless metadata reach a later phase.
-    match topics.iter().find(|t| t.name == spec.target.marker_topic) {
-        Some(t) if t.error.is_none() => {}
-        Some(t) => {
-            return Err(GuardRefusal(format!(
-                "marker topic `{}` exists on cluster {target_cluster_id} but its metadata \
-                 carried an error, so its presence cannot be confirmed healthy: {}. \
-                 Its existence is the v0.1 segregation proof — recreate it healthy on the \
-                 SCRATCH cluster only.",
-                spec.target.marker_topic,
-                t.error.as_deref().unwrap_or("<no detail>")
-            ))
-            .into());
+
+    // **THE MODE BRANCH** (interface I33, spec §6.1). Written as an explicit
+    // `match` on `spec.target.mode` — never as three scattered `if mode ==`
+    // tests — so the set of checks a `newTopic` restore does NOT run is
+    // readable in one place, with the reason beside each.
+    match spec.target.mode {
+        // v0.1's behaviour, byte for byte. The three checks below ARE the
+        // scratch segregation proof, and their job is to establish that this
+        // drill is writing to a throwaway cluster.
+        TargetMode::Scratch => {
+            // SKIPPED IN `newTopic` (1 of 3) — the cluster allowlist. An
+            // allowlist of permitted SCRATCH clusters cannot contain the
+            // cluster an operator is recovering INTO, so requiring it would
+            // make the flagship restore unperformable; the plan's approval
+            // (phase 1) and the target-absence refusal below are what bound a
+            // `newTopic` run instead.
+            if !allowed.allowed_cluster_ids.contains(&target_cluster_id) {
+                return Err(GuardRefusal(format!(
+                    "target cluster id {target_cluster_id} is not in allowedClusterIds"
+                ))
+                .into());
+            }
+            // SKIPPED IN `newTopic` (2 of 3) — target != source. For a
+            // scratch drill, restoring onto the cluster the archive came from
+            // would destroy the segregation the whole drill claims; for a
+            // point-in-time recovery, the source cluster is EXACTLY where the
+            // restore belongs, and refusing it would refuse the only case tag
+            // 1 exists for.
+            if allowed.source_cluster_id.as_deref() == Some(target_cluster_id.as_str()) {
+                return Err(GuardRefusal(format!(
+                    "target cluster id {target_cluster_id} equals the source cluster id"
+                ))
+                .into());
+            }
+            // SKIPPED IN `newTopic` (3 of 3) — the marker topic. Its
+            // existence is a statement that a cluster is a throwaway; asking
+            // an operator to create `logweir.scratch` on a production cluster
+            // to recover a topic would be asking them to write a lie about
+            // that cluster onto it.
+            //
+            // The marker must be CONFIRMED HEALTHY, not merely named in the
+            // list: `logweir_kafka::reader::TopicMeta`'s own doc comment
+            // assigns this caller the job of checking `error.is_none()` rather
+            // than trusting bare presence — a topic mid-leader-election or one
+            // this principal cannot describe still appears in `list_topics`'s
+            // output (by that same contract) carrying `partitions: 0` and an
+            // `error`, and admitting on name alone would let that meaningless
+            // metadata reach a later phase.
+            match topics.iter().find(|t| t.name == spec.target.marker_topic) {
+                Some(t) if t.error.is_none() => {}
+                Some(t) => {
+                    return Err(GuardRefusal(format!(
+                        "marker topic `{}` exists on cluster {target_cluster_id} but its metadata \
+                         carried an error, so its presence cannot be confirmed healthy: {}. \
+                         Its existence is the v0.1 segregation proof — recreate it healthy on the \
+                         SCRATCH cluster only.",
+                        spec.target.marker_topic,
+                        t.error.as_deref().unwrap_or("<no detail>")
+                    ))
+                    .into());
+                }
+                None => {
+                    return Err(GuardRefusal(format!(
+                        "marker topic `{}` does not exist on cluster {target_cluster_id}. \
+                         Create it on the SCRATCH cluster only — its existence is the v0.1 \
+                         segregation proof.",
+                        spec.target.marker_topic
+                    ))
+                    .into());
+                }
+            }
         }
-        None => {
-            return Err(GuardRefusal(format!(
-                "marker topic `{}` does not exist on cluster {target_cluster_id}. \
-                 Create it on the SCRATCH cluster only — its existence is the v0.1 \
-                 segregation proof.",
-                spec.target.marker_topic
-            ))
-            .into());
-        }
+        // A restore into a NEW topic is non-destructive by construction: it
+        // only ever writes a topic that did not exist, which the refusal
+        // immediately below proves rather than assumes. That refusal is not a
+        // weaker substitute for the three checks above — it is the only one of
+        // the four that says anything at all about a real cluster's data.
+        //
+        // Phase 9 also tears nothing down in this mode (Global Constraint 19,
+        // `phase9_teardown::run`), which is the fourth difference and lives
+        // there because that is where the deletion is.
+        TargetMode::NewTopic => {}
     }
 
     // **Spec §6.1: "A `Restore` refuses if any mapped target topic already
@@ -325,23 +383,33 @@ pub fn run(
     // configuration finding, spec §3.2 names no state of its own for it, and
     // widening the declared state to cover it would make the terminal state a
     // worse signal for the operator, not a better one.
+    // **ONE refusal path, in BOTH modes.** Task 9b converges the message on
+    // spec §6.1's own sentence and adds nothing beside it: a second
+    // `newTopic`-only existence check would be a second place for the two to
+    // drift, and the rule is identical in both modes because the reason is.
     let already_present: Vec<&String> = topic_mapping
         .values()
         .filter(|t| topics.iter().any(|m| &m.name == *t))
         .collect();
-    if !already_present.is_empty() {
+    if let Some(first) = already_present.first() {
         return Err(GuardRefusal(format!(
-            "mapped target topic(s) already exist on cluster {target_cluster_id}: {}. A restore \
-             appends into them, so the drill would reconcile the archive against records it did \
-             not write, and their message.timestamp.type and retention.ms are whatever they were \
-             created with — this build sets the pinned pair by CREATING each target and cannot \
-             alter an existing one. Delete them on the SCRATCH cluster, or restore under a \
-             target.topic_mapping_prefix nothing has used yet.",
+            "mapped target topic `{first}` already exists on cluster {target_cluster_id}; \
+             appending into a half-populated topic produces a restore that reconciles against \
+             records it did not write. Every mapped target topic that already exists, in \
+             mapping order: {}. Their message.timestamp.type and retention.ms are also whatever \
+             they were created with — this build sets the pinned pair by CREATING each target \
+             and cannot alter an existing one. Delete them, or restore under a prefix nothing \
+             has used yet ({prefix_field} in this spec, mode {mode}).",
             already_present
                 .iter()
                 .map(|t| format!("`{t}`"))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            prefix_field = match spec.target.mode {
+                TargetMode::Scratch => "target.topic_mapping_prefix",
+                TargetMode::NewTopic => "target.topic_naming.prefix",
+            },
+            mode = spec.target.mode,
         ))
         .into());
     }
@@ -356,6 +424,7 @@ pub fn run(
     Ok(Admitted {
         target_cluster_id,
         topic_mapping,
+        topic_mapping_prefix: prefix,
         topic_preflight,
     })
 }
@@ -699,6 +768,8 @@ mod tests {
             target: TargetSpec {
                 bootstrap_servers: vec!["localhost:9092".into()],
                 auth: logweir_core::spec::AuthSpec::Plaintext,
+                mode: TargetMode::Scratch,
+                topic_naming: None,
                 marker_topic: "logweir.scratch".into(),
                 topic_mapping_prefix: prefix.into(),
                 default_replication_factor: 1,

@@ -256,6 +256,7 @@ fn teardown_failure_names_the_topics() {
         &RefusesTheOneTopic,
         &fixtures::mapping("orders", SCRATCH_TOPIC),
         "delete",
+        logweir_core::spec::TargetMode::Scratch,
         "RUN",
         "SC",
     );

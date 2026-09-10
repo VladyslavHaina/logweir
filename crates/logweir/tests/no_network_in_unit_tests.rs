@@ -88,7 +88,7 @@ const DIAL_TOKENS: [&str; 13] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 15] = [
+const ALLOWED: [(&str, &str); 16] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -161,6 +161,12 @@ const ALLOWED: [(&str, &str); 15] = [
         "crates/weirkeeper/tests/retention.rs",
         "read-only handles over a filesystem archive copied into a scratch directory — no \
          endpoint, no network",
+    ),
+    (
+        "crates/logweir/tests/restore_mode.rs",
+        "test support: `DrillSpec` YAML whose `target.bootstrap_servers` is `localhost:9092`, \
+         handed to `ClusterReader`/`TopicCreator`/`TopicDeleter` doubles; constructs no client \
+         (Task 9b, chain N)",
     ),
 ];
 

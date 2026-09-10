@@ -1740,3 +1740,95 @@ fn the_crd_auth_mode_enum_and_auth_spec_agree() {
     // have quietly grown one either.
     assert_eq!(rust_tags.len(), 2, "{rust_tags:?}");
 }
+
+/// **I33, Task 9b's half.** `TargetMode`'s serde names are exactly the
+/// `Restore` CRD's `target.mode` enum, in that order.
+///
+/// Two surfaces name this mode and both have to agree: the custom resource an
+/// adopter applies (this CRD's enum, pinned independently by
+/// `restore_target_mode_accepts_only_scratch_or_new_topic`) and the YAML an
+/// adopter writes into a `RestoreSpec` (`TargetMode`, serde). Task 20 renders
+/// `Restore.spec.planBytes` from the former into the latter, so a spelling
+/// that differs between them is a `kubectl apply` that succeeds followed by a
+/// `restore run` that cannot parse its own plan.
+///
+/// **BY VALUE, out of serde itself, not retyped.** Each variant is serialised
+/// and the resulting string read back, so this cannot pass against a type
+/// whose wire spelling has drifted from its variant name. The ORDER is
+/// asserted too, not just the set: `enum_values` returns the CRD's declaration
+/// order, which is the order `kubectl explain` prints, and an adopter reading
+/// the two lists side by side should not have to wonder whether they are the
+/// same list.
+///
+/// The mutant this exists for: spell the CRD-facing mode `new-topic` instead of
+/// `newTopic` — drop `#[serde(rename_all = "camelCase")]` from `TargetMode`, or
+/// rename the variant. Either fails HERE, at assertion time.
+#[test]
+fn the_crd_mode_enum_and_target_mode_agree() {
+    let doc = crd("restores.yaml");
+    let crd_enum = enum_values(at(
+        spec_schema(&doc),
+        &["properties", "target", "properties", "mode"],
+    ));
+
+    // The Rust half: each variant's SERDE representation, read out of serde.
+    // `TargetMode` is a unit enum, so `to_value` is the bare string.
+    let rust_names: Vec<String> = [
+        logweir_core::spec::TargetMode::Scratch,
+        logweir_core::spec::TargetMode::NewTopic,
+    ]
+    .iter()
+    .map(|m| {
+        serde_json::to_value(m)
+            .expect("TargetMode serialises")
+            .as_str()
+            .expect("a unit enum serialises to a string")
+            .to_string()
+    })
+    .collect();
+
+    assert_eq!(
+        rust_names, crd_enum,
+        "`TargetMode`'s serde names and the CRD's `target.mode` enum must be the same two \
+         strings in the same order (interface I33)"
+    );
+    assert_eq!(crd_enum, vec!["scratch", "newTopic"]);
+
+    // And `Display` — which is what a refusal message interpolates — is the
+    // same string again, so a run cannot report a third spelling of its own
+    // mode.
+    assert_eq!(
+        logweir_core::spec::TargetMode::Scratch.to_string(),
+        crd_enum[0]
+    );
+    assert_eq!(
+        logweir_core::spec::TargetMode::NewTopic.to_string(),
+        crd_enum[1]
+    );
+
+    // NO THIRD MODE, and `scratch` is the DEFAULT: `#[serde(default)]` on
+    // `TargetSpec::mode` is what makes every spec written before this field
+    // existed mean exactly what it meant.
+    assert_eq!(rust_names.len(), 2, "{rust_names:?}");
+    assert_eq!(
+        logweir_core::spec::TargetMode::default(),
+        logweir_core::spec::TargetMode::Scratch
+    );
+
+    // `target.topicNaming.prefix` is the CRD's name for the block
+    // `RestoreSpec`'s `target.topic_naming` carries — camelCase on the custom
+    // resource, snake_case in the plan document, exactly like every other
+    // field of this grammar. The TYPE is what both sides have to agree on.
+    let naming = at(
+        spec_schema(&doc),
+        &["properties", "target", "properties", "topicNaming"],
+    );
+    assert_eq!(
+        at(naming, &["properties", "prefix", "type"]).as_str(),
+        Some("string")
+    );
+    let round_tripped: logweir_core::spec::TopicNaming =
+        serde_yaml::from_str("prefix: \"restore-20260907T140500Z-\"")
+            .expect("TopicNaming accepts a bare `prefix` string, like the CRD's block");
+    assert_eq!(round_tripped.prefix, "restore-20260907T140500Z-");
+}

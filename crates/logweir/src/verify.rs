@@ -111,6 +111,18 @@ pub struct VerifyReport {
     pub approver: String,
     pub ticket: String,
     pub key_id: String,
+    /// `evidence.offset_report_key` and `evidence.offset_report_sha256`, read
+    /// PRESENCE-TOLERANTLY (Task 9b — Global Constraint 12's price for two
+    /// nested optional fields, this reader's half).
+    ///
+    /// `None` means the document records no offset-mapping report, which is
+    /// the truthful state for a run that signed a document without having
+    /// completed a restore. The pair is `Option<(key, digest)>` and not two
+    /// fields because `Scorecard::validate_invariants` refuses a document
+    /// carrying one without the other — so by the time this value is built,
+    /// "one without the other" is unrepresentable, and a type that could
+    /// represent it would invite a printer to render half of it.
+    pub offset_report: Option<(String, String)>,
 }
 
 /// What a verification actually established.
@@ -359,6 +371,13 @@ pub fn verify_scorecard(
         }
         return Err(ExitCode::SigningOrLock);
     }
+    // Both-or-neither, and `validate_invariants` above has already refused
+    // anything else — so `zip` is exhaustive here rather than lossy.
+    let offset_report = sc
+        .evidence
+        .offset_report_key
+        .clone()
+        .zip(sc.evidence.offset_report_sha256.clone());
     Ok(Verdict::Scorecard(VerifyReport {
         signature_valid: true,
         invariants_ok: true,
@@ -368,6 +387,7 @@ pub fn verify_scorecard(
         approver: sc.approval.approver.clone(),
         ticket: sc.approval.ticket.clone(),
         key_id: matched_key_id,
+        offset_report,
     }))
 }
 
@@ -385,6 +405,18 @@ fn print_report(r: &VerifyReport) {
         println!("approval:  SELF-ATTESTED — the approval key equals the signing key");
     } else {
         println!("approval:  {} ({})", r.approver, r.ticket);
+    }
+    // The offset report, printed only when the document records one — so a
+    // scorecard signed before this field existed prints exactly what it always
+    // did. The DIGEST goes beside the key, because a key alone tells an auditor
+    // where to look and not whether what they find is what was signed.
+    // `docs/verify_scorecard.py` prints the same two facts in the same order.
+    if let Some((key, digest)) = &r.offset_report {
+        println!("offsets:   {key}");
+        println!(
+            "           {digest} — the engine's offset MAPPING, uploaded as evidence \
+             and applied to nothing"
+        );
     }
 }
 

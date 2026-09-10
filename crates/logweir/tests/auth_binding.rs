@@ -113,7 +113,7 @@ fn render_as_a_controller_would(spec_text: &str, live: &KafkaClusterView) -> (Re
     // covered timestamp is the spec's own `sample.window_start`, which is what
     // keeps every G-ID assertion below about the PRINCIPAL and nothing else.
     let facts = one_segment_facts(ts("2026-08-29T00:00:00Z").timestamp_millis());
-    let plan = logweir::drill::build_plan(&spec, &set, &mapping, &facts, "01J9X")
+    let plan = logweir::drill::build_plan(&spec, &set, &mapping, &facts, "01J9X", None)
         .expect("the plan builds: the fixture's manifest floor is a real timestamp");
     // THE MUTATION POINT for "render from the cluster object". Replace this
     // line with `plan.target_auth = AuthRender::ScramSha512 { username:

@@ -178,11 +178,56 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // and this golden, not an upstream default we are trusting — the same
     // argument Global Constraint 20 makes for `consumer_group_strategy`.
     s.push_str("  strip_offset_headers: false\n");
+    // ---------------------------------------------------------------------
+    // **THE OFFSET SIDE, RENDERED EXPLICITLY** (Global Constraint 20, spec
+    // §6.1 N6/N9). All four lines, unconditionally, in both modes.
+    //
+    // THE REASON IS THAT AN INHERITED DEFAULT IS NOT AN ASSERTION. Global
+    // Constraint 20 says "tag 1 makes no consumer-group offset commit
+    // anywhere", and until this task the three keys that decide it were left
+    // at the engine's own defaults — the note that stood here said
+    // `reset_consumer_offsets` and `auto_consumer_groups` were "deliberately
+    // not rendered", which meant the invariant was a belief about
+    // [U:crates/kafka-backup-core/src/config.rs:1023, :1029] rather than a
+    // line in this document, in the approved bytes and in this golden. An
+    // upstream bump that flipped either default would have flipped Logweir's
+    // behaviour with nothing to show it.
+    //
+    // Each key is a `RestoreOptions` field, so all four sit under `restore:`
+    // at this indent [VERIFIED against the pinned engine 0.21.0:
+    // `consumer_group_strategy` config.rs:773-774, `reset_consumer_offsets`
+    // :853-854, `offset_report` :857-858, `auto_consumer_groups` :899-900;
+    // upstream's own round-trip test at :1400-1421 parses `restore:
+    // consumer_group_strategy: skip` with `warnings.is_empty()`]. Indentation
+    // is part of the contract — plan erratum E3 is the SASL block that landed
+    // one indent too shallow and ran UNAUTHENTICATED behind four "Ignoring
+    // unknown config key" lines.
+    //
+    // `skip` is `OffsetStrategy::Skip`'s wire spelling: the enum is
+    // `#[serde(rename_all = "kebab-case")]` [config.rs:719-726], and `Skip` is
+    // one word, so kebab-case leaves it `skip`.
+    s.push_str("  consumer_group_strategy: skip\n");
+    // `false` and `false`, and never `true` in tag 1: these two are what
+    // `offset_recovery_requested()` keys off (restore/preflight.rs:196-198),
+    // and `auto_consumer_groups: true` additionally enables
+    // `reset_consumer_offsets` behind the operator's back [config.rs:897].
+    // Upstream also REFUSES `reset_consumer_offsets: true` with an empty
+    // `consumer_groups` [config.rs:1247-1253], so `false` is the only value
+    // this document can carry that does not either commit offsets or fail
+    // config validation.
+    s.push_str("  reset_consumer_offsets: false\n");
+    s.push_str("  auto_consumer_groups: false\n");
+    // The report itself: written, never applied (Global Constraint 35). It is
+    // a path like `checkpoint_state` above and goes through `yaml_scalar` for
+    // the same reason.
+    s.push_str(&format!(
+        "  offset_report: {}\n",
+        yaml_scalar_checked(&plan.offset_report.display().to_string())?
+    ));
     // Deliberately NOT rendered, at any value: purge_topics, dry_run,
-    // header_preflight_external. Also not rendered: reset_consumer_offsets and
-    // auto_consumer_groups — spec §2's non-goals forbid Logweir from setting
-    // either, and they are what `offset_recovery_requested()` keys off
-    // (restore/preflight.rs:196-198).
+    // header_preflight_external (Global Constraint 4). `reset_consumer_offsets`
+    // and `auto_consumer_groups` USED to be on that list; they are above now,
+    // pinned at `false`, which is the same invariant stated instead of assumed.
     Ok(s)
 }
 

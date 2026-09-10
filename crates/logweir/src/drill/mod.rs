@@ -183,6 +183,11 @@ pub struct RunArgs {
     pub triggered_by: Option<String>,
     pub out: Option<PathBuf>,
     pub metrics_file: Option<PathBuf>,
+    /// `--offset-report-out`. Where the ENGINE writes its offset-mapping
+    /// report, which phase 8 then uploads beside the scorecard. Absent means
+    /// `offsets.json` in this run's workdir (`run_workdir`), beside the
+    /// checkpoint.
+    pub offset_report_out: Option<PathBuf>,
 }
 
 /// The log filter used when `RUST_LOG` is unset or blank.
@@ -280,7 +285,51 @@ fn phase_observer(run_id: &str) -> crate::metrics::PhaseLogger {
     crate::metrics::PhaseLogger::new(run_id)
 }
 
+/// WHICH of the command's two names the operator typed.
+///
+/// `logweir restore run` is the name (interface **I20**/**I8**);
+/// `logweir drill run` is the tag-0 name, kept working so that every
+/// checked-in invocation, every doc and every CronJob in the wild still runs,
+/// and printing exactly one deprecation line. Both parse the same
+/// `RestoreSpec` and both reach `run_with`, so there is nothing an alias can
+/// do differently by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvokedAs {
+    Restore,
+    DrillAlias,
+}
+
+/// The one deprecation line `logweir drill run` prints, verbatim.
+///
+/// A constant rather than a `format!` at the call site so the line a test
+/// asserts and the line an operator reads are the same bytes.
+pub const DRILL_RUN_DEPRECATION: &str =
+    "logweir drill run is the tag-0 name for logweir restore run and will be removed in tag 2";
+
+/// The deprecation line, through a writer seam, for the same reason
+/// `crate::exit::print_refusal_reason_to` has one: a `eprintln!` nobody can
+/// observe is a contract nothing pins.
+///
+/// It goes on STDERR and it is the ONLY thing the alias adds. Stdout is
+/// interface I8's channel and a deprecation notice on it would land between a
+/// controller and the three keys it reads.
+pub fn print_deprecation_to<W: std::io::Write>(
+    w: &mut W,
+    invoked_as: InvokedAs,
+) -> std::io::Result<()> {
+    match invoked_as {
+        InvokedAs::DrillAlias => writeln!(w, "{DRILL_RUN_DEPRECATION}"),
+        InvokedAs::Restore => Ok(()),
+    }
+}
+
 pub fn run(args: RunArgs) -> ExitCode {
+    run_named(args, InvokedAs::Restore)
+}
+
+/// `run` under whichever of the two names was typed. What `main.rs` calls for
+/// both `restore run` and `drill run`.
+pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
     // Spec §13: structured JSON logs on stdout with run_id on every line.
     let run_id = crate::ids::new_run_id();
     // T0-10. `EnvFilter::from_default_env()` builds with
@@ -316,6 +365,8 @@ pub fn run(args: RunArgs) -> ExitCode {
         .with_env_filter(filter)
         .try_init();
     let _span = tracing::info_span!("drill", run_id = %run_id).entered();
+    // The alias's ONE line, before anything else this process says.
+    let _ = print_deprecation_to(&mut std::io::stderr().lock(), invoked_as);
 
     let outcome = execute(&args, &run_id);
     // Read for notification purposes ONLY, and read here rather than taken
@@ -323,6 +374,36 @@ pub fn run(args: RunArgs) -> ExitCode {
     // path, and on that path there is no `Ctx` to take anything from.
     let spec = notification_spec(&args);
     report(&args, &run_id, spec.as_ref(), outcome)
+}
+
+/// `run_named` with the run's handles SUPPLIED rather than constructed — the
+/// seam a whole invocation can be driven through over doubles.
+///
+/// `run_named` needs a live broker, a bucket and the engine binary (that is
+/// what `context` builds), so nothing could previously assert what one full
+/// invocation of either CLI name does without them. This is the same
+/// `run`/`run_with` split the crate already uses for `execute`/`execute_with`
+/// and `report`/`report_with`, and it is what
+/// `crates/logweir/tests/restore_mode.rs::
+/// cli_drill_run_is_an_alias_for_restore_run` calls: one function, one args
+/// value parsed from either command line, and the deprecation line captured
+/// through `stderr` instead of trusted.
+///
+/// It does NOT install a tracing subscriber and does not enter the `drill`
+/// span. Those are process-global and belong to the binary's entry point;
+/// installing them here would make two calls in one test process fight over
+/// the global default.
+pub fn run_with(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    invoked_as: InvokedAs,
+    mut stderr: &mut dyn std::io::Write,
+) -> ExitCode {
+    let _ = print_deprecation_to(&mut stderr, invoked_as);
+    let outcome = execute_with_outcome(args, run_id, c);
+    let spec = notification_spec(args);
+    report(args, run_id, spec.as_ref(), outcome)
 }
 
 /// Re-read `args.spec` so the failure paths can reach the notification
@@ -374,7 +455,7 @@ fn report(
     args: &RunArgs,
     run_id: &str,
     spec: Option<&DrillSpec>,
-    outcome: Result<Scorecard, DrillError>,
+    outcome: Result<RestoreOutcome, DrillError>,
 ) -> ExitCode {
     report_with(args, run_id, spec, outcome, &phase7_verify::UreqSink::new())
 }
@@ -385,11 +466,11 @@ fn report_with(
     args: &RunArgs,
     run_id: &str,
     spec: Option<&DrillSpec>,
-    outcome: Result<Scorecard, DrillError>,
+    outcome: Result<RestoreOutcome, DrillError>,
     sink: &dyn phase7_verify::EventSink,
 ) -> ExitCode {
     let sc: Option<&Scorecard> = match &outcome {
-        Ok(sc) => Some(sc),
+        Ok(o) => Some(&o.scorecard),
         // A drill RESULT: the scorecard was signed and uploaded by phase 8, so
         // the metrics and the summary line are owed.
         Err(DrillError::NotPass(sc)) => Some(sc),
@@ -458,7 +539,12 @@ fn report_with(
             sink,
         );
     }
-    exiting(run_id, code, refusal_message.as_deref())
+    // [I8] Only a successful run has three keys to name — see `exiting`.
+    let evidence = match &outcome {
+        Ok(o) => Some(&o.evidence),
+        Err(_) => None,
+    };
+    exiting(run_id, code, refusal_message.as_deref(), evidence)
 }
 
 /// Everything a terminal path owes the outside world, whether or not a
@@ -497,7 +583,12 @@ fn publish(args: &RunArgs, run_id: &str, code: ExitCode, sc: Option<&Scorecard>)
 /// The log line is the one place that distinction survives into a log
 /// aggregator. Documenting it for operators is Tasks 22/23's job; emitting it
 /// is this one's.
-fn exiting(run_id: &str, code: ExitCode, refusal_message: Option<&str>) -> ExitCode {
+fn exiting(
+    run_id: &str,
+    code: ExitCode,
+    refusal_message: Option<&str>,
+    evidence: Option<&EvidenceKeys>,
+) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
         ExitCode::Operational => "logweir could not do its job; NO scorecard was written",
@@ -519,6 +610,29 @@ fn exiting(run_id: &str, code: ExitCode, refusal_message: Option<&str>) -> ExitC
     // instead of printing nothing.
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+    }
+    // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
+    // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
+    // a successful run with nothing after them — the same shape `logweir
+    // backup run` uses for interface I7's two keys
+    // (`crate::backup::mod`'s `exiting`), because a controller cannot tell
+    // stdout from stderr through the pod log API and reads a bounded tail by
+    // KEY NAME (plan erratum E4).
+    //
+    // AFTER the tracing line and after `finish`'s summary line, both of which
+    // are emitted before `exiting` is reached. Printed only on exit 0: on
+    // every other code there is no set of keys to name, and a line naming a
+    // key nothing was written to would be the worst possible output.
+    //
+    // The third line is printed only when there IS an offset report — see
+    // `phase8_score::Signed::offset_report_key`. Two lines is a truthful
+    // answer; a third naming an object that was never put is not.
+    if let (ExitCode::Ok, Some(e)) = (code, evidence) {
+        println!("scorecard-key={}", e.scorecard_key);
+        println!("sidecar-key={}", e.sidecar_key);
+        if let Some(k) = &e.offset_report_key {
+            println!("offset-report-key={k}");
+        }
     }
     code
 }
@@ -942,12 +1056,17 @@ pub fn naming_the_password_var(
     }
 }
 
-pub fn execute(args: &RunArgs, run_id: &str) -> Result<Scorecard, DrillError> {
+/// Returns the whole `RestoreOutcome`, not the scorecard alone, because
+/// interface **I8**'s three stdout lines are keys the run PUT AT and `report`
+/// is what prints them. `execute_with` stays the scorecard-returning half for
+/// the ~40 existing call sites in `tests/orchestrator.rs` and
+/// `tests/teardown.rs`.
+pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillError> {
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
     check_projected_credentials()?;
     let c = context(args)?;
-    execute_with(args, run_id, &c)
+    execute_with_outcome(args, run_id, &c)
 }
 
 /// Refuses an engine identity that would enter a signed document empty.
@@ -1075,7 +1194,14 @@ pub fn execute_with_outcome(
     // artifact — see `docs/stability.md`). Building the plan once is now a
     // convenience, not the guarantee, so a future phase-5/phase-6 split cannot
     // dissolve the identity by moving these two call sites apart.
-    let plan = build_plan(&c.spec, &set, &admitted.topic_mapping, &facts, run_id)?;
+    let plan = build_plan(
+        &c.spec,
+        &set,
+        &admitted.topic_mapping,
+        &facts,
+        run_id,
+        args.offset_report_out.as_deref(),
+    )?;
     // The engine writes its restore checkpoint to `plan.checkpoint_state` and
     // does NOT create that file's parent directory. `context` creates the
     // workdir it renders restore.yaml into (`logweir-<pid>`); the checkpoint
@@ -1089,6 +1215,18 @@ pub fn execute_with_outcome(
     // `Operational`, not a guard refusal: a scratch directory that cannot be
     // created says nothing about the archive.
     if let Some(dir) = plan.checkpoint_state.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
+    }
+    // And the offset report's parent, for exactly the same reason and with
+    // one difference that makes it worse: the engine's checkpoint write
+    // surfaces as an error, while its offset-report write is wrapped in a
+    // `warn!` [U:crates/kafka-backup-core/src/restore/engine.rs:423-425] — so
+    // a missing directory there produces no file, no failure, and no signed
+    // `evidence.offset_report_key`. By default this is the same directory the
+    // line above just created; it is a separate call because
+    // `--offset-report-out` may name any path the operator likes.
+    if let Some(dir) = plan.offset_report.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
     }
@@ -1137,7 +1275,10 @@ pub fn execute_with_outcome(
                 .map(|f| format!("{}/{} {}: {}", f.topic, f.partition, f.state, f.detail))
                 .collect();
         }
-        let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+        // `None`: phase 5 BLOCKED, so `restore` never ran and there is no
+        // offset-mapping report to describe. The engine writes one only from a
+        // completed restore.
+        let signed = sign_and_publish(&mut sc, args, run_id, c, None)?;
         // NO teardown here, deliberately, and the asymmetry with the phase-6
         // branch below is the point: a blocked preflight means `restore` never
         // ran, so this drill created NOTHING on the target. Phase 0 now
@@ -1226,7 +1367,10 @@ pub fn execute_with_outcome(
             if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 6) {
                 p.notes = vec![msg];
             }
-            let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+            // `None` for the same reason as the phase-5 branch, with one extra
+            // fact: `RestoreNoOp` is the engine having exited 0 having produced
+            // nothing, so any offset mapping it wrote would describe no records.
+            let signed = sign_and_publish(&mut sc, args, run_id, c, None)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -1319,8 +1463,18 @@ pub fn execute_with_outcome(
     // comment for the signed document that produced.
 
     // 8
-    let signed = sign_and_publish(&mut sc, args, run_id, c)?;
+    // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
+    // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
+    // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
+    let signed = sign_and_publish(&mut sc, args, run_id, c, Some(&plan.offset_report))?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
+    // [I8] The three keys, taken off `Signed` — the value that built each
+    // string and put at it — before `signed` is consumed below.
+    let evidence = EvidenceKeys {
+        scorecard_key: signed.key.clone(),
+        sidecar_key: signed.sidecar_key.clone(),
+        offset_report_key: signed.offset_report_key.clone(),
+    };
     sc = signed.scorecard.clone();
     // 9
     teardown(
@@ -1346,6 +1500,7 @@ pub fn execute_with_outcome(
     Ok(RestoreOutcome {
         scorecard: sc,
         topic_preflight,
+        evidence,
     })
 }
 
@@ -1358,6 +1513,24 @@ pub fn execute_with_outcome(
 pub struct RestoreOutcome {
     pub scorecard: Scorecard,
     pub topic_preflight: phase0_admit::TopicPreflight,
+    /// **Interface I8's three stdout lines**, as the keys the run actually
+    /// put at — never reconstructed from `run_id` by whoever prints them.
+    pub evidence: EvidenceKeys,
+}
+
+/// The three evidence keys a successful restore names on stdout, in the order
+/// interface **I8** fixes: `scorecard-key=`, `sidecar-key=`,
+/// `offset-report-key=`.
+///
+/// They come out of `phase8_score::Signed`, which built each string once and
+/// put at it, so a controller that fetches what these lines name gets the
+/// object this run wrote. `offset_report_key` is `None` when the run had no
+/// offset-mapping report — see `Signed::offset_report_key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceKeys {
+    pub scorecard_key: String,
+    pub sidecar_key: String,
+    pub offset_report_key: Option<String>,
 }
 
 /// Phase 9, in one place, because two paths reach it: the normal end of a run
@@ -1387,6 +1560,11 @@ fn teardown(
             deleter,
             mapping,
             &c.spec.target.teardown,
+            // Global Constraint 19, passed rather than re-derived: phase 9
+            // deletes only in `scratch` mode, and the mode travels onto the
+            // teardown attestation so a reader can tell "nothing, and nothing
+            // was owed" from "nothing, and the policy said keep".
+            c.spec.target.mode,
             run_id,
             scorecard_sha256,
         );
@@ -1442,10 +1620,11 @@ fn sign_and_publish(
     args: &RunArgs,
     run_id: &str,
     c: &Ctx,
+    offset_report: Option<&std::path::Path>,
 ) -> Result<phase8_score::Signed, DrillError> {
     let to_sign = sc.clone();
     let signed = record(sc, 8, "score-and-sign", || {
-        phase8_score::run(&to_sign, &args.signing_key, &c.store)
+        phase8_score::run(&to_sign, &args.signing_key, &c.store, offset_report)
     })?;
     write_scorecard_artifact(args, run_id, &signed);
     // Carried obligation from Task 20. Phase 8 signs BEFORE it puts — bytes
@@ -1529,6 +1708,7 @@ pub fn build_plan(
     mapping: &BTreeMap<String, String>,
     facts: &BackupSetFacts,
     run_id: &str,
+    offset_report_out: Option<&std::path::Path>,
 ) -> Result<RestorePlan, DrillError> {
     // **GUARD G-WIN, THE BINDING HALF.** `RestorePlan.time_window.0` is
     // computed from the archive set's earliest covered timestamp as recorded
@@ -1583,6 +1763,7 @@ pub fn build_plan(
             source: WindowFloorSource::ArchiveManifest,
             manifest_floor_ms,
         },
+        offset_report_out,
     )
 }
 
@@ -1606,6 +1787,21 @@ pub struct WindowFloor {
     pub manifest_floor_ms: i64,
 }
 
+/// The per-run workdir both pod-local engine files live in:
+/// `<temp>/logweir-<run_id>`.
+///
+/// A named function rather than the same `temp_dir().join(...)` written twice,
+/// because the two paths have to be siblings — `execute_with_outcome` creates
+/// this directory once, from `plan.checkpoint_state.parent()`, and the engine
+/// creates neither file's parent
+/// [U:crates/kafka-backup-core/src/restore/engine.rs:1382-1388 uses a bare
+/// `tokio::fs::write`, whose failure is only a `warn!`]. Two independently
+/// spelled paths could drift into two directories, one of which would not
+/// exist, and the offset report would then silently never be written.
+pub fn run_workdir(run_id: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("logweir-{run_id}"))
+}
+
 /// `build_plan` with the floor supplied rather than derived — see `WindowFloor`.
 pub fn build_plan_with_floor(
     spec: &DrillSpec,
@@ -1613,6 +1809,7 @@ pub fn build_plan_with_floor(
     mapping: &BTreeMap<String, String>,
     run_id: &str,
     floor: WindowFloor,
+    offset_report_out: Option<&std::path::Path>,
 ) -> Result<RestorePlan, DrillError> {
     // The window's END: the requested recovery point when the spec states one,
     // else the sample window's end. The FIELD's name travels with the value,
@@ -1637,10 +1834,16 @@ pub fn build_plan_with_floor(
         default_replication_factor: spec.target.default_replication_factor,
         // Pod-local and never uploaded: a crashed restore is NOT resumable in
         // v0.1 (spec §11).
-        checkpoint_state: std::env::temp_dir()
-            .join(format!("logweir-{run_id}"))
-            .join("checkpoint.json"),
+        checkpoint_state: run_workdir(run_id).join("checkpoint.json"),
         checkpoint_interval_secs: 30,
+        // Pod-local and UPLOADED, which is the whole difference from the
+        // checkpoint above: the offset report is evidence about what the
+        // restore mapped, and the pod that holds it is deleted. Default:
+        // `offsets.json` beside `checkpoint.json` in the same per-run workdir,
+        // which is the one directory `execute_with_outcome` creates.
+        offset_report: offset_report_out
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| run_workdir(run_id).join("offsets.json")),
     };
     // **THE ENUM IS CHECKED AGAINST THE VALUE IT CLAIMS** (critique A F22).
     // An EXPLICIT check, deliberately NOT a `debug_assert!`: that macro is
@@ -1838,6 +2041,11 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             retain_until: None,
             immutable: false,
             create_only_enforced: false,
+            // Both None here and BOTH SET BY PHASE 8, from the one file the
+            // engine wrote — `new_scorecard` has no offset report to describe
+            // because no restore has run yet.
+            offset_report_key: None,
+            offset_report_sha256: None,
         },
         redactions: Vec::new(),
     }
@@ -1872,7 +2080,14 @@ fn target_info(
     Ok(TargetInfo {
         cluster_id: admitted.target_cluster_id.clone(),
         marker_topic: spec.target.marker_topic.clone(),
-        topic_mapping_prefix: spec.target.topic_mapping_prefix.clone(),
+        // The prefix PHASE 0 ACTUALLY MAPPED THROUGH, taken off `Admitted`
+        // rather than re-read from the spec. In `newTopic` mode the name comes
+        // from `target.topic_naming.prefix` or from
+        // `spec::default_topic_prefix`, so `spec.target.topic_mapping_prefix`
+        // — which stays in the document because an empty scratch prefix maps
+        // every topic onto itself — would put the wrong string in the one
+        // signed field an auditor uses to re-derive the mapping.
+        topic_mapping_prefix: admitted.topic_mapping_prefix.clone(),
         // sha256 over the topic_mapping block AS RENDERED into restore.yaml —
         // the same function that renders it, so the hash and the bytes the
         // engine was handed cannot drift.
@@ -1949,6 +2164,30 @@ mod tests {
             .expect("the checked-in fixture parses")
     }
 
+    /// The fixture scorecard as `report` now takes it — a whole
+    /// `RestoreOutcome`, because interface I8's three stdout lines are keys the
+    /// RUN put at and `report` is what prints them (Task 9b). The keys here are
+    /// the ones `phase8_score::run` builds for this fixture's run id.
+    fn an_outcome() -> RestoreOutcome {
+        let sc = a_scorecard();
+        let run_id = sc.run_id.clone();
+        RestoreOutcome {
+            scorecard: sc,
+            topic_preflight: phase0_admit::TopicPreflight {
+                timestamp_type: "CreateTime".into(),
+                retention_ms: "-1".into(),
+                timestamp_bound_ms: None,
+                configs_set: Vec::new(),
+                topics_created: Vec::new(),
+            },
+            evidence: EvidenceKeys {
+                scorecard_key: format!("logweir/drills/{run_id}.json"),
+                sidecar_key: format!("logweir/drills/{run_id}.sig"),
+                offset_report_key: Some(format!("logweir/drills/{run_id}.offsets.json")),
+            },
+        }
+    }
+
     fn args_with(metrics_file: Option<PathBuf>) -> RunArgs {
         RunArgs {
             spec: PathBuf::from("drill.yaml"),
@@ -1959,6 +2198,7 @@ mod tests {
             triggered_by: None,
             out: None,
             metrics_file,
+            offset_report_out: None,
         }
     }
 
@@ -2314,8 +2554,8 @@ mod tests {
 
         let mut notpass = a_scorecard();
         notpass.outcome = Outcome::FailIntegrity;
-        let cases: Vec<(ExitCode, Result<Scorecard, DrillError>)> = vec![
-            (ExitCode::Ok, Ok(a_scorecard())),
+        let cases: Vec<(ExitCode, Result<RestoreOutcome, DrillError>)> = vec![
+            (ExitCode::Ok, Ok(an_outcome())),
             (
                 ExitCode::DrillNotPass,
                 Err(DrillError::NotPass(Box::new(notpass))),
@@ -2399,7 +2639,7 @@ mod tests {
         let mut notpass = a_scorecard();
         notpass.outcome = Outcome::FailIntegrity;
         for outcome in [
-            Ok(a_scorecard()),
+            Ok(an_outcome()),
             Err(DrillError::NotPass(Box::new(notpass))),
             Err(DrillError::Operational("x".into())),
             Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
@@ -2463,7 +2703,7 @@ mod tests {
                 &args_with(Some(pass.clone())),
                 "01TEST",
                 None,
-                Ok(a_scorecard())
+                Ok(an_outcome())
             ),
             ExitCode::Ok
         );
@@ -2610,9 +2850,9 @@ mod tests {
         // `DrillError::RestoreNoOp` is deliberately not represented: reaching
         // the ExitCode conversion with it is an `unreachable!` (ruling A8), and
         // this task does not change that.
-        fn representative(code: ExitCode) -> Result<Scorecard, DrillError> {
+        fn representative(code: ExitCode) -> Result<RestoreOutcome, DrillError> {
             match code {
-                ExitCode::Ok => Ok(a_scorecard()),
+                ExitCode::Ok => Ok(an_outcome()),
                 ExitCode::DrillNotPass => {
                     let mut sc = a_scorecard();
                     sc.outcome = Outcome::FailIntegrity;
@@ -2745,7 +2985,7 @@ mod tests {
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
             assert_eq!(
-                exiting("01TEST", c, None),
+                exiting("01TEST", c, None, None),
                 c,
                 "exiting must not alter the code"
             );
@@ -2832,7 +3072,7 @@ mod tests {
         let spec = spec_with_a_routing_key();
 
         for outcome in [
-            Ok(a_scorecard()),
+            Ok(an_outcome()),
             Err(DrillError::NotPass(Box::new(a_scorecard()))),
         ] {
             let sink = RecordingSink::default();

@@ -47,6 +47,7 @@ fn plan() -> RestorePlan {
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
+        offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
 }
 

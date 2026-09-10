@@ -39,3 +39,7 @@ restore:
   time_window_start: 1787961600000
   time_window_end: 1788055200000
   strip_offset_headers: false
+  consumer_group_strategy: skip
+  reset_consumer_offsets: false
+  auto_consumer_groups: false
+  offset_report: "/var/lib/logweir/01J9X/offsets.json"

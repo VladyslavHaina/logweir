@@ -240,6 +240,7 @@ fn restore_plan_window_start_is_the_archive_floor() {
         &mapping(),
         &facts_with_two_segments(),
         "01J9X",
+        None,
     )
     .expect("the plan builds");
 
@@ -292,8 +293,15 @@ fn the_floor_is_the_minimum_not_the_first_segment_in_iteration_order() {
     // (iii) And the plan binds THAT value — the property the two assertions
     // above only feed. Without this line the guard could still bind a floor
     // the facts do not report.
-    let plan = build_plan(&spec(), &set(), &mapping(), &across_partitions, "01J9X")
-        .expect("the plan builds");
+    let plan = build_plan(
+        &spec(),
+        &set(),
+        &mapping(),
+        &across_partitions,
+        "01J9X",
+        None,
+    )
+    .expect("the plan builds");
     assert_eq!(
         plan.time_window.0.timestamp_millis(),
         FLOOR_MS,
@@ -324,6 +332,7 @@ fn the_floor_source_enum_agrees_with_the_value() {
             source: WindowFloorSource::ArchiveManifest,
             manifest_floor_ms: FLOOR_MS,
         },
+        None,
     );
     // THE EXIT CODE FIRST, as its own assertion, so a mutant that lets the lie
     // through fails HERE — at assertion time, on the exit code — and not at an
@@ -357,6 +366,7 @@ fn the_floor_source_enum_agrees_with_the_value() {
             source: WindowFloorSource::InheritedFromSpec,
             manifest_floor_ms: FLOOR_MS,
         },
+        None,
     )
     .expect("a plan that does not claim the manifest is not refused by this check");
     assert_eq!(
@@ -395,6 +405,7 @@ fn the_point_in_time_is_the_window_end_when_present() {
             &mapping(),
             &facts_with_two_segments(),
             "01J9X",
+            None,
         )
         .expect("the plan builds");
         assert_eq!(
@@ -414,6 +425,7 @@ fn the_point_in_time_is_the_window_end_when_present() {
         &mapping(),
         &facts_with_two_segments(),
         "01J9X",
+        None,
     )
     .expect("the plan builds");
     assert!(
@@ -468,6 +480,7 @@ fn a_recovery_point_at_or_before_the_archive_floor_is_refused() {
             &mapping(),
             &facts_with_two_segments(),
             "01J9X",
+            None,
         );
         // THE EXIT CODE FIRST, as its own assertion: a mutant that drops the
         // check fails HERE, on the code, rather than at an `expect_err`
@@ -507,6 +520,7 @@ fn a_recovery_point_at_or_before_the_archive_floor_is_refused() {
         &mapping(),
         &facts_with_two_segments(),
         "01J9X",
+        None,
     )
     .expect("a window one millisecond wide is still a window");
     assert_eq!(plan.time_window.0.timestamp_millis(), FLOOR_MS);
@@ -522,7 +536,7 @@ fn a_sample_window_end_at_or_before_the_archive_floor_is_refused_too() {
     // The floor is `LATER_SEGMENT_MS` here, which is AFTER the fixture's
     // `sample.window_end`.
     let facts = facts_from(&[SPEC_END_MS + 60_000]);
-    let r = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X");
+    let r = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X", None);
     assert_eq!(exit_of(&r), ExitCode::GuardRefused);
     let msg = guard_message(&r.expect_err("a window that holds no instant is refused"));
     assert!(
@@ -591,7 +605,8 @@ fn a_topic_the_restore_does_not_name_does_not_lower_the_floor() {
 
     // Both seams, over the same facts. Plan construction binds the named
     // floor…
-    let plan = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X").expect("the plan builds");
+    let plan =
+        build_plan(&spec(), &set(), &mapping(), &facts, "01J9X", None).expect("the plan builds");
     assert_eq!(
         plan.time_window.0.timestamp_millis(),
         FLOOR_MS,
@@ -621,7 +636,7 @@ fn a_topic_the_restore_does_not_name_does_not_lower_the_floor() {
 #[test]
 fn phase5_refuses_a_rendered_start_that_is_not_the_floor() {
     let facts = facts_with_two_segments();
-    let mut plan = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X").expect("builds");
+    let mut plan = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X", None).expect("builds");
     // The state a printer bug, a hand-built plan, or a controller-side edit
     // would produce.
     plan.time_window.0 = ts(SPEC_START_MS);
@@ -650,7 +665,7 @@ fn phase5_refuses_a_rendered_start_that_is_not_the_floor() {
 #[test]
 fn phase5_accepts_the_rendered_start_when_it_is_the_floor() {
     let facts = facts_with_two_segments();
-    let plan = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X").expect("builds");
+    let plan = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X", None).expect("builds");
     assert_eq!(
         exit_of(&phase5_preflight::check_rendered_window_floor(
             &plan, &facts
@@ -669,7 +684,7 @@ fn an_archive_set_with_no_segment_has_no_floor_to_bind() {
     facts.topics[0].partitions[0].segments.clear();
     assert_eq!(facts.earliest_covered_timestamp_ms(&named_topics()), None);
 
-    let floorless = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X");
+    let floorless = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X", None);
     assert_eq!(exit_of(&floorless), ExitCode::GuardRefused);
     let e = floorless.expect_err("a floorless archive set is refused");
     assert!(
@@ -681,7 +696,7 @@ fn an_archive_set_with_no_segment_has_no_floor_to_bind() {
     );
 
     let good = facts_with_two_segments();
-    let plan = build_plan(&spec(), &set(), &mapping(), &good, "01J9X").expect("builds");
+    let plan = build_plan(&spec(), &set(), &mapping(), &good, "01J9X", None).expect("builds");
     assert_eq!(
         exit_of(&phase5_preflight::check_rendered_window_floor(
             &plan, &facts

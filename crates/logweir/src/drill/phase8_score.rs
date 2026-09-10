@@ -265,6 +265,26 @@ pub struct Signed {
     /// lock back from it, and hands it out here, so the three can never
     /// disagree.
     pub key: String,
+    /// The DSSE sidecar's own key — **interface I8's second stdout line**.
+    ///
+    /// Built and put in the same statement pair as `key`, for the same reason
+    /// `key` exists at all: `exiting` prints these strings to a controller
+    /// that will go and fetch the objects, and a printed key that was
+    /// reconstructed from a run id is a key nothing guarantees was written.
+    pub sidecar_key: String,
+    /// The offset report's key — **interface I8's third stdout line** — and
+    /// `None` when this run had no report to upload.
+    ///
+    /// `None` is a real state, not a defensive one: the engine writes its
+    /// offset report only from the `Ok` arm of a completed restore, and a
+    /// failed write there is a `warn!` rather than an error
+    /// [U:crates/kafka-backup-core/src/restore/engine.rs:417-427]. So the
+    /// paths that sign a document WITHOUT having run a restore — phase 5's
+    /// `Verdict::Block`, phase 6's `RestoreNoOp` — have no report by
+    /// construction, and both exit 2 rather than 0. Recording a key for an
+    /// object that does not exist would be the worst available answer;
+    /// printing no third line, and logging why, is the honest one.
+    pub offset_report_key: Option<String>,
 }
 
 /// Hand-written rather than derived: `bytes` is the whole document and
@@ -320,7 +340,46 @@ fn note(sc: &mut Scorecard, msg: &str) {
     }
 }
 
-pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, DrillError> {
+/// The engine's offset-mapping report, read off the pod-local path the plan
+/// named, together with the digest and key the signed scorecard will carry.
+///
+/// `None` when there is no readable file there — see
+/// `Signed::offset_report_key` for why that is a legitimate state and not an
+/// error. The reason is LOGGED, because a silently absent piece of evidence is
+/// how a gap becomes permanent.
+fn read_offset_report(run_id: &str, path: Option<&Path>) -> Option<(String, String, Vec<u8>)> {
+    let path = path?;
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let digest = logweir_core::ids::sha256_prefixed(&bytes);
+            Some((
+                format!("logweir/drills/{run_id}.offsets.json"),
+                digest,
+                bytes,
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                run_id = %run_id,
+                path = %path.display(),
+                error = %e,
+                "no offset-mapping report at the path the plan named, so the scorecard records \
+                 none and nothing is uploaded; the engine writes it only from a completed \
+                 restore and its own write failure is a warning"
+            );
+            None
+        }
+    }
+}
+
+/// `offset_report` is the pod-local path the plan named
+/// (`RestorePlan::offset_report`), or `None` on a path that ran no restore.
+pub fn run(
+    sc: &Scorecard,
+    signing_key: &Path,
+    store: &Store,
+    offset_report: Option<&Path>,
+) -> Result<Signed, DrillError> {
     let mut sc = sc.clone();
     let run_id = sc.run_id.clone();
 
@@ -427,6 +486,23 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     sc.evidence.retain_until = None;
     sc.evidence.version_id = None;
 
+    // 3b. THE OFFSET REPORT'S KEY AND DIGEST, BEFORE SIGNING — which is the
+    //     opposite of step 3's four fields and for the opposite reason.
+    //
+    //     Those four describe an event that has not happened yet, so they
+    //     cannot be signed. These two describe bytes that ALREADY EXIST on
+    //     disk: the digest is computed from the file the engine wrote and the
+    //     key is the one step 7 puts those exact bytes at. So they CAN be
+    //     signed, and must be — a digest published outside the signature would
+    //     bind nothing.
+    //
+    //     Both or neither, which is what `Scorecard::validate_invariants`'s
+    //     arm refuses a document for: a key with no digest names bytes nothing
+    //     binds, and a digest with no key binds bytes nobody can fetch.
+    let offsets = read_offset_report(&run_id, offset_report);
+    sc.evidence.offset_report_key = offsets.as_ref().map(|(k, _, _)| k.clone());
+    sc.evidence.offset_report_sha256 = offsets.as_ref().map(|(_, d, _)| d.clone());
+
     // 4. Refuse to sign a self-contradicting document — over the EXACT document
     //    step 5 serialises and step 6 signs, never a draft of it.
     //
@@ -463,10 +539,19 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
     //    `put_create_only`, which reports create_only_enforced: false —
     //    recorded honestly, never assumed.
     let scorecard_key = format!("logweir/drills/{run_id}.json");
+    let sidecar_key = format!("logweir/drills/{run_id}.sig");
     let out: PutOutcome = store.put_create_only(&scorecard_key, &bytes).map_err(sig)?;
     store
-        .put_create_only(&format!("logweir/drills/{run_id}.sig"), &sidecar_bytes)
+        .put_create_only(&sidecar_key, &sidecar_bytes)
         .map_err(sig)?;
+    // 7b. The offset report, at the key the SIGNED document above names, with
+    //     the bytes the digest above covers. Create-only like the other two,
+    //     and its failure is exit 4 through the same `sig` — a signed
+    //     scorecard naming an object that was not written is worse than a run
+    //     that reports it could not attest itself.
+    if let Some((key, _, report_bytes)) = &offsets {
+        store.put_create_only(key, report_bytes).map_err(sig)?;
+    }
 
     // 8. Readback ONLY, and IN-MEMORY ONLY. No readback => immutable: false.
     //
@@ -506,6 +591,8 @@ pub fn run(sc: &Scorecard, signing_key: &Path, store: &Store) -> Result<Signed, 
         bytes,
         sidecar,
         key: scorecard_key,
+        sidecar_key,
+        offset_report_key: offsets.map(|(k, _, _)| k),
     })
 }
 

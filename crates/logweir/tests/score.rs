@@ -352,6 +352,7 @@ fn a_signing_failure_exits_4_and_uploads_nothing() {
         &fixtures::scorecard_pass(),
         &fixtures::unreadable_signing_key().path,
         &store,
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, logweir::drill::DrillError::SigningOrLock(_)));
@@ -373,6 +374,7 @@ fn a_backend_without_conditional_put_records_create_only_enforced_false() {
         &fixtures::scorecard_pass(),
         &fixtures::good_signing_key().path,
         &store,
+        None,
     )
     .unwrap();
     assert!(!signed.scorecard.evidence.create_only_enforced);
@@ -391,7 +393,8 @@ fn a_successful_run_writes_the_scorecard_and_its_sidecar_under_the_logweir_prefi
     let store = fixtures::recording_store();
     let sc = fixtures::scorecard_pass();
     let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .unwrap();
     let run_id = &sc.run_id;
     assert_eq!(
         store.puts(),
@@ -418,7 +421,7 @@ fn the_stored_bytes_are_the_signed_bytes_and_verify_against_the_signing_key() {
     let store = fixtures::recording_store();
     let key = fixtures::good_signing_key();
     let sc = fixtures::scorecard_pass();
-    let signed = logweir::drill::phase8_score::run(&sc, &key.path, &store).unwrap();
+    let signed = logweir::drill::phase8_score::run(&sc, &key.path, &store, None).unwrap();
 
     let (stored, _vid) = store
         .get(&format!("logweir/drills/{}.json", sc.run_id))
@@ -453,13 +456,13 @@ fn an_existing_key_is_refused_and_the_first_drills_bytes_are_untouched() {
     let store = fixtures::recording_store();
     let key = fixtures::good_signing_key();
     let sc = fixtures::scorecard_pass();
-    let first =
-        logweir::drill::phase8_score::run(&sc, &key.path, &store).expect("the first put succeeds");
+    let first = logweir::drill::phase8_score::run(&sc, &key.path, &store, None)
+        .expect("the first put succeeds");
 
     // A SECOND, different document at the SAME key.
     let mut second_sc = sc.clone();
     second_sc.triggered_by = Some("a second drill that must not overwrite the first".into());
-    let err = logweir::drill::phase8_score::run(&second_sc, &key.path, &store)
+    let err = logweir::drill::phase8_score::run(&second_sc, &key.path, &store, None)
         .expect_err("an existing key must be refused, never overwritten");
     assert!(matches!(err, DrillError::SigningOrLock(_)));
     assert_eq!(ExitCode::from(err), ExitCode::SigningOrLock);
@@ -485,7 +488,8 @@ fn immutable_is_false_without_a_provider_readback_even_when_the_input_claimed_tr
     sc.evidence.immutable = true;
     sc.evidence.retain_until = Some(fixtures::ts("2030-01-01T00:00:00Z"));
     let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .unwrap();
     assert!(
         !signed.scorecard.evidence.immutable,
         "immutable must come from a readback, never from the caller's claim"
@@ -532,7 +536,7 @@ fn the_signed_bytes_carry_no_unsubstantiated_claim_about_the_upload() {
     sc.evidence.retain_until = Some(fixtures::ts("2030-01-01T00:00:00Z"));
     sc.evidence.version_id = Some("v-claimed-by-the-caller".into());
 
-    let signed = logweir::drill::phase8_score::run(&sc, &key.path, &store).unwrap();
+    let signed = logweir::drill::phase8_score::run(&sc, &key.path, &store, None).unwrap();
 
     let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).unwrap();
     assert_eq!(
@@ -577,8 +581,9 @@ fn a_self_contradicting_scorecard_is_refused_before_signing_and_uploads_nothing(
     let mut sc = fixtures::scorecard_pass();
     // Violates the Global Constraint 18(a) false-branch invariant.
     sc.measured.rpo_source_relative_seconds = Some(0);
-    let err = logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store)
-        .expect_err("a document violating its own invariants must never be signed");
+    let err =
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .expect_err("a document violating its own invariants must never be signed");
     assert!(matches!(err, DrillError::SigningOrLock(_)));
     assert!(
         store.puts().is_empty(),
@@ -601,7 +606,8 @@ fn an_engine_subreport_under_the_per_run_prefix_is_carried_verbatim() {
         .unwrap();
 
     let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .unwrap();
     let sub = signed
         .scorecard
         .engine_subreport
@@ -638,7 +644,8 @@ fn an_absent_engine_subreport_is_a_note_on_phase_8_not_a_failure() {
         notes: vec![],
     });
     let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .unwrap();
     assert!(signed.scorecard.engine_subreport.is_none());
     let p8 = signed
         .scorecard
@@ -683,7 +690,8 @@ fn extra_objects_under_the_engine_validation_prefix_are_named_not_silently_dropp
         .unwrap();
 
     let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .unwrap();
     let sub = signed.scorecard.engine_subreport.clone().unwrap();
     assert_eq!(
         sub.retrieved_from,
@@ -795,6 +803,7 @@ fn teardown_deletes_exactly_the_mapped_topics_and_nothing_else() {
         &d,
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
+        logweir_core::spec::TargetMode::Scratch,
         "RUN",
         "SC",
     );
@@ -812,6 +821,7 @@ fn teardown_keep_deletes_nothing_but_still_attests() {
         &d,
         &fixtures::mapping("orders", "drill-orders"),
         "keep",
+        logweir_core::spec::TargetMode::Scratch,
         "RUN",
         "SC",
     );
@@ -828,6 +838,7 @@ fn a_topic_that_could_not_be_deleted_is_attested_as_failed_not_as_deleted() {
         &PartiallyFailingDeleter,
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
+        logweir_core::spec::TargetMode::Scratch,
         "RUN",
         "SC",
     );
@@ -846,7 +857,14 @@ fn a_topic_that_could_not_be_deleted_is_attested_as_failed_not_as_deleted() {
 fn a_deleter_that_refuses_the_whole_call_fails_every_mapped_topic() {
     let mut mapping = fixtures::mapping("orders", "drill-orders");
     mapping.insert("payments".into(), "drill-payments".into());
-    let a = logweir::drill::phase9_teardown::run(&RefusingDeleter, &mapping, "delete", "RUN", "SC");
+    let a = logweir::drill::phase9_teardown::run(
+        &RefusingDeleter,
+        &mapping,
+        "delete",
+        logweir_core::spec::TargetMode::Scratch,
+        "RUN",
+        "SC",
+    );
     assert!(a.topics_deleted.is_empty());
     let failed: Vec<&str> = a.topics_failed.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(failed, vec!["drill-orders", "drill-payments"]);
@@ -863,7 +881,8 @@ fn the_attestation_binds_the_sha256_of_the_signed_scorecard_bytes() {
     let store = fixtures::recording_store();
     let sc = fixtures::scorecard_pass();
     let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store).unwrap();
+        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store, None)
+            .unwrap();
     let digest = logweir_core::ids::sha256_prefixed(&signed.bytes);
     let a = logweir::drill::phase9_teardown::run(
         &fixtures::RecordingDeleter {
@@ -871,6 +890,7 @@ fn the_attestation_binds_the_sha256_of_the_signed_scorecard_bytes() {
         },
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
+        logweir_core::spec::TargetMode::Scratch,
         &sc.run_id,
         &digest,
     );
@@ -891,6 +911,7 @@ fn the_persisted_attestation_is_signed_create_only_and_still_reports_the_failure
         &PartiallyFailingDeleter,
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
+        logweir_core::spec::TargetMode::Scratch,
         "RUN0",
         "sha256:deadbeef",
     );
@@ -938,6 +959,7 @@ fn a_teardown_that_cannot_be_signed_is_exit_4() {
         },
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
+        logweir_core::spec::TargetMode::Scratch,
         "RUN1",
         "sha256:0",
     );

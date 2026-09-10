@@ -457,6 +457,90 @@ def test_a_true_evidence_immutable_is_refused():
                 "are zeroed before signing") in r.stderr
 
 
+# ------------------------------------- the offset report's key and digest travel together
+# Task 9b. Two NESTED OPTIONAL fields on `evidence` — the only kind Global
+# Constraint 12 as amended permits — carrying the object key and sha256 of the
+# ENGINE's offset-mapping report, which the runner uploads beside the scorecard
+# because the engine writes it to a pod-local path and the pod is deleted. The
+# arm is symmetric and the messages are byte-identical with the Rust arm's.
+
+def test_an_offset_report_key_without_its_sha256_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{"evidence.offset_report_key": "logweir/drills/RUN.offsets.json"},
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert ("evidence.offset_report_key and evidence.offset_report_sha256 are present "
+                "or absent together; a key with no digest names bytes nothing binds, and a "
+                "digest with no key binds bytes nobody can fetch") in r.stderr
+
+
+def test_an_offset_report_sha256_without_its_key_is_refused():
+    # The other direction, same arm, same message: a digest with no key binds
+    # bytes nobody can fetch.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{"evidence.offset_report_sha256": "sha256:" + "0" * 64},
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "are present or absent together" in r.stderr
+
+
+def test_a_blank_offset_report_key_counts_as_absent():
+    # Ruling R-A: `.strip()` here, `trim().is_empty()` in Rust. A `""` key
+    # beside a `""` digest is two absent fields, not two present ones — and a
+    # `""` key beside a REAL digest is still the arm's refusal.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{"evidence.offset_report_key": "   ", "evidence.offset_report_sha256": ""},
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{
+                "evidence.offset_report_key": "  ",
+                "evidence.offset_report_sha256": "sha256:" + "0" * 64,
+            },
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "are present or absent together" in r.stderr
+
+
+def test_both_offset_report_fields_present_verify_and_are_printed():
+    key = "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.offsets.json"
+    digest = "sha256:" + "a" * 64
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d,
+            **{"evidence.offset_report_key": key, "evidence.offset_report_sha256": digest},
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        # The presence-tolerant READ: printed only when the document carries
+        # one, with the digest beside the key.
+        assert key in r.stdout, r.stdout
+        assert digest in r.stdout, r.stdout
+        assert "applied to nothing" in r.stdout, r.stdout
+
+
+def test_an_absent_offset_report_prints_no_offsets_line():
+    # The control for the row above: an older document, which has neither
+    # field, prints exactly what it always did.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "offsets:" not in r.stdout, r.stdout
+
+
 def test_a_lower_major_with_a_non_zeroed_evidence_block_is_accepted():
     """The evidence arm's `doc_major == 1` guard, where it is actually
     observable.
@@ -567,7 +651,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.10.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.11.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -583,6 +667,11 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "target.auth's mode present, not blank, and one of the two values the "
             "format defines when the block is"
+        ) in r.stdout, r.stdout
+        # 1.11.0's addition: GC12's price for `evidence.offset_report_key` and
+        # `evidence.offset_report_sha256`, which travel together or not at all.
+        assert (
+            "evidence.offset_report_key and its sha256 present or absent together"
         ) in r.stdout, r.stdout
 
 
@@ -1820,9 +1909,14 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # one more arm in `check_invariants` and one more in
     # `check_backup_receipt_invariants`, which is an invariant-set change and
     # therefore a minor bump, with the payload-type map unchanged at four.
+    #
+    # 1.11.0 (Task 9b) added one more arm — the `evidence.offset_report_*` pair
+    # — with the payload-type map still at four. `task-9b-brief.md` says
+    # "1.9.0 -> 1.10.0"; 1.10.0 was already taken by 5b's fix round, so the
+    # brief's number is the error and this is the bump.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 4, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.10.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.11.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
 

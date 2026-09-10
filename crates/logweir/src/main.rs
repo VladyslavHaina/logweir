@@ -1,5 +1,5 @@
 use clap::Parser;
-use logweir::drill::RunArgs;
+use logweir::drill::InvokedAs;
 use logweir::{cli, exit, schema, show, verify};
 
 fn main() -> std::process::ExitCode {
@@ -73,25 +73,18 @@ fn main() -> std::process::ExitCode {
             public_key,
             payload_type,
         }) => verify::run(&scorecard, &signature, &public_key, &payload_type),
-        cli::Command::Drill(cli::DrillCmd::Run {
-            spec,
-            approval,
-            approver_key,
-            allowed_clusters,
-            signing_key,
-            triggered_by,
-            out,
-            metrics_file,
-        }) => logweir::drill::run(RunArgs {
-            spec,
-            approval,
-            approver_key,
-            allowed_clusters,
-            signing_key,
-            triggered_by,
-            out,
-            metrics_file,
-        }),
+        // THE ONE FUNCTION, TWO NAMES (interface I20). Both arms build the
+        // same `RunArgs` through the same `From` impl and call
+        // `drill::run_named`; the only difference between them is the
+        // `InvokedAs` value, which decides whether the single deprecation line
+        // is printed on stderr. There is deliberately no second code path for
+        // the alias — an alias that could behave differently is not an alias.
+        cli::Command::Restore(cli::RestoreCmd::Run(a)) => {
+            logweir::drill::run_named(a.into(), InvokedAs::Restore)
+        }
+        cli::Command::Drill(cli::DrillCmd::Run(a)) => {
+            logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
+        }
         // Task 22 (carried obligation 1). `show::run` has been implemented and
         // golden-tested since `d403abc`, but this match ended in a `_ =>` arm
         // that printed "not yet implemented in this task" — so the ONLY way to

@@ -67,6 +67,7 @@ fn validation_run_defaults_to_an_operational_refusal_not_a_fabricated_pass() {
         default_replication_factor: 1,
         checkpoint_state: "/tmp/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
+        offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     };
     let err = NullEngine.validation_run(&plan).unwrap_err();
     assert!(matches!(err, EngineError::Operational(_)));

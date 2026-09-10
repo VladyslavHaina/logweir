@@ -188,5 +188,13 @@
     "python_exit": 1,
     "reason": "target.auth.mode is not one of the two values this format defines; it is \"plaintext\" or \"scramSha512\" and nothing else",
     "arm": "target.auth.mode is not one of the two values this format defines"
+  },
+  {
+    "id": "offset_report_key_without_its_sha256",
+    "file": "offset_report_key_without_its_sha256.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch",
+    "arm": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together"
   }
 ]

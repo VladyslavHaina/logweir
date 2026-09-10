@@ -2,6 +2,23 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// **Interface I20's canonical name for this document.** `RestoreSpec` is what
+/// all new code and every producer of `Restore.spec.planBytes` uses;
+/// `DrillSpec` is the same type under its tag-0 name, kept valid so every
+/// checked-in reference keeps compiling.
+///
+/// An ALIAS and not a new type, deliberately: spec §6.1 amendment 4 says "the
+/// restore plan document has ONE grammar, and it is the runner's
+/// `restore.yaml`", and two types would be two grammars the moment one of them
+/// grew a field. `crates/logweir/tests/restore_mode.rs::
+/// restore_spec_is_the_canonical_name` asserts `serde_yaml::from_str` accepts
+/// the same bytes under both names, so neither can drift from the other.
+///
+/// It is NOT `RestoreSpecBlock`. That is the nested `{point_in_time}` block
+/// INSIDE this document (Task 9), reached as `RestoreSpec::restore`, and it is
+/// not a synonym for the document.
+pub type RestoreSpec = DrillSpec;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrillSpec {
     /// This drill's own stable identity, per ruling **R-D**.
@@ -244,13 +261,47 @@ pub struct TargetSpec {
     /// broker, carries its own.
     #[serde(default)]
     pub auth: AuthSpec,
+    /// **Interface I33.** WHICH of the two restores this is (spec §6.1;
+    /// §3.1's `Drill` = `Restore` with `target.mode: scratch`).
+    ///
+    /// `#[serde(default)]` — `Scratch` — so every checked-in spec that
+    /// predates this field keeps its exact behaviour, which is what makes
+    /// `logweir drill run` and `logweir restore run` the same command over the
+    /// same documents.
+    #[serde(default)]
+    pub mode: TargetMode,
+    /// How the target topics are NAMED in `newTopic` mode. Absent means
+    /// `default_topic_prefix(<the recovery point>)`.
+    ///
+    /// Absent is also the only legal state in `Scratch` mode, where the name
+    /// comes from `topic_mapping_prefix`; it is not read there and it is not
+    /// refused there either, because a field an adopter left behind after
+    /// switching modes is not a plan this build has to reject.
+    #[serde(default)]
+    pub topic_naming: Option<TopicNaming>,
     /// The v0.1 segregation proof. Must EXIST on the target.
+    ///
+    /// **`Scratch` mode only.** `TargetMode::NewTopic` skips this check —
+    /// see `TargetMode`'s own doc comment for why the marker proves nothing
+    /// about a restore into a brand-new topic on a real cluster.
     #[serde(default = "marker")]
     pub marker_topic: String,
+    /// The `Scratch`-mode target-topic prefix, and **required on purpose**.
+    ///
+    /// It is deliberately NOT `#[serde(default)]`: an empty prefix maps every
+    /// source topic onto ITSELF, which on a scratch cluster is a restore into
+    /// the topic the archive was taken from. Today a spec that omits it is a
+    /// serde error before any phase runs, and that is the right refusal. A
+    /// `newTopic` spec therefore still carries it (see
+    /// `examples/restore.yaml`), where it is unread — `topic_naming.prefix`,
+    /// or `default_topic_prefix`, is the name source in that mode
+    /// (`target_topic_prefix`).
     pub topic_mapping_prefix: String,
     #[serde(default = "rf1")]
     pub default_replication_factor: i16,
-    /// "delete" (default) or "keep".
+    /// "delete" (default) or "keep". **`Scratch` mode only**: phase 9 tears
+    /// nothing down in `newTopic` mode at any value of this field (Global
+    /// Constraint 19).
     #[serde(default = "delete")]
     pub teardown: String,
 }
@@ -262,6 +313,114 @@ fn rf1() -> i16 {
 }
 fn delete() -> String {
     "delete".into()
+}
+
+/// **Interface I33, the Rust half.** The two restores tag 1 performs.
+///
+/// The serde names are `scratch` and `newTopic`, in that order, and they are
+/// the `Restore` CRD's `target.mode` enum byte for byte
+/// (`crates/weirkeeper/config/crd/restores.yaml`, pinned by
+/// `crates/weirkeeper/tests/crd_shape.rs::
+/// restore_target_mode_accepts_only_scratch_or_new_topic` and compared against
+/// THIS type by `the_crd_mode_enum_and_target_mode_agree` in the same file). A
+/// `kubectl apply` that succeeds and a `restore run` that then refuses to parse
+/// the same string is the failure that agreement closes.
+///
+/// # What the two modes actually differ in
+///
+/// `Scratch` is v0.1's behaviour, unchanged: the marker topic must exist and
+/// be healthy, the target cluster id must be in `allowedClusterIds` and must
+/// not equal the source, and phase 9 deletes the topics the run created.
+/// Those three are the SCRATCH SEGREGATION PROOF — they exist to establish
+/// that a drill is writing to a throwaway cluster.
+///
+/// `NewTopic` skips all three, and the reason is that each of them is
+/// meaningless for the thing tag 1's flagship actually does. A restore into a
+/// new topic on a real cluster is non-destructive BY CONSTRUCTION: it only
+/// ever writes a topic that did not exist, which phase 0 proves by refusing
+/// the plan outright if any mapped target topic is already there. A marker
+/// topic on a production cluster would be a lie about that cluster's purpose;
+/// an allowlist of scratch clusters cannot contain the cluster an operator is
+/// recovering INTO; and tearing the restored topic down would delete the
+/// recovery.
+///
+/// `Default` is `Scratch`, so `#[serde(default)]` on `TargetSpec::mode` makes
+/// every spec written before this field existed mean exactly what it meant.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetMode {
+    #[default]
+    Scratch,
+    NewTopic,
+}
+
+impl std::fmt::Display for TargetMode {
+    /// The WIRE spelling, so a refusal message and a CRD field cannot disagree
+    /// about what mode a run was in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TargetMode::Scratch => "scratch",
+            TargetMode::NewTopic => "newTopic",
+        })
+    }
+}
+
+/// `target.topicNaming` — how `newTopic` mode names the topics it creates.
+///
+/// One field today. It is a BLOCK rather than a bare `target.topic_prefix`
+/// because the CRD already declares it as one
+/// (`target.topicNaming.prefix`, and `status.newTopics` is built from it), and
+/// a Rust shape that flattened it would make the two documents disagree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopicNaming {
+    pub prefix: String,
+}
+
+/// The `newTopic` default prefix: `restore-<YYYYmmddTHHMMSSZ>-`.
+///
+/// So `orders` at a recovery point of `2026-09-07T14:05:00Z` becomes
+/// `restore-20260907T140500Z-orders`, which says on the broker's own topic
+/// list what the topic is and what instant it was recovered to.
+///
+/// **The compact `YYYYmmddTHHMMSSZ` form is for KAFKA TOPIC NAMES ONLY.**
+/// Kafka permits `[a-zA-Z0-9._-]`, so it is legal there. Kubernetes object
+/// names are DNS-1123 and permit neither the uppercase `T`/`Z` nor a leading
+/// digit after a dot; those names use the form Task 18 defines and never this
+/// one.
+///
+/// A PURE function of its argument — no clock, no environment (Global
+/// Constraint 1) — so the mapped names a plan carries are a function of the
+/// approved bytes and of nothing else.
+pub fn default_topic_prefix(point_in_time: DateTime<Utc>) -> String {
+    format!("restore-{}-", point_in_time.format("%Y%m%dT%H%M%SZ"))
+}
+
+/// The prefix phase 0 actually maps every source topic through, for THIS
+/// spec's mode. The ONE place the rule lives, so a renderer, a refusal message
+/// and the signed scorecard cannot each derive it differently.
+///
+/// * `Scratch` → `target.topic_mapping_prefix`, exactly as v0.1.
+/// * `NewTopic` → `target.topic_naming.prefix` when the spec states one, else
+///   `default_topic_prefix` of THE RECOVERY POINT.
+///
+/// **"The recovery point" is `restore.point_in_time` when the spec states one
+/// and `sample.window_end` otherwise** — the same pairing
+/// `logweir::drill::build_plan_with_floor` makes for `time_window.1` and
+/// `phase0_admit::target_topic_preflight` makes for the broker's timestamp
+/// bound. Reading `point_in_time` alone would leave the default prefix
+/// unconstructible for a `newTopic` spec that names no explicit recovery
+/// point, and reading `sample.window_end` alone would name an instant this
+/// restore never asks the engine for.
+pub fn target_topic_prefix(spec: &DrillSpec) -> String {
+    match spec.target.mode {
+        TargetMode::Scratch => spec.target.topic_mapping_prefix.clone(),
+        TargetMode::NewTopic => match &spec.target.topic_naming {
+            Some(n) => n.prefix.clone(),
+            None => {
+                default_topic_prefix(spec.restore.point_in_time.unwrap_or(spec.sample.window_end))
+            }
+        },
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

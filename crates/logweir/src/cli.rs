@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -21,8 +21,20 @@ pub enum Command {
     // `drill` row of `logweir --help` was blank — the first thing a new user
     // sees of the subcommand the whole tool exists for.
     /// Run a restore drill, or show and verify the scorecard one produced.
+    ///
+    /// `drill run` is the tag-0 name for `restore run`; it takes the same
+    /// flags, parses the same spec, calls the same function and prints one
+    /// deprecation line on stderr.
     #[command(subcommand)]
     Drill(DrillCmd),
+    // Chain L, Task 9b, interfaces I20/I8. `restore` is the NAME: a restore
+    // into a new topic at a point in time on a real cluster is what tag 1's
+    // flagship does, and `drill` is that same command with
+    // `target.mode: scratch`. The `///` line below is what clap renders.
+    /// Restore a sampled window from an archive into a target cluster, verify
+    /// it per record, and emit a signed scorecard.
+    #[command(subcommand)]
+    Restore(RestoreCmd),
     // Chain L, Task 4. The `///` line below is what clap renders in
     // `logweir --help`; the build rationale stays in `//` comments so it is
     // not printed to users (the same rule the `Drill` arm above records).
@@ -105,31 +117,7 @@ pub enum DrillCmd {
     /// exits 1 (nothing was refused — project the Secret and re-run); a value
     /// that cannot be substituted into the engine's pre-parse config text
     /// exits 3 with `refusal-reason=CredentialNotRenderable`.
-    Run {
-        #[arg(long)]
-        spec: PathBuf,
-        /// MANDATORY in v0.1: approval is unconditional (spec §9.3 phase 1).
-        #[arg(long)]
-        approval: PathBuf,
-        /// MANDATORY: the approver's public key, which SHOULD differ from the
-        /// signing key. Equal keys are labelled self_attested, never refused.
-        #[arg(long)]
-        approver_key: PathBuf,
-        #[arg(long)]
-        allowed_clusters: PathBuf,
-        #[arg(long)]
-        signing_key: PathBuf,
-        #[arg(long)]
-        triggered_by: Option<String>,
-        /// Where the scorecard is written locally, in addition to the bucket.
-        /// The DSSE sidecar lands beside it at `<out>` with the extension
-        /// replaced by `.sig`. Default: `./logweir-<run_id>.json`.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Prometheus textfile-collector output (spec §13). Task 21a.
-        #[arg(long)]
-        metrics_file: Option<PathBuf>,
-    },
+    Run(RestoreRunArgs),
     /// Render a scorecard as a fixed-width table (or `--format json`, the
     /// exact stored bytes). Reads a file; runs no drill and touches no cluster.
     Show {
@@ -170,6 +158,97 @@ pub enum DrillCmd {
         #[arg(long, default_value = "scorecard")]
         payload_type: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum RestoreCmd {
+    /// Restore the window the spec names into the target cluster, reconcile it
+    /// per record, and emit a signed scorecard.
+    ///
+    /// With `target.mode: newTopic` the restore lands in brand-new topics
+    /// named `restore-<YYYYmmddTHHMMSSZ>-<topic>` (or under
+    /// `target.topicNaming.prefix`), and is refused before anything runs if any
+    /// of those topics already exists — appending into a half-populated topic
+    /// produces a restore that reconciles against records it did not write.
+    /// Nothing is torn down in that mode.
+    ///
+    /// With `target.mode: scratch` — the default, and what `logweir drill run`
+    /// has always done — the marker topic must exist, the target cluster must
+    /// be in `--allowed-clusters`, and phase 9 deletes the topics this run
+    /// created.
+    ///
+    /// With `target.auth.mode: scramSha512` in the spec, the SASL password is
+    /// read from the environment variable `LOGWEIR_TARGET_PASSWORD` and from
+    /// nowhere else — see `drill run` for why there is no flag for it.
+    Run(RestoreRunArgs),
+}
+
+/// The flags `logweir restore run` and `logweir drill run` share.
+///
+/// **ONE clap struct, flattened into both subcommands**, which is what makes
+/// "the alias takes the same flags" a property of the type rather than a
+/// promise in a doc comment: there is no second list to forget to update, and
+/// `crates/logweir/tests/restore_mode.rs::
+/// cli_drill_run_is_an_alias_for_restore_run` parses one command line under
+/// each name and compares the two values with `PartialEq`.
+///
+/// `logweir drill run` therefore also accepts `--offset-report-out`, which it
+/// did not have before. That is a SUPERSET: every invocation that worked
+/// before still works, and the alternative — two field lists differing by one
+/// flag — is the drift this struct exists to prevent.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct RestoreRunArgs {
+    #[arg(long)]
+    pub spec: PathBuf,
+    /// MANDATORY in v0.1: approval is unconditional (spec §9.3 phase 1).
+    #[arg(long)]
+    pub approval: PathBuf,
+    /// MANDATORY: the approver's public key, which SHOULD differ from the
+    /// signing key. Equal keys are labelled self_attested, never refused.
+    #[arg(long)]
+    pub approver_key: PathBuf,
+    #[arg(long)]
+    pub allowed_clusters: PathBuf,
+    #[arg(long)]
+    pub signing_key: PathBuf,
+    #[arg(long)]
+    pub triggered_by: Option<String>,
+    /// Where the scorecard is written locally, in addition to the bucket.
+    /// The DSSE sidecar lands beside it at `<out>` with the extension
+    /// replaced by `.sig`. Default: `./logweir-<run_id>.json`.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Prometheus textfile-collector output (spec §13). Task 21a.
+    #[arg(long)]
+    pub metrics_file: Option<PathBuf>,
+    /// Where the ENGINE writes its offset-mapping report. Pod-local; the run
+    /// uploads it beside the scorecard at
+    /// `logweir/drills/<run_id>.offsets.json` and records that key and its
+    /// sha256 in the signed document. Default: `offsets.json` in this run's
+    /// workdir, beside the restore checkpoint.
+    ///
+    /// The report is WRITTEN and never applied: tag 1 commits no consumer-group
+    /// offset on any cluster.
+    #[arg(long)]
+    pub offset_report_out: Option<PathBuf>,
+}
+
+impl From<RestoreRunArgs> for crate::drill::RunArgs {
+    /// The one mapping from the parsed command line to the run's arguments, so
+    /// neither CLI name can build a different `RunArgs` from the same flags.
+    fn from(a: RestoreRunArgs) -> Self {
+        crate::drill::RunArgs {
+            spec: a.spec,
+            approval: a.approval,
+            approver_key: a.approver_key,
+            allowed_clusters: a.allowed_clusters,
+            signing_key: a.signing_key,
+            triggered_by: a.triggered_by,
+            out: a.out,
+            metrics_file: a.metrics_file,
+            offset_report_out: a.offset_report_out,
+        }
+    }
 }
 
 #[derive(Subcommand)]

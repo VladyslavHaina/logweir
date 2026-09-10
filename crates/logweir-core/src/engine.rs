@@ -225,6 +225,31 @@ pub struct RestorePlan {
     pub default_replication_factor: i16,
     pub checkpoint_state: std::path::PathBuf,
     pub checkpoint_interval_secs: u64,
+    /// Where the engine writes its offset-mapping report
+    /// [U:crates/kafka-backup-core/src/config.rs:857-858
+    /// `pub offset_report: Option<std::path::PathBuf>`].
+    ///
+    /// A FIELD OF THE PLAN, like `checkpoint_state` beside it, and for the
+    /// same reason: `plan_hash` covers the plan, so the path the engine writes
+    /// to is a function of the approved bytes rather than of an environment
+    /// variable read at render time. `--offset-report-out` sets it; absent
+    /// that it is `offsets.json` in the same per-run workdir as
+    /// `checkpoint_state`.
+    ///
+    /// **Pod-local, and that is why phase 8 uploads it.** The engine writes
+    /// this file with `tokio::fs::write` inside the container
+    /// [U:crates/kafka-backup-core/src/restore/engine.rs:417-427] and the pod
+    /// is then deleted, so the only durable copy is the one
+    /// `logweir::drill::phase8_score::run` puts at
+    /// `logweir/drills/<run_id>.offsets.json` — recorded, with its digest, in
+    /// the signed scorecard's `evidence.offset_report_key` /
+    /// `evidence.offset_report_sha256`.
+    ///
+    /// Global Constraint 20 is UNCHANGED by its presence: tag 1 renders the
+    /// report and applies nothing (constraint 35). The report is a
+    /// description of what the offsets WOULD map to; committing it is tag 2's
+    /// `Switchover`, behind its own approval and its own ADR.
+    pub offset_report: std::path::PathBuf,
 }
 
 /// How a cluster's client is told to authenticate, as the renderer needs it —

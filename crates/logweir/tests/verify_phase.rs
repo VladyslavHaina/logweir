@@ -280,6 +280,7 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
+        offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
 }
 
@@ -2903,9 +2904,13 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
     sc.objectives = objectives;
 
     let store = fixtures::recording_store();
-    let signed =
-        logweir::drill::phase8_score::run(&sc, &fixtures::good_signing_key().path, &store.inner)
-            .expect("a partial verdict is a signable document");
+    let signed = logweir::drill::phase8_score::run(
+        &sc,
+        &fixtures::good_signing_key().path,
+        &store.inner,
+        None,
+    )
+    .expect("a partial verdict is a signable document");
 
     // Parsed from `signed.bytes` — the exact bytes the signature covers.
     let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).unwrap();

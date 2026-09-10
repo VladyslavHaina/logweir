@@ -2,6 +2,15 @@
 #   logweir drill run --spec drill.yaml --approval approval.json \
 #     --approver-key approver.pem --allowed-clusters allowed-clusters.json \
 #     --signing-key signer.pem
+#
+# A DRILL IS A RESTORE WITH `target.mode: scratch`, which is this document's
+# default and the reason it names no mode at all. This file and
+# `examples/restore.yaml` are ONE grammar —
+# `logweir_core::spec::RestoreSpec` (interface I20) — so the command is really
+# `logweir restore run`, and `logweir drill run` is its tag-0 name: same flags,
+# same spec, same function, plus one deprecation line on stderr. Start from
+# `examples/restore.yaml` for a point-in-time recovery into brand-new topics on
+# a real cluster; start from here for a drill into a throwaway one.
 source:
   storage:
     backend: s3
