@@ -94,10 +94,53 @@ marker is not an escape. Neither check subsumes the other: the secondary owns
 the two-word forms and tokens built outside an invocation, and its escape does
 **not** excuse the primary.
 
-## Sections E onward
+## Amendment E — two crates extracted, on opposite sides of the pure layer
 
-`docs/adr/0008` is extended by Task 13 (§E first half) and Task 14 (§E second
-half) — chain Z; nothing beyond Amendment D is written yet.
+Tag 1 splits two crates out of existing ones. They are recorded together
+because the pair is the point: one lands **outside** the pure layer and one
+**inside** it, and each placement is a decision taken here rather than a
+consequence of where the code happened to sit.
+
+**`crates/logweir-store` — the object-store half of `logweir-engine-oso`,
+outside the pure layer.** The whole of `logweir-engine-oso/src/storage.rs`
+becomes `logweir-store/src/lib.rs`, and `logweir-engine-oso/src/lib.rs` reads
+`pub use logweir_store as storage;` where it read `pub mod storage;`, so every
+existing `…::storage::Store` call site resolves unchanged. **The reason:**
+three tag-1 features need an object-store handle in a component that must not
+link `logweir-engine-oso` — `weirkeeper` verifies evidence it fetches with its
+own read-only credential (spec §8), lists manifests to compute a retention
+report (spec §5, guard G-RET) and reads a manifest's covered window for a
+schedule's status — and `logweir-engine-oso` exists to shell out to the OSO
+engine, carrying `subprocess.rs`, `vendored/` and the engine binary path, all
+of which linking it would drag into the control plane for the sake of
+`object_store`. `02-k8s-transition-plan.md:963` already named the extraction;
+this is it.
+
+`logweir-store` is **deliberately outside the pure layer**, by this amendment
+and not by any edit to a check. It takes `object_store` at Global Constraint 9's
+`["aws","azure","gcp","http"]` feature set, which pulls `aws-*`, so it can never
+satisfy the pure layer's zero-`aws-*` grep. Global Constraint 1 already names
+`crates/weirkeeper` and `crates/logweir-store` as outside the pure layer "by
+ADR, never by a quiet edit to the grep";
+`.github/workflows/no-oso.yml`'s forbidden-dependency loop is therefore **not**
+extended to it, and carries a comment saying so with a pointer here, so a
+future reader does not mistake the omission for an oversight. What the crate
+does depend on besides `object_store` is `logweir-core`, which is pure.
+
+Both constraints that lived in the moved file move with it and are unchanged:
+Global Constraint 6's `LOGWEIR_ROOT` is still the literal `"logweir/"` fixed in
+code, guarded in `from_url` and asserted in `put_create_only`, and a handle
+from `read_only_from_url` still physically cannot put — the `ReadOnly` check
+runs before the `LOGWEIR_ROOT` assertion and before anything else. The one
+piece of genuinely new code is `Store::manifest_facts`, returning
+`ManifestFacts { backup_id, newest_record_ms, oldest_record_ms }`: the
+retention reconciler needs a backup set's covered window, `list_manifests`
+returns `BackupSetRef`, which carries no timestamp at all, and the only
+structure that does carry one is produced by `OsoCliEngine::describe` — in the
+crate this extraction exists to keep out of the control plane.
+
+*(Task 14 records the second extraction, `crates/logweir-verify`, in this same
+section.)*
 
 ## Consequences
 

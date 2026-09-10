@@ -1,4 +1,4 @@
-use logweir_engine_oso::storage::{Store, StoreError};
+use logweir_store::{Store, StoreError};
 
 /// object_store's in-process InMemory backend, so the create-only semantics are
 /// provable with no MinIO and no network.
@@ -306,4 +306,64 @@ fn object_lock_readback_reports_no_proof_rather_than_guessing() {
             .is_none(),
         "and absence of the object is not evidence of retention either"
     );
+}
+
+// Interface I12, new with the `logweir-store` extraction. The retention
+// reconciler (spec §5, guard G-RET) runs in `weirkeeper` and therefore cannot
+// call `OsoCliEngine::describe` — the only other thing in this workspace that
+// carries a backup set's timestamps. `list_manifests` returns `BackupSetRef`,
+// which is `{ backup_id, manifest_key }` derived from the KEY STRING alone,
+// with no object read: there is no timestamp anywhere in it.
+//
+// Both arms matter. The first pins that the window comes out of the manifest
+// BODY — the key below carries no timestamp at all, so anything derived from
+// the key reports 0 and fails here. The second pins the refusal: a manifest
+// with no segment bounds no window, and an empty min/max would otherwise be
+// published as if it were a real one.
+#[test]
+fn manifest_facts_reads_the_window_from_the_body() {
+    let s = Store::in_memory("logweir");
+    let manifest = br#"{"topics":[{"name":"orders","partitions":[{"partition_id":0,"segments":[
+        {"key":"b1/topics/orders/partition=0/segment-00000000000000000000.bin.zst","start_timestamp":1700000000000,"end_timestamp":1700000300000},
+        {"key":"b1/topics/orders/partition=0/segment-00000000000000000100.bin.zst","start_timestamp":1700000300000,"end_timestamp":1700000600000}]}]},
+        {"name":"payments","partitions":[{"partition_id":3,"segments":[
+        {"key":"b1/topics/payments/partition=3/segment-00000000000000000000.bin.zst","start_timestamp":1700000100000,"end_timestamp":1700000500000}]}]}]}"#;
+    s.put_create_only("logweir/b1/manifest.json", manifest)
+        .unwrap();
+
+    let facts = s.manifest_facts("logweir/b1/manifest.json").unwrap();
+    assert_eq!(
+        facts.backup_id, "b1",
+        "backup_id is the manifest key's parent directory, derived exactly as \
+         list_manifests derives it"
+    );
+    assert_eq!(
+        facts.oldest_record_ms, 1_700_000_000_000,
+        "oldest_record_ms is the MINIMUM start_timestamp over every segment of \
+         every partition of every topic, read from the body — the key carries no \
+         timestamp, so a key-derived value would be 0"
+    );
+    assert_eq!(
+        facts.newest_record_ms, 1_700_000_600_000,
+        "newest_record_ms is the MAXIMUM end_timestamp over every segment of \
+         every partition of every topic, read from the body — the key carries no \
+         timestamp, so a key-derived value would be 0"
+    );
+
+    // Second arm: a manifest that declares no segment bounds no window.
+    s.put_create_only("logweir/b2/manifest.json", br#"{"topics":[]}"#)
+        .unwrap();
+    match s.manifest_facts("logweir/b2/manifest.json") {
+        Err(StoreError::Backend(m)) => {
+            assert!(
+                m.contains("logweir/b2/manifest.json"),
+                "the refusal must name the key it refused: {m}"
+            );
+            assert!(
+                m.contains("manifest declares no segment, so it bounds no window"),
+                "the refusal must say why, not just that: {m}"
+            );
+        }
+        other => panic!("a segment-less manifest bounds no window, got {other:?}"),
+    }
 }

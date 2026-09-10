@@ -1,0 +1,38 @@
+[package]
+name = "logweir-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The object-store half of the old `logweir-engine-oso`, extracted so a
+# component that must NOT link the OSO-coupled crate can still hold a bucket
+# handle (`02-k8s-transition-plan.md:963`; ADR 0008 §E). `logweir-engine-oso`
+# exists to shell out to the OSO engine — it carries `subprocess.rs`,
+# `vendored/` and the engine binary path — and linking it into the control
+# plane drags all of that in for the sake of `object_store`.
+#
+# DELIBERATELY OUTSIDE THE PURE LAYER (Global Constraint 1). `object_store`
+# with GC9's `["aws","azure","gcp","http"]` feature set pulls `aws-*`, so this
+# crate is named as outside the pure layer BY ADR — never by a quiet edit to
+# `.github/workflows/no-oso.yml`'s forbidden-dependency grep, which is not
+# extended to it.
+[dependencies]
+# The pure layer: `BackupSetRef`, `EngineError`, `StorageUrl`.
+logweir-core = { path = "../logweir-core" }
+# Global Constraint 9: the same crate, version and feature set OSO uses.
+object_store.workspace = true
+# The one runtime per store — see `Store::new_rt`.
+tokio.workspace = true
+# `StreamExt` over `ObjectStore::list` in `list_keys`.
+futures.workspace = true
+# `LockInfo::retain_until`.
+chrono.workspace = true
+# `StoreError`'s derive.
+thiserror.workspace = true
+# The untyped `serde_json::Value` reads in `segments_in_manifest` and
+# `manifest_facts`: this crate links NO vendored upstream struct.
+serde_json.workspace = true
+
+[features]
+default = []

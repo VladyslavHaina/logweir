@@ -8,7 +8,12 @@
 
 pub mod engine;
 pub mod kbak;
-pub mod storage;
+// The object-store half of this crate now lives in `logweir-store`, so a
+// component that must not link the OSO engine wrapper can still hold a
+// bucket handle (ADR 0008 §E; `02-k8s-transition-plan.md:963`). The
+// re-export keeps `logweir_engine_oso::storage::…` and `crate::storage::…`
+// resolving, so the extraction changed no call site.
+pub use logweir_store as storage;
 pub mod subprocess;
 pub mod vendored;
 

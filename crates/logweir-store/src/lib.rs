@@ -65,6 +65,24 @@ pub struct LockInfo {
     pub retain_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The covered window one manifest declares, plus the backup set it belongs
+/// to. Interface **I12**, the only new type in the `logweir-store`
+/// extraction.
+///
+/// It exists because `list_manifests` returns `Vec<BackupSetRef>` and
+/// `BackupSetRef` is `{ backup_id, manifest_key }` — derived from the key
+/// string alone, with no object read, so **there is no timestamp anywhere in
+/// the returned type**. The only structure carrying one is `BackupSetFacts`,
+/// produced by `OsoCliEngine::describe`, in the crate this extraction exists
+/// to keep out of the control plane. A retention reconciler needs a window
+/// and must not link that crate to get one.
+#[derive(Debug, Clone)]
+pub struct ManifestFacts {
+    pub backup_id: String,
+    pub newest_record_ms: i64,
+    pub oldest_record_ms: i64,
+}
+
 /// The ONLY key root Logweir may write under (Global Constraint 6). Fixed in
 /// code, never taken from a spec, so `put_create_only`'s guard cannot be
 /// widened by an adopter's configuration.
@@ -359,6 +377,85 @@ impl Store {
                 manifest_key: k,
             })
             .collect())
+    }
+
+    /// The covered window ONE manifest declares, read out of the manifest
+    /// BODY. Interface **I12**, for the retention reconciler (spec §5, guard
+    /// G-RET), which runs in `weirkeeper` and therefore cannot call
+    /// `OsoCliEngine::describe`.
+    ///
+    /// An untyped `serde_json::Value` read of the manifest body's
+    /// covered-window fields. Links NO vendored upstream struct — the same
+    /// untyped read, for the same reason, that `segments_in_manifest` states
+    /// in its own doc comment further down this file. The field paths are
+    /// `topics[].partitions[].segments[].{start_timestamp,end_timestamp}`,
+    /// two of the three that method already reads.
+    ///
+    /// `newest_record_ms` is the MAXIMUM `end_timestamp` and `oldest_record_ms`
+    /// the MINIMUM `start_timestamp` over every segment of every partition of
+    /// every topic — the whole manifest, unfiltered, because a backup set's
+    /// window is the union of its segments' windows and not any one topic's.
+    /// Both come from the BODY: the key carries no timestamp, so deriving
+    /// either from the key string would report `0`.
+    ///
+    /// `backup_id` is the manifest key's parent directory, derived exactly as
+    /// `list_manifests` derives it, so the two can never disagree about which
+    /// backup set a manifest belongs to.
+    ///
+    /// A manifest with no segment bounds no window, and saying so is the only
+    /// honest answer: an empty min/max would be published as a real window.
+    pub fn manifest_facts(&self, key: &str) -> Result<ManifestFacts, StoreError> {
+        let (bytes, _) = self.get(key)?;
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
+        let mut newest: Option<i64> = None;
+        let mut oldest: Option<i64> = None;
+        let topics = v
+            .get("topics")
+            .and_then(|t| t.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        for t in topics {
+            let parts = t
+                .get("partitions")
+                .and_then(|p| p.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+            for p in parts {
+                let ss = p
+                    .get("segments")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[]);
+                for s in ss {
+                    let (Some(t0), Some(t1)) = (
+                        s.get("start_timestamp").and_then(|x| x.as_i64()),
+                        s.get("end_timestamp").and_then(|x| x.as_i64()),
+                    ) else {
+                        return Err(StoreError::Backend(format!(
+                            "{key}: segment entry missing start_timestamp/end_timestamp"
+                        )));
+                    };
+                    oldest = Some(oldest.map_or(t0, |o: i64| o.min(t0)));
+                    newest = Some(newest.map_or(t1, |n: i64| n.max(t1)));
+                }
+            }
+        }
+        let (Some(oldest_record_ms), Some(newest_record_ms)) = (oldest, newest) else {
+            return Err(StoreError::Backend(format!(
+                "{key}: manifest declares no segment, so it bounds no window"
+            )));
+        };
+        Ok(ManifestFacts {
+            backup_id: key
+                .trim_end_matches("/manifest.json")
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+            newest_record_ms,
+            oldest_record_ms,
+        })
     }
 
     /// Pure window filter, extracted so it is testable with no backend.

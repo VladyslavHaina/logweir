@@ -1369,16 +1369,13 @@ dependencies = [
  "byteorder",
  "chrono",
  "crc32fast",
- "futures",
  "insta",
  "logweir-core",
  "logweir-kafka",
+ "logweir-store",
  "lz4_flex",
- "object_store",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "tokio",
  "zstd",
 ]
 
@@ -1406,6 +1403,19 @@ dependencies = [
  "hex",
  "rdkafka",
  "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "logweir-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "logweir-core",
+ "object_store",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
 ]

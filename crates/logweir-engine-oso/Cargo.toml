@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 # `DateTime::from_timestamp_millis` (describe()'s manifest.created_at) and
 # `Utc::now()` (restore()'s OWN start/finish timing — `restore` prints no
 # report file, see engine.rs).
@@ -29,9 +28,15 @@ lz4_flex = "0.13"
 # `zstd-sys`/`cc` — so this crate is not C-toolchain-free overall; only the
 # rdkafka half of that claim holds.
 logweir-kafka = { path = "../logweir-kafka", default-features = false }
-object_store.workspace = true
-futures.workspace = true
-tokio.workspace = true
+# The object-store half of this crate, extracted (ADR 0008 §E). The
+# `pub use logweir_store as storage;` in lib.rs is what keeps
+# `logweir_engine_oso::storage::…` resolving for every existing caller.
+#
+# `object_store`, `futures`, `tokio` and `thiserror` left with it: after
+# the move no file in this crate names any of the four (the only
+# remaining `object_store` occurrence is the prose comment at
+# engine.rs:130). They are declared by `logweir-store` instead.
+logweir-store = { path = "../logweir-store" }
 
 [dev-dependencies]
 insta.workspace = true

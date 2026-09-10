@@ -113,7 +113,7 @@ const ALLOWED: [(&str, &str); 9] = [
          constructs no client (measured: the binaries that use it run in <0.1 s)",
     ),
     (
-        "crates/logweir-engine-oso/tests/storage.rs",
+        "crates/logweir-store/tests/storage.rs",
         "Store::from_url over tempdir filesystem URLs — no endpoint, no network \
          (measured 0.05 s for the whole binary)",
     ),
