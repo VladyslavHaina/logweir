@@ -27,6 +27,38 @@ pub enum SubjectKind {
     Backup,
 }
 
+impl SubjectKind {
+    /// The kind as the string check 8 compares.
+    ///
+    /// WHY A STRING AND NOT AN ENUM COMPARISON. The fifth check
+    /// ([`crate::controllers::approval::evaluate`] step 8) compares the
+    /// `subject_kind` inside the **signed bytes** with the referent's kind, and
+    /// the signed bytes carry a string that `logweir drill approve` wrote — not
+    /// a `SubjectKind`. Deserialising it into this enum first would turn "the
+    /// approval binds a kind this build has never heard of" (a `Switchover`
+    /// approval replayed against a tag-1 controller) into a parse error two
+    /// checks earlier, reported as a bad signature. Comparing strings keeps
+    /// that case where it belongs: `SubjectKindMismatch`, naming both sides.
+    ///
+    /// These two spellings are the serde spellings of the two variants — the
+    /// enum takes no `rename_all`, so `Restore` and `Backup` are what the wire
+    /// carries — and `the_subject_kind_strings_are_the_wire_spellings` asserts
+    /// that by round-tripping each through `serde_json`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Restore => "Restore",
+            Self::Backup => "Backup",
+        }
+    }
+}
+
+impl std::fmt::Display for SubjectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The object this approval is about.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

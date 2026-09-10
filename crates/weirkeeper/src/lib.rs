@@ -15,6 +15,14 @@
 //! [`job`] holds the one constant that names the runner image, and nothing
 //! else until Task 17 grows `job::build` around it.
 //!
+//! WHAT TASK 16 ADDED. [`controllers`] holds the first two reconcilers —
+//! [`controllers::approval`], whose five checks in a stated order are what
+//! turn an `Approval` object into an authorisation, and
+//! [`controllers::trust_roster`], which makes the roster's `LOADED` and
+//! `EXPIRED` printer columns mean something. [`ROSTER_NAME`] is re-exported
+//! here (interface **I16**) because `weirkeeper::ROSTER_NAME` is the one path
+//! every consumer of it names.
+//!
 //! WHAT THIS CRATE LINKS, AND WHAT IT MUST NOT. `logweir-verify` — the
 //! verifying half of the DSSE machinery — and never `logweir-evidence`, which
 //! keeps `SigningKey` and `sign_detached`. Global Constraint 27 states the
@@ -32,9 +40,20 @@
 //! `http-body-util` are normal dependencies here rather than
 //! `[dev-dependencies]`.
 
+pub mod controllers;
 pub mod crds;
 pub mod job;
 pub mod testing;
+
+/// The name of the one cluster-scoped `TrustRoster` — interface **I16**.
+///
+/// RE-EXPORTED HERE BECAUSE `weirkeeper::ROSTER_NAME` IS THE ONE PATH TASKS
+/// 20, 21, 24, 27 AND 28 NAME. The declaration lives beside the reconciler
+/// that resolves it ([`controllers::approval::ROSTER_NAME`]); this line is
+/// what makes the interface register's spelling the spelling every consumer
+/// writes, so a later task cannot reach the constant by a second path and then
+/// have that path move.
+pub use controllers::approval::ROSTER_NAME;
 
 /// Install the process-level rustls [`CryptoProvider`] this binary's TLS stack
 /// needs, and report whether this call was the one that installed it.

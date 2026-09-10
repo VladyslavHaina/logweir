@@ -138,6 +138,38 @@ chrono.workspace = true
 # and teardown signatures the UI renders (spec §8) and must not thereby link
 # the signer.
 logweir-verify = { path = "../logweir-verify" }
+# TASK 16 — `ids::sha256_prefixed`, AND NOTHING ELSE FROM THIS CRATE. Check 7
+# of `controllers::approval::evaluate` RECOMPUTES the plan hash from the
+# referent's own `spec.planBytes` and compares it with the hash the approval
+# document names, so the controller and `logweir drill approve`
+# (`crates/logweir/src/drill/phase1_approval.rs:88`) must agree on the hash
+# function BY SHARING IT — a second `sha256_prefixed` in this crate is exactly
+# how the two halves come to disagree about which document was approved.
+#
+# ADDS NO PACKAGE (Global Constraint 38): `logweir-core` is a workspace member
+# and already in the resolved graph. A `path =` entry is also outside
+# `tests/linkage.rs::claimed_already_resolved`'s set, so the four-entry
+# assertion there is untouched.
+#
+# THE EDGE POINTS THE PERMITTED WAY. Global Constraint 1 forbids the PURE layer
+# from taking `kube`/`k8s-openapi`; it says nothing about this crate taking the
+# pure layer, and `crates/weirkeeper` is outside the pure layer by ADR. Nor
+# does it reach the signer: `logweir-core` declares no `logweir-evidence` edge,
+# so `scripts/check-one-signer.sh`'s check 1 still computes {logweir, e2e}.
+logweir-core = { path = "../logweir-core" }
+# TASK 16 — `StreamExt`, TO DRIVE A `kube::runtime::Controller` TO COMPLETION.
+# `Controller::run` returns a `Stream`, not a `Future`, and `main.rs`'s
+# registration point takes `Pin<Box<dyn Future<Output = ()> + Send>>`; there is
+# no way to poll that stream without naming the `Stream`/`StreamExt` traits,
+# and `kube` re-exports neither (`kube::runtime::WatchStreamExt` has `Stream`
+# as a SUPERTRAIT, which does not bring it into scope).
+#
+# `workspace = true`, so the version stays the root manifest's single decision
+# — and `futures = "0.3"` is already a `[workspace.dependencies]` entry, taken
+# by `crates/logweir-store`, so this adds NO package (Global Constraint 38) and
+# is outside `claimed_already_resolved`'s set for the same reason the five
+# entries below are.
+futures.workspace = true
 # `main.rs` needs a runtime for the kube client and a SIGTERM handler.
 # `signal` pulls `signal-hook-registry` and `mio`, both already in
 # `Cargo.lock`, so it adds no package either.

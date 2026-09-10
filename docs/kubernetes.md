@@ -414,5 +414,149 @@ an alternative expression of the same property, at cluster scope rather than
 per-CRD, and it is not a substitute: nothing in the shipped install depends on
 it, and uncommenting it on a 1.29 API server would fail to apply.
 
+## 8. The approval flow: five checks, in this order
+
+An `Approval` object that exists is **not** an approval. An `Approval` whose
+status the controller set to `Verified=True` is. Creating the object is a
+`POST` any namespace tenant can make; what turns it into an authorisation is a
+DSSE signature, by a key on the roster, over bytes that bind *this* plan and
+*this* kind of subject.
+
+### Install step 1: the roster
+
+**Before any custom resource, create the one cluster-scoped `TrustRoster`, and
+name it `default`.**
+
+```bash
+kubectl --context docker-desktop get trustroster default
+```
+
+`default` is a **fact, not a convention**. The controller resolves
+`trustrosters/default` and nothing else — not a name read off the `Approval`,
+not one from a flag, not one from the environment, because a roster whose name
+the subject supplies is a roster the subject can choose. A roster under any
+other name authorises nothing, and every `Approval` in the cluster is refused
+with:
+
+```
+Verified=False  reason=RosterNotFound
+no cluster-scoped TrustRoster named 'default'; see docs/kubernetes.md install step 1
+```
+
+That is a refusal you can read, never a silent one. `spkiPem` on every entry is
+a **public** key in SubjectPublicKeyInfo PEM form; nothing in this API group has
+a field a private key could go in.
+
+`kubectl --context docker-desktop get trustroster default` renders `LOADED` and
+`EXPIRED` from the roster's own status, and those two columns mean something
+because a reconciler writes them: it parses every `approverKeys[].spkiPem`
+**and every `signingKeys[].spkiPem`**, sets `status.loaded`, and lists in
+`status.expiredKeyIds` every entry from **either** list whose `notAfter` has
+passed. A roster with one unparseable PEM is `Loaded=False` naming the `keyId`
+— and refuses every approval, because a partially loaded roster is not a
+roster. Expiry is reported here so no consumer has to derive it from a clock it
+does not share with the controller.
+
+### The five checks
+
+Each `Approval` event resolves the roster, fetches the referent named by
+`spec.subjectRef`, reads its `spec.planBytes`, and runs the checks **in this
+order**. The order is load-bearing: the DSSE verifier refuses a `payloadType`
+mismatch itself and returns the same error kind for "no signature by this key",
+so an implementation that simply tried the roster's keys would report *one*
+refusal for a substituted document, an attacker's key and a genuinely broken
+signature alike.
+
+| # | Check | `reason` on failure |
+|---|---|---|
+| 1 | `sidecarBytes.payloadType` is the approval payload type — **before any key is tried** | `PayloadTypeMismatch` (both strings, in full) |
+| 2 | **Every** `approverKeys[]` entry parses | `SignatureInvalid`, naming the `keyId` |
+| 3 | Each entry's declared `keyId` is the sha256 of its own `spkiPem` | `KeyIdNotInRoster`, naming both ids |
+| 4 | Some `sidecarBytes.signatures[].keyid` is on `approverKeys` | `KeyIdNotInRoster`, naming the sidecar's key ids |
+| 5 | The signature verifies, under the **matched** key | `SignatureInvalid` |
+| 6 | The matched entry's `notAfter` is in the future | `KeyIdExpired` |
+| 7 | The document's `plan_hash` equals the sha256 of the referent's `spec.planBytes`, **recomputed** | `PlanHashMismatch` |
+| 8 | The document's `subject_kind` equals the referent's kind | `SubjectKindMismatch` |
+
+Checks 1–6 are the "five checks" the roster and the signature answer; 7 and 8
+are what bind the signature to a particular plan and a particular kind of
+object. **A key outside the roster is `KeyIdNotInRoster`, never
+`SignatureInvalid`** — the signature may verify perfectly; the signer is simply
+not authorised, and an operator has to be able to see which of those two
+happened.
+
+**Check 5 reports the key that matched, never `signatures[0]`.** A sidecar
+carrying two signatures — one by a rostered key and one by anyone else's —
+verifies under exactly one of them, and only that one appears in
+`status.matchedKeyId`.
+
+**Check 7 is recomputed, never read from a status.** A status field is written
+by a controller and is not part of anything anyone signed, so it could never
+rescue an approval that binds a different plan. `Restore.status` carries no
+plan hash at all.
+
+**Check 8 exists because without it the second approval degenerates.** An
+`Approval` whose `planHash` matched a `Restore` would be accepted for a
+`Switchover`, and "a valid signature by a rostered key exists in this
+namespace" is a property any approved restore in that namespace already
+produced. `Switchover` is tag 2, so the check is cheap now and expensive to
+retrofit — and its absence would be invisible until then. The subject kind is
+part of the **signed bytes**: `logweir drill approve` writes
+`"subject_kind": "Restore"` into `approval.json`.
+
+In tag 1 `spec.subjectRef.kind: Backup` is refused with
+`ReferentHasNoPlanBytes`: the `Backup` kind carries no `spec.planBytes` for
+check 7 to recompute a hash from, and hashing something nobody signed is not an
+alternative. Tag 1's approval flow is the restore path.
+
+### `approvalBytes` and `sidecarBytes` are document text, never base64
+
+They carry **the UTF-8 document text, verbatim**. Paste exactly what
+`logweir drill approve` wrote. Neither field declares `format: byte`, the
+controller passes `spec.approvalBytes` straight into the checks with no decode
+step, and the hash is over exactly those bytes. A base64 layer between the
+approver's file and the verified bytes is the class of transformation
+`planBytes` exists to forbid.
+
+### What lands on the status, and what does not
+
+On success: `verified: true`, `matchedKeyId`, `approver`, `ticket`,
+`selfAttestedRisk`, and a `Verified` condition. On a refusal: `verified: false`
+and a `Verified` condition whose `reason` is the name from the table above and
+whose `message` says what was compared — and **no** `approver` and **no**
+`matchedKeyId`, because a name lifted out of bytes whose signature nobody
+authorised is an attacker-controlled string on a field a UI renders.
+
+`selfAttestedRisk` is `true` when the matched approver key id also appears in
+`spec.signingKeys[].keyId`. It is **labelled, never refused**: `false` means
+only "two different key ids", and one operator holding both keys satisfies it.
+
+**The controller patches `/status` and nothing else.** It never patches a
+`spec` — every `spec` in this group is sealed by the CEL rule of §7, and an
+approval whose bytes a controller could edit is not an approval — and it never
+deletes. **A refused `Approval` stays in the cluster**, as the audit trail of a
+rejected attempt:
+
+```bash
+kubectl --context docker-desktop get approvals
+kubectl --context docker-desktop get approval a1 \
+  -o jsonpath='{.status.conditions[?(@.type=="Verified")].reason}'
+```
+
+Both reconcilers re-examine their objects periodically as well as on change,
+because two of these verdicts are functions of the clock: a key that lapses
+overnight must appear in `expiredKeyIds`, and an `Approval` refused with
+`RosterNotFound` at 09:00 must stop saying so once the roster is installed at
+09:05.
+
+### What the controller does not claim
+
+It verifies. It links the verifying half of the evidence machinery and never
+the signing half, which is a **linkage** property and the whole of what is
+claimed: the *capability* to sign is unbroken while the controller holds Job
+CRUD over the signing key's namespace, and that residual is stated rather than
+designed away. The controller reads no Secret, and its archive handle is
+read-only.
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

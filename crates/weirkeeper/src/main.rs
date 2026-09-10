@@ -77,6 +77,17 @@ fn main() -> ExitCode {
 }
 
 /// Run the controller until SIGTERM.
+///
+/// `clippy::vec_init_then_push` IS ALLOWED FOR THE REGISTRATION POINT BELOW,
+/// AND THE REASON IS A CONTRACT AND NOT A PREFERENCE. The `controllers` vector
+/// is the one place every chain-O task from Task 16 onward appends ONE line —
+/// `controllers.push(Box::pin(…));` — with nothing else in this file changing.
+/// Collapsing the two current entries into the `vec![…]` literal clippy
+/// suggests would turn each of those one-line additions into an edit of the
+/// same expression, which is precisely the rewrite the plain `Vec` was written
+/// to avoid. The allow sits on the function because the lint's span is the
+/// whole statement group, not the `let`.
+#[allow(clippy::vec_init_then_push)]
 fn run() -> ExitCode {
     // JSON to stdout, filter from `RUST_LOG`: the pod log API has no stream
     // selector (Global Constraint 11), so everything a controller wants read
@@ -119,11 +130,18 @@ fn run() -> ExitCode {
         // what makes those serial edits one-line additions instead of a
         // rewrite of `main`.
         //
-        // `mut` is unused until Task 16 pushes the first reconciler; the
-        // binding is written in its final shape now rather than being reshaped
-        // by whichever task happens to be first.
-        #[allow(unused_mut)]
+        // Task 16 pushed the first two, so the `#[allow(unused_mut)]` Task 15
+        // left here for exactly this moment is gone.
+        //
+        // `Vec::new()` + `push`, AND NOT `vec![…]` — see the
+        // `clippy::vec_init_then_push` allow on `run` for why.
         let mut controllers: Vec<ControllerTask> = Vec::new();
+        controllers.push(Box::pin(weirkeeper::controllers::trust_roster::controller(
+            client.clone(),
+        )));
+        controllers.push(Box::pin(weirkeeper::controllers::approval::controller(
+            client.clone(),
+        )));
 
         let registered = controllers.len();
         info!(
