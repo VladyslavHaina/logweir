@@ -1,0 +1,199 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-backup-receipt-1.0.0.json",
+  "title": "BackupReceipt",
+  "description": "The signed record of one `logweir backup run`.\n\nField order is the document's own serialisation order (`serde_json` is built with `preserve_order`, so declaration order IS byte order through `crate::det_json::to_deterministic_json`). Do not reorder without regenerating `schemas/logweir-backup-receipt-1.0.0.json` and re-minting `e2e/fixtures/signed/backup-receipt.json`.",
+  "type": "object",
+  "required": [
+    "archive",
+    "backup_id",
+    "covered",
+    "engine",
+    "exit_code",
+    "finished_at",
+    "format_version",
+    "records",
+    "requested_at",
+    "run_id",
+    "source",
+    "started_at",
+    "triggered_by"
+  ],
+  "properties": {
+    "archive": {
+      "$ref": "#/definitions/ReceiptArchive"
+    },
+    "backup_id": {
+      "description": "The engine's own identifier for the archive this run wrote. Distinct from `run_id`: two runs can be asked to append to one backup set, and `archive.manifest_key` is keyed on THIS.",
+      "type": "string"
+    },
+    "covered": {
+      "$ref": "#/definitions/ReceiptCovered"
+    },
+    "engine": {
+      "$ref": "#/definitions/ReceiptEngine"
+    },
+    "exit_code": {
+      "description": "The engine's exit status, as `crate::engine::BackupFacts` measured it — NOT the `logweir` process's own exit code, which maps through Global Constraint 11. Invariant 2 below is the biconditional that makes this field mean something: a receipt for a failed backup names no manifest.",
+      "type": "integer",
+      "format": "int32"
+    },
+    "finished_at": {
+      "description": "When the engine subprocess finished.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "format_version": {
+      "description": "Semver of THIS format — `1.0.0`, and independent of the scorecard's.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string, for the reason `crate::scorecard::Scorecard::format_version` records: without it a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-backup-receipt-1.0.0.json`, so a schema-only validator — the one route that does not go through `validate_invariants` — accepted exactly the document GC12 exists to refuse. Any `1.x.y` is allowed, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
+    },
+    "records": {
+      "description": "Records captured, per topic. Invariant 3 requires exactly one entry per `source.topics` entry and no others: a receipt that counts a topic the run was never asked to back up, or omits one it was, is describing some other run.\n\nA `BTreeMap`, so the key order is the topic names' own order and two runs over the same topic set produce byte-identical bytes here.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    },
+    "requested_at": {
+      "description": "When the run was requested — the same clock reading `Scorecard::requested_at` carries.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "description": "ULID of the run that produced this receipt. Also the object key stem in the evidence bucket, exactly as `Scorecard::run_id` is.",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/definitions/ReceiptSource"
+    },
+    "started_at": {
+      "description": "When the engine subprocess started. Logweir-measured, never engine-reported (`crate::engine::BackupFacts`): `backup` has no `--format` and writes no report file.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "triggered_by": {
+      "description": "Free text from `--triggered-by`. Deliberately **not** a metric label: unbounded cardinality, for the reason `Scorecard::triggered_by` records.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ReceiptArchive": {
+      "description": "What was written, and where. The two fields an auditor needs in order to go and look: the manifest's key, and a digest over the exact manifest bytes THIS RUN READ BACK (not over bytes Logweir remembers writing).",
+      "type": "object",
+      "required": [
+        "manifest_key",
+        "manifest_sha256",
+        "prefix"
+      ],
+      "properties": {
+        "manifest_key": {
+          "description": "Empty **if and only if** the backup did not exit 0 — invariant 2.",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "description": "`\"sha256:<hex>\"` over the manifest bytes read back after the run.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "The object-store prefix everything this run wrote lives under. GC6: Logweir writes only under its own `logweir/` prefix.",
+          "type": "string"
+        }
+      }
+    },
+    "ReceiptAuth": {
+      "description": "How the source client was told to authenticate. **Never a password, and no field that could hold one** — the render-side twin of `crate::engine::AuthRender`, whose doc comment states the same rule for the same reason: the secret reaches the engine through its own `${VAR}` environment expansion and is never interpolated by us, so it can never be interpolated into a document we then sign and publish.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "description": "`\"plaintext\"` or `\"scram-sha-512\"`.",
+          "type": "string"
+        },
+        "username": {
+          "description": "The SASL username, when there is one. `null` under `plaintext` — which is not the same as an empty username.",
+          "default": null,
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "ReceiptCovered": {
+      "description": "The time range the archive covers, in **EPOCH MILLISECONDS**.\n\n# Not RFC 3339, and this is the interface, not a preference (I22)\n\n`Backup.status.windowCovered{fromMs,toMs}` mirrors this shape as two `int64`s, and a Kubernetes status subresource has no date-time type to mirror a string into. Two representations of one window — a string here and an integer there — would need a conversion nobody owns, and the first disagreement between them would be invisible: both would still be well-formed. So the receipt speaks the operator's units, and the operator copies the numbers.",
+      "type": "object",
+      "required": [
+        "from_ms",
+        "to_ms"
+      ],
+      "properties": {
+        "from_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "to_ms": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "ReceiptEngine": {
+      "description": "The pinned engine that took the backup. `digest` is why this block is worth signing: GC7 pins by digest and never by tag, and a receipt that named only a version would be satisfied by any binary claiming it.",
+      "type": "object",
+      "required": [
+        "digest",
+        "id",
+        "version"
+      ],
+      "properties": {
+        "digest": {
+          "description": "`\"sha256:…\"`, from `third_party/kafka-backup-binary.digest`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "`\"oso-cli\"`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "`\"v0.21.0\"` — at or above the GC8 floor.",
+          "type": "string"
+        }
+      }
+    },
+    "ReceiptSource": {
+      "description": "The SOURCE cluster, as measured — never as a spec claimed it.",
+      "type": "object",
+      "required": [
+        "auth",
+        "bootstrap_servers",
+        "cluster_id",
+        "topics"
+      ],
+      "properties": {
+        "auth": {
+          "$ref": "#/definitions/ReceiptAuth"
+        },
+        "bootstrap_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cluster_id": {
+          "description": "Read from the broker at phase −1, never from the spec. GC18(c)'s fourth rail records the source `cluster_id` and re-asserts it is not the restore target; this is where the recorded value is attested.",
+          "type": "string"
+        },
+        "topics": {
+          "description": "The named topic allowlist the run was given. GC18(c) rail 1: a named set with no glob metacharacter (**G-GLOB**), so this list is the exact set of topics, not a pattern that a reader would have to re-expand against a cluster it cannot see.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

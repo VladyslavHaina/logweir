@@ -459,3 +459,163 @@ fn the_verifier_parity_script_is_wired_into_lint_and_ci() {
          the script does not count."
     );
 }
+
+// ---------------------------------------------------------------- Task 5
+/// The signed backup-receipt fixture verifies under `--payload-type
+/// backup-receipt`, and the SAME bytes are refused under `--payload-type
+/// scorecard`.
+///
+/// Two halves, and the second is the load-bearing one. `verify_detached`
+/// compares the sidecar's `payloadType` **in full**, so a genuinely-signed
+/// document of one type presented in place of another is refused as
+/// SUBSTITUTION rather than accepted — which is what makes the default
+/// (`scorecard`) safe to leave in place while the flag exists. If the
+/// comparison were a prefix, a substring, or absent, the second half of this
+/// test would pass at exit 0 and nothing else in the suite would notice.
+///
+/// Exit codes are read directly from `Command::output()`'s status.
+#[test]
+fn the_signed_receipt_fixture_verifies() {
+    let verify_typed = |payload_type: &str| {
+        bin()
+            .args([
+                "drill",
+                "verify",
+                "--payload-type",
+                payload_type,
+                "--scorecard",
+            ])
+            .arg(format!("{FIX}/backup-receipt.json"))
+            .arg("--signature")
+            .arg(format!("{FIX}/backup-receipt.sig"))
+            .arg("--public-key")
+            .arg(format!("{FIX}/public.pem"))
+            .output()
+            .unwrap()
+    };
+
+    let ok = verify_typed("backup-receipt");
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "the signed receipt fixture must verify under its own payload type, stderr: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let stdout = String::from_utf8(ok.stdout).unwrap();
+    assert!(
+        stdout.contains("signature: VALID"),
+        "the verdict must say the signature is valid, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("application/vnd.logweir.backup-receipt+json;version=1.0.0"),
+        "the verdict must name the media type it checked, got: {stdout}"
+    );
+    // The honest line. An exit 0 here does NOT mean what a scorecard's exit 0
+    // means, and the printer has to say so — otherwise the weaker verdict is
+    // indistinguishable from the stronger one at the only place an operator
+    // looks.
+    assert!(
+        stdout.contains("the SIGNATURE only"),
+        "an exit 0 that checked no invariant must say so on stdout, got: {stdout}"
+    );
+
+    let substituted = verify_typed("scorecard");
+    assert_ne!(
+        substituted.status.code(),
+        Some(0),
+        "the same bytes must be REFUSED as a scorecard: `verify_detached` compares \
+         payloadType in full, and a genuinely-signed receipt handed over in place of \
+         a scorecard is substitution. stdout: {}",
+        String::from_utf8_lossy(&substituted.stdout)
+    );
+    assert_eq!(
+        substituted.status.code(),
+        Some(4),
+        "a payloadType mismatch is evidence of substitution, which is the same class \
+         as a bad signature (Global Constraint 11, exit 4), stderr: {}",
+        String::from_utf8_lossy(&substituted.stderr)
+    );
+}
+
+/// An unrecognised `--payload-type` is an ERROR, never a passthrough.
+///
+/// A typo'd media type that fell through would surface downstream as
+/// "unexpected payloadType" and read like a bad artifact rather than a bad
+/// command line — and a value that fell through to the scorecard's constant
+/// would silently verify the wrong thing. Exit 1 (operational: no artifact
+/// was produced and nothing was refused by a guard), and the message names
+/// the four accepted values.
+#[test]
+fn drill_verify_refuses_an_unknown_payload_type() {
+    let out = bin()
+        .args([
+            "drill",
+            "verify",
+            "--payload-type",
+            "backup_receipt",
+            "--scorecard",
+        ])
+        .arg(format!("{FIX}/backup-receipt.json"))
+        .arg("--signature")
+        .arg(format!("{FIX}/backup-receipt.sig"))
+        .arg("--public-key")
+        .arg(format!("{FIX}/public.pem"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unknown --payload-type is a bad command line, stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    for name in ["backup-receipt", "receipt", "scorecard", "teardown"] {
+        assert!(
+            err.contains(name),
+            "the refusal must name the accepted value {name:?}, got: {err}"
+        );
+    }
+}
+
+/// The default is `scorecard`, so every invocation that predates
+/// `--payload-type` is byte-for-byte unchanged.
+///
+/// Asserted by comparing the three-argument form's stdout against the
+/// explicit `--payload-type scorecard` form's over the same fixture. A
+/// default of anything else, or a printer that mentioned the payload type on
+/// the scorecard path, would change output an auditor's script may be reading.
+#[test]
+fn the_payload_type_default_leaves_the_scorecard_invocation_unchanged() {
+    let implicit = verify(
+        format!("{FIX}/scorecard.json"),
+        format!("{FIX}/scorecard.sig"),
+        format!("{FIX}/public.pem"),
+    );
+    let explicit = bin()
+        .args([
+            "drill",
+            "verify",
+            "--payload-type",
+            "scorecard",
+            "--scorecard",
+        ])
+        .arg(format!("{FIX}/scorecard.json"))
+        .arg("--signature")
+        .arg(format!("{FIX}/scorecard.sig"))
+        .arg("--public-key")
+        .arg(format!("{FIX}/public.pem"))
+        .output()
+        .unwrap();
+    assert_eq!(implicit.status.code(), Some(0), "the fixture must verify");
+    assert_eq!(implicit.status.code(), explicit.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&implicit.stdout),
+        String::from_utf8_lossy(&explicit.stdout),
+        "the default must be `scorecard`, and the scorecard path's four printed lines \
+         must be exactly what they were before the flag existed"
+    );
+    assert!(
+        String::from_utf8_lossy(&implicit.stdout).contains("run_id:"),
+        "the scorecard path still prints its full report, not the signature-only one"
+    );
+}

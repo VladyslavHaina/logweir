@@ -29,7 +29,7 @@ pub enum Command {
     /// Back up a source cluster into an archive, from a Logweir spec.
     #[command(subcommand)]
     Backup(BackupCmd),
-    /// Print a JSON Schema. v0.1 accepts only `scorecard`.
+    /// Print a JSON Schema. Tag 1 accepts `scorecard` and `backup-receipt`.
     Schema { which: String },
     /// Check credentials, engine VERSION and glibc floor, target reachability,
     /// marker topic and approver key — before a drill is attempted.
@@ -128,15 +128,37 @@ pub enum DrillCmd {
         #[arg(long, default_value = "table")]
         format: String,
     },
-    /// Check a scorecard's DSSE signature against a public key. Exit 0 only
-    /// if the signature covers the bytes of `--scorecard` exactly as stored.
+    /// Check a signed Logweir document's DSSE signature against a public
+    /// key. Exit 0 only if the signature covers the bytes of `--scorecard`
+    /// exactly as stored.
     Verify {
+        // The flag stays `--scorecard` even though `--payload-type` now lets
+        // it name three other documents. Renaming it would break every
+        // existing invocation, every doc, `scripts/check-verifier-parity.sh`
+        // and `docs/verify-a-scorecard.md` in exchange for a better word; a
+        // `--document` alias is a tag-2 conversation, not a tag-1 rename.
         #[arg(long)]
         scorecard: PathBuf,
         #[arg(long)]
         signature: PathBuf,
         #[arg(long)]
         public_key: PathBuf,
+        /// Which of the four documents Logweir signs this is —
+        /// `scorecard`, `backup-receipt`, `receipt` (the post-put storage
+        /// readback) or `teardown`.
+        //
+        // DEFAULT `scorecard`, so every invocation that existed before Task 5
+        // is byte-for-byte unchanged: the three-argument form still verifies
+        // a scorecard and still runs its invariant arms. The value is
+        // resolved to a media type by `crate::verify::resolve_payload_type`,
+        // and an unrecognised one is an ERROR (exit 1) rather than a
+        // passthrough of anything containing a slash — a typo would otherwise
+        // surface as "unexpected payloadType" and read like a bad artifact
+        // instead of a bad command line. `docs/verify_scorecard.py`'s
+        // `--payload-type` is the same flag with the same short names, so an
+        // auditor runs the two readers with one command line.
+        #[arg(long, default_value = "scorecard")]
+        payload_type: String,
     },
 }
 

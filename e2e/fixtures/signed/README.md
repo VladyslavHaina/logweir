@@ -45,6 +45,36 @@ engineering's call, not a test's. It no longer costs the keypair, though:
 absent, so `public.pem` and `signing.pem` are unchanged by a re-mint and the
 `917cf9a2…` fingerprint survives it.
 
+## The backup receipt (Task 5)
+
+`backup-receipt.json` and `backup-receipt.sig` are a signed **backup receipt**
+— a different document type with its own media type
+(`application/vnd.logweir.backup-receipt+json;version=1.0.0`), its own schema
+and its own `format_version`, described field by field in
+[`docs/formats/backup-receipt.md`](../../../docs/formats/backup-receipt.md).
+They are signed by the same pinned `917cf9a2…` key as everything else here.
+
+The document describes a **successful** two-topic backup, so it satisfies all
+four of `BackupReceipt::validate_invariants`' arms;
+`crates/logweir-evidence/examples/mint_backup_receipt_fixture.rs` asserts that
+before it signs anything, and
+`crates/logweir-core/tests/backup_receipt.rs::the_checked_in_receipt_fixture_parses_and_satisfies_its_invariants`
+asserts it of the committed bytes. Every value in it is a plausible constant
+rather than a measured one: it is an example of the FORMAT.
+
+Verify it with either reader:
+
+```
+logweir drill verify --payload-type backup-receipt \
+  --scorecard e2e/fixtures/signed/backup-receipt.json \
+  --signature e2e/fixtures/signed/backup-receipt.sig \
+  --public-key e2e/fixtures/signed/public.pem
+```
+
+The minter needs no shell redirect and no `mv`: it writes the document and the
+signature over exactly those bytes itself, in one process, so the tracked pair
+can never disagree.
+
 ## The deliberately bogus fixture
 
 `scorecard-self-attested-bogus.json` and `scorecard-self-attested-bogus.sig`

@@ -1,3 +1,4 @@
+use crate::backup_receipt::BackupReceipt;
 use crate::scorecard::Scorecard;
 
 /// Pretty-printed JSON Schema for the scorecard. `$id` pins the published
@@ -12,6 +13,29 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id =
         Some("https://logweir.dev/schemas/logweir-drill-scorecard-1.0.0.json".to_string());
+    let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
+    out.push('\n');
+    out
+}
+
+/// Pretty-printed JSON Schema for the backup receipt (Task 5). Same
+/// generator settings as the scorecard's, so the two files are comparable by
+/// eye and a reviewer reading one drift diff has learnt to read the other.
+///
+/// `$id` pins the published URL, and the CI drift arm at
+/// `.github/workflows/ci.yml` regenerates this and `diff -u`s it against
+/// `schemas/logweir-backup-receipt-1.0.0.json` on every build — so the
+/// checked-in file cannot silently stop describing the type.
+pub fn backup_receipt_schema() -> String {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.option_nullable = true;
+        s.option_add_null_type = false;
+    });
+    let mut root = settings
+        .into_generator()
+        .into_root_schema_for::<BackupReceipt>();
+    root.schema.metadata().id =
+        Some("https://logweir.dev/schemas/logweir-backup-receipt-1.0.0.json".to_string());
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
     out

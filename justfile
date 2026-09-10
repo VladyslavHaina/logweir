@@ -123,8 +123,19 @@ test:
 golden:
     INSTA_UPDATE=always cargo test --workspace
 
+# Regenerates BOTH checked-in schemas. Tag 1 ships two (Global Constraint 13
+# as revised): the drill scorecard and the backup receipt. The CI drift arms at
+# .github/workflows/ci.yml regenerate each one into /tmp and `diff -u` it
+# against the file here, so a schema that stopped describing its type is a diff
+# a reviewer sees rather than a surprise at validation time.
+#
+# `just` runs each recipe line in its own shell, so the two redirects cannot
+# interfere. Neither target is a SIGNED artefact — unlike `fixtures-sign`'s,
+# these files carry no signature and a truncated redirect target costs a
+# `just schema`, not a re-mint (Task 5).
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
+    cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
 
 # The Python auditor verifier. Task 7 — needs `pip install cryptography pytest`.
 verify-py:
@@ -143,10 +154,17 @@ verify-py:
 # redirect and the mv must share one.
 # `crates/logweir-core/tests/fixture_regen.rs::fixtures_recipe_is_non_destructive`
 # keeps it that way.
+#
+# Task 5's `mint_backup_receipt_fixture` needs no redirect and no `mv` at all:
+# it writes e2e/fixtures/signed/backup-receipt.json AND the .sig over exactly
+# those bytes itself, in one process, after validating the document against its
+# own four invariants — so there is no window in which the tracked document and
+# the tracked signature over it disagree.
 fixtures-sign:
     mkdir -p target/fixtures-tmp
     cargo run -p logweir-core --example emit_fixture > target/fixtures-tmp/scorecard.json && mv target/fixtures-tmp/scorecard.json e2e/fixtures/signed/scorecard.json
     cargo run -p logweir-evidence --example mint_fixture
+    cargo run -p logweir-evidence --example mint_backup_receipt_fixture
 
 # The DELIBERATELY BOGUS fixture: a validly signed scorecard whose only defect
 # is its own self_attested claim. Additive — writes ONLY the two -bogus files

@@ -5,6 +5,7 @@
 /// fields only; a major changes an identity rule.
 pub const FORMAT_VERSION: &str = "1.0.0";
 
+pub mod backup_receipt;
 pub mod det_json;
 pub mod engine;
 pub mod guard;

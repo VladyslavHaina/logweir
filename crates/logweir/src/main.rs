@@ -71,7 +71,8 @@ fn main() -> std::process::ExitCode {
             scorecard,
             signature,
             public_key,
-        }) => verify::run(&scorecard, &signature, &public_key),
+            payload_type,
+        }) => verify::run(&scorecard, &signature, &public_key, &payload_type),
         cli::Command::Drill(cli::DrillCmd::Run {
             spec,
             approval,

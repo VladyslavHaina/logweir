@@ -2,7 +2,7 @@
 //! The SIGNING half of Logweir's DSSE evidence, and nothing else.
 //!
 //! `VerifyingKey`, `verify_detached`, `pae`, `Signature`, `Sidecar`, `Error`
-//! and the three payload-type constants moved to `crates/logweir-verify` so
+//! and the payload-type constants moved to `crates/logweir-verify` so
 //! that a component which VERIFIES a signature does not thereby link the
 //! signer — the remedy `scripts/check-one-signer.sh:46-49` ruled in writing
 //! before there was anything to remedy, recorded in ADR 0008 §E. What stays
@@ -18,9 +18,17 @@
 //! `logweir_evidence::keys::VerifyingKey`,
 //! `logweir_evidence::verify::verify_detached`,
 //! `logweir_evidence::pae::pae` — compiles unchanged across the extraction.
-//! `crates/logweir-verify/src/lib.rs` is where the three constants are now
+//! `crates/logweir-verify/src/lib.rs` is where the constants are now
 //! DECLARED, and `docs/test_verify_scorecard.py` reads that file: a
-//! re-export contains none of the three media-type literals.
+//! re-export contains none of the media-type literals.
+//!
+//! THERE ARE FOUR OF THEM SINCE TASK 5. Three moved in Task 14
+//! (`PAYLOAD_TYPE_SCORECARD`, `_TEARDOWN`, `_PUT_RECEIPT`) and
+//! `PAYLOAD_TYPE_BACKUP_RECEIPT` was declared there, beside them, by Task 5 —
+//! never here (critique A F8, critique B H2). The `pub use` below re-exports
+//! all four, so `logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT` resolves for
+//! `examples/mint_backup_receipt_fixture.rs`, which signs with it, and no
+//! call site has to know which crate declares what.
 pub mod keys;
 pub mod pae;
 pub mod sign;

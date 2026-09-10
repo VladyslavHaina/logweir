@@ -60,6 +60,21 @@ jobs:
         run: |
           cargo run -p logweir-core --example emit_schema > /tmp/schema.json
           diff -u schemas/logweir-drill-scorecard-1.0.0.json /tmp/schema.json
+      # Task 5: THE SECOND DRIFT ARM, in the same shape as the scorecard arm
+      # above and for the same reason. The backup receipt is a document Global
+      # Constraint 12 requires a `cmp` on the drift gate for, exactly like the
+      # scorecard — and it is a SEPARATE step rather than two more lines in the
+      # step above so a failure names which schema drifted without a reviewer
+      # having to read the diff to find out.
+      #
+      # A DISTINCT /tmp PATH, not /tmp/schema.json: two arms writing one
+      # temporary file would make the second diff depend on the order the steps
+      # happened to run in, and a `diff` of a file against itself is the one
+      # comparison that cannot fail.
+      - name: backup receipt schema drift
+        run: |
+          cargo run -p logweir-core --example emit_backup_receipt_schema > /tmp/backup-receipt-schema.json
+          diff -u schemas/logweir-backup-receipt-1.0.0.json /tmp/backup-receipt-schema.json
       # Task 15b: THE THIRD DRIFT ARM, beside the schema arm above and for the
       # same reason. A CRD change is a FORMAT change — config/crd/ is what
       # `kubectl apply` consumes, what the UI's forms are written against and

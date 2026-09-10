@@ -46,6 +46,28 @@ pub const PAYLOAD_TYPE_TEARDOWN: &str = "application/vnd.logweir.drill-teardown+
 /// memory ever held.
 pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
     "application/vnd.logweir.drill-put-receipt+json;version=1.0.0";
+/// The BACKUP receipt (Task 5) — the signed record of one `logweir backup
+/// run`, and not to be confused with `PAYLOAD_TYPE_PUT_RECEIPT` above, which
+/// is the post-put storage readback of a drill SCORECARD.
+///
+/// It is a new DOCUMENT rather than new scorecard fields (spec §7, Global
+/// Constraint 12 as amended): the scorecard stays frozen at 21 top-level
+/// properties and 17 required ones, and top-level information about a
+/// different operation on a different cluster ships as its own media type
+/// with its own `format_version`. The type is
+/// `logweir_core::backup_receipt::BackupReceipt`; the schema is
+/// `schemas/logweir-backup-receipt-1.0.0.json`.
+///
+/// DECLARED HERE, in the verify-only crate, and NOT in `logweir-evidence`
+/// (critique A F8, critique B H2, chain V: Task 14 → Task 5). `weirkeeper`
+/// links `logweir-verify` and never the signer, and Task 24's verifier has to
+/// name this constant in order to check a receipt — so a constant declared on
+/// the signing side would have dragged the signer into the control plane to
+/// serve a string. `docs/test_verify_scorecard.py` reads THIS file for the
+/// literals, because `logweir-evidence`'s `pub use logweir_verify::*;`
+/// contains none of them.
+pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
+    "application/vnd.logweir.backup-receipt+json;version=1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signature {

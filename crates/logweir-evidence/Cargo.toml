@@ -29,6 +29,15 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 serde_json.workspace = true
 
 [dev-dependencies]
+# Only for `examples/mint_backup_receipt_fixture.rs` (Task 5), which types the
+# fixture receipt's five timestamps as `DateTime<Utc>` — the same type
+# `logweir_core::backup_receipt::BackupReceipt` declares them as. A
+# DEV-dependency, so the library build and every `--no-default-features` build
+# are untouched (Global Constraint 1), and it ADDS NO PACKAGE to the resolved
+# graph: `chrono` is already `logweir-core`'s, one edge further out, so the
+# `cargo metadata` package count is unchanged (Global Constraint 38, which
+# makes exactly this distinction for `tower`/`http`/`http-body-util`).
+chrono.workspace = true
 # Only for the `mint_fixture` example (Task 6 step 6), which parses and
 # re-serialises a `Scorecard` before signing it. Not a dependency of the
 # library.
