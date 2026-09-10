@@ -401,6 +401,37 @@ fn line_of(text: &str, index: usize) -> usize {
     text[..index].matches('\n').count() + 1
 }
 
+/// Whether `token`'s occurrence at `at` starts a NEW identifier rather than
+/// ending a longer one.
+///
+/// # `store.` IS A SUBSTRING OF `restore.spec`, AND THAT MADE THE GUARD LIE
+///
+/// [`STORE_CALL_TOKENS`] holds bare substrings, and [`occurrences`] finds them
+/// anywhere. Every reconciler until Task 20 named its object `backup` or
+/// `schedule`, so nothing collided; `controllers/restore.rs` names its object
+/// `restore`, and the very first run of the guard against it reported **eight
+/// offences on lines that touch no `Store` at all** — `restore.spec`,
+/// `restore.status`, `restore.name_any()`. A guard whose failure mode is a
+/// false positive is a guard the next implementer edits the token list to
+/// silence, and then it is blind for real.
+///
+/// THE RULE: when a token begins with an identifier byte, the byte before its
+/// occurrence must not be one. `.` IS DELIBERATELY ALLOWED — `self.store.get(…)`
+/// and `ctx.store.get(…)` are exactly the calls this scan exists to catch, so
+/// treating a leading `.` as "part of a longer name" would trade a false
+/// positive for a false negative. Tokens that themselves begin with `.`
+/// (`.manifest_facts(`) are unaffected: their own first byte is the boundary.
+fn token_at_word_boundary(text: &str, at: usize, token: &str) -> bool {
+    let first = token.as_bytes()[0];
+    if !(first.is_ascii_alphanumeric() || first == b'_') {
+        return true;
+    }
+    match at.checked_sub(1).map(|i| text.as_bytes()[i]) {
+        None => true,
+        Some(prev) => !(prev.is_ascii_alphanumeric() || prev == b'_'),
+    }
+}
+
 /// [`sanitize`] is TESTED BEFORE IT IS TRUSTED, and the case it is here for is
 /// the first one.
 ///
@@ -470,6 +501,41 @@ fn the_sanitizer_knows_a_lifetime_from_a_character_literal() {
         2,
         "newlines are preserved so a failure message can name a line number"
     );
+}
+
+/// [`token_at_word_boundary`] is tested before the scan trusts it, in BOTH
+/// directions.
+///
+/// **Task 20, ruling 1.** The false positive it exists for is real and was
+/// measured: `restore.spec` contains `store.`, and the scan reported eight
+/// offences against `controllers/restore.rs` on lines that touch no `Store`.
+/// The false NEGATIVE it must not introduce is `self.store.get(…)`, which is
+/// exactly the call the scan exists to catch — so `.` before the token is
+/// allowed and an identifier byte is not.
+#[test]
+fn the_store_token_scan_tells_a_call_from_a_longer_identifier() {
+    let at = |text: &str, token: &str| {
+        occurrences(text, token)
+            .into_iter()
+            .filter(|&i| token_at_word_boundary(text, i, token))
+            .count()
+    };
+
+    // FALSE POSITIVES that must be zero.
+    assert_eq!(at("let n = restore.spec.plan_bytes;", "store."), 0);
+    assert_eq!(at("restore.status.as_ref()", "store."), 0);
+    assert_eq!(at("let x = restore.name_any();", "store."), 0);
+    assert_eq!(at("let s = MyStore::new();", "Store::"), 0);
+
+    // REAL CALLS that must all still count — including the two receiver
+    // shapes whose token is preceded by a `.`.
+    assert_eq!(at("store.get(k)", "store."), 1);
+    assert_eq!(at("let _ = store.get(k);", "store."), 1);
+    assert_eq!(at("self.store.get(k)", "store."), 1);
+    assert_eq!(at("ctx.store.get(k)", "store."), 1);
+    assert_eq!(at("Store::read_only_from_url(&loc)", "Store::"), 1);
+    // A token that begins with `.` is its own boundary and is unaffected.
+    assert_eq!(at("handle.manifest_facts(key)", ".manifest_facts("), 1);
 }
 
 // ===========================================================================
@@ -900,6 +966,12 @@ fn no_store_call_is_made_outside_spawn_blocking() {
 
         for token in STORE_CALL_TOKENS {
             for at in occurrences(&text, token) {
+                // `store.` is a substring of `restore.spec` — see
+                // `token_at_word_boundary` for the eight false positives that
+                // made this check necessary.
+                if !token_at_word_boundary(&text, at, token) {
+                    continue;
+                }
                 let inside_async = async_bodies.iter().any(|(s, e)| at > *s && at < *e);
                 if !inside_async {
                     continue;
