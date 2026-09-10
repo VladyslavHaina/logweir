@@ -1250,6 +1250,30 @@ fn check_restored_count(
     floor_ms: i64,
     pit_ms: i64,
 ) -> Result<Option<String>, DrillError> {
+    // UNREACHABLE FROM `run` TODAY, and kept deliberately — the same cheap
+    // belt-and-braces as `roll_up`'s redundant `!verdicts.is_empty()`
+    // conjunct below, and stated here for the same reason: an unexplained
+    // guard reads as a guard nobody thought about (Task 10's review, F2).
+    //
+    // Why it cannot fire from `run`: `topic_mapping` is built at phase 0 from
+    // `spec.source.topics` (`phase0_admit.rs:155`), and phase 4's candidates
+    // are `topic_mapping.keys()` (`drill/mod.rs:1171`), so an empty mapping
+    // makes `phase4_sample::run` refuse first ("a drill over an empty window
+    // would report a pass that means nothing") and `run`'s own
+    // `sel.is_empty()` guard refuse after that — both before this line. Phase
+    // 0's `check_topic_mapping_coverage` independently refuses (exit 3) any
+    // SELECTED topic with no entry.
+    //
+    // Why it stays: the alternative to refusing is a silent PASS. Over zero
+    // topics `expected_restored_count` is `(0, 0)` and the high-watermark sum
+    // over zero targets is `0`, so `0` is inside `[0, 0]`, this function
+    // answers `Ok(None)`, and "the count agrees with the manifest" would be
+    // reported about a comparison that examined nothing — the empty-set false
+    // pass every other guard in this phase exists to close. The next caller is
+    // a future one (a second restore mode, the operator's reconciler), which
+    // is exactly where it would arrive. `classify_parity_all` refuses an empty
+    // mapping for the same reason and IS pinned, by
+    // `classify_parity_all_refuses_an_empty_mapping`.
     if mapping.is_empty() {
         return Err(DrillError::Operational(
             "restored-count bound ran with zero mapped topics; refusing to report a count \

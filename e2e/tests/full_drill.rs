@@ -623,10 +623,24 @@ fn the_real_archive_header_is_eight_bytes() {
         let decoded = logweir::drill::phase7_verify::decode_original_offset(hdr)
             .expect("eight bytes must decode");
         // `scripts/e2e-seed.sh` writes 1000 records per source topic, so every
-        // original offset in this archive is a small non-negative number. The
-        // SAME eight bytes read big-endian would be at least 2^48 for any
-        // non-zero offset — 72_057_594_037_927_936 for offset 1 — so this
-        // bound is what distinguishes the two byte orders on real bytes.
+        // original offset in this archive is in `0..1000`. Read BIG-endian the
+        // same eight bytes are at least 2^48 for every non-zero one of THOSE,
+        // and the exponent is scoped to that range on purpose (Task 10's
+        // review, F3, read the 2^48 as loose against the 2^56 quoted next; the
+        // two are the range's minimum and offset 1's own value, and both are
+        // right — recomputed rather than corrected):
+        //
+        //   little-endian puts the low byte FIRST, so a big-endian read makes
+        //   it the HIGH byte. An offset whose low byte is non-zero therefore
+        //   misreads to at least 2^56 — 72_057_594_037_927_936 for offset 1 —
+        //   and the only non-zero offsets under 1000 with a zero low byte are
+        //   256, 512 and 768, which misread to 1, 2 and 3 times 2^48. So 2^48
+        //   is the TIGHT floor here, attained at offset 256. It is not a floor
+        //   for arbitrary offsets: 2^24 read big-endian is only 2^32.
+        //
+        // Either way the smallest possible big-endian misreading is
+        // ~281_474_976 times the top of the bound below, which is what makes
+        // this assertion tell the two byte orders apart on real engine bytes.
         assert!(
             (0..1_000_000).contains(&decoded),
             "{topic}/{p}: an original offset of {decoded} is not an offset this archive could \
