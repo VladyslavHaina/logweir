@@ -33,6 +33,7 @@
 use crate::drill::DrillError;
 use logweir_core::engine::{BackupSetFacts, CoverageState, PreflightReport, RestorePlan};
 use logweir_core::guard::GuardRefusal;
+use std::collections::BTreeSet;
 
 /// The exact prefix of the rendered `restore.yaml` line this guard reads. Two
 /// spaces, because `time_window_start` is a key of the `restore:` block
@@ -70,13 +71,23 @@ pub fn check_rendered_window_floor(
     // RE-DERIVED from the manifest, never read off the plan: a floor taken
     // from `plan.time_window.0` would make this check compare the plan with
     // itself.
-    let floor = facts.earliest_covered_timestamp_ms().ok_or_else(|| {
-        DrillError::Guard(GuardRefusal(format!(
-            "the archive set `{}` records no segment in its manifest, so the rendered \
-             time_window_start cannot be checked against an archive floor",
-            plan.set.backup_id
-        )))
-    })?;
+    //
+    // Over the topics THIS RESTORE NAMES (plan erratum E7(b)) — the keys of
+    // the plan's own topic mapping, which is the same set `build_plan` reduced
+    // the manifest by, so the independent reading is of the same fact and not
+    // of a wider one. `plan.topic_mapping` and not the spec: the plan is what
+    // `plan_hash` covers and what the engine is about to be handed.
+    let named_topics: BTreeSet<&str> = plan.topic_mapping.keys().map(String::as_str).collect();
+    let floor = facts
+        .earliest_covered_timestamp_ms(&named_topics)
+        .ok_or_else(|| {
+            DrillError::Guard(GuardRefusal(format!(
+                "the archive set `{}` records no segment in its manifest for any of the topics \
+                 this restore names, so the rendered time_window_start cannot be checked \
+                 against an archive floor",
+                plan.set.backup_id
+            )))
+        })?;
     let doc = logweir_engine_oso::render_restore::render(plan)
         .map_err(|e| DrillError::Operational(format!("rendering restore.yaml: {e}")))?;
     let rendered = doc

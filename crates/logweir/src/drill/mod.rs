@@ -28,7 +28,7 @@ use logweir_core::scorecard::{
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicCreator, TopicDeleter};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -1544,15 +1544,28 @@ pub fn build_plan(
     // mutant applied there is byte-identical to correct output whenever the
     // plan handed to it is already right — which is exactly why spec §10's
     // earlier G-WIN row had two mutants that both passed.
-    let manifest_floor_ms = facts.earliest_covered_timestamp_ms().ok_or_else(|| {
-        DrillError::Guard(GuardRefusal(format!(
-            "the archive set `{}` records no segment in its manifest, so it has no earliest \
-             covered timestamp; a Restore's window start is the archive set's earliest covered \
-             timestamp, never the spec's, so this plan has no floor to bind and is refused \
-             before anything runs",
-            set.backup_id
-        )))
-    })?;
+    // The floor is the minimum over the topics THIS RESTORE NAMES — the keys
+    // of the admitted topic mapping — so it reports the same instant the
+    // backup receipt's `covered.from_ms` reports for the same archive and the
+    // same topics (plan erratum E7(b)). Phase 5 re-derives it from the same
+    // field of the plan built here.
+    let named_topics: BTreeSet<&str> = mapping.keys().map(String::as_str).collect();
+    let manifest_floor_ms = facts
+        .earliest_covered_timestamp_ms(&named_topics)
+        .ok_or_else(|| {
+            DrillError::Guard(GuardRefusal(format!(
+                "the archive set `{}` records no segment in its manifest for any of the topics \
+                 this restore names ({}), so it has no earliest covered timestamp; a Restore's \
+                 window start is the archive set's earliest covered timestamp, never the \
+                 spec's, so this plan has no floor to bind and is refused before anything runs",
+                set.backup_id,
+                named_topics
+                    .iter()
+                    .copied()
+                    .collect::<Vec<&str>>()
+                    .join(", ")
+            )))
+        })?;
     let start = chrono::DateTime::from_timestamp_millis(manifest_floor_ms).ok_or_else(|| {
         DrillError::Guard(GuardRefusal(format!(
             "the archive set `{}` records an earliest covered timestamp of epoch-ms \

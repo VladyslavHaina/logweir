@@ -91,27 +91,49 @@ impl BackupSetFacts {
     }
 
     /// **Guard G-WIN's floor.** The archive set's EARLIEST COVERED TIMESTAMP
-    /// as recorded in the manifest: the minimum `start_timestamp` over
-    /// `topics[].partitions[].segments[]`.
+    /// as recorded in the manifest, over the topics the caller NAMES: the
+    /// minimum `start_timestamp` over `topics[].partitions[].segments[]` for
+    /// every topic in `named_topics`, and nothing else.
     ///
-    /// `None` only when the set records no segment at all, which is not a
-    /// number this function may invent — a caller that needs a floor must
-    /// refuse instead (`logweir::drill::build_plan`).
+    /// `None` when the set records no segment for any named topic, which is
+    /// not a number this function may invent — a caller that needs a floor
+    /// must refuse instead (`logweir::drill::build_plan`).
     ///
-    /// It lives here, on the facts, because TWO callers must get the SAME
-    /// answer from the SAME manifest: plan construction computes the floor it
-    /// binds into `RestorePlan.time_window.0`, and phase 5 RE-DERIVES it from
-    /// the manifest it already holds to check the rendered document against
-    /// it. Two independent minimum-walks would be free to drift, and the whole
+    /// # Why `named_topics` and not the whole set
+    ///
+    /// This is the restore-side twin of the backup receipt's
+    /// `covered.from_ms`, which is the minimum over the topics the BACKUP
+    /// named (`logweir::backup::phase_run`, interface I22), and the two must
+    /// report the same instant for the same archive and the same topics or
+    /// "the archive's earliest covered timestamp" means two things in two
+    /// signed documents (plan erratum **E7(b)**). An archive set may hold
+    /// topics this restore does not name — a set is written per backup, a
+    /// restore selects from it — and an unnamed topic's older segment would
+    /// otherwise drag the floor below every instant the restore can reach.
+    ///
+    /// # Why it lives here, on the facts
+    ///
+    /// TWO callers must get the SAME answer from the SAME manifest: plan
+    /// construction computes the floor it binds into
+    /// `RestorePlan.time_window.0`, and phase 5 RE-DERIVES it from the
+    /// manifest it already holds to check the rendered document against it.
+    /// Two independent minimum-walks would be free to drift, and the whole
     /// point of the phase-5 check is that it is an independent reading of the
-    /// same fact — not of the same code path's cached result.
+    /// same fact — not of the same code path's cached result. Both callers
+    /// pass the keys of the SAME topic mapping for the same reason.
     ///
     /// The MINIMUM, never the maximum: a floor taken from the newest segment
     /// would exclude every record before it, which is precisely the silent
-    /// loss G-WIN refuses.
-    pub fn earliest_covered_timestamp_ms(&self) -> Option<i64> {
+    /// loss G-WIN refuses. And the minimum over the whole walk, never the
+    /// first segment it reaches: nothing orders a real manifest, so a later
+    /// partition may hold the older segment.
+    pub fn earliest_covered_timestamp_ms(
+        &self,
+        named_topics: &std::collections::BTreeSet<&str>,
+    ) -> Option<i64> {
         self.topics
             .iter()
+            .filter(|t| named_topics.contains(t.name.as_str()))
             .flat_map(|t| t.partitions.iter())
             .flat_map(|p| p.segments.iter())
             .map(|seg| seg.start_timestamp)

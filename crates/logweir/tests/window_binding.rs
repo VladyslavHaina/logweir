@@ -39,7 +39,7 @@ use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, PartitionFacts, SegmentFacts, TopicFacts, WindowFloorSource,
 };
 use logweir_core::spec::DrillSpec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The manifest's earliest covered timestamp — `2023-11-14T22:13:20Z`.
 const FLOOR_MS: i64 = 1_700_000_000_000;
@@ -47,6 +47,10 @@ const FLOOR_MS: i64 = 1_700_000_000_000;
 /// "take the maximum instead of the minimum" is a mutant with a witness: a
 /// one-segment manifest cannot tell min from max.
 const LATER_SEGMENT_MS: i64 = 1_700_001_800_000;
+/// The only segment start of a topic the restore does NOT name — an hour
+/// EARLIER than the named topic's floor, which is the direction that would
+/// pull the window's start below every instant the restore can reach.
+const UNNAMED_TOPIC_MS: i64 = FLOOR_MS - 3_600_000;
 /// The spec's `sample.window_start` — ten minutes AFTER the manifest floor,
 /// which is the direction that loses records.
 const SPEC_START_MS: i64 = 1_700_000_600_000;
@@ -107,6 +111,14 @@ fn mapping() -> BTreeMap<String, String> {
     [("orders".to_string(), "drill-orders".to_string())]
         .into_iter()
         .collect()
+}
+
+/// The topics the restore NAMES — the keys of `mapping()`, which is exactly
+/// what both seams pass to `earliest_covered_timestamp_ms`. That it agrees
+/// with `mapping()` is asserted, not assumed, in
+/// `a_topic_the_restore_does_not_name_does_not_lower_the_floor`.
+fn named_topics() -> BTreeSet<&'static str> {
+    ["orders"].into_iter().collect()
 }
 
 /// One topic, one partition, TWO segments — the earlier starting at
@@ -170,6 +182,19 @@ fn facts_with_partitions(per_partition: &[&[i64]]) -> BackupSetFacts {
                 .collect(),
         }],
     }
+}
+
+/// `facts_with_two_segments`, plus a topic the restore's `mapping()` does NOT
+/// name whose single segment starts an hour EARLIER than every named segment.
+/// An archive set is written per backup and a restore selects from it, so a
+/// set holding topics this restore does not name is the ordinary case, not a
+/// corrupt manifest.
+fn facts_with_an_unnamed_topic() -> BackupSetFacts {
+    let mut facts = facts_with_two_segments();
+    let mut unnamed = facts_from(&[UNNAMED_TOPIC_MS]).topics.remove(0);
+    unnamed.name = "payments".into();
+    facts.topics.push(unnamed);
+    facts
 }
 
 /// The exit code the SHIPPED mapping (`DrillError::exit_code`, Global
@@ -248,7 +273,7 @@ fn the_floor_is_the_minimum_not_the_first_segment_in_iteration_order() {
     // so the first the walk reaches is the LATER one.
     let descending = facts_from(&[LATER_SEGMENT_MS, FLOOR_MS]);
     assert_eq!(
-        descending.earliest_covered_timestamp_ms(),
+        descending.earliest_covered_timestamp_ms(&named_topics()),
         Some(FLOOR_MS),
         "the floor is the minimum start_timestamp, not the first segment in \
          iteration order"
@@ -259,7 +284,7 @@ fn the_floor_is_the_minimum_not_the_first_segment_in_iteration_order() {
     // the set's floor either.
     let across_partitions = facts_with_partitions(&[&[LATER_SEGMENT_MS], &[FLOOR_MS]]);
     assert_eq!(
-        across_partitions.earliest_covered_timestamp_ms(),
+        across_partitions.earliest_covered_timestamp_ms(&named_topics()),
         Some(FLOOR_MS),
         "a LATER partition may hold the OLDER segment; the floor is still the minimum"
     );
@@ -510,6 +535,70 @@ fn a_sample_window_end_at_or_before_the_archive_floor_is_refused_too() {
     );
 }
 
+/// **The floor is the minimum over the topics THIS RESTORE NAMES** (plan
+/// erratum E7(b)).
+///
+/// The backup receipt's `covered.from_ms` is the minimum over the topics the
+/// BACKUP named (`logweir::backup::phase_run`, interface I22). If the restore
+/// floor were the minimum over the WHOLE set, the two signed documents would
+/// report different instants for "the archive's earliest covered timestamp"
+/// on the same archive and the same topics — and the restore window would
+/// start below every instant its own topics can reach, which is a window the
+/// engine is asked for and a floor phase 7 can never reconcile against.
+///
+/// The direction is safe (an earlier floor cannot LOSE a record), which is
+/// exactly why nothing else in the tree would notice.
+#[test]
+fn a_topic_the_restore_does_not_name_does_not_lower_the_floor() {
+    // The set of topics the two seams pass is the mapping's keys, and this
+    // file's `named_topics()` must BE that set.
+    assert_eq!(
+        named_topics(),
+        mapping()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<&str>>(),
+        "the fixture's named-topic set must be the mapping's keys, or the \
+         assertions below are about a set the shipped seams never use"
+    );
+
+    let facts = facts_with_an_unnamed_topic();
+    assert!(
+        UNNAMED_TOPIC_MS < FLOOR_MS,
+        "the unnamed topic's segment must be EARLIER, or this test proves nothing"
+    );
+    // The witness: over BOTH topics the answer WOULD be the earlier one, so
+    // the fixture can tell a filtered walk from an unfiltered one.
+    assert_eq!(
+        facts.earliest_covered_timestamp_ms(&["orders", "payments"].into_iter().collect()),
+        Some(UNNAMED_TOPIC_MS),
+        "the unnamed topic's segment is in the manifest and IS the set-wide minimum"
+    );
+    assert_eq!(
+        facts.earliest_covered_timestamp_ms(&named_topics()),
+        Some(FLOOR_MS),
+        "but the floor is the minimum over the NAMED topics only"
+    );
+
+    // Both seams, over the same facts. Plan construction binds the named
+    // floor…
+    let plan = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X").expect("the plan builds");
+    assert_eq!(
+        plan.time_window.0.timestamp_millis(),
+        FLOOR_MS,
+        "time_window.0 is the floor of the topics the restore names"
+    );
+    // …and phase 5 re-derives the SAME one from the plan's own mapping, so an
+    // unfiltered walk on either side is a refusal rather than a drift.
+    assert_eq!(
+        exit_of(&phase5_preflight::check_rendered_window_floor(
+            &plan, &facts
+        )),
+        ExitCode::Ok,
+        "the two seams reduce the manifest by the same set of topics"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // G-WIN, first half — the phase-5 refusal
 // ---------------------------------------------------------------------------
@@ -569,13 +658,15 @@ fn phase5_accepts_the_rendered_start_when_it_is_the_floor() {
 fn an_archive_set_with_no_segment_has_no_floor_to_bind() {
     let mut facts = facts_with_two_segments();
     facts.topics[0].partitions[0].segments.clear();
-    assert_eq!(facts.earliest_covered_timestamp_ms(), None);
+    assert_eq!(facts.earliest_covered_timestamp_ms(&named_topics()), None);
 
     let floorless = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X");
     assert_eq!(exit_of(&floorless), ExitCode::GuardRefused);
     let e = floorless.expect_err("a floorless archive set is refused");
     assert!(
-        guard_message(&e).contains("records no segment in its manifest"),
+        guard_message(&e).contains(
+            "records no segment in its manifest for any of the topics this restore names"
+        ),
         "{}",
         guard_message(&e)
     );
