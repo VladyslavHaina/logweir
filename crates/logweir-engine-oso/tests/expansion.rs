@@ -34,7 +34,9 @@
 //! file constructs no client of any kind and belongs in no `ALLOWED` entry
 //! (STANDING RULE 18).
 
-use logweir_core::engine::{AuthRender, BackupPlan, BackupSetRef, RestorePlan, StorageUrl};
+use logweir_core::engine::{
+    AuthRender, BackupPlan, BackupSetRef, RestorePlan, StorageUrl, WindowFloorSource,
+};
 use logweir_engine_oso::render_backup::RenderError;
 use logweir_engine_oso::yaml::{
     assert_no_unnamed_dollar_brace, PLACEHOLDER_SOURCE_PASSWORD, PLACEHOLDER_TARGET_PASSWORD,
@@ -95,6 +97,7 @@ fn restore_plan() -> RestorePlan {
                 .unwrap()
                 .into(),
         ),
+        window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/checkpoint".into(),
         checkpoint_interval_secs: 30,

@@ -106,13 +106,63 @@ fn render_as_a_controller_would(spec_text: &str, live: &KafkaClusterView) -> (Re
     // THE SHIPPED SEAM. `build_plan` is where the approved bytes become the
     // plan `plan_hash` covers; the live view is available to it here and is
     // not among its arguments, which is the structural half of G-ID.
-    let plan = logweir::drill::build_plan(&spec, &set, &mapping, "01J9X");
+    //
+    // The `BackupSetFacts` argument is guard **G-WIN**'s: since Task 9 the
+    // window's floor comes from the archive manifest and from nothing else, so
+    // plan construction needs the manifest's facts. This one's earliest
+    // covered timestamp is the spec's own `sample.window_start`, which is what
+    // keeps every G-ID assertion below about the PRINCIPAL and nothing else.
+    let facts = one_segment_facts(ts("2026-08-29T00:00:00Z").timestamp_millis());
+    let plan = logweir::drill::build_plan(&spec, &set, &mapping, &facts, "01J9X")
+        .expect("the plan builds: the fixture's manifest floor is a real timestamp");
     // THE MUTATION POINT for "render from the cluster object". Replace this
     // line with `plan.target_auth = AuthRender::ScramSha512 { username:
     // live.username.clone(), tls: true };` and the assertions below fail.
     let _ = &live.username;
     let (doc, _digest) = render_restore::render_and_digest(&plan).expect("the plan renders");
     (plan, doc)
+}
+
+fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// One topic, one partition, one segment starting at `start_ms` — the minimum
+/// a manifest needs for `BackupSetFacts::earliest_covered_timestamp_ms` to
+/// answer, which plan construction now requires (guard **G-WIN**).
+fn one_segment_facts(start_ms: i64) -> logweir_core::engine::BackupSetFacts {
+    use logweir_core::engine::{BackupSetFacts, PartitionFacts, SegmentFacts, TopicFacts};
+    BackupSetFacts {
+        backup_id: "backup-2026-08-30T02:00:00Z".into(),
+        created_at: ts("2026-08-30T02:00:00Z"),
+        source_cluster_id: Some("SRC0000000000000000000".into()),
+        manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics: vec![TopicFacts {
+            name: "orders".into(),
+            original_partition_count: Some(1),
+            source_replication_factor: Some(1),
+            configurations: Default::default(),
+            partitions: vec![PartitionFacts {
+                partition_id: 0,
+                segments: vec![SegmentFacts {
+                    key: "drills/b/0/000000000000.kbak".into(),
+                    start_offset: 0,
+                    end_offset: 9,
+                    start_timestamp: start_ms,
+                    end_timestamp: start_ms + 1_000,
+                    record_count: 10,
+                    sha256: format!("sha256:{}", "b".repeat(64)),
+                    uploaded_at: start_ms + 2_000,
+                }],
+                gaps: vec![],
+                pruned: vec![],
+            }],
+        }],
+    }
 }
 
 /// **G-ID.** The rendered `sasl_username` is a function of the plan bytes and

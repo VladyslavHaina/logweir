@@ -72,6 +72,7 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
             anchor: Anchor::Head,
             max_partitions: None,
         },
+        restore: logweir_core::spec::RestoreSpecBlock::default(),
         objectives: ObjectivesSpec {
             rto_seconds: None,
             rpo_seconds: None,

@@ -2815,6 +2815,7 @@ mod tests {
             target_auth: logweir_core::engine::AuthRender::Plaintext,
             topic_mapping: BTreeMap::new(),
             time_window: (chrono::Utc::now(), chrono::Utc::now()),
+            window_floor_source: logweir_core::engine::WindowFloorSource::ArchiveManifest,
             default_replication_factor: 1,
             checkpoint_state: "/tmp/checkpoint.json".into(),
             checkpoint_interval_secs: 30,

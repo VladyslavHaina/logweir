@@ -89,6 +89,42 @@ impl BackupSetFacts {
     pub fn consumer_group_snapshot_present(&self) -> bool {
         self.consumer_group_snapshot_sha256.is_some()
     }
+
+    /// **Guard G-WIN's floor.** The archive set's EARLIEST COVERED TIMESTAMP
+    /// as recorded in the manifest: the minimum `start_timestamp` over
+    /// `topics[].partitions[].segments[]`.
+    ///
+    /// `None` only when the set records no segment at all, which is not a
+    /// number this function may invent — a caller that needs a floor must
+    /// refuse instead (`logweir::drill::build_plan`).
+    ///
+    /// It lives here, on the facts, because TWO callers must get the SAME
+    /// answer from the SAME manifest: plan construction computes the floor it
+    /// binds into `RestorePlan.time_window.0`, and phase 5 RE-DERIVES it from
+    /// the manifest it already holds to check the rendered document against
+    /// it. Two independent minimum-walks would be free to drift, and the whole
+    /// point of the phase-5 check is that it is an independent reading of the
+    /// same fact — not of the same code path's cached result.
+    ///
+    /// The MINIMUM, never the maximum: a floor taken from the newest segment
+    /// would exclude every record before it, which is precisely the silent
+    /// loss G-WIN refuses.
+    pub fn earliest_covered_timestamp_ms(&self) -> Option<i64> {
+        self.topics
+            .iter()
+            .flat_map(|t| t.partitions.iter())
+            .flat_map(|p| p.segments.iter())
+            .map(|seg| seg.start_timestamp)
+            .min()
+    }
+}
+
+/// Where `RestorePlan.time_window.0` came from. An enum, not a bool: phase 5's
+/// refusal reads this and a caller cannot get it backwards silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFloorSource {
+    ArchiveManifest,
+    InheritedFromSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +176,13 @@ pub struct RestorePlan {
     /// One explicit entry per selected topic: "<source>" -> "<prefix><source>".
     pub topic_mapping: BTreeMap<String, String>,
     pub time_window: (DateTime<Utc>, DateTime<Utc>),
+    /// Where `time_window.0` came from — **guard G-WIN's carrier**, and the
+    /// reason a `RestorePlan` cannot claim an archive-bound floor while
+    /// holding a spec-supplied one: `logweir::drill::build_plan` ends with an
+    /// explicit check (not a `debug_assert`, which is compiled out in
+    /// release) that `ArchiveManifest` implies `time_window.0` equals the
+    /// manifest floor it just computed, and refuses exit 3 otherwise.
+    pub window_floor_source: WindowFloorSource,
     pub default_replication_factor: i16,
     pub checkpoint_state: std::path::PathBuf,
     pub checkpoint_interval_secs: u64,

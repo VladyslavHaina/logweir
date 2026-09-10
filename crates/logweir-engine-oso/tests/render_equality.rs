@@ -22,6 +22,7 @@
 //! `docs/stability.md` is the record.
 use logweir_core::engine::{
     BackupSetRef, DataEngine, EngineError, PhaseObserver, RestorePlan, StorageUrl,
+    WindowFloorSource,
 };
 use logweir_engine_oso::engine::OsoCliEngine;
 use logweir_engine_oso::render_restore;
@@ -62,6 +63,7 @@ fn plan() -> RestorePlan {
             "2026-08-29T00:00:00Z".parse().unwrap(),
             "2026-08-30T02:00:00Z".parse().unwrap(),
         ),
+        window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

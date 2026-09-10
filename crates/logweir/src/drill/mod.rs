@@ -16,7 +16,10 @@ pub mod phase8_score;
 pub mod phase9_teardown;
 
 use crate::exit::ExitCode;
-use logweir_core::engine::{BackupSetRef, DataEngine, RestorePlan};
+use logweir_core::engine::{
+    BackupSetFacts, BackupSetRef, DataEngine, RestorePlan, WindowFloorSource,
+};
+use logweir_core::guard::GuardRefusal;
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult, LeverState, MatrixVerdict, Outcome};
 use logweir_core::scorecard::{
     ApprovalInfo, AuthSummary, EngineInfo, EvidenceInfo, Integrity, Levers, Measured, Objectives,
@@ -1072,7 +1075,7 @@ pub fn execute_with_outcome(
     // artifact — see `docs/stability.md`). Building the plan once is now a
     // convenience, not the guarantee, so a future phase-5/phase-6 split cannot
     // dissolve the identity by moving these two call sites apart.
-    let plan = build_plan(&c.spec, &set, &admitted.topic_mapping, run_id);
+    let plan = build_plan(&c.spec, &set, &admitted.topic_mapping, &facts, run_id)?;
     // The engine writes its restore checkpoint to `plan.checkpoint_state` and
     // does NOT create that file's parent directory. `context` creates the
     // workdir it renders restore.yaml into (`logweir-<pid>`); the checkpoint
@@ -1090,6 +1093,15 @@ pub fn execute_with_outcome(
             .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
     }
     let (verdict, report) = record(&mut sc, 5, "preflight", || {
+        // **GUARD G-WIN, THE REFUSING HALF**, and it runs BEFORE
+        // `engine.preflight` writes anything: `check_rendered_window_floor`
+        // renders the document itself, reads the `time_window_start` line back
+        // off the bytes, and compares THAT against a floor it re-derives from
+        // the manifest. Exit 3, "refused by a guard, before anything ran" —
+        // NOT the exit 1 of ruling R-E's phase-5/phase-6 render mismatch,
+        // which is a different failure at a later point (see the function's
+        // own doc comment).
+        phase5_preflight::check_rendered_window_floor(&plan, &facts)?;
         let r = c.engine.preflight(&plan)?;
         Ok((phase5_preflight::adjudicate(&r), r))
     })?;
@@ -1284,11 +1296,15 @@ pub fn execute_with_outcome(
     };
     sc.measured = phase8_score::compute_measured(
         &timeline,
-        // The requested recovery point. `SourceSpec` carries no
-        // `point_in_time` field; the drill's recovery point IS the end of the
-        // window it restores and samples, which is the same value
-        // `build_plan` renders as `restore.time_window_end`.
-        c.spec.sample.window_end.timestamp_millis(),
+        // The requested recovery point: the END of the window this plan
+        // restores, read off the plan itself so it cannot drift from what
+        // `build_plan` bound and `render_restore` printed as
+        // `restore.time_window_end`. Since Task 9 that is
+        // `spec.restore.point_in_time` when the spec states one and
+        // `spec.sample.window_end` otherwise — reading `sample.window_end`
+        // here would score a `point_in_time` restore against a recovery point
+        // it was never asked to reach.
+        plan.time_window.1.timestamp_millis(),
         verified.newest_restored_ts_ms,
     );
     let (outcome, objectives) =
@@ -1511,9 +1527,84 @@ pub fn build_plan(
     spec: &DrillSpec,
     set: &BackupSetRef,
     mapping: &BTreeMap<String, String>,
+    facts: &BackupSetFacts,
     run_id: &str,
-) -> RestorePlan {
-    RestorePlan {
+) -> Result<RestorePlan, DrillError> {
+    // **GUARD G-WIN, THE BINDING HALF.** `RestorePlan.time_window.0` is
+    // computed from the archive set's earliest covered timestamp as recorded
+    // in the manifest — never from the spec and never from an inherited
+    // tuple. `time_window.1` is `spec.restore.point_in_time` when present,
+    // else `spec.sample.window_end`, which preserves every existing drill's
+    // behaviour for the END of the window; the START widens to the archive
+    // floor for every mode, which cannot lose records and is the direction
+    // the guard requires.
+    //
+    // And the binding lives HERE, where the plan is built, not where it is
+    // printed: `logweir_engine_oso::render_restore::render` is a printer, so a
+    // mutant applied there is byte-identical to correct output whenever the
+    // plan handed to it is already right — which is exactly why spec §10's
+    // earlier G-WIN row had two mutants that both passed.
+    let manifest_floor_ms = facts.earliest_covered_timestamp_ms().ok_or_else(|| {
+        DrillError::Guard(GuardRefusal(format!(
+            "the archive set `{}` records no segment in its manifest, so it has no earliest \
+             covered timestamp; a Restore's window start is the archive set's earliest covered \
+             timestamp, never the spec's, so this plan has no floor to bind and is refused \
+             before anything runs",
+            set.backup_id
+        )))
+    })?;
+    let start = chrono::DateTime::from_timestamp_millis(manifest_floor_ms).ok_or_else(|| {
+        DrillError::Guard(GuardRefusal(format!(
+            "the archive set `{}` records an earliest covered timestamp of epoch-ms \
+             {manifest_floor_ms}, which is outside the representable date range",
+            set.backup_id
+        )))
+    })?;
+    build_plan_with_floor(
+        spec,
+        set,
+        mapping,
+        run_id,
+        WindowFloor {
+            start,
+            source: WindowFloorSource::ArchiveManifest,
+            manifest_floor_ms,
+        },
+    )
+}
+
+/// The window's floor, and the CLAIM the plan is about to make about where it
+/// came from — the seam `build_plan` exposes so that claim can be checked
+/// against the value it describes, by a test as well as at runtime.
+///
+/// `window_floor_source == ArchiveManifest` while `time_window.0` was read
+/// from the spec is a lie the enum cannot catch on its own (critique A F22).
+/// Passing the three values TOGETHER is what makes the lie constructible, and
+/// therefore refusable: `build_plan_with_floor` ends by checking that
+/// `ArchiveManifest` implies `start.timestamp_millis() == manifest_floor_ms`.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowFloor {
+    /// What becomes `RestorePlan.time_window.0`.
+    pub start: chrono::DateTime<chrono::Utc>,
+    /// What becomes `RestorePlan.window_floor_source`.
+    pub source: WindowFloorSource,
+    /// The manifest floor `start` is CHECKED against whenever `source` is
+    /// `WindowFloorSource::ArchiveManifest`.
+    pub manifest_floor_ms: i64,
+}
+
+/// `build_plan` with the floor supplied rather than derived — see `WindowFloor`.
+pub fn build_plan_with_floor(
+    spec: &DrillSpec,
+    set: &BackupSetRef,
+    mapping: &BTreeMap<String, String>,
+    run_id: &str,
+    floor: WindowFloor,
+) -> Result<RestorePlan, DrillError> {
+    // The window's END: the requested recovery point when the spec states one,
+    // else the sample window's end.
+    let window_end = spec.restore.point_in_time.unwrap_or(spec.sample.window_end);
+    let plan = RestorePlan {
         set: set.clone(),
         storage: spec.source.storage.clone(),
         target_bootstrap: spec.target.bootstrap_servers.clone(),
@@ -1522,7 +1613,8 @@ pub fn build_plan(
         // read from nothing else. See `AuthSpec::username`.
         target_auth: spec.target.auth.to_render(),
         topic_mapping: mapping.clone(),
-        time_window: (spec.sample.window_start, spec.sample.window_end),
+        time_window: (floor.start, window_end),
+        window_floor_source: floor.source,
         default_replication_factor: spec.target.default_replication_factor,
         // Pod-local and never uploaded: a crashed restore is NOT resumable in
         // v0.1 (spec §11).
@@ -1530,7 +1622,27 @@ pub fn build_plan(
             .join(format!("logweir-{run_id}"))
             .join("checkpoint.json"),
         checkpoint_interval_secs: 30,
+    };
+    // **THE ENUM IS CHECKED AGAINST THE VALUE IT CLAIMS** (critique A F22).
+    // An EXPLICIT check, deliberately NOT a `debug_assert!`: that macro is
+    // compiled out in release, which is the profile every shipped binary is
+    // built in, so the one assertion standing between a lying plan and a
+    // signed `pass` would exist only in the test profile.
+    //
+    // Exit 3, before anything runs (Global Constraint 11, `crate::exit`).
+    if plan.window_floor_source == WindowFloorSource::ArchiveManifest
+        && plan.time_window.0.timestamp_millis() != floor.manifest_floor_ms
+    {
+        return Err(DrillError::Guard(GuardRefusal(format!(
+            "the plan claims its window floor came from the archive manifest, and its \
+             time_window start is epoch-ms {} while the manifest floor is epoch-ms {}; a \
+             Restore's window start is the archive set's earliest covered timestamp, never \
+             the spec's",
+            plan.time_window.0.timestamp_millis(),
+            floor.manifest_floor_ms
+        ))));
     }
+    Ok(plan)
 }
 
 fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {

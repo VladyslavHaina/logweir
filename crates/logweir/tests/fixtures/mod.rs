@@ -130,6 +130,7 @@ pub fn plan() -> RestorePlan {
         target_auth: logweir_core::engine::AuthRender::Plaintext,
         topic_mapping: mapping("orders", "drill-orders"),
         time_window: (ts("2026-08-29T00:00:00Z"), ts("2026-08-30T02:00:00Z")),
+        window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

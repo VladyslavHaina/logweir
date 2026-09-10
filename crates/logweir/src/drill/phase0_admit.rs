@@ -448,13 +448,30 @@ fn target_topic_preflight(
     // panics in debug and wraps to a floor in the FUTURE in release — which
     // would refuse every window on every default broker.
     if let Some(bound) = timestamp_bound_ms {
-        let window_end_ms = spec.sample.window_end.timestamp_millis();
+        // The window END this plan will actually ask the engine for, which is
+        // `spec.restore.point_in_time` when the spec states one and
+        // `spec.sample.window_end` otherwise — the same choice
+        // `crate::drill::build_plan_with_floor` makes for `time_window.1`.
+        // Reading `sample.window_end` unconditionally would check a bound
+        // against a timestamp this restore never requests.
+        //
+        // The window START is deliberately NOT checked here: since Task 9 it
+        // is the ARCHIVE's floor and not a spec field (guard **G-WIN**), and a
+        // broker's `message.timestamp.before.max.ms` refusal is about how far
+        // in the past a record may be — a window whose end is inside the bound
+        // but whose start is not is a partial refusal the engine reports per
+        // record, not a plan this guard can adjudicate before anything runs.
+        let (window_end_field, window_end) = match spec.restore.point_in_time {
+            Some(t) => ("restore.point_in_time", t),
+            None => ("sample.window_end", spec.sample.window_end),
+        };
+        let window_end_ms = window_end.timestamp_millis();
         let oldest_accepted_ms = chrono::Utc::now().timestamp_millis().saturating_sub(bound);
         if window_end_ms < oldest_accepted_ms {
             return Err(target_topic_refusal(format!(
                 "the target broker bounds how far in the past a CreateTime record may be \
                  ({bound} ms, so nothing older than epoch-ms {oldest_accepted_ms} is accepted), \
-                 and this plan's sample.window_end is epoch-ms {window_end_ms}. The engine \
+                 and this plan's {window_end_field} is epoch-ms {window_end_ms}. The engine \
                  produces every restored record with its ORIGINAL timestamp \
                  [U:crates/kafka-backup-core/src/kafka/produce.rs:101-104], so the broker would \
                  reject the whole window. Raise message.timestamp.before.max.ms (or, before \
@@ -694,6 +711,7 @@ mod tests {
                 anchor: Anchor::Head,
                 max_partitions: None,
             },
+            restore: logweir_core::spec::RestoreSpecBlock::default(),
             objectives: ObjectivesSpec {
                 rto_seconds: None,
                 rpo_seconds: None,

@@ -198,7 +198,7 @@ use logweir::drill::DrillError;
 use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineRun, PartitionFacts,
     PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection,
-    SegmentFacts, StorageUrl, TopicFacts,
+    SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
@@ -276,6 +276,7 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
             fixtures::ts("2026-08-29T00:00:00Z"),
             fixtures::ts("2026-08-30T02:00:00Z"),
         ),
+        window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
         checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

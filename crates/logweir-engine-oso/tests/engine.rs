@@ -5,7 +5,7 @@
 //! unproven" section for exactly what these tests cannot cover.
 use logweir_core::engine::{
     BackupSetRef, CoverageState, DataEngine, EngineError, PhaseObserver, RestorePlan,
-    SampleSelection, StorageUrl,
+    SampleSelection, StorageUrl, WindowFloorSource,
 };
 use logweir_core::spec::Anchor;
 use logweir_engine_oso::engine::OsoCliEngine;
@@ -43,6 +43,7 @@ fn plan() -> RestorePlan {
             "2026-08-29T00:00:00Z".parse().unwrap(),
             "2026-08-30T02:00:00Z".parse().unwrap(),
         ),
+        window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/checkpoint.json".into(),
         checkpoint_interval_secs: 30,

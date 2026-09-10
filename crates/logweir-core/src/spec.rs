@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -24,6 +25,13 @@ pub struct DrillSpec {
     pub source: SourceSpec,
     pub target: TargetSpec,
     pub sample: SampleSpec,
+    /// The RESTORE's own window, as distinct from the SAMPLE's.
+    ///
+    /// Optional and defaulted so every spec written before this block existed
+    /// still parses, and so an absent block means exactly what it did before:
+    /// `time_window.1` is `sample.window_end`. See `RestoreSpecBlock`.
+    #[serde(default)]
+    pub restore: RestoreSpecBlock,
     pub objectives: ObjectivesSpec,
     /// The evidence sink. A DIFFERENT bucket and principal from `source` by
     /// default (spec §7.1); the guard warns loudly when they are equal.
@@ -35,6 +43,28 @@ pub struct DrillSpec {
     /// Spec §13. Absent means "notify nobody"; it is never an error.
     #[serde(default)]
     pub notifications: Notifications,
+}
+
+/// Spec §3.2 `Restore.spec`'s restore block — the recovery POINT, which is the
+/// only half of the window a spec may state.
+///
+/// # There is deliberately no `window_start` here, and there never will be
+///
+/// Spec §6.1 H7: the window is a closed interval and the spec binds its
+/// **start** to the archive, not to a field. `RestorePlan.time_window.0` is the
+/// archive set's earliest covered timestamp as recorded in the manifest, and
+/// `crate::engine::WindowFloorSource` is how the plan says so. A spec-supplied
+/// floor is what guard **G-WIN** exists to refuse: a restore that inherits a
+/// later start silently loses everything before it, while phase 7 reconciles
+/// only the *sampled* records and the scorecard says pass.
+///
+/// `point_in_time` is the window's END when it is present, and
+/// `sample.window_end` when it is absent — which preserves every existing
+/// drill's behaviour for the end of the window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestoreSpecBlock {
+    #[serde(default)]
+    pub point_in_time: Option<DateTime<Utc>>,
 }
 
 /// Spec §13's notification shape. v0.1 POSTs one JSON summary per sink and

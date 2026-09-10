@@ -30,7 +30,81 @@
 //! warnings preserved on a blocking run would need `adjudicate`'s signature
 //! changed; Task 17 does not do that.
 
-use logweir_core::engine::{CoverageState, PreflightReport};
+use crate::drill::DrillError;
+use logweir_core::engine::{BackupSetFacts, CoverageState, PreflightReport, RestorePlan};
+use logweir_core::guard::GuardRefusal;
+
+/// The exact prefix of the rendered `restore.yaml` line this guard reads. Two
+/// spaces, because `time_window_start` is a key of the `restore:` block
+/// (`logweir_engine_oso::render_restore::render`); the golden carries the same
+/// indentation, and indentation is part of the contract (plan errata E2/E3).
+const RENDERED_WINDOW_START_PREFIX: &str = "  time_window_start: ";
+
+/// **GUARD G-WIN, the refusing half.** Refuses, exit 3, when the RENDERED
+/// `time_window_start` is not the archive set's earliest covered timestamp.
+///
+/// # Why it reads the rendered bytes and not `plan.time_window.0`
+///
+/// Spec §10's G-WIN row says *the rendered* `time_window_start`. A comparison
+/// against the plan field cannot see a printer that ignores the plan:
+/// `render_restore::render` is where the integer is actually produced, and a
+/// mutant there is invisible to any assertion made about the plan struct. So
+/// this function renders the document FIRST, parses the integer off its
+/// `  time_window_start: ` line, and compares THAT against a floor it
+/// re-derives from the manifest it already holds.
+///
+/// # Why exit 3, and not ruling R-E's exit 1
+///
+/// Ruling R-E makes the phase-5/phase-6 render mismatch exit **1**,
+/// operational, no artifact — by that point the guards have run and
+/// `validate-restore` has already executed. This check is a different animal:
+/// it runs **before** the document is written and before the engine is
+/// invoked at all, so "refused by a guard, before anything runs" (Global
+/// Constraint 11, `crate::exit`) is exactly what describes it. It therefore
+/// returns `DrillError::Guard`, which `DrillError::exit_code` maps to
+/// `ExitCode::GuardRefused` (3).
+pub fn check_rendered_window_floor(
+    plan: &RestorePlan,
+    facts: &BackupSetFacts,
+) -> Result<(), DrillError> {
+    // RE-DERIVED from the manifest, never read off the plan: a floor taken
+    // from `plan.time_window.0` would make this check compare the plan with
+    // itself.
+    let floor = facts.earliest_covered_timestamp_ms().ok_or_else(|| {
+        DrillError::Guard(GuardRefusal(format!(
+            "the archive set `{}` records no segment in its manifest, so the rendered \
+             time_window_start cannot be checked against an archive floor",
+            plan.set.backup_id
+        )))
+    })?;
+    let doc = logweir_engine_oso::render_restore::render(plan)
+        .map_err(|e| DrillError::Operational(format!("rendering restore.yaml: {e}")))?;
+    let rendered = doc
+        .lines()
+        .find_map(|l| l.strip_prefix(RENDERED_WINDOW_START_PREFIX))
+        .ok_or_else(|| {
+            DrillError::Operational(format!(
+                "the rendered restore.yaml carries no `{}` line, so the archive floor cannot \
+                 be checked against it",
+                RENDERED_WINDOW_START_PREFIX.trim_end()
+            ))
+        })?
+        .trim()
+        .parse::<i64>()
+        .map_err(|e| {
+            DrillError::Operational(format!(
+                "the rendered restore.yaml's time_window_start is not an integer: {e}"
+            ))
+        })?;
+    if rendered != floor {
+        return Err(DrillError::Guard(GuardRefusal(format!(
+            "rendered time_window_start {rendered} is not the archive floor {floor}; a \
+             Restore's window start is the archive set's earliest covered timestamp, never \
+             the spec's"
+        ))));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct Finding {

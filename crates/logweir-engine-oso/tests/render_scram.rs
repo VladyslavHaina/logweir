@@ -41,7 +41,9 @@
 //! no_network_in_unit_tests.rs`'s `DIAL_TOKENS`, so that gate needs no entry
 //! for this path at all. (Naming one here, even in prose, would trip it: the
 //! scan is a plain `contains` over the file, by design.)
-use logweir_core::engine::{AuthRender, BackupPlan, BackupSetRef, RestorePlan, StorageUrl};
+use logweir_core::engine::{
+    AuthRender, BackupPlan, BackupSetRef, RestorePlan, StorageUrl, WindowFloorSource,
+};
 use logweir_engine_oso::render_backup::RenderError;
 use logweir_engine_oso::{render_backup, render_restore, render_validation};
 
@@ -76,6 +78,7 @@ fn restore_plan(auth: AuthRender) -> RestorePlan {
             "2026-08-29T00:00:00Z".parse().unwrap(),
             "2026-08-30T02:00:00Z".parse().unwrap(),
         ),
+        window_floor_source: WindowFloorSource::ArchiveManifest,
         default_replication_factor: 1,
         checkpoint_state: "/var/lib/logweir/01J9X/checkpoint.json".into(),
         checkpoint_interval_secs: 30,
