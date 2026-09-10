@@ -519,6 +519,86 @@ fn a_timestamp_bound_that_excludes_the_window_end_is_a_guard_refusal() {
     );
 }
 
+/// **The bound is checked against the window end THIS restore asks for.**
+///
+/// Since Task 9 `RestorePlan.time_window.1` is `restore.point_in_time` when
+/// the spec states one and `sample.window_end` otherwise, so phase 0 makes the
+/// same choice: reading `sample.window_end` unconditionally would compare the
+/// broker's bound against a timestamp this restore never requests — passing a
+/// plan the broker will reject record by record, or refusing one it would have
+/// accepted.
+///
+/// Both directions are asserted, because the repoint was correct and entirely
+/// unasserted: "read `sample.window_end` even when `point_in_time` is present"
+/// survived `cargo test --workspace` at 814 passed / 0 failed (task-9 review,
+/// MED-3). Arm 1 dies on the missing refusal, arm 2 on a refusal that should
+/// not have happened, and arm 1 also pins the `restore.point_in_time` label
+/// the message carries.
+#[test]
+fn the_timestamp_bound_is_checked_against_the_recovery_point_when_the_spec_states_one() {
+    let reader_configs: &[(&str, &str)] = &[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.message.timestamp.before.max.ms", "3600000"),
+    ];
+
+    // ARM 1 — the sample window's end is INSIDE the one-hour bound and the
+    // requested recovery point is 48 h outside it. The plan asks the engine
+    // for the recovery point, so this is a refusal.
+    let mut spec = spec_with_window_end(chrono::Utc::now() - chrono::Duration::minutes(5));
+    let recovery_point = chrono::Utc::now() - chrono::Duration::hours(48);
+    spec.restore.point_in_time = Some(recovery_point);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let msg = guard_message(
+        phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &BrokerDouble::new(reader_configs),
+            &creator,
+            &deleter,
+        )
+        .expect_err("a RECOVERY POINT outside the broker's bound is refused"),
+    );
+    assert!(msg.starts_with("TargetTopicConfigRefused: "), "{msg}");
+    assert!(
+        msg.contains("restore.point_in_time"),
+        "the refusal names the field it read, not `sample.window_end`: {msg}"
+    );
+    assert!(
+        msg.contains(&recovery_point.timestamp_millis().to_string()),
+        "and the integer it compared: {msg}"
+    );
+    assert!(
+        creator.calls.lock().unwrap().is_empty(),
+        "a refusal knowable by comparison must not write to the target first"
+    );
+
+    // ARM 2 — the mirror. The SAMPLE window's end is 48 h old, outside the
+    // bound, while the requested recovery point is five minutes old and inside
+    // it. Nothing may be refused: the engine is never asked for the sample
+    // window's end.
+    let mut spec = spec_with_window_end(chrono::Utc::now() - chrono::Duration::hours(48));
+    spec.restore.point_in_time = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &BrokerDouble::new(reader_configs),
+        &creator,
+        &deleter,
+    )
+    .expect("a recovery point INSIDE the bound is admitted, whatever the sample window says");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_bound_ms,
+        Some(3_600_000),
+        "the bound was read — arm 2 passes because the comparison used the \
+         recovery point, not because the check was skipped"
+    );
+}
+
 /// The deprecated spelling still counts: before Kafka 3.6 the key is
 /// `log.message.timestamp.difference.max.ms`, and an adopter on 3.5 gets the
 /// same refusal.
