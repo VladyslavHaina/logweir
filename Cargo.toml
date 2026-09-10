@@ -40,6 +40,28 @@
 # add it to the list above, noting the toolchain version it was pinned
 # against so a future MSRV bump can re-check it the same way this comment
 # just did.
+#
+# TASK 15 — THE KUBERNETES CLIENT PAIR, held below the newest release on
+# purpose and recorded here in the practice this file already documents:
+#   kube         0.99.0   (newest at resolution time: 4.2.0)
+#   k8s-openapi  0.24.0   (newest at resolution time: 0.28.0)
+# Both declared in `crates/weirkeeper/Cargo.toml` — `kube = "0.99"` with
+# `default-features = false`, `k8s-openapi = "0.24"` with `features =
+# ["v1_29"]` — and RESOLVED AGAINST TOOLCHAIN 1.89.0, this workspace's pin.
+#
+# They are NOT `cargo update --precise` pins and are not in the list above:
+# `cargo info kube@0.99` reports `rust-version: 1.81.0`, comfortably under
+# 1.89, and `k8s-openapi@0.24` declares none at all, so neither needed the
+# MSRV treatment the six entries above got. What makes them worth recording in
+# the same place is that a caret requirement on `0.99` is itself a decision to
+# stay several majors below the newest release: the pair is chosen for
+# `k8s-openapi`'s `v1_29` feature (Global Constraint 25 — minimum Kubernetes
+# 1.29) and for `schemars 0.8`, which `logweir-core`'s `emit_schema` example
+# and the `.github/workflows/ci.yml:53-56` drift arm are written against. A
+# newer `kube` that requires `schemars 1.x` would put two majors of the
+# `JsonSchema` trait in one graph and diverge the two drift gates, which is a
+# stop-and-report and not a version bump. Task 22 carries this pair into
+# `docs/stability.md`.
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask", "e2e"]

@@ -1,0 +1,87 @@
+[package]
+name = "weirkeeper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# THE CONTROLLER CRATE. It is a NEW crate and had to be one: the
+# forbidden-dependency loop in `.github/workflows/no-oso.yml:23` forbids the
+# pure layer from taking `kube` or `k8s-openapi`, and
+# `docs/mvp/02-k8s-transition-plan.md:986-989` rules that any operator code
+# lives in a new crate or that guard gets renegotiated. Global Constraint 1
+# names `crates/weirkeeper` as outside the pure layer BY ADR, never by a quiet
+# edit to that grep.
+#
+# WHAT IT LINKS, AND WHAT IT MUST NOT. `logweir-verify` — the verifying half —
+# and never `logweir-evidence`, which keeps `SigningKey` and `sign_detached`
+# (Global Constraint 27, guard G-SIGN: `scripts/check-one-signer.sh`'s
+# `ALLOWED_VERIFY_LINK` and `ALLOWED_PRIMITIVE` admit this crate, and
+# `ALLOWED_LINK` / `ALLOWED_SOURCE` do not). An edge back to the signer would
+# also be a dependency CYCLE and break the build, which sounds like enough and
+# is not: a build failure is not a NAMED property. `tests/linkage.rs` reads
+# both halves out of `cargo metadata`, so the boundary has a test that names
+# it.
+[dependencies]
+# THE ONE DEPENDENCY DECISION OF THIS PLAN, recorded rather than implied.
+# `default-features = false` is load-bearing. kube 0.99's own default set is
+# `[client, rustls-tls, ring]` (`cargo info kube@0.99`, run against the pinned
+# 1.89.0 toolchain), and taking the defaults would leave the feature set free
+# to drift with the upstream crate instead of being a decision this repository
+# holds. This workspace already resolves the entire rustls HTTP stack through
+# `object_store`'s Global-Constraint-9 feature set — rustls 0.23.43,
+# tokio-rustls 0.26.4, hyper-rustls 0.27.9, hyper 1.11.1, hyper-util 0.1.20,
+# http 1.5.0, http-body-util 0.1.5, tower 0.5.3, tower-http 0.6.11 — so the
+# rustls arm adds no HTTP stack at all. `openssl-tls`, `oauth`, `gzip` and the
+# jsonpatch-heavy optional features are deliberately NOT taken.
+#
+# The exact list is asserted by
+# `tests/linkage.rs::kube_is_declared_without_default_features`: a fifth
+# feature, a dropped entry or a dropped `default-features = false` fails that
+# test at ASSERTION time, with no build.
+kube = { version = "0.99", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
+# Global Constraint 25: minimum Kubernetes 1.29, so the `v1_29` feature and no
+# other — `k8s-openapi` refuses to build with two version features at once,
+# which makes this a single-value choice rather than a set. `cargo info
+# k8s-openapi@0.24` confirms `v1_29` is exposed at this version.
+k8s-openapi = { version = "0.24", features = ["v1_29"] }
+# THE NEXT THREE ARE ALREADY RESOLVED IN `Cargo.lock` AND ADD NO PACKAGE
+# (Global Constraint 38, critique B M4). They are DECLARED anyway, because
+# being in the lock file is not being a declared dependency — today `tower` is
+# reached only by `reqwest` and `tower-http`, neither of which is this crate's.
+# They are NORMAL dependencies and not `[dev-dependencies]`, because
+# `src/testing.rs` is a `src/` module that ships in the library.
+# `service_fn` sits behind tower's `util` feature and tower 0.5's own defaults
+# are `["log"]`, so the feature is required rather than decorative;
+# `tests/linkage.rs::the_three_declared_entries_carry_their_features` asserts
+# it, and `no_new_package_enters_the_graph_for_the_mock` asserts the three add
+# nothing to the resolved graph.
+tower = { version = "0.5", features = ["util"] }
+# `http::Request` / `http::Response` are the types a `kube::Client`'s inner
+# service speaks.
+http = "1"
+# `BodyExt::collect`, for reading a response body back in the double's own
+# tests.
+http-body-util = "0.1"
+# The VERIFYING half of the DSSE machinery — `VerifyingKey`, `Sidecar`,
+# `verify_detached` and the three payload-type constants (Task 14, interface
+# I4). Declared NOW and used from Task 16: the controller checks the scorecard
+# and teardown signatures the UI renders (spec §8) and must not thereby link
+# the signer.
+logweir-verify = { path = "../logweir-verify" }
+# `main.rs` needs a runtime for the kube client and a SIGTERM handler.
+# `signal` pulls `signal-hook-registry` and `mio`, both already in
+# `Cargo.lock`, so it adds no package either.
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# `tests/linkage.rs` reads `cargo metadata`'s JSON, the same shape and for the
+# same reason as `crates/logweir-verify/tests/deps.rs`. It is a DEV
+# dependency here because the library itself parses no JSON yet, and it is
+# already in `Cargo.lock`, so it adds no package.
+serde_json.workspace = true
+
+[features]
+default = []

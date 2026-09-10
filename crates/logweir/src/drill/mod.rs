@@ -213,9 +213,10 @@ pub struct RunArgs {
 ///   `fields.run_id` and no `span` object at all.
 ///
 /// Excluded: this workspace's own crates (they MUST stay at `info`),
-/// `tracing-subscriber` (the subscriber, which emits nothing) and
-/// `tracing-log` (the bridge itself, likewise). Target names are MODULE paths,
-/// so hyphens become underscores.
+/// `tracing` (the facade — every event carries the EMITTING module's target,
+/// never `tracing`), `tracing-subscriber` (the subscriber, which emits
+/// nothing) and `tracing-log` (the bridge itself, likewise). Target names are
+/// MODULE paths, so hyphens become underscores.
 ///
 /// Also excluded, and this is the second half of the derivation: a crate that
 /// is in `Cargo.lock` but **not in the resolved graph**. The lockfile records
@@ -230,15 +231,39 @@ pub struct RunArgs {
 /// re-derives the whole set — both bridges, narrowed to what this build
 /// actually compiled — on every run, so a new emitter arriving with a future
 /// dependency bump fails a test instead of silently widening the stream.
+///
+/// FIVE NAMES ADDED BY TASK 15, and this is the "future dependency bump" the
+/// paragraph above was written for. `crates/weirkeeper` took `kube` and
+/// `k8s-openapi`, and five crates that were already in `Cargo.lock` became
+/// emitters as a result: `hyper_rustls`, `kube_client`, `kube_runtime`, `tower`
+/// and `tower_http`. Their `tracing` edge is OPTIONAL upstream — `tower`'s and
+/// `tower_http`'s behind their tracing/log features, `hyper_rustls`'s behind
+/// `logging` — and nothing in the workspace activated it until `kube-client`
+/// did, which is why they sat in the lockfile for several tasks without
+/// appearing here. That is the gate doing its job: the emitters arrived
+/// without a version bump anywhere, and the test named them on the first run
+/// after the client landed.
+///
+/// `weirkeeper` itself is NOT here, and not because it cannot emit — it
+/// depends on `tracing` directly. It is one of this workspace's own crates,
+/// which the paragraph above excludes because they MUST stay at `info`, and it
+/// installs its own subscriber in `crates/weirkeeper/src/main.rs`; the
+/// `logweir` binary never links it. The exclusion predicate in the test below
+/// names it for that reason.
 const DEFAULT_LOG_DIRECTIVE: &str = "info,\
      h2=warn,\
+     hyper_rustls=warn,\
      hyper_util=warn,\
      iana_time_zone=warn,\
+     kube_client=warn,\
+     kube_runtime=warn,\
      object_store=warn,\
      rdkafka=warn,\
      reqwest=warn,\
      rustls=warn,\
      rustls_platform_verifier=warn,\
+     tower=warn,\
+     tower_http=warn,\
      ureq=warn";
 
 /// The observer phase 6 hands to the engine, carrying THIS run's id.
@@ -1789,8 +1814,29 @@ mod tests {
         // is the subscriber and `tracing-log` is the bridge; neither emits an
         // event of its own, and `tracing-log` would otherwise be counted purely
         // for depending on `log`.
-        let ours = |n: &str| n == "logweir" || n.starts_with("logweir-");
-        let plumbing = |n: &str| n == "tracing-subscriber" || n == "tracing-log";
+        // `weirkeeper` joins this predicate with Task 15 rather than joining
+        // the WARN list: it is one of ours, it depends on `tracing` directly,
+        // and it installs its OWN subscriber in `crates/weirkeeper/src/main.rs`
+        // — the `logweir` binary never links it, so pinning it here would be
+        // decoration in a constant whose doc comment refuses decoration. The
+        // crate is not named `logweir-*`, which is the only reason the prefix
+        // test does not already cover it.
+        let ours = |n: &str| n == "logweir" || n.starts_with("logweir-") || n == "weirkeeper";
+        // `tracing` — the FACADE — joins this predicate with Task 15, for the
+        // same reason the other two are already here: it emits no event of its
+        // own. Every `tracing` event carries the EMITTING module's target
+        // (`logweir::drill`, `kube_client::client`), never `tracing`, so a
+        // `tracing=warn` directive would silence nothing and would be exactly
+        // the decoration `DEFAULT_LOG_DIRECTIVE`'s doc comment refuses. It
+        // arrived in the oracle because `kube-client` enables `tracing`'s
+        // optional `log` feature (`cargo tree -e features -i tracing`:
+        // `tracing feature "log" └── kube-client v0.99.0`), which put a direct
+        // `"log"` line into `tracing`'s own `Cargo.lock` entry where there was
+        // none before. That feature makes tracing forward to the `log` facade
+        // only when no subscriber is interested in the event, so it does not
+        // widen this stream — the run-id assertions in this module are the
+        // check on that, and they stay green.
+        let plumbing = |n: &str| n == "tracing" || n == "tracing-subscriber" || n == "tracing-log";
         let compiled = crates_compiled_into_this_build();
         let mut emitters: Vec<String> = vec![];
         let mut skipped_unresolved: Vec<String> = vec![];
