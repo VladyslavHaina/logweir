@@ -234,9 +234,15 @@ def test_the_three_payload_types_match_the_rust_constants():
     # The verifier is only independent if it agrees with the signer on the
     # exact media types. A drift here means one of them signs or checks a
     # string the other never uses, and every fixture would still pass.
-    rust = (ROOT / "crates" / "logweir-evidence" / "src" / "lib.rs").read_text()
+    #
+    # THE PATH FOLLOWED THE CONSTANTS. Task 14 moved the three constants into
+    # `crates/logweir-verify/src/lib.rs`; `logweir-evidence` re-exports them
+    # with `pub use logweir_verify::*;`, and a re-export contains none of the
+    # three media-type literals — so reading the old file would assert a
+    # property of a `pub use` line. Read the file that DECLARES them.
+    rust = (ROOT / "crates" / "logweir-verify" / "src" / "lib.rs").read_text()
     for t in (SCORECARD_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
-        assert t in rust, f"{t} is not declared in logweir-evidence/src/lib.rs"
+        assert t in rust, f"{t} is not declared in logweir-verify/src/lib.rs"
     py = VERIFIER.read_text()
     for t in (SCORECARD_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
         assert t in py, f"{t} is not declared in verify_scorecard.py"

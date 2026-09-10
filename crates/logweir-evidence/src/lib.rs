@@ -1,61 +1,29 @@
 #![forbid(unsafe_code)]
+//! The SIGNING half of Logweir's DSSE evidence, and nothing else.
+//!
+//! `VerifyingKey`, `verify_detached`, `pae`, `Signature`, `Sidecar`, `Error`
+//! and the three payload-type constants moved to `crates/logweir-verify` so
+//! that a component which VERIFIES a signature does not thereby link the
+//! signer — the remedy `scripts/check-one-signer.sh:46-49` ruled in writing
+//! before there was anything to remedy, recorded in ADR 0008 §E. What stays
+//! here is `SigningKey`, `KeyAlg`, `KeyOrigin`, `sign_detached`,
+//! `generate_p256`, `generate_ed25519`, `SigningKey::from_pem_file`,
+//! `SigningKey::load_or_generate` and `to_pkcs8_pem` — and the
+//! `rand_core`/`getrandom` entropy source they need, which `logweir-verify`
+//! does not declare.
+//!
+//! The glob re-export below is deliberate and load-bearing: every existing
+//! call site in this workspace — `logweir_evidence::PAYLOAD_TYPE_SCORECARD`,
+//! `logweir_evidence::Sidecar`, `logweir_evidence::Error`,
+//! `logweir_evidence::keys::VerifyingKey`,
+//! `logweir_evidence::verify::verify_detached`,
+//! `logweir_evidence::pae::pae` — compiles unchanged across the extraction.
+//! `crates/logweir-verify/src/lib.rs` is where the three constants are now
+//! DECLARED, and `docs/test_verify_scorecard.py` reads that file: a
+//! re-export contains none of the three media-type literals.
 pub mod keys;
 pub mod pae;
 pub mod sign;
 pub mod verify;
 
-use serde::{Deserialize, Serialize};
-
-pub const PAYLOAD_TYPE_SCORECARD: &str =
-    "application/vnd.logweir.drill-scorecard+json;version=1.0.0";
-pub const PAYLOAD_TYPE_TEARDOWN: &str = "application/vnd.logweir.drill-teardown+json;version=1.0.0";
-/// The post-put storage receipt (Task 21a, discharging Task 20's carried
-/// obligation). A scorecard is SIGNED before it is PUT — bytes cannot be
-/// signed before they are serialised — so `evidence.create_only_enforced`,
-/// `immutable`, `retain_until` and `version_id` are unknowable at signing
-/// time and the scorecard neutralises all four. This second document carries
-/// the readback taken AFTER the put, signed on its own, so the storage claim
-/// is something an auditor can check rather than something only Logweir's
-/// memory ever held.
-pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
-    "application/vnd.logweir.drill-put-receipt+json;version=1.0.0";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Signature {
-    pub keyid: String,
-    pub sig: String,
-}
-
-/// The detached sidecar written beside a directly-readable JSON payload, so a
-/// human can `cat` the scorecard and a machine can still verify it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Sidecar {
-    #[serde(rename = "payloadType")]
-    pub payload_type: String,
-    pub signatures: Vec<Signature>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("key error: {0}")]
-    Key(String),
-    /// The sidecar's signature bytes are structurally invalid: base64 that
-    /// will not decode, or a signature blob that is not valid DER (P-256) or
-    /// is the wrong length (Ed25519). This is evidence of CORRUPTION — a
-    /// truncated file, a bad encoding — never evidence that a genuine,
-    /// well-formed document was tampered with after signing. A caller
-    /// mapping this crate's errors onto an exit-code contract SHOULD treat
-    /// this variant as an operational failure, not as a proof of tampering.
-    #[error("malformed signature data: {0}")]
-    Malformed(String),
-    /// A structurally valid signature was checked against the payload and
-    /// either did not verify, or no signature in the sidecar was made by the
-    /// presented key — or the sidecar's `payloadType` does not match what
-    /// the caller asked to verify, which is evidence of SUBSTITUTION (a
-    /// genuinely-signed sidecar for a different kind of document, handed
-    /// over in place of this one). Each of these is a definite negative
-    /// answer the crypto/protocol layer actually gave, as opposed to
-    /// `Malformed`'s "the input was never well-formed enough to ask".
-    #[error("verification failed: {0}")]
-    Verify(String),
-}
+pub use logweir_verify::*;

@@ -1386,15 +1386,12 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
- "hex",
  "logweir-core",
+ "logweir-verify",
  "p256",
  "rand_core 0.6.4",
- "serde",
  "serde_json",
- "sha2",
  "tempfile",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1419,6 +1416,20 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "logweir-verify"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "p256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

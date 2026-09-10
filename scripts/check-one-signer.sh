@@ -17,24 +17,53 @@
 # A documented guarantee the code does not deliver is the defect class this
 # gate exists to remove, not to repeat.
 #
-# THREE CHECKS, because each alone proves the wrong thing — the same
-# three-ways-proved shape as `scripts/check-no-oso.sh`:
+# FOUR CHECKS, because each alone proves the wrong thing — the same
+# proved-several-ways shape as `scripts/check-no-oso.sh`:
 #
 #   1. the reverse-dependency walk over `cargo metadata` (the property
 #      carrier: linkage);
-#   2. the two signing primitives, `p256` and `ed25519-dalek`, over
-#      `cargo tree --invert` (a second, independent walk of the same claim
-#      from the primitive end);
+#   2. the two primitive crates, `p256` and `ed25519-dalek`, over
+#      `cargo tree --invert` (a second, independent walk from the primitive
+#      end — RE-SCOPED, see below);
 #   3. a narrow source grep for `sign_detached` / `SigningKey` (which catches a
-#      crate that NAMES the API before its manifest edit lands).
+#      crate that NAMES the API before its manifest edit lands);
+#   4. a second reverse-dependency walk, for `logweir-verify`, against its own
+#      separate allowlist (added with the verify-only extraction).
 #
-# TWO DIFFERENT WALKS, DELIBERATELY, AND THEY HAVE DIFFERENT ALLOWLISTS.
+# FOUR WALKS, DELIBERATELY, AND THEY HAVE DIFFERENT ALLOWLISTS.
 # Check 1 counts EVERY dependency kind — normal, build AND dev — because a
 # backdoor added under `[dev-dependencies]` links the signer just as hard as
 # one under `[dependencies]`; over that graph the reaching set is {logweir,
 # e2e}, since `e2e` takes `logweir-evidence` as a dev-dependency. Check 2 keeps
-# `-e normal`, which drops dev edges, so its allowlist is {logweir-evidence,
-# logweir}. Both statements are true of different walks; neither is a typo.
+# `-e normal`, which drops dev edges. Check 4 counts every kind again, like
+# check 1, but walks a different target. Each statement is true of its own
+# walk; none is a typo.
+#
+# CHECK 2 IS RE-SCOPED, AND THE REASON IS HERE RATHER THAN IN A COMMIT
+# MESSAGE. Verification and signing SHARE their primitives: `VerifyingKey` is
+# an enum over `p256` and `ed25519-dalek` and `verify_detached` matches both
+# arms, so `crates/logweir-verify` — the verify-only crate the ruling below
+# demanded — must depend on both. Once it does, "reaches a signing primitive"
+# is no longer a proxy for "can sign": `p256` and `ed25519-dalek` are reached
+# by everything that merely CHECKS a signature. Check 2 therefore no longer
+# claims that only the signer reaches them. It claims the narrower thing it can
+# still prove — THESE FOUR CRATES AND NO OTHERS REACH THE PRIMITIVE CRATES —
+# and the crates that reach the SIGNING half are checks 1 and 3.
+#
+# This widening is RECORDED, not silent, and that is the whole point: an
+# implementer who hit check 2 could have added two names to `ALLOWED_PRIMITIVE`
+# and retired the check for `weirkeeper` for good. It is written here, in
+# `docs/adr/0008-mvp-constraint-amendments.md` §E, and in `docs/mvp/03-spec.md`
+# §10's G-SIGN row, and
+# `crates/logweir/tests/one_signer_gate.rs`'s
+# `check_two_states_the_narrowed_claim` fails if this paragraph goes missing or
+# if a fifth name appears on that allowlist.
+#
+# THE FOURTH ALLOWLIST DOES NOT WEAKEN CHECKS 1 AND 3. `ALLOWED_VERIFY_LINK`
+# governs who may link the VERIFYING crate, which holds no `SigningKey`, no
+# `sign_detached` and no entropy source; `ALLOWED_LINK` and `ALLOWED_SOURCE`
+# are byte-identical to what they were before the extraction, and `weirkeeper`
+# is absent from both.
 #
 # `ring`, `rustls` AND `aws-lc-rs` ARE DELIBERATELY NOT CHECKED. They are TLS
 # primitives, reachable from `object_store` / `reqwest` / `ureq`, and have
@@ -43,10 +72,15 @@
 # this gate is that if it is not green against the unmodified tree, the script
 # is wrong, not the tree. Do not add them back.
 #
-# `weirkeeper`, the controller, and every cluster object are OUT OF SCOPE here:
-# none exists yet. When one does, it does not go on the allowlist — the ruled
-# remedy is to extract a verify-only crate, so that a controller which VERIFIES
-# a signature does not thereby link the signer.
+# `weirkeeper`, the controller, and every cluster object are OUT OF SCOPE for
+# checks 1 and 3: it does not go on either allowlist — the ruled remedy was to
+# extract a verify-only crate, so that a controller which VERIFIES a signature
+# does not thereby link the signer. THAT REMEDY HAS BEEN CARRIED OUT:
+# `crates/logweir-verify` holds `VerifyingKey`, `verify_detached` and `pae`,
+# `crates/logweir-evidence` keeps `SigningKey` and `sign_detached` and
+# re-exports the verifying half, and check 4 below is the allowlist for the
+# verifying crate. `weirkeeper` appears on `ALLOWED_VERIFY_LINK` and on
+# `ALLOWED_PRIMITIVE`, and on neither `ALLOWED_LINK` nor `ALLOWED_SOURCE`.
 #
 # COSTS NOTHING AND REACHES NOTHING: no network, no Docker, no `.engine/`, and
 # it builds not one object file. `cargo metadata --no-deps` performs no
@@ -94,9 +128,24 @@ ALLOWED_SOURCE="logweir-evidence logweir e2e"
 # Crates permitted to reach a signing PRIMITIVE over normal edges only. This is
 # the same claim as ALLOWED_LINK seen from the other end of a narrower walk:
 # `e2e` is absent because its edge is a dev-dependency and `-e normal` drops it.
-ALLOWED_PRIMITIVE="logweir-evidence logweir"
-# The signing primitives themselves, from crates/logweir-evidence/Cargo.toml.
+# RE-SCOPED (see the header): these are the crates permitted to reach a
+# PRIMITIVE crate over normal edges. It is no longer the same claim as
+# ALLOWED_LINK seen from the other end, because verification shares the
+# primitives with signing. `logweir-verify` is here because a verifier needs
+# both primitives; `weirkeeper` is here because it links `logweir-verify`
+# (spec §8). FOUR NAMES, IN THIS ORDER, AND NO FIFTH — a fifth is the mutant
+# `check_two_states_the_narrowed_claim` exists to kill.
+ALLOWED_PRIMITIVE="logweir-evidence logweir logweir-verify weirkeeper"
+# Crates permitted to LINK the VERIFYING crate (any dependency kind). A FOURTH,
+# SEPARATE allowlist: it governs `logweir-verify`, which holds no `SigningKey`,
+# no `sign_detached` and no entropy source, and it leaves ALLOWED_LINK and
+# ALLOWED_SOURCE untouched.
+ALLOWED_VERIFY_LINK="logweir-evidence logweir weirkeeper e2e"
+# The primitive crates themselves, from crates/logweir-evidence/Cargo.toml and
+# crates/logweir-verify/Cargo.toml — both halves declare both.
 PRIMITIVES="p256 ed25519-dalek"
+# The verify-only crate check 4 walks.
+VERIFIER="logweir-verify"
 
 meta_file="$(mktemp)"
 trap 'rm -f "$meta_file"' EXIT
@@ -176,7 +225,7 @@ if [ "$fail" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------- check 2
-echo "== cargo tree: the signing primitives ($PRIMITIVES) reach no other workspace crate =="
+echo "== cargo tree: only {$ALLOWED_PRIMITIVE} reach the primitive crates ($PRIMITIVES) — reaching a primitive is NOT reaching the signer; for that, see checks 1 and 3 =="
 # Captured into a variable on its own line, status handled on its own line:
 # `cargo tree | grep` would hide cargo's exit code behind grep's.
 #
@@ -242,7 +291,7 @@ for prim in $PRIMITIVES; do
     esac
   done
   if [ "$prim_fail" -eq 0 ]; then
-    echo "ok: $prim reaches {$(echo $names | tr ' ' ',')}"
+    echo "ok: $prim reaches {$(echo $names | tr ' ' ',')}, all on the primitive allowlist — the crates that reach the SIGNING half are checks 1 and 3"
   fi
 done
 
@@ -321,6 +370,73 @@ done
 # Same guard as checks 1 and 2: no `ok:` line for a check that just failed.
 if [ "$src_fail" -eq 0 ]; then
   echo "ok: the crates naming the signing API are {$(echo $named | tr ' ' ',')}"
+fi
+
+# ---------------------------------------------------------------- check 4
+echo "== cargo metadata: which workspace crates reach $VERIFIER, over EVERY dependency kind =="
+# THE WALKER IS DUPLICATED FROM CHECK 1 ON PURPOSE. Checks 1 and 3 are
+# byte-identical to what they were before the verify-only extraction — that is
+# the property spec §10's G-SIGN row asserts and
+# `the_two_original_allowlists_are_unchanged` reads — so factoring the walk
+# into a shell function would have rewritten check 1. `$meta_file` is reused:
+# no second `cargo metadata`.
+#
+# ONE DIRECTION ONLY, unlike check 1, and the reason is written down rather
+# than assumed. Check 1 also fails on a STALE allowlist (a name that no longer
+# reaches the signer), because its allowlist describes a graph that exists.
+# `ALLOWED_VERIFY_LINK` names `weirkeeper`, which spec §8 pre-authorises and
+# which arrives one task later; a staleness arm here would make this gate red
+# for that whole interval, and a gate that is red for a scheduled reason is a
+# gate people learn to ignore. EXTRA members still fail: an unlisted crate
+# linking the verifying crate is exactly what this check is for.
+reaching_verify="$(python3 - "$meta_file" "$VERIFIER" <<'PYEOF'
+import json, sys
+
+meta = json.load(open(sys.argv[1]))
+target = sys.argv[2]
+
+# `--no-deps` lists the workspace members and nothing else, so this set is
+# exactly the intra-workspace vocabulary.
+names = {p["name"] for p in meta["packages"]}
+
+# Reverse edges, counting EVERY dependency kind — a dev edge onto the verifying
+# crate is a link like any other.
+rev = {}
+for p in meta["packages"]:
+    for d in p.get("dependencies", []):
+        if d["name"] in names:
+            rev.setdefault(d["name"], set()).add(p["name"])
+
+seen = set()
+frontier = [target]
+while frontier:
+    node = frontier.pop()
+    for parent in rev.get(node, ()):
+        if parent not in seen:
+            seen.add(parent)
+            frontier.append(parent)
+seen.discard(target)
+for n in sorted(seen):
+    print(n)
+PYEOF
+)" || { echo "FAIL: the reverse-dependency walk over cargo metadata failed for $VERIFIER" >&2; exit 1; }
+
+reaching_verify="$(echo $reaching_verify)"
+
+verify_fail=0
+for c in $reaching_verify; do
+  case " $ALLOWED_VERIFY_LINK " in
+    *" $c "*) ;;
+    *)
+      echo "FAIL: $c links the verifying crate $VERIFIER and is not on the verify allowlist" >&2
+      verify_fail=1
+      fail=1
+      ;;
+  esac
+done
+# Same guard as checks 1, 2 and 3: no `ok:` line for a check that just failed.
+if [ "$verify_fail" -eq 0 ]; then
+  echo "ok: the crates reaching $VERIFIER are {$(echo $reaching_verify | tr ' ' ',')}, all on the verify allowlist — linking the verifier is NOT linking the signer"
 fi
 
 exit "$fail"

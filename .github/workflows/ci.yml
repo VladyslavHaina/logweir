@@ -31,10 +31,16 @@ jobs:
       - name: pure-layer purity guard (Global Constraint 1)
         run: ./scripts/check-pure-core.sh
       # G2': no crate outside {logweir, e2e} LINKS the signing API. This proves a
-      # link-time property only — it does NOT prove the control plane cannot sign
+      # link-time property only — it does NOT bound anyone's CAPABILITY to sign
       # (the signing key is a Secret; `create pods` in its namespace is equivalent
-      # to holding it). Per line item 1g this workflow has never executed on any
-      # commit, so this step is DOCUMENTATION; `just lint` is the gate.
+      # to holding it; Global Constraint 27). NOTE for whoever edits this comment:
+      # `scripts/check-withdrawn-claim.sh` walks this directory for the withdrawn
+      # stronger claim and its paraphrases, and `check-one-signer.sh:16` binds "the
+      # CI step that runs it" by name — so state the narrowed claim, as above, and
+      # do not quote the withdrawn one even to deny it. (Same hazard as the
+      # check-dod.sh note two comments below.) Per line item 1g this workflow has
+      # never executed on any commit, so this step is DOCUMENTATION; `just lint`
+      # is the gate.
       - name: single-signer linkage gate (G2')
         run: ./scripts/check-one-signer.sh
       # `scripts/check-dod.sh` — the sole enforcer of the ASF attribution

@@ -95,8 +95,44 @@ fn logweir_store_depends_on_nothing_oso() {
 
     // (b) the boundary itself, on its own.
     assert!(
-        !deps.contains("logweir-engine-oso") && !deps.iter().any(|d| d.starts_with("kafka-backup")),
+        !declares_oso(&deps),
         "logweir-store exists so a component can hold an object-store handle \
          WITHOUT linking the OSO engine wrapper (ADR 0008 §E); it declared {deps:?}"
     );
+}
+
+/// The boundary predicate, extracted from the assertion above so that its
+/// SECOND disjunct is reachable by a test.
+///
+/// `logweir-engine-oso` is caught by name; the `kafka-backup` PREFIX arm exists
+/// for Global Constraint 2 — `kafka-backup-core` is never a workspace
+/// dependency, in any version, behind any feature, and neither is any other
+/// `kafka-backup*` crate. Nothing in this tree declares one, so on the real
+/// dependency set that arm is dead code, and dead code in an assertion is how
+/// a guard quietly stops covering half of what it claims.
+fn declares_oso(deps: &BTreeSet<String>) -> bool {
+    deps.contains("logweir-engine-oso") || deps.iter().any(|d| d.starts_with("kafka-backup"))
+}
+
+/// Task 13 review carry (b): the `kafka-backup` prefix arm, with a case.
+#[test]
+fn the_boundary_predicate_catches_a_kafka_backup_prefix() {
+    let clean: BTreeSet<String> = ["logweir-core", "object_store"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(
+        !declares_oso(&clean),
+        "a clean set must not trip the predicate"
+    );
+
+    for bad in ["logweir-engine-oso", "kafka-backup-core", "kafka-backup"] {
+        let mut set = clean.clone();
+        set.insert(bad.to_string());
+        assert!(
+            declares_oso(&set),
+            "`{bad}` must trip the boundary predicate (Global Constraint 2 for \
+             the `kafka-backup` prefix, ADR 0008 §E for the engine wrapper)"
+        );
+    }
 }

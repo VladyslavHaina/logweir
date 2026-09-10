@@ -1,9 +1,19 @@
 use crate::Error;
-use p256::pkcs8::{
-    DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding,
-};
-use sha2::{Digest, Sha256};
+use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use std::path::Path;
+
+/// `VerifyingKey` and its entire inherent `impl` block moved to
+/// `logweir-verify` (ADR 0008 §E) and are re-exported here, so every
+/// existing `logweir_evidence::keys::VerifyingKey` call site — including
+/// the `VerifyingKey::P256(_)` / `VerifyingKey::Ed25519(_)` patterns in
+/// `crates/logweir/tests/fixtures/mod.rs` — compiles unchanged. The block
+/// had to move whole: Rust coherence forbids this crate adding an inherent
+/// method to a type it no longer defines, which is why
+/// `to_public_key_pem` went with it.
+///
+/// `KeyAlg` below did NOT move: it is `SigningKey::alg`'s return type and
+/// `impl VerifyingKey` never names it.
+pub use logweir_verify::keys::VerifyingKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAlg {
@@ -23,12 +33,6 @@ pub enum SigningKey {
 pub enum KeyOrigin {
     LoadedFromFile,
     Minted,
-}
-
-#[derive(Clone)]
-pub enum VerifyingKey {
-    P256(p256::ecdsa::VerifyingKey),
-    Ed25519(ed25519_dalek::VerifyingKey),
 }
 
 impl SigningKey {
@@ -120,47 +124,5 @@ impl SigningKey {
                 .map_err(|e| Error::Key(e.to_string()))?,
         };
         Ok(pem.to_string())
-    }
-}
-
-impl VerifyingKey {
-    pub fn from_pem_file(path: &Path) -> Result<Self, Error> {
-        let pem = std::fs::read_to_string(path)
-            .map_err(|e| Error::Key(format!("{}: {e}", path.display())))?;
-        if let Ok(k) = p256::ecdsa::VerifyingKey::from_public_key_pem(&pem) {
-            return Ok(VerifyingKey::P256(k));
-        }
-        ed25519_dalek::VerifyingKey::from_public_key_pem(&pem)
-            .map(VerifyingKey::Ed25519)
-            .map_err(|e| {
-                Error::Key(format!(
-                    "{}: not a P-256 or Ed25519 public key: {e}",
-                    path.display()
-                ))
-            })
-    }
-
-    pub fn key_id(&self) -> String {
-        let der = match self {
-            VerifyingKey::P256(k) => k.to_public_key_der().expect("SPKI").as_bytes().to_vec(),
-            VerifyingKey::Ed25519(k) => k.to_public_key_der().expect("SPKI").as_bytes().to_vec(),
-        };
-        let mut h = Sha256::new();
-        h.update(&der);
-        hex::encode(h.finalize())
-    }
-
-    /// SubjectPublicKeyInfo PEM. Used to mint the checked-in `public.pem` test
-    /// fixture and by any future caller that needs to hand out a public key.
-    pub fn to_public_key_pem(&self) -> Result<String, Error> {
-        let pem = match self {
-            VerifyingKey::P256(k) => k
-                .to_public_key_pem(LineEnding::LF)
-                .map_err(|e| Error::Key(e.to_string()))?,
-            VerifyingKey::Ed25519(k) => k
-                .to_public_key_pem(LineEnding::LF)
-                .map_err(|e| Error::Key(e.to_string()))?,
-        };
-        Ok(pem)
     }
 }

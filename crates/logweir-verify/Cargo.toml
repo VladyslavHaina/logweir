@@ -1,0 +1,52 @@
+[package]
+name = "logweir-verify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The VERIFYING half of the old `logweir-evidence`, extracted so a component
+# that must NOT link the signer can still check a DSSE signature
+# (`scripts/check-one-signer.sh:46-49` rules the remedy in writing; ADR 0008
+# §E). `weirkeeper` performs the DSSE checks the UI renders (spec §8) and must
+# not thereby link `SigningKey`.
+#
+# A FEATURE FLAG CANNOT EXPRESS THIS SPLIT, and that is why the split is a
+# crate. `logweir-evidence` has `[features] default = []` with `p256`,
+# `ed25519-dalek` and `rand_core` all NON-OPTIONAL, so
+# `default-features = false` removes nothing; and verification needs BOTH
+# primitives anyway, because `VerifyingKey` is an enum over them and
+# `verify_detached` matches both arms. The one thing the verifying half does
+# not need is `rand_core = { version = "0.6", features = ["getrandom"] }` —
+# the signer's entropy source — and NOT taking that line is the whole content
+# of the split.
+#
+# INSIDE THE PURE LAYER (Global Constraint 1), unlike its sibling extraction
+# `logweir-store`: it builds with `--no-default-features` and carries no
+# `aws-*`, `rusoto`, `kube`, `k8s-openapi` or `kafka-backup` dependency.
+# `.github/workflows/no-oso.yml`'s build list and forbidden-dependency loop
+# are BOTH extended to it, which is the asymmetry ADR 0008 §E records.
+[dependencies]
+# `Signature.sig` is standard base64 in the sidecar.
+base64.workspace = true
+# NO `rand_core` feature: that is the signing half's entropy source. `pkcs8`
+# is what `from_public_key_pem` / `to_public_key_der` need.
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+# `key_id`'s hex of the SPKI DER digest.
+hex.workspace = true
+# `pem` is what `to_public_key_pem` needs; `pkcs8` backs the SPKI DER used by
+# `key_id`; `ecdsa` is the P-256 signature type `verify_detached` checks.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+# `Sidecar`/`Signature` are the on-disk sidecar shape.
+serde.workspace = true
+# `tests/deps.rs` reads `cargo metadata --no-deps` JSON to assert the crate
+# boundary at ASSERTION time rather than at link time — the same reason
+# `crates/logweir-store/Cargo.toml` carries it.
+serde_json.workspace = true
+# `key_id`'s SHA-256 over the SubjectPublicKeyInfo DER.
+sha2.workspace = true
+# `Error`'s derive.
+thiserror.workspace = true
+
+[features]
+default = []

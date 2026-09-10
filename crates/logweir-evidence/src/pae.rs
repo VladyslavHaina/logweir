@@ -1,17 +1,11 @@
-/// DSSE v1 Pre-Authentication Encoding.
-///   PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body
-/// LEN is the ASCII decimal byte count. Length-prefixing is what makes the
-/// encoding injective, which is the whole security property (see the
-/// `pae_is_unambiguous_across_a_shifted_boundary` test).
-pub fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + payload_type.len() + 32);
-    out.extend_from_slice(b"DSSEv1 ");
-    out.extend_from_slice(payload_type.len().to_string().as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(payload_type.as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(payload.len().to_string().as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(payload);
-    out
-}
+//! DSSE PAE moved to `logweir-verify` and is re-exported here.
+//!
+//! The encoding is needed by BOTH halves — `sign_detached` and
+//! `verify_detached` both call it — and a verifier that had to link the
+//! signer to get at the encoding would defeat the extraction. It therefore
+//! lives with the verifying half, which is the half a component may link
+//! without linking the signer.
+//!
+//! This module exists so that every existing `logweir_evidence::pae::pae`
+//! call site compiles unchanged (ADR 0008 §E).
+pub use logweir_verify::pae::pae;

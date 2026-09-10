@@ -6,15 +6,27 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# The VERIFYING half, extracted by Task 14 (ADR 0008 §E) and re-exported
+# wholesale from `src/lib.rs`. The edge runs THIS WAY ROUND on purpose:
+# `logweir-verify` declares no dependency on this crate, which is what lets
+# a component verify without linking the signer.
+logweir-verify = { path = "../logweir-verify" }
+# `sign_detached` base64-encodes the signature blob.
 base64.workspace = true
+# `rand_core` stays a FEATURE of the signing half: `SigningKey::generate_*`
+# needs `ed25519_dalek::SigningKey::generate(&mut OsRng)`.
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
-hex.workspace = true
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+# THE LINE THE SPLIT IS ABOUT. This is the signer's entropy source, and
+# `crates/logweir-verify/Cargo.toml` deliberately does not declare it.
 rand_core = { version = "0.6", features = ["getrandom"] }
-serde.workspace = true
+# `hex`, `sha2`, `serde` and `thiserror` are GONE from this crate's direct
+# dependencies, not overlooked: `hex`/`sha2` were `VerifyingKey::key_id`'s,
+# `serde` was `Sidecar`/`Signature`'s derive and `thiserror` was `Error`'s,
+# and all four moved to `logweir-verify` with the code that used them. They
+# are still in the resolved graph, one edge further out.
+# `tests/key_provenance.rs` and the two `examples/` deserialise a sidecar.
 serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 # Only for the `mint_fixture` example (Task 6 step 6), which parses and

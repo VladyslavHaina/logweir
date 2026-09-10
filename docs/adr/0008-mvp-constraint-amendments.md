@@ -139,8 +139,126 @@ returns `BackupSetRef`, which carries no timestamp at all, and the only
 structure that does carry one is produced by `OsoCliEngine::describe` — in the
 crate this extraction exists to keep out of the control plane.
 
-*(Task 14 records the second extraction, `crates/logweir-verify`, in this same
-section.)*
+**`crates/logweir-verify` — the verifying half of `logweir-evidence`, INSIDE
+the pure layer.** `pae.rs` and `verify.rs` move whole; from `keys.rs`, the
+`VerifyingKey` enum and its **entire inherent `impl` block** —
+`from_pem_file`, `key_id` **and `to_public_key_pem`**; from `lib.rs`, the three
+payload-type constants, `Signature`, `Sidecar` and `Error`.
+`logweir-evidence/src/lib.rs` gains `pub use logweir_verify::*;` and its
+`keys.rs`, `pae.rs` and `verify.rs` become re-export shims, so every existing
+`logweir_evidence::…` call site — including the `VerifyingKey::P256(_)`
+patterns in `crates/logweir/tests/fixtures/mod.rs` — compiles unchanged.
+`VerifyingKey::from_pem_str` is **added**: the same parse without the
+`std::fs::read_to_string`, because `weirkeeper` reads a `TrustRoster` entry's
+`spkiPem` out of an API object and has no file to hand.
+
+**The reason:** spec §8 requires `weirkeeper` to perform the DSSE checks the UI
+renders, and `scripts/check-one-signer.sh:46-49` had already ruled the remedy
+in writing — "`weirkeeper`… does not go on the allowlist — the ruled remedy is
+to extract a verify-only crate, so that a controller which VERIFIES a signature
+does not thereby link the signer." **A feature flag cannot express this split.**
+`logweir-evidence` had `[features] default = []` with `p256`, `ed25519-dalek`
+and `rand_core` all non-optional, so `default-features = false` removed
+nothing; and verification needs **both** primitives anyway, because
+`VerifyingKey` is an enum over them and `verify_detached` matches both arms.
+The one thing the verifying half does not need is
+`rand_core = { version = "0.6", features = ["getrandom"] }` — the signer's
+entropy source — and a crate that never declares that line is the whole content
+of the split.
+
+**`KeyAlg` stayed with the signer.** It is `SigningKey::alg`'s return type and
+`impl VerifyingKey` never names it.
+
+**Which crate keeps which dependency.** `logweir-verify` declares `base64`,
+`ed25519-dalek` (`pkcs8` only, **no `rand_core` feature**), `hex`, `p256`
+(`ecdsa`, `pkcs8`, `pem`), `serde`, `serde_json`, `sha2` and `thiserror`.
+`logweir-evidence` keeps `base64`, `ed25519-dalek` (with `rand_core`), `p256`,
+`rand_core` and `serde_json`, gains `logweir-verify`, and **drops** its now-dead
+direct `hex`, `sha2`, `serde` and `thiserror` edges — those were
+`VerifyingKey::key_id`'s, `Sidecar`/`Signature`'s derive and `Error`'s derive,
+and all four moved with the code that used them. The resolved package count
+goes 342 → **343**: one new workspace member and no new third-party package
+(Global Constraint 38).
+
+**What the transitive tree does NOT show, stated here so nobody re-derives it
+as a defect.** `logweir-verify`'s resolved tree still contains `rand_core` and
+`getrandom`: `p256` requires `elliptic-curve`, which declares `rand_core`
+non-optionally, and `signature`'s own `rand_core` feature brings `getrandom`.
+Measured on this tree, `cargo tree -p logweir-verify -e normal --prefix none |
+grep -c '^rand_core '` is **5** against `logweir-evidence`'s **7**. The claim
+this extraction makes is therefore about the **declared** manifest edge, which
+is what `crates/logweir-verify/tests/deps.rs` asserts, in both directions at
+once; a "zero transitive `rand_core`" claim would be false, and is not made
+anywhere.
+
+`logweir-verify` is **inside the pure layer** — it builds with
+`--no-default-features` and carries no `aws-*`, `rusoto`, `kube`,
+`k8s-openapi` or `kafka-backup` dependency — so
+`.github/workflows/no-oso.yml`'s build list **and** its forbidden-dependency
+loop are BOTH extended to it, in the same commit, making four crates in each.
+That is the asymmetry this section exists to record: `logweir-store` is added
+to neither, `logweir-verify` to both.
+
+### G-SIGN's check 2 is re-scoped, and this is the written reason
+
+`scripts/check-one-signer.sh`'s check 2 does not walk to `logweir-evidence`; it
+walks to the **primitive crates**, `p256` and `ed25519-dalek`, over
+`cargo tree --workspace --invert`, and fails for every workspace member on
+those inverted trees that is not on `ALLOWED_PRIMITIVE`. Because
+`logweir-verify` must depend on both primitives, the inverted tree gains it and
+check 2 **cannot pass unamended**; at the end of Task 15 it also gains
+`weirkeeper`.
+
+Guard **G-SIGN** is `[EDIT-DERIVED]`, so STANDING RULE 21 binds: an implementer
+must not quietly add two names to an allowlist, because that would retire the
+check for `weirkeeper` for good. The re-scope is therefore **recorded**, in
+three places that must agree — the script's own header, this section, and spec
+§10's **G-SIGN** row (which carries amendment 2's text at v3.1). The narrowed
+claim check 2 now makes is:
+
+> These four crates and no others reach the primitive crates. The crates that
+> reach the SIGNING half are checks 1 and 3.
+
+`ALLOWED_PRIMITIVE` becomes `"logweir-evidence logweir logweir-verify
+weirkeeper"` — four names, in that order, and no fifth. Check 2's heading and
+its `ok:` line are rewritten to state that claim and to point at checks 1 and 3
+for the signing half. **Checks 1 and 3 are byte-identical** to `fdc73a5`:
+`ALLOWED_LINK="logweir e2e"` and
+`ALLOWED_SOURCE="logweir-evidence logweir e2e"`, with `weirkeeper` absent from
+both. A **fourth**, separate allowlist,
+`ALLOWED_VERIFY_LINK="logweir-evidence logweir weirkeeper e2e"`, governs who may
+link the verifying crate; it does not weaken checks 1 and 3, and check 4 is a
+one-directional subset check because it names `weirkeeper` a task before
+`weirkeeper` exists.
+
+`crates/logweir/tests/one_signer_gate.rs::check_two_states_the_narrowed_claim`
+fails if the header paragraph goes missing or a fifth name appears, and
+`the_two_original_allowlists_are_unchanged` fails on the byte comparison of the
+two original allowlist lines.
+
+### G-SIGN's second half — the corpus grep
+
+`scripts/check-withdrawn-claim.sh` walks every shipped surface — the five root
+documents, `docs/`, `config/`, `examples/`, `ui/`, `.github/workflows/`,
+`scripts/`, and every `*.rs` under `crates/` — for a fixed, case-insensitive
+list of six phrases, and fails naming the file and line. It exempts exactly two
+paths, as literals and never as a pattern:
+`scripts/check-one-signer.sh` and `scripts/check-withdrawn-claim.sh`, which
+exist to *forbid* the claim and therefore have to quote it. `scripts/` is walked
+for that reason: a scan that skipped it would make the exemption decorative.
+
+It exists because the stronger claim has already been made once, was red on the
+tree it was asserted about, and was withdrawn;
+`scripts/check-one-signer.sh:10-19` forbids restating it, in those words, and
+binds "this script's output, its comments, or the CI step that runs it" by name.
+That last clause is why this task also reworded `.github/workflows/ci.yml`'s
+G2′ comment, which quoted the withdrawn sentence in order to deny it — a
+negation is still a quotation to a fixed-string grep, and the gate reported it.
+The residual is real and accepted (**O1**/O0 default (a)): `weirkeeper` has Job
+CRUD in the runner namespace, so it can create a pod that mounts the signing key
+and sign anything. "No `get` on Secrets" bounds *reads*, not *capability*
+(Global Constraint 27). Nothing in this repository may say otherwise, on any
+surface, and this gate is what keeps that true.
 
 ## Consequences
 

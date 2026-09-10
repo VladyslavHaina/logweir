@@ -13,27 +13,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: pure crates build with no default features
-        # THE PURE LAYER IS THESE THREE CRATES (plus `logweir-verify` once
-        # Task 14 lands it). `logweir-store` is DELIBERATELY NOT HERE and its
+        # THE PURE LAYER IS THESE FOUR CRATES — `logweir-verify` joined it when
+        # Task 14 extracted it, and both this build list and the
+        # forbidden-dependency loop below were extended in that same commit.
+        # `logweir-store` is DELIBERATELY NOT HERE and its
         # absence is not an oversight: it takes `object_store` with Global
         # Constraint 9's ["aws","azure","gcp","http"] feature set, which pulls
         # `aws-*`, so it is outside the pure layer BY ADR — see
         # docs/adr/0008-mvp-constraint-amendments.md §E and Global Constraint 1,
         # which names `crates/weirkeeper` and `crates/logweir-store` as outside
         # "by ADR, never by a quiet edit to the grep". Widening the grep below
-        # to admit it would be exactly that quiet edit.
+        # to admit it would be exactly that quiet edit. The asymmetry between
+        # the two Task-13/Task-14 extractions is the whole point of ADR 0008 §E:
+        # one lands outside the pure layer and one inside it.
         run: |
           cargo build -p logweir-core     --no-default-features
           cargo build -p logweir-evidence --no-default-features
           cargo build -p logweir-kafka    --no-default-features
-      - run: cargo build -p logweir-core -p logweir-evidence -p logweir-kafka --no-default-features
+          cargo build -p logweir-verify   --no-default-features
+      - run: cargo build -p logweir-core -p logweir-evidence -p logweir-kafka -p logweir-verify --no-default-features
       - name: zero OSO / AWS / Kubernetes dependencies in the pure layer
-        # The loop below is NOT extended to `logweir-store`, and must not be:
+        # The loop below IS extended to `logweir-verify` (Task 14) and is NOT
+        # extended to `logweir-store`, and must not be:
         # `logweir-store` links `object_store` with the `aws` feature and would
         # fail this grep by construction. It is outside the pure layer by ADR
         # (docs/adr/0008-mvp-constraint-amendments.md §E; Global Constraint 1).
         run: |
-          for c in logweir-core logweir-evidence logweir-kafka; do
+          for c in logweir-core logweir-evidence logweir-kafka logweir-verify; do
             deps=$(cargo tree -p "$c" --no-default-features --prefix none --edges normal \
                    | grep -Ei '^(aws-|rusoto|kube|k8s-openapi|kafka-backup)' || true)
             if [ -n "$deps" ]; then
