@@ -164,6 +164,8 @@ pub const TERMINAL_STATES: &[&str] = &[
     "ReferentNotFound",
     "PlanConfigMapConflict",
     "ArchiveUrlUnreadable",
+    "PlanHashMismatch",
+    "ClusterNotReachable",
 ];
 
 /// A `scramSha512` `KafkaCluster` carries no `auth.username`, so the plan
@@ -177,6 +179,64 @@ pub const TERMINAL_STATES: &[&str] = &[
 /// `sasl_username: ""` would produce a run that authenticates as nobody and a
 /// receipt that says so.
 pub const TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE: &str = "CredentialNotRenderable";
+
+/// `spec.approvalRef` names nothing at all — the `Restore` half, Task 20.
+///
+/// A DIFFERENT FACT FROM [`REASON_APPROVAL_NOT_VERIFIED`], AND THE SPLIT IS
+/// THE WHOLE POINT. This one is "you did not ask for authorisation": the ref's
+/// name is empty, `spec` is sealed by a CEL rule, and no `Approval` anyone
+/// creates can ever bind to this object — so it is TERMINAL. An `Approval`
+/// that has simply not arrived yet, or has arrived and is not `Verified=True`,
+/// is the other one and is a 30-second HOLD (interface **I19**). Reporting
+/// both under one name is how an operator comes to wait for an approval that
+/// will never be looked for.
+pub const TERMINAL_STATE_APPROVAL_NOT_RECEIVED: &str = "ApprovalNotReceived";
+
+/// `sha256_prefixed(Restore.spec.planBytes)` is not the `plan_hash` inside the
+/// approval's own signed bytes — Task 20, interface **I18**.
+///
+/// TERMINAL. The approval authorises bytes; these are different bytes; and
+/// both `spec`s are immutable, so re-approving the exact plan is the only way
+/// forward. The hash is recomputed at Job-creation time and read from inside
+/// `Approval.spec.approvalBytes` — never from either object's `status`, which
+/// is a controller-written cache nobody signed.
+///
+/// THE SAME SPELLING AS [`crate::controllers::approval::ApprovalRefusal`]'s
+/// OWN `PlanHashMismatch`, ON PURPOSE. The `Approval` reconciler reaches the
+/// same fact from the other side — it hashes the referent's bytes while
+/// verifying the signature — and two halves of one refusal reported under two
+/// names is how an operator comes to think they are two problems.
+pub const TERMINAL_STATE_PLAN_HASH_MISMATCH: &str = "PlanHashMismatch";
+
+/// `Restore.spec.target.clusterRef` resolves to nothing, or to a
+/// `KafkaCluster` whose `status.reachable` is not `Some(true)` — Task 20.
+///
+/// TERMINAL BY CONTROLLER RULING, and the reasoning is that an approval binds
+/// a plan to a target: a target that was not visible at admission time is a
+/// run an operator should re-authorise rather than one that starts by itself
+/// hours later. `status.reachable` is written by Task 15c's probe, so the
+/// value this reads is the control plane's own last look and not a dial this
+/// reconciler made.
+pub const TERMINAL_STATE_CLUSTER_NOT_REACHABLE: &str = "ClusterNotReachable";
+
+/// Exit **2** whose scorecard `outcome` names an archive-coverage failure —
+/// Task 20.
+///
+/// The run happened, was measured, and a scorecard WAS written and signed
+/// (Global Constraint 11's code 2); what it says is that the archive did not
+/// cover the window the plan asked for.
+/// [`crate::controllers::restore::OUTCOME_FAIL_COVERAGE`] carries the
+/// measurement about which `outcome` values the frozen 1.0.0 schema actually
+/// admits.
+pub const TERMINAL_STATE_WINDOW_NOT_COVERED: &str = "WindowNotCovered";
+
+/// The target topic's own configuration refused the restore — guard **G-TS**,
+/// printed by the RUNNER on its `refusal-reason=` line.
+///
+/// The controller MAPS it and produces no part of it (interface **I9**): Task
+/// 3 owns `guard.rs`'s refusal printer and Task 8 the target-topic preflight.
+/// Declared here because `Restore.status.exitReason` is where it lands.
+pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigRefused";
 
 /// The archive exists without its detached sidecar — spec §3.2.
 ///
@@ -265,6 +325,39 @@ pub const CONDITION_FAILED: &str = "Failed";
 /// finished.
 pub const CONDITION_JOB_CREATED: &str = "JobCreated";
 
+/// Whether a `Restore`'s admission passed — **its own condition type**, Task
+/// 20.
+///
+/// WHY NOT A `Failed` CONDITION. An `Approval` that has not arrived yet is not
+/// a failure: it is a HOLD, and interface **I19** requires the object to be
+/// released the moment the approval is verified. Errata **E5c** is exactly
+/// about the shape a `Failed=False` would take — a condition array is a MAP
+/// KEYED BY `type`, so a `Failed=False` written at admission time and a
+/// `Failed=True` written when the run later fails are one field with two
+/// values, and the day any task gives the array the standard
+/// `x-kubernetes-list-type: map` the API server rejects the patch. So the
+/// admission gets its own type: `True` with reason [`REASON_ADMITTED`] on the
+/// pass that creates the Job, `False` with reason
+/// [`REASON_APPROVAL_NOT_VERIFIED`] while it waits, and a TERMINAL admission
+/// refusal writes a `Failed` condition instead, because that one really does
+/// end the object's life.
+pub const CONDITION_ADMITTED: &str = "Admitted";
+
+/// The `reason` on an [`CONDITION_ADMITTED`] condition that passed.
+pub const REASON_ADMITTED: &str = "Admitted";
+
+/// The `reason` while a `Restore` waits for its `Approval` — **interface
+/// I19**, and it is a HOLD and not a verdict.
+///
+/// NOT IN [`TERMINAL_STATES`], AND THAT IS THE ASSERTION. It is the one
+/// admission outcome that can change without anybody touching the object, so
+/// it requeues at
+/// [`crate::controllers::restore::ADMISSION_REQUEUE_SECS`] — thirty seconds —
+/// which is what makes the restore wizard's minted-both-names-first ordering
+/// workable. Its terminal sibling is
+/// [`TERMINAL_STATE_APPROVAL_NOT_RECEIVED`].
+pub const REASON_APPROVAL_NOT_VERIFIED: &str = "ApprovalNotVerified";
+
 /// Whether the run's two evidence keys were recorded — **its own condition
 /// type, and raised only at exit 0**.
 ///
@@ -327,6 +420,8 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_EVIDENCE_KEYS_UNREADABLE,
     REASON_EVIDENCE_KEYS_RECORDED,
     CONDITION_JOB_CREATED,
+    REASON_ADMITTED,
+    REASON_APPROVAL_NOT_VERIFIED,
 ];
 
 /// The condition TYPES a `Backup` can carry, in one list.
@@ -340,7 +435,20 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_FAILED,
     CONDITION_JOB_CREATED,
     CONDITION_EVIDENCE_RECORDED,
+    CONDITION_ADMITTED,
 ];
+
+/// `phase` for a `Restore` whose admission has not passed yet — **interface
+/// I19**, Task 20.
+///
+/// `Pending` IS NOT `Failed`, AND THE DIFFERENCE IS THE WHOLE OF I19. A
+/// `Restore` created before its `Approval` is verified sits here with one
+/// `Admitted=False` condition and is released the moment the approval
+/// verifies. `Restore.status.phase`'s vocabulary is Task 20's
+/// (`crds/restore.rs` says so), and this is the value that makes a dangling
+/// `approvalRef` workable rather than fatal. `Backup` has no such state: its
+/// Job is created on the first pass.
+pub const PHASE_PENDING: &str = "Pending";
 
 /// `phase` while the Job exists and has not finished.
 pub const PHASE_RUNNING: &str = "Running";

@@ -44,9 +44,24 @@
 //! the exit code lives on the POD, not on the Job. It still deletes nothing —
 //! not the Job, not the pod, and not an orphaned scorecard.
 
+//! WHAT A RECONCILER IN THIS DIRECTORY MAY DO BEFORE IT CREATES ANYTHING
+//! (Task 20). [`restore`] is the first reconciler whose FIRST act is a
+//! refusal: [`restore::admit`] is a pure function of the `Restore`, the
+//! `Approval` it names and the target `KafkaCluster`, it runs before the first
+//! `POST`, and **an unapproved plan creates nothing at all** — no ConfigMap,
+//! no Job, zero `POST`s (Global Constraint 6's operator half). It recomputes
+//! `sha256_prefixed(spec.planBytes)` there and then and compares it against
+//! the `plan_hash` inside `Approval.spec.approvalBytes`, never against
+//! `Approval.status`: a spec schema change invalidates every approval, and a
+//! status is a cache. The one admission outcome that is NOT a verdict —
+//! "the approval has not arrived yet" — is a thirty-second requeue
+//! (interface **I19**), which is what makes a `Restore` and its `Approval`
+//! creatable in either order.
+
 pub mod approval;
 pub mod backup;
 pub mod backup_schedule;
+pub mod restore;
 pub mod trust_roster;
 
 use std::future::Future;

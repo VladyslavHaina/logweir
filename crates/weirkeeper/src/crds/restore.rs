@@ -127,7 +127,7 @@ pub struct Integrity {
 /// What phase 0 found out about the target topics before writing anything.
 ///
 /// Guard **G-TS**. Not a scorecard field: it is returned by phase 0 in
-/// `RestoreOutcome` and written here.
+/// `RestoreOutcome`.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicPreflight {
@@ -155,7 +155,12 @@ pub struct RestoreEvidence {
     /// The object key of the signed scorecard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scorecard_key: Option<String>,
-    /// The sha256 of the scorecard at `scorecardKey`, lowercase hex.
+    /// The sha256 of the scorecard at `scorecardKey`, as
+    /// `sha256:<lowercase hex>` — the one digest spelling this corpus uses
+    /// everywhere (`logweir_core::ids::sha256_prefixed`), so a value read off
+    /// this field and a value read out of a signed document compare as
+    /// strings. **COMPUTED by the controller over the bytes it fetched**, not
+    /// copied: a document cannot carry its own digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scorecard_sha256: Option<String>,
     /// The object key of the scorecard's detached DSSE sidecar.
@@ -165,7 +170,12 @@ pub struct RestoreEvidence {
     /// applies nothing (Global Constraint 35).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_report_key: Option<String>,
-    /// The sha256 of the offset report, lowercase hex.
+    /// The sha256 of the offset report, as `sha256:<lowercase hex>`.
+    /// **COPIED from the signed scorecard's own
+    /// `evidence.offset_report_sha256`**, never recomputed: the report's
+    /// digest is inside the bytes the signature covers, so recomputing it
+    /// would fetch a second object to answer a question the first one already
+    /// answers — and would report a mismatch as agreement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_report_sha256: Option<String>,
     /// What `weirkeeper` recorded when it verified the scorecard.
@@ -261,6 +271,16 @@ pub struct RestoreStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objectives: Option<Objectives>,
     /// What phase 0 found out about the target topics (guard **G-TS**).
+    /// **Always absent in tag 1: it has no producer, and this field says so
+    /// rather than being fabricated.** The observation is returned by phase 0
+    /// inside the runner (`RestoreOutcome::topic_preflight`) and, by Global
+    /// Constraint 12 as amended, is deliberately NOT a scorecard field — so
+    /// nothing carries it out of the pod. Interface I8 fixes three stdout key
+    /// lines and none of them is a preflight, and the controller reads the
+    /// pod's log and the signed scorecard and nothing else. Closing the gap
+    /// means a fourth machine-read stdout line on the runner's side, which is
+    /// the interface owner's change and not the operator's; an absent field is
+    /// truthful and a guessed one is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflight>,
     /// The signed scorecard, the offset report, and the controller's

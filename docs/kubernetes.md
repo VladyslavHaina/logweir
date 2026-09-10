@@ -500,6 +500,30 @@ signature alike.
 | 7 | The document's `plan_hash` equals the sha256 of the referent's `spec.planBytes`, **recomputed** | `PlanHashMismatch` |
 | 8 | The document's `subject_kind` equals the referent's kind | `SubjectKindMismatch` |
 
+Two more `reason`s reach the same `Verified` condition without being checks on
+a signature at all. They are properties of the **referent** — the object
+`spec.subjectRef` points at — and are kept in their own vocabulary because
+"your cluster is missing an object" is not a verdict about anybody's approval:
+
+| — | Referent problem | `reason` |
+|---|---|---|
+| — | `spec.subjectRef` names an object that does not exist in this namespace | `ReferentNotFound` |
+| — | The referent exists and its KIND carries no `spec.planBytes` for check 7 to recompute a hash from — in tag 1 that is `subjectRef.kind: Backup` | `ReferentHasNoPlanBytes` |
+
+**So `Verified`'s `reason` is one of NINE strings, and this is the one place
+all nine are named**: `PayloadTypeMismatch`, `SignatureInvalid`,
+`KeyIdNotInRoster`, `KeyIdExpired`, `PlanHashMismatch`, `SubjectKindMismatch`,
+`RosterNotFound` (install step 1, above), `ReferentNotFound` and
+`ReferentHasNoPlanBytes`. A tenth would be a compile error rather than a
+surprise: each reason is the name of the enum variant that produced it, and
+both `match`es are wildcard-free on purpose.
+
+`ReferentNotFound` is also the one reason that can be a RACE rather than a
+problem: an `Approval` reconciled before its `Restore` exists reports it, and
+the `Restore` reconciler (§12) reads that reason, holds for thirty seconds and
+tries again rather than refusing — which is what makes minting both names
+before creating either object workable.
+
 Checks 1–6 are the "five checks" the roster and the signature answer; 7 and 8
 are what bind the signature to a particular plan and a particular kind of
 object. **A key outside the roster is `KeyIdNotInRoster`, never
@@ -1171,6 +1195,221 @@ The compose SCRAM password is a **fixture constant**, not key material: it
 authenticates to one throwaway broker on one developer machine. It appears in
 the compose file, the harness and the e2e config on purpose. No signing key
 appears anywhere in this repository.
+
+## 12. A `Restore` runs only against a verified approval, and the hash is recomputed here
+
+A `Restore` is one restore run, executed as one Job. **A drill is a `Restore`
+with `spec.target.mode: scratch`** — there is no separate kind, and the mode's
+four differences (a marker topic, an allowlisted cluster, a source-may-equal-
+target rule and phase-9 teardown) are decisions the *runner* makes from the
+plan document it parses. The two Jobs are byte-identical; the two plans are
+not.
+
+### Why the admission is here and not in the pod
+
+Exit 3 from a runner pod used to be ambiguous, and the corpus says why: phase 0
+dials before phase 1 runs, so a `plan_hash` mismatch or a bad approval
+signature only became exit 3 **when the target answered**. With a dead broker
+the same spec exits `1` — so a UI that maps exit 3 to *"your approval does not
+match this spec"* mislabels that case every time the scratch cluster is down.
+
+The controller removes the ambiguity **at the source**. Before any pod exists
+it runs four checks, in this order:
+
+| # | Check | `reason`, and what happens |
+|---|---|---|
+| 0 | The object's own name is at most 63 characters | `NameTooLong`, terminal. Nothing is created |
+| 1 | `spec.approvalRef` names something | `ApprovalNotReceived`, **terminal** |
+| 2 | That `Approval` exists and is `Verified=True` | `ApprovalNotVerified`, **held and retried in 30 s** |
+| 3 | `sha256(spec.planBytes)` equals the `plan_hash` **inside** `Approval.spec.approvalBytes` | `PlanHashMismatch`, terminal, naming both hashes |
+| 4 | `spec.target.clusterRef` resolves to a `KafkaCluster` with `status.reachable: true` | `ClusterNotReachable`, terminal |
+
+**An unapproved plan creates nothing at all** — no ConfigMap, no Job, zero
+`POST`s. So **exit 3 from a `Restore`'s pod now means only "a phase-0 admission
+guard refused"**, and the exit-code table of §10 reads the same way for both
+kinds.
+
+Check 1 and check 2 are different facts and are reported under different
+names. Check 1 is *you did not ask for authorisation*: the ref is empty, `spec`
+is sealed by the CEL rule of §7, and no `Approval` anyone creates can ever bind
+to this object — so it is terminal. Check 2 is *your authorisation has not
+arrived*, which can change without anybody touching the object.
+
+### The thirty-second hold is what makes the wizard work
+
+The restore wizard mints **both** `metadata.name`s from the plan bytes before
+it creates either object, and an approver may take an afternoon over the
+`Approval`. So a `Restore` whose `spec.approvalRef` names an `Approval` that
+does not exist yet is not an error:
+
+```bash
+kubectl --context docker-desktop get restore r1 \
+  -o jsonpath='{.status.phase}{"  "}{.status.conditions[?(@.type=="Admitted")].reason}'
+# Pending  ApprovalNotVerified
+```
+
+`phase: Pending`, one `Admitted=False` condition, no Job, no `exitCode` — and
+the object is released the moment the `Approval` verifies. `Admitted` is its
+own condition type on purpose: a condition array is a map keyed by `type`, so a
+`Failed=False` written while waiting and a `Failed=True` written if the run
+later fails would be one field with two values.
+
+The same hold covers the mirror-image race: an `Approval` reconciled *before*
+its `Restore` existed reports `ReferentNotFound` (§8), which this reconciler
+routes on explicitly, logs as the race it is, and retries.
+
+### The hash is recomputed, and never read from a status
+
+`sha256(spec.planBytes)` is computed **at Job-creation time** and compared
+against the `plan_hash` **inside the approval document's own bytes**. Neither
+half is read from a `status`:
+
+* a spec schema change invalidates every approval, and a status is a cache;
+* a status field is written by a controller and is not part of anything anyone
+  signed, so it could rescue an approval that binds a different plan.
+
+`spec.approvalBytes` is the **UTF-8 document text, verbatim, never base64**
+(§8). A decode step between the approver's file and the parsed document would
+find no JSON, no `plan_hash`, and would report every approval in the cluster as
+a mismatch.
+
+### `spec.planBytes` reaches the pod byte for byte
+
+The controller writes `spec.planBytes` into a ConfigMap `<restore name>-plan`
+as the single key `restore.yaml`, **verbatim** — no parse, no re-serialise, no
+`trim`. It is `POST`ed **before** the Job, because the Job mounts it at
+`/plan`; a Job created first is a pod that sits in `ContainerCreating` on
+`configmap not found` until its `activeDeadlineSeconds` fires.
+
+That document has ONE grammar and it is the runner's own: the shipped
+`examples/restore.yaml`, which `logweir restore run --spec` parses. `planBytes`
+stays an opaque string on the way through precisely because the API server
+normalises YAML and a typed round-trip silently invalidates every approval —
+`plan_hash` binds these exact bytes, trailing whitespace included.
+
+```bash
+kubectl --context docker-desktop get cm r1-plan -o jsonpath='{.data.restore\.yaml}' \
+  | sha256sum
+kubectl --context docker-desktop get restore r1 -o jsonpath='{.spec.planBytes}' \
+  | sha256sum
+# the two digests are equal, and both equal the plan_hash the approval names
+```
+
+### What the Job carries
+
+Beyond §10's shape — `restartPolicy: Never`, `backoffLimit: 0`, the two-rule
+`podFailurePolicy`, one container named `runner`, no ServiceAccount token, no
+TTL at creation time:
+
+| Volume | From | At | Why |
+|---|---|---|---|
+| `approval` | Secret `logweir-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` |
+| `signing` | Secret `logweir-signing-key`, `0440` | `/signing` | the runner's own signing key, readable only because `fsGroup: 65532` is set |
+| `plan` | ConfigMap `<name>-plan` | `/plan` | `spec.planBytes`, verbatim |
+| `work` | `emptyDir` | `/work` | the scorecard, the offset report and the checkpoint state, on a pod whose root filesystem is read-only |
+
+**`allowed-clusters.json` is in a SECRET here and a ConfigMap on the backup
+path, and the direction is why.** On this path the file authorises a restore
+*target*: a subject with `patch configmaps` who replaced it would WIDEN the set
+of clusters a restore may write into. On the backup path the same file can only
+make a run refuse (§10), so it stays a ConfigMap key there.
+
+The object-store credential reaches the pod as `secretKeyRef` env
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) from
+`spec.sourceArchive.secretRef` — the Secret this install calls `logweir-s3`.
+A `scramSha512` target additionally gets `LOGWEIR_TARGET_PASSWORD` from that
+`KafkaCluster`'s own `auth.secretRef`, key `password`.
+
+### The credential is validated by the RUNNER, and the controller checks nothing
+
+`weirkeeper` holds **no `get` on Secrets anywhere** (§9), so it never sees the
+projected value and has nothing to validate. The check happens in the runner,
+at the moment it reads `LOGWEIR_SOURCE_PASSWORD` / `LOGWEIR_TARGET_PASSWORD`,
+and it exits **3** with `refusal-reason=CredentialNotRenderable`. The
+controller maps that refusal onto the terminal state of the same name and does
+nothing else with it. Do not look for a controller-side check; "no `get` on
+Secrets" forbids one.
+
+### Exit 3: the discriminator is a KEY NAME in a bounded tail
+
+`TargetTopicConfigRefused` and `CredentialNotRenderable` are both exit 3, and
+the only thing that tells them apart is the runner's `refusal-reason=` line.
+**Read §10's note on `refusal-reason=` before writing any reader of it**
+(plan erratum **E4**): the line is the last line of the runner's *stdout*, but
+a pod log is stdout and stderr merged in nondeterministic order, and the pod
+log API has no stream selector — so the position is not a rule in either
+direction. This reconciler scans the final eight non-empty lines and matches by
+key name, exactly as the `Backup` path does and through the same shared
+function. **A log body with no such line at exit 3 yields
+`GuardRefusedUnknownReason`, never a guess at which guard fired.**
+
+Interface **I8**'s three evidence keys are read the same way, by name:
+
+```
+scorecard-key=logweir/drills/<run_id>.json
+sidecar-key=logweir/drills/<run_id>.json.sig
+offset-report-key=logweir/drills/<run_id>.offsets.json
+```
+
+**The third line is conditional.** It is printed exactly when the engine wrote
+an offset report, so two lines at exit 0 is a complete, truthful answer;
+`EvidenceRecorded=False` / `EvidenceKeysUnreadable` is raised only when one of
+the two *mandatory* keys is missing, and only at exit 0, because Global
+Constraint 11 says exits 1, 3 and 4 write no artifact at all.
+
+### What the status carries, and what it copies
+
+`exitCode` and the condition are decided from the pod. Everything else is
+**copied verbatim** out of the signed scorecard, fetched with the controller's
+read-only archive credential: `outcome`, `lastPhaseCompleted`, `objectives`
+(`rtoSeconds`, `rpoSeconds`, `passRate`, `met`), `integrity`
+(`level`, `result`, `partialReason`) and `measured`. The controller **never
+parses the scorecard into a typed struct and re-emits it**: that type accepts
+unknown fields and defaults every one of its own, so a field the reader does
+not declare is silently dropped — and a re-emitted status block would quietly
+disagree with the document an auditor reads. It lifts the values it needs out
+of the JSON by pointer and copies them.
+
+If the archive was not observed — no `LOGWEIR_ARCHIVE_URL`, an unreachable
+bucket, an object that 404s — **every one of those keys is omitted**, and the
+exit code is still recorded. Absent means "nobody looked", which is different
+from `null`.
+
+`newTopics` and `oldTopics` are derived from `spec.planBytes` through the one
+prefix rule the runner uses, so they are a function of the bytes the approver
+signed. They exist in tag 1 **solely** so tag 2's `Switchover` retirement has a
+list to validate against; nothing in tag 1 reads them, and nothing in any tag
+writes to a topic named in `oldTopics`.
+
+`topicPreflight` is **always absent in tag 1, and that is a declared gap rather
+than an oversight**. Guard G-TS's observation is returned by phase 0 inside the
+runner and is deliberately not a scorecard field, and interface I8 fixes three
+stdout key lines of which none is a preflight — so nothing carries it out of
+the pod. Closing the gap means a fourth machine-read stdout line, which is the
+runner's interface to change. An absent field is truthful; a guessed one is
+not.
+
+### A green `Restore`
+
+```bash
+kubectl --context docker-desktop get restore r1 \
+  -o jsonpath='{.status.evidence.verification.result}{"  "}{.status.outcome}'
+# Valid  pass
+```
+
+**Both**, and the badge reads both. `Valid` alone says the document is
+authentic; it says nothing about whether the drill passed. `pass` alone says
+the drill passed according to a document nobody verified. The `SIGNED` and
+`OUTCOME` printer columns are those two fields, side by side, for exactly that
+reason.
+
+### The TTL, last
+
+The status patch carrying the exit code happens **before** the Job is patched
+with `ttlSecondsAfterFinished` — the same ordering, and the same measured
+reason, as §10: the TTL controller deletes the Job *and its pods*, and the exit
+code lives only on the pod.
+
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

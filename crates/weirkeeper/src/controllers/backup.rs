@@ -706,7 +706,17 @@ pub fn refusal_state(log: &str) -> Option<String> {
 }
 
 /// The final [`KEY_SCAN_TAIL_LINES`] non-empty lines, trimmed of `\r`.
-fn tail_lines(log: &str) -> Vec<&str> {
+///
+/// **PUBLIC, AND SHARED WITH [`super::restore`] (Task 20).** Interface I7's
+/// two keys and interface I8's three come off the same bounded tail under the
+/// same rule — plan erratum **E4**'s "scan a bounded tail and match by key
+/// name" — and the two reconcilers must not disagree about what "the tail" is.
+/// Sharing the ONE implementation rather than copying three lines is what
+/// makes a change to [`KEY_SCAN_TAIL_LINES`] reach both scanners; the key
+/// scans themselves stay separate, because the prefix sets differ and one of
+/// interface I8's three lines is conditional.
+#[must_use]
+pub fn tail_lines(log: &str) -> Vec<&str> {
     let all: Vec<&str> = log
         .lines()
         .map(|l| l.trim_end_matches('\r'))

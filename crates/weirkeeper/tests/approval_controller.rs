@@ -1224,3 +1224,242 @@ async fn the_roster_reconciler_patches_only_status_at_cluster_scope() {
         "cluster-scoped, no namespace segment, and /status only"
     );
 }
+
+// ===========================================================================
+// TASK 16's REVIEW CARRIES, ROUTED TO TASK 20 AND WRITTEN HERE
+// ===========================================================================
+//
+// Both live BESIDE Task 16's tests rather than in
+// `tests/restore_controller.rs`, and the reason is the key material: the
+// `notAfter` boundary is reached only AFTER check 5's crypto verifies, so a
+// test of it needs a real signature by a real key over the real document —
+// `APPROVER_PEM`, `APPROVER_SIG` and `APPROVAL_DOC` are here and are the only
+// place in this crate they exist. Copying them into a second test file to keep
+// the tests beside their consumer would be two fixtures for one signature,
+// which is how one of them comes to be regenerated and the other not.
+// `load_roster`'s three states are here for the same reason: they are the
+// function's own contract, not the `Restore` reconciler's use of it.
+
+/// **Task 16 review carry, routed to Task 20.** `load_roster`'s THREE states,
+/// each asserted, with the transport error kept distinguishable from the 404.
+///
+/// # Why three and not two
+///
+/// `RosterLoad` exists because a 404 and a connection reset must not become
+/// the same thing. A 404 is a VERDICT — the install skipped step 1 — and lands
+/// on `status.conditions` as `RosterNotFound`; a transport error is not a
+/// verdict about anybody's approval and must REQUEUE instead of stamping a
+/// refusal onto an object that may well be fine. A `Result<TrustRoster,
+/// ApprovalRefusal>` shape could not express the difference, and every
+/// consumer in chain O — `approval::decide` and `restore`'s argv builder —
+/// routes on it.
+#[tokio::test]
+async fn load_roster_has_three_states_and_a_transport_error_is_not_a_verdict() {
+    // ---- FOUND ---------------------------------------------------------
+    let (client, recorder) = mock_client_recording(vec![Route {
+        method: "GET",
+        path_suffix: "/trustrosters/default",
+        status: 200,
+        body: roster_body(&approver_entry_json(), ""),
+    }]);
+    match approval::load_roster(&client)
+        .await
+        .expect("a 200 is not an error")
+    {
+        approval::RosterLoad::Found(roster) => {
+            assert_eq!(roster.spec.approver_keys.len(), 1);
+            assert_eq!(roster.spec.approver_keys[0].key_id, APPROVER_KEY_ID);
+        }
+        approval::RosterLoad::NotFound => panic!("a 200 is Found"),
+    }
+    assert_eq!(
+        seen(&recorder),
+        vec![(
+            "GET".to_string(),
+            format!("/apis/logweir.dev/v1alpha1/trustrosters/{ROSTER_NAME}")
+        )],
+        "CLUSTER-SCOPED, and by the ONE name: `trustrosters/default`, with no namespace segment. \
+         A roster whose name the subject supplies is a roster the subject can choose"
+    );
+
+    // ---- NOT FOUND: a verdict, not an error ----------------------------
+    let (client, _rec) = mock_client_recording(vec![Route {
+        method: "GET",
+        path_suffix: "/trustrosters/default",
+        status: 404,
+        body: not_found_body("trustrosters.logweir.dev \\\"default\\\" not found"),
+    }]);
+    assert!(
+        matches!(
+            approval::load_roster(&client)
+                .await
+                .expect("a 404 is a VERDICT and never an Err — the install skipped step 1"),
+            approval::RosterLoad::NotFound
+        ),
+        "a 404 is NotFound"
+    );
+
+    // ---- A TRANSPORT / SERVER ERROR: an Err, so the caller requeues -----
+    for status in [500u16, 503, 403] {
+        let (client, _rec) = mock_client_recording(vec![Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status,
+            body: format!(
+                r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
+                     "message":"the API server is unavailable","code":{status}}}"#
+            ),
+        }]);
+        let err = approval::load_roster(&client).await.expect_err(
+            "anything that is not a 404 must be an Err, so the caller REQUEUES rather than \
+             stamping RosterNotFound onto an approval that may well be fine",
+        );
+        // The error is the API server's, verbatim, so a caller can log which.
+        assert!(
+            format!("{err}").contains(&status.to_string())
+                || format!("{err:?}").contains(&status.to_string()),
+            "the error names the status the API server returned: {err}"
+        );
+    }
+
+    // ---- AND `decide` ROUTES THE THREE APART ---------------------------
+    // A 404 reaches the object as a REFUSAL and the referent is never fetched.
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let (client, recorder) = mock_client_recording(vec![Route {
+        method: "GET",
+        path_suffix: "/trustrosters/default",
+        status: 404,
+        body: not_found_body("not found"),
+    }]);
+    assert_eq!(
+        approval::decide(&approval, &client)
+            .await
+            .expect("a missing roster is a verdict"),
+        ApprovalOutcome::Refused(ApprovalRefusal::RosterNotFound)
+    );
+    assert_eq!(
+        seen(&recorder).len(),
+        1,
+        "…and the referent is NEVER fetched: without a roster there is no set of keys any \
+         signature could be checked against, so fetching it would be work performed to reach a \
+         conclusion already known. Saw: {:?}",
+        seen(&recorder)
+    );
+    // A transport error reaches `decide` as an Err — nothing is written.
+    let (client, _rec) = mock_client_recording(vec![Route {
+        method: "GET",
+        path_suffix: "/trustrosters/default",
+        status: 500,
+        body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure","code":500}"#.to_string(),
+    }]);
+    assert!(
+        approval::decide(&approval, &client).await.is_err(),
+        "a transport error is not a verdict, so `decide` returns an Err and the reconcile writes \
+         nothing at all"
+    );
+}
+
+/// **Task 16 review carry, routed to Task 20.** A key expiring EXACTLY at
+/// `now` does not authorise anything.
+///
+/// # The boundary, and why this arm was owed
+///
+/// Check 6 is `if *not_after <= now`, so the interval a key authorises over is
+/// **closed at the start and OPEN at the end**: `notAfter` is the first
+/// instant the key is dead, not the last instant it is alive.
+/// `approval_refuses_an_expired_key` asserts one second either side of the
+/// boundary and therefore passes under BOTH comparisons — `<=` and `<` — which
+/// leaves the boundary itself untested and the `<` mutant alive. This arm is
+/// the boundary: with `notAfter == now` the verdict must be `KeyIdExpired`.
+///
+/// KILLS: `*not_after < now` in check 6.
+///
+/// A KEY THAT EXPIRES AT MIDNIGHT IS NOT VALID AT MIDNIGHT. That is the
+/// reading an operator writing `notAfter: 2027-01-01T00:00:00Z` expects, and
+/// it is the safe direction: a one-instant window in which a retired key still
+/// authorises a restore is a window nobody can reason about.
+#[test]
+fn a_key_expiring_exactly_at_now_authorises_nothing() {
+    let boundary = now();
+    let at_boundary = roster_spec(
+        vec![key(APPROVER_KEY_ID, APPROVER_PEM, Some(boundary))],
+        vec![],
+    );
+    assert_eq!(
+        evaluate(
+            APPROVAL_DOC.as_bytes(),
+            good_sidecar().as_bytes(),
+            &at_boundary,
+            boundary,
+            "Restore",
+            PLAN_BYTES.as_bytes(),
+        ),
+        Err(ApprovalRefusal::KeyIdExpired {
+            key_id: APPROVER_KEY_ID.to_string(),
+            not_after: boundary.to_rfc3339(),
+        }),
+        "`notAfter` is the first instant the key is DEAD, not the last instant it is alive: \
+         check 6 is `<=`, and a `<` would leave a one-instant window in which a retired key \
+         still authorises a restore"
+    );
+
+    // ONE MILLISECOND LATER STILL REFUSES, and one millisecond EARLIER
+    // verifies — so the boundary is a single instant and not a rounding.
+    let just_after = roster_spec(
+        vec![key(
+            APPROVER_KEY_ID,
+            APPROVER_PEM,
+            Some(boundary - Duration::milliseconds(1)),
+        )],
+        vec![],
+    );
+    assert!(matches!(
+        evaluate(
+            APPROVAL_DOC.as_bytes(),
+            good_sidecar().as_bytes(),
+            &just_after,
+            boundary,
+            "Restore",
+            PLAN_BYTES.as_bytes(),
+        ),
+        Err(ApprovalRefusal::KeyIdExpired { .. })
+    ));
+    let just_before = roster_spec(
+        vec![key(
+            APPROVER_KEY_ID,
+            APPROVER_PEM,
+            Some(boundary + Duration::milliseconds(1)),
+        )],
+        vec![],
+    );
+    assert!(
+        evaluate(
+            APPROVAL_DOC.as_bytes(),
+            good_sidecar().as_bytes(),
+            &just_before,
+            boundary,
+            "Restore",
+            PLAN_BYTES.as_bytes(),
+        )
+        .is_ok(),
+        "one millisecond of remaining life is still life"
+    );
+
+    // AND AN ABSENT `notAfter` IS NOT AN EXPIRY. A roster entry with no
+    // `notAfter` never expires, which is what `Option` means here — and a
+    // check that treated `None` as "expired at the epoch" would refuse every
+    // approval on a roster written without the field.
+    let never = roster_spec(vec![key(APPROVER_KEY_ID, APPROVER_PEM, None)], vec![]);
+    assert!(
+        evaluate(
+            APPROVAL_DOC.as_bytes(),
+            good_sidecar().as_bytes(),
+            &never,
+            boundary,
+            "Restore",
+            PLAN_BYTES.as_bytes(),
+        )
+        .is_ok(),
+        "an absent notAfter is `no expiry`, never `expired`"
+    );
+}

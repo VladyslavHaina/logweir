@@ -238,6 +238,18 @@ fn run() -> ExitCode {
             client.clone(),
             archive.clone(),
         )));
+        // Task 20 pushes the FIFTH — the `Restore` reconciler that admits a
+        // run only against a `Verified=True` approval whose own bytes carry
+        // the hash of `spec.planBytes`, recomputed here at Job-creation time,
+        // and then runs it as one Job. `archive.clone()` is the same
+        // `Option<Arc<Store>>` clone the two above take, not a second
+        // constructor: its oracle reads the signed scorecard the run put, for
+        // `status.{outcome,objectives,integrity,measured}`. `tests/linkage.rs`'s
+        // `"controllers":5` moved in this same commit.
+        controllers.push(Box::pin(weirkeeper::controllers::restore::controller(
+            client.clone(),
+            archive.clone(),
+        )));
 
         let registered = controllers.len();
         info!(

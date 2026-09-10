@@ -116,6 +116,30 @@ pub const PLAN_VOLUME: &str = "plan";
 /// Where [`PLAN_VOLUME`] is mounted, read-only.
 pub const PLAN_MOUNT_PATH: &str = "/plan";
 
+/// The volume name the approval bundle Secret is projected as — the
+/// **restore** Job's mount (Task 20).
+///
+/// WHY THE NAME AND THE PATH LIVE HERE AND THE SECRET'S NAME DOES NOT. This
+/// module owns the Job's SHAPE: a volume name has to be unique within the pod
+/// spec [`build`] renders, and a mount path has to agree with the argv the
+/// caller writes. WHICH Secret is projected is the caller's decision — a
+/// `Restore` names its own approval bundle
+/// ([`crate::controllers::restore::APPROVAL_BUNDLE_SECRET`]) exactly as it
+/// names its own signing key — and putting it here would put a
+/// `Restore`-specific object name in the file every Job in the crate is built
+/// through. The same division `SIGNING_VOLUME` follows on the `Backup` path.
+///
+/// A SECRET AND NOT A ConfigMap. `allowed-clusters.json` on the restore path
+/// authorises a restore TARGET, so a subject with `patch configmaps` who
+/// replaced it would WIDEN the set of clusters a restore may write into; on
+/// the `Backup` path the same file can only make a run refuse (errata
+/// **E5a**), so it stays a ConfigMap key there.
+pub const APPROVAL_VOLUME: &str = "approval";
+/// Where [`APPROVAL_VOLUME`] is mounted, read-only. The directory half of
+/// every `--approval` / `--approver-key` / `--allowed-clusters` path in
+/// [`crate::controllers::restore::runner_argv`].
+pub const APPROVAL_MOUNT_PATH: &str = "/approval";
+
 /// `imagePullPolicy` on the runner container. **`Never`.**
 ///
 /// GLOBAL CONSTRAINT 17 AND GC37, TOGETHER. Zero cloud spend means every
