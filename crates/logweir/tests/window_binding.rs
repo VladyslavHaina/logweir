@@ -563,9 +563,18 @@ fn a_topic_the_restore_does_not_name_does_not_lower_the_floor() {
     );
 
     let facts = facts_with_an_unnamed_topic();
+    // The unnamed topic's segment must actually be EARLIER, or this test
+    // proves nothing — read off the FIXTURE it was built into rather than
+    // compared between two constants, which is an assertion the compiler
+    // discards.
+    let unnamed = facts
+        .topics
+        .iter()
+        .find(|t| t.name == "payments")
+        .expect("the fixture carries a topic the mapping does not name");
     assert!(
-        UNNAMED_TOPIC_MS < FLOOR_MS,
-        "the unnamed topic's segment must be EARLIER, or this test proves nothing"
+        unnamed.partitions[0].segments[0].start_timestamp < FLOOR_MS,
+        "the unnamed topic's segment must be EARLIER than the named floor"
     );
     // The witness: over BOTH topics the answer WOULD be the earlier one, so
     // the fixture can tell a filtered walk from an unfiltered one.
