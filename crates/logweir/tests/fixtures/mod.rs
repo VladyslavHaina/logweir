@@ -232,6 +232,15 @@ impl ClusterReader for FakeReader {
             .map(|t| t.configs.clone())
             .unwrap_or_default())
     }
+    /// Task 8 (guard **G-TS**). `TargetState` describes the target's TOPICS
+    /// and carries no broker-wide configuration, so this answers with an empty
+    /// map — the harmless case: phase 0's preflight then treats the broker as
+    /// the Apache default (`CreateTime`) and refuses nothing. A hostile broker
+    /// is modelled in `crates/logweir/tests/topic_preflight.rs`, which builds
+    /// its own doubles for exactly that.
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
     fn consume_range(
         &self,
         _t: &str,
@@ -987,6 +996,9 @@ pub struct FixtureClient {
     pub configs: BTreeMap<String, BTreeMap<String, String>>,
     pub records: BTreeMap<String, Vec<ConsumedRecord>>,
     pub deleted: std::sync::Mutex<Vec<String>>,
+    /// Every `NewTopicSpec` phase 0's creation step handed to `TopicCreator`,
+    /// in order (Task 8, guard **G-TS**).
+    pub created: std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>,
     /// Topic names whose deletion the broker refuses, and the error string it
     /// refuses with. Empty for every shape but `Drill::LeavesATopicBehind`, so
     /// every other fixture drill tears down exactly as it always did.
@@ -1006,6 +1018,12 @@ impl ClusterReader for FixtureClient {
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
         Ok(self.configs.get(topic).cloned().unwrap_or_default())
     }
+    /// Task 8 (guard **G-TS**). Empty: this fixture's broker is the Apache
+    /// default, so phase 0's preflight observes nothing hostile, refuses
+    /// nothing, and the fixture drill still reaches phase 9 exactly as before.
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
     fn consume_range(
         &self,
         t: &str,
@@ -1024,6 +1042,22 @@ impl ClusterReader for FixtureClient {
                     .collect()
             })
             .unwrap_or_default())
+    }
+}
+
+/// Task 8, guard **G-TS**. `TargetClient` now requires a `TopicCreator`
+/// because the rendered `restore.yaml` says `create_topics: false`: the target
+/// topics are Logweir's to create. Every `NewTopicSpec` is RECORDED so a test
+/// can assert the exact ordered `configs` vector the drill asked for, and every
+/// creation succeeds — an already-existing target topic is phase 3's collision
+/// to report, and `Drill::LeavesATopicBehind` is about deletion, not creation.
+impl logweir_kafka::reader::TopicCreator for FixtureClient {
+    fn create_topics(
+        &self,
+        topics: &[logweir_kafka::reader::NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.created.lock().unwrap().extend_from_slice(topics);
+        Ok(topics.iter().map(|t| (t.name.clone(), Ok(()))).collect())
     }
 }
 
@@ -1215,6 +1249,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             .into_iter()
             .collect(),
         deleted: std::sync::Mutex::new(Vec::new()),
+        created: std::sync::Mutex::new(Vec::new()),
         // T0-11. The one shape whose broker refuses a deletion; every other
         // shape gets an empty map and the deleter it always had.
         refuses_deletion_of: if shape == Drill::LeavesATopicBehind {

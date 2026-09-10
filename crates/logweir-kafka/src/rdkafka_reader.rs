@@ -1,5 +1,6 @@
 use crate::reader::{
-    AuthConfig, ClusterReader, ConsumedRecord, KafkaError, TopicDeleter, TopicMeta,
+    AuthConfig, ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator,
+    TopicDeleter, TopicMeta,
 };
 use rdkafka::admin::AdminClient;
 use rdkafka::client::DefaultClientContext;
@@ -244,13 +245,78 @@ impl ClusterReader for RdKafkaReader {
             .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
         let mut out = BTreeMap::new();
         for r in res {
-            // rdkafka 0.36's element type is
-            // `ConfigResourceResult = Result<ConfigResource, RDKafkaErrorCode>`
-            // [VERIFIED https://docs.rs/rdkafka/0.36.2/rdkafka/admin/type.ConfigResourceResult.html].
-            // The error is a BARE code, not the `(String, RDKafkaErrorCode)`
-            // tuple that belongs to `TopicResult`; the tuple pattern does not
-            // match and the crate does not compile.
+            // `describe_configs` yields one `Result<_, RDKafkaErrorCode>`
+            // per resource [VERIFIED rdkafka-0.36.2/src/admin.rs:948, the
+            // alias whose Ok side is the resource-plus-entries struct at
+            // :1019]. The error is a BARE code, not the
+            // `(String, RDKafkaErrorCode)` tuple that belongs to
+            // `TopicResult`; the tuple pattern does not match and the crate
+            // does not compile. (The alias's own NAME is spelled out in
+            // `tests/reader.rs`'s
+            // `the_broker_resource_is_spelled_the_rdkafka_way`, which is why
+            // it is a file:line here.)
             let cfg = r.map_err(|e| Self::classify_topic_error(topic, e))?;
+            for e in cfg.entries {
+                if let Some(v) = e.value {
+                    out.insert(e.name, v);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// **Guard G-TS.** DescribeConfigs on `ResourceSpecifier::Broker(<the
+    /// broker id from metadata>)`, returned flat.
+    ///
+    /// The DescribeConfigs INPUT is `ResourceSpecifier::Broker(i32)`
+    /// (`rdkafka-0.36.2/src/admin.rs:962-968`) and the result carries
+    /// `OwnedResourceSpecifier::Broker(i32)` (`:973-979`). The Java client's
+    /// name for the input role is not one rdkafka 0.36 offers, and writing it
+    /// is how this read gets aimed at the wrong type; `tests/reader.rs`'s
+    /// `the_broker_resource_is_spelled_the_rdkafka_way` keeps it out of both
+    /// source files.
+    ///
+    /// The broker id comes from METADATA rather than from a config or a
+    /// literal: a `Broker(0)` sent to a cluster whose only node is `1001` —
+    /// which is exactly what the compose stack runs — describes nothing, and
+    /// the preflight built on top of this would then read an empty map and
+    /// conclude the broker is harmless.
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        use rdkafka::admin::{AdminOptions, ResourceSpecifier};
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        let broker_id = md.brokers().first().map(|b| b.id()).ok_or_else(|| {
+            KafkaError::Unreachable(
+                "cluster metadata listed no broker, so there is no broker id to describe configs \
+                 for"
+                .to_string(),
+            )
+        })?;
+        // Same per-call current-thread runtime as `topic_configs` and
+        // `delete_topics`, for the reason ADR 0004 records: rdkafka's admin
+        // futures need a driven tokio runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let res = rt
+            .block_on(self.admin.describe_configs(
+                &[ResourceSpecifier::Broker(broker_id)],
+                &AdminOptions::new().request_timeout(Some(T)),
+            ))
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        let mut out = BTreeMap::new();
+        for r in res {
+            // One `Result<_, RDKafkaErrorCode>` per resource — a BARE code,
+            // as in `topic_configs`, not `TopicResult`'s
+            // `(String, RDKafkaErrorCode)` tuple. There is no topic name to
+            // classify against here, so a failure is reported as-is rather
+            // than through `classify_topic_error`.
+            let cfg = r.map_err(|e| {
+                KafkaError::Client(format!("DescribeConfigs on broker {broker_id}: {e}"))
+            })?;
             for e in cfg.entries {
                 if let Some(v) = e.value {
                     out.insert(e.name, v);
@@ -412,12 +478,100 @@ impl ClusterReader for RdKafkaReader {
     }
 }
 
+/// The `NewTopicSpec` -> `rdkafka::admin::NewTopic` conversion, guard **G-TS**.
+///
+/// Split out of `TopicCreator::create_topics` so it is assertable with no
+/// broker and no admin client: `crates/logweir-kafka/tests/reader.rs`'s
+/// `create_topics_sets_the_config_entries_it_was_given` reads `NewTopic`'s own
+/// public fields back off the result, so the assertion is over the rdkafka
+/// structs that are actually sent and not over a restatement of them.
+///
+/// **The lifetime is the contract.** `NewTopic<'a>` borrows its name and both
+/// halves of every config entry (`NewTopic::set(key: &'a str, value: &'a str)`,
+/// `rdkafka-0.36.2/src/admin.rs:658`), and the returned `Vec` is tied to
+/// `specs` by the elided `'_`, so the caller's slice must outlive every
+/// `NewTopic` built from it. Building one from a `String` created inside this
+/// function would not compile.
+pub fn new_topics_for(specs: &[NewTopicSpec]) -> Vec<rdkafka::admin::NewTopic<'_>> {
+    use rdkafka::admin::{NewTopic, TopicReplication};
+    specs
+        .iter()
+        .map(|t| {
+            let mut nt = NewTopic::new(
+                t.name.as_str(),
+                t.num_partitions,
+                TopicReplication::Fixed(t.replication_factor),
+            );
+            // IN ORDER, one `.set` per entry. `NewTopic::set` pushes onto
+            // `config`, so the vector it builds is the order the CreateTopics
+            // request carries.
+            for (k, v) in &t.configs {
+                nt = nt.set(k.as_str(), v.as_str());
+            }
+            nt
+        })
+        .collect()
+}
+
+impl TopicCreator for RdKafkaReader {
+    /// **Guard G-TS.** One `rdkafka::admin::NewTopic` per `NewTopicSpec`, with
+    /// `.set(k, v)` called for each entry of `configs` IN ORDER.
+    ///
+    /// # Why the `topics` slice must outlive the `NewTopic`s
+    ///
+    /// `NewTopic<'a>` borrows: `NewTopic::new(name: &'a str, …)` and
+    /// `NewTopic::set(key: &'a str, value: &'a str)`
+    /// (`rdkafka-0.36.2/src/admin.rs:658`) store `&'a str`, and
+    /// `AdminClient::create_topics` takes `I: IntoIterator<Item = &'a NewTopic<'a>>`.
+    /// So every string these borrow — the name and both halves of every config
+    /// entry — must live at least as long as the `create_topics` call. Here
+    /// they live in the caller's `&[NewTopicSpec]`, which by the signature
+    /// outlives this whole function body; nothing is built from a temporary.
+    /// Formatting a name or a value into a local `String` inside the loop
+    /// would not compile, and that is deliberate.
+    ///
+    /// Unlike `delete_topics` there is no `scratch_prefix` check: creation is
+    /// not destruction. The names come from `topic_mapping`, which phase 0's
+    /// mapping guard has already refused to let equal any source topic, and
+    /// phase 3 reports every target name that already exists.
+    fn create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        use rdkafka::admin::AdminOptions;
+        if topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        let new_topics = new_topics_for(topics);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let res = rt
+            .block_on(
+                self.admin
+                    .create_topics(&new_topics, &AdminOptions::new().request_timeout(Some(T))),
+            )
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        // `TopicResult = Result<String, (String, RDKafkaErrorCode)>` — the
+        // error here IS the `(name, code)` tuple, as in `delete_topics`.
+        Ok(res
+            .into_iter()
+            .map(|r| match r {
+                Ok(name) => (name, Ok(())),
+                Err((name, code)) => (name, Err(code.to_string())),
+            })
+            .collect())
+    }
+}
+
 impl TopicDeleter for RdKafkaReader {
     /// Exactly the named topics. rdkafka 0.36's `delete_topics` takes
     /// `&[&str]` and returns `Vec<TopicResult>` where
     /// `TopicResult = Result<String, (String, RDKafkaErrorCode)>` — note the
-    /// error here IS the `(name, code)` tuple, unlike `ConfigResourceResult`
-    /// in `topic_configs`, whose error is a bare code.
+    /// error here IS the `(name, code)` tuple, unlike the DescribeConfigs
+    /// element type used by `topic_configs` and `broker_configs`
+    /// (rdkafka-0.36.2/src/admin.rs:948), whose error is a bare code.
     ///
     /// This is the only code path in the entire product that destroys data.
     /// The trait's contract ("never a pattern, never a prefix") describes

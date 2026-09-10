@@ -324,6 +324,15 @@ impl ClusterReader for MapReader {
             .map(|d| d.configs.clone())
             .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))
     }
+    /// Task 8 (guard **G-TS**) added this to `ClusterReader`. An empty map is
+    /// a broker that surfaces neither `log.message.timestamp.type` nor a
+    /// timestamp bound, which is the harmless case: phase 0's preflight then
+    /// treats the broker as the Apache default (`CreateTime`) and refuses
+    /// nothing. G-TS's own arms live in
+    /// `crates/logweir/tests/topic_preflight.rs`.
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
     fn consume_range(
         &self,
         topic: &str,
@@ -1654,6 +1663,11 @@ impl ClusterReader for SpyReader {
     }
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
         self.inner.topic_configs(topic)
+    }
+    /// Task 8 (guard **G-TS**): forwarded like every other read, so the spy
+    /// keeps observing exactly what the inner reader answers.
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        self.inner.broker_configs()
     }
     fn consume_range(
         &self,

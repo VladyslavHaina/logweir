@@ -68,6 +68,29 @@ impl TargetDiff {
     }
 }
 
+/// The partition count one target topic must be created with, derived the way
+/// the ENGINE derives it: `original_partition_count` when the manifest carries
+/// one, else `max(partition_id) + 1`
+/// [U:crates/kafka-backup-core/src/restore/engine.rs:1421-1436].
+///
+/// It is public and shared with `phase0_admit::create_target_topics` (guard
+/// **G-TS**) on purpose. Since Task 8 the engine no longer creates the target
+/// topics — the rendered document says `create_topics: false` — so this number
+/// is no longer only a REPORT in `would_create`: it is the count Logweir
+/// actually passes to `TopicCreator`. Two copies of the derivation would let
+/// `target_diff.would_create` claim one count in the signed scorecard while the
+/// broker was asked for another.
+pub fn restore_partition_count(t: &logweir_core::engine::TopicFacts) -> i32 {
+    t.original_partition_count.unwrap_or_else(|| {
+        t.partitions
+            .iter()
+            .map(|p| p.partition_id)
+            .max()
+            .unwrap_or(-1)
+            + 1
+    })
+}
+
 /// A diff against ACTUAL TARGET STATE, which OSO's dry run never performs and
 /// which the operator's dry run fakes with an unconditional DryRunPassed.
 pub fn run(
@@ -80,17 +103,7 @@ pub fn run(
         let Some(dst) = mapping.get(&t.name) else {
             continue;
         };
-        // Match the engine's own derivation so `would_create` cannot lie:
-        // original_partition_count when present, else max(partition_id)+1
-        // (restore/engine.rs:1421-1436).
-        let want = t.original_partition_count.unwrap_or_else(|| {
-            t.partitions
-                .iter()
-                .map(|p| p.partition_id)
-                .max()
-                .unwrap_or(-1)
-                + 1
-        });
+        let want = restore_partition_count(t);
         match target.topics.get(dst) {
             None => {
                 d.absent.push(dst.clone());

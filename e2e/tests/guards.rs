@@ -294,3 +294,287 @@ fn schema_plan_exits_1_naming_sp3() {
     assert_eq!(o.status.code(), Some(1));
     assert!(o.stderr_utf8().contains("SP3"));
 }
+
+// --- G-TS: the target topics Logweir creates itself, and spec §17 residual 3 -
+
+/// The broker's KRaft node id (`KAFKA_NODE_ID`, `e2e/compose/docker-compose.yml:26`).
+const BROKER_ID: &str = "1001";
+/// The PLAINTEXT inter-broker listener (`docker-compose.yml:31`), which exists
+/// today — this probe does not depend on Task 7's added listeners.
+const INTER_BROKER: &str = "kafka-broker-1:9094";
+/// The one topic the probe creates. Inside `drill-`, so the already-scoped
+/// `TopicDeleter` can remove it, and named so a stray one is obviously a probe.
+const PROBE_TOPIC: &str = "drill-logweir-t8-timestamp-override-probe";
+
+/// `docker compose exec kafka-broker-1 /opt/kafka/bin/kafka-configs.sh …`.
+///
+/// A **dynamic** broker config: it needs no compose edit, so STANDING RULE 15
+/// (Task 7 is the only editor of `docker-compose.yml`) is untouched, and the
+/// plan names it as the sanctioned way to probe a broker setting.
+fn kafka_configs(args: &[&str]) -> std::process::Output {
+    let mut c = std::process::Command::new("docker");
+    c.args([
+        "compose",
+        "-f",
+        "e2e/compose/docker-compose.yml",
+        "exec",
+        "-T",
+        "kafka-broker-1",
+        "/opt/kafka/bin/kafka-configs.sh",
+        "--bootstrap-server",
+        INTER_BROKER,
+    ]);
+    c.args(args);
+    c.current_dir(root()).output().expect("docker compose exec")
+}
+
+fn alter_broker(args: &[&str]) -> std::process::Output {
+    let mut all = vec![
+        "--alter",
+        "--entity-type",
+        "brokers",
+        "--entity-name",
+        BROKER_ID,
+    ];
+    all.extend_from_slice(args);
+    kafka_configs(&all)
+}
+
+fn describe_broker_dynamic_config() -> String {
+    let o = kafka_configs(&[
+        "--describe",
+        "--entity-type",
+        "brokers",
+        "--entity-name",
+        BROKER_ID,
+    ]);
+    format!("{}{}", o.stdout_utf8(), o.stderr_utf8())
+}
+
+/// Reverts the dynamic broker config even if the body of the probe panics.
+/// `--delete-config` on a key that is already absent succeeds, so the explicit
+/// revert inside the test and this one are both safe.
+struct RevertTimestampType;
+impl Drop for RevertTimestampType {
+    fn drop(&mut self) {
+        let _ = alter_broker(&["--delete-config", "log.message.timestamp.type"]);
+    }
+}
+
+/// **Spec §15 `[UNVERIFIED]` mark 9 / spec §17 residual 3, answered by
+/// execution.** Does a broker configured `log.message.timestamp.type =
+/// LogAppendTime` accept a per-topic `message.timestamp.type = CreateTime`
+/// override?
+///
+/// The compose broker is on the Apache default (`CreateTime`) —
+/// `docker-compose.yml:25-45` sets no `KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE` — so
+/// printing the broker's value answers nothing. This alters it DYNAMICALLY,
+/// creates one topic through the shipped `TopicCreator` with the shipped
+/// `TARGET_TOPIC_CONFIGS`, reads it back through the shipped `topic_configs`,
+/// and reverts in the same step, asserting the revert.
+///
+/// It is also where the ONE binary-level assertion of the
+/// `TargetTopicConfigRefused` contract lives: a binary arm needs both a broker
+/// and a broker on `LogAppendTime`, which is what this test manufactures. If
+/// the broker honours the override the refusal is unreachable here by
+/// construction and the transcript says so — the deterministic refusal arm is
+/// `crates/logweir/tests/topic_preflight.rs`'s
+/// `a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`, in
+/// process over doubles.
+#[test]
+fn a_logappendtime_broker_accepts_or_refuses_a_per_topic_override() {
+    use logweir_kafka::reader::{
+        ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, TARGET_TOPIC_CONFIGS,
+    };
+
+    // Start from a known state, and make sure the probe topic is not left over
+    // from an interrupted run.
+    let scoped = reader()
+        .with_scratch_prefix(SCRATCH_PREFIX)
+        .expect("`drill-` is a usable scratch namespace");
+    let _ = TopicDeleter::delete_topics(&scoped, &[PROBE_TOPIC.to_string()]);
+
+    let before = describe_broker_dynamic_config();
+    println!("--- residual 3, transcript 1: the broker's dynamic config BEFORE ---\n{before}");
+    assert!(
+        !before.contains("log.message.timestamp.type"),
+        "this probe starts from a broker with no dynamic log.message.timestamp.type; found:\n{before}"
+    );
+
+    let _revert = RevertTimestampType;
+    let altered = alter_broker(&["--add-config", "log.message.timestamp.type=LogAppendTime"]);
+    assert!(
+        altered.status.success(),
+        "kafka-configs --alter failed:\n{}\n{}",
+        altered.stdout_utf8(),
+        altered.stderr_utf8()
+    );
+
+    // Bounded FOREGROUND poll until the broker reports the new value. Dynamic
+    // config propagation is asynchronous; nothing here is backgrounded.
+    let mut reported = String::new();
+    for _ in 0..30 {
+        reported = ClusterReader::broker_configs(&reader())
+            .expect("the broker answers DescribeConfigs")
+            .get("log.message.timestamp.type")
+            .cloned()
+            .unwrap_or_default();
+        if reported == "LogAppendTime" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert_eq!(
+        reported, "LogAppendTime",
+        "the dynamic broker config did not take effect within 15s"
+    );
+    println!(
+        "--- residual 3, transcript 2: broker_configs() reports \
+         log.message.timestamp.type={reported} ---"
+    );
+
+    // The override attempt, through the SHIPPED seam and the SHIPPED constant.
+    let spec = NewTopicSpec {
+        name: PROBE_TOPIC.to_string(),
+        num_partitions: 1,
+        replication_factor: 1,
+        configs: TARGET_TOPIC_CONFIGS
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect(),
+    };
+    let created = TopicCreator::create_topics(&scoped, std::slice::from_ref(&spec))
+        .expect("the CreateTopics call itself succeeds");
+    println!("--- residual 3, transcript 3: create_topics -> {created:?} ---");
+    assert!(
+        created.iter().all(|(_, r)| r.is_ok()),
+        "creating the probe topic failed: {created:?}"
+    );
+
+    let readback = ClusterReader::topic_configs(&scoped, PROBE_TOPIC)
+        .expect("the probe topic describes")
+        .get("message.timestamp.type")
+        .cloned()
+        .unwrap_or_default();
+    println!(
+        "--- residual 3, ANSWER: a broker on log.message.timestamp.type=LogAppendTime, asked for \
+         a per-topic message.timestamp.type=CreateTime, reports message.timestamp.type={readback} \
+         for {PROBE_TOPIC} ---"
+    );
+    assert!(
+        readback == "CreateTime" || readback == "LogAppendTime",
+        "message.timestamp.type read back as {readback:?}, which is neither value Kafka defines"
+    );
+    let honoured = readback == "CreateTime";
+
+    // The binary arm, reachable only on a broker that REFUSES the override.
+    if honoured {
+        println!(
+            "--- residual 3: this broker HONOURS the per-topic override, so the \
+             TargetTopicConfigRefused binary arm is unreachable here by construction. The \
+             deterministic arm is crates/logweir/tests/topic_preflight.rs::\
+             a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal. ---"
+        );
+    } else {
+        let r = drill_run(&spec_default());
+        let stdout = r.out.stdout_utf8();
+        let stderr = r.out.stderr_utf8();
+        println!("--- residual 3, binary arm stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+        assert_eq!(
+            r.out.status.code(),
+            Some(3),
+            "a refused override is exit 3: {stderr}"
+        );
+        // The runner's FINAL non-empty stdout line is the terminal state
+        // (interface **I9**): the pod log API has no stream selector, so a
+        // controller reads the last line of an interleaved stream.
+        let last = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default();
+        assert_eq!(
+            last, "refusal-reason=TargetTopicConfigRefused",
+            "stdout was:\n{stdout}"
+        );
+        assert!(
+            !r.scorecard.exists(),
+            "a guard refusal writes NO scorecard: {} exists",
+            r.scorecard.display()
+        );
+    }
+
+    // Put the cluster back: the probe topic, then the dynamic config, and
+    // assert the revert by reading the broker config back.
+    TopicDeleter::delete_topics(&scoped, &[PROBE_TOPIC.to_string()])
+        .expect("the probe topic deletes");
+    let reverted = alter_broker(&["--delete-config", "log.message.timestamp.type"]);
+    assert!(
+        reverted.status.success(),
+        "kafka-configs --delete-config failed:\n{}\n{}",
+        reverted.stdout_utf8(),
+        reverted.stderr_utf8()
+    );
+    let mut after = String::new();
+    for _ in 0..30 {
+        after = describe_broker_dynamic_config();
+        if !after.contains("log.message.timestamp.type") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    println!(
+        "--- residual 3, transcript 4: the broker's dynamic config AFTER the revert ---\n{after}"
+    );
+    assert!(
+        !after.contains("log.message.timestamp.type"),
+        "the dynamic broker config was NOT reverted; every later e2e row would run against a \
+         LogAppendTime broker:\n{after}"
+    );
+    assert_eq!(
+        ClusterReader::broker_configs(&reader())
+            .expect("the broker answers DescribeConfigs")
+            .get("log.message.timestamp.type")
+            .cloned()
+            .unwrap_or_default(),
+        "CreateTime",
+        "after the revert the broker is back on the Apache default"
+    );
+}
+
+/// **G-TS at the binary level, on the compose broker.** The rendered
+/// `restore.yaml` says `create_topics: false`, so a passing drill proves
+/// LOGWEIR created the target topics — and it created them with
+/// `TARGET_TOPIC_CONFIGS`, which is asserted by reading the topic back.
+#[test]
+fn logweir_creates_the_target_topics_with_the_pinned_config_set() {
+    use logweir_kafka::reader::ClusterReader;
+
+    delete_all_drill_topics();
+    let r = drill_run(&spec_default());
+    assert_eq!(
+        r.out.status.code(),
+        Some(0),
+        "the engine creates nothing now (create_topics: false), so this passing run is the proof \
+         Logweir created the target topics itself: {}",
+        r.out.stderr_utf8()
+    );
+    let reader = reader();
+    let configs = ClusterReader::topic_configs(&reader, "drill-orders").expect("drill-orders");
+    assert_eq!(
+        configs.get("message.timestamp.type").map(String::as_str),
+        Some("CreateTime"),
+        "restored records keep their ORIGINAL timestamps only if the target topic is CreateTime; \
+         got {configs:?}"
+    );
+    assert_eq!(
+        configs.get("retention.ms").map(String::as_str),
+        Some("-1"),
+        "an older restore point writes segments already past a finite retention threshold; \
+         got {configs:?}"
+    );
+    // The partition count is still the MANIFEST's, which is what makes the
+    // creation step correct at all — see
+    // `phase3_diff::restore_partition_count`.
+    assert_eq!(count_partitions("drill-orders"), 3);
+}

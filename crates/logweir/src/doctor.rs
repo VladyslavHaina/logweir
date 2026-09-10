@@ -703,6 +703,12 @@ mod tests {
         fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
             Ok(BTreeMap::new())
         }
+        /// Task 8 (guard G-TS) added this to `ClusterReader`. `doctor` never
+        /// reads it — the target-topic preflight is phase 0's, and `doctor`
+        /// refuses to create anything.
+        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+            Ok(BTreeMap::new())
+        }
         fn consume_range(
             &self,
             _topic: &str,

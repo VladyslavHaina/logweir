@@ -54,5 +54,22 @@ impl From<ExitCode> for std::process::ExitCode {
 /// one global stdout handle with the tracing subscriber's writer, which is
 /// what makes "after the tracing line" an ordering and not a race.
 pub fn print_refusal_reason(message: &str) {
-    println!("{}", logweir_core::guard::refusal_reason_line(message));
+    // `expect`-free: a closed stdout is not a reason to change the exit code,
+    // which GC11 has already decided by the time this is reached.
+    let _ = print_refusal_reason_to(&mut std::io::stdout().lock(), message);
+}
+
+/// The writer seam `print_refusal_reason` prints through, so a test can assert
+/// the EXACT BYTES — the line and its newline — instead of trusting a
+/// `println!` nobody can observe.
+///
+/// It is `pub` rather than `#[cfg(test)]` deliberately: the assertion that
+/// matters lives in an integration test
+/// (`crates/logweir/tests/topic_preflight.rs`'s
+/// `a_target_topic_refusal_prints_its_terminal_state`), which is a separate
+/// crate and cannot see a `#[cfg(test)]` item. Task 8 added it; before it,
+/// `print_refusal_reason` was a bare `println!` and the "on stdout, last"
+/// half of interface **I9** had no in-process coverage at all.
+pub fn print_refusal_reason_to<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", logweir_core::guard::refusal_reason_line(message))
 }

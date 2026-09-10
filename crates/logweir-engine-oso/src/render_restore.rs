@@ -94,10 +94,31 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // an operator-influenced topic name is exactly the kind of value GC4
     // cares about ("never emitted, at any value") — see that function's doc.
     s.push_str(&render_topic_mapping_block(&plan.topic_mapping)?);
-    // config.rs:860-863 — create_topics DEFAULTS TO FALSE ("safe default -
-    // won't create topics unexpectedly"). A scratch target contains none of
-    // the prefixed topics, so without this the restore has nothing to write to.
-    s.push_str("  create_topics: true\n");
+    // **Guard G-TS.** `false`, rendered EXPLICITLY rather than left to the
+    // engine's own default, so the chosen value is in this golden and in the
+    // approved bytes.
+    //
+    // The engine's default is already false (config.rs:860-863, "safe default
+    // - won't create topics unexpectedly") and Logweir used to render `true`,
+    // because a scratch target contains none of the prefixed topics and the
+    // restore would otherwise have nothing to write to. The problem is HOW the
+    // engine creates them: `TopicToCreate { name, num_partitions,
+    // replication_factor }`
+    // [U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455] carries no
+    // configuration at all, so every target topic lands on cluster defaults —
+    // typically `retention.ms = 604800000`, under which an older restore point
+    // writes segments already past the deletion threshold and they are removed
+    // on the next retention check, possibly AFTER phase 7 signed a `pass`; and
+    // under a broker on `message.timestamp.type = LogAppendTime` every
+    // restored timestamp is overwritten with the restore's wall clock, voiding
+    // the timestamp work the whole product rests on.
+    //
+    // So Logweir creates the target topics itself, with the two settings that
+    // decide whether the restore survives:
+    // `logweir_kafka::reader::TARGET_TOPIC_CONFIGS`, applied through
+    // `TopicCreator` by `logweir::drill::phase0_admit::create_target_topics`.
+    // The engine must therefore create nothing, and this line is what says so.
+    s.push_str("  create_topics: false\n");
     // config.rs:~866 — rendered explicitly so the chosen value appears in this
     // golden and in the scorecard. The engine already coerces the absent case
     // to -1 (restore/engine.rs:1448), so only a POSITIVE value changes

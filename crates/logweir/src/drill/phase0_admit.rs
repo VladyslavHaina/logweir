@@ -1,13 +1,83 @@
 use crate::drill::DrillError;
-use logweir_core::guard::{check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal};
+use logweir_core::guard::{
+    check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal,
+    TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+};
 use logweir_core::spec::{AllowedClusters, Anchor, DrillSpec};
-use logweir_kafka::reader::ClusterReader;
+use logweir_kafka::reader::{
+    ClusterReader, NewTopicSpec, TopicCreator, TopicDeleter, TARGET_TOPIC_CONFIGS,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct Admitted {
     pub target_cluster_id: String,
     pub topic_mapping: BTreeMap<String, String>,
+    /// **Guard G-TS.** What phase 0 read off the broker, and the config set it
+    /// will apply to every target topic. `topics_created` is filled in by
+    /// `create_target_topics` — see that function for why the creation itself
+    /// cannot happen inside this phase.
+    pub topic_preflight: TopicPreflight,
+}
+
+/// What phase 0 found out about the target topics before anything was written,
+/// and what Logweir set on them.
+///
+/// **This is NOT a scorecard field** (Global Constraint 12 as amended): the
+/// scorecard is frozen at 21 top-level properties and 17 required ones, and a
+/// new top-level block would break `the_scorecard_top_level_shape_is_unchanged`
+/// and re-open GC12 in a direction the plan's preamble forbids. It is returned
+/// by phase 0 in `crate::drill::RestoreOutcome` and written to
+/// `Restore.status.topicPreflight` (spec §10 G-TS) by the operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicPreflight {
+    /// The broker's effective `log.message.timestamp.type`.
+    pub timestamp_type: String,
+    /// The broker's `log.retention.ms`, as reported — a STRING, not an `i64`,
+    /// because that is what DescribeConfigs returns and because a value this
+    /// build cannot parse is a fact worth carrying verbatim rather than
+    /// silently dropping to `None`.
+    pub retention_ms: String,
+    /// `log.message.timestamp.before.max.ms` (Kafka >= 3.6), else
+    /// `log.message.timestamp.difference.max.ms` (< 3.6), when either is
+    /// present and parses.
+    pub timestamp_bound_ms: Option<i64>,
+    /// Exactly `TARGET_TOPIC_CONFIGS`, as applied.
+    pub configs_set: Vec<(String, String)>,
+    pub topics_created: Vec<String>,
+}
+
+impl TopicPreflight {
+    /// `TARGET_TOPIC_CONFIGS`, owned and in order. The ONE place the constant
+    /// becomes a `Vec`, so no caller can reorder it on the way in.
+    fn pinned_configs() -> Vec<(String, String)> {
+        TARGET_TOPIC_CONFIGS
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+}
+
+/// The literal `message.timestamp.type` is the PER-TOPIC key; the broker-wide
+/// one is `log.message.timestamp.type`. Both spellings appear below and mixing
+/// them up is the whole hazard, so each is a named constant.
+const BROKER_TIMESTAMP_TYPE: &str = "log.message.timestamp.type";
+const BROKER_RETENTION_MS: &str = "log.retention.ms";
+const BROKER_TIMESTAMP_BEFORE_MAX_MS: &str = "log.message.timestamp.before.max.ms";
+const BROKER_TIMESTAMP_DIFFERENCE_MAX_MS: &str = "log.message.timestamp.difference.max.ms";
+const TOPIC_TIMESTAMP_TYPE: &str = "message.timestamp.type";
+const LOG_APPEND_TIME: &str = "LogAppendTime";
+const CREATE_TIME: &str = "CreateTime";
+
+/// Opens every G-TS refusal message, so `logweir_core::guard::terminal_state`
+/// — which matches a PREFIX and the `": "` separator with it — classifies the
+/// run as `TargetTopicConfigRefused` and the runner's final stdout line reads
+/// `refusal-reason=TargetTopicConfigRefused` (interface **I9**, exit 3).
+fn target_topic_refusal(detail: String) -> DrillError {
+    GuardRefusal(format!(
+        "{TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED}: {detail}"
+    ))
+    .into()
 }
 
 /// Every check here is OBSERVED. The `spec_text` argument is the raw file
@@ -24,6 +94,8 @@ pub fn run(
     spec_text: &str,
     allowed: &AllowedClusters,
     reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+    deleter: &dyn TopicDeleter,
 ) -> Result<Admitted, DrillError> {
     // `?` on purpose: the scan FAILS CLOSED. A spec text this scanner cannot
     // parse is a spec it did not scan, and that is a `GuardRefusal` (exit 3),
@@ -209,10 +281,317 @@ pub fn run(
         }
     }
 
+    // **Guard G-TS.** The target-topic preflight, after the cluster-identity
+    // and marker checks and before anything else.
+    let topic_preflight = target_topic_preflight(spec, &topic_mapping, reader, creator, deleter)?;
+
     Ok(Admitted {
         target_cluster_id,
         topic_mapping,
+        topic_preflight,
     })
+}
+
+/// **Guard G-TS**, the refusing half.
+///
+/// Three target-topic settings destroy a restore silently, and none of them is
+/// observed by anything that ships today:
+///
+/// 1. `retention.ms` on cluster defaults (typically `604800000`) — restoring an
+///    older point writes segments already past the deletion threshold, removed
+///    on the next retention check, possibly AFTER phase 7 signed a `pass`.
+/// 2. `message.timestamp.difference.max.ms` (Kafka < 3.6) /
+///    `message.timestamp.before.max.ms` (>= 3.6) — rejects a CreateTime too far
+///    in the past. Unbounded by Apache default, commonly tightened, and set by
+///    MSK cluster configurations.
+/// 3. `message.timestamp.type = LogAppendTime` — overwrites every restored
+///    timestamp with the restore's wall clock, voiding any timestamp lookup.
+///
+/// The obvious instrument is the WRONG one. `ClusterReader::topic_configs`
+/// describes a topic that does not exist until Logweir creates it — the mapped
+/// target topics are absent at phase 0 by construction — so a fixture-driven
+/// test over it would guard nothing. That is why spec §10 marks G-TS
+/// `[EDIT-DERIVED]`, and why this reads `broker_configs` instead.
+///
+/// # A `KafkaError` here is exit 1, not exit 3
+///
+/// `broker_configs()?` maps into `DrillError::Kafka`. A broker that cannot
+/// answer DescribeConfigs has told us nothing about the plan; the plan may be
+/// perfectly fine and the correct action is to retry. Only a value we could
+/// READ and refuse is a `GuardRefusal`.
+///
+/// # The one write phase 0 performs, and why it is undone
+///
+/// The `LogAppendTime` arm cannot be answered by reading: whether a broker on
+/// `LogAppendTime` honours a per-topic `message.timestamp.type` override is
+/// exactly spec §17 residual 3, and the only way to find out is to ask this
+/// broker. So that arm — and ONLY that arm, i.e. only when the broker actually
+/// reports `LogAppendTime` — creates the first mapped target topic with
+/// `TARGET_TOPIC_CONFIGS` and reads it back.
+///
+/// The probe topic is then deleted on BOTH branches, not only on the refusing
+/// one: at phase 0 the manifest's partition count is not known (see
+/// `create_target_topics`), so a probe topic left behind would be a
+/// one-partition target for an N-partition source — precisely the silent
+/// restore failure this guard exists to prevent. Deleting it means phase 0
+/// leaves the target exactly as it found it, which is what exit 3's "refused
+/// before anything ran" claims.
+fn target_topic_preflight(
+    spec: &DrillSpec,
+    topic_mapping: &BTreeMap<String, String>,
+    reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+    deleter: &dyn TopicDeleter,
+) -> Result<TopicPreflight, DrillError> {
+    // 1 — read the BROKER's defaults.
+    let broker = reader.broker_configs()?;
+    let timestamp_type = broker
+        .get(BROKER_TIMESTAMP_TYPE)
+        .cloned()
+        // The Apache default [VERIFIED kafka 3.7 server.properties reference].
+        // An absent key is not a positive observation of a hostile setting, and
+        // the per-topic `message.timestamp.type = CreateTime` this task pins on
+        // every created topic is what actually decides the topic's behaviour;
+        // refusing on absence would refuse every broker that does not surface
+        // the key while protecting nothing extra.
+        .unwrap_or_else(|| CREATE_TIME.to_string());
+    let retention_ms = broker.get(BROKER_RETENTION_MS).cloned().unwrap_or_default();
+    // `before.max.ms` first: on Kafka >= 3.6 BOTH keys are reported and
+    // `difference.max.ms` is the deprecated one.
+    let timestamp_bound_ms = broker
+        .get(BROKER_TIMESTAMP_BEFORE_MAX_MS)
+        .or_else(|| broker.get(BROKER_TIMESTAMP_DIFFERENCE_MAX_MS))
+        .and_then(|v| v.trim().parse::<i64>().ok());
+
+    let preflight = TopicPreflight {
+        timestamp_type: timestamp_type.clone(),
+        retention_ms,
+        timestamp_bound_ms,
+        configs_set: TopicPreflight::pinned_configs(),
+        topics_created: Vec::new(),
+    };
+
+    // 2 — the timestamp bound. A PURE comparison, so it runs before the arm
+    // that writes: creating a probe topic on a target for a plan that is about
+    // to be refused anyway would contradict exit 3's own meaning.
+    //
+    // `saturating_sub` is load-bearing, not defensive: the Apache default for
+    // both bound keys is `9223372036854775807`, so a plain `-` overflows and
+    // panics in debug and wraps to a floor in the FUTURE in release — which
+    // would refuse every window on every default broker.
+    if let Some(bound) = timestamp_bound_ms {
+        let window_end_ms = spec.sample.window_end.timestamp_millis();
+        let oldest_accepted_ms = chrono::Utc::now().timestamp_millis().saturating_sub(bound);
+        if window_end_ms < oldest_accepted_ms {
+            return Err(target_topic_refusal(format!(
+                "the target broker bounds how far in the past a CreateTime record may be \
+                 ({bound} ms, so nothing older than epoch-ms {oldest_accepted_ms} is accepted), \
+                 and this plan's sample.window_end is epoch-ms {window_end_ms}. The engine \
+                 produces every restored record with its ORIGINAL timestamp \
+                 [U:crates/kafka-backup-core/src/kafka/produce.rs:101-104], so the broker would \
+                 reject the whole window. Raise message.timestamp.before.max.ms (or, before \
+                 Kafka 3.6, message.timestamp.difference.max.ms) on the target, or restore a \
+                 more recent window."
+            )));
+        }
+    }
+
+    // 3 — `LogAppendTime`, and the per-topic override.
+    if timestamp_type != LOG_APPEND_TIME {
+        return Ok(preflight);
+    }
+    let Some(probe) = topic_mapping.values().next().cloned() else {
+        // No mapped target topic at all. `check_topic_mapping_coverage` above
+        // has already refused an unmapped SELECTED topic, so this is reachable
+        // only from a spec that selects nothing — there is nothing to probe and
+        // nothing to restore either.
+        return Ok(preflight);
+    };
+    let spec_probe = NewTopicSpec {
+        name: probe.clone(),
+        // ONE partition. The real count is the manifest's and is not known
+        // here; this topic exists for one DescribeConfigs read and is deleted
+        // immediately below, so the count is not a fact about the restore.
+        num_partitions: 1,
+        replication_factor: i32::from(spec.target.default_replication_factor),
+        configs: TopicPreflight::pinned_configs(),
+    };
+    let created = creator.create_topics(std::slice::from_ref(&spec_probe))?;
+    if let Some((name, Err(e))) = created.iter().find(|(_, r)| r.is_err()) {
+        return Err(target_topic_refusal(format!(
+            "the target broker reports {BROKER_TIMESTAMP_TYPE}={LOG_APPEND_TIME}, which \
+             overwrites every restored record's timestamp with the restore's wall clock, and the \
+             per-topic override could not be tested because creating `{name}` failed: {e}"
+        )));
+    }
+    let readback = reader.topic_configs(&probe);
+    let delete = deleter.delete_topics(std::slice::from_ref(&probe));
+    // The probe topic is gone before any verdict is returned, so no path out of
+    // here leaves it behind. A deletion that was REFUSED (a degenerate
+    // `target.topic_mapping_prefix` disables `RdKafkaReader::delete_topics`
+    // entirely) is itself a refusal, naming the topic an operator now has to
+    // remove by hand.
+    match &delete {
+        Ok(results) => {
+            if let Some((name, Err(e))) = results.iter().find(|(_, r)| r.is_err()) {
+                return Err(target_topic_refusal(format!(
+                    "the {LOG_APPEND_TIME} override probe created target topic `{name}` and could \
+                     not delete it again: {e}. Delete `{name}` on the target before re-running: \
+                     it was created with one partition for the probe and is NOT the topic this \
+                     restore needs."
+                )));
+            }
+        }
+        Err(e) => {
+            return Err(target_topic_refusal(format!(
+                "the {LOG_APPEND_TIME} override probe created target topic `{probe}` and the \
+                 delete call itself failed: {e}. Delete `{probe}` on the target before \
+                 re-running: it was created with one partition for the probe and is NOT the \
+                 topic this restore needs."
+            )));
+        }
+    }
+    let effective = readback?
+        .get(TOPIC_TIMESTAMP_TYPE)
+        .cloned()
+        .unwrap_or_else(|| timestamp_type.clone());
+    if effective == LOG_APPEND_TIME {
+        return Err(target_topic_refusal(format!(
+            "the target broker reports {BROKER_TIMESTAMP_TYPE}={LOG_APPEND_TIME} and REFUSED a \
+             per-topic {TOPIC_TIMESTAMP_TYPE}={CREATE_TIME} override: `{probe}` read back \
+             {TOPIC_TIMESTAMP_TYPE}={effective}. Every restored record's timestamp would be \
+             replaced by the restore's wall clock, so the drill could not verify a single \
+             timestamp and any point-in-time claim over the result would be false. Restore into a \
+             cluster whose {BROKER_TIMESTAMP_TYPE} is {CREATE_TIME}."
+        )));
+    }
+    Ok(preflight)
+}
+
+/// **Guard G-TS**, the creating half: every mapped target topic, created by
+/// LOGWEIR, with exactly `TARGET_TOPIC_CONFIGS`, the source topic's partition
+/// count and `spec.target.default_replication_factor`.
+///
+/// The rendered `restore.yaml` says `create_topics: false`, so this is the only
+/// thing that creates them. The engine's own creation path carries no
+/// configuration at all —
+/// `TopicToCreate { name, num_partitions, replication_factor }`
+/// [U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455] — which is
+/// exactly why it cannot be trusted with the two settings that decide whether
+/// the restored records survive being written.
+///
+/// # Why this is not inside `run`
+///
+/// The brief for this task places the creation step inside phase 0. It cannot
+/// be there, for three independent reasons, each of which has a test in this
+/// tree today:
+///
+/// 1. **Phase 1 verifies the approval.** Creating every mapped target topic at
+///    phase 0 would let an UNAPPROVED plan write to the target cluster, and
+///    exit 3 promises the opposite ("refused before anything ran").
+/// 2. **Phases 2 and 3 read the target's PRE-EXISTING state.**
+///    `phase3_diff::run` reports an already-present target topic as a
+///    `Collision` in the signed scorecard; creating first would turn every
+///    target topic into a self-inflicted collision.
+/// 3. **The partition count is a fact of the archive MANIFEST**
+///    (`BackupSetFacts::topics[].partitions`, via
+///    `phase3_diff::restore_partition_count`), and the archive is opened in
+///    `execute_with` AFTER phases 0 and 1 by design — `Ctx`'s own doc comment
+///    says so and `crates/logweir/tests/guard_cli.rs` pins the consequence,
+///    because a refused plan must never open the bucket. Creating at phase 0
+///    would mean creating at a count nobody had read yet, and a one-partition
+///    target for a three-partition source loses two thirds of the restore
+///    silently.
+///
+/// So `run` keeps the OBSERVATION and both REFUSALS — the guard, at phase 0,
+/// exit 3, before anything runs — and this runs from `execute_with` after the
+/// phase-5 verdict and immediately before phase 6.
+///
+/// **After phase 5, not before it**, for a fourth reason found by execution:
+/// phase 5's `Verdict::Block` branch returns without a teardown on the stated
+/// ground that a blocked preflight means the restore never ran and the drill
+/// created nothing on the target, and
+/// `e2e/tests/full_drill.rs`'s
+/// `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`
+/// asserts exactly that (`!topic_exists("drill-orders")`). It failed against a
+/// version of this call placed before phase 5. The engine's preflight is
+/// `validate-restore`, which force-sets `dry_run = true` and writes nothing, so
+/// it needs no target topic; `restore` does.
+///
+/// # An already-existing target topic is not fatal here
+///
+/// Phase 3 has already recorded it as a collision in the document an auditor
+/// reads, so refusing again here would add nothing and would break a re-run
+/// against a target somebody chose not to tear down. Every other per-topic
+/// failure is `DrillError::Operational` (exit 1, no artifact): nothing about
+/// the archive was established, and the fix is on the cluster.
+pub fn create_target_topics(
+    creator: &dyn TopicCreator,
+    topic_mapping: &BTreeMap<String, String>,
+    facts: &logweir_core::engine::BackupSetFacts,
+    default_replication_factor: i16,
+    preflight: &mut TopicPreflight,
+) -> Result<(), DrillError> {
+    let mut specs: Vec<NewTopicSpec> = Vec::new();
+    for t in &facts.topics {
+        let Some(dst) = topic_mapping.get(&t.name) else {
+            continue;
+        };
+        specs.push(NewTopicSpec {
+            name: dst.clone(),
+            num_partitions: super::phase3_diff::restore_partition_count(t),
+            replication_factor: i32::from(default_replication_factor),
+            // `TARGET_TOPIC_CONFIGS`, in order, on EVERY topic. Not a default
+            // set, not a broker default, and not conditional on what the
+            // broker reported: `configs_set` in the preflight is the claim
+            // that this is what was applied.
+            configs: TopicPreflight::pinned_configs(),
+        });
+    }
+    if specs.is_empty() {
+        return Ok(());
+    }
+    // The slice outlives the `NewTopic`s built from it inside the impl — see
+    // `RdKafkaReader::create_topics`, which cannot compile otherwise.
+    let results = creator.create_topics(&specs)?;
+    for (name, r) in results {
+        match r {
+            Ok(()) => preflight.topics_created.push(name),
+            Err(e) if already_exists(&e) => {
+                tracing::warn!(
+                    topic = %name,
+                    error = %e,
+                    "target topic already exists; phase 3 recorded it as a collision and the \
+                     restore will write into it as it stands — its message.timestamp.type and \
+                     retention.ms are NOT the pinned ones"
+                );
+                preflight.topics_created.push(name);
+            }
+            Err(e) => {
+                return Err(DrillError::Operational(format!(
+                    "target topic `{name}` could not be created with the pinned configuration \
+                     ({}): {e}",
+                    TARGET_TOPIC_CONFIGS
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The broker's `TopicAlreadyExists` (code 36), by the string rdkafka's
+/// `RDKafkaErrorCode::Display` produces. A code comparison would be better, but
+/// `TopicCreator`'s contract returns `Result<(), String>` per topic so a double
+/// can be written without linking rdkafka (Global Constraint 1: `crates/logweir`
+/// takes no rdkafka dependency), and the string is what both the real impl and
+/// every double can produce.
+fn already_exists(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("already exists") || e.contains("topicalreadyexists")
 }
 
 #[cfg(test)]
@@ -297,6 +676,17 @@ mod tests {
         fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
             Ok(BTreeMap::new())
         }
+        /// An empty broker-config map: `target_topic_preflight` then reads no
+        /// `log.message.timestamp.type` (so it treats the broker as the Apache
+        /// default, `CreateTime`) and no timestamp bound, which is exactly what
+        /// the identity, marker and anchor tests in this module want — they
+        /// prove the checks that run BEFORE the preflight, and would be worse
+        /// tests if a hostile broker value could interfere. Guard **G-TS**'s
+        /// own four arms live in `crates/logweir/tests/topic_preflight.rs`,
+        /// over doubles built for it.
+        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+            Ok(BTreeMap::new())
+        }
         fn consume_range(
             &self,
             _topic: &str,
@@ -305,6 +695,36 @@ mod tests {
             _max: usize,
         ) -> Result<Vec<ConsumedRecord>, KafkaError> {
             Ok(vec![])
+        }
+    }
+
+    /// Task 8, guard **G-TS**. Phase 0 now takes a `TopicCreator` and a
+    /// `TopicDeleter` because its target-topic preflight needs them for the one
+    /// case that cannot be answered by reading — a broker on `LogAppendTime`.
+    /// Every test in THIS module runs against a broker that reports nothing, so
+    /// neither of these may be reached; both panic rather than returning
+    /// something plausible, so a preflight that started writing on the ordinary
+    /// path would fail here instead of passing quietly.
+    struct NoopCreator;
+    impl logweir_kafka::reader::TopicCreator for NoopCreator {
+        fn create_topics(
+            &self,
+            topics: &[logweir_kafka::reader::NewTopicSpec],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            panic!(
+                "phase 0 must create nothing on a broker that is not LogAppendTime; asked for \
+                 {topics:?}"
+            )
+        }
+    }
+
+    struct NoopDeleter;
+    impl logweir_kafka::reader::TopicDeleter for NoopDeleter {
+        fn delete_topics(
+            &self,
+            names: &[String],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            panic!("phase 0 must delete nothing here; asked for {names:?}")
         }
     }
 
@@ -324,6 +744,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap();
         assert_eq!(admitted.target_cluster_id, "ALLOWED0000000000000000");
@@ -342,6 +764,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err();
         match err {
@@ -364,6 +788,8 @@ mod tests {
                 Some("SAME0000000000000000000A"),
             ),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err();
         match err {
@@ -386,6 +812,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err();
         match err {
@@ -416,6 +844,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err();
         match err {
@@ -441,6 +871,8 @@ mod tests {
                 "restore: {}\n",
                 &allowed(&["ALLOWED0000000000000000"], None),
                 &reader,
+                &NoopCreator,
+                &NoopDeleter,
             )
             .unwrap_err();
             match err {
@@ -471,6 +903,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err()
         {
@@ -512,6 +946,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err()
         {
@@ -535,6 +971,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err();
         match err {
@@ -557,6 +995,8 @@ mod tests {
             "restore: {}\n",
             &allowed(&["ALLOWED0000000000000000"], None),
             &reader,
+            &NoopCreator,
+            &NoopDeleter,
         )
         .unwrap_err();
         match err {

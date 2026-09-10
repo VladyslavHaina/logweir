@@ -371,15 +371,75 @@ fn forbidden_keys_survive_adversarial_string_content() {
     }
 }
 
+/// The name is kept from before Task 8: this test still asserts that
+/// `create_topics` is SET explicitly rather than left absent. Its VALUE
+/// changed, to `false` — guard **G-TS**: Logweir creates the target topics
+/// itself, with `TARGET_TOPIC_CONFIGS`, because the engine's own creation path
+/// carries no configuration at all
+/// [U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455].
 #[test]
 fn restore_yaml_sets_both_levers_and_create_topics() {
     let doc =
         render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
     assert!(doc.contains("header_preflight: full"));
     assert!(doc.contains("dry_run_check_segments: true"));
-    assert!(doc.contains("create_topics: true"));
+    assert!(doc.contains("create_topics: false"));
     assert!(doc.contains("default_replication_factor: 1"));
     assert!(doc.contains("checkpoint_interval_secs: 30"));
+}
+
+/// **Guard G-TS**, the render half. The rendered restore document creates NO
+/// topics, and the assertion is on the EXACT LINE — two leading spaces, the
+/// key, the value — in the rendered bytes AND in every checked-in `restore*`
+/// golden, so a change made only in the source or only in a snapshot cannot
+/// pass.
+///
+/// The goldens are read as files rather than through `insta` on purpose: this
+/// test's job is that no `restore.yaml` anywhere in the tree still says
+/// `create_topics: true`, which is a property of the SET of goldens and not of
+/// any one render call.
+#[test]
+fn the_rendered_restore_document_creates_no_topics() {
+    const LINE: &str = "  create_topics: false\n";
+    let doc =
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
+    assert!(
+        doc.contains(LINE),
+        "the rendered restore document does not carry the exact line \
+         `  create_topics: false`:\n{doc}"
+    );
+    assert!(
+        !doc.contains("create_topics: true"),
+        "the rendered restore document still creates topics:\n{doc}"
+    );
+
+    let snapshots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let mut checked = 0usize;
+    for e in std::fs::read_dir(&snapshots)
+        .expect("tests/snapshots")
+        .flatten()
+    {
+        let name = e.file_name().to_string_lossy().to_string();
+        // Every golden of a RESTORE document, under either of the two test
+        // binaries that write one (`render__restore_*`, `render_scram__restore_*`).
+        if !name.contains("restore") || !name.ends_with(".snap") {
+            continue;
+        }
+        let body = std::fs::read_to_string(e.path()).expect(&name);
+        assert!(
+            body.contains(LINE),
+            "golden {name} does not carry the exact line `  create_topics: false`"
+        );
+        assert!(
+            !body.contains("create_topics: true"),
+            "golden {name} still creates topics"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 6,
+        "expected at least the six checked-in restore goldens, walked {checked}"
+    );
 }
 
 #[test]

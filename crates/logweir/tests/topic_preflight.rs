@@ -1,0 +1,769 @@
+//! **Guard G-TS** — the target topics Logweir creates itself.
+//!
+//! Spec §10's G-TS row is `[EDIT-DERIVED]` because the obvious instrument is
+//! the wrong one: `ClusterReader::topic_configs` describes a topic that does
+//! not exist until Logweir creates it (the mapped target topics are absent at
+//! phase 0 by construction), so a fixture-driven test over it would guard
+//! nothing. What this file proves instead is that phase 0 reads the BROKER's
+//! defaults, refuses the two configurations that destroy a restore silently,
+//! and that every mapped target topic is created with exactly
+//! `TARGET_TOPIC_CONFIGS` in order.
+//!
+//! **Every test here runs IN PROCESS over doubles.** None runs the binary and
+//! none dials a socket: a binary-level arm for the `LogAppendTime` case would
+//! need both a broker and a broker configured `LogAppendTime`, so the only
+//! binary assertion of that contract is
+//! `logweir/e2e/tests/guards.rs`'s residual-3 probe, under
+//! `#![cfg(feature = "e2e")]`.
+mod fixtures;
+
+use logweir::drill::phase0_admit::{self, TopicPreflight};
+use logweir::drill::DrillError;
+use logweir::exit::ExitCode;
+use logweir_core::guard::GuardRefusal;
+use logweir_core::spec::{
+    AllowedClusters, Anchor, DrillSpec, Notifications, ObjectivesSpec, SampleSpec, SourceSpec,
+    TargetSpec,
+};
+use logweir_kafka::reader::{
+    ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator, TopicDeleter, TopicMeta,
+    TARGET_TOPIC_CONFIGS,
+};
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+const CLUSTER: &str = "SCRATCH00000000000000AA";
+const MARKER: &str = "logweir.scratch";
+const PREFIX: &str = "drill-";
+
+fn pinned() -> Vec<(String, String)> {
+    TARGET_TOPIC_CONFIGS
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
+}
+
+/// A drill spec whose `bootstrap_servers` is the literal `localhost:9092`.
+/// That string is why this file is in `no_network_in_unit_tests.rs`'s `ALLOWED`
+/// (chain N, STANDING RULE 18): it is DATA handed to doubles and no client is
+/// ever constructed from it.
+fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec {
+    DrillSpec {
+        name: None,
+        source: SourceSpec {
+            storage: logweir_core::engine::StorageUrl::Filesystem {
+                path: "/tmp/src".into(),
+            },
+            backup: "latestCompleted".into(),
+            topics: vec!["orders".into(), "payments".into()],
+        },
+        target: TargetSpec {
+            bootstrap_servers: vec!["localhost:9092".into()],
+            auth: logweir_core::spec::AuthSpec::Plaintext,
+            marker_topic: MARKER.into(),
+            topic_mapping_prefix: PREFIX.into(),
+            default_replication_factor: 1,
+            teardown: "delete".into(),
+        },
+        sample: SampleSpec {
+            window_start: window_end - chrono::Duration::hours(1),
+            window_end,
+            records_per_partition: 25,
+            anchor: Anchor::Head,
+            max_partitions: None,
+        },
+        objectives: ObjectivesSpec {
+            rto_seconds: None,
+            rpo_seconds: None,
+            pass_rate: None,
+        },
+        evidence: logweir_core::engine::StorageUrl::Filesystem {
+            path: "/tmp/evidence".into(),
+        },
+        engine_overrides: Default::default(),
+        notifications: Notifications::default(),
+    }
+}
+
+fn a_recent_spec() -> DrillSpec {
+    spec_with_window_end(chrono::Utc::now() - chrono::Duration::minutes(5))
+}
+
+fn allowed() -> AllowedClusters {
+    AllowedClusters {
+        allowed_cluster_ids: vec![CLUSTER.to_string()],
+        source_cluster_id: None,
+    }
+}
+
+/// The `ClusterReader` half of the doubles.
+///
+/// `topic_configs` **panics** unless the named topic is one this double was
+/// told Logweir had just created. That is the assertion in
+/// `phase0_calls_broker_configs_and_never_topic_configs_before_creation`, and
+/// it is what kills the "use `topic_configs` in place of `broker_configs`"
+/// mutant: the mapped target topics do not exist at phase 0, so a preflight
+/// that described one would be describing nothing.
+struct BrokerDouble {
+    broker: BTreeMap<String, String>,
+    /// Topic -> its configuration, for topics that EXIST because Logweir
+    /// created them. Any other name panics.
+    readable_after_creation: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+}
+
+impl BrokerDouble {
+    fn new(broker: &[(&str, &str)]) -> Self {
+        Self {
+            broker: broker
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            readable_after_creation: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Pre-arm the readback the `LogAppendTime` probe performs: the topic is
+    /// only readable because Logweir created it a moment earlier, which is the
+    /// whole point of the panic in `topic_configs`.
+    fn readable(self, topic: &str, configs: &[(&str, &str)]) -> Self {
+        self.readable_after_creation.lock().unwrap().insert(
+            topic.to_string(),
+            configs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        );
+        self
+    }
+}
+
+impl ClusterReader for BrokerDouble {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok(CLUSTER.to_string())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(vec![TopicMeta::new(MARKER, 1)])
+    }
+    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        match self.readable_after_creation.lock().unwrap().get(topic) {
+            Some(c) => Ok(c.clone()),
+            None => panic!(
+                "phase 0 read topic_configs({topic:?}), a topic Logweir has not created. The \
+                 mapped target topics do not exist at phase 0 by construction, so a TOPIC-resource \
+                 DescribeConfigs describes nothing — the broker's own defaults are what phase 0 \
+                 has to read, through broker_configs()"
+            ),
+        }
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(self.broker.clone())
+    }
+    fn consume_range(
+        &self,
+        _t: &str,
+        _p: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+}
+
+/// Records every `NewTopicSpec` it is handed, in order.
+#[derive(Default)]
+struct RecordingCreator {
+    calls: Mutex<Vec<NewTopicSpec>>,
+}
+
+impl TopicCreator for RecordingCreator {
+    fn create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.calls.lock().unwrap().extend_from_slice(topics);
+        Ok(topics.iter().map(|t| (t.name.clone(), Ok(()))).collect())
+    }
+}
+
+#[derive(Default)]
+struct RecordingDeleter {
+    calls: Mutex<Vec<String>>,
+}
+
+impl TopicDeleter for RecordingDeleter {
+    fn delete_topics(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.calls.lock().unwrap().extend_from_slice(names);
+        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
+    }
+}
+
+/// One archive manifest's worth of facts: `orders` with three partitions,
+/// `payments` with one, which is what makes "the source topic's partition
+/// count" an assertable value rather than a constant.
+fn facts_for(topics: &[(&str, i32)]) -> logweir_core::engine::BackupSetFacts {
+    logweir_core::engine::BackupSetFacts {
+        backup_id: "backup-1".into(),
+        created_at: chrono::Utc::now(),
+        source_cluster_id: Some("SOURCE000000000000000AA".into()),
+        manifest_sha256: "sha256:00".into(),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics: topics
+            .iter()
+            .map(|(n, p)| logweir_core::engine::TopicFacts {
+                name: (*n).to_string(),
+                original_partition_count: Some(*p),
+                source_replication_factor: Some(1),
+                configurations: BTreeMap::new(),
+                partitions: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn guard_message(e: DrillError) -> String {
+    let code = e.exit_code();
+    match e {
+        DrillError::Guard(GuardRefusal(m)) => {
+            assert_eq!(
+                code,
+                ExitCode::GuardRefused,
+                "a guard refusal is exit 3 and nothing else"
+            );
+            m
+        }
+        other => panic!("expected a guard refusal (exit 3), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G-TS, four arms
+// ---------------------------------------------------------------------------
+
+/// **G-TS.** The whole property, in the four arms spec §10's row names. Each is
+/// a `#[test]` of its own below, and this one is the roll-up an auditor reads:
+/// the run reaches creation, every mapped target topic is created with the
+/// pinned config set, a `LogAppendTime` broker that refuses the override is a
+/// refusal, and a timestamp bound that excludes the window's end is a refusal.
+#[test]
+fn restore_creates_target_topics_with_createtime_and_infinite_retention() {
+    phase0_calls_broker_configs_and_never_topic_configs_before_creation();
+    every_mapped_target_topic_is_created_with_the_pinned_config_set();
+    a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal();
+    a_timestamp_bound_that_excludes_the_window_end_is_a_guard_refusal();
+}
+
+/// **G-TS arm 1.** The reader double panics from `topic_configs` for any topic
+/// Logweir has not created, and the run reaches creation regardless — because
+/// phase 0 reads `broker_configs()`, never a topic resource.
+///
+/// This is the arm that kills the mutant "use `topic_configs` in place of
+/// `broker_configs` in the preflight": that version panics inside the double.
+#[test]
+fn phase0_calls_broker_configs_and_never_topic_configs_before_creation() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.retention.ms", "604800000"),
+    ]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("a CreateTime broker admits the plan");
+    assert_eq!(admitted.topic_preflight.timestamp_type, "CreateTime");
+    assert_eq!(admitted.topic_preflight.retention_ms, "604800000");
+    assert_eq!(admitted.topic_preflight.timestamp_bound_ms, None);
+    // Phase 0 creates NOTHING on this path: the probe is only for a
+    // `LogAppendTime` broker, and the creation step runs later.
+    assert!(
+        creator.calls.lock().unwrap().is_empty(),
+        "phase 0 must not create a topic on a CreateTime broker"
+    );
+
+    // …and the run reaches creation.
+    let mut preflight = admitted.topic_preflight.clone();
+    phase0_admit::create_target_topics(
+        &creator,
+        &admitted.topic_mapping,
+        &facts_for(&[("orders", 3), ("payments", 1)]),
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect("creation succeeds");
+    assert_eq!(
+        preflight.topics_created,
+        vec!["drill-orders".to_string(), "drill-payments".to_string()],
+        "the run reached creation and created every mapped target topic"
+    );
+}
+
+/// **G-TS arm 2.** The recorded `Vec<NewTopicSpec>` is asserted equal to an
+/// expected value INCLUDING the exact ordered `configs` vector.
+///
+/// Two mutants die here. "Create a target topic with an empty `configs`" fails
+/// on the recorded value; "reorder `TARGET_TOPIC_CONFIGS`" fails on it too,
+/// because the assertion is on the ordered vector and order is what
+/// `NewTopic::set` is called in.
+#[test]
+fn every_mapped_target_topic_is_created_with_the_pinned_config_set() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "CreateTime")]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("admitted");
+    let mut preflight = admitted.topic_preflight.clone();
+    phase0_admit::create_target_topics(
+        &creator,
+        &admitted.topic_mapping,
+        &facts_for(&[("orders", 3), ("payments", 1)]),
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect("creation succeeds");
+
+    let expected = vec![
+        NewTopicSpec {
+            name: "drill-orders".into(),
+            num_partitions: 3,
+            replication_factor: 1,
+            configs: vec![
+                (
+                    "message.timestamp.type".to_string(),
+                    "CreateTime".to_string(),
+                ),
+                ("retention.ms".to_string(), "-1".to_string()),
+            ],
+        },
+        NewTopicSpec {
+            name: "drill-payments".into(),
+            num_partitions: 1,
+            replication_factor: 1,
+            configs: vec![
+                (
+                    "message.timestamp.type".to_string(),
+                    "CreateTime".to_string(),
+                ),
+                ("retention.ms".to_string(), "-1".to_string()),
+            ],
+        },
+    ];
+    assert_eq!(*creator.calls.lock().unwrap(), expected);
+    // The same set, restated from the shipped constant, so a reorder of
+    // `TARGET_TOPIC_CONFIGS` fails here as well as above.
+    assert_eq!(
+        expected[0].configs,
+        pinned(),
+        "TARGET_TOPIC_CONFIGS is [message.timestamp.type=CreateTime, retention.ms=-1], in that \
+         order"
+    );
+    assert_eq!(preflight.configs_set, pinned());
+}
+
+/// **G-TS arm 3.** A broker reporting `log.message.timestamp.type=LogAppendTime`
+/// whose per-topic override reads back `LogAppendTime` is a guard refusal, and
+/// the refusal message opens `TargetTopicConfigRefused: `.
+///
+/// This is the arm that kills "make any of the preflight checks a `warn!`":
+/// that version returns `Ok`, and the assertion below expects
+/// `ExitCode::GuardRefused`.
+#[test]
+fn a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[
+        ("log.message.timestamp.type", "LogAppendTime"),
+        ("log.retention.ms", "604800000"),
+    ])
+    // The readback: the broker did NOT honour the override.
+    .readable(
+        "drill-orders",
+        &[("message.timestamp.type", "LogAppendTime")],
+    );
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+
+    let msg = guard_message(
+        phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &reader,
+            &creator,
+            &deleter,
+        )
+        .expect_err("a LogAppendTime broker that refuses the override is refused"),
+    );
+    assert!(
+        msg.starts_with("TargetTopicConfigRefused: "),
+        "the refusal message must OPEN with the terminal state and its `: ` separator, or \
+         `logweir_core::guard::terminal_state` (which matches a prefix) classifies the run as a \
+         plain GuardRefused:\n{msg}"
+    );
+    assert!(msg.contains("LogAppendTime"), "{msg}");
+    assert!(msg.contains("message.timestamp.type"), "{msg}");
+
+    // The probe created exactly one topic — the first mapped target — with the
+    // pinned config set, and deleted it again, so phase 0 left the target as it
+    // found it.
+    let created = creator.calls.lock().unwrap().clone();
+    assert_eq!(created.len(), 1, "one probe topic, not the whole mapping");
+    assert_eq!(created[0].name, "drill-orders");
+    assert_eq!(created[0].configs, pinned());
+    assert_eq!(
+        *deleter.calls.lock().unwrap(),
+        vec!["drill-orders".to_string()],
+        "the probe topic is deleted through the already-scoped TopicDeleter, so a refusal leaves \
+         nothing behind"
+    );
+}
+
+/// **G-TS arm 3b**, the other side of the probe: a broker on `LogAppendTime`
+/// that HONOURS the per-topic override admits the plan.
+///
+/// Without this the refusal above could be satisfied by refusing every
+/// `LogAppendTime` broker unconditionally, which is a different (and weaker)
+/// guard: the spec's question is whether the override sticks.
+#[test]
+fn a_logappendtime_broker_that_honours_the_override_is_admitted() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "LogAppendTime")])
+        .readable("drill-orders", &[("message.timestamp.type", "CreateTime")]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("an honoured override admits the plan");
+    // The observation is recorded verbatim — the BROKER is on LogAppendTime,
+    // and that is what `Restore.status.topicPreflight` will say.
+    assert_eq!(admitted.topic_preflight.timestamp_type, "LogAppendTime");
+    assert_eq!(
+        *deleter.calls.lock().unwrap(),
+        vec!["drill-orders".to_string()],
+        "the probe topic is deleted on this branch too: at phase 0 the manifest's partition count \
+         is not known, so a one-partition probe topic left behind would be the wrong target"
+    );
+}
+
+/// **G-TS arm 4.** A timestamp bound that excludes the window's end is a guard
+/// refusal naming `TargetTopicConfigRefused`.
+///
+/// `before.max.ms` = 3600000 (one hour) against a window end 48 h old.
+#[test]
+fn a_timestamp_bound_that_excludes_the_window_end_is_a_guard_refusal() {
+    let spec = spec_with_window_end(chrono::Utc::now() - chrono::Duration::hours(48));
+    let reader = BrokerDouble::new(&[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.message.timestamp.before.max.ms", "3600000"),
+    ]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let msg = guard_message(
+        phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &reader,
+            &creator,
+            &deleter,
+        )
+        .expect_err("a window end outside the broker's bound is refused"),
+    );
+    assert!(msg.starts_with("TargetTopicConfigRefused: "), "{msg}");
+    assert!(msg.contains("3600000"), "{msg}");
+    assert!(
+        creator.calls.lock().unwrap().is_empty(),
+        "a refusal knowable by comparison must not write to the target first"
+    );
+}
+
+/// The deprecated spelling still counts: before Kafka 3.6 the key is
+/// `log.message.timestamp.difference.max.ms`, and an adopter on 3.5 gets the
+/// same refusal.
+#[test]
+fn the_pre_3_6_timestamp_bound_spelling_is_read_too() {
+    let spec = spec_with_window_end(chrono::Utc::now() - chrono::Duration::hours(48));
+    let reader = BrokerDouble::new(&[("log.message.timestamp.difference.max.ms", "3600000")]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let msg = guard_message(
+        phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &reader,
+            &creator,
+            &deleter,
+        )
+        .expect_err("refused"),
+    );
+    assert!(msg.starts_with("TargetTopicConfigRefused: "), "{msg}");
+}
+
+/// The Apache default for both bound keys is `9223372036854775807`, i.e.
+/// unbounded. A plain `now - bound` overflows: it panics in a debug build and
+/// wraps to a floor in the FUTURE in a release build, which would refuse every
+/// window on every default broker. `saturating_sub` is the fix and this is the
+/// test that would have caught its absence.
+#[test]
+fn the_apache_default_timestamp_bound_refuses_nothing() {
+    let spec = spec_with_window_end(chrono::Utc::now() - chrono::Duration::days(365));
+    let reader = BrokerDouble::new(&[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.message.timestamp.before.max.ms", "9223372036854775807"),
+        (
+            "log.message.timestamp.difference.max.ms",
+            "9223372036854775807",
+        ),
+    ]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("an unbounded broker refuses nothing, even for a year-old window");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_bound_ms,
+        Some(9_223_372_036_854_775_807),
+        "the value is still RECORDED verbatim; it just refuses nothing"
+    );
+}
+
+/// A broker that cannot answer DescribeConfigs is OPERATIONAL (exit 1), never a
+/// guard refusal (exit 3): nothing about the plan was observed, and the correct
+/// action is to retry. Same contract `cluster_id` and `list_topics` already
+/// have in this phase.
+#[test]
+fn a_broker_configs_read_failure_is_operational_not_a_guard_refusal() {
+    struct Unreachable;
+    impl ClusterReader for Unreachable {
+        fn cluster_id(&self) -> Result<String, KafkaError> {
+            Ok(CLUSTER.to_string())
+        }
+        fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+            Ok(vec![TopicMeta::new(MARKER, 1)])
+        }
+        fn end_offsets(&self, _t: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+            Ok(vec![])
+        }
+        fn topic_configs(&self, _t: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+            unimplemented!()
+        }
+        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+            Err(KafkaError::Unreachable(
+                "no broker returned its configuration within 20s".into(),
+            ))
+        }
+        fn consume_range(
+            &self,
+            _t: &str,
+            _p: i32,
+            _f: i64,
+            _m: usize,
+        ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+            Ok(vec![])
+        }
+    }
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let err = phase0_admit::run(
+        &a_recent_spec(),
+        "restore: {}\n",
+        &allowed(),
+        &Unreachable,
+        &creator,
+        &deleter,
+    )
+    .expect_err("an unreachable broker is an error");
+    assert_eq!(err.exit_code(), ExitCode::Operational, "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// I9 — the refusal-reason line, in process
+// ---------------------------------------------------------------------------
+
+/// **Interface I9**, second producer half. The refusal built by the
+/// `a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`
+/// fixture is handed to `logweir_core::guard::refusal_reason_line` and the
+/// result is byte-equal to `refusal-reason=TargetTopicConfigRefused`; then
+/// `logweir::exit::print_refusal_reason_to` is asserted to write exactly that
+/// line, with its newline, to the writer `print_refusal_reason` prints stdout
+/// through.
+///
+/// **In process, never the binary** — a binary-level arm would need both a
+/// broker and a `LogAppendTime` broker, so the only binary assertion of this
+/// contract lives in `logweir/e2e/tests/guards.rs` beside the residual-3 probe,
+/// under `#![cfg(feature = "e2e")]`.
+///
+/// This is the arm that kills the mutant "open the refusal message with
+/// `target topic config refused: ` (lower case, no colon-prefixed state)":
+/// `terminal_state` matches a PREFIX, so the line would read
+/// `refusal-reason=GuardRefused`.
+#[test]
+fn a_target_topic_refusal_prints_its_terminal_state() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "LogAppendTime")]).readable(
+        "drill-orders",
+        &[("message.timestamp.type", "LogAppendTime")],
+    );
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let msg = guard_message(
+        phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &reader,
+            &creator,
+            &deleter,
+        )
+        .expect_err("refused"),
+    );
+
+    assert_eq!(
+        logweir_core::guard::refusal_reason_line(&msg),
+        "refusal-reason=TargetTopicConfigRefused"
+    );
+
+    // …and the runner actually WRITES it, to stdout, through this seam.
+    let mut captured: Vec<u8> = Vec::new();
+    logweir::exit::print_refusal_reason_to(&mut captured, &msg).expect("write");
+    assert_eq!(
+        String::from_utf8(captured).expect("utf8"),
+        "refusal-reason=TargetTopicConfigRefused\n",
+        "the line, and its newline — a controller tailing pods/log reads the final line, and the \
+         pod log API has no stream selector, so stderr would not be distinguishable at all"
+    );
+}
+
+/// `TargetTopicConfigRefused` is one of the three declared terminal states, so
+/// a controller's exit-3 map is closed over it. Task 3 declared the constant for
+/// this task; this is the assertion that it is now actually produced.
+#[test]
+fn the_terminal_state_this_task_emits_is_one_of_the_declared_three() {
+    assert!(
+        logweir_core::guard::TERMINAL_STATES
+            .contains(&logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED),
+        "TargetTopicConfigRefused must be in TERMINAL_STATES"
+    );
+    assert_eq!(
+        logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+        "TargetTopicConfigRefused"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The preflight leaves the run in `RestoreOutcome`
+// ---------------------------------------------------------------------------
+
+/// The preflight leaves a WHOLE RUN, not just the phase: a full drill over the
+/// orchestrator fixture's doubles, through `execute_with_outcome`.
+///
+/// Deliberately **not** `topic_preflight_lands_in_the_scorecard`: it is not a
+/// scorecard field. Global Constraint 12 as amended freezes the document at 21
+/// top-level properties and 17 required ones and permits nested optional fields
+/// only, so a `topic_preflight` block would make the count 22 and break Task
+/// 5's `the_scorecard_top_level_shape_is_unchanged`. Spec §10's G-TS row puts it
+/// in `Restore.status.topicPreflight`, which the operator writes from this
+/// outcome.
+#[test]
+fn topic_preflight_lands_in_the_run_outcome() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let outcome = logweir::drill::execute_with_outcome(&f.args, &f.run_id, &f.ctx)
+        .expect("the fixture drill passes");
+    assert_eq!(outcome.topic_preflight.configs_set, pinned());
+    assert_eq!(
+        outcome.topic_preflight.topics_created,
+        vec!["drill-orders".to_string()],
+        "the mapped target names, and nothing else"
+    );
+    // The scorecard is still the scorecard: this block is not in it.
+    let json = serde_json::to_value(&outcome.scorecard).expect("the scorecard serialises");
+    assert!(
+        json.get("topic_preflight").is_none(),
+        "topic_preflight is NOT a scorecard field (Global Constraint 12 as amended)"
+    );
+}
+
+/// The scorecard-returning half is unchanged, so the ~40 existing call sites in
+/// `orchestrator.rs` and `teardown.rs` keep meaning what they meant.
+#[test]
+fn execute_with_still_returns_the_scorecard_alone() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let sc = logweir::drill::execute_with(&f.args, &f.run_id, &f.ctx).expect("passes");
+    assert_eq!(sc.outcome, logweir_core::outcome::Outcome::Pass);
+}
+
+/// The `TopicPreflight` a run reports is the one phase 0 built: same broker
+/// observations, with `topics_created` filled in by the creation step. Nothing
+/// re-derives it.
+#[test]
+fn the_outcome_preflight_is_the_one_phase_0_built() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.retention.ms", "604800000"),
+        ("log.message.timestamp.before.max.ms", "9223372036854775807"),
+    ]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("admitted");
+    let mut preflight = admitted.topic_preflight.clone();
+    phase0_admit::create_target_topics(
+        &creator,
+        &admitted.topic_mapping,
+        &facts_for(&[("orders", 3), ("payments", 1)]),
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect("created");
+    assert_eq!(
+        preflight,
+        TopicPreflight {
+            timestamp_type: "CreateTime".into(),
+            retention_ms: "604800000".into(),
+            timestamp_bound_ms: Some(9_223_372_036_854_775_807),
+            configs_set: pinned(),
+            topics_created: vec!["drill-orders".into(), "drill-payments".into()],
+        }
+    );
+}

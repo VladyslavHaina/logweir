@@ -70,6 +70,17 @@ impl ClusterReader for FakeReader {
         }
         Ok(Default::default())
     }
+    /// Task 8, guard **G-TS**. `inject` reaches this method too, for the same
+    /// reason it reaches every other one: `RdKafkaReader::broker_configs` can
+    /// return `Unreachable` (no metadata, or DescribeConfigs timed out), and a
+    /// phase-0 test whose double could never produce that would let the
+    /// preflight's exit-1-not-exit-3 mapping go unproven.
+    fn broker_configs(&self) -> Result<std::collections::BTreeMap<String, String>, KafkaError> {
+        if let Some(e) = &self.inject {
+            return Err(e.clone());
+        }
+        Ok(Default::default())
+    }
     fn consume_range(
         &self,
         _t: &str,
@@ -160,6 +171,7 @@ fn the_fake_can_be_configured_to_return_each_new_error_variant() {
         assert!(r.list_topics().is_err());
         assert!(r.end_offsets("orders").is_err());
         assert!(r.topic_configs("orders").is_err());
+        assert!(r.broker_configs().is_err());
         assert!(r.consume_range("orders", 0, 0, 1).is_err());
     }
 }
@@ -210,4 +222,101 @@ fn a_consumed_record_fingerprints_identically_to_the_archived_one() {
         headers: headers.clone(),
     };
     assert_eq!(a, rec.fingerprint());
+}
+
+/// **Guard G-TS.** The `NewTopicSpec` -> `rdkafka::admin::NewTopic` conversion,
+/// read back off `NewTopic`'s own public fields — so this asserts what the
+/// CreateTopics request actually carries, not a restatement of it.
+///
+/// Three properties in one test, because they are one property:
+///
+/// 1. every `(k, v)` of `configs` reaches `.set`, and
+/// 2. **in order** — `NewTopic::set` pushes onto `config`, so the vector below
+///    is the order the request carries, and `TARGET_TOPIC_CONFIGS`'s own order
+///    is therefore observable;
+/// 3. the conversion holds the caller's owned `Vec` for the `NewTopic`'s
+///    lifetime. That one **is proven by compilation**: `new_topics_for`
+///    returns `Vec<NewTopic<'_>>` tied to its argument, and `NewTopic<'a>`
+///    stores `&'a str` for the name and both halves of every entry
+///    (`rdkafka-0.36.2/src/admin.rs:658`), so a version that formatted a local
+///    `String` per entry could not be written.
+#[cfg(feature = "client")]
+#[test]
+fn create_topics_sets_the_config_entries_it_was_given() {
+    use logweir_kafka::reader::{NewTopicSpec, TARGET_TOPIC_CONFIGS};
+    // The exact value the drill builds: the pinned set, owned, in order.
+    let specs = vec![
+        NewTopicSpec {
+            name: "drill-orders".into(),
+            num_partitions: 3,
+            replication_factor: 1,
+            configs: TARGET_TOPIC_CONFIGS
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        },
+        NewTopicSpec {
+            name: "drill-payments".into(),
+            num_partitions: 1,
+            replication_factor: 1,
+            configs: TARGET_TOPIC_CONFIGS
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        },
+    ];
+    let built = logweir_kafka::rdkafka_reader::new_topics_for(&specs);
+    assert_eq!(built.len(), 2);
+    for (nt, spec) in built.iter().zip(&specs) {
+        assert_eq!(nt.name, spec.name);
+        assert_eq!(nt.num_partitions, spec.num_partitions);
+        // `TopicReplication` has no `PartialEq`; `Debug` is the only readback
+        // rdkafka 0.36 offers, and `Fixed(1)` vs `Variable(..)` is exactly the
+        // distinction that matters here.
+        assert_eq!(
+            format!("{:?}", nt.replication),
+            format!("Fixed({})", spec.replication_factor)
+        );
+        // THE ORDERED VECTOR, not a set.
+        assert_eq!(
+            nt.config,
+            vec![
+                ("message.timestamp.type", "CreateTime"),
+                ("retention.ms", "-1")
+            ],
+            "{} did not receive TARGET_TOPIC_CONFIGS in order",
+            spec.name
+        );
+    }
+}
+
+/// **Guard G-TS**, spelling. `ConfigResource` is the JAVA client's name for the
+/// DescribeConfigs input and DOES NOT EXIST in rdkafka 0.36: the input type is
+/// `ResourceSpecifier::Broker(i32)` and the result carries
+/// `OwnedResourceSpecifier::Broker(i32)`. A doc comment or an implementation
+/// that names `ConfigResource` is documenting an API this crate cannot call.
+///
+/// A source read, deliberately: the compiler already rejects a `ConfigResource`
+/// *expression*, so the only place the wrong name can survive is prose — and
+/// `ClusterReader::broker_configs`'s doc comment is what the next implementer
+/// reads.
+#[test]
+fn the_broker_resource_is_spelled_the_rdkafka_way() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut saw_specifier = false;
+    for rel in ["src/reader.rs", "src/rdkafka_reader.rs"] {
+        let body = std::fs::read_to_string(root.join(rel)).expect(rel);
+        assert!(
+            !body.contains("ConfigResource"),
+            "{rel} names `ConfigResource`, which is the Java client's type name and does not \
+             exist in rdkafka 0.36 — the input is ResourceSpecifier::Broker(i32) and the result \
+             carries OwnedResourceSpecifier::Broker(i32)"
+        );
+        saw_specifier |= body.contains("ResourceSpecifier");
+    }
+    assert!(
+        saw_specifier,
+        "neither src/reader.rs nor src/rdkafka_reader.rs names `ResourceSpecifier`, so nothing \
+         records which rdkafka type the broker-config read is issued against"
+    );
 }

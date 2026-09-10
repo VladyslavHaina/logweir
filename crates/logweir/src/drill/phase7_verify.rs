@@ -2392,6 +2392,13 @@ mod tests {
             ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
                 unimplemented!()
             }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
+                unimplemented!()
+            }
             fn topic_configs(
                 &self,
                 _: &str,
@@ -2453,6 +2460,13 @@ mod tests {
                 &self,
                 _: &str,
             ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -2525,6 +2539,13 @@ mod tests {
             ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
                 panic!("classify_parity_all must refuse an empty mapping before calling the reader")
             }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
+                unimplemented!()
+            }
             fn topic_configs(
                 &self,
                 _: &str,
@@ -2578,6 +2599,13 @@ mod tests {
                      before calling the reader"
                 )
             }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
+                unimplemented!()
+            }
             fn topic_configs(
                 &self,
                 _: &str,
@@ -2627,6 +2655,13 @@ mod tests {
             ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
                 panic!("newest_ts must refuse an empty mapping before calling the reader")
             }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
+                unimplemented!()
+            }
             fn topic_configs(
                 &self,
                 _: &str,
@@ -2666,6 +2701,13 @@ mod tests {
                 _: &str,
             ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
                 Ok(vec![(0, 0)])
+            }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
+                unimplemented!()
             }
             fn topic_configs(
                 &self,
@@ -2717,6 +2759,13 @@ mod tests {
                 _: &str,
             ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
                 Ok(vec![(0, 1), (1, 1)])
+            }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
+                // never reads it: the target-topic preflight is phase 0's.
+                unimplemented!()
             }
             fn topic_configs(
                 &self,

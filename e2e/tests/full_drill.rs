@@ -71,10 +71,13 @@ fn a_full_drill_produces_a_signed_scorecard_with_real_numbers() {
     assert!(logweir_verify(&out).success());
     assert!(python_verify(&out).success());
 
-    // Topics were auto-created at the MANIFEST partition count. The broker runs
-    // with KAFKA_AUTO_CREATE_TOPICS_ENABLE=false and num.partitions=1, so a 3
-    // here can only come from `create_topics: true` plus the rendered partition
-    // count actually being honoured — implicit creation would give 1.
+    // Topics were created at the MANIFEST partition count. The broker runs with
+    // KAFKA_AUTO_CREATE_TOPICS_ENABLE=false and num.partitions=1, so a 3 here
+    // can only come from a deliberate creation at the manifest's count —
+    // implicit creation would give 1. Since Task 8 the creator is LOGWEIR, not
+    // the engine (`create_topics: false`, guard G-TS), through
+    // `phase0_admit::create_target_topics` and
+    // `phase3_diff::restore_partition_count`.
     assert_eq!(count_partitions("drill-orders"), 3);
     assert_eq!(sc["target_diff"]["level"], "full");
     assert!(sc["target_diff"]["would_create"].is_array());
@@ -333,7 +336,8 @@ fn a_restore_into_an_empty_scratch_target_succeeds() {
     assert_eq!(
         out.out.status.code(),
         Some(0),
-        "proves create_topics: true and the explicit replication factor are actually rendered: {}",
+        "proves Logweir's own target-topic creation (create_topics: false, guard G-TS) and the \
+         explicit replication factor are actually applied: {}",
         out.out.stderr_utf8()
     );
     assert_eq!(count_partitions("drill-payments"), 3);
@@ -431,8 +435,8 @@ fn an_unknown_config_key_warning_is_read_back_from_the_stream_the_engine_uses() 
     // A key Logweir never renders, and NOT one of the three Global Constraint 4
     // forbids — the point is the readback mechanism, not the guard.
     let probe = doc.replace(
-        "  create_topics: true\n",
-        "  create_topics: true\n  logweir_e2e_probe_unknown_key: 1\n",
+        "  create_topics: false\n",
+        "  create_topics: false\n  logweir_e2e_probe_unknown_key: 1\n",
     );
     assert_ne!(probe, doc, "the probe key was not inserted");
     let (code, stdout, stderr) = engine_validate_restore(&probe);

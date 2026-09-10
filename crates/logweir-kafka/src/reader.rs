@@ -218,8 +218,15 @@ pub trait ClusterReader: Send + Sync {
     /// (partition, high watermark) — the ListOffsets read used by the phase-3
     /// diff, the phase-6 post-condition and the phase-7 restored-count check.
     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError>;
-    /// DescribeConfigs for ConfigResource TOPIC only.
+    /// DescribeConfigs for `ResourceSpecifier::Topic(&str)` only — a TOPIC
+    /// resource and nothing else. `ResourceSpecifier` is rdkafka 0.36's
+    /// DescribeConfigs INPUT type; the Java client's name for that role is a
+    /// different thing and is not it (see `broker_configs`).
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError>;
+    /// DescribeConfigs for ResourceSpecifier::Broker(i32). NOT topic_configs:
+    /// the mapped target topics do not exist at phase 0 (a Restore refuses if
+    /// any of them does), so a TOPIC-resource read would describe nothing.
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError>;
     fn consume_range(
         &self,
         topic: &str,
@@ -228,3 +235,62 @@ pub trait ClusterReader: Send + Sync {
         max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError>;
 }
+
+/// The SECOND write seam this crate exposes (the first is TopicDeleter,
+/// reader.rs:135-148).
+///
+/// **Guard G-TS.** Logweir creates the restore's target topics itself, with
+/// the config entries that decide whether the restore survives at all, because
+/// the engine's own creation path carries no configuration whatsoever
+/// (`TopicToCreate { name, num_partitions, replication_factor }`,
+/// `U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455`) — so on a
+/// topic left on cluster defaults the restored segments are written already
+/// past a `retention.ms` deletion threshold, or every restored timestamp is
+/// overwritten by `message.timestamp.type = LogAppendTime`, and the drill signs
+/// a `pass` over records the broker is about to delete or has already
+/// re-stamped.
+///
+/// Unlike `TopicDeleter`, this needs no prefix scope: creation is not
+/// destruction, and a `Restore` already refuses if any mapped target topic
+/// exists.
+pub trait TopicCreator: Send + Sync {
+    /// Creates exactly the named topics with exactly the given config entries.
+    /// Never a pattern, never a default set. One result per name.
+    #[allow(clippy::type_complexity)]
+    fn create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError>;
+}
+
+/// One topic to create, fully specified. Nothing here is defaulted by the
+/// broker and nothing is inferred: the name, the partition count, the
+/// replication factor and the ordered config entries are all decided by the
+/// caller, so the whole set is assertable by a golden.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTopicSpec {
+    pub name: String,
+    pub num_partitions: i32,
+    pub replication_factor: i32,
+    /// Explicit, ordered, and asserted by a golden.
+    pub configs: Vec<(String, String)>,
+}
+
+/// The config entries **every** target topic Logweir creates carries, in this
+/// order. Ordered because the order is what `rdkafka::admin::NewTopic::set` is
+/// called in, and a test asserts the recorded vector, not a set.
+///
+/// - `message.timestamp.type = CreateTime` — the engine builds its batches with
+///   `timestamp_type: TimestampType::Creation` and the record's ORIGINAL
+///   timestamp (`U:crates/kafka-backup-core/src/kafka/produce.rs:101-104`).
+///   `LogAppendTime` on the target would overwrite every one of them with the
+///   restore's wall clock, voiding any timestamp lookup and any point-in-time
+///   claim.
+/// - `retention.ms = -1` — infinite. A topic on cluster defaults typically
+///   carries `retention.ms = 604800000`, so restoring an older point writes
+///   segments already past the deletion threshold, removed on the next
+///   retention check — possibly AFTER phase 7 signed a `pass`.
+pub const TARGET_TOPIC_CONFIGS: &[(&str, &str)] = &[
+    ("message.timestamp.type", "CreateTime"),
+    ("retention.ms", "-1"),
+];

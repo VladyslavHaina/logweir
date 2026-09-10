@@ -24,7 +24,7 @@ use logweir_core::scorecard::{
 };
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_engine_oso::storage::Store;
-use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicDeleter};
+use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicCreator, TopicDeleter};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -640,13 +640,23 @@ fn write_scorecard_artifact(args: &RunArgs, run_id: &str, signed: &phase8_score:
 /// two traits on purpose (see `TopicDeleter`'s own doc comment), and this is
 /// the one place the drill needs both from a single object — `RdKafkaReader`
 /// on the live path, a double in `tests/fixtures/mod.rs`.
-pub trait TargetClient: ClusterReader + TopicDeleter {
+pub trait TargetClient: ClusterReader + TopicCreator + TopicDeleter {
     fn as_reader(&self) -> &dyn ClusterReader;
+    /// **Guard G-TS**, Task 8. The SECOND write seam, beside `as_deleter`:
+    /// since `restore.yaml` renders `create_topics: false`, the target topics
+    /// are created here and nowhere else. It is a separate trait rather than a
+    /// method on `ClusterReader` for the same reason `TopicDeleter` is — a
+    /// reader is read-only — and it is on `TargetClient` so `crates/logweir`
+    /// still never takes an rdkafka dependency.
+    fn as_creator(&self) -> &dyn TopicCreator;
     fn as_deleter(&self) -> &dyn TopicDeleter;
 }
 
-impl<T: ClusterReader + TopicDeleter> TargetClient for T {
+impl<T: ClusterReader + TopicCreator + TopicDeleter> TargetClient for T {
     fn as_reader(&self) -> &dyn ClusterReader {
+        self
+    }
+    fn as_creator(&self) -> &dyn TopicCreator {
         self
     }
     fn as_deleter(&self) -> &dyn TopicDeleter {
@@ -962,16 +972,41 @@ fn assert_engine_identity(id: &logweir_core::engine::EngineId) -> Result<(), Dri
 }
 
 pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, DrillError> {
+    execute_with_outcome(args, run_id, c).map(|o| o.scorecard)
+}
+
+/// The same phase sequence as `execute_with`, returning everything ONE RUN
+/// produced rather than the scorecard alone.
+///
+/// `TopicPreflight` (guard **G-TS**) is deliberately not a scorecard field —
+/// Global Constraint 12 as amended permits nested optional fields only and no
+/// new top-level property, and the scorecard is frozen at 21/17 — so it needs a
+/// carrier out of the run. `RestoreOutcome` is it: spec §10's G-TS row puts the
+/// preflight in `Restore.status.topicPreflight`, which the operator writes from
+/// the runner's outcome, and it goes no further inside this repository's
+/// evidence documents.
+///
+/// `execute_with` stays the scorecard-returning half so the ~40 existing call
+/// sites in `tests/orchestrator.rs` and `tests/teardown.rs` are untouched.
+pub fn execute_with_outcome(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+) -> Result<RestoreOutcome, DrillError> {
     let mut sc = new_scorecard(run_id, args, c);
-    // Phase 9 deletes through the SAME client. Named here so the layering rule
-    // — `logweir-kafka` is the only crate that dials a broker — is visible.
+    // Phase 9 deletes through the SAME client, and since Task 8 phase 0's
+    // preflight and the target-topic creation step write through it too. Named
+    // here so the layering rule — `logweir-kafka` is the only crate that dials
+    // a broker — is visible.
     let deleter: &dyn TopicDeleter = c.client.as_deleter();
+    let creator: &dyn TopicCreator = c.client.as_creator();
     let reader: &dyn ClusterReader = c.client.as_reader();
 
     // 0
     let admitted = record(&mut sc, 0, "admit", || {
-        phase0_admit::run(&c.spec, &c.spec_text, &c.allowed, reader)
+        phase0_admit::run(&c.spec, &c.spec_text, &c.allowed, reader, creator, deleter)
     })?;
+    let mut topic_preflight = admitted.topic_preflight.clone();
     sc.target = target_info(&c.spec, &admitted)?;
     assert_engine_identity(&c.engine.id())?;
 
@@ -1100,6 +1135,33 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
         // tidy up after a drill that touched nothing.
         return Err(DrillError::NotPass(Box::new(signed.scorecard)));
     }
+
+    // **Guard G-TS**, the creating half — the last thing before the restore,
+    // and NOT inside phase 0. `phase0_admit::create_target_topics`'s doc
+    // comment carries the reasons; the short version is that phase 1 verifies
+    // the approval, phases 2 and 3 must see the target's PRE-EXISTING state,
+    // and the partition count is the archive manifest's, which is read after
+    // phase 1 by design.
+    //
+    // AFTER the phase-5 verdict, deliberately. The `Verdict::Block` branch
+    // above returns without a teardown, on the stated ground that a blocked
+    // preflight means `restore` never ran and this drill created NOTHING on the
+    // target — `e2e/tests/full_drill.rs`'s
+    // `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`
+    // asserts `!topic_exists("drill-orders")` and caught an earlier version of
+    // this line placed before phase 5. The engine's preflight is
+    // `validate-restore`, which force-sets `dry_run = true` and writes nothing,
+    // so it needs no target topic; `restore` does.
+    //
+    // The rendered `restore.yaml` says `create_topics: false`, so this is what
+    // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
+    phase0_admit::create_target_topics(
+        creator,
+        &admitted.topic_mapping,
+        &facts,
+        c.spec.target.default_replication_factor,
+        &mut topic_preflight,
+    )?;
 
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
@@ -1264,7 +1326,21 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
     if sc.outcome != Outcome::Pass {
         return Err(DrillError::NotPass(Box::new(sc)));
     }
-    Ok(sc)
+    Ok(RestoreOutcome {
+        scorecard: sc,
+        topic_preflight,
+    })
+}
+
+/// Everything ONE restore run produced. The scorecard is the signed evidence;
+/// `topic_preflight` is guard **G-TS**'s observation, which is deliberately not
+/// in the scorecard (Global Constraint 12 as amended: nested optional fields
+/// only, no new top-level property, and the document stays at 21/17) and is
+/// written to `Restore.status.topicPreflight` by the operator instead.
+#[derive(Debug, Clone)]
+pub struct RestoreOutcome {
+    pub scorecard: Scorecard,
+    pub topic_preflight: phase0_admit::TopicPreflight,
 }
 
 /// Phase 9, in one place, because two paths reach it: the normal end of a run

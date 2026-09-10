@@ -30,7 +30,7 @@ storage:
 restore:
   topic_mapping:
     "orders": "drill-20260903-orders"
-  create_topics: true
+  create_topics: false
   default_replication_factor: 1
   header_preflight: full
   dry_run_check_segments: true
