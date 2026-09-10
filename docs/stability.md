@@ -676,6 +676,33 @@ boundary record. Both documents' floors are the minimum segment start over the t
 names, so a receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same
 archive and the same topics.
 
+### Interface I8's third stdout line is CONDITIONAL: `offset-report-key=` is present exactly when the engine wrote a report
+
+A successful `logweir restore run` (or its `drill run` alias) prints its evidence keys as the last
+lines of stdout, in this order:
+
+```
+scorecard-key=logweir/drills/<run_id>.json
+sidecar-key=logweir/drills/<run_id>.sig
+offset-report-key=logweir/drills/<run_id>.offsets.json
+```
+
+**The third line is present exactly when the run completed a restore AND the engine wrote its
+offset-mapping report to the path the plan named.** The engine writes that file only from a
+completed restore, and its own write failure is a warning rather than an error, so a restore that
+finished can legitimately leave nothing at the path. When that happens `phase8_score` records no
+offset-report key or digest in the signed scorecard, uploads nothing, emits a `tracing::warn!`
+naming the run, the path and the error — and the run still **exits 0 with two key lines**. It is
+not a finding: exits 1, 3 and 4 write no artifact at all by contract, and a scorecard whose
+`evidence.offset_report_*` pair is absent is a well-formed 1.0.0 document that both readers accept
+(the pair is present-or-absent together, never half of one).
+
+**So a reader must scan for a key by NAME and treat the third as optional** — never take "the third
+line from the end", and never treat its absence as an error. That is the same rule plan erratum E4
+draws for `refusal-reason=`: a pod log is stdout and stderr merged in nondeterministic order, so
+every reader in this project scans a bounded tail and matches by key name
+(`KEY_SCAN_TAIL_LINES = 8`, `controllers::backup::evidence_keys`).
+
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
 Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once
