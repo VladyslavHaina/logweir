@@ -577,23 +577,20 @@ fn the_real_archive_header_is_eight_bytes() {
     assert_eq!(out.out.status.code(), Some(0), "{}", out.out.stderr_utf8());
 
     let r = reader();
-    let mut seen: Option<Vec<u8>> = None;
-    let mut checked = 0usize;
+    // TWO records, not one, and that is the byte-ORDER half: the first restored
+    // record's original offset is 0, whose eight bytes are all zero and decode
+    // to 0 under EITHER byte order. Only a record whose original offset is
+    // non-zero can tell little-endian from big-endian, so the second one is
+    // what makes this test about the encoding rather than about the length.
+    let mut seen: Vec<(String, i32, Vec<u8>)> = Vec::new();
     for topic in ["drill-orders", "drill-payments"] {
         for (p, hi) in ClusterReader::end_offsets(&r, topic).unwrap() {
-            if hi <= 0 || seen.is_some() {
+            if hi <= 0 || !seen.is_empty() {
                 continue;
             }
-            let Some(rec) = ClusterReader::consume_range(&r, topic, p, 0, 1)
-                .unwrap()
-                .into_iter()
-                .next()
-            else {
-                continue;
-            };
-            checked += 1;
-            seen = Some(
-                rec.headers
+            for rec in ClusterReader::consume_range(&r, topic, p, 0, 2).unwrap() {
+                let hdr = rec
+                    .headers
                     .iter()
                     .find(|(k, _)| k == "x-original-offset")
                     .unwrap_or_else(|| {
@@ -607,25 +604,45 @@ fn the_real_archive_header_is_eight_bytes() {
                     })
                     .1
                     .clone()
-                    .expect("x-original-offset with a null value is not an offset"),
-            );
+                    .expect("x-original-offset with a null value is not an offset");
+                seen.push((topic.to_string(), p, hdr));
+            }
         }
     }
-    assert!(checked > 0, "no restored record was read back at all");
-    let hdr = seen.expect("no x-original-offset header was found on any restored topic");
-    assert_eq!(
-        hdr.len(),
-        8,
-        "the engine writes the original offset as an 8-byte little-endian i64; got {} \
-         byte(s): {hdr:?}",
-        hdr.len()
-    );
-    // And it decodes, through the SAME function phase 7 uses, to an offset the
-    // archive could plausibly have held.
-    let decoded = logweir::drill::phase7_verify::decode_original_offset(&hdr)
-        .expect("eight bytes must decode");
-    assert!(
-        decoded >= 0,
-        "a decoded original offset of {decoded} is not an offset; the byte order is wrong"
-    );
+    assert!(!seen.is_empty(), "no restored record was read back at all");
+
+    for (topic, p, hdr) in &seen {
+        assert_eq!(
+            hdr.len(),
+            8,
+            "{topic}/{p}: the engine writes the original offset as an 8-byte little-endian \
+             i64; got {} byte(s): {hdr:?}",
+            hdr.len()
+        );
+        // Decoded through the SAME function phase 7 uses.
+        let decoded = logweir::drill::phase7_verify::decode_original_offset(hdr)
+            .expect("eight bytes must decode");
+        // `scripts/e2e-seed.sh` writes 1000 records per source topic, so every
+        // original offset in this archive is a small non-negative number. The
+        // SAME eight bytes read big-endian would be at least 2^48 for any
+        // non-zero offset — 72_057_594_037_927_936 for offset 1 — so this
+        // bound is what distinguishes the two byte orders on real bytes.
+        assert!(
+            (0..1_000_000).contains(&decoded),
+            "{topic}/{p}: an original offset of {decoded} is not an offset this archive could \
+             hold; the byte order is wrong. Header bytes: {hdr:?}"
+        );
+    }
+
+    // And the SECOND record's original offset is greater than the first's,
+    // which no all-zero header can satisfy by accident.
+    if seen.len() >= 2 {
+        let a = logweir::drill::phase7_verify::decode_original_offset(&seen[0].2).unwrap();
+        let b = logweir::drill::phase7_verify::decode_original_offset(&seen[1].2).unwrap();
+        assert!(
+            b > a,
+            "consecutive restored records carry original offsets {a} then {b}; a decode that \
+             read the bytes in the wrong order would not order them"
+        );
+    }
 }
