@@ -659,7 +659,7 @@ fn approval_fixture(self_attested: bool) -> ApprovalFixture {
     }
 }
 
-fn write_pub(k: &logweir_evidence::keys::SigningKey, to: &std::path::Path) {
+pub fn write_pub(k: &logweir_evidence::keys::SigningKey, to: &std::path::Path) {
     use p256::pkcs8::EncodePublicKey;
     match k.verifying_key() {
         logweir_evidence::keys::VerifyingKey::P256(v) => {
@@ -783,6 +783,17 @@ pub enum Drill {
     /// its archive fingerprint. Reaches the same final gate by the other
     /// route. Scores `fail-integrity`.
     ReconcilesWithMismatches,
+    /// Task 10 fix round 1 (review F5). Every phase RUNS, the sampled canary
+    /// reconciles 25/25, every objective is met — and the target's high
+    /// watermark is `FIXTURE_WINDOW_RECORDS - 100`, so the restored count
+    /// falls BELOW the `[500, 500]` the manifest bounds the window at.
+    ///
+    /// Guard **G-WIN**'s second half is the only thing that can move this
+    /// drill's verdict, which is what makes the `fail-integrity` it scores
+    /// attributable to the bound rather than to a mismatch or an objective.
+    /// It is the third route to the same final gate, and the one no
+    /// whole-drill test covered.
+    RestoresOutsideTheManifestBound,
     /// The drill PASSES every phase and then phase 9's deletion of the one
     /// scratch topic is refused by the broker, per topic — `delete_topics`
     /// returns `Ok(vec![("drill-orders", Err("BROKER: TOPIC_DELETION_DISABLED"))])`.
@@ -1326,6 +1337,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::RestoresNothing
         | Drill::MissesTheRpoObjective
         | Drill::ReconcilesWithMismatches
+        // The engine is byte-for-byte the passing one: the whole variable is
+        // the TARGET's high watermark below.
+        | Drill::RestoresOutsideTheManifestBound
         | Drill::LeavesATopicBehind => {}
     }
 
@@ -1339,10 +1353,21 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     // against the manifest's own bound and refuses the mismatch, so the old
     // value now makes every fixture drill `fail-integrity`. That is the check
     // working, not the check being wrong.
-    let restored_hi = if shape == Drill::RestoresNothing {
-        0
-    } else {
-        FIXTURE_WINDOW_RECORDS
+    //
+    // `RestoresOutsideTheManifestBound` is the same window 100 records short:
+    // BELOW the manifest's own `[500, 500]`, which is what
+    // `check_restored_count` refuses. 100 and not 1 so the failure text
+    // carries a figure nothing else in this fixture could have produced, and
+    // BELOW rather than above because a restore that lost records is the
+    // shape an operator meets. The target still HOLDS all 500 records, so the
+    // canary's 25 still reconcile and `newest_ts` — which consumes at
+    // `hi - 1` = 399 — still reads a real record; the measured RPO is then
+    // 100 s against the spec's 300 s objective, i.e. still MET, so the
+    // `fail-integrity` this shape scores can only have come from the count.
+    let restored_hi = match shape {
+        Drill::RestoresNothing => 0,
+        Drill::RestoresOutsideTheManifestBound => FIXTURE_WINDOW_RECORDS - 100,
+        _ => FIXTURE_WINDOW_RECORDS,
     };
     let client = FixtureClient {
         cluster_id: FIXTURE_CLUSTER_ID.into(),

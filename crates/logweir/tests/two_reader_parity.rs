@@ -59,6 +59,21 @@
 //! the invariant corpus cannot, because its fixed point is the Rust struct
 //! rather than the file the check was deleted from.
 
+//! Task 10 fix round 1 adds a FOURTH kind of test —
+//! `a_whole_drill_outside_the_manifest_bound_signs_fail_integrity_and_both_readers_accept_it`
+//! — which walks no corpus at all: it runs a WHOLE DRILL over the doubles and
+//! puts the document that drill actually signed through both readers. It lives
+//! here and not in `windowed_reconciliation.rs` (Task 10's own file) for one
+//! reason: this file owns the ONE resolver for "the python3 that can run the
+//! auditor's verifier" that `every_gate_resolves_the_auditors_interpreter_the_same_way`
+//! checks, and a sixth resolver in a sixth file is precisely the defect that
+//! test exists to prevent.
+
+mod fixtures;
+
+use logweir::drill::{execute_with, DrillError};
+use logweir::exit::ExitCode;
+use logweir_core::outcome::{IntegrityResult, Outcome};
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
 use logweir_evidence::PAYLOAD_TYPE_SCORECARD;
@@ -1785,4 +1800,226 @@ fn every_gate_resolves_the_auditors_interpreter_the_same_way() {
             body.join("\n")
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 10 fix round 1 (review F5): a WHOLE DRILL through both readers.
+
+/// The bound's failure text for the orchestrator fixture, spelled out here
+/// rather than assembled from the same `format!` the production code uses — an
+/// expectation built by the code under test cannot disagree with it.
+///
+/// Both instants were computed with
+/// `python3 -c 'import datetime as d; print(int(d.datetime.fromisoformat(s).timestamp()*1000))'`
+/// (plan errata E6/E7): `fixtures::FIXTURE_WINDOW_START` `2026-08-29T00:00:00Z`
+/// = 1787961600000, which is also the archive floor plan construction binds,
+/// and `FIXTURE_WINDOW_END` `2026-08-30T02:00:00Z` = 1788055200000, the
+/// window's INCLUSIVE end. The fixture manifest's single segment spans exactly
+/// that window and claims `FIXTURE_WINDOW_RECORDS` = 500 records, so it is
+/// WHOLLY INSIDE and both bounds are 500; the target holds 400.
+const WHOLE_DRILL_BOUND_FAILURE: &str = "restored 400 records but the manifest bounds the window \
+                                         [1787961600000, 1788055200000] at [500, 500]";
+
+/// **GC11 at the document level, for guard G-WIN's second half.** One whole
+/// drill — every phase, over the doubles — whose restored count falls OUTSIDE
+/// the manifest's bound: the document is written AND signed, says
+/// `outcome: fail-integrity`, carries the bound's VERBATIM failure text in
+/// `integrity.partial_reason`, the process status is **2**, and BOTH readers
+/// accept the signed bytes.
+///
+/// Task 10's review (F5) found that chain covered only in pieces.
+/// `windowed_reconciliation.rs::restored_count_is_inside_the_manifest_bound`
+/// reaches exit 2 through `phase8_score::decide` and `ExitCode::from` DIRECTLY,
+/// over a phase-7 outcome rather than a drill; the orchestrator's
+/// write-and-sign is covered end to end for the mismatch and objective routes
+/// (`a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase`),
+/// which the bound joins at the identical `IntegrityResult::Fail`. Nothing
+/// drove a whole drill to `fail-integrity` THROUGH the count and then read the
+/// signed bytes back. This does, with both readers, which is the only form in
+/// which "the scorecard both readers accept says fail-integrity" is a checked
+/// claim rather than a composition of two.
+///
+/// The two readers are exercised the way an auditor would:
+///
+/// * **Rust, IN PROCESS** — `logweir::verify::verify_scorecard`, which is the
+///   whole of `drill verify` minus its printer (`verify::run` resolves the
+///   payload type and calls exactly this), so the signature check, every
+///   scorecard invariant and the derived approval claim all run.
+/// * **Python, by direct call** — `docs/verify_scorecard.py` as a child
+///   process over the same three files, through this file's own
+///   `require_python()`, so the second reader here is the same interpreter
+///   every other parity gate resolves.
+///
+/// Both are handed the `--out` artifact and the sidecar beside it — the files
+/// an operator actually has — and the PUBLIC half of the run's signing key,
+/// derived from the key the drill signed with rather than assumed to be a
+/// checked-in twin of it.
+///
+/// Kills the mutant "let a bound failure keep `Outcome::Pass`" (and its
+/// weaker cousin "report the bound in a log line instead of the document"):
+/// the outcome assertion and the `partial_reason` assertion fail on the SIGNED
+/// bytes, and both readers are then reading a document that no longer says
+/// what happened.
+#[test]
+fn a_whole_drill_outside_the_manifest_bound_signs_fail_integrity_and_both_readers_accept_it() {
+    // Resolved first: a parity claim that silently skipped its second reader
+    // would be the "documented guarantee the code does not deliver" this file
+    // exists to remove.
+    let py = require_python();
+
+    let f = fixtures::orchestrator_fixture(fixtures::Drill::RestoresOutsideTheManifestBound);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx)
+        .expect_err("a restored count outside the manifest's bound must never report success");
+    let sc = match &err {
+        DrillError::NotPass(sc) => sc.clone(),
+        other => panic!(
+            "a count outside the bound is a drill RESULT, never an operational failure: {other:?}"
+        ),
+    };
+
+    // It is a WHOLE drill: phases 6 and 7 both ran and the run was scored, so
+    // this is the final gate rather than an early return.
+    let phases: Vec<i8> = sc.phases.iter().map(|p| p.phase).collect();
+    assert!(
+        phases.contains(&6) && phases.contains(&7),
+        "the count bound is read at the END of phase 7; a run that never restored proves \
+         nothing about it: {phases:?}"
+    );
+    assert!(
+        sc.measured.rto_seconds.is_some() && sc.measured.rpo_seconds.is_some(),
+        "the drill must have been SCORED"
+    );
+    // ...and every objective was MET, so `fail-integrity` is attributable to
+    // the count and to nothing else. `decide` tests `integrity.result` BEFORE
+    // any objective, so without this the outcome would be the same either way
+    // and the test would not know which variable produced it.
+    assert_eq!(
+        sc.objectives.met,
+        Some(true),
+        "every objective must be met, or the outcome is over-determined: {:?}",
+        sc.objectives
+    );
+    assert_eq!(
+        sc.integrity.mismatches, 0,
+        "the sample must reconcile PERFECTLY: the count is the only failing variable"
+    );
+    assert_eq!(sc.integrity.result, IntegrityResult::Fail);
+
+    // The exit code, read from the same `From` impl the binary uses — never
+    // through a pipe (STANDING RULE 20, GC11).
+    let code = ExitCode::from(err);
+    assert_eq!(code, ExitCode::DrillNotPass);
+    assert_eq!(
+        code as i32, 2,
+        "a result that is not a pass is exit 2, with the document always written and signed"
+    );
+
+    // The SIGNED BYTES, not the in-memory copy: the struct has grown phase 9
+    // by now, so what the readers get is what phase 8 froze.
+    let signed_bytes = std::fs::read(&f.out).expect("--out was written");
+    let uploaded = f
+        .ctx
+        .store
+        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .expect("phase 8 uploaded the scorecard")
+        .0;
+    assert_eq!(
+        signed_bytes, uploaded,
+        "the local artifact and the uploaded object must be the same bytes"
+    );
+    let on_the_wire: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&signed_bytes).expect("the signed bytes are a Scorecard");
+    assert_eq!(
+        on_the_wire.outcome,
+        Outcome::FailIntegrity,
+        "the SIGNED document must say fail-integrity"
+    );
+    assert_eq!(on_the_wire.outcome.wire_name(), "fail-integrity");
+    let reason = on_the_wire
+        .integrity
+        .partial_reason
+        .as_deref()
+        .expect("a failing bound must say so IN THE SIGNED DOCUMENT");
+    assert!(
+        reason.contains(WHOLE_DRILL_BOUND_FAILURE),
+        "the signed reason must carry the bound's exact failure text.\n  expected to \
+         contain: {WHOLE_DRILL_BOUND_FAILURE}\n  got: {reason}"
+    );
+
+    // ---- both readers, over those exact bytes ----
+    let sig_path = f.out.with_extension("sig");
+    assert!(
+        sig_path.exists(),
+        "phase 8 writes the sidecar beside --out; without it neither reader can run"
+    );
+    // The PUBLIC half of the key this run signed with, written into the
+    // fixture's own temp dir. Derived from the signing key the drill used, so
+    // a reader accepting these bytes is evidence about THIS run.
+    let pub_path = f.out.with_file_name("run-signing.pub.pem");
+    fixtures::write_pub(
+        &SigningKey::from_pem_file(&f.args.signing_key).expect("the run's signing key"),
+        &pub_path,
+    );
+
+    // Reader 1 — Rust, in process.
+    let media = logweir::verify::resolve_payload_type("scorecard").expect("the short name");
+    assert_eq!(media, PAYLOAD_TYPE_SCORECARD);
+    match logweir::verify::verify_scorecard(&f.out, &sig_path, &pub_path, media) {
+        Ok(logweir::verify::Verdict::Scorecard(report)) => {
+            assert!(
+                report.signature_valid,
+                "the Rust reader must find the signature valid"
+            );
+            assert!(
+                report.invariants_ok,
+                "a fail-integrity document whose count is outside the bound is a VALID \
+                 document — the bound is a finding, not a contradiction"
+            );
+            assert_eq!(report.run_id, f.run_id);
+            assert_eq!(
+                report.outcome,
+                Outcome::FailIntegrity,
+                "the reader must report the outcome the document carries"
+            );
+        }
+        Ok(other) => panic!("a scorecard must verify as a scorecard, got {other:?}"),
+        Err(code) => panic!(
+            "the Rust reader REFUSED the drill's own signed scorecard (exit {}); a document \
+             Logweir signs and its own verifier rejects is the broken format \
+             docs/verify_scorecard.py's module comment describes",
+            code as i32
+        ),
+    }
+
+    // Reader 2 — the auditor's Python verifier, by direct call. Run from the
+    // workspace root because the script's own paths are relative to it.
+    let out = Command::new(&py)
+        .current_dir(root())
+        .arg("docs/verify_scorecard.py")
+        .arg(&f.out)
+        .arg(&sig_path)
+        .arg(&pub_path)
+        .output()
+        .expect("run docs/verify_scorecard.py");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // `Output::status.code()` is the real process status, never a pipeline's.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the auditor's verifier must ACCEPT the drill's own signed scorecard\n  \
+         stderr: {}\n  stdout: {}",
+        stderr.trim(),
+        String::from_utf8_lossy(&out.stdout).trim()
+    );
+    assert!(
+        strip(&stderr, &[PYTHON_PREFIX]).is_none(),
+        "the auditor's verifier refused an invariant on a document it exited 0 for: {stderr}"
+    );
+    // And the second reader really did read THIS document, rather than exiting
+    // 0 over something it never parsed.
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        stdout.contains("fail-integrity"),
+        "the auditor's verifier must report the outcome it read: {stdout}"
+    );
 }
