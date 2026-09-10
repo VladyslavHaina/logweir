@@ -118,3 +118,125 @@ fn default_data_engine_backup_is_operational() {
          got {r:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 10 — `expected_restored_count`, guard **G-WIN**'s second half.
+
+/// Epoch milliseconds, each computed with
+/// `python3 -c 'import datetime as d; ...'` before being written here (plan
+/// errata E6/E7) and spelled beside its date:
+const FLOOR_MS: i64 = 1_788_220_800_000; // 2026-09-01T00:00:00Z
+const MID_MS: i64 = 1_788_242_400_000; // 2026-09-01T06:00:00Z
+const NEAR_PIT_MS: i64 = 1_788_260_400_000; // 2026-09-01T11:00:00Z
+const PIT_MS: i64 = 1_788_264_000_000; // 2026-09-01T12:00:00Z
+const PAST_PIT_MS: i64 = 1_788_267_600_000; // 2026-09-01T13:00:00Z
+
+fn facts_with_segments(segs: Vec<SegmentFacts>) -> BackupSetFacts {
+    BackupSetFacts {
+        backup_id: "backup-bound-test".into(),
+        created_at: chrono::DateTime::from_timestamp_millis(PAST_PIT_MS).unwrap(),
+        source_cluster_id: None,
+        manifest_sha256: "sha256:0".into(),
+        manifest_version_id: None,
+        consumer_group_snapshot_sha256: None,
+        topics: vec![TopicFacts {
+            name: "orders".into(),
+            original_partition_count: Some(1),
+            source_replication_factor: Some(3),
+            configurations: std::collections::BTreeMap::new(),
+            partitions: vec![PartitionFacts {
+                partition_id: 0,
+                segments: segs,
+                gaps: vec![],
+                pruned: vec![],
+            }],
+        }],
+    }
+}
+
+fn seg(start_ms: i64, end_ms: i64, record_count: i64) -> SegmentFacts {
+    SegmentFacts {
+        key: format!("archive/orders/0/{start_ms}.kbak"),
+        start_offset: 0,
+        end_offset: record_count.max(0) - 1,
+        start_timestamp: start_ms,
+        end_timestamp: end_ms,
+        record_count,
+        sha256: String::new(),
+        uploaded_at: end_ms,
+    }
+}
+
+/// **Guard G-WIN, the bound's arithmetic.** A segment wholly inside the window
+/// is what the manifest PROVES is there and counts towards both bounds; a
+/// segment straddling either bound counts towards `upper` only, because the
+/// manifest carries no per-record timestamp and cannot say how many of its
+/// records fall on the window's side of the boundary.
+///
+/// Kills the mutant "count straddling segments into `lower` as well as
+/// `upper`", which returns `(150, 150)` here.
+#[test]
+fn expected_restored_count_separates_whole_from_straddling_segments() {
+    let facts = facts_with_segments(vec![
+        // Wholly inside: [06:00, 11:00] within [00:00, 12:00].
+        seg(MID_MS, NEAR_PIT_MS, 100),
+        // Straddles `pit_ms`: starts before 12:00 and ends after it.
+        seg(NEAR_PIT_MS, PAST_PIT_MS, 50),
+    ]);
+    assert_eq!(
+        expected_restored_count(&facts, FLOOR_MS, PIT_MS),
+        (100, 150),
+        "the straddling segment's 50 records belong to `upper` only"
+    );
+
+    // A NEGATIVE `record_count` contributes 0, not a wrapped `u64`. Both
+    // bounds must lose exactly the 100 the wholly-inside segment carried, and
+    // neither may come back near `u64::MAX`.
+    let negative = facts_with_segments(vec![
+        seg(MID_MS, NEAR_PIT_MS, -100),
+        seg(NEAR_PIT_MS, PAST_PIT_MS, 50),
+    ]);
+    assert_eq!(
+        expected_restored_count(&negative, FLOOR_MS, PIT_MS),
+        (0, 50),
+        "a negative record_count contributes 0 rather than wrapping"
+    );
+}
+
+/// The three arms the bound's arithmetic needs beyond the split above, each of
+/// which a plausible mutant gets wrong on its own.
+#[test]
+fn expected_restored_count_treats_the_window_as_closed_and_ignores_segments_outside_it() {
+    // Both bounds INCLUSIVE: a segment touching `floor_ms` and `pit_ms`
+    // exactly is wholly INSIDE, not straddling.
+    let flush = facts_with_segments(vec![seg(FLOOR_MS, PIT_MS, 400)]);
+    assert_eq!(
+        expected_restored_count(&flush, FLOOR_MS, PIT_MS),
+        (400, 400),
+        "the restore window's end is inclusive (docs/stability.md), so a segment ending \
+         exactly on it is inside it"
+    );
+
+    // A segment that straddles the FLOOR counts towards `upper` only, exactly
+    // as one straddling the point-in-time does.
+    let below = facts_with_segments(vec![seg(FLOOR_MS - 1, MID_MS, 70)]);
+    assert_eq!(expected_restored_count(&below, FLOOR_MS, PIT_MS), (0, 70));
+
+    // A segment overlapping the window NOWHERE contributes to NEITHER bound:
+    // counting it into `upper` would let an arbitrarily large archive make the
+    // upper bound unfalsifiable.
+    let outside = facts_with_segments(vec![
+        seg(MID_MS, NEAR_PIT_MS, 100),
+        seg(PAST_PIT_MS, PAST_PIT_MS + 1, 9_000),
+        seg(FLOOR_MS - 10, FLOOR_MS - 1, 9_000),
+    ]);
+    assert_eq!(
+        expected_restored_count(&outside, FLOOR_MS, PIT_MS),
+        (100, 100)
+    );
+
+    // No segment in the window at all is `(0, 0)` — an empty bound, never a
+    // fabricated expectation.
+    let empty = facts_with_segments(vec![]);
+    assert_eq!(expected_restored_count(&empty, FLOOR_MS, PIT_MS), (0, 0));
+}

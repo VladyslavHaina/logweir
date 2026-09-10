@@ -7,6 +7,7 @@
 //! execution route) and why a checked-in value cannot serve for any of them.
 mod harness;
 use harness::*;
+use logweir_kafka::reader::ClusterReader;
 
 /// The Part C exit criterion, mechanised.
 #[test]
@@ -550,5 +551,81 @@ fn the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run(
         phase_outcomes(&sc).keys().max() == Some(&7),
         "the signed document should end at phase 7: {:?}",
         phase_outcomes(&sc)
+    );
+}
+
+/// **Guard G-HDR, against the real engine.** The header a real archive
+/// actually carries on a restored record is EIGHT BYTES.
+///
+/// This is the row no in-process test can stand in for. Logweir's own fixtures
+/// fabricate `x-original-offset`, so a fixture can only ever prove that the
+/// decode agrees with the fixture's own encoding; the claim the fix rests on —
+/// that the engine writes `record.offset.to_le_bytes()`
+/// (`U:crates/kafka-backup-core/src/backup/engine.rs:1846`) and that the
+/// restore-side injection matches (`U:…/restore/helpers.rs:130`) — is a claim
+/// about the ENGINE, and only a real archive restored by the real binary can
+/// settle it. Erratum E2's rule, one field over: every contract with the
+/// engine gets at least one real-engine row, because the stub cannot see what
+/// the engine actually does.
+///
+/// It also kills the mutant "render `strip_offset_headers: true` in the restore
+/// document": there would then be no header at all on any restored record, and
+/// this test fails naming that.
+#[test]
+fn the_real_archive_header_is_eight_bytes() {
+    let out = drill_run(&spec_default());
+    assert_eq!(out.out.status.code(), Some(0), "{}", out.out.stderr_utf8());
+
+    let r = reader();
+    let mut seen: Option<Vec<u8>> = None;
+    let mut checked = 0usize;
+    for topic in ["drill-orders", "drill-payments"] {
+        for (p, hi) in ClusterReader::end_offsets(&r, topic).unwrap() {
+            if hi <= 0 || seen.is_some() {
+                continue;
+            }
+            let Some(rec) = ClusterReader::consume_range(&r, topic, p, 0, 1)
+                .unwrap()
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            checked += 1;
+            seen = Some(
+                rec.headers
+                    .iter()
+                    .find(|(k, _)| k == "x-original-offset")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{topic}/{p} offset {} carries no x-original-offset header at all; \
+                             the restore document must never render \
+                             `strip_offset_headers: true` (spec §6.1). Headers present: {:?}",
+                            rec.offset,
+                            rec.headers.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                        )
+                    })
+                    .1
+                    .clone()
+                    .expect("x-original-offset with a null value is not an offset"),
+            );
+        }
+    }
+    assert!(checked > 0, "no restored record was read back at all");
+    let hdr = seen.expect("no x-original-offset header was found on any restored topic");
+    assert_eq!(
+        hdr.len(),
+        8,
+        "the engine writes the original offset as an 8-byte little-endian i64; got {} \
+         byte(s): {hdr:?}",
+        hdr.len()
+    );
+    // And it decodes, through the SAME function phase 7 uses, to an offset the
+    // archive could plausibly have held.
+    let decoded = logweir::drill::phase7_verify::decode_original_offset(&hdr)
+        .expect("eight bytes must decode");
+    assert!(
+        decoded >= 0,
+        "a decoded original offset of {decoded} is not an offset; the byte order is wrong"
     );
 }

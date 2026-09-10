@@ -122,7 +122,17 @@ fn compare_matches_by_the_original_offset_header_not_the_targets_own_offset() {
     // header set (see `fixtures::matching_pair`) — so it is included on
     // BOTH the archive fingerprint and the consumed record here, exactly as
     // it would be in a real restored record.
-    let headers = vec![("x-original-offset".to_string(), Some(b"5".to_vec()))];
+    // Task 10, guard **G-HDR**: the header value is the engine's 8-byte
+    // little-endian i64 `\x05\x00\x00\x00\x00\x00\x00\x00`, NEVER the ASCII
+    // `b"5"` this fixture used to fabricate. `b"5"` is one byte, so
+    // `decode_original_offset` answers `None` for it and `compare` falls back
+    // to the target's own offset — which here is 99, so under the old ASCII
+    // fixture the mutant this test exists to kill (deleting the header lookup)
+    // was killed by accident and the DECODE was never exercised at all.
+    let headers = vec![(
+        "x-original-offset".to_string(),
+        Some(fixtures::le_offset(5)),
+    )];
     let archive = vec![logweir_core::engine::RecordFingerprint {
         topic: "orders".into(),
         partition: 0,
@@ -203,7 +213,19 @@ use logweir_core::engine::{
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
 
-const WINDOW: (i64, i64) = (0, 1_000_000);
+/// The instants every hand-built `SegmentFacts` in this file spans, and every
+/// `SampleSelection` here asks for.
+///
+/// It MUST be the same pair of instants as `plan_orders_to_drill_orders`'s
+/// `time_window` (Task 10): guard **G-WIN**'s second half bounds the restored
+/// count by the segments the manifest places inside the PLAN's window, so a
+/// fixture whose segments sit outside that window proves a bound of `[0, 0]`
+/// and refuses the 50 records its own target holds. Until Task 10 these two
+/// were `(0, 1_000_000)` — 1970-01-01T00:00:00Z to 1970-01-01T00:16:40Z — and
+/// 2026-08-29/30 respectively, an inconsistency nothing in phase 7 could see.
+/// `2026-08-29T00:00:00Z` and `2026-08-30T02:00:00Z`, computed with
+/// `python3 -c 'import datetime as d; ...'` (plan errata E6/E7).
+const WINDOW: (i64, i64) = (1_787_961_600_000, 1_788_055_200_000);
 /// The exact timestamp base `fixtures::matching_pair` bakes into every
 /// record it builds (offset `i` gets `BASE_TS + i`) — duplicated here (not
 /// exported by the fixture) only so `newest_restored_ts_ms` can be asserted
@@ -282,6 +304,34 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
         checkpoint_interval_secs: 30,
         offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
+}
+
+/// The same plan with its point-in-time moved ONE MILLISECOND inside the
+/// segment every fixture here spans — which makes guard **G-WIN**'s
+/// restored-count bound deliberately non-binding, `[0, Σ record_count]`
+/// instead of `[Σ, Σ]`.
+///
+/// Task 10. Every test that reaches for this one is about a SHORT or EMPTY
+/// read-back — an archive that offered one fingerprint where the manifest
+/// claims twenty-five, a sampled partition that gave back nothing — and each
+/// of them models that by giving the target a high watermark as short as the
+/// read-back. Against a wholly-inside segment the count bound then fires too,
+/// and the verdict becomes `Fail` for a second, independent reason: the test
+/// would still be green, and would no longer kill the per-selection mutant it
+/// exists to kill, because the property it pins would no longer be the cause
+/// of what it asserts.
+///
+/// Moving the point-in-time inside the segment is not a fixture dodge; it is
+/// the case the bound exists to be honest about. A `point_in_time` landing
+/// inside a segment is the NORMAL case for a point-in-time restore, and it is
+/// exactly when the manifest cannot say how many records precede it — the
+/// segment straddles, so it counts towards `upper` and not `lower`, and any
+/// count from zero to the whole segment is inside the bound. The count check
+/// is therefore silent here BY CONSTRUCTION, and the selection lane is left as
+/// the single decider it is meant to be.
+fn with_pit_inside_the_segment(mut plan: RestorePlan) -> RestorePlan {
+    plan.time_window.1 -= chrono::Duration::milliseconds(1);
+    plan
 }
 
 #[derive(Default, Clone)]
@@ -1010,7 +1060,7 @@ fn distinct_matching_pair(tag: &str, n: usize) -> (Vec<RecordFingerprint>, Vec<C
         let off = i as i64;
         let headers = vec![(
             "x-original-offset".to_string(),
-            Some(off.to_string().into_bytes()),
+            Some(fixtures::le_offset(off)),
         )];
         let key = format!("{tag}-k{i}").into_bytes();
         let value = format!("{tag}-v{i}").into_bytes();
@@ -1477,7 +1527,9 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     ];
     let mut mapping = fixtures::mapping("orders", "drill-orders");
     mapping.insert("payments".to_string(), "drill-payments".to_string());
-    let mut plan = plan_orders_to_drill_orders();
+    // Task 10: the count bound is deliberately non-binding here — see
+    // `with_pit_inside_the_segment`.
+    let mut plan = with_pit_inside_the_segment(plan_orders_to_drill_orders());
     plan.topic_mapping = mapping.clone();
 
     let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
@@ -1540,7 +1592,9 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
-    let plan = plan_orders_to_drill_orders();
+    // Task 10: the count bound is deliberately non-binding here — see
+    // `with_pit_inside_the_segment`.
+    let plan = with_pit_inside_the_segment(plan_orders_to_drill_orders());
 
     let out = run(
         &engine,
@@ -1616,7 +1670,9 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         &facts,
         &sel_orders(), // count 50
         &fixtures::mapping("orders", "drill-orders"),
-        &plan_orders_to_drill_orders(),
+        // Task 10: the count bound is deliberately non-binding here — see
+        // `with_pit_inside_the_segment`.
+        &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
     )
     .expect("an under-delivering target is a DRILL RESULT, never an Err");
 
@@ -1862,7 +1918,7 @@ fn distinct_pair_for_partition(
         let off = i as i64;
         let headers = vec![(
             "x-original-offset".to_string(),
-            Some(off.to_string().into_bytes()),
+            Some(fixtures::le_offset(off)),
         )];
         let key = format!("p{partition}-k{i}").into_bytes();
         let value = format!("p{partition}-v{i}").into_bytes();
@@ -2237,7 +2293,9 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         &facts,
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
-        &two_topic_plan(),
+        // Task 10: the count bound is deliberately non-binding here — see
+        // `with_pit_inside_the_segment`.
+        &with_pit_inside_the_segment(two_topic_plan()),
     )
     .expect("an un-restored topic is a DRILL RESULT (exit 2, signed), never an Err (exit 1)");
 
@@ -2404,7 +2462,9 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
         &facts,
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
-        &plan_orders_to_drill_orders(),
+        // Task 10: the count bound is deliberately non-binding here — see
+        // `with_pit_inside_the_segment`.
+        &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
     )
     .expect("a partition that gave back nothing is a DRILL RESULT, never an Err");
 
@@ -2482,7 +2542,9 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         &facts,
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
-        &two_topic_plan(),
+        // Task 10: the count bound is deliberately non-binding here — see
+        // `with_pit_inside_the_segment`.
+        &with_pit_inside_the_segment(two_topic_plan()),
     )
     .expect("an under-delivering archive is a DRILL RESULT, never an Err");
 

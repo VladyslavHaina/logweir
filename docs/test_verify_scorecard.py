@@ -570,6 +570,51 @@ def test_a_new_topic_document_with_no_marker_topic_is_accepted():
         assert r.returncode == 0, r.stderr
 
 
+MODE_ARM = (
+    'target.mode is not one of the two values this format defines; it is "scratch" or '
+    '"newTopic" and nothing else'
+)
+
+
+def test_an_unknown_target_mode_is_refused_as_rust_refuses_it():
+    # Task 9b's re-review, NIT-1, measured: `drill verify` exits 1 at
+    # DESERIALISATION on both of these documents — `TargetMode` is a real Rust
+    # enum, so `unknown variant `bogus`, expected `scratch` or `newTopic`` and
+    # `expected value` respectively — while this reader printed VALID and
+    # exited 0. A reader that accepts what the other refuses is the one thing
+    # this file's parity claim forbids, whatever the reason.
+    #
+    # The two TEXTS are not byte-identical and are not meant to be: Rust's are
+    # serde_json's vocabulary, and `expected value` says nothing a second
+    # reader could honestly restate. The VERDICT is what parity is about. Both
+    # documents are `shape-index.json` cases
+    # (`target_mode_unknown_value`, `target_mode_null`), where both readers'
+    # refusals and their separate texts are recorded.
+    for bad in ("bogus", "scratch-ish", "NewTopic", "", "   ", None, 7):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{"target.mode": bad})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 1, f"{bad!r} was accepted: {r.stdout}"
+            assert MODE_ARM in r.stderr, f"{bad!r}: {r.stderr}"
+
+
+def test_an_absent_target_mode_is_still_scratch_and_still_accepted():
+    # ABSENT IS LEGAL and means scratch — `#[serde(default)]` plus
+    # `skip_serializing_if = "TargetMode::is_scratch"` in Rust — and every
+    # scorecard this tree has ever written omits the key. A value-set check
+    # that refused absence would refuse all of them.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "VALID" in r.stdout
+    for good in ("scratch", "newTopic"):
+        with tempfile.TemporaryDirectory() as d:
+            sc, sig = _signed_scorecard(d, **{"target.mode": good})
+            r = run(sc, sig, FIX / "public.pem")
+            assert r.returncode == 0, f"{good!r} was refused: {r.stderr}"
+
+
 def test_a_blank_marker_topic_counts_as_absent():
     # Ruling R-A: `.strip()` here, `trim().is_empty()` in Rust. Without it the
     # two readers split on `""` — the class T0-6 actually found.
@@ -724,7 +769,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.12.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.13.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -751,6 +796,13 @@ def test_the_version_line_names_the_current_invariant_set():
         # which run it was.
         assert (
             "target.marker_topic present unless target.mode is newTopic"
+        ) in r.stdout, r.stdout
+        # 1.13.0's addition (Task 10, closing Task 9b's re-review NIT-1):
+        # `target.mode`'s value set is closed here as it already was in Rust,
+        # where `TargetMode` is a real enum and an unknown or null value is
+        # refused at deserialisation.
+        assert (
+            "target.mode absent or one of the two values the format defines"
         ) in r.stdout, r.stdout
 
 
@@ -1997,9 +2049,16 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.12.0 (Task 9b fix round 1, review F1) added one more arm again —
     # `target.marker_topic` present unless `target.mode` is `newTopic` — plus
     # the new nested optional `target.mode` it reads. Map still four.
+    #
+    # 1.13.0 (Task 10) closes `target.mode`'s VALUE SET, which 1.12.0 read but
+    # did not check: `target.mode: "bogus"` and `"mode": null` made `drill
+    # verify` exit 1 at deserialisation while this reader printed VALID, a
+    # one-sided disagreement measured in Task 9b's re-review (NIT-1). One more
+    # arm; map still four; no new field and no top-level shape change, so the
+    # scorecard stays at format_version 1.0.0 with its 21 properties.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 4, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.12.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.13.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
 

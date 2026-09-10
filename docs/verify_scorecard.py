@@ -320,7 +320,28 @@ FORMAT_VERSION = "1.0.0"
 # thing the proof was about. Both are NESTED fields on `target` — Global
 # Constraint 12 as amended permits that kind and no other — and the document
 # stays at its frozen 21 top-level properties and 17 required ones.
-SCRIPT_VERSION = "1.12.0"
+#
+# 1.13.0 (Task 10) closes Task 9b's re-review NIT-1 and pays Global Constraint
+# 12's price for the restored-count bound.
+#
+# NIT-1, measured rather than reasoned: a scorecard carrying
+# `target.mode: "bogus"` — or `"mode": null` — made `drill verify` exit 1 at
+# DESERIALISATION (`signature verified but the payload is not a scorecard:
+# unknown variant `bogus`, expected `scratch` or `newTopic`` and `signature
+# verified but the payload is not a scorecard: expected value`) while THIS
+# reader printed VALID and exited 0. That is a one-sided disagreement, which is
+# the one thing the parity claim in this file's module comment forbids
+# outright; `target.mode`'s value set is now closed here too, and both
+# documents are corpus cases in `shape-index.json`.
+#
+# Global Constraint 12's price, the OTHER half: `phase7_verify`'s new
+# restored-count bound writes its failure into `integrity.partial_reason`, a
+# field that already exists and whose only invariant is that a `partial` result
+# must not leave it blank. What was NOT pinned is the shape the bound actually
+# writes — `integrity.result: fail` with a reason PRESENT, and the same
+# document with it ABSENT — so `index.json` gains both as ACCEPT cases. No new
+# field, no new arm, and no change to the frozen top-level shape.
+SCRIPT_VERSION = "1.13.0"
 
 # The FOUR payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -933,15 +954,48 @@ def check_invariants(doc) -> str:
         # BLANK COUNTS AS ABSENT (ruling R-A): `.strip()` here,
         # `trim().is_empty()` there.
         #
+        # THE VALUE SET IS CLOSED (SCRIPT_VERSION 1.13.0, Task 9b re-review
+        # NIT-1), and this arm comes FIRST because it decides what the arm
+        # below is allowed to read as "scratch".
+        #
+        # ABSENT IS SCRATCH: `#[serde(default)]` plus `skip_serializing_if =
+        # "TargetMode::is_scratch"` there, `"mode" not in target` here, and
+        # every scorecard this tree has ever written omits the key. PRESENT is
+        # a closed set of exactly `TargetMode`'s two serde tags.
+        #
+        # Until 1.13.0 this file did not check the value at all, and the
+        # comment that stood here cited `shape-index.json` as the precedent for
+        # leaving it unchecked. THAT WAS A MISREADING OF THE PRECEDENT, and it
+        # is worth stating plainly because it is the failure mode this whole
+        # directory exists to catch. Every one of `shape-index.json`'s entries
+        # records a document BOTH readers REFUSE — `rust_exit` and
+        # `python_exit` are both refusals in all of them — with each reader's
+        # own text recorded separately because Rust's half is `serde_json`'s
+        # message and this repository's half is its own wording. What that
+        # index licenses is two DIFFERENT SENTENCES for the same verdict. It
+        # has never licensed one reader printing VALID over a document the
+        # other refuses, and `two_reader_parity_on_documents_refused_before_
+        # the_invariants` fails the moment an entry tries.
+        #
+        # The two texts are therefore not byte-identical, deliberately: Rust's
+        # are `unknown variant `bogus`, expected `scratch` or `newTopic`` and
+        # `expected value` — the second of which carries no information a
+        # second reader could honestly restate, and both of which are
+        # `serde_json`'s vocabulary rather than this format's. Reproducing them
+        # here would bind this file's output to a dependency's internal wording
+        # and would say "I could not parse this" about a document this reader
+        # parsed perfectly well. The VERDICT is what parity is about, and the
+        # verdict now agrees.
+        if "mode" in target and target["mode"] not in ("scratch", "newTopic"):
+            return (
+                "target.mode is not one of the two values this format defines; it "
+                "is \"scratch\" or \"newTopic\" and nothing else"
+            )
+
         # ABSENT-OR-`"scratch"` IS SCRATCH, which is exactly Rust's
         # `#[serde(default)]` plus `TargetMode::is_scratch` for every document
-        # the Rust reader can read. A `mode` that is neither of the format's
-        # two spellings — `"bogus"`, or `null` — is refused by Rust at
-        # DESERIALISATION, because `TargetMode` is a real enum there: that is
-        # the class `shape-index.json` records, where the two readers' texts
-        # are kept separately because neither reaches an invariant, and it is
-        # the same boundary this file already draws for a non-dict `auth` and
-        # for `outcome`'s own value set.
+        # the Rust reader can read. By the time this runs, a PRESENT `mode` is
+        # one of the two spellings and `mode is None` means the key was absent.
         marker_named = bool(str(target.get("marker_topic") or "").strip())
         mode = target.get("mode")
         if not marker_named and (mode is None or mode == "scratch"):
@@ -1591,6 +1645,7 @@ def main(
             "format defines when the block is; "
             "evidence.offset_report_key and its sha256 present or absent together; "
             "target.marker_topic present unless target.mode is newTopic; "
+            "target.mode absent or one of the two values the format defines; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

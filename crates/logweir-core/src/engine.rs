@@ -141,6 +141,78 @@ impl BackupSetFacts {
     }
 }
 
+/// Returns (lower, upper): the count the manifest can PROVE over [floor_ms, pit_ms].
+/// `lower` sums record_count for segments wholly inside the window; `upper` adds
+/// every segment that straddles either bound. A restored count outside [lower, upper]
+/// is an integrity failure; inside it, the sampled reconciliation is the finer check.
+///
+/// SegmentFacts::record_count is i64 (engine.rs:120) and non-negative by
+/// construction; a negative value contributes 0 rather than wrapping.
+///
+/// # Both bounds are INCLUSIVE, because the plan's window is
+///
+/// `RestorePlan::time_window` is `(floor, point_in_time-or-window_end)` and its
+/// END is inclusive — the engine's own restore filter is
+/// `r.timestamp >= s && r.timestamp <= e`
+/// [U:crates/kafka-backup-core/src/restore/helpers.rs:74-82], and
+/// `docs/stability.md` records that the restore window's end is inclusive while
+/// the backup receipt's `covered.to_ms` is exclusive. So "wholly inside" here is
+/// `start_timestamp >= floor_ms && end_timestamp <= pit_ms`, and a segment
+/// touching a bound exactly is inside it, not across it.
+///
+/// # Why a BOUND and not an equality
+///
+/// The manifest's finest granularity is the SEGMENT: `SegmentFacts` carries
+/// `start_timestamp`/`end_timestamp`/`record_count` and there is no per-record
+/// timestamp anywhere in `BackupSetFacts`. When `point_in_time` falls INSIDE a
+/// segment — the normal case for a point-in-time restore — the number of records
+/// at or before it is not derivable, so the manifest can only over-count (take
+/// the whole segment) or under-count (drop it). An equality would therefore fail
+/// a CORRECT implementation, and would then be "fixed" by weakening it, which is
+/// what STANDING RULE 21 forbids. Hence: `lower` is what the manifest proves must
+/// be there, `upper` is the most it could account for, and the boundary question
+/// inside the bound belongs to G-PITR's payload set, never to a count.
+///
+/// # Segments outside the window contribute to NEITHER bound
+///
+/// A segment that ends before `floor_ms` or starts after `pit_ms` overlaps the
+/// window nowhere; counting it into `upper` would let an arbitrarily large
+/// archive make the upper bound unfalsifiable.
+///
+/// # The caller restricts `facts` to the topics it will count
+///
+/// This function sums over every topic in the `facts` it is handed, deliberately:
+/// its signature carries no topic filter, so the ONE decision about which topics
+/// are in scope stays at the call site, next to the count it is compared against.
+/// `logweir::drill::phase7_verify::check_restored_count` therefore passes a
+/// `BackupSetFacts` restricted to the source topics its `topic_mapping` names,
+/// which is the same rule `earliest_covered_timestamp_ms` applies to the floor
+/// (plan erratum **E7(b)**) — an archive may hold topics a restore does not
+/// name, and their records are not records this restore was ever going to write.
+pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i64) -> (u64, u64) {
+    let mut lower = 0u64;
+    let mut straddling = 0u64;
+    for seg in facts
+        .topics
+        .iter()
+        .flat_map(|t| t.partitions.iter())
+        .flat_map(|p| p.segments.iter())
+    {
+        // `record_count` is i64 and non-negative by construction; a negative
+        // value contributes 0 rather than wrapping a `u64` to ~1.8e19, which
+        // would make the upper bound unfalsifiable.
+        let n = seg.record_count.max(0) as u64;
+        let wholly_inside = seg.start_timestamp >= floor_ms && seg.end_timestamp <= pit_ms;
+        let overlaps = seg.end_timestamp >= floor_ms && seg.start_timestamp <= pit_ms;
+        if wholly_inside {
+            lower += n;
+        } else if overlaps {
+            straddling += n;
+        }
+    }
+    (lower, lower + straddling)
+}
+
 /// Where `RestorePlan.time_window.0` came from. An enum, not a bool, so the
 /// plan's claim about its own floor is a VALUE that can be checked against the
 /// floor it describes — and the one place that check happens is plan

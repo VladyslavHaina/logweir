@@ -163,7 +163,7 @@ arm *and* its `uncovered-arms.json` entry in the same edit.
 
 ## `shape-index.json` — parity BEFORE the invariants
 
-Thirty-three documents that neither reader reaches an invariant on. Eleven are
+Thirty-five documents that neither reader reaches an invariant on. Eleven are
 `unmodified_example.json` with one whole required block removed and nothing else
 touched; one has two removed at once; six have one required NON-block field
 removed and six carry one at the WRONG JSON TYPE; three override
@@ -311,6 +311,54 @@ and five more on `null`, and closed both by widening the same derivation. Task 5
 found three more again — the same three fields at the wrong TYPE — and closed
 them by widening it once more, this time to carry the JSON type each field's Rust
 type implies.
+
+## The two `target.mode` cases in `shape-index.json` (Task 10)
+
+`target_mode_unknown_value` (`target.mode` → `"bogus"`) and `target_mode_null`
+(`target.mode` → `null`) close Task 9b's re-review finding NIT-1, measured:
+`drill verify` exited `1` at DESERIALISATION on both — `TargetMode` is a real
+Rust enum, so `unknown variant \`bogus\`, expected \`scratch\` or \`newTopic\`` and
+`expected value` respectively — while `docs/verify_scorecard.py` printed `VALID`
+and exited `0`. One reader accepting what the other refuses is the disagreement
+this whole directory exists to make impossible; `SCRIPT_VERSION 1.13.0` closes
+the value set on the Python side.
+
+They are shape cases and not `index.json` cases because Rust reaches no
+invariant on them, and their two recorded texts DIFFER for the reason every
+other entry here has two: Rust's half is `serde_json`'s own vocabulary, and
+`expected value` carries nothing a second reader could honestly restate.
+Reproducing it would bind this repository's output to a dependency's internal
+wording and would claim this reader could not parse a document it parsed
+perfectly well. **What this index has never licensed is the shape NIT-1 found:**
+all of its entries record BOTH readers refusing, and the comment in
+`verify_scorecard.py` that once cited it as grounds for leaving `target.mode`
+unchecked has been corrected in place.
+
+The `check` kind is `message:` — the weakest kind, and the only applicable one:
+`target.mode` is a NESTED optional field, so none of the `block:`/`field:`/
+`type:`/`null:` arithmetics, all of which are derived from `Scorecard`'s
+top-level required fields, can supply a count for it. The per-arm protections
+are therefore `docs/test_verify_scorecard.py::
+test_an_unknown_target_mode_is_refused_as_rust_refuses_it` (seven bad values)
+and `::test_an_absent_target_mode_is_still_scratch_and_still_accepted` (the
+accept control, in both spellings and absent).
+
+## The two `fail`-with-a-reason cases in `index.json` (Task 10)
+
+`fail_integrity_with_a_bound_partial_reason` and
+`fail_integrity_without_a_partial_reason` are ACCEPT cases, and they are Global
+Constraint 12's price for phase 7's restored-count bound (guard **G-WIN**,
+second half). The bound writes its failure —
+`restored <n> records but the manifest bounds the window [<floor_ms>, <pit_ms>]
+at [<lower>, <upper>]` — into `integrity.partial_reason` beside
+`integrity.result: fail`, which is a field that already existed and a shape no
+case pinned: the only `partial_reason` arm is about a `partial` result, and
+`outcome: pass`'s arm is about a `pass`. Both documents are
+`matrix_pass_on_a_non_pass_at_byte_fingerprint.json` with a coherent
+`matrix_verdict: fail` and its reason, differing from each other by the
+`partial_reason` alone — PRESENT in one, `null` in the other — so a reader that
+started refusing either direction is caught. Neither adds an arm, so
+`every_invariant_arm_has_a_corpus_case`'s arithmetic is untouched.
 
 ## `backup-receipt-index.json` — the BACKUP RECEIPT's corpus (Task 5b)
 

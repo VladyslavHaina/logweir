@@ -211,8 +211,8 @@
 use crate::drill::DrillError;
 use crate::exit::ExitCode;
 use logweir_core::engine::{
-    BackupSetFacts, DataEngine, EngineError, EngineRun, RecordFingerprint, RestorePlan,
-    SampleSelection, SegmentFacts,
+    expected_restored_count, BackupSetFacts, DataEngine, EngineError, EngineRun, RecordFingerprint,
+    RestorePlan, SampleSelection, SegmentFacts,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::scorecard::{Integrity, Scorecard, TopicParity};
@@ -240,6 +240,33 @@ impl VerifyOutcome {
     }
 }
 
+/// The engine writes x-original-offset as `record.offset.to_le_bytes()` — an
+/// 8-byte little-endian i64 (U:crates/kafka-backup-core/src/backup/engine.rs:1846);
+/// the restore-side injection matches (U:…/restore/helpers.rs:130). Anything
+/// that is not exactly 8 bytes is NOT an original offset and yields None.
+///
+/// # There is deliberately NO ASCII fallback — do not add one
+///
+/// This function replaced a decimal-text decode
+/// (`std::str::from_utf8(v).ok().and_then(|s| s.parse::<i64>().ok())`) that was
+/// `None` against EVERY real archive, so `compare` silently fell back to the
+/// target's own offsets — correct only for a scratch topic restored from offset
+/// 0 with no window, which is precisely why every drill passed. Re-adding a
+/// text arm for the "not 8 bytes" case would resurrect that silent fallback,
+/// and an 8-byte value that happens to be ASCII digits is ambiguous under the
+/// two readings anyway: `b"12345678"` is a perfectly valid little-endian i64
+/// and is decoded as one. The tree already knows LE is right in two other
+/// places — `logweir-engine-oso/examples/mint_segments.rs` mints
+/// `off.to_le_bytes()`, and `logweir-engine-oso/tests/kbak.rs` asserts
+/// `i64::from_le_bytes` — so the text decode was the outlier, not the contract.
+///
+/// Pinned by `decode_original_offset_accepts_only_eight_bytes`
+/// (`crates/logweir/tests/windowed_reconciliation.rs`), whose `b"5"` row
+/// asserts `None` and NOT `Some(5)`.
+pub fn decode_original_offset(raw: &[u8]) -> Option<i64> {
+    Some(i64::from_le_bytes(raw.try_into().ok()?))
+}
+
 /// Reconciles by (partition, offset) — never by position, because a restored
 /// topic's offsets need not start at the source's. Returns
 /// (sampled, matching, mismatch descriptions).
@@ -249,7 +276,9 @@ pub fn compare(
 ) -> (u64, u64, Vec<String>) {
     // The restored record carries x-original-offset when the backup wrote it;
     // otherwise we fall back to the target offset, which is correct on a fresh
-    // scratch topic restored from offset 0.
+    // scratch topic restored from offset 0 — and ONLY then, which is why
+    // `decode_original_offset` must not be allowed to answer `None` for a
+    // header the engine actually wrote (see its doc comment).
     let by_offset: BTreeMap<i64, &ConsumedRecord> = consumed
         .iter()
         .map(|c| {
@@ -258,8 +287,7 @@ pub fn compare(
                 .iter()
                 .find(|(k, _)| k == "x-original-offset")
                 .and_then(|(_, v)| v.as_ref())
-                .and_then(|v| std::str::from_utf8(v).ok())
-                .and_then(|s| s.parse::<i64>().ok());
+                .and_then(|v| decode_original_offset(v));
             (orig.unwrap_or(c.offset), c)
         })
         .collect();
@@ -477,16 +505,41 @@ impl SelectionVerdict {
 ///    that lane means "this partition actually gave back at least the
 ///    records the manifest claims". The lane cannot opt out of the
 ///    obligation, because the obligation is not written in the lane.
-fn roll_up(verdicts: &[SelectionVerdict]) -> Integrity {
+///
+/// # `count_bound` — the whole-drill check that is not a selection (Task 10)
+///
+/// Guard **G-WIN**'s second half is not per-selection: it compares the count
+/// the TARGET actually holds against the bound the MANIFEST puts on the
+/// restore window, over every mapped topic at once. It therefore cannot be a
+/// `SelectionVerdict`, and it must not be applied AFTER this function either —
+/// property 1 above is worth exactly as much as the claim "this is the only
+/// place `IntegrityResult` is decided", and a second decider downstream would
+/// retire that claim. So the verdict arrives here as an argument:
+/// `Some(text)` when the restored count fell outside the bound (a `Fail`, whose
+/// text `partial_reason` carries), `None` when it did not. It can only make the
+/// result worse — there is no arm in which a `None` bound turns a non-pass into
+/// a pass — and `check_restored_count` is the one place that decides it.
+fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrity {
     if verdicts.is_empty() {
+        // Still folds the bound in: an empty ledger is already not a pass, but
+        // an auditor reading `partial_reason` must find every finding the run
+        // actually made, and a count outside the bound is a finding.
+        let mut why = vec![
+            "no selection produced a verdict; a verification that examined \
+                            nothing can never report a pass"
+                .to_string(),
+        ];
+        if let Some(bound) = count_bound {
+            why.push(bound.to_string());
+        }
         return Integrity {
             level: IntegrityLevel::NotAttempted,
-            result: IntegrityResult::Partial,
-            partial_reason: Some(
-                "no selection produced a verdict; a verification that examined nothing can \
-                 never report a pass"
-                    .into(),
-            ),
+            result: if count_bound.is_some() {
+                IntegrityResult::Fail
+            } else {
+                IntegrityResult::Partial
+            },
+            partial_reason: Some(why.join("; ")),
             records_sampled: 0,
             records_sampled_matching: 0,
             mismatches: 0,
@@ -509,7 +562,12 @@ fn roll_up(verdicts: &[SelectionVerdict]) -> Integrity {
         IntegrityLevel::ByteFingerprint
     };
 
-    let result = if verdicts.iter().any(SelectionVerdict::failed) {
+    let result = if count_bound.is_some() || verdicts.iter().any(SelectionVerdict::failed) {
+        // The count bound is FIRST and is a `Fail`, not a `Partial`: the
+        // manifest proves the window holds a number of records the target does
+        // not hold, which is a measured contradiction and not missing
+        // coverage. Exit 2 through `Outcome::FailIntegrity`, with the
+        // scorecard written and signed (Global Constraint 11).
         IntegrityResult::Fail
     } else if !verdicts.is_empty() && verdicts.iter().all(SelectionVerdict::fully_verified) {
         // The `!verdicts.is_empty()` conjunct is redundant with the early
@@ -569,6 +627,11 @@ fn roll_up(verdicts: &[SelectionVerdict]) -> Integrity {
         };
 
     let mut notes: Vec<String> = verdicts.iter().flat_map(SelectionVerdict::notes).collect();
+    // FIRST in the joined string, ahead of every per-selection note: it is the
+    // only finding here that is about the restore as a whole.
+    if let Some(bound) = count_bound {
+        notes.insert(0, bound.to_string());
+    }
     if level == IntegrityLevel::ConsumeOnly {
         let byte_level: Vec<&str> = verdicts
             .iter()
@@ -1141,6 +1204,85 @@ fn newest_ts(
     })
 }
 
+/// Guard **G-WIN**, second half: the count the TARGET holds against the bound
+/// the MANIFEST puts on `[floor_ms, pit_ms]`. `None` when the count is inside
+/// the bound; `Some(text)` — the verdict `roll_up` turns into
+/// `IntegrityResult::Fail`, `Outcome::FailIntegrity` and exit 2 — when it is
+/// outside.
+///
+/// # Both numbers are MEASURED; neither is read back out of a document
+///
+/// The expectation comes from `logweir_core::engine::expected_restored_count`
+/// over the manifest facts this phase already holds, and the actual count from
+/// `ClusterReader::end_offsets`, the same ListOffsets read the phase-3 diff and
+/// the phase-6 post-condition use (`logweir-kafka/src/reader.rs`, whose own doc
+/// names it "the phase-7 restored-count check"). An expectation parsed back out
+/// of the document Logweir itself emitted would be a tautology: the engine's
+/// restore filter is `r.timestamp >= s && r.timestamp <= e`
+/// [U:crates/kafka-backup-core/src/restore/helpers.rs:74-82], so both sides of
+/// such a comparison shrink together and the check could never fire. The two
+/// instants arrive as plain `i64` PARAMETERS for that reason — this function
+/// cannot reach a document even if a later edit wanted it to — and
+/// `the_count_expectation_never_reads_the_rendered_document`
+/// (`crates/logweir/tests/windowed_reconciliation.rs`) reads this function's
+/// own source text to keep it that way.
+///
+/// # Scope: exactly the topics the restore names
+///
+/// `expected_restored_count`'s signature carries no topic filter, so the scope
+/// decision lives here, beside the count it is compared against: the facts are
+/// restricted to the source topics `mapping` names, and the count is summed
+/// over the target topics those same entries map to. That is the rule plan
+/// erratum **E7(b)** fixed for the window floor, applied to the bound for the
+/// same reason — an archive set may hold topics this restore does not name, and
+/// their records were never going to be written.
+///
+/// # Why a high-watermark sum is the honest actual count
+///
+/// Every target topic in a `mode: scratch` or `mode: newTopic` restore is one
+/// Logweir created in this run (phase 6; Task 8), so it starts at offset 0 and
+/// its high watermark IS its record count. A negative watermark is impossible
+/// from a broker and contributes 0 rather than wrapping.
+fn check_restored_count(
+    reader: &dyn ClusterReader,
+    facts: &BackupSetFacts,
+    mapping: &BTreeMap<String, String>,
+    floor_ms: i64,
+    pit_ms: i64,
+) -> Result<Option<String>, DrillError> {
+    if mapping.is_empty() {
+        return Err(DrillError::Operational(
+            "restored-count bound ran with zero mapped topics; refusing to report a count \
+             inside a bound computed over nothing"
+                .into(),
+        ));
+    }
+    let named = BackupSetFacts {
+        topics: facts
+            .topics
+            .iter()
+            .filter(|t| mapping.contains_key(&t.name))
+            .cloned()
+            .collect(),
+        ..facts.clone()
+    };
+    let (lower, upper) = expected_restored_count(&named, floor_ms, pit_ms);
+
+    let mut restored = 0u64;
+    for target in mapping.values() {
+        for (_partition, hi) in reader.end_offsets(target)? {
+            restored += hi.max(0) as u64;
+        }
+    }
+
+    Ok((restored < lower || restored > upper).then(|| {
+        format!(
+            "restored {restored} records but the manifest bounds the window \
+             [{floor_ms}, {pit_ms}] at [{lower}, {upper}]"
+        )
+    }))
+}
+
 /// Phase 7's four checks, routed through ONE ledger and ONE roll-up.
 ///
 /// The shape is deliberate and is the fix for the fourth false pass: `run`
@@ -1225,7 +1367,25 @@ pub fn run(
         )?);
     }
 
-    let integrity = roll_up(&verdicts);
+    // Guard **G-WIN**, second half. The two instants are the PLAN's window —
+    // `(floor, point_in_time-or-window_end)`, whose floor plan construction has
+    // already checked against the manifest (`build_plan_with_floor`, exit 3) and
+    // whose rendered spelling phase 5 has already re-derived from the manifest
+    // (`phase5_preflight::check_rendered_window_floor`). `check_restored_count`
+    // takes them as integers so it can reach no document of its own.
+    let count_bound = check_restored_count(
+        reader,
+        facts,
+        mapping,
+        plan.time_window.0.timestamp_millis(),
+        plan.time_window.1.timestamp_millis(),
+    )?;
+    if let Some(why) = &count_bound {
+        tracing::error!(target: "logweir::verify", detail = %why,
+                        "restored count is outside the manifest's bound for the window");
+    }
+
+    let integrity = roll_up(&verdicts, count_bound.as_deref());
     for v in &verdicts {
         tracing::info!(target: "logweir::verify", selection = %v.id, claimed = v.claimed,
                        segments = ?v.segments, records = ?v.records,
@@ -1876,18 +2036,21 @@ mod tests {
         assert!(empty.is_empty());
 
         let (store, _) = store_with("logweir/k", b"anything");
-        let integrity = roll_up(&[
-            verdict(
-                "orders/0",
-                Evidence::Verified { checked: 1 },
-                Evidence::Verified { checked: 10 },
-            ),
-            verdict(
-                "orders/7",
-                segment_evidence(&store, &empty).unwrap(),
-                Evidence::Verified { checked: 10 },
-            ),
-        ]);
+        let integrity = roll_up(
+            &[
+                verdict(
+                    "orders/0",
+                    Evidence::Verified { checked: 1 },
+                    Evidence::Verified { checked: 10 },
+                ),
+                verdict(
+                    "orders/7",
+                    segment_evidence(&store, &empty).unwrap(),
+                    Evidence::Verified { checked: 10 },
+                ),
+            ],
+            None,
+        );
         assert_eq!(
             integrity.result,
             IntegrityResult::Partial,
@@ -1908,7 +2071,7 @@ mod tests {
     /// and it is answered first and explicitly.
     #[test]
     fn roll_up_on_an_empty_ledger_is_partial_never_pass() {
-        let integrity = roll_up(&[]);
+        let integrity = roll_up(&[], None);
         assert_ne!(
             integrity.result,
             IntegrityResult::Pass,
@@ -1928,41 +2091,53 @@ mod tests {
     /// still pass against a `roll_up` that could never return `Pass` at all.
     #[test]
     fn roll_up_reaches_pass_only_with_positive_evidence_on_both_lanes() {
-        let both = roll_up(&[verdict(
-            "orders/0",
-            Evidence::Verified { checked: 1 },
-            Evidence::Verified { checked: 10 },
-        )]);
+        let both = roll_up(
+            &[verdict(
+                "orders/0",
+                Evidence::Verified { checked: 1 },
+                Evidence::Verified { checked: 10 },
+            )],
+            None,
+        );
         assert_eq!(both.result, IntegrityResult::Pass);
 
         // Segment lane silent -> not a pass.
-        let seg_silent = roll_up(&[verdict(
-            "orders/0",
-            Evidence::Unverified {
-                why: "no sha256".into(),
-            },
-            Evidence::Verified { checked: 10 },
-        )]);
+        let seg_silent = roll_up(
+            &[verdict(
+                "orders/0",
+                Evidence::Unverified {
+                    why: "no sha256".into(),
+                },
+                Evidence::Verified { checked: 10 },
+            )],
+            None,
+        );
         assert_eq!(seg_silent.result, IntegrityResult::Partial);
 
         // Record lane silent -> not a pass.
-        let rec_silent = roll_up(&[verdict(
-            "orders/0",
-            Evidence::Verified { checked: 1 },
-            Evidence::Unverified {
-                why: "nothing came back".into(),
-            },
-        )]);
+        let rec_silent = roll_up(
+            &[verdict(
+                "orders/0",
+                Evidence::Verified { checked: 1 },
+                Evidence::Unverified {
+                    why: "nothing came back".into(),
+                },
+            )],
+            None,
+        );
         assert_eq!(rec_silent.result, IntegrityResult::Partial);
 
         // Either lane failing -> Fail, which outranks both of the above.
-        let failed = roll_up(&[verdict(
-            "orders/0",
-            Evidence::Verified { checked: 1 },
-            Evidence::Failed {
-                why: "mismatch".into(),
-            },
-        )]);
+        let failed = roll_up(
+            &[verdict(
+                "orders/0",
+                Evidence::Verified { checked: 1 },
+                Evidence::Failed {
+                    why: "mismatch".into(),
+                },
+            )],
+            None,
+        );
         assert_eq!(failed.result, IntegrityResult::Fail);
     }
 
@@ -2019,7 +2194,7 @@ mod tests {
         );
         segment_failed.downgrade = Some("kbak level below the gate".into());
         segment_failed.reconciled = None;
-        let integrity = roll_up(&[segment_failed]);
+        let integrity = roll_up(&[segment_failed], None);
         assert_eq!(
             integrity.result,
             IntegrityResult::Fail,
@@ -2039,7 +2214,10 @@ mod tests {
         );
         record_failed.downgrade = Some("kbak level below the gate".into());
         record_failed.reconciled = None;
-        assert_eq!(roll_up(&[record_failed]).result, IntegrityResult::Fail);
+        assert_eq!(
+            roll_up(&[record_failed], None).result,
+            IntegrityResult::Fail
+        );
 
         // And a failed DOWNGRADED selection still outranks a healthy sibling,
         // so the whole-drill verdict cannot be rescued by averaging.
@@ -2052,14 +2230,17 @@ mod tests {
         );
         mixed.downgrade = Some("kbak level below the gate".into());
         mixed.reconciled = None;
-        let integrity = roll_up(&[
-            mixed,
-            verdict(
-                "payments/0",
-                Evidence::Verified { checked: 1 },
-                Evidence::Verified { checked: 10 },
-            ),
-        ]);
+        let integrity = roll_up(
+            &[
+                mixed,
+                verdict(
+                    "payments/0",
+                    Evidence::Verified { checked: 1 },
+                    Evidence::Verified { checked: 10 },
+                ),
+            ],
+            None,
+        );
         assert_eq!(integrity.result, IntegrityResult::Fail);
     }
 
@@ -2098,7 +2279,7 @@ mod tests {
         downgraded_but_reconciled.downgrade = Some("kbak level below the gate".into());
         downgraded_but_reconciled.reconciled = Some((7, 5));
 
-        let integrity = roll_up(&[downgraded_but_reconciled]);
+        let integrity = roll_up(&[downgraded_but_reconciled], None);
         assert_eq!(
             integrity.records_sampled, 7,
             "a selection carrying reconciliation counts contributes them to the signed \
@@ -2126,7 +2307,7 @@ mod tests {
         downgraded.reconciled = None;
         downgraded.records_restored = 0;
 
-        let integrity = roll_up(&[downgraded]);
+        let integrity = roll_up(&[downgraded], None);
         assert_eq!(integrity.level, IntegrityLevel::ConsumeOnly);
         assert_ne!(
             integrity.result,
@@ -2151,14 +2332,17 @@ mod tests {
         downgraded.downgrade = Some("kbak level below the gate".into());
         downgraded.reconciled = None;
 
-        let integrity = roll_up(&[
-            downgraded,
-            verdict(
-                "payments/0",
-                Evidence::Verified { checked: 1 },
-                Evidence::Verified { checked: 10 },
-            ),
-        ]);
+        let integrity = roll_up(
+            &[
+                downgraded,
+                verdict(
+                    "payments/0",
+                    Evidence::Verified { checked: 1 },
+                    Evidence::Verified { checked: 10 },
+                ),
+            ],
+            None,
+        );
         assert_eq!(integrity.level, IntegrityLevel::ConsumeOnly);
         assert_eq!(integrity.result, IntegrityResult::Pass);
         assert_eq!(
@@ -2192,14 +2376,17 @@ mod tests {
         );
         short.reconciled = Some((1, 1));
 
-        let integrity = roll_up(&[
-            short,
-            verdict(
-                "payments/0",
-                Evidence::Verified { checked: 1 },
-                Evidence::Verified { checked: 10 },
-            ),
-        ]);
+        let integrity = roll_up(
+            &[
+                short,
+                verdict(
+                    "payments/0",
+                    Evidence::Verified { checked: 1 },
+                    Evidence::Verified { checked: 10 },
+                ),
+            ],
+            None,
+        );
         assert_eq!(integrity.result, IntegrityResult::Partial);
         assert_eq!(
             integrity.pass_rate_measured, None,

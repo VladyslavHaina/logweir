@@ -1,215 +1,229 @@
 [
-  {
-    "id": "unmodified_example",
-    "file": "unmodified_example.json",
-    "rust_exit": 0,
-    "python_exit": 0,
-    "reason": ""
-  },
-  {
-    "id": "partial_reason_empty_string",
-    "file": "partial_reason_empty_string.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "integrity.result is 'partial' but partial_reason is null",
-    "arm": "integrity.result is 'partial' but partial_reason is null"
-  },
-  {
-    "id": "partial_reason_whitespace",
-    "file": "partial_reason_whitespace.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "integrity.result is 'partial' but partial_reason is null",
-    "arm": "integrity.result is 'partial' but partial_reason is null"
-  },
-  {
-    "id": "redactions_non_empty",
-    "file": "redactions_non_empty.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "redactions is non-empty but format_version 1.0.0 has no way to produce one; --redact is a v0.1.1 feature",
-    "arm": "redactions is non-empty but format_version "
-  },
-  {
-    "id": "both_partial_reason_and_redactions",
-    "file": "both_partial_reason_and_redactions.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "integrity.result is 'partial' but partial_reason is null",
-    "arm": "integrity.result is 'partial' but partial_reason is null"
-  },
-  {
-    "id": "outcome_pass_with_partial_integrity",
-    "file": "outcome_pass_with_partial_integrity.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "outcome is 'pass' but integrity.result is not 'pass'",
-    "arm": "outcome is 'pass' but integrity.result is not 'pass'"
-  },
-  {
-    "id": "outcome_pass_with_partial_reason",
-    "file": "outcome_pass_with_partial_reason.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "outcome is 'pass' but integrity.partial_reason is present",
-    "arm": "outcome is 'pass' but integrity.partial_reason is present"
-  },
-  {
-    "id": "outcome_pass_with_unmet_objective",
-    "file": "outcome_pass_with_unmet_objective.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "outcome is 'pass' but objectives.met is false",
-    "arm": "outcome is 'pass' but objectives.met is false"
-  },
-  {
-    "id": "outcome_pass_with_incomplete_sample",
-    "file": "outcome_pass_with_incomplete_sample.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "outcome is 'pass' but only 50 of 100 sampled records matched",
-    "arm": "outcome is 'pass' but only {} of {} sampled records matched"
-  },
-  {
-    "id": "sample_exceeding_expected",
-    "file": "sample_exceeding_expected.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "records_sampled (100) exceeds sample.records_expected (75)",
-    "arm": "records_sampled ({}) exceeds sample.records_expected ({})"
-  },
-  {
-    "id": "matrix_pass_without_byte_fingerprint",
-    "file": "matrix_pass_without_byte_fingerprint.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level",
-    "arm": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
-  },
-  {
-    "id": "matrix_pass_on_a_degraded_pass",
-    "file": "matrix_pass_on_a_degraded_pass.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level",
-    "arm": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
-  },
-  {
-    "id": "matrix_pass_on_a_non_pass_at_byte_fingerprint",
-    "file": "matrix_pass_on_a_non_pass_at_byte_fingerprint.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level",
-    "arm": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
-  },
-  {
-    "id": "pass_with_a_fail_result_and_a_matrix_pass",
-    "file": "pass_with_a_fail_result_and_a_matrix_pass.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "outcome is 'pass' but integrity.result is not 'pass'",
-    "arm": "outcome is 'pass' but integrity.result is not 'pass'"
-  },
-  {
-    "id": "objectives_met_at_a_reduced_level",
-    "file": "objectives_met_at_a_reduced_level.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "objectives.met must be null when pass_rate is not measurable",
-    "arm": "objectives.met must be null when pass_rate is not measurable"
-  },
-  {
-    "id": "negative_rpo_objective",
-    "file": "negative_rpo_objective.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "objectives.rpo_seconds is negative (-300); a recovery-point gap of less than zero is not a smaller gap, it is a meaningless one",
-    "arm": "{name} is negative ({v}); a recovery-point gap of less than zero"
-  },
-  {
-    "id": "more_matching_than_sampled",
-    "file": "more_matching_than_sampled.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "records_sampled_matching exceeds records_sampled",
-    "arm": "records_sampled_matching exceeds records_sampled"
-  },
-  {
-    "id": "matrix_fail_without_a_reason",
-    "file": "matrix_fail_without_a_reason.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null",
-    "arm": "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null"
-  },
-  {
-    "id": "pass_rate_measured_without_byte_fingerprint",
-    "file": "pass_rate_measured_without_byte_fingerprint.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "integrity.pass_rate_measured is set but the level is not byte-fingerprint",
-    "arm": "integrity.pass_rate_measured is set but the level is not byte-fingerprint"
-  },
-  {
-    "id": "last_phase_completed_out_of_domain",
-    "file": "last_phase_completed_out_of_domain.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "last_phase_completed outside -1..=9",
-    "arm": "last_phase_completed outside -1..=9"
-  },
-  {
-    "id": "option_rto_seconds_null",
-    "file": "option_rto_seconds_null.json",
-    "rust_exit": 0,
-    "python_exit": 0,
-    "reason": ""
-  },
-  {
-    "id": "target_auth_mode_absent_is_plaintext",
-    "file": "target_auth_mode_absent_is_plaintext.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext",
-    "arm": "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
-  },
-  {
-    "id": "target_auth_username_without_mode",
-    "file": "target_auth_username_without_mode.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated",
-    "arm": "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated"
-  },
-  {
-    "id": "target_auth_mode_is_the_legacy_spelling",
-    "file": "target_auth_mode_is_the_legacy_spelling.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "target.auth.mode is not one of the two values this format defines; it is \"plaintext\" or \"scramSha512\" and nothing else",
-    "arm": "target.auth.mode is not one of the two values this format defines"
-  },
-  {
-    "id": "offset_report_key_without_its_sha256",
-    "file": "offset_report_key_without_its_sha256.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch",
-    "arm": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together"
-  },
-  {
-    "id": "new_topic_without_a_marker_topic",
-    "file": "new_topic_without_a_marker_topic.json",
-    "rust_exit": 0,
-    "python_exit": 0,
-    "reason": ""
-  },
-  {
-    "id": "scratch_without_a_marker_topic",
-    "file": "scratch_without_a_marker_topic.json",
-    "rust_exit": 4,
-    "python_exit": 1,
-    "reason": "target.marker_topic is absent but target.mode is scratch; the marker topic is the segregation proof phase 0 verified, and a scratch document that omits it claims a check nothing recorded",
-    "arm": "target.marker_topic is absent but target.mode is scratch"
-  }
+ {
+  "id": "unmodified_example",
+  "file": "unmodified_example.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "partial_reason_empty_string",
+  "file": "partial_reason_empty_string.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is 'partial' but partial_reason is null",
+  "arm": "integrity.result is 'partial' but partial_reason is null"
+ },
+ {
+  "id": "partial_reason_whitespace",
+  "file": "partial_reason_whitespace.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is 'partial' but partial_reason is null",
+  "arm": "integrity.result is 'partial' but partial_reason is null"
+ },
+ {
+  "id": "redactions_non_empty",
+  "file": "redactions_non_empty.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "redactions is non-empty but format_version 1.0.0 has no way to produce one; --redact is a v0.1.1 feature",
+  "arm": "redactions is non-empty but format_version "
+ },
+ {
+  "id": "both_partial_reason_and_redactions",
+  "file": "both_partial_reason_and_redactions.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.result is 'partial' but partial_reason is null",
+  "arm": "integrity.result is 'partial' but partial_reason is null"
+ },
+ {
+  "id": "outcome_pass_with_partial_integrity",
+  "file": "outcome_pass_with_partial_integrity.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "outcome is 'pass' but integrity.result is not 'pass'",
+  "arm": "outcome is 'pass' but integrity.result is not 'pass'"
+ },
+ {
+  "id": "outcome_pass_with_partial_reason",
+  "file": "outcome_pass_with_partial_reason.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "outcome is 'pass' but integrity.partial_reason is present",
+  "arm": "outcome is 'pass' but integrity.partial_reason is present"
+ },
+ {
+  "id": "outcome_pass_with_unmet_objective",
+  "file": "outcome_pass_with_unmet_objective.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "outcome is 'pass' but objectives.met is false",
+  "arm": "outcome is 'pass' but objectives.met is false"
+ },
+ {
+  "id": "outcome_pass_with_incomplete_sample",
+  "file": "outcome_pass_with_incomplete_sample.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "outcome is 'pass' but only 50 of 100 sampled records matched",
+  "arm": "outcome is 'pass' but only {} of {} sampled records matched"
+ },
+ {
+  "id": "sample_exceeding_expected",
+  "file": "sample_exceeding_expected.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "records_sampled (100) exceeds sample.records_expected (75)",
+  "arm": "records_sampled ({}) exceeds sample.records_expected ({})"
+ },
+ {
+  "id": "matrix_pass_without_byte_fingerprint",
+  "file": "matrix_pass_without_byte_fingerprint.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level",
+  "arm": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+ },
+ {
+  "id": "matrix_pass_on_a_degraded_pass",
+  "file": "matrix_pass_on_a_degraded_pass.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level",
+  "arm": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+ },
+ {
+  "id": "matrix_pass_on_a_non_pass_at_byte_fingerprint",
+  "file": "matrix_pass_on_a_non_pass_at_byte_fingerprint.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level",
+  "arm": "engine.matrix_verdict is 'pass' but the drill did not pass at byte-fingerprint level"
+ },
+ {
+  "id": "pass_with_a_fail_result_and_a_matrix_pass",
+  "file": "pass_with_a_fail_result_and_a_matrix_pass.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "outcome is 'pass' but integrity.result is not 'pass'",
+  "arm": "outcome is 'pass' but integrity.result is not 'pass'"
+ },
+ {
+  "id": "objectives_met_at_a_reduced_level",
+  "file": "objectives_met_at_a_reduced_level.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "objectives.met must be null when pass_rate is not measurable",
+  "arm": "objectives.met must be null when pass_rate is not measurable"
+ },
+ {
+  "id": "negative_rpo_objective",
+  "file": "negative_rpo_objective.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "objectives.rpo_seconds is negative (-300); a recovery-point gap of less than zero is not a smaller gap, it is a meaningless one",
+  "arm": "{name} is negative ({v}); a recovery-point gap of less than zero"
+ },
+ {
+  "id": "more_matching_than_sampled",
+  "file": "more_matching_than_sampled.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "records_sampled_matching exceeds records_sampled",
+  "arm": "records_sampled_matching exceeds records_sampled"
+ },
+ {
+  "id": "matrix_fail_without_a_reason",
+  "file": "matrix_fail_without_a_reason.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null",
+  "arm": "engine.matrix_verdict is 'fail' but matrix_verdict_reason is null"
+ },
+ {
+  "id": "pass_rate_measured_without_byte_fingerprint",
+  "file": "pass_rate_measured_without_byte_fingerprint.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.pass_rate_measured is set but the level is not byte-fingerprint",
+  "arm": "integrity.pass_rate_measured is set but the level is not byte-fingerprint"
+ },
+ {
+  "id": "last_phase_completed_out_of_domain",
+  "file": "last_phase_completed_out_of_domain.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "last_phase_completed outside -1..=9",
+  "arm": "last_phase_completed outside -1..=9"
+ },
+ {
+  "id": "option_rto_seconds_null",
+  "file": "option_rto_seconds_null.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_auth_mode_absent_is_plaintext",
+  "file": "target_auth_mode_absent_is_plaintext.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext",
+  "arm": "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
+ },
+ {
+  "id": "target_auth_username_without_mode",
+  "file": "target_auth_username_without_mode.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated",
+  "arm": "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated"
+ },
+ {
+  "id": "target_auth_mode_is_the_legacy_spelling",
+  "file": "target_auth_mode_is_the_legacy_spelling.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.auth.mode is not one of the two values this format defines; it is \"plaintext\" or \"scramSha512\" and nothing else",
+  "arm": "target.auth.mode is not one of the two values this format defines"
+ },
+ {
+  "id": "offset_report_key_without_its_sha256",
+  "file": "offset_report_key_without_its_sha256.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch",
+  "arm": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together"
+ },
+ {
+  "id": "new_topic_without_a_marker_topic",
+  "file": "new_topic_without_a_marker_topic.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "scratch_without_a_marker_topic",
+  "file": "scratch_without_a_marker_topic.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.marker_topic is absent but target.mode is scratch; the marker topic is the segregation proof phase 0 verified, and a scratch document that omits it claims a check nothing recorded",
+  "arm": "target.marker_topic is absent but target.mode is scratch"
+ },
+ {
+  "id": "fail_integrity_with_a_bound_partial_reason",
+  "file": "fail_integrity_with_a_bound_partial_reason.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "fail_integrity_without_a_partial_reason",
+  "file": "fail_integrity_without_a_partial_reason.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ }
 ]

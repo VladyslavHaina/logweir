@@ -208,10 +208,26 @@ fn the_deleter_receives_exactly_the_named_topics_and_never_a_pattern() {
     );
 }
 
+/// The `x-original-offset` header value, spelled the way the engine writes it:
+/// `record.offset.to_le_bytes()`, an 8-byte little-endian i64
+/// [U:crates/kafka-backup-core/src/backup/engine.rs:1846]. Task 10, guard
+/// **G-HDR**.
+///
+/// This crate's tests cannot reach `crates/logweir/tests/fixtures::le_offset`
+/// — that is a test-only module of a different crate, not part of any library
+/// — so this is its twin rather than a second encoding: both definitions have
+/// the body `n.to_le_bytes().to_vec()` and
+/// `no_test_fixture_encodes_an_offset_header_as_ascii`
+/// (`crates/logweir/tests/windowed_reconciliation.rs`) reads both files and
+/// asserts exactly that, so the two cannot drift.
+fn le_offset(n: i64) -> Vec<u8> {
+    n.to_le_bytes().to_vec()
+}
+
 #[test]
 fn a_consumed_record_fingerprints_identically_to_the_archived_one() {
     use logweir_kafka::fingerprint::record_fingerprint;
-    let headers = vec![("x-original-offset".to_string(), Some(b"100".to_vec()))];
+    let headers = vec![("x-original-offset".to_string(), Some(le_offset(100)))];
     let a = record_fingerprint(Some(b"k0"), Some(b"v0"), &headers, 1_700_000_000_000);
     let rec = ConsumedRecord {
         partition: 0,

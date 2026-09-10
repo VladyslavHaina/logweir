@@ -276,6 +276,28 @@ impl TopicDeleter for RecordingDeleter {
 
 // ---------------------------------------------------------------- reconciliation
 
+/// The ONE place this crate's tests spell the `x-original-offset` header value.
+///
+/// The engine writes it as `record.offset.to_le_bytes()` — an 8-byte
+/// little-endian i64 [U:crates/kafka-backup-core/src/backup/engine.rs:1846] —
+/// and the restore-side injection matches [U:…/restore/helpers.rs:130]. Every
+/// fixture in this tree used to fabricate it as decimal ASCII
+/// (`off.to_string().into_bytes()`), which decodes to `None` and made
+/// `phase7_verify::compare` fall back to the target's own offset. Because those
+/// fixtures also restored from offset 0, the fallback happened to equal the
+/// right answer and the tests kept passing over a decode that was wrong against
+/// every real archive (Task 10, guard **G-HDR**).
+///
+/// A helper rather than six literals so the encoding cannot drift between
+/// sites; `no_test_fixture_encodes_an_offset_header_as_ascii`
+/// (`crates/logweir/tests/windowed_reconciliation.rs`) asserts that every
+/// `x-original-offset` in this file, in `verify_phase.rs` and in
+/// `logweir-kafka/tests/reader.rs` is paired with a call to it, and that every
+/// definition of it has this exact body.
+pub fn le_offset(n: i64) -> Vec<u8> {
+    n.to_le_bytes().to_vec()
+}
+
 /// `n` archive fingerprints at offsets 0..n and the matching consumed records,
 /// each carrying `x-original-offset` so `compare` matches by original offset.
 pub fn matching_pair(n: usize) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) {
@@ -283,10 +305,7 @@ pub fn matching_pair(n: usize) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) 
     let mut cons = Vec::with_capacity(n);
     for i in 0..n {
         let off = i as i64;
-        let headers = vec![(
-            "x-original-offset".to_string(),
-            Some(off.to_string().into_bytes()),
-        )];
+        let headers = vec![("x-original-offset".to_string(), Some(le_offset(off)))];
         let key = format!("k{i}").into_bytes();
         let value = format!("v{i}").into_bytes();
         let tsms = 1_756_425_600_000i64 + off;
@@ -807,10 +826,7 @@ pub fn orchestrator_pair(
     let mut cons = Vec::with_capacity(n);
     for i in 0..n {
         let off = i as i64;
-        let headers = vec![(
-            "x-original-offset".to_string(),
-            Some(off.to_string().into_bytes()),
-        )];
+        let headers = vec![("x-original-offset".to_string(), Some(le_offset(off)))];
         let key = format!("k{i}").into_bytes();
         let value = format!("v{i}").into_bytes();
         let tsms = newest_ms - ((n - 1 - i) as i64) * 1000;
@@ -1248,6 +1264,46 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // mismatch, and `roll_up` must turn that into `IntegrityResult::Fail`.
         records[0].value = Some(b"tampered".to_vec());
     }
+    // Task 10, guard **G-WIN** second half: the rest of the restored window.
+    //
+    // The manifest says this window holds `FIXTURE_WINDOW_RECORDS` (500)
+    // records, and until Task 10 this fixture's target held only the
+    // `FIXTURE_SAMPLE_RECORDS` (25) the canary reads back — a target holding
+    // 5 % of the window the manifest claims, signed as `Drill::Passes`,
+    // because nothing in phase 7 compared a count against the manifest. It is
+    // the same fixture-invisible false pass G-HDR closes on the header
+    // encoding, one field over, and the fixture is what was wrong: a healthy
+    // restore of a 500-record window puts 500 records on the target.
+    //
+    // So offsets 25..500 are filled in behind the canary. They are NOT part of
+    // the archive fingerprint set and never reach `compare`, which is handed
+    // exactly `consume_range(target, partition, 0, sel.count)` = the first 25;
+    // what they are for is the two reads that look at the WHOLE topic —
+    // `check_restored_count`'s high-watermark sum, and `newest_ts`, which
+    // consumes at `hi - 1` and therefore needs a real record at offset 499.
+    //
+    // Their timestamps run BACK from `newest_ms` in the same one-second cadence
+    // the canary uses, so offset 499 lands exactly on `newest_ms` and the
+    // measured RPO is bit-for-bit what it was before this block existed. The
+    // canary's own 25 timestamps are deliberately left untouched — every
+    // archive fingerprint folds its record's timestamp in, so moving them would
+    // rewrite the archive side of a comparison this fixture is not about — with
+    // the one visible consequence that offsets 24 and 499 share `newest_ms`.
+    // `newest_ts` reads `hi - 1` only, so it reads 499's, and no assertion in
+    // this tree depends on the target's timestamps being monotonic in offset.
+    records.extend(
+        (FIXTURE_SAMPLE_RECORDS as i64..FIXTURE_WINDOW_RECORDS).map(|off| {
+            let tail = FIXTURE_WINDOW_RECORDS - 1 - off;
+            ConsumedRecord {
+                partition: 0,
+                offset: off,
+                timestamp_ms: newest_ms - tail * 1000,
+                key: Some(format!("k{off}").into_bytes()),
+                value: Some(format!("v{off}").into_bytes()),
+                headers: vec![("x-original-offset".to_string(), Some(le_offset(off)))],
+            }
+        }),
+    );
 
     let mut engine = FixtureEngine::new(facts, fps);
     match shape {
@@ -1274,10 +1330,19 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     }
 
     // ---- the target cluster ----
+    // Task 10, guard **G-WIN** second half. `FIXTURE_WINDOW_RECORDS`, not
+    // `FIXTURE_SAMPLE_RECORDS`: the high watermark is a property of the TOPIC,
+    // and a scratch topic Logweir created in this run starts at offset 0, so
+    // its watermark is its record count — which for a healthy restore of this
+    // window is the 500 the manifest claims, never the 25 the canary happens
+    // to read back. `phase7_verify::check_restored_count` compares this sum
+    // against the manifest's own bound and refuses the mismatch, so the old
+    // value now makes every fixture drill `fail-integrity`. That is the check
+    // working, not the check being wrong.
     let restored_hi = if shape == Drill::RestoresNothing {
         0
     } else {
-        FIXTURE_SAMPLE_RECORDS as i64
+        FIXTURE_WINDOW_RECORDS
     };
     let client = FixtureClient {
         cluster_id: FIXTURE_CLUSTER_ID.into(),
