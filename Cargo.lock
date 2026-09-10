@@ -3674,6 +3674,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "logweir-verify",
+ "rustls",
  "serde_json",
  "tokio",
  "tower",

@@ -63,6 +63,47 @@ http = "1"
 # `BodyExt::collect`, for reading a response body back in the double's own
 # tests.
 http-body-util = "0.1"
+# THE PROCESS-LEVEL rustls CRYPTO PROVIDER, declared because the binary has to
+# INSTALL one and cannot be handed one by a feature (fix round 1, review
+# finding H1).
+#
+# rustls 0.23 picks a process-level `CryptoProvider` from its own crate
+# features, and only when EXACTLY ONE of `ring` / `aws-lc-rs` is enabled. This
+# workspace's unified graph enables BOTH — `aws-lc-rs` through
+# `object_store` → `reqwest`, `ring` through `ureq 2.12.1` — and two is the
+# same as none: `ClientConfig::builder()` panics
+# (`rustls-0.23.43/src/crypto/mod.rs:249`). Measured on the shipped binary
+# before this entry existed: `weirkeeper` with no argv aborted at **exit 101**
+# inside rustls, before `kube::Client::try_default()` could return anything, so
+# `main.rs`'s `error!("no Kubernetes client…")` branch was unreachable and a pod
+# would have CrashLoopBackOff'd on a raw panic with no structured log line.
+#
+# WHY `ring` AND NOT `aws-lc-rs`. `ring` is the provider kube 0.99 itself pairs
+# with the `rustls-tls` this crate takes: kube's own `default` set is
+# `["client", "ring"]` and its `ring` feature is exactly
+# `hyper-rustls?/ring` → `rustls/ring` (`kube-client-0.99.0/Cargo.toml:344`).
+# `ring 0.17.14` is ALREADY in `Cargo.lock`, so this entry adds no package
+# (Global Constraint 38) — `cargo metadata` holds at 392 either way, and
+# `tests/linkage.rs::no_new_package_enters_the_graph_for_the_mock` MEASURES
+# that rather than asserting it. `aws-lc-rs 1.18.1` is in the lock too, but it
+# builds `aws-lc-sys` through cmake and a C/asm toolchain that Task 23's image
+# would then have to carry, and rustls reaches it only through `default` /
+# `prefer-post-quantum`, which `default-features = false` declines here.
+#
+# WHY AN INSTALL AND NOT A FIFTH kube FEATURE. Adding `"ring"` to kube's list
+# would yield exactly one provider in a `cargo build -p weirkeeper` graph and
+# fix NOTHING under `cargo test --workspace`, where feature unification puts
+# both provider features back on rustls. An explicit
+# `CryptoProvider::install_default()` is the only fix that holds in every
+# graph — and it leaves kube's feature list at the four the brief pins, which
+# `kube_is_declared_without_default_features` asserts.
+#
+# `default-features = false`: rustls's own default set is
+# `["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"]`, and taking
+# it would drag the second provider into this crate's own graph and re-create
+# the ambiguity in the `-p weirkeeper` build an image uses. `std` is supplied
+# by `tokio-rustls`, which declares `rustls` with `features = ["std"]`.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # The VERIFYING half of the DSSE machinery — `VerifyingKey`, `Sidecar`,
 # `verify_detached` and the three payload-type constants (Task 14, interface
 # I4). Declared NOW and used from Task 16: the controller checks the scorecard

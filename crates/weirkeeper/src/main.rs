@@ -13,6 +13,16 @@
 //! container has no kubeconfig, no service-account token and no API server to
 //! reach; if it built a client first it would exit non-zero in exactly the
 //! place it is used.
+//!
+//! ONE THING PRECEDES THE ARGV MATCH: THE rustls PROVIDER INSTALL. It is not a
+//! client and it is not I/O — it builds a struct and sets a `OnceLock` — and
+//! it has to be unconditional, because it is the difference between this
+//! binary's no-argv path logging a named error and ABORTING at exit 101 inside
+//! rustls (review finding H1). See
+//! [`weirkeeper::install_default_crypto_provider`] for the mechanism and
+//! `Cargo.toml`'s `rustls` entry for why the provider is `ring`. `--version`'s
+//! guarantee is unchanged: it still builds no client and touches no cluster,
+//! which is what Task 23's `scripts/check-image-weirkeeper.sh` check 2 runs.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -31,6 +41,12 @@ Takes no arguments: `--version` prints the version, `--help` prints this, and no
 argument at all runs the controller until SIGTERM.";
 
 fn main() -> ExitCode {
+    // BEFORE ANY kube CLIENT IS BUILT — and before the argv match, because a
+    // provider install is neither a client nor a syscall and an unconditional
+    // one cannot be skipped by a future argv form that does build a client.
+    // Losing the race to another installer is a `false`, not an error.
+    let _installed = weirkeeper::install_default_crypto_provider();
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let flags: Vec<&str> = argv.iter().map(String::as_str).collect();
     match flags.as_slice() {

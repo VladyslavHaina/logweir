@@ -253,16 +253,24 @@ fn kube_is_declared_without_default_features() {
 /// overlay, `cargo metadata` is counted there, those entries are commented out
 /// in the copy, and it is counted again. Equality is the property.
 ///
+/// THE FOURTH ENTRY IS `rustls`, ADDED IN FIX ROUND 1, AND IT IS MEASURED
+/// HERE RATHER THAN ARGUED. The binary has to install a process-level
+/// `CryptoProvider` (review finding H1), which means naming `rustls` in this
+/// manifest; `ring 0.17.14` and `rustls 0.23.43` are both already in
+/// `Cargo.lock`, so the claim is the same claim the other three make and it is
+/// tested by the same measurement — comment the entry out and the resolved
+/// package count must not move.
+///
 /// THE SET OF ENTRIES IS DISCOVERED, NOT HARD-CODED, AND THAT IS WHAT KILLS
 /// THE MUTANT. Written against a literal `["tower", "http",
-/// "http-body-util"]`, this test would PASS after someone adds a fourth
-/// manifest entry pulling a package that is not in `Cargo.lock`: the fourth
-/// entry would be present in BOTH overlays, so both counts would rise together
+/// "http-body-util"]`, this test would PASS after someone adds a further
+/// manifest entry pulling a package that is not in `Cargo.lock`: that entry
+/// would be present in BOTH overlays, so both counts would rise together
 /// and equality would still hold. Discovering every plain third-party version
 /// requirement — everything under `[dependencies]` that is not `kube`, not
 /// `k8s-openapi`, not a `path` dependency and not `workspace = true` — puts
-/// the fourth entry in the commented-out set, where it makes the two numbers
-/// differ. The set is asserted to be exactly the three AFTER the counts are
+/// that entry in the commented-out set, where it makes the two numbers
+/// differ. The set is asserted to be exactly the four AFTER the counts are
 /// compared, so the count difference is the failure a reviewer sees.
 ///
 /// `--offline` throughout: a unit test never reaches the network (STANDING
@@ -315,8 +323,8 @@ fn no_new_package_enters_the_graph_for_the_mock() {
     );
     assert_eq!(
         claimed,
-        vec!["tower", "http", "http-body-util"],
-        "the plain third-party entries in this manifest are fixed at these three (Global \
+        vec!["tower", "http", "http-body-util", "rustls"],
+        "the plain third-party entries in this manifest are fixed at these four (Global \
          Constraint 38 closes the workspace graph); got {claimed:?}"
     );
 }
@@ -650,4 +658,350 @@ fn weirkeeper_help_exits_zero_with_one_paragraph() {
         "one paragraph means no blank line: {stdout}"
     );
     assert!(stdout.contains("weirkeeper"), "got {stdout:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The no-argv startup path — review finding H1
+// ---------------------------------------------------------------------------
+//
+// WHAT WAS BROKEN. `weirkeeper` with no argv aborted at **exit 101** inside
+// rustls: "Could not automatically determine the process-level CryptoProvider
+// from Rustls crate features". rustls 0.23 auto-selects only when EXACTLY ONE
+// of `ring` / `aws-lc-rs` is enabled, and this workspace's unified graph
+// enables both — `aws-lc-rs` through `object_store` → `reqwest`, `ring`
+// through `ureq 2.12.1` — so two behaved as none. The abort happened INSIDE
+// `kube::Client::try_default()`, which is why `main`'s
+// `error!("no Kubernetes client…")` branch was unreachable and why eleven
+// tests and eight mutants missed it: nothing exercised the path.
+//
+// WHY THERE ARE TWO TESTS AND NOT ONE. The first drives the startup path
+// IN-PROCESS, so the provider install has an assertion of its own and the
+// failure is a named expectation rather than a stack trace. The second runs
+// the SHIPPED BINARY, because the property the brief states is a property of
+// a process — its exit code and its log lines — and an in-process test cannot
+// observe `main`'s `ExitCode` or the panic-versus-log distinction at all.
+//
+// NEITHER DIALS. Building a `kube::Client` constructs a connector; it opens no
+// socket, and no `Api` call is ever made. The fixture's apiserver is
+// `https://127.0.0.1:1`: privileged, unused, and never contacted — the address
+// exists so that a regression which DOES dial fails loudly and instantly
+// (connection refused) instead of hanging on a routable host. It is not one of
+// `crates/logweir/tests/no_network_in_unit_tests.rs`'s thirteen `DIAL_TOKENS`
+// (which name the two dialling constructors, the compose stack's 9092/9000
+// endpoints and ureq's agentless builders), so STANDING RULE 18 needs no new
+// `ALLOWED` entry — `the_default_suite_dials_nothing` is green unchanged.
+
+/// The unreachable apiserver every fixture in this section points at.
+const FIXTURE_APISERVER: &str = "https://127.0.0.1:1";
+
+/// A kubeconfig that PARSES and yields a usable `Config`.
+///
+/// No credential material of any kind: no `certificate-authority-data`, no
+/// token, no client certificate, no exec plugin. A controller starting against
+/// this reaches exactly as far as building a client and no further.
+fn good_kubeconfig() -> String {
+    format!(
+        "apiVersion: v1\n\
+         kind: Config\n\
+         clusters:\n\
+         - name: weirkeeper-fixture\n\
+         \x20 cluster:\n\
+         \x20   server: {FIXTURE_APISERVER}\n\
+         contexts:\n\
+         - name: weirkeeper-fixture\n\
+         \x20 context:\n\
+         \x20   cluster: weirkeeper-fixture\n\
+         \x20   user: weirkeeper-fixture\n\
+         current-context: weirkeeper-fixture\n\
+         users:\n\
+         - name: weirkeeper-fixture\n\
+         \x20 user: {{}}\n"
+    )
+}
+
+/// A kubeconfig whose current context names a cluster that is not there.
+///
+/// Valid YAML, valid kubeconfig shape, unresolvable context — so
+/// `Config::infer()` returns a clean `Err` and `main`'s error branch is
+/// REACHED rather than merely written. Finding H1b was that this branch was
+/// unreachable; this fixture is what proves it no longer is.
+fn unresolvable_kubeconfig() -> String {
+    "apiVersion: v1\n\
+     kind: Config\n\
+     clusters: []\n\
+     contexts: []\n\
+     current-context: weirkeeper-no-such-context\n\
+     users: []\n"
+        .to_string()
+}
+
+/// A kubeconfig written to a private temp directory, removed on drop.
+///
+/// The same `std::env::temp_dir()` + `Drop` shape as [`Overlay`], and for the
+/// same reason: Global Constraint 38 fixes this crate's manifest additions, so
+/// there is no `tempfile` dev-dependency to reach for.
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn write(tag: &str, text: &str) -> Self {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "weirkeeper-kubeconfig-{tag}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("the temp dir is creatable");
+        let path = dir.join("kubeconfig.yaml");
+        std::fs::write(&path, text).expect("the fixture is writable");
+        Self(dir)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.join("kubeconfig.yaml")
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The startup path, in-process: the provider is installed, and the client
+/// builds instead of panicking.
+///
+/// WHAT THIS PROVES. `weirkeeper::install_default_crypto_provider()` leaves a
+/// process-level `CryptoProvider` installed, and with one installed the exact
+/// two calls `main` makes — a `Config` off a kubeconfig, then
+/// `kube::Client::try_from` — complete cleanly. `Client::try_from` is where the
+/// abort used to happen: it builds the rustls HTTPS connector through
+/// `ConfigExt`, and `ClientConfig::builder()` is the call that panicked.
+///
+/// WHAT THIS DOES NOT PROVE. Nothing about reaching an apiserver. Building a
+/// client is not a connection, and the measured outcome here is `Ok`, not
+/// `Err` — which is precisely why the brief's clause for the no-argv path is
+/// "logs one line and exits 0 on SIGTERM" and not "exits non-zero". The clean
+/// `Err` half of `main`'s branch is asserted in the second arm below, and the
+/// process-level behaviour in the test after this one.
+///
+/// WHY `install_default_crypto_provider` IS CALLED AND ITS EFFECT ASSERTED
+/// SEPARATELY. The assertion is the mutant's landing site: delete the install
+/// (or empty the function) and this fails at the `get_default().is_some()`
+/// line with a named message, rather than unwinding out of rustls with a
+/// stack trace a reader has to interpret.
+#[tokio::test]
+async fn the_startup_path_builds_a_client_from_a_kubeconfig_without_panicking() {
+    weirkeeper::install_default_crypto_provider();
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_some(),
+        "install_default_crypto_provider() must leave a process-level CryptoProvider \
+         installed. Without one, rustls 0.23 tries to pick from its crate features, this \
+         workspace enables BOTH ring (via ureq) and aws-lc-rs (via object_store -> reqwest), \
+         and rustls panics at rustls-0.23.43/src/crypto/mod.rs:249 — which is the exit-101 \
+         abort of the no-argv path (review finding H1)."
+    );
+
+    let fixture = Fixture::write("good", &good_kubeconfig());
+    let kubeconfig =
+        kube::config::Kubeconfig::read_from(fixture.path()).expect("the fixture kubeconfig parses");
+    let cfg = kube::Config::from_custom_kubeconfig(
+        kubeconfig,
+        &kube::config::KubeConfigOptions::default(),
+    )
+    .await
+    .expect("the fixture kubeconfig yields a Config");
+    assert!(
+        cfg.cluster_url.to_string().starts_with(FIXTURE_APISERVER),
+        "the fixture points at the unreachable apiserver, got {}",
+        cfg.cluster_url
+    );
+
+    // THE CALL THAT USED TO ABORT THE PROCESS.
+    let client = kube::Client::try_from(cfg).expect(
+        "kube::Client::try_from must build a client from the fixture Config — it constructs a \
+         connector and opens no socket",
+    );
+    assert_eq!(
+        client.default_namespace(),
+        "default",
+        "a context with no namespace resolves to `default`, which is the value main logs"
+    );
+
+    // THE CLEAN-ERROR HALF: main's `error!(\"no Kubernetes client…\")` branch is
+    // reachable, and reached by a typed Err rather than by an unwind.
+    let broken = Fixture::write("unresolvable", &unresolvable_kubeconfig());
+    let kubeconfig =
+        kube::config::Kubeconfig::read_from(broken.path()).expect("the shape still parses");
+    let err = kube::Config::from_custom_kubeconfig(
+        kubeconfig,
+        &kube::config::KubeConfigOptions::default(),
+    )
+    .await
+    .expect_err("a context that names no cluster must be a clean Err, not a panic");
+    let text = err.to_string();
+    assert!(
+        !text.is_empty(),
+        "the error main logs must have a Display form"
+    );
+}
+
+/// The shipped binary, with no argv and a `KUBECONFIG`: the brief's clause,
+/// end to end.
+///
+/// Runs the binary cargo has ALREADY built for this test target — never `cargo
+/// run`, which would re-enter cargo while `cargo test --workspace` holds the
+/// build lock (the idiom is `crates/logweir/tests/guard_cli.rs:7`).
+///
+/// ARM 1 — the brief's no-argv clause. With a kubeconfig it can build a client
+/// from, the binary installs its subscriber, logs ONE line naming the
+/// registered controller count, and exits **0** on SIGTERM. Before the fix this
+/// arm produced exit **101** and a rustls panic on stderr, so this is the
+/// assertion the provider-removal mutant lands on.
+///
+/// ARM 2 — the error branch, named. With a kubeconfig whose context resolves to
+/// nothing, the binary exits **1** having logged `no Kubernetes client`.
+///
+/// STDERR IS ASSERTED EMPTY IN BOTH ARMS, and that is the point rather than a
+/// detail: Global Constraint 11 puts every readable line on STDOUT as JSON
+/// (the pod log API has no stream selector), so on this binary a non-empty
+/// stderr means a panic or a subscriber that never installed. "Exit code plus
+/// the log line" is therefore spelled as "exit code, the line on stdout, and
+/// nothing at all on stderr".
+///
+/// NO SOCKET. Nothing is listening on `127.0.0.1:1`, no `Api` call is made and
+/// no reconciler is registered — `controllers` is 0 until Task 16 — so the
+/// process builds a client, logs, and waits for a signal.
+///
+/// OUTPUT GOES TO FILES, NOT PIPES. A long-lived child whose stdout is a pipe
+/// nobody drains can block on a full pipe buffer, and the exit code is read
+/// from `Child::wait()` directly — never through a pipe (STANDING RULE 20).
+#[test]
+fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
+    // ---- ARM 1: the good kubeconfig, SIGTERM, exit 0 -------------------
+    let fixture = Fixture::write("proc-good", &good_kubeconfig());
+    let out_path = fixture.path().with_file_name("stdout.log");
+    let err_path = fixture.path().with_file_name("stderr.log");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
+        .env("KUBECONFIG", fixture.path())
+        // The subscriber filters from RUST_LOG; `info` is what makes the
+        // startup line and the SIGTERM line observable.
+        .env("RUST_LOG", "info")
+        // Never let a stray in-cluster environment win over the fixture:
+        // `Config::infer()` tries in-cluster FIRST, and a workstation that
+        // happens to export these would take a different branch.
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("KUBERNETES_SERVICE_PORT")
+        .stdout(std::fs::File::create(&out_path).expect("the log file is creatable"))
+        .stderr(std::fs::File::create(&err_path).expect("the log file is creatable"))
+        .spawn()
+        .expect("the built binary runs");
+
+    // Wait for the startup line, or for an early exit, whichever comes first.
+    // 10 s is a generous ceiling on "install a subscriber and build a
+    // connector"; measured, it is milliseconds. STANDING RULE 22 bounds each
+    // test at 15 s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut early = None;
+    loop {
+        if let Some(status) = child.try_wait().expect("the child is waitable") {
+            early = Some(status);
+            break;
+        }
+        if std::fs::read_to_string(&out_path)
+            .unwrap_or_default()
+            .contains("weirkeeper started")
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the no-argv binary never logged `weirkeeper started` within 10 s.\n\
+                 stdout: {:?}\nstderr: {:?}",
+                std::fs::read_to_string(&out_path).unwrap_or_default(),
+                std::fs::read_to_string(&err_path).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+    assert!(
+        early.is_none(),
+        "the no-argv binary must NOT exit on its own: it exited {:?}.\n\
+         This is review finding H1: exit 101 with `Could not automatically determine the \
+         process-level CryptoProvider` means the provider install in main is gone.\n\
+         stdout: {stdout:?}\nstderr: {stderr:?}",
+        early.map(|s| s.code())
+    );
+    assert!(
+        stderr.is_empty(),
+        "nothing may reach stderr — every readable line is JSON on stdout (Global Constraint \
+         11), so a non-empty stderr is a panic or a missing subscriber. Got: {stderr:?}"
+    );
+    assert!(
+        stdout.contains("\"controllers\":0"),
+        "the startup line names the registered controller count, 0 until Task 16. Got: \
+         {stdout:?}"
+    );
+
+    // SIGTERM through the shell's builtin rather than a `kill` binary, which is
+    // not present on every image; the exit code that matters is read from
+    // `Child::wait()` below, not from this process.
+    let pid = child.id();
+    let signalled = Command::new("/bin/sh")
+        .args(["-c", &format!("kill -TERM {pid}")])
+        .status()
+        .expect("the shell runs");
+    assert!(
+        signalled.success(),
+        "SIGTERM could not be delivered to {pid}"
+    );
+
+    let status = child.wait().expect("the child is waitable");
+    let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "SIGTERM must be an ordinary shutdown: a controller that exits non-zero on `kubectl \
+         delete pod` turns a rollout into a CrashLoopBackOff.\nstdout: {stdout:?}\nstderr: \
+         {stderr:?}"
+    );
+    assert!(
+        stdout.contains("SIGTERM"),
+        "the shutdown is logged, not silent. Got: {stdout:?}"
+    );
+    assert!(stderr.is_empty(), "still nothing on stderr: {stderr:?}");
+
+    // ---- ARM 2: the unresolvable kubeconfig, exit 1, named error --------
+    let broken = Fixture::write("proc-unresolvable", &unresolvable_kubeconfig());
+    let out = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
+        .env("KUBECONFIG", broken.path())
+        .env("RUST_LOG", "info")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("KUBERNETES_SERVICE_PORT")
+        .output()
+        .expect("the built binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a kubeconfig that resolves to nothing is an exit-1 named error, never a panic \
+         (finding H1b).\nstdout: {stdout:?}\nstderr: {stderr:?}"
+    );
+    assert!(
+        stdout.contains("no Kubernetes client"),
+        "the error branch names itself on stdout. Got: {stdout:?}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "the error branch logs; it does not panic. Got: {stderr:?}"
+    );
 }

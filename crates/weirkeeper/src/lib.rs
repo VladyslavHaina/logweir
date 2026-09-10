@@ -27,3 +27,47 @@
 //! `[dev-dependencies]`.
 
 pub mod testing;
+
+/// Install the process-level rustls [`CryptoProvider`] this binary's TLS stack
+/// needs, and report whether this call was the one that installed it.
+///
+/// WHY THIS FUNCTION EXISTS. rustls 0.23 selects a process-level provider from
+/// its own crate features, and only when EXACTLY ONE of `ring` / `aws-lc-rs`
+/// is enabled; with two enabled `from_crate_features()` returns `None` and
+/// `ClientConfig::builder()` panics at
+/// `rustls-0.23.43/src/crypto/mod.rs:249`. This workspace's unified graph
+/// enables both — `aws-lc-rs` through `object_store` → `reqwest`, `ring`
+/// through `ureq 2.12.1` — so **two is the same as none**. Measured on the
+/// shipped binary before this function existed: `weirkeeper` with no argv
+/// aborted at **exit 101** inside rustls, before `kube::Client::try_default()`
+/// could return anything. `main`'s `error!("no Kubernetes client…")` branch was
+/// therefore unreachable, and a pod would have CrashLoopBackOff'd on a raw
+/// panic with no structured log line at all.
+///
+/// WHY IT IS A LIBRARY FUNCTION AND NOT THREE LINES INSIDE `main`. `main.rs`
+/// is a binary: an integration test cannot call into it. Putting the install
+/// here is what lets
+/// `tests/linkage.rs::the_startup_path_builds_a_client_from_a_kubeconfig_without_panicking`
+/// drive the exact call `main` makes, in-process and without a socket, so the
+/// property has a test at assertion time rather than only a process-level
+/// observation.
+///
+/// WHY `ring`. It is the provider kube 0.99 itself pairs with the `rustls-tls`
+/// feature this crate takes — kube's own `default` set is `["client", "ring"]`
+/// — and `ring 0.17.14` is already in `Cargo.lock`, so declaring it adds no
+/// package (Global Constraint 38). `Cargo.toml`'s entry carries the full
+/// reasoning, including why `aws-lc-rs` was declined and why a fifth kube
+/// feature would not have fixed this.
+///
+/// IDEMPOTENT BY CONSTRUCTION. `install_default` is a `OnceLock::set`: a
+/// `false` return means some other caller got there first, which is a race
+/// this function is allowed to lose and not an error. The return value is
+/// reported rather than discarded so a caller — and the test — can say which
+/// happened.
+///
+/// [`CryptoProvider`]: rustls::crypto::CryptoProvider
+pub fn install_default_crypto_provider() -> bool {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_ok()
+}
