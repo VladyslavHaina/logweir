@@ -237,6 +237,14 @@ fn scram_auth(password: &str) -> AuthConfig {
 /// `--zookeeper` path, and the credential is a user config record a client has
 /// to write after the quorum is serving.
 ///
+/// And it is the assertion the **fifth** mutant kills, which is not where the
+/// brief expected it: map `SASL`/`SASLEXT` to `PLAINTEXT` and the CORRECT
+/// password can no longer read the cluster id, because a PLAINTEXT-mapped
+/// listener refuses the SASL handshake outright rather than waving every
+/// password through. Measured; see
+/// `scram_refuses_a_wrong_password_through_the_rdkafka_client`'s doc comment
+/// for the transcript and for why the refusal row is not the killer there.
+///
 /// The cluster id is compared with the one read over the PLAINTEXT `EXTERNAL`
 /// listener, so this row proves it reached **the same broker** and not merely
 /// *a* broker.
@@ -274,15 +282,31 @@ fn scram_authenticates_through_the_rdkafka_client() {
     );
 }
 
-/// **A WRONG PASSWORD IS REFUSED**, and this row is the only thing standing
-/// between `SASL:SASL_PLAINTEXT` and a silent `SASL:PLAINTEXT`.
+/// **A WRONG PASSWORD IS REFUSED** — the one property no other row in this
+/// file asserts.
 ///
-/// Map `SASL`/`SASLEXT` to `PLAINTEXT` in the protocol map (mutant 5) and the
-/// broker stops authenticating anything: librdkafka's SASL configuration is
-/// then irrelevant, every password is accepted, and `cluster_id()` returns
-/// `Ok`. So the assertion is that it returns `Err` — with the
-/// success arm above as the control that makes the `Err` mean "the password
-/// was rejected" rather than "nothing was listening".
+/// # It is NOT what catches `SASL:PLAINTEXT`, and that was measured
+///
+/// The task brief predicts that mapping `SASL`/`SASLEXT` to `PLAINTEXT`
+/// (mutant 5) makes this row fail, on the reasoning that "a wrong password is
+/// accepted because nothing authenticates". **Applied and run, that is not
+/// what the broker does.** A PLAINTEXT-mapped listener does not accept a SASL
+/// client at all — it refuses the handshake:
+///
+/// ```text
+/// SASL SCRAM-SHA-512 mechanism handshake failed: Broker: Request not valid in
+/// current SASL state: broker's supported mechanisms:
+/// ```
+///
+/// so the wrong password is still refused, and THIS ROW STILL PASSES. The row
+/// that fails under mutant 5 is
+/// `scram_authenticates_through_the_rdkafka_client` above, where the CORRECT
+/// password can no longer read the cluster id. Recorded here rather than left
+/// as a comment that claims more than the run supports: under the six mutants
+/// the brief lists, this row is the unique killer of none of them. It exists
+/// because "a wrong password does not get in" is a property the success row
+/// cannot state, and the success row is what makes this row's `Err` mean "the
+/// password was rejected" rather than "nothing was listening".
 ///
 /// # What the error type can and cannot say
 ///
@@ -768,8 +792,98 @@ fn a_drill_with_a_wrong_scram_password_fails_as_authentication() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The K8S listener: a published port, and a POD.
+// 5. The K8S listener: a parameter, a published port, and a POD.
 // ---------------------------------------------------------------------------
+
+/// **The advertised K8S name is a PARAMETER, not a literal** (critique D H10).
+///
+/// `host.docker.internal` does not resolve inside a `kind` node on a Linux
+/// GitHub runner, and STANDING RULE 15 makes this task the compose file's only
+/// editor — so `LOGWEIR_K8S_ADVERTISED_HOST` has to exist HERE or a later task
+/// has to break that rule to get one. The default is the docker-desktop name
+/// every local gate uses.
+///
+/// Rendered TWICE by `docker compose config`, with `-q` read directly for the
+/// exit code and the `KAFKA_ADVERTISED_LISTENERS` line captured on one call and
+/// read on the next (STANDING RULE 20 — nothing whose status matters is
+/// piped). It needs no broker: `config` is a pure render.
+///
+/// **This is the row that kills the sixth mutant.** Hard-code
+/// `host.docker.internal` in place of `${LOGWEIR_K8S_ADVERTISED_HOST:-…}` and
+/// the override arm below fails at assertion time — the rendered line still
+/// reads `host.docker.internal` under the override. The acceptance runs the
+/// same two commands by hand; this row is what makes the property a test with
+/// a count rather than a transcript in a report.
+#[test]
+fn the_k8s_advertised_host_is_a_parameter() {
+    let render = |host: Option<&str>| -> (Option<i32>, String) {
+        let mut quiet = Command::new("docker");
+        quiet.args([
+            "compose",
+            "-f",
+            "e2e/compose/docker-compose.yml",
+            "config",
+            "-q",
+        ]);
+        let mut full = Command::new("docker");
+        full.args(["compose", "-f", "e2e/compose/docker-compose.yml", "config"]);
+        if let Some(h) = host {
+            quiet.env("LOGWEIR_K8S_ADVERTISED_HOST", h);
+            full.env("LOGWEIR_K8S_ADVERTISED_HOST", h);
+        }
+        let rc = quiet
+            .current_dir(root())
+            .output()
+            .expect("docker compose config -q")
+            .status
+            .code();
+        let out = full
+            .current_dir(root())
+            .output()
+            .expect("docker compose config");
+        let line = out
+            .stdout_utf8()
+            .lines()
+            .find(|l| l.contains("KAFKA_ADVERTISED_LISTENERS"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        (rc, line)
+    };
+
+    let (rc, line) = render(None);
+    assert_eq!(rc, Some(0), "`docker compose config -q` failed: {line}");
+    assert!(
+        line.contains("K8S://host.docker.internal:9095"),
+        "the DEFAULT must be the docker-desktop name every local gate uses: {line}"
+    );
+
+    let (rc, line) = render(Some("172.18.0.1"));
+    assert_eq!(
+        rc,
+        Some(0),
+        "`docker compose config -q` failed under the override: {line}"
+    );
+    assert!(
+        line.contains("K8S://172.18.0.1:9095"),
+        "LOGWEIR_K8S_ADVERTISED_HOST was IGNORED — the advertised K8S name is hard-coded, so \
+         Task 31 has no override and would have to edit this file (STANDING RULE 15): {line}"
+    );
+    // And the override touches NOTHING else: the other four advertisements are
+    // fixed strings, not parameters that a CI runner could bend by accident.
+    for fixed in [
+        "PLAINTEXT://kafka-broker-1:9094",
+        "EXTERNAL://localhost:9092",
+        "SASL://kafka-broker-1:9096",
+        "SASLEXT://localhost:9097",
+    ] {
+        assert!(
+            line.contains(fixed),
+            "{fixed} changed under the override: {line}"
+        );
+    }
+    eprintln!("[t7] override honoured: {line}");
+}
 
 /// **The published half.** Port 9095 answers on the host, and the advertised
 /// name a client on `kafka-net` reads back out of the broker's METADATA is
@@ -783,7 +897,8 @@ fn a_drill_with_a_wrong_scram_password_fails_as_authentication() {
 /// not this file's.
 ///
 /// Mutant 4 — drop `K8S` from `ports:` — fails the first half at assertion
-/// time.
+/// time (`Connection refused` on `127.0.0.1:9095`), and fails
+/// `a_pod_really_reaches_the_k8s_listener` below too.
 #[test]
 fn a_pod_reachable_listener_is_published() {
     // `nc -z localhost 9095` as a TCP connect, so the assertion is on a
