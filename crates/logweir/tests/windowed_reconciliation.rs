@@ -41,9 +41,9 @@ use logweir::drill::phase7_verify::{compare, decode_original_offset, run};
 use logweir::drill::{phase8_score, DrillError};
 use logweir::exit::ExitCode;
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineRun, PartitionFacts,
-    PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection,
-    SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    expected_restored_count, BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId,
+    EngineRun, PartitionFacts, PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts,
+    RestorePlan, SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::{IntegrityResult, Outcome};
 use logweir_core::spec::{Anchor, ObjectivesSpec};
@@ -659,6 +659,187 @@ fn restored_count_is_inside_the_manifest_bound() {
         .partial_reason
         .as_deref()
         .is_some_and(|r| r.contains("restored 6001 records but the manifest bounds the window")));
+}
+
+// ---------------------------------------------------------------------------
+// G-WIN, second half: the bound's SCOPE (plan erratum E7(b)).
+
+/// How many records the manifest places in the window for the topic the
+/// restore NAMES, and how many the target gets — a healthy, exact restore.
+const NAMED_TOPIC_RECORDS: i64 = 50;
+/// And how many an archive topic the restore does NOT name holds in the same
+/// window. 180× the named topic's, so an unfiltered walk cannot be mistaken
+/// for a rounding difference — and wholly INSIDE `[FLOOR_MS, PIT_MS]`, because
+/// a segment outside the window contributes to neither bound and a fixture
+/// built that way could not tell the two walks apart at all.
+const UNNAMED_TOPIC_RECORDS: i64 = 9_000;
+
+/// `facts_with`'s `orders` plus a SECOND topic `topic_mapping` does not name.
+fn facts_with_an_unnamed_topic(named: SegmentFacts, unnamed: SegmentFacts) -> BackupSetFacts {
+    let mut facts = facts_with(vec![named]);
+    facts.topics.push(TopicFacts {
+        name: "audit-log".into(),
+        original_partition_count: Some(1),
+        source_replication_factor: Some(1),
+        configurations: fixtures::source_configs(&[("cleanup.policy", "delete")]),
+        partitions: vec![PartitionFacts {
+            partition_id: 0,
+            segments: vec![unnamed],
+            gaps: vec![],
+            pruned: vec![],
+        }],
+    });
+    facts
+}
+
+/// **Plan erratum E7(b), the bound's half.** The bound is computed over the
+/// topics the restore NAMES, and an archive topic the mapping leaves out
+/// cannot raise it.
+///
+/// Both behaviours are pinned, because they are two different contracts held
+/// by two different pieces of code and only the pair is the property:
+///
+/// 1. `logweir_core::engine::expected_restored_count` is UNFILTERED BY
+///    CONTRACT — its own doc comment says it "sums over every topic in the
+///    `facts` it is handed, deliberately", so that the ONE scope decision
+///    lives at the call site rather than in a signature that cannot carry a
+///    mapping. Handed every topic it counts every topic: `(9050, 9050)`.
+/// 2. `phase7_verify::check_restored_count` is where the reduction is applied,
+///    beside the count it is compared against — the same rule
+///    `earliest_covered_timestamp_ms` applies to the FLOOR
+///    (`window_binding.rs::a_topic_the_restore_does_not_name_does_not_lower_the_floor`,
+///    which is the floor-side twin of this test).
+///
+/// Kills the mutant "delete the `mapping.contains_key(&t.name)` filter in
+/// `check_restored_count`" — measured by Task 10's reviewer to leave the whole
+/// 924-test suite green. It is not an equivalent mutant: with the filter gone
+/// the bound over this fixture becomes `[9050, 9050]`, and the healthy,
+/// exact 50-of-50 restore below is signed `fail-integrity` with
+/// `restored 50 records but the manifest bounds the window [.., ..] at
+/// [9050, 9050]`. Half 2 is what fails, on the COUNT.
+#[test]
+fn the_bound_counts_only_the_topics_the_restore_names() {
+    let store = Store::in_memory("logweir");
+    let sha_named = seed_segment(
+        &store,
+        "logweir/win-named.kbak",
+        b"the topic the restore names",
+    );
+    let sha_unnamed = seed_segment(
+        &store,
+        "logweir/win-unnamed.kbak",
+        b"a topic the restore does not name",
+    );
+    let facts = facts_with_an_unnamed_topic(
+        SegmentFacts {
+            key: "logweir/win-named.kbak".into(),
+            start_offset: 0,
+            end_offset: NAMED_TOPIC_RECORDS - 1,
+            start_timestamp: MID_MS,
+            end_timestamp: NEAR_PIT_MS,
+            record_count: NAMED_TOPIC_RECORDS,
+            sha256: sha_named,
+            uploaded_at: NEAR_PIT_MS,
+        },
+        SegmentFacts {
+            key: "logweir/win-unnamed.kbak".into(),
+            start_offset: 0,
+            end_offset: UNNAMED_TOPIC_RECORDS - 1,
+            start_timestamp: MID_MS,
+            end_timestamp: NEAR_PIT_MS,
+            record_count: UNNAMED_TOPIC_RECORDS,
+            sha256: sha_unnamed,
+            uploaded_at: NEAR_PIT_MS,
+        },
+    );
+    let mapping = fixtures::mapping("orders", "drill-orders");
+
+    // The fixture's own discriminating power, read OFF THE FIXTURE rather than
+    // compared between two constants (an assertion the compiler would discard).
+    assert!(
+        !mapping.contains_key("audit-log"),
+        "`audit-log` is the topic the restore does NOT name; if the mapping named it \
+         this test would be about nothing"
+    );
+    let unnamed = facts
+        .topics
+        .iter()
+        .find(|t| t.name == "audit-log")
+        .expect("the fixture carries a topic the mapping does not name");
+    let seg = &unnamed.partitions[0].segments[0];
+    assert!(
+        seg.start_timestamp >= FLOOR_MS && seg.end_timestamp <= PIT_MS,
+        "the unnamed topic's segment must be WHOLLY INSIDE [{FLOOR_MS}, {PIT_MS}] — a \
+         segment outside the window lands in neither bound, and a fixture built that way \
+         cannot tell a filtered walk from an unfiltered one"
+    );
+
+    // Half 1. The unit function counts what it is handed, and must not grow a
+    // filter of its own.
+    let all_topics = (NAMED_TOPIC_RECORDS + UNNAMED_TOPIC_RECORDS) as u64;
+    assert_eq!(
+        expected_restored_count(&facts, FLOOR_MS, PIT_MS),
+        (all_topics, all_topics),
+        "`expected_restored_count` carries no topic filter BY CONTRACT: over all-topics \
+         facts both bounds are the whole {all_topics}"
+    );
+
+    // Half 2. The call site's reduction, through the whole of phase 7: the
+    // bound is [50, 50] over the named topic alone, so a target holding
+    // exactly 50 PASSES.
+    let mut archive = Vec::new();
+    let mut consumed = Vec::new();
+    for i in 0..NAMED_TOPIC_RECORDS {
+        let (a, c) = archived_and_restored("orders", 0, i, i, MID_MS + i);
+        archive.push(a);
+        consumed.push(c);
+    }
+    let reader = WindowReader {
+        end_offsets: [("drill-orders".to_string(), vec![(0, NAMED_TOPIC_RECORDS)])]
+            .into_iter()
+            .collect(),
+        configs: [("drill-orders".to_string(), scratch_target_configs())]
+            .into_iter()
+            .collect(),
+        records: [("drill-orders".to_string(), consumed)]
+            .into_iter()
+            .collect(),
+    };
+    let engine = WindowEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+    };
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &selection(NAMED_TOPIC_RECORDS as usize),
+        &mapping,
+        &window_plan(),
+    )
+    .expect("a count inside the bound is never an operational failure");
+
+    assert_eq!(
+        out.integrity.result,
+        IntegrityResult::Pass,
+        "the restore wrote exactly the {NAMED_TOPIC_RECORDS} records the manifest proves \
+         for the topic it NAMES; the {UNNAMED_TOPIC_RECORDS} records of a topic it does \
+         not name were never going to be written. Got {:?}",
+        out.integrity
+    );
+    // Stronger than `result == Pass` on its own: a bound failure inserts its
+    // text at position 0 of the notes, so an empty `partial_reason` is the
+    // assertion that NOTHING was reported against this run at all.
+    assert_eq!(
+        out.integrity.partial_reason, None,
+        "a healthy restore of the named window has nothing to report"
+    );
+    assert_eq!(
+        out.integrity.records_sampled_matching, NAMED_TOPIC_RECORDS as u64,
+        "and the sample reconciled, so the bound is the only thing this test's verdict \
+         could have come from"
+    );
 }
 
 // ---------------------------------------------------------------------------
