@@ -1,6 +1,6 @@
 ---
 source: crates/logweir-engine-oso/tests/render.rs
-expression: "render_restore::render(&p)"
+expression: "render_restore::render(&p).expect(\"G-GLOB: this fixture holds no glob metacharacter\")"
 ---
 # Rendered by logweir. Do not edit; regenerate with `logweir drill run`.
 mode: restore
@@ -30,3 +30,4 @@ restore:
   checkpoint_interval_secs: 30
   time_window_start: 1787961600000
   time_window_end: 1788055200000
+  strip_offset_headers: false

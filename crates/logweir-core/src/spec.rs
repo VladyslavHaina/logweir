@@ -326,6 +326,111 @@ pub struct ObjectivesSpec {
     pub pass_rate: Option<f64>,
 }
 
+/// How a cluster's client authenticates. **The SHAPE only** — critique A F4.
+///
+/// It lands in this task rather than in Task 6 because `BackupSourceSpec`
+/// below is declared with an `auth` field, so a Task-2 implementer reading
+/// only Task 2 could not compile the type it is told to produce. The methods
+/// that wire it to a client (`to_render()`, `mode_str()`, `username()`) are
+/// Task 6's (interface **I1**).
+///
+/// **No password field, at any variant.** A SCRAM secret reaches the engine
+/// through the engine's own `${VAR}` expansion of its config file
+/// [U/kafka-backup/crates/kafka-backup-cli/src/commands/config.rs:6-35] and
+/// Logweir's own client through its environment — never through a spec file
+/// an adopter commits, and never through a rendered document. `tls` is
+/// separate from the mechanism because SASL/SCRAM over PLAINTEXT and over SSL
+/// are two different `security.protocol` values for one mechanism, and an
+/// adopter with a private CA has to configure BOTH trust stores (Global
+/// Constraint 29).
+/// The default is `Plaintext`, expressed as `#[derive(Default)]` +
+/// `#[default]` rather than as the hand-written `impl Default for AuthSpec`
+/// the plan's interface block writes. The two are the same value —
+/// `AuthSpec::default() == AuthSpec::Plaintext` either way, which is what a
+/// consumer of this interface can observe — and `just lint`'s
+/// `clippy::derivable_impls` (under `-D warnings`) rejects the hand-written
+/// form. `Anchor`, forty lines up, is the same shape written the same way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum AuthSpec {
+    #[default]
+    Plaintext,
+    ScramSha512 {
+        username: String,
+        #[serde(default)]
+        tls: bool,
+    },
+}
+
+/// The adopter-facing shape of a `--from-cluster` backup. `render_backup`
+/// consumes `crate::engine::BackupPlan`, not this: a spec is what a human
+/// wrote and a plan is what the guards have already accepted, and collapsing
+/// the two is how an unvalidated topic list reaches a rendered document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupSpec {
+    pub source: BackupSourceSpec,
+    pub storage: crate::engine::StorageUrl,
+    pub backup_id: String,
+    #[serde(default)]
+    pub backup: BackupSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupSourceSpec {
+    pub bootstrap_servers: Vec<String>,
+    #[serde(default)]
+    pub auth: AuthSpec,
+    /// NAMED topics, never patterns — GC18(c) rail 1, enforced at render time
+    /// by `crate::guard::reject_glob_metacharacters` (**G-GLOB**). Required,
+    /// with no default: an omitted list is the one shape that would mean
+    /// "everything" to the engine, and a mandatory allowlist whose absence
+    /// means "all topics" is not an allowlist.
+    pub topics: Vec<String>,
+}
+
+/// The `backup:` block's tunables. The three keys the rendered document
+/// pins unconditionally — `continuous: false`, `include_offset_headers: true`,
+/// `strip_offset_headers: false` — are deliberately NOT fields: they are
+/// invariants of what a Logweir-driven backup is, not settings (see
+/// `render_backup::render`'s comments for what each one costs if flipped).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupSettings {
+    #[serde(default = "zstd")]
+    pub compression: String,
+    #[serde(default = "seg_max_records")]
+    pub segment_max_records: u64,
+    #[serde(default = "seg_max_bytes")]
+    pub segment_max_bytes: u64,
+    #[serde(default = "max_concurrent_partitions")]
+    pub max_concurrent_partitions: u32,
+}
+
+impl Default for BackupSettings {
+    fn default() -> Self {
+        Self {
+            compression: zstd(),
+            segment_max_records: seg_max_records(),
+            segment_max_bytes: seg_max_bytes(),
+            max_concurrent_partitions: max_concurrent_partitions(),
+        }
+    }
+}
+
+fn zstd() -> String {
+    "zstd".into()
+}
+/// The harness's own checked-in values (`e2e/compose/config/backup-drill.yaml:37-39`),
+/// which are what the drill archive was produced with.
+fn seg_max_records() -> u64 {
+    1000
+}
+fn seg_max_bytes() -> u64 {
+    10_485_760
+}
+fn max_concurrent_partitions() -> u32 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllowedClusters {
     /// Supplied as a SEPARATE file argument, never read from the drill spec,

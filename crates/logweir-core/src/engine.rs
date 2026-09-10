@@ -137,6 +137,72 @@ pub struct RestorePlan {
     pub checkpoint_interval_secs: u64,
 }
 
+/// How the SOURCE cluster's client is told to authenticate, as the renderer
+/// needs it — the render-side twin of `crate::spec::AuthSpec`.
+///
+/// **It never carries a password.** `ScramSha512` names the username only;
+/// the secret reaches the engine through its own `${VAR}` environment
+/// expansion, which is the one thing `yaml_scalar` explicitly cannot defend
+/// against and therefore the one thing that must never be interpolated by us.
+/// The `to_render()` / `mode_str()` / `username()` methods that map a spec to
+/// this type belong to Task 6 (interface **I1**); this task renders only the
+/// `Plaintext` arm, which emits nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthRender {
+    Plaintext,
+    ScramSha512 { username: String, tls: bool },
+}
+
+/// Everything `render_backup::render` needs to emit a `backup.yaml`, and
+/// nothing else.
+///
+/// # There is deliberately no `source_cluster_id` field — do not look for one
+///
+/// GC18(c)'s fourth rail is "the source `cluster_id` recorded and re-asserted
+/// `!= target`". That rail lands in **Task 4**, where the run happens, and NOT
+/// as a field here, because phase 0 reads the cluster id FROM THE BROKER and
+/// never from a spec (`crates/logweir/src/drill/phase0_admit.rs:94`). A
+/// `source_cluster_id` on this struct would be an adopter-supplied string
+/// standing where a measured fact belongs — the same class of defect as
+/// letting a drill spec widen its own cluster allowlist, which is why
+/// `AllowedClusters` is a separate file argument.
+///
+/// The other three rails ARE this struct's business and are enforced by the
+/// renderer: `topics` is a named allowlist with no glob metacharacter
+/// (**G-GLOB**, `crate::guard::reject_glob_metacharacters`); the type has no
+/// field that could produce `reset_consumer_offsets`, `auto_consumer_groups`,
+/// `create_topics` or any consumer-group key, so the rendered document is
+/// read-only by construction; and `purge_topics`/`dry_run` are unrepresentable
+/// here and re-scanned out of the rendered bytes by `render_and_digest`.
+#[derive(Debug, Clone)]
+pub struct BackupPlan {
+    pub backup_id: String,
+    pub source_bootstrap: Vec<String>,
+    /// Never a password — see `AuthRender`.
+    pub source_auth: AuthRender,
+    /// Named topics. No glob metacharacter: one entry is one topic, because
+    /// the engine's `TopicSelection` would otherwise read a name as a pattern.
+    pub topics: Vec<String>,
+    pub storage: StorageUrl,
+    /// `"zstd"`.
+    pub compression: String,
+    pub segment_max_records: u64,
+    pub segment_max_bytes: u64,
+    pub max_concurrent_partitions: u32,
+}
+
+/// Logweir-measured, never engine-reported — the backup twin of
+/// `RestoreFacts`, and for the same reason: `backup` has no `--format` and
+/// writes no report file, so its start, finish and exit code are ours to
+/// time and its unknown-key warnings are ours to read back off stderr.
+#[derive(Debug, Clone)]
+pub struct BackupFacts {
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub exit_code: i32,
+    pub unknown_key_warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoverageState {
     Full,

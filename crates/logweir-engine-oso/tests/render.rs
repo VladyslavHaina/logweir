@@ -39,7 +39,10 @@ fn plan() -> RestorePlan {
 
 #[test]
 fn restore_yaml_matches_the_golden() {
-    insta::assert_snapshot!("restore_yaml", render_restore::render(&plan()));
+    insta::assert_snapshot!(
+        "restore_yaml",
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter")
+    );
 }
 
 #[test]
@@ -65,7 +68,10 @@ fn restore_yaml_matches_the_golden_for_azure_storage() {
         container_name: "kafka-backups".into(),
         prefix: "basic-demo".into(),
     };
-    insta::assert_snapshot!("restore_yaml_azure", render_restore::render(&p));
+    insta::assert_snapshot!(
+        "restore_yaml_azure",
+        render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter")
+    );
 }
 
 #[test]
@@ -75,7 +81,10 @@ fn restore_yaml_matches_the_golden_for_gcs_storage() {
         bucket: "kafka-backups".into(),
         prefix: "basic-demo".into(),
     };
-    insta::assert_snapshot!("restore_yaml_gcs", render_restore::render(&p));
+    insta::assert_snapshot!(
+        "restore_yaml_gcs",
+        render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter")
+    );
 }
 
 #[test]
@@ -84,7 +93,10 @@ fn restore_yaml_matches_the_golden_for_filesystem_storage() {
     p.storage = StorageUrl::Filesystem {
         path: "/var/backups/basic-demo".into(),
     };
-    insta::assert_snapshot!("restore_yaml_filesystem", render_restore::render(&p));
+    insta::assert_snapshot!(
+        "restore_yaml_filesystem",
+        render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter")
+    );
 }
 
 /// Review fix, "FIX 2" continued: the `triggered_by: None` branch of
@@ -111,7 +123,7 @@ fn validation_yaml_matches_the_golden_with_no_triggered_by() {
 #[test]
 fn neither_document_ever_contains_a_forbidden_key() {
     for doc in [
-        render_restore::render(&plan()),
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter"),
         render_validation::render(&plan(), "r", None),
     ] {
         assert_no_forbidden_key_line(&doc);
@@ -201,7 +213,8 @@ fn forbidden_keys_are_unreachable_across_every_storage_variant_and_plan_shape() 
                     p.checkpoint_interval_secs = checkpoint_interval_secs;
 
                     for doc in [
-                        render_restore::render(&p),
+                        render_restore::render(&p)
+                            .expect("G-GLOB: this fixture holds no glob metacharacter"),
                         render_validation::render(&p, "run-id", None),
                         render_validation::render(&p, "run-id", Some("someone")),
                     ] {
@@ -331,7 +344,8 @@ fn forbidden_keys_survive_adversarial_string_content() {
     cases.push(("triggered_by", plan(), "run-id", Some(PAYLOAD)));
 
     for (label, p, run_id, triggered_by) in cases {
-        let restore_doc = render_restore::render(&p);
+        let restore_doc =
+            render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter");
         let validation_doc = render_validation::render(&p, run_id, triggered_by);
 
         assert_no_forbidden_key_line(&restore_doc);
@@ -350,7 +364,8 @@ fn forbidden_keys_survive_adversarial_string_content() {
 
 #[test]
 fn restore_yaml_sets_both_levers_and_create_topics() {
-    let doc = render_restore::render(&plan());
+    let doc =
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
     assert!(doc.contains("header_preflight: full"));
     assert!(doc.contains("dry_run_check_segments: true"));
     assert!(doc.contains("create_topics: true"));
@@ -360,7 +375,8 @@ fn restore_yaml_sets_both_levers_and_create_topics() {
 
 #[test]
 fn the_time_window_is_rendered_as_epoch_millis_not_rfc3339() {
-    let doc = render_restore::render(&plan());
+    let doc =
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
     // The brief's literals here (1756425600000 / 1756519200000) decode to
     // 2025-08-29 / 2025-08-30, not the 2026-08-29T00:00:00Z /
     // 2026-08-30T02:00:00Z the same brief's `plan()` fixture specifies
@@ -378,7 +394,8 @@ fn the_time_window_is_rendered_as_epoch_millis_not_rfc3339() {
 
 #[test]
 fn topic_mapping_is_one_explicit_entry_per_selected_topic() {
-    let doc = render_restore::render(&plan());
+    let doc =
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
     // Review fix ("FIX 1"): both sides of the mapping now go through
     // `yaml_scalar`, so a benign topic name is rendered double-quoted.
     assert!(doc.contains("\"orders\": \"drill-20260903-orders\""));
@@ -391,4 +408,78 @@ fn validation_yaml_points_evidence_storage_at_the_per_run_logweir_prefix() {
     // Review fix ("FIX 1"): the whole composed value is one `yaml_scalar`
     // call, so it is rendered as a single double-quoted scalar.
     assert!(doc.contains("prefix: \"logweir/01J9X2QK7C4V0R8YB3ZP6MTS5A/engine-validation\""));
+}
+
+/// **G-GLOB, restore side** (GC18(c) rail 1). The same table as
+/// `tests/render_backup.rs::topic_include_entries_reject_glob_metacharacters`,
+/// run once through the mapping's KEYS and once through its VALUES, because
+/// both reach an include-style position in the rendered document: the keys
+/// become `target.topics.include` entries and the values become
+/// `restore.topic_mapping` targets, which the engine's selector reads the same
+/// way. `yaml_scalar` quotes both and neutralises neither — quoting is a YAML
+/// concern, globbing is the engine's — so a topic legitimately named `orders*`
+/// would widen one named entry into a set and the "no wildcard" rail would
+/// hold only because nobody had typed one.
+///
+/// This arm is SEPARABLE from the backup arm on purpose: deleting the call in
+/// `render_restore` alone must fail this test and leave the backup-side test
+/// passing, which is the mutant the plan lists.
+#[test]
+fn topic_include_entries_reject_glob_metacharacters_on_the_restore_side() {
+    use logweir_engine_oso::render_backup::RenderError;
+
+    for bad in ["orders*", "orders?", "events[1]", "a]b", "x{1}", "y}z"] {
+        // ... on the KEY side (the source topic name).
+        let mut p = plan();
+        p.topic_mapping = [(bad.to_string(), "drill-target".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            render_restore::render(&p).unwrap_err(),
+            RenderError::GlobMetacharacter(bad.to_string()),
+            "source topic `{bad}` must be refused as a glob pattern"
+        );
+
+        // ... and on the VALUE side (the mapped target name).
+        let mut p = plan();
+        p.topic_mapping = [("orders".to_string(), bad.to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            render_restore::render(&p).unwrap_err(),
+            RenderError::GlobMetacharacter(bad.to_string()),
+            "mapped target `{bad}` must be refused as a glob pattern"
+        );
+    }
+
+    for good in ["orders", "payments", "orders.v2", "a-b_c"] {
+        let mut p = plan();
+        p.topic_mapping = [(good.to_string(), format!("drill-{good}"))]
+            .into_iter()
+            .collect();
+        assert!(
+            render_restore::render(&p).is_ok(),
+            "`{good}` is a plain topic name and must render"
+        );
+    }
+}
+
+/// Spec §6.1 M5/N1: `strip_offset_headers: false` is rendered EXPLICITLY in
+/// both modes. Rendering `true` here would strip `x-original-offset` on the
+/// way into the scratch topic, and that header is the only key phase 7
+/// reconciles on (`phase7_verify.rs:243-265`) — a windowed restore would exit
+/// 0 and be unverifiable. The exact line, indentation included, so a key
+/// emitted at the wrong nesting level is a failure too.
+#[test]
+fn restore_document_renders_strip_offset_headers_false() {
+    let doc =
+        render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
+    assert!(
+        doc.lines().any(|l| l == "  strip_offset_headers: false"),
+        "expected the exact line `  strip_offset_headers: false`; got:\n{doc}"
+    );
+    assert!(
+        !doc.contains("strip_offset_headers: true"),
+        "the only permitted value is false:\n{doc}"
+    );
 }

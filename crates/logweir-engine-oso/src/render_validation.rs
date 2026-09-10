@@ -9,7 +9,8 @@
 //! and produces NO unknown-key warning list, so a key we get wrong here is
 //! dropped SILENTLY (spec §7.2(b)). The stdout+stderr readback of Task 12 does not
 //! cover this document.
-use crate::render_restore::{render_storage_block, yaml_scalar};
+use crate::render_restore::render_storage_block;
+use crate::yaml::yaml_scalar;
 use logweir_core::engine::RestorePlan;
 
 pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> String {

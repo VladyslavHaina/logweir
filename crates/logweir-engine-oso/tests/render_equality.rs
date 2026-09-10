@@ -118,15 +118,20 @@ const CLEAN: &str = "../../e2e/fixtures/fake-engine-clean.sh";
 #[test]
 fn render_equality_digest_is_over_the_written_bytes() {
     let p = plan();
-    let (doc, digest) = render_restore::render_and_digest(&p);
+    let (doc, digest) = render_restore::render_and_digest(&p)
+        .expect("G-GLOB: this fixture holds no glob metacharacter");
     assert_eq!(
         doc,
-        render_restore::render(&p),
+        render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter"),
         "render_and_digest must return the render verbatim"
     );
     assert_eq!(
         digest,
-        logweir_core::ids::sha256_prefixed(render_restore::render(&p).as_bytes()),
+        logweir_core::ids::sha256_prefixed(
+            render_restore::render(&p)
+                .expect("G-GLOB: this fixture holds no glob metacharacter")
+                .as_bytes()
+        ),
         "the digest must be over the rendered bytes, not over a re-serialisation of the plan"
     );
     assert!(
@@ -142,7 +147,9 @@ fn phase6_accepts_the_identical_document() {
     let report = engine.preflight(&p).expect("preflight");
     assert_eq!(
         report.rendered_restore_sha256,
-        render_restore::render_and_digest(&p).1,
+        render_restore::render_and_digest(&p)
+            .expect("G-GLOB: this fixture holds no glob metacharacter")
+            .1,
         "phase 5 must record the digest of the document it wrote"
     );
     let mut obs = RecordingObserver::default();
@@ -157,8 +164,8 @@ fn phase6_refuses_when_rendered_restore_differs_from_phase5() {
     let p = plan();
     let mutated = divergent_plan();
     assert_ne!(
-        render_restore::render(&mutated),
-        render_restore::render(&p),
+        render_restore::render(&mutated).expect("G-GLOB: this fixture holds no glob metacharacter"),
+        render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter"),
         "the fixture must actually diverge, or this test degenerates into a tautology"
     );
 
@@ -166,7 +173,9 @@ fn phase6_refuses_when_rendered_restore_differs_from_phase5() {
     let engine = engine_at(CLEAN, workdir.clone(), Store::in_memory("logweir"));
     let report = engine.preflight(&p).expect("preflight");
     let five = report.rendered_restore_sha256.clone();
-    let six = render_restore::render_and_digest(&mutated).1;
+    let six = render_restore::render_and_digest(&mutated)
+        .expect("G-GLOB: this fixture holds no glob metacharacter")
+        .1;
     assert_ne!(five, six, "the two digests must differ");
 
     let mut obs = RecordingObserver::default();
@@ -196,7 +205,7 @@ fn phase6_refuses_when_rendered_restore_differs_from_phase5() {
     // after the write; this one does not.
     assert_eq!(
         std::fs::read_to_string(workdir.join("restore.yaml")).unwrap(),
-        render_restore::render(&p),
+        render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter"),
         "a refused phase 6 must not have overwritten the document phase 5 validated"
     );
 }

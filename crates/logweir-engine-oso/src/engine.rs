@@ -241,7 +241,15 @@ impl DataEngine for OsoCliEngine {
     }
 
     fn preflight(&self, plan: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        let (doc, rendered_restore_sha256) = render_restore::render_and_digest(plan);
+        // G-GLOB: a topic (or a mapped target) carrying a glob
+        // metacharacter is refused HERE, at phase 5, before the engine is
+        // spawned. `EngineError::Operational` is exit 1 — the same mapping
+        // ruling R-E gives the phase-5/phase-6 digest divergence, and for the
+        // same reason: `preflight` is reached only after phase 0's guards have
+        // run, so Global Constraint 11's exit 3 ("refused by a guard, before
+        // anything runs") does not describe it.
+        let (doc, rendered_restore_sha256) = render_restore::render_and_digest(plan)
+            .map_err(|e| EngineError::Operational(e.to_string()))?;
         let cfg = self.write("restore.yaml", &doc)?;
         // T0-14. Memoised HERE, immediately after the write and before the
         // engine is spawned, because the field's meaning is "the digest of the
@@ -384,7 +392,8 @@ impl DataEngine for OsoCliEngine {
         // including the engine's own `validate-restore`. The ADR that would
         // carry this ruling is gated on open question O2 and is deferred; see
         // docs/stability.md.
-        let (doc, six) = render_restore::render_and_digest(plan);
+        let (doc, six) = render_restore::render_and_digest(plan)
+            .map_err(|e| EngineError::Operational(e.to_string()))?;
         match self
             .phase5_render
             .lock()

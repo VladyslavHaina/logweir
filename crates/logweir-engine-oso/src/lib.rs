@@ -18,9 +18,20 @@ pub mod subprocess;
 pub mod vendored;
 
 /// Global Constraint 4: never emit these three keys, at any value, on any
-/// argv or in any rendered YAML. `render_restore` and `render_validation` are
-/// structurally incapable of writing them; `tests/render.rs` pins the
-/// property.
+/// argv or in any rendered YAML. All THREE renderers — `render_restore`,
+/// `render_validation` and `render_backup` — are structurally incapable of
+/// writing them; `tests/render.rs` pins the property for the first two, and
+/// `render_backup::render_and_digest` additionally re-scans its own output
+/// with `logweir_core::guard::scan_forbidden_keys` (GC18(c) rail 3), which
+/// `tests/render_backup.rs` proves against a constructed document per GR7.
 pub const FORBIDDEN_KEYS: [&str; 3] = ["purge_topics", "dry_run", "header_preflight_external"];
+pub mod render_backup;
 pub mod render_restore;
 pub mod render_validation;
+// The workspace's SINGLE YAML scalar escaper, extracted from
+// `render_restore.rs` so the three renderers import it instead of one of them
+// owning it and the others reaching into it. `pub(crate)`: nothing outside
+// this crate renders an engine document, and `tests/render_backup.rs::
+// there_is_exactly_one_yaml_escaper` pins the "exactly one" half by reading
+// the three renderer sources rather than by calling the function.
+pub(crate) mod yaml;

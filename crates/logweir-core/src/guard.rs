@@ -63,6 +63,52 @@ fn walk(v: &serde_yaml::Value, path: String, out: &mut Vec<String>) {
     }
 }
 
+/// The six characters upstream's topic selector treats as GLOB PATTERN
+/// SYNTAX rather than as part of a name.
+///
+/// `TopicSelection.include`/`exclude` "supports glob patterns"
+/// [U/kafka-backup/crates/kafka-backup-core/src/config.rs:334-343], and both
+/// renderers put operator-chosen topic names straight into
+/// `topics.include`. So a topic legitimately NAMED `orders*` or `events[1]`
+/// is handed to the engine as a PATTERN: one named entry silently widens to a
+/// set, and GC18(c)'s "mandatory named-topic allowlist with no wildcard" rail
+/// would be satisfied only by nobody having typed one. `*`/`?` are the
+/// classic pair; `[`/`]` open and close a character class; `{`/`}` open and
+/// close a brace alternation. All six are refused, and the CLOSING halves are
+/// refused as well as the opening ones — a scanner that accepted `a]b`
+/// because the class was never opened would be reasoning about the glob
+/// dialect's grammar instead of about whether the string is a plain name.
+pub const GLOB_METACHARACTERS: [char; 6] = ['*', '?', '[', ']', '{', '}'];
+
+/// GC18(c) rail 1, and guard **G-GLOB**: no topic include entry may contain a
+/// glob metacharacter. Shared by `render_backup::render` (over
+/// `BackupPlan::topics`) and `render_restore::render` (over BOTH sides of
+/// `topic_mapping` — a mapped target name is an include entry too), so the
+/// two renderers can never disagree about what counts as a plain name.
+///
+/// It lives HERE, in the pure core, for the same reason `redact_url` does:
+/// two copies of a predicate is how the two copies come to disagree.
+///
+/// Returns the FIRST offending entry verbatim, not a formatted message: the
+/// caller owns the wording (`render_backup::RenderError::GlobMetacharacter`
+/// carries the whole explanation), and an `Err(String)` that is already prose
+/// cannot be re-wrapped without either nesting two sentences or discarding
+/// the entry the operator has to go and fix.
+///
+/// **It does not, and must not, quote or escape anything.** Quoting is a YAML
+/// concern and `logweir_engine_oso::yaml::yaml_scalar` already does it
+/// unconditionally; globbing is the ENGINE's concern, one layer further out.
+/// A quoted `"orders*"` is still a glob to the engine's selector, which is
+/// exactly why this predicate exists beside the escaper rather than inside it.
+pub fn reject_glob_metacharacters(entries: &[String]) -> Result<(), String> {
+    for entry in entries {
+        if entry.chars().any(|c| GLOB_METACHARACTERS.contains(&c)) {
+            return Err(entry.clone());
+        }
+    }
+    Ok(())
+}
+
 /// Every selected topic must have a mapping entry whose target DIFFERS from
 /// its source, or the restore would write over the topic it came from.
 pub fn check_topic_mapping_coverage(
@@ -122,5 +168,35 @@ target:
             scan_forbidden_keys(rendered).unwrap(),
             vec!["target.dry_run".to_string()]
         );
+    }
+
+    /// The shared half of **G-GLOB**, pinned at its own home. Both renderers'
+    /// arms are pinned separately (`tests/render_backup.rs` and
+    /// `tests/render.rs` in `logweir-engine-oso`); this asserts the predicate
+    /// itself refuses ALL SIX metacharacters, including the closing halves,
+    /// and returns the offending entry rather than a message.
+    #[test]
+    fn the_glob_predicate_refuses_every_metacharacter_and_names_the_entry() {
+        for bad in ["orders*", "orders?", "events[1]", "a]b", "x{1}", "y}z"] {
+            assert_eq!(
+                reject_glob_metacharacters(&[bad.to_string()]),
+                Err(bad.to_string()),
+                "`{bad}` must be refused as a glob pattern"
+            );
+        }
+        for good in ["orders", "payments", "orders.v2", "a-b_c"] {
+            assert_eq!(
+                reject_glob_metacharacters(&[good.to_string()]),
+                Ok(()),
+                "`{good}` is a plain topic name and must be accepted"
+            );
+        }
+        // The FIRST offender is the one reported, and a clean prefix does not
+        // shadow a later offender.
+        assert_eq!(
+            reject_glob_metacharacters(&["orders".into(), "pay*".into(), "z?".into()]),
+            Err("pay*".to_string())
+        );
+        assert_eq!(reject_glob_metacharacters(&[]), Ok(()));
     }
 }

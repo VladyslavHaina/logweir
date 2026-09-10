@@ -7,6 +7,8 @@
 //! ourselves: an ordinary YAML-deserialised `dry_run: true`
 //! [VERIFIED config.rs:776-778] reaching phase 6 would produce a no-op restore,
 //! exit 0, and a signed scorecard whose RTO was measured around nothing.
+use crate::render_backup::RenderError;
+use crate::yaml::yaml_scalar;
 use logweir_core::engine::{RestorePlan, StorageUrl};
 
 /// The rendered restore document and the SHA-256 of the EXACT bytes that
@@ -14,13 +16,31 @@ use logweir_core::engine::{RestorePlan, StorageUrl};
 /// rendered at phase 5 and again at phase 6, and `fs::write` truncates, so
 /// the digest — never a re-serialisation of `plan` — is the only thing that
 /// can prove the two are the same document.
-pub fn render_and_digest(plan: &RestorePlan) -> (String, String) {
-    let doc = render(plan);
+pub fn render_and_digest(plan: &RestorePlan) -> Result<(String, String), RenderError> {
+    let doc = render(plan)?;
     let digest = logweir_core::ids::sha256_prefixed(doc.as_bytes());
-    (doc, digest)
+    Ok((doc, digest))
 }
 
-pub fn render(plan: &RestorePlan) -> String {
+pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
+    // GC18(c) rail 1 / **G-GLOB**, restore side. BOTH SIDES of the mapping
+    // are checked, because both reach an include-style position: the keys are
+    // rendered verbatim into `target.topics.include` below, and the values are
+    // rendered as `restore.topic_mapping` targets — which the engine also
+    // treats as topic selectors, so a mapped target named `drill-*orders` is
+    // as much a pattern as a source named `orders*`. Checking only the keys
+    // would leave the half an operator is MORE likely to template.
+    //
+    // Two calls, not one over a concatenation, so the refusal names which
+    // entry it found — an operator fixing `a]b` needs to know whether it is
+    // the topic or the prefix that produced it.
+    let sources: Vec<String> = plan.topic_mapping.keys().cloned().collect();
+    logweir_core::guard::reject_glob_metacharacters(&sources)
+        .map_err(RenderError::GlobMetacharacter)?;
+    let targets: Vec<String> = plan.topic_mapping.values().cloned().collect();
+    logweir_core::guard::reject_glob_metacharacters(&targets)
+        .map_err(RenderError::GlobMetacharacter)?;
+
     let mut s = String::new();
     s.push_str("# Rendered by logweir. Do not edit; regenerate with `logweir drill run`.\n");
     s.push_str("mode: restore\n");
@@ -97,12 +117,28 @@ pub fn render(plan: &RestorePlan) -> String {
         "  time_window_end: {}\n",
         plan.time_window.1.timestamp_millis()
     ));
+    // RENDERED EXPLICITLY, IN BOTH MODES, and never `true` (spec §6.1 M5/N1).
+    // `include_offset_headers` defaults true on the BACKUP side and stamps
+    // `x-original-offset`/`x-original-timestamp` on every archived record;
+    // `strip_offset_headers` defaults false on both
+    // [U/kafka-backup/config/example-backup.yaml,
+    // U/kafka-backup/config/example-restore.yaml]. Rendering `true` here would
+    // delete `x-original-offset` on the way INTO the scratch topic — the only
+    // key phase 7 reconciles on (`crates/logweir/src/drill/phase7_verify.rs:
+    // 243-265` reads it and falls back to the target offset), so a windowed
+    // restore would become unverifiable: every sampled record would look like
+    // a mismatch, or (worse) accidentally match by position on a partition
+    // that happened to restore from 0 with nothing dropped. It is written out
+    // rather than inherited so the invariant is an ASSERTION in this document
+    // and this golden, not an upstream default we are trusting — the same
+    // argument Global Constraint 20 makes for `consumer_group_strategy`.
+    s.push_str("  strip_offset_headers: false\n");
     // Deliberately NOT rendered, at any value: purge_topics, dry_run,
     // header_preflight_external. Also not rendered: reset_consumer_offsets and
     // auto_consumer_groups — spec §2's non-goals forbid Logweir from setting
     // either, and they are what `offset_recovery_requested()` keys off
     // (restore/preflight.rs:196-198).
-    s
+    Ok(s)
 }
 
 /// The `restore.topic_mapping` block exactly as it appears in the rendered
@@ -175,61 +211,4 @@ pub(crate) fn render_storage_block(storage: &StorageUrl) -> String {
             yaml_scalar(&path.display().to_string())
         ),
     }
-}
-
-/// Escapes an arbitrary string for safe embedding as a YAML double-quoted
-/// scalar, and is used at EVERY interpolation site in both renderers
-/// (`backup_id`, bootstrap servers, both sides of `topic_mapping`, every
-/// storage field, `checkpoint_state`, `run_id` and `triggered_by`).
-///
-/// Global Constraint 4 says the three forbidden keys are never emitted "at
-/// any value" — a value that, written raw, would ITSELF contain a physical
-/// line whose pre-colon token is one of those keys is still an emission.
-/// Concretely: `render_validation::render(&plan, "r", Some("x\ndry_run:
-/// true"))` written without this function would produce a physical line
-/// `dry_run: true` inside `restore.yaml`/`validation.yaml`, because a raw `\n`
-/// in an interpolated `&str` is a real newline byte once it lands in the
-/// rendered `String`. A `"` would truncate a naively hand-quoted scalar early
-/// (see the old `format!("backup_id: \"{}\"\n\n", …)`, which quoted but never
-/// escaped); a `\` would be reinterpreted as the start of a YAML escape by
-/// whatever eventually reads the file. This function closes all three: it
-/// ALWAYS emits a double-quoted scalar (never a bare/plain one) and escapes
-/// backslash, double-quote, and every C0 control character (`\n`, `\r`, `\t`
-/// by their short names; everything else below 0x20 as `\xHH`).
-///
-/// Deliberately NOT an attempt at full YAML plain-scalar-safety detection
-/// (leading indicators, ambiguous ": ", reserved words, …) with quoting only
-/// where "needed": a scalar that is unconditionally quoted is unconditionally
-/// safe, and the resulting document is easier for the human reviewer this
-/// task exists for to audit than one where quoting is conditional on the
-/// input's shape.
-///
-/// What this function does NOT and CANNOT defend against: upstream's
-/// `expand_env_vars` [U/kafka-backup/crates/kafka-backup-cli/src/commands/
-/// config.rs:6-35] scans the RAW file text for a literal `${VAR}` and
-/// substitutes it BEFORE the file is parsed as YAML at all — a textual
-/// preprocessing pass with no awareness of quoting. A value containing a
-/// literal `${...}` is expanded by the engine's own preprocessing regardless
-/// of how this function escapes it, and the substituted text (drawn from
-/// whichever environment variable is named, in the engine's OWN process
-/// environment) lands in the file un-requoted. That hazard sits a layer
-/// below YAML syntax entirely, so no YAML-scalar escaper — this one or any
-/// other — can close it; it is a distinct problem from the one this function
-/// solves.
-pub(crate) fn yaml_scalar(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }

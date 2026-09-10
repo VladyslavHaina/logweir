@@ -1,0 +1,29 @@
+---
+source: crates/logweir-engine-oso/tests/render_backup.rs
+description: "The filesystem backend, through the SAME render_storage_block the restore and validation documents use — one arm set, one golden per backend."
+expression: "render_backup::render(&p).expect(\"the fixture renders\")"
+---
+# Rendered by logweir. Do not edit; regenerate with `logweir backup run`.
+mode: backup
+backup_id: "drill-demo"
+
+source:
+  bootstrap_servers:
+    - "kafka-broker-1:9094"
+  topics:
+    include:
+      - "orders"
+      - "payments"
+
+storage:
+  backend: filesystem
+  path: "/var/backups/drill-demo"
+
+backup:
+  compression: "zstd"
+  continuous: false
+  segment_max_records: 1000
+  segment_max_bytes: 10485760
+  max_concurrent_partitions: 3
+  include_offset_headers: true
+  strip_offset_headers: false

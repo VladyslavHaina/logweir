@@ -37,6 +37,13 @@ logweir-kafka = { path = "../logweir-kafka", default-features = false }
 # remaining `object_store` occurrence is the prose comment at
 # engine.rs:130). They are declared by `logweir-store` instead.
 logweir-store = { path = "../logweir-store" }
+# BACK, deliberately, and named here so the T13 comment above is not read as
+# forbidding it: `render_backup::RenderError` is a real error type on a real
+# refusal path (GC18(c) rails 1 and 3), and both renderers return it. This is
+# a DECLARATION of a package the workspace graph already resolves —
+# `logweir-core`, `logweir-kafka` and `logweir-store` all depend on it — so it
+# adds no package to the closed graph of Global Constraint 38.
+thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
