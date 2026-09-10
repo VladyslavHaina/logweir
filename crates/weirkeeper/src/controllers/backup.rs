@@ -321,7 +321,7 @@ pub fn plan_backup_spec(
                     BackupError::Refused(
                         TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
                         format!(
-                            "the KafkaCluster {} names auth mode scramSha512 and no                              auth.username, so the plan document cannot name the identity the                              run will present",
+                            "the KafkaCluster {} names auth mode scramSha512 and no auth.username, so the plan document cannot name the identity the run will present",
                             cluster.name_any()
                         ),
                     )
