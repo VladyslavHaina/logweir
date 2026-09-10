@@ -20,9 +20,18 @@ Three ways to run someone else's restore:
 
 ## Decision
 
-**Shell out to `kafka-backup`, pinned by image digest, with exactly three
-subcommands reachable from shipped code: `restore`, `validate-restore`, and
-`validation run`** (Global Constraint 3).
+**Shell out to `kafka-backup`, pinned by image digest, with exactly four
+subcommands reachable from shipped code: `backup`, `restore`,
+`validate-restore`, `validation run`** (Global Constraint 3).
+
+**Amended 2026-09-09** by the Logweir MVP tag-1 plan
+(`docs/mvp/2026-09-09-mvp-tag1-plan.md`, Task 1), spec §5 and spec §16 item 10,
+and recorded as Amendment D of `docs/adr/0008-mvp-constraint-amendments.md`:
+the original Decision fixed the count at **three** and named **no
+`--from-cluster` exception anywhere in this ADR**, so admitting `backup` is a
+CHANGE to what this ADR decided and not a reading of it — GC18's
+`--from-cluster` path renders a `backup.yaml` and runs it, which three
+subcommands cannot express.
 
 The details that make this safe rather than merely convenient:
 
@@ -58,8 +67,8 @@ The details that make this safe rather than merely convenient:
   that names no engine is not a scorecard an auditor can act on, so `drill run`
   exits 1 rather than signing one.
 - **`engine_subreport` is `null` in v0.1.** `OsoCliEngine` does not override
-  `DataEngine::validation_run`, so the third permitted subcommand is not
-  actually invoked yet. The default implementation refuses rather than
+  `DataEngine::validation_run`, so the permitted `validation run` subcommand is
+  not actually invoked yet. The default implementation refuses rather than
   fabricating a report — see `docs/stability.md`.
 - **Cross-architecture is the adopter's problem, and it is documented.**
   Upstream publishes linux/amd64 only. On arm64 the extracted ELF cannot exec;

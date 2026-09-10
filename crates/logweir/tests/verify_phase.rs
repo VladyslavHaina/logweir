@@ -22,7 +22,7 @@ fn a_single_changed_value_is_a_mismatch_not_a_count_difference() {
     assert_eq!(sampled, 50);
     assert_eq!(matching, 49);
     assert_eq!(mismatches.len(), 1);
-    assert!(mismatches[0].contains("offset")); // harness-only: asserts on `compare`'s own mismatch wording, not a kafka-backup CLI subcommand
+    assert!(mismatches[0].contains("offset")); // engine-token-ok: asserts on `compare`'s own mismatch wording, not a kafka-backup CLI subcommand
 }
 
 #[test]

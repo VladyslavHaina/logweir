@@ -127,7 +127,7 @@ fn main() {
     }
     std::fs::write(
         "e2e/fixtures/segments/legacy.json",
-        br#"[{"offset":100,"timestamp":1,"key":"azA=","value":"djA="}]"#, // harness-only: JSON fixture field name, not a kafka-backup CLI subcommand
+        br#"[{"offset":100,"timestamp":1,"key":"azA=","value":"djA="}]"#, // engine-token-ok: JSON fixture field name, not a kafka-backup CLI subcommand
     )
     .unwrap();
     println!("minted 3 .kbak fixtures (5 records each) and legacy.json");
