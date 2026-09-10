@@ -151,8 +151,9 @@ Logweir **drives** upstream's engine. It does not fork it, link it, or modify it
   an immutable image digest, never a tag. The allowlist `scripts/check-no-oso.sh`
   enforces is exactly four subcommands — `backup`, `restore`,
   `validate-restore`, `validation run` — and that is a *ceiling*, not a
-  description: **v0.1 actually invokes two.** `OsoCliEngine` does not override `DataEngine::validation_run`,
-  so the engine's own validation run is never executed and
+  description: **v0.1 actually invokes two.** `OsoCliEngine` does not override
+  `DataEngine::validation_run`, so the engine's own validation run is never
+  executed and
   `engine_subreport` is `null` in every scorecard v0.1 produces. See
   [ADR 0002](docs/adr/0002-shell-out.md) and
   [stability.md](docs/stability.md).

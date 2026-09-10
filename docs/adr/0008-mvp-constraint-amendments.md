@@ -71,7 +71,9 @@ contains **no `--from-cluster` clause anywhere in its 79 lines**. The sentence
 `--from-cluster` execution path, which renders a `backup.yaml` and runs it — so
 GC3 and GC18 contradicted each other until this amendment resolved them. Spec §5
 ("Logweir drives the engine's `backup` command itself") and spec §16 item 10 are
-the authority.
+the authority, and ADR 0007 (`docs/adr/0007-from-cluster-in-v0.1.md`) had already
+revoked the `--from-cluster` deferral; this amendment is the count-side
+consequence of that revocation.
 
 **How it is enforced.** `scripts/check-no-oso.sh` carries two allowlists that are
 deliberately not the same list:
