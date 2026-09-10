@@ -54,6 +54,22 @@ use std::pin::Pin;
 pub struct Context {
     /// The client every `Api` in this directory is built from.
     pub client: kube::Client,
+    /// The controller's ONE read-only archive handle, or `None` when
+    /// [`crate::retention::ARCHIVE_URL_ENV`] is unset — interface **I13**.
+    ///
+    /// `Arc<Store>` AND NOT A URL, AND THAT IS THE GUARD. `Store` drives its
+    /// own current-thread runtime, so a handle rebuilt inside a reconcile
+    /// both panics (*Cannot start a runtime from within a runtime*) and
+    /// discards the connection pool on every reconcile; the handle is
+    /// therefore built ONCE, in `main`, before the tokio runtime exists, and
+    /// shared. Every call on it goes through `tokio::task::spawn_blocking`.
+    ///
+    /// IT CANNOT WRITE. `main` builds it with `Store::read_only_from_url`,
+    /// whose `read_only` flag makes every put method refuse before it checks
+    /// anything else. `Option` because a controller with no archive
+    /// configured holds no archive handle at all, which is the shape every
+    /// gate in this task runs in.
+    pub archive: Option<std::sync::Arc<logweir_store::Store>>,
 }
 
 /// The type `main`'s registration point holds.

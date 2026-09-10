@@ -85,10 +85,13 @@ use kube::{Api, Resource, ResourceExt};
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use logweir_store::Store;
+
 use super::Context;
 use crate::crds::backup::{Backup, BackupSpec};
-use crate::crds::backup_schedule::{BackupSchedule, BackupScheduleSpec};
+use crate::crds::backup_schedule::{BackupSchedule, BackupScheduleSpec, Retention};
 use crate::crds::{Condition, LocalRef};
+use crate::retention::RetentionReport;
 use crate::slot::{backup_id_for, scheduled_backup_name, slot_name, Cron, CronError, SlotError};
 
 /// The condition type this reconciler owns.
@@ -620,7 +623,30 @@ pub fn status_patch(
     created: Option<&str>,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
+    status_patch_with_retention(schedule, decision, created, None, now)
+}
+
+/// [`status_patch`], plus the retention report (Task 19).
+///
+/// `None` OMITS THE KEY ENTIRELY, and that is deliberate. A `Merge` patch
+/// carrying `retentionReport: null` would DELETE a report the controller had
+/// already written, so a controller that lost its archive handle — an
+/// unmounted credential, a removed environment variable — would erase the last
+/// good report rather than leave it standing. An absent key says "this
+/// reconcile has nothing to say about retention"; an absent BLOCK on the
+/// object says "no evaluation has ever happened".
+#[must_use]
+pub fn status_patch_with_retention(
+    schedule: &BackupSchedule,
+    decision: &SlotDecision,
+    created: Option<&str>,
+    retention: Option<&RetentionReport>,
+    now: DateTime<Utc>,
+) -> serde_json::Value {
     let mut status = serde_json::Map::new();
+    if let Some(report) = retention {
+        status.insert("retentionReport".to_string(), json!(report.to_status()));
+    }
     status.insert(
         "nextFireTime".to_string(),
         match decision.next_fire_time() {
@@ -768,6 +794,47 @@ pub async fn reconcile_schedule(
     client: &kube::Client,
     now: DateTime<Utc>,
 ) -> Result<ScheduleOutcome, ScheduleError> {
+    reconcile_schedule_with_archive(schedule, client, None, now).await
+}
+
+/// [`reconcile_schedule`], plus the controller's ONE read-only archive handle.
+///
+/// TASK 19. The retention **report** is refreshed on every reconcile, from the
+/// same status write the slot decision produces, so
+/// `kubectl get backupschedule -o yaml` shows both and the UI reads them with
+/// no extra call. `archive` is `None` on a controller with no archive
+/// configured, and then no `retentionReport` key is written at all — an absent
+/// block says "no evaluation happened", which is a different claim from an
+/// empty `setsThatWouldBeRemoved`.
+///
+/// TWO ENTRY POINTS AND NOT A FOURTH PARAMETER ON ONE, because
+/// [`reconcile_schedule`]'s three-argument shape is Task 18's tested contract
+/// and eight of its tests name it. This is the same function with the handle
+/// threaded through; the three-argument form is it with `None`.
+///
+/// EVERY STORE CALL IS INSIDE `spawn_blocking` — interface **I13**, and the
+/// property `no_store_call_is_made_outside_spawn_blocking` reads out of this
+/// file's source. `Store` drives its own current-thread runtime, and
+/// `Runtime::block_on` from a thread already driving one panics with *Cannot
+/// start a runtime from within a runtime*; `kube`'s `Controller` drives this
+/// function ON a runtime. Without the closure the code compiles cleanly and
+/// dies at the first retention reconcile.
+///
+/// A RETENTION FAILURE IS NOT A RECONCILE FAILURE. An unreadable archive — a
+/// lapsed credential, a prefix pointing at objects that are not manifests —
+/// must not stop a schedule from firing its next slot, so the report is
+/// logged at `warn` and omitted, and the slot decision is written regardless.
+/// Retention is a REPORT; a schedule is a backup.
+///
+/// # Errors
+///
+/// [`ScheduleError`] for anything that is not a decision.
+pub async fn reconcile_schedule_with_archive(
+    schedule: &BackupSchedule,
+    client: &kube::Client,
+    archive: Option<&Arc<Store>>,
+    now: DateTime<Utc>,
+) -> Result<ScheduleOutcome, ScheduleError> {
     let name = schedule.name_any();
     let namespace = schedule
         .namespace()
@@ -820,13 +887,72 @@ pub async fn reconcile_schedule(
         created = Some(object_name.clone());
     }
 
+    // THE RETENTION REPORT. Between the create and the status write, so the
+    // report travels in the same patch as the slot decision — one write, one
+    // resourceVersion bump.
+    //
+    // INSIDE `spawn_blocking`, AND THAT IS INTERFACE I13. Every `Store`
+    // method drives its own current-thread runtime, and this function is
+    // driven ON a runtime by `kube`'s `Controller`; a direct call panics with
+    // *Cannot start a runtime from within a runtime*.
+    let retention_report = match archive {
+        None => None,
+        Some(store) => {
+            let store = Arc::clone(store);
+            let archive_url = schedule.spec.archive.url.clone();
+            // The handle's own key space is what it was built over, so the
+            // prefix to list under is the archive URL's own prefix. The URL
+            // itself is what the rendered commands name.
+            let prefix = crate::retention::bucket_and_prefix(&archive_url).1;
+            let retention = schedule.spec.retention.clone().unwrap_or(Retention {
+                keep_last: None,
+                keep_days: None,
+            });
+            let joined = tokio::task::spawn_blocking(move || {
+                crate::retention::evaluate(&store, &archive_url, &prefix, &retention, now)
+            })
+            .await;
+            match joined {
+                Ok(Ok(report)) => Some(report),
+                // A REPORT IS NOT A BACKUP. An unreadable archive must not
+                // stop a schedule from firing, so this is a `warn` and an
+                // omitted block, never an error the reconcile returns.
+                Ok(Err(e)) => {
+                    warn!(
+                        schedule = %name,
+                        namespace = %namespace,
+                        error = %e,
+                        "could not evaluate retention against the archive; the report is omitted \
+                         and the slot decision is written regardless"
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(
+                        schedule = %name,
+                        namespace = %namespace,
+                        error = %e,
+                        "the retention evaluation task did not complete; the report is omitted"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
     // AFTER THE CREATE, ALWAYS. See the function note: the crash window is
     // harmless only in this order.
     let api: Api<BackupSchedule> = Api::namespaced(client.clone(), &namespace);
     api.patch_status(
         &name,
         &PatchParams::default(),
-        &Patch::Merge(status_patch(schedule, &decision, created.as_deref(), now)),
+        &Patch::Merge(status_patch_with_retention(
+            schedule,
+            &decision,
+            created.as_deref(),
+            retention_report.as_ref(),
+            now,
+        )),
     )
     .await?;
 
@@ -858,7 +984,8 @@ async fn reconcile(
     schedule: Arc<BackupSchedule>,
     ctx: Arc<Context>,
 ) -> Result<Action, ScheduleError> {
-    reconcile_schedule(&schedule, &ctx.client, Utc::now()).await?;
+    reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), Utc::now())
+        .await?;
     // NOT `Action::await_change()`. A cron schedule's next event is a clock
     // tick, and no Kubernetes watch delivers one; without a requeue a schedule
     // created at 09:00 would never fire again until somebody edited it.
@@ -882,9 +1009,17 @@ fn error_policy(schedule: Arc<BackupSchedule>, err: &ScheduleError, _ctx: Arc<Co
 /// `Api::all`: this controller reconciles schedules in every namespace, which
 /// is what a cluster-scoped install means (Global Constraint 30 — one
 /// controller per cluster, no fleet).
-pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
+///
+/// `archive` is the controller's ONE read-only archive handle, built once in
+/// `main` before the tokio runtime exists and shared as `Arc<Store>` —
+/// interface **I13**. `None` is a controller with no archive configured; it
+/// writes no retention report and the schedule half is unaffected.
+pub fn controller(
+    client: kube::Client,
+    archive: Option<Arc<Store>>,
+) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<BackupSchedule> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client });
+    let ctx = Arc::new(Context { client, archive });
     async move {
         Controller::new(api, watcher::Config::default())
             .run(reconcile, error_policy, ctx)

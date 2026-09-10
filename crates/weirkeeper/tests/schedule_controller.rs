@@ -566,7 +566,23 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         );
     }
 
-    let reconcile_body = fn_body(&src, "pub async fn reconcile_schedule(");
+    // TASK 19 MOVED THIS BODY, AND THE NEEDLE FOLLOWED IT. The
+    // API-server-facing half is now `reconcile_schedule_with_archive`, which
+    // carries the controller's read-only archive handle for the retention
+    // report; `reconcile_schedule` is that function with `None`, so Task 18's
+    // three-argument contract is unchanged for every caller. The property this
+    // test is about — no clock read, decision before the POST, status write
+    // after it — is asserted over the body that now holds it, and the
+    // delegation is PINNED below so the three-argument form cannot quietly
+    // grow a second implementation.
+    let reconcile_body = fn_body(&src, "pub async fn reconcile_schedule_with_archive(");
+    let delegating_body = fn_body(&src, "pub async fn reconcile_schedule(");
+    assert!(
+        delegating_body.contains("reconcile_schedule_with_archive(schedule, client, None, now)"),
+        "`reconcile_schedule` must be `reconcile_schedule_with_archive` with no archive handle \
+         and nothing else: two implementations of one reconcile is how the ordering this test \
+         asserts comes to hold in only one of them. Got:\n{delegating_body}"
+    );
     assert!(
         !reconcile_body.contains("Utc::now()"),
         "`reconcile_schedule` — the half that talks to the API server — must contain no \
@@ -616,9 +632,14 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         "async fn reconcile(\n    schedule: Arc<BackupSchedule>,",
     );
     assert!(
-        wrapper.contains("reconcile_schedule(&schedule, &ctx.client, Utc::now())"),
+        wrapper.contains(
+            "reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), \
+             Utc::now())"
+        ),
         "the one clock read is the wrapper's, and it is handed straight to \
-         `reconcile_schedule` as an argument"
+         `reconcile_schedule_with_archive` as an argument — beside the archive handle Task 19 \
+         threads through, which is a value on the context and not a second clock. Got:\n\
+         {wrapper}"
     );
 
     // AND `slot.rs` READS NO CLOCK AT ALL (review finding LOW-2). Both the

@@ -101,6 +101,75 @@ fn run() -> ExitCode {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // THE ONE READ-ONLY ARCHIVE HANDLE, BUILT BEFORE THE TOKIO RUNTIME EXISTS
+    // — interface I13, and the ORDER is load-bearing rather than tidy.
+    // `Store`'s constructors build and drive their OWN current-thread runtime
+    // (`crates/logweir-store/src/lib.rs`'s `new_rt`, and the `rt.block_on` in
+    // `build_backend`), and `Runtime::block_on` from a thread already driving
+    // a runtime panics with *Cannot start a runtime from within a runtime*.
+    // Constructing this inside `rt.block_on` below — or worse, inside a
+    // reconcile — is that panic. Here, on a thread driving nothing, it is a
+    // plain synchronous call.
+    //
+    // AND IT IS BUILT EXACTLY ONCE. `Arc<Store>` is cloned into the schedule
+    // controller's context; every later call on it goes through
+    // `tokio::task::spawn_blocking`. A handle rebuilt per reconcile discards
+    // the connection pool each time and reintroduces the nested-runtime panic,
+    // and `tests/retention.rs::no_store_call_is_made_outside_spawn_blocking`
+    // asserts this file is the only place in the crate that constructs one.
+    //
+    // `read_only_from_url` AND NEVER `from_url`. The archive is never under
+    // `logweir/`, so the write-path constructor's `LOGWEIR_ROOT` guard would
+    // refuse to build a handle over it at all; the handle this returns
+    // physically cannot put (Global Constraint 6, guard G-RET).
+    // `scripts/check-no-archive-write.sh` fails if the other constructor is
+    // named anywhere under `crates/weirkeeper/src/`.
+    let archive = match std::env::var(weirkeeper::retention::ARCHIVE_URL_ENV) {
+        Err(_) => {
+            info!(
+                env = weirkeeper::retention::ARCHIVE_URL_ENV,
+                "no archive configured: this controller holds no archive handle and writes no \
+                 retention report"
+            );
+            None
+        }
+        Ok(url) => match weirkeeper::retention::storage_url_for(&url) {
+            Err(e) => {
+                // NOT FATAL, AND NAMED. A malformed archive URL must not stop
+                // the approval and schedule reconcilers, which need no
+                // archive at all; retention is the only thing that degrades,
+                // and it degrades loudly.
+                error!(
+                    env = weirkeeper::retention::ARCHIVE_URL_ENV,
+                    error = %e,
+                    "the configured archive URL is not readable as an object-store location; \
+                     this controller holds no archive handle and writes no retention report"
+                );
+                None
+            }
+            Ok(loc) => match logweir_store::Store::read_only_from_url(&loc) {
+                Ok(store) => {
+                    info!(
+                        archive_url = %url,
+                        read_only = true,
+                        "built the controller's one archive handle; it cannot write (Global \
+                         Constraint 6, guard G-RET)"
+                    );
+                    Some(std::sync::Arc::new(store))
+                }
+                Err(e) => {
+                    error!(
+                        archive_url = %url,
+                        error = %e,
+                        "could not build the read-only archive handle; this controller writes no \
+                         retention report"
+                    );
+                    None
+                }
+            },
+        },
+    };
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -148,8 +217,13 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::approval::controller(
             client.clone(),
         )));
+        // Task 19 threads the ONE read-only archive handle through this call
+        // rather than adding a fourth `controllers.push(…)` line: retention is
+        // a REPORT on a `BackupSchedule`, refreshed by the reconciler that
+        // already owns that object's status, so the registered count stays
+        // three (`tests/linkage.rs` asserts `"controllers":3`).
         controllers.push(Box::pin(
-            weirkeeper::controllers::backup_schedule::controller(client.clone()),
+            weirkeeper::controllers::backup_schedule::controller(client.clone(), archive.clone()),
         ));
 
         let registered = controllers.len();

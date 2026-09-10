@@ -183,29 +183,73 @@ spec:
                 description: What retention WOULD remove. Nothing was deleted — see [`RetentionReport`].
                 nullable: true
                 properties:
-                  command:
-                    description: The exact command an operator can run to remove the sets above, for their own object store. Reported, never executed.
+                  awsCli:
+                    description: The exact `aws s3 rm` commands an operator can run to remove the sets above, one per set, in the same order. **Reported, never executed.**
+                    items:
+                      type: string
                     nullable: true
-                    type: string
+                    type: array
                   evaluatedAt:
                     description: When the controller last evaluated retention.
                     format: date-time
                     nullable: true
                     type: string
-                  kept:
-                    description: The `backupId`s the policy would keep.
+                  keepDays:
+                    description: '`spec.retention.keepDays`, as it was applied.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  keepLast:
+                    description: '`spec.retention.keepLast`, **as it was applied**. Absent when no rule was configured, or when the configured value was not a non-negative count and was therefore not applied.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  mcCli:
+                    description: The same commands in `mc`'s spelling. Reported, never executed.
                     items:
                       type: string
                     nullable: true
                     type: array
                   note:
-                    description: Why the evaluation is incomplete, when it is.
+                    description: Why the evaluation removed nothing, when the reason is not "there is nothing to remove" — set when no retention rule is configured.
                     nullable: true
                     type: string
-                  removable:
-                    description: The `backupId`s the policy WOULD remove. They are still in the archive; Logweir deleted nothing.
+                  setsKept:
+                    description: The `backupId`s the policy keeps, newest first.
                     items:
                       type: string
+                    nullable: true
+                    type: array
+                  setsThatWouldBeRemoved:
+                    description: The sets the policy WOULD remove, newest first. They are still in the archive; Logweir deleted nothing.
+                    items:
+                      description: One set retention WOULD remove. **It is still in the archive.**
+                      properties:
+                        backupId:
+                          description: The backup set's id — the manifest key's parent directory.
+                          type: string
+                        days:
+                          description: The configured `keepDays`, when `reason` is `OlderThanKeepDays`.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        newestRecordAt:
+                          description: The set's newest record instant, read from the manifest BODY and never from the key string, which carries no timestamp.
+                          format: date-time
+                          type: string
+                        rank:
+                          description: The set's 1-based rank in newest-first order, when `reason` is `BeyondKeepLast`.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        reason:
+                          description: '`OlderThanKeepDays` or `BeyondKeepLast`. `OlderThanKeepDays` when both rules select the set, because age is the reason an operator acts on.'
+                          type: string
+                      required:
+                      - backupId
+                      - newestRecordAt
+                      - reason
+                      type: object
                     nullable: true
                     type: array
                 type: object

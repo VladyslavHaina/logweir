@@ -558,5 +558,97 @@ CRUD over the signing key's namespace, and that residual is stated rather than
 designed away. The controller reads no Secret, and its archive handle is
 read-only.
 
+## 9. Schedules and retention: Logweir deletes nothing
+
+### A schedule's name has a 32-character budget
+
+A `BackupSchedule` named `nightly` produces `Backup` objects called
+`logweir-backup-nightly-20260909-030000`, where the tail is the UTC instant
+the slot came due. The cap is **63 characters** — a *label value* limit and
+not the 253-character name limit, because the runner Job's pods carry
+`batch.kubernetes.io/job-name` as a label derived from this name — and the
+fixed parts of the template take 31 of them: 15 for `logweir-backup-`, 1 for
+the separator, 15 for the slot. **A schedule's own name therefore has a
+32-character budget**: 32 fits exactly, and 33 is the first that does not.
+
+This is not advice. A schedule whose name is longer produces no `Backup` at
+all: the reconciler refuses to mint a name it cannot use, records a `Ready`
+condition whose reason is `NameTooLong`, and says so in the message —
+
+```bash
+kubectl --context docker-desktop get backupschedule my-schedule \
+  -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}'
+```
+
+— rather than truncating, hashing or silently firing under a different name.
+An object name that is a pure function of the trigger is what makes a
+duplicate reconcile a 409 `AlreadyExists` instead of a second, partial archive
+(guard **G-SLOT**), and a name that had to be shortened to fit would not be
+that function any more.
+
+### A slot older than one hour is skipped, and the skip is recorded
+
+The controller has no timer and no leader lease: it re-examines every schedule
+every 30 seconds and works out which slot is due. A slot that came due more
+than **one hour** before the controller looked is **skipped** — a controller
+restarted after a week must not fire six days of backlog, because a `Backup`
+for a window nobody is waiting for costs the same broker read as one somebody
+is.
+
+A skip is a fact, not a silence. It lands in
+`status.lastMissedSlot` with a `Ready` condition whose reason is `SlotMissed`,
+and the field is never cleared afterwards — it is the audit trail of the skip:
+
+```bash
+kubectl --context docker-desktop get backupschedule nightly \
+  -o jsonpath='{.status.lastMissedSlot}'
+```
+
+`kubectl explain backupschedule.status.lastMissedSlot` states the same
+one-hour horizon, so the number is discoverable from the cluster and not only
+from this page.
+
+### Retention **reports**. It never deletes
+
+`spec.retention{keepLast, keepDays}` is evaluated by the controller on every
+reconcile against the manifests it lists, and the result goes into
+`status.retentionReport`: which sets it would keep, which sets it **would**
+remove and why, and **the exact commands an operator would run**, rendered as
+strings.
+
+```bash
+kubectl --context docker-desktop get backupschedule nightly \
+  -o jsonpath='{.status.retentionReport.awsCli[*]}'
+# aws s3 rm s3://kafka-backups/mvp-demo/backup-001/ --recursive
+```
+
+**Logweir prints them. An operator runs them.** Nothing in the report was
+deleted, and **no Logweir component in tag 1 holds any delete capability
+against object storage** — the controller's archive handle is built with the
+read-only constructor, which refuses every write before it checks anything
+else, and guard **G-RET** (`scripts/check-no-archive-write.sh`, in `just
+lint`) fails the build if any source file in the control plane so much as
+names a writable constructor or an object-store put or delete. The adopter's
+own bucket lifecycle policy does the deleting. Retention never touches a Kafka
+topic, in any tag.
+
+The report is a union of the two rules, and it says which one applies:
+`reason` is `BeyondKeepLast` with the set's `rank`, or `OlderThanKeepDays`
+with the configured `days`. When both rules select one set the report says
+`OlderThanKeepDays`, because a set that is too old stays too old however the
+count changes. With neither field set, `note` reads *no retention rule is
+configured; nothing would be removed* and nothing is listed as removable.
+
+**The controller reads the archive only if you tell it where the archive is.**
+The one read-only handle is built once, at controller start, from the
+environment variable **`LOGWEIR_ARCHIVE_URL`** (`s3://…`, `gs://…`, `az://…`
+or `file://…`; region, endpoint and credentials come from the object store's
+own environment chain). With it unset the controller holds no archive handle,
+writes no `retentionReport` at all, and logs one line saying so — schedules
+still fire, because a report is not a backup. An absent `retentionReport`
+block therefore means *no evaluation has happened*; an empty
+`setsThatWouldBeRemoved` means *the evaluation found nothing to remove*, and
+they are different answers.
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

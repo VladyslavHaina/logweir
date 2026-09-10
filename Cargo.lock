@@ -3678,6 +3678,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "logweir-core",
+ "logweir-store",
  "logweir-verify",
  "rustls",
  "schemars",

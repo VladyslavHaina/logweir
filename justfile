@@ -31,6 +31,18 @@ fmt:
 # membership in THIS recipe is what makes it enforced rather than asserted;
 # `crates/logweir/tests/withdrawn_claim.rs::the_withdrawn_claim_gate_is_in_just_lint`
 # keeps it here.
+#
+# Task 19 (chain J, slot 9) appends `check-no-archive-write.sh` last — G-RET,
+# the capability gate for the retention path. It greps `crates/weirkeeper/src`
+# for `Store::from_url`, the put methods and a RECEIVER-ANCHORED `.delete(`,
+# with comment and doc-comment lines stripped first, and never for the bare
+# word delete: that is a Kubernetes verb the controller legitimately holds on
+# Jobs and an ordinary English word in the doc comments this design requires.
+# The question a guard has to answer about a deletion is not "did it?" but
+# "CAN it?", which is why this is a grep beside `check-one-signer.sh` and not
+# a behavioural test.
+# `crates/weirkeeper/tests/retention.rs::the_no_archive_write_gate_is_in_just_lint`
+# keeps it here.
 lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
@@ -43,6 +55,7 @@ lint:
     ./scripts/check-one-signer.sh
     test -f crates/logweir/src/drill/phase9_teardown.rs && ! grep -q 'exit 4 rather than a silent success' crates/logweir/src/drill/phase9_teardown.rs
     ./scripts/check-withdrawn-claim.sh
+    ./scripts/check-no-archive-write.sh
 
 # Task 7 (Phase 1 line item 1c). G2′: the set of workspace crates from which
 # the signing API is reachable is exactly {logweir, e2e}, computed from the

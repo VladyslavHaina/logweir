@@ -38,6 +38,66 @@ pub enum StoreError {
     /// a codepath that writes.
     #[error("store is read-only — refusing to put {0}")]
     ReadOnly(String),
+    /// The object at this key parsed as JSON but is not a backup manifest:
+    /// it declares no `topics` array at all.
+    ///
+    /// TASK 13 REVIEW CARRY, DISCHARGED HERE. `manifest_facts` used to answer
+    /// `{"hello":"world"}` and `{"topics":5}` with
+    /// `Backend("… declares no segment, so it bounds no window")` — the same
+    /// error a REAL manifest describing an empty backup set gets. Those two
+    /// facts are not the same fact, and collapsing them is the
+    /// `NotFound`-versus-`Io` defect this enum's own doc comments already
+    /// argue about: "this is not a manifest" is a configuration error (the
+    /// prefix points at the wrong thing, or a sibling JSON object was picked
+    /// up by the `/manifest.json` filter), while "this manifest bounds no
+    /// window" is a fact about a backup set that really exists. A caller —
+    /// and a reader of a controller log — needs to be able to tell them
+    /// apart, so `manifest_facts` now returns THIS for the first and keeps
+    /// `Backend` for the second.
+    ///
+    /// The second field carries what was wrong, so the message names the key
+    /// AND the reason rather than only one of them.
+    #[error("{0} is not a backup manifest: {1}")]
+    NotAManifest(String, String),
+}
+
+/// The `backup_id` a manifest key belongs to: the key's parent directory.
+///
+/// TASK 13 REVIEW CARRY, DISCHARGED HERE. This derivation was copy-pasted in
+/// two places — `Store::list_manifests` and `Store::manifest_facts` — and the
+/// second one's doc comment promised it was "derived exactly as
+/// `list_manifests` derives it, so the two can never disagree about which
+/// backup set a manifest belongs to". A promise kept by two copies of four
+/// chained iterator calls is a promise one edit breaks silently, and
+/// `manifest_facts`'s `backup_id` is the string the retention report's
+/// rendered `aws s3 rm` command names. It is one function now, both callers
+/// go through it, and `the_backup_id_derivation_is_one_function` asserts the
+/// two agree over every shape that reaches either.
+///
+/// `pub` because `weirkeeper`'s retention reconciler lists manifest KEYS
+/// (`list_manifest_keys`, the same call `list_manifests` is written on top of)
+/// and must name the sets by the same rule.
+#[must_use]
+pub fn backup_id_from_manifest_key(key: &str) -> String {
+    key.trim_end_matches("/manifest.json")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The JSON type name of `v`, for an error message that says what was found
+/// rather than only what was expected. The VALUE is never quoted: a manifest
+/// body is an adopter's data and this string reaches a controller log.
+fn kind_of(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 impl From<StoreError> for EngineError {
@@ -368,12 +428,7 @@ impl Store {
             .list_manifest_keys(loc.prefix())?
             .into_iter()
             .map(|k| BackupSetRef {
-                backup_id: k
-                    .trim_end_matches("/manifest.json")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string(),
+                backup_id: backup_id_from_manifest_key(&k),
                 manifest_key: k,
             })
             .collect())
@@ -398,9 +453,21 @@ impl Store {
     /// Both come from the BODY: the key carries no timestamp, so deriving
     /// either from the key string would report `0`.
     ///
-    /// `backup_id` is the manifest key's parent directory, derived exactly as
-    /// `list_manifests` derives it, so the two can never disagree about which
-    /// backup set a manifest belongs to.
+    /// `backup_id` is the manifest key's parent directory, derived by the ONE
+    /// function [`backup_id_from_manifest_key`] that `list_manifests` also
+    /// calls, so the two cannot disagree about which backup set a manifest
+    /// belongs to. (Task 13 review carry: it used to be two copies of the same
+    /// four chained calls, under a doc comment promising they agreed.)
+    ///
+    /// TWO DIFFERENT FAILURES, TWO DIFFERENT ERRORS (Task 13 review carry).
+    /// A body that carries no `topics` array — `{"hello":"world"}`, or
+    /// `{"topics":5}` where the key exists but is not an array — is not a
+    /// manifest at all, and answers [`StoreError::NotAManifest`]. A body that
+    /// IS manifest-shaped but whose segments bound no window answers
+    /// `Backend`, because "this backup set declares no segment" is a fact
+    /// about a real set and not a configuration mistake. Collapsing the two,
+    /// which is what this method did, reported a prefix pointing at the wrong
+    /// objects identically to an empty backup set.
     ///
     /// A manifest with no segment bounds no window, and saying so is the only
     /// honest answer: an empty min/max would be published as a real window.
@@ -410,11 +477,17 @@ impl Store {
             serde_json::from_slice(&bytes).map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
         let mut newest: Option<i64> = None;
         let mut oldest: Option<i64> = None;
-        let topics = v
-            .get("topics")
-            .and_then(|t| t.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
+        let Some(topics) = v.get("topics").map(|t| {
+            t.as_array()
+                .map(|a| a.as_slice())
+                .ok_or_else(|| format!("`topics` is {}, not an array", kind_of(t)))
+        }) else {
+            return Err(StoreError::NotAManifest(
+                key.to_string(),
+                "it declares no `topics` key".to_string(),
+            ));
+        };
+        let topics = topics.map_err(|why| StoreError::NotAManifest(key.to_string(), why))?;
         for t in topics {
             let parts = t
                 .get("partitions")
@@ -447,12 +520,7 @@ impl Store {
             )));
         };
         Ok(ManifestFacts {
-            backup_id: key
-                .trim_end_matches("/manifest.json")
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .to_string(),
+            backup_id: backup_id_from_manifest_key(key),
             newest_record_ms,
             oldest_record_ms,
         })

@@ -367,3 +367,128 @@ fn manifest_facts_reads_the_window_from_the_body() {
         other => panic!("a segment-less manifest bounds no window, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// TASK 19: the two Task 13 review carries.
+// ---------------------------------------------------------------------------
+
+/// CARRY 1 — an honest error taxonomy for `manifest_facts`.
+///
+/// `{"hello":"world"}` and `{"topics":5}` used to answer
+/// `Backend("… declares no segment, so it bounds no window")` — the SAME error
+/// a real manifest describing an empty backup set gets. "The prefix points at
+/// objects that are not manifests" and "this backup set declares no segment"
+/// are different facts, and a retention report that cannot tell them apart
+/// reports a misconfigured archive as an empty one.
+///
+/// THE THIRD ARM IS WHY THIS IS A TAXONOMY AND NOT A RENAME: `{"topics":[]}`
+/// must STILL be `Backend`, so the new variant is not simply the old error
+/// under a new name.
+#[test]
+fn a_body_that_is_not_a_manifest_is_not_a_segment_less_manifest() {
+    let s = mem();
+
+    s.put_create_only("logweir/n1/manifest.json", br#"{"hello":"world"}"#)
+        .unwrap();
+    match s.manifest_facts("logweir/n1/manifest.json") {
+        Err(StoreError::NotAManifest(key, why)) => {
+            assert_eq!(key, "logweir/n1/manifest.json");
+            assert!(
+                why.contains("declares no `topics` key"),
+                "the refusal must say what was missing: {why}"
+            );
+        }
+        other => panic!("a body with no `topics` key is not a manifest, got {other:?}"),
+    }
+
+    s.put_create_only("logweir/n2/manifest.json", br#"{"topics":5}"#)
+        .unwrap();
+    match s.manifest_facts("logweir/n2/manifest.json") {
+        Err(StoreError::NotAManifest(key, why)) => {
+            assert_eq!(key, "logweir/n2/manifest.json");
+            assert!(
+                why.contains("`topics` is a number, not an array"),
+                "the refusal must name the type it found, and never quote the value: {why}"
+            );
+        }
+        other => panic!("a body whose `topics` is not an array is not a manifest, got {other:?}"),
+    }
+
+    // AND THE OLD ERROR STILL MEANS THE OLD THING.
+    s.put_create_only("logweir/n3/manifest.json", br#"{"topics":[]}"#)
+        .unwrap();
+    match s.manifest_facts("logweir/n3/manifest.json") {
+        Err(StoreError::Backend(m)) => assert!(
+            m.contains("manifest declares no segment, so it bounds no window"),
+            "a manifest-shaped body with no segment keeps the Backend error: {m}"
+        ),
+        other => panic!("a segment-less manifest is still Backend, got {other:?}"),
+    }
+}
+
+/// CARRY 2 — the `backup_id` derivation is ONE function.
+///
+/// It was copy-pasted into `list_manifests` and `manifest_facts`, under a doc
+/// comment promising the two agreed. This asserts the promise against the
+/// function both now call, over every shape that reaches either: a plain key,
+/// a deeply prefixed key, a key with no directory at all, and — the one that
+/// makes the two implementations distinguishable if they ever diverge — a
+/// `backup_id` that itself contains the substring `manifest`.
+#[test]
+fn the_backup_id_derivation_is_one_function() {
+    use logweir_store::backup_id_from_manifest_key;
+
+    for (key, want) in [
+        ("logweir/b1/manifest.json", "b1"),
+        (
+            "kafka-backups/daily/2026-09-09T00-00Z/manifest.json",
+            "2026-09-09T00-00Z",
+        ),
+        // A manifest at the very root has no parent directory, and the shared
+        // function answers with the file name itself. RECORDED RATHER THAN
+        // CHANGED: `trim_end_matches("/manifest.json")` needs the leading
+        // slash to bite, and both callers have always behaved this way, so
+        // this is the behaviour the extraction preserves rather than a defect
+        // the extraction introduces. No archive Logweir writes or reads puts a
+        // manifest at the root — every key is `<backup_id>/manifest.json`.
+        ("manifest.json", "manifest.json"),
+        ("archive/manifest-archive/manifest.json", "manifest-archive"),
+    ] {
+        assert_eq!(
+            backup_id_from_manifest_key(key),
+            want,
+            "backup_id_from_manifest_key({key})"
+        );
+    }
+
+    // BOTH CALLERS, OVER THE SAME KEY, THROUGH A REAL STORE. `list_manifests`
+    // derives from the key string; `manifest_facts` reads the body. They must
+    // return the identical `backup_id`, and both must equal the shared
+    // function's answer.
+    let s = mem();
+    let key = "logweir/manifest-archive/manifest.json";
+    s.put_create_only(
+        key,
+        br#"{"topics":[{"name":"t","partitions":[{"partition_id":0,"segments":[
+            {"key":"s.bin","start_timestamp":1,"end_timestamp":2}]}]}]}"#,
+    )
+    .unwrap();
+    let facts = s.manifest_facts(key).unwrap();
+    let listed = s
+        .list_manifests(&logweir_core::engine::StorageUrl::S3 {
+            bucket: "irrelevant".to_string(),
+            prefix: "logweir".to_string(),
+            region: None,
+            endpoint: None,
+            path_style: false,
+            allow_http: false,
+        })
+        .unwrap();
+    let listed = listed
+        .iter()
+        .find(|r| r.manifest_key == key)
+        .expect("the manifest just written is listed");
+    assert_eq!(facts.backup_id, listed.backup_id);
+    assert_eq!(facts.backup_id, backup_id_from_manifest_key(key));
+    assert_eq!(facts.backup_id, "manifest-archive");
+}

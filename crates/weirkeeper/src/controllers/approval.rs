@@ -904,7 +904,13 @@ fn error_policy(approval: Arc<Approval>, err: &ReconcileError, _ctx: Arc<Context
 /// controller per cluster, no fleet).
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Approval> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client });
+    // Task 19: this reconciler holds NO archive handle. Spelled out
+    // rather than defaulted, so the one context field that is a
+    // capability is visible at every construction site.
+    let ctx = Arc::new(Context {
+        client,
+        archive: None,
+    });
     async move {
         Controller::new(api, watcher::Config::default())
             .run(reconcile, error_policy, ctx)

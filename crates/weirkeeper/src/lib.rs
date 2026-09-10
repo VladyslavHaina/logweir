@@ -32,6 +32,18 @@
 //! here (interface **I16**) because `weirkeeper::ROSTER_NAME` is the one path
 //! every consumer of it names.
 //!
+//! WHAT TASK 19 ADDED. [`retention`] — the retention **report**, and guard
+//! **G-RET**. It lists an archive's manifests through a handle the caller
+//! built with `Store::read_only_from_url`, works out which backup sets a
+//! `{keepLast, keepDays}` policy WOULD remove, renders the exact `aws s3 rm`
+//! and `mc rm` commands an operator would run, and **deletes nothing** —
+//! Global Constraint 6 stands unamended, and no Logweir component in tag 1
+//! holds any delete capability against object storage. The report lands on
+//! `BackupSchedule.status.retentionReport`, refreshed on every reconcile.
+//! Interface **I13** is stated in that module's header: `Store` is blocking,
+//! so every call from a reconciler goes through `tokio::task::spawn_blocking`
+//! and the handle is built once, in `main`, and shared as `Arc<Store>`.
+//!
 //! WHAT THIS CRATE LINKS, AND WHAT IT MUST NOT. `logweir-verify` — the
 //! verifying half of the DSSE machinery — and never `logweir-evidence`, which
 //! keeps `SigningKey` and `sign_detached`. Global Constraint 27 states the
@@ -52,6 +64,7 @@
 pub mod controllers;
 pub mod crds;
 pub mod job;
+pub mod retention;
 pub mod slot;
 pub mod testing;
 

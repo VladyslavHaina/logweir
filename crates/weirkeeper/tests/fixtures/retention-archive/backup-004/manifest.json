@@ -1,0 +1,20 @@
+{
+  "backup_id": "backup-004",
+  "topics": [
+    {
+      "name": "orders",
+      "partitions": [
+        {
+          "partition_id": 0,
+          "segments": [
+            {
+              "key": "backup-004/topics/orders/partition=0/segment-00000000000000000000.bin",
+              "start_timestamp": 1788732000000,
+              "end_timestamp": 1788735600000
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

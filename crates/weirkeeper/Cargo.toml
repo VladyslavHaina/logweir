@@ -173,6 +173,25 @@ logweir-verify = { path = "../logweir-verify" }
 # does it reach the signer: `logweir-core` declares no `logweir-evidence` edge,
 # so `scripts/check-one-signer.sh`'s check 1 still computes {logweir, e2e}.
 logweir-core = { path = "../logweir-core" }
+# TASK 19 — THE READ-ONLY ARCHIVE HANDLE, AND NOTHING ELSE FROM THIS CRATE.
+# `src/retention.rs` needs `Store`, `Store::read_only_from_url`,
+# `Store::list_manifest_keys` and `Store::manifest_facts` (interface I12) to
+# report what retention WOULD remove; `src/main.rs` builds the one handle at
+# controller start (interface I13). Guard G-RET is that the handle this crate
+# can construct is the read-only one: `scripts/check-no-archive-write.sh`
+# refuses `Store::from_url` and every put/delete token anywhere under
+# `crates/weirkeeper/src/`, so taking this edge does not take the ability to
+# write.
+#
+# ADDS NO PACKAGE (Global Constraint 38): `logweir-store` is a workspace
+# member already in the resolved graph, and a `path =` entry is outside
+# `tests/linkage.rs::claimed_already_resolved`'s set, so the four-entry
+# assertion there is untouched.
+#
+# NOR DOES IT REACH THE SIGNER. `logweir-store` declares `logweir-core`,
+# `object_store`, `futures` and `tokio` and no `logweir-evidence` edge, so
+# `scripts/check-one-signer.sh`'s check 1 still computes {logweir, e2e}.
+logweir-store = { path = "../logweir-store" }
 # TASK 16 — `StreamExt`, TO DRIVE A `kube::runtime::Controller` TO COMPLETION.
 # `Controller::run` returns a `Stream`, not a `Future`, and `main.rs`'s
 # registration point takes `Pin<Box<dyn Future<Output = ()> + Send>>`; there is
