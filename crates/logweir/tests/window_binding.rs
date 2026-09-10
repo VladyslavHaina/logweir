@@ -110,14 +110,29 @@ fn mapping() -> BTreeMap<String, String> {
 }
 
 /// One topic, one partition, TWO segments — the earlier starting at
-/// `FLOOR_MS`, the later at `LATER_SEGMENT_MS`. The segments are in ascending
-/// order, so a `min` mutated to `max`, to `last()`, or to "the first segment's
-/// timestamp of the newest partition" all produce a different answer.
+/// `FLOOR_MS`, the later at `LATER_SEGMENT_MS`, in ASCENDING order. That order
+/// tells `min` apart from `max` and from `last()`, and it deliberately CANNOT
+/// tell `min` apart from "the FIRST segment in iteration order": with one
+/// ascending partition the first segment *is* the minimum. The fixtures that
+/// do tell those apart are `facts_from(&[LATER_SEGMENT_MS, FLOOR_MS])` and its
+/// cross-partition twin — see
+/// `the_floor_is_the_minimum_not_the_first_segment_in_iteration_order`, which
+/// exists because a `.min()` → `.next()` mutant survived all 814 tests
+/// (task-9 review, MED-1).
 fn facts_with_two_segments() -> BackupSetFacts {
     facts_from(&[FLOOR_MS, LATER_SEGMENT_MS])
 }
 
+/// One topic, one partition, one segment per element of `segment_starts`, IN
+/// THE ORDER GIVEN — the order is data, because the walk's order is exactly
+/// what `earliest_covered_timestamp_ms` must not depend on.
 fn facts_from(segment_starts: &[i64]) -> BackupSetFacts {
+    facts_with_partitions(&[segment_starts])
+}
+
+/// The same, one partition per element: the realistic shape in which a LATER
+/// partition holds an OLDER segment.
+fn facts_with_partitions(per_partition: &[&[i64]]) -> BackupSetFacts {
     BackupSetFacts {
         backup_id: "backup-2023-11-14T23:00:00Z".into(),
         created_at: ts(LATER_SEGMENT_MS),
@@ -127,28 +142,32 @@ fn facts_from(segment_starts: &[i64]) -> BackupSetFacts {
         consumer_group_snapshot_sha256: None,
         topics: vec![TopicFacts {
             name: "orders".into(),
-            original_partition_count: Some(1),
+            original_partition_count: Some(per_partition.len() as i32),
             source_replication_factor: Some(1),
             configurations: BTreeMap::new(),
-            partitions: vec![PartitionFacts {
-                partition_id: 0,
-                segments: segment_starts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, start)| SegmentFacts {
-                        key: format!("drills/b/0/{i:012}.kbak"),
-                        start_offset: i as i64 * 100,
-                        end_offset: i as i64 * 100 + 99,
-                        start_timestamp: *start,
-                        end_timestamp: *start + 60_000,
-                        record_count: 100,
-                        sha256: format!("sha256:{}", "b".repeat(64)),
-                        uploaded_at: *start + 120_000,
-                    })
-                    .collect(),
-                gaps: vec![],
-                pruned: vec![],
-            }],
+            partitions: per_partition
+                .iter()
+                .enumerate()
+                .map(|(p, segment_starts)| PartitionFacts {
+                    partition_id: p as i32,
+                    segments: segment_starts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, start)| SegmentFacts {
+                            key: format!("drills/b/{p}/{i:012}.kbak"),
+                            start_offset: i as i64 * 100,
+                            end_offset: i as i64 * 100 + 99,
+                            start_timestamp: *start,
+                            end_timestamp: *start + 60_000,
+                            record_count: 100,
+                            sha256: format!("sha256:{}", "b".repeat(64)),
+                            uploaded_at: *start + 120_000,
+                        })
+                        .collect(),
+                    gaps: vec![],
+                    pruned: vec![],
+                })
+                .collect(),
         }],
     }
 }
@@ -209,6 +228,52 @@ fn restore_plan_window_start_is_the_archive_floor() {
         plan.window_floor_source,
         WindowFloorSource::ArchiveManifest,
         "and the plan must SAY the floor came from the manifest"
+    );
+}
+
+/// **The MINIMUM, not the first segment the walk reaches.**
+/// `earliest_covered_timestamp_ms` walks `topics → partitions → segments`, and
+/// nothing orders a real manifest: a later partition — or a later topic — may
+/// hold the older segment, because a partition's segments are uploaded when
+/// that partition rolls them, not when some other partition does.
+///
+/// `facts_with_two_segments` cannot see that. Its one partition is ascending,
+/// so its first segment IS its minimum, and `.min()` → `.next()` produced the
+/// same answer for every test in the tree: the mutant survived
+/// `cargo test --workspace` at 814 passed / 0 failed (task-9 review, MED-1).
+/// Both arms below are the witness that fixture lacks.
+#[test]
+fn the_floor_is_the_minimum_not_the_first_segment_in_iteration_order() {
+    // (i) One partition, segments DESCENDING: the earlier segment is SECOND,
+    // so the first the walk reaches is the LATER one.
+    let descending = facts_from(&[LATER_SEGMENT_MS, FLOOR_MS]);
+    assert_eq!(
+        descending.earliest_covered_timestamp_ms(),
+        Some(FLOOR_MS),
+        "the floor is the minimum start_timestamp, not the first segment in \
+         iteration order"
+    );
+
+    // (ii) The realistic shape: partition 0 holds only the LATER segment and
+    // partition 1 holds the older one, so no per-partition first segment is
+    // the set's floor either.
+    let across_partitions = facts_with_partitions(&[&[LATER_SEGMENT_MS], &[FLOOR_MS]]);
+    assert_eq!(
+        across_partitions.earliest_covered_timestamp_ms(),
+        Some(FLOOR_MS),
+        "a LATER partition may hold the OLDER segment; the floor is still the minimum"
+    );
+
+    // (iii) And the plan binds THAT value — the property the two assertions
+    // above only feed. Without this line the guard could still bind a floor
+    // the facts do not report.
+    let plan = build_plan(&spec(), &set(), &mapping(), &across_partitions, "01J9X")
+        .expect("the plan builds");
+    assert_eq!(
+        plan.time_window.0.timestamp_millis(),
+        FLOOR_MS,
+        "time_window.0 is the archive set's earliest covered timestamp over EVERY \
+         partition, whatever order the manifest lists them in"
     );
 }
 
