@@ -1671,8 +1671,8 @@ fn first_difference(left: &str, right: &str) -> (usize, String, String) {
 /// documents a reader parses (`ReceiptAuth.mode`, and Task 5b's
 /// `AuthSummary.mode`). A `kubectl apply` that succeeds and a `drill run` that
 /// then refuses to parse the same string is the failure this closes — and it
-/// is not hypothetical: the receipt's own field doc still describes the value
-/// as `"scram-sha-512"`, a spelling nothing emits.
+/// was not hypothetical: until Task 5b's fix round the receipt's own field doc
+/// described the value as `"scram-sha-512"`, a spelling nothing emitted.
 ///
 /// The order is asserted too, not just the set: `enum_values` returns the
 /// declaration order, the CRD's enum is what `kubectl explain` prints in that

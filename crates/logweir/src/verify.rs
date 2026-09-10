@@ -418,7 +418,8 @@ fn print_backup_receipt(
     );
     println!(
         "checked:   the signature AND all five backup-receipt invariants \
-         (format_version, exit_code/manifest_key, records/topics, covered window)"
+         (format_version, exit_code/manifest_key, records/topics, covered window, \
+         source.auth.mode)"
     );
 }
 

@@ -318,7 +318,8 @@ fn backup_receipt_invariants_have_exactly_four_arms() {
     assert_eq!(
         cases.len(),
         4,
-        "the invariant has four arms and this test walks all of them; adding an arm \
+        "this test walks the four self-contradiction arms (arm 5, the auth-mode enum, has \
+         its own test); adding an arm \
          without a case here would leave it unasserted, which is how a guard becomes \
          a comment"
     );
