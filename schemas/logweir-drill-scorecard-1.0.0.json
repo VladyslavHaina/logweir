@@ -694,7 +694,6 @@
       "type": "object",
       "required": [
         "cluster_id",
-        "marker_topic",
         "topic_mapping_entries",
         "topic_mapping_prefix",
         "topic_mapping_sha256"
@@ -713,8 +712,17 @@
           "type": "string"
         },
         "marker_topic": {
-          "description": "The v0.1 segregation proof, verified over the logweir-kafka client: cluster_id ∈ allowedClusterIds AND this topic exists (spec §9.3 phase 0).",
-          "type": "string"
+          "description": "The v0.1 segregation proof, verified over the logweir-kafka client: cluster_id ∈ allowedClusterIds AND this topic exists (spec §9.3 phase 0).\n\n**SCRATCH MODE ONLY, and therefore optional (review F1).** In `newTopic` mode those are skipped checks 1 and 3 of the mode branch — neither the allowlist membership nor the topic's existence is verified — so writing the spec's value here put a field with THAT documented meaning into a DSSE-signed document about a run that never checked it. A `newTopic` run now omits the field, and the invariant below refuses the converse: a `scratch` document that omits it claims a segregation proof nothing recorded. `None` is therefore not \"unknown\", it is \"`mode` says this run had no marker topic to verify\".",
+          "type": "string",
+          "nullable": true
+        },
+        "mode": {
+          "description": "**Which of the two target modes the run was in.** The signed document carried no discriminator at all until fix round 1 (review F1): the mode travelled only on `crate::teardown::TeardownAttestation.target_mode`, a different document under a different media type that a `Verdict::Block` run (exit 2) never writes, and `target.topic_mapping_prefix` is not a substitute because `topic_naming.prefix` is adopter-chosen (`examples/restore.yaml` suggests `incident-4471-`). Without it a reader cannot tell whether the three scratch segregation checks ran, which is the whole difference between the two modes.\n\n`#[serde(default)]` is `Scratch`, so every document written before this field existed means exactly what it meant, and `skip_serializing_if` keeps the scratch case ABSENT ON THE WIRE — the same rule and the same reason as `auth` below: the three checked-in SIGNED fixtures are byte-compared against the generator by `crates/logweir-core/tests/fixture_regen.rs`, they are never re-minted (ruling R-G), and a field that serialised as `\"mode\": \"scratch\"` would orphan three signatures this round may not replace.\n\nGlobal Constraint 12 as amended permits this as a NESTED optional field: `TargetInfo`'s own properties are not the scorecard's 21, so the top-level shape is unchanged (21 properties, 17 required).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TargetMode"
+            }
+          ]
         },
         "topic_mapping_entries": {
           "type": "integer",
@@ -729,6 +737,14 @@
           "type": "string"
         }
       }
+    },
+    "TargetMode": {
+      "description": "**Interface I33, the Rust half.** The two restores tag 1 performs.\n\nThe serde names are `scratch` and `newTopic`, in that order, and they are the `Restore` CRD's `target.mode` enum byte for byte (`crates/weirkeeper/config/crd/restores.yaml`, pinned by `crates/weirkeeper/tests/crd_shape.rs:: restore_target_mode_accepts_only_scratch_or_new_topic` and compared against THIS type by `the_crd_mode_enum_and_target_mode_agree` in the same file). A `kubectl apply` that succeeds and a `restore run` that then refuses to parse the same string is the failure that agreement closes.\n\n# What the two modes actually differ in\n\n`Scratch` is v0.1's behaviour, unchanged: the marker topic must exist and be healthy, the target cluster id must be in `allowedClusterIds` and must not equal the source, and phase 9 deletes the topics the run created. Those three are the SCRATCH SEGREGATION PROOF — they exist to establish that a drill is writing to a throwaway cluster.\n\n`NewTopic` skips all three, and the reason is that each of them is meaningless for the thing tag 1's flagship actually does. A restore into a new topic on a real cluster is non-destructive BY CONSTRUCTION: it only ever writes a topic that did not exist, which phase 0 proves by refusing the plan outright if any mapped target topic is already there. A marker topic on a production cluster would be a lie about that cluster's purpose; an allowlist of scratch clusters cannot contain the cluster an operator is recovering INTO; and tearing the restored topic down would delete the recovery.\n\n`Default` is `Scratch`, so `#[serde(default)]` on `TargetSpec::mode` makes every spec written before this field existed mean exactly what it meant.\n\n`JsonSchema` is derived because `crate::scorecard::TargetInfo::mode` carries this type into the SIGNED document and therefore into `schemas/logweir-drill-scorecard-1.0.0.json` (global ruling GR3). It is the only spec type that does: nothing else in this module reaches a schema.",
+      "type": "string",
+      "enum": [
+        "scratch",
+        "newTopic"
+      ]
     },
     "TopicParity": {
       "type": "object",

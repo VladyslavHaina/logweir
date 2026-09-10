@@ -513,6 +513,79 @@ def test_a_blank_offset_report_key_counts_as_absent():
         assert r.returncode == 1, r.stdout
         assert "are present or absent together" in r.stderr
 
+# --- target.mode / target.marker_topic (1.12.0, review F1) -----------------
+
+MARKER_ARM = (
+    "target.marker_topic is absent but target.mode is scratch; the marker topic is the "
+    "segregation proof phase 0 verified, and a scratch document that omits it claims a "
+    "check nothing recorded"
+)
+
+
+def _signed_scorecard_without_a_marker_topic(d, mode=None):
+    """The format example with `target.marker_topic` REMOVED — key and all,
+    which is how `drill::target_info` writes a `newTopic` document — and
+    `target.mode` set when one is given. `_signed_scorecard` can override a
+    value but cannot delete a key, and the absence is the whole point here."""
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    del doc["target"]["marker_topic"]
+    if mode is not None:
+        doc["target"]["mode"] = mode
+    return _write_signed(d, "case", SCORECARD_TYPE, doc)
+
+
+def test_a_scratch_document_with_no_marker_topic_is_refused():
+    # The arm in the direction that matters: `target.marker_topic`'s own
+    # documented meaning is the phase-0 segregation proof — the cluster is in
+    # `allowedClusterIds` AND the topic exists — so a scratch document that
+    # omits it claims a check nothing recorded. An ABSENT `mode` is `scratch`,
+    # which is what every document written before the field existed carries.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard_without_a_marker_topic(d)
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert MARKER_ARM in r.stderr, r.stderr
+    # An EXPLICIT `scratch` is the same document by another spelling.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard_without_a_marker_topic(d, mode="scratch")
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert MARKER_ARM in r.stderr, r.stderr
+
+
+def test_a_new_topic_document_with_no_marker_topic_is_accepted():
+    # The mode branch's own document, and the exact shape this tree now
+    # writes: `newTopic` skips phase 0's marker and allowlist checks, so the
+    # field is absent rather than echoed from the spec.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard_without_a_marker_topic(d, mode="newTopic")
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "VALID" in r.stdout
+    # And a `newTopic` document that DOES name one is accepted too: what this
+    # tree writes is narrower than what its readers accept.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"target.mode": "newTopic"})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+
+
+def test_a_blank_marker_topic_counts_as_absent():
+    # Ruling R-A: `.strip()` here, `trim().is_empty()` in Rust. Without it the
+    # two readers split on `""` — the class T0-6 actually found.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(d, **{"target.marker_topic": "   "})
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert MARKER_ARM in r.stderr, r.stderr
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _signed_scorecard(
+            d, **{"target.marker_topic": "", "target.mode": "newTopic"}
+        )
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+
+
 
 def test_both_offset_report_fields_present_verify_and_are_printed():
     key = "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.offsets.json"
@@ -651,7 +724,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.11.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.12.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -672,6 +745,12 @@ def test_the_version_line_names_the_current_invariant_set():
         # `evidence.offset_report_sha256`, which travel together or not at all.
         assert (
             "evidence.offset_report_key and its sha256 present or absent together"
+        ) in r.stdout, r.stdout
+        # 1.12.0's addition (review F1): `target.marker_topic` is the scratch
+        # segregation proof, so it is optional and `target.mode` is what says
+        # which run it was.
+        assert (
+            "target.marker_topic present unless target.mode is newTopic"
         ) in r.stdout, r.stdout
 
 
@@ -1914,9 +1993,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # — with the payload-type map still at four. `task-9b-brief.md` says
     # "1.9.0 -> 1.10.0"; 1.10.0 was already taken by 5b's fix round, so the
     # brief's number is the error and this is the bump.
+    #
+    # 1.12.0 (Task 9b fix round 1, review F1) added one more arm again —
+    # `target.marker_topic` present unless `target.mode` is `newTopic` — plus
+    # the new nested optional `target.mode` it reads. Map still four.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 4, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.11.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.12.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
 

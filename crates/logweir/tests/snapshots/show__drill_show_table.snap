@@ -8,7 +8,7 @@ logweir drill scorecard  (01J9X2QK7C4V0R8YB3ZP6MTS5A v1.0.0)
   outcome                     pass
   engine                      oso-cli v0.21.0 sha256:0000000000000000000000000000000000000000000000000000000000000000
   levers                      header_preflight=honoured  dry_run_check_segments=unknown-not-observable
-  target                      MkU3OEVBNTcwNTJENDM2Qk  marker=logweir.scratch  1 mapping entry/ies
+  target                      MkU3OEVBNTcwNTJENDM2Qk  mode=scratch  marker=logweir.scratch  1 mapping entry/ies
   approval                    sre-oncall@example.com (CHG-40881)
 
   rto requested→verified      542s

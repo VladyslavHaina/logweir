@@ -142,8 +142,9 @@ their refusal text, so the agreement is checked rather than asserted.
 | `source.manifest_sha256` | string | `sha256:` of the archive manifest as stored. Re-derivable by hand — [verify-a-scorecard.md](../verify-a-scorecard.md) shows how. |
 | `source.manifest_version_id` | string \| null | The store's version id for the manifest object, when the backend returned one. |
 | `source.captured_by_logweir` | bool | `true` **exactly when** phase −1 ran. `validate_invariants` enforces the pairing in **both** directions with `last_phase_completed` and the two `rpo_source_relative_*` fields, so it cannot be forged into a signed document. **Always `false` in v0.1.0.** |
-| `target.cluster_id` | string | The scratch cluster's own id, read from it. |
-| `target.marker_topic` | string | The segregation proof. Its absence refuses the drill at phase 0 with exit 3, before anything runs. |
+| `target.cluster_id` | string | The target cluster's own id, read from it. |
+| `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
+| `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
 | `target.topic_mapping_prefix` | string | Prefix applied to restored topic names. |
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |

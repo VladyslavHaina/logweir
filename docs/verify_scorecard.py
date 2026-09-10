@@ -306,7 +306,21 @@ FORMAT_VERSION = "1.0.0"
 # NOTE FOR ANY LATER TASK QUOTING A BRIEF: task-9b-brief.md says "1.9.0 ->
 # 1.10.0". 1.10.0 was already taken, by Task 5b's fix round, which closed the
 # auth mode's value set. The brief's number is the error, not this constant.
-SCRIPT_VERSION = "1.11.0"
+# 1.12.0 (Task 9b fix round 1, review F1) adds ONE arm and one new nested
+# optional field. `target.mode` is the scorecard's first record of WHICH of the
+# two target modes a run was in — `scratch` (absent on the wire, the default
+# and everything v0.1 wrote) or `newTopic`. `target.marker_topic` becomes
+# OPTIONAL, because its documented meaning is the scratch segregation proof —
+# `cluster_id in allowedClusterIds` AND the topic exists, both verified at
+# phase 0 — and `newTopic` mode skips both checks; a `newTopic` run that wrote
+# the spec's value there was reporting a verification that never ran, measured
+# on a real cluster with the marker topic DELETED and an EMPTY allowlist. The
+# arm is the converse and it is the one that matters to an auditor: a document
+# in `scratch` mode with NO marker topic claims the proof while omitting the
+# thing the proof was about. Both are NESTED fields on `target` — Global
+# Constraint 12 as amended permits that kind and no other — and the document
+# stays at its frozen 21 top-level properties and 17 required ones.
+SCRIPT_VERSION = "1.12.0"
 
 # The FOUR payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -904,6 +918,37 @@ def check_invariants(doc) -> str:
                 "evidence.offset_report_key and evidence.offset_report_sha256 are present or "
                 "absent together; a key with no digest names bytes nothing binds, and a digest "
                 "with no key binds bytes nobody can fetch"
+            )
+        # `target.marker_topic` / `target.mode` (SCRIPT_VERSION 1.12.0, review
+        # F1), mirrored ARM FOR ARM and IN THIS POSITION from
+        # `Scorecard::validate_invariants` — last inside the same `major == 1`
+        # scope, with the same words.
+        #
+        # ONE DIRECTION: an absent marker requires `newTopic`. A `newTopic`
+        # document that DOES name a marker topic is accepted by both readers,
+        # because what this tree writes is narrower than what its readers
+        # accept and a reader must not refuse a document a future writer could
+        # legitimately produce.
+        #
+        # BLANK COUNTS AS ABSENT (ruling R-A): `.strip()` here,
+        # `trim().is_empty()` there.
+        #
+        # ABSENT-OR-`"scratch"` IS SCRATCH, which is exactly Rust's
+        # `#[serde(default)]` plus `TargetMode::is_scratch` for every document
+        # the Rust reader can read. A `mode` that is neither of the format's
+        # two spellings — `"bogus"`, or `null` — is refused by Rust at
+        # DESERIALISATION, because `TargetMode` is a real enum there: that is
+        # the class `shape-index.json` records, where the two readers' texts
+        # are kept separately because neither reaches an invariant, and it is
+        # the same boundary this file already draws for a non-dict `auth` and
+        # for `outcome`'s own value set.
+        marker_named = bool(str(target.get("marker_topic") or "").strip())
+        mode = target.get("mode")
+        if not marker_named and (mode is None or mode == "scratch"):
+            return (
+                "target.marker_topic is absent but target.mode is scratch; the marker topic "
+                "is the segregation proof phase 0 verified, and a scratch document that omits "
+                "it claims a check nothing recorded"
             )
 
     # T0-6 / ruling R-A: `.strip()` on both sides. Python truthiness already
@@ -1545,6 +1590,7 @@ def main(
             "target.auth's mode present, not blank, and one of the two values the "
             "format defines when the block is; "
             "evidence.offset_report_key and its sha256 present or absent together; "
+            "target.marker_topic present unless target.mode is newTopic; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

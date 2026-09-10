@@ -167,6 +167,25 @@ fn a_successful_restore_prints_three_keys_and_uploads_the_offset_report() {
     // Both readers accept the document that carries the pair.
     assert!(logweir_verify(&r).success());
     assert!(python_verify(&r).success());
+
+    // THE SCRATCH CONTROL for review F1, on a real broker: this run's
+    // document names the marker topic phase 0 actually verified, and carries
+    // no `mode` key at all — `Scratch` is the default and is
+    // `skip_serializing_if`-absent on the wire, which is what keeps the three
+    // checked-in signed fixtures under `e2e/fixtures/signed/` byte-identical.
+    // The `newTopic` arm of the same pair is asserted by
+    // `a_new_topic_restore_names_its_topics_and_tears_nothing_down` below.
+    assert_eq!(
+        sc["target"]["marker_topic"].as_str(),
+        Some(MARKER_TOPIC),
+        "a scratch run records the marker topic it checked: {}",
+        sc["target"]
+    );
+    assert!(
+        sc["target"].get("mode").is_none(),
+        "scratch is the default and adds no key: {}",
+        sc["target"]
+    );
 }
 
 /// **One `mode: newTopic` round trip on a real cluster.**
@@ -248,6 +267,24 @@ fn a_new_topic_restore_names_its_topics_and_tears_nothing_down() {
         sc["target"]["topic_mapping_prefix"].as_str(),
         Some(prefix.as_str()),
         "the scorecard records the prefix this run mapped through, not the scratch one"
+    );
+    // …and it says WHICH MODE it was in, and names NO marker topic (review
+    // F1). This is the reviewer's live counterexample turned into a permanent
+    // row: `delete_marker_topic()` above removed `logweir.scratch` from this
+    // very cluster, and the shipped document still reported
+    // `target.marker_topic: "logweir.scratch"` — a field whose own doc comment
+    // means "phase 0 verified this topic exists on an allowlisted cluster".
+    assert_eq!(
+        sc["target"]["mode"].as_str(),
+        Some("newTopic"),
+        "the signed document names the mode it ran in: {}",
+        sc["target"]
+    );
+    assert!(
+        sc["target"].get("marker_topic").is_none(),
+        "a newTopic run verified no marker topic, so its document carries no such KEY \
+         (not a null one): {}",
+        sc["target"]
     );
 
     // 3 — phase 9 tore nothing down: the topics are still there, and the

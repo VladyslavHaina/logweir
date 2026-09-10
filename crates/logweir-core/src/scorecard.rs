@@ -1,4 +1,5 @@
 use crate::outcome::{IntegrityLevel, IntegrityResult, LeverState, MatrixVerdict, Outcome};
+use crate::spec::TargetMode;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -105,9 +106,45 @@ pub struct SourceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TargetInfo {
     pub cluster_id: String,
+    /// **Which of the two target modes the run was in.** The signed document
+    /// carried no discriminator at all until fix round 1 (review F1): the mode
+    /// travelled only on `crate::teardown::TeardownAttestation.target_mode`, a
+    /// different document under a different media type that a
+    /// `Verdict::Block` run (exit 2) never writes, and
+    /// `target.topic_mapping_prefix` is not a substitute because
+    /// `topic_naming.prefix` is adopter-chosen (`examples/restore.yaml`
+    /// suggests `incident-4471-`). Without it a reader cannot tell whether the
+    /// three scratch segregation checks ran, which is the whole difference
+    /// between the two modes.
+    ///
+    /// `#[serde(default)]` is `Scratch`, so every document written before this
+    /// field existed means exactly what it meant, and
+    /// `skip_serializing_if` keeps the scratch case ABSENT ON THE WIRE — the
+    /// same rule and the same reason as `auth` below: the three checked-in
+    /// SIGNED fixtures are byte-compared against the generator by
+    /// `crates/logweir-core/tests/fixture_regen.rs`, they are never re-minted
+    /// (ruling R-G), and a field that serialised as `"mode": "scratch"` would
+    /// orphan three signatures this round may not replace.
+    ///
+    /// Global Constraint 12 as amended permits this as a NESTED optional
+    /// field: `TargetInfo`'s own properties are not the scorecard's 21, so the
+    /// top-level shape is unchanged (21 properties, 17 required).
+    #[serde(default, skip_serializing_if = "TargetMode::is_scratch")]
+    pub mode: TargetMode,
     /// The v0.1 segregation proof, verified over the logweir-kafka client:
     /// cluster_id ∈ allowedClusterIds AND this topic exists (spec §9.3 phase 0).
-    pub marker_topic: String,
+    ///
+    /// **SCRATCH MODE ONLY, and therefore optional (review F1).** In
+    /// `newTopic` mode those are skipped checks 1 and 3 of the mode branch —
+    /// neither the allowlist membership nor the topic's existence is verified
+    /// — so writing the spec's value here put a field with THAT documented
+    /// meaning into a DSSE-signed document about a run that never checked it.
+    /// A `newTopic` run now omits the field, and the invariant below refuses
+    /// the converse: a `scratch` document that omits it claims a segregation
+    /// proof nothing recorded. `None` is therefore not "unknown", it is
+    /// "`mode` says this run had no marker topic to verify".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_topic: Option<String>,
     pub topic_mapping_prefix: String,
     /// sha256 over the rendered restore.yaml topic_mapping block, so an
     /// auditor can re-derive exactly what was written.
@@ -650,6 +687,47 @@ impl Scorecard {
                         .into(),
                 ));
             }
+            // `target.marker_topic` is the SCRATCH SEGREGATION PROOF and
+            // nothing else (review F1, fix round 1). Its own doc comment says
+            // what carrying it means — `cluster_id ∈ allowedClusterIds` AND
+            // this topic exists, both verified at phase 0 — and in `newTopic`
+            // mode neither is verified, because they are skipped checks 1 and
+            // 3 of the mode branch. So the field is optional and `mode` is
+            // what says which run this was.
+            //
+            // ARMED IN ONE DIRECTION ONLY, and deliberately. An ABSENT marker
+            // requires `mode: newTopic`: a scratch document with no marker
+            // claims the proof phase 0 makes while omitting the thing the
+            // proof was made about. The other direction is NOT an invariant —
+            // a document may carry both `newTopic` and a marker topic — and
+            // the reason is that a reader must not refuse a document a
+            // FUTURE writer could legitimately produce (`TargetSpec::marker_topic`
+            // is a required spec field that a `newTopic` spec still carries,
+            // so recording it as an unverified echo is a coherent choice).
+            // What THIS tree writes is narrower than what its readers accept,
+            // which is the standing rule for every optional field in this
+            // format, and the narrower claim is a WRITER-side test:
+            // `crates/logweir/tests/restore_mode.rs::
+            // a_new_topic_scorecard_carries_the_mode_and_no_marker_topic`.
+            //
+            // BLANK COUNTS AS ABSENT (ruling R-A): `trim().is_empty()` here,
+            // `.strip()` in `docs/verify_scorecard.py`, so the two readers
+            // cannot split on `""` the way T0-6 found them splitting.
+            //
+            // Scoped to major 1 like every arm above. NOT INTERPOLATED: the
+            // message is joined to `index.json`'s `arm` field by literal
+            // substring.
+            let marker_named = self
+                .target
+                .marker_topic
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty());
+            if !marker_named && self.target.mode.is_scratch() {
+                return Err(InvariantError(
+                    "target.marker_topic is absent but target.mode is scratch; the marker topic is the segregation proof phase 0 verified, and a scratch document that omits it claims a check nothing recorded"
+                        .into(),
+                ));
+            }
         }
         // Ruling R-A / T0-6: `.is_none()` accepted `""` and `"   "`, which
         // `docs/verify_scorecard.py`'s truthiness test refuses — the two
@@ -1036,7 +1114,10 @@ mod tests {
             },
             target: TargetInfo {
                 cluster_id: "cluster-1".into(),
-                marker_topic: "logweir.scratch".into(),
+                // The DEFAULT, which is absent on the wire. Every test below
+                // that needs the other mode says so by assignment.
+                mode: TargetMode::Scratch,
+                marker_topic: Some("logweir.scratch".into()),
                 topic_mapping_prefix: "drill-".into(),
                 topic_mapping_sha256: "sha256:0".into(),
                 topic_mapping_entries: 1,
@@ -1295,6 +1376,108 @@ mod tests {
         ] {
             assert!(ev.get(name).is_some(), "{name} must still be present: {ev}");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // `target.mode` / `target.marker_topic` (fix round 1, review F1)
+    // -----------------------------------------------------------------
+
+    /// The arm, in the direction that matters to an auditor: a `scratch`
+    /// document with no marker topic claims the phase-0 segregation proof
+    /// while omitting the thing the proof was about.
+    #[test]
+    fn invariants_refuse_a_scratch_document_with_no_marker_topic() {
+        let mut sc = valid_scorecard();
+        sc.target.marker_topic = None;
+        let e = sc
+            .validate_invariants()
+            .expect_err("scratch with no marker topic is a claim about an unrecorded check");
+        assert_eq!(
+            e.0,
+            "target.marker_topic is absent but target.mode is scratch; the marker topic is the segregation proof phase 0 verified, and a scratch document that omits it claims a check nothing recorded"
+        );
+        // BLANK COUNTS AS ABSENT — ruling R-A, the same predicate
+        // `docs/verify_scorecard.py` applies with `.strip()`.
+        for blank in ["", "   "] {
+            let mut sc = valid_scorecard();
+            sc.target.marker_topic = Some(blank.into());
+            sc.validate_invariants()
+                .expect_err("a blank marker topic is an absent one, in both readers");
+        }
+    }
+
+    /// The mode branch's own document: `newTopic` with no marker topic is what
+    /// `drill::target_info` writes, and it must verify.
+    #[test]
+    fn invariants_accept_a_new_topic_document_with_no_marker_topic() {
+        let mut sc = valid_scorecard();
+        sc.target.mode = TargetMode::NewTopic;
+        sc.target.marker_topic = None;
+        sc.validate_invariants()
+            .expect("a newTopic run has no marker topic to verify, and says so by omission");
+        // And a `newTopic` document that DOES name one is still accepted: what
+        // this tree writes is narrower than what its readers accept.
+        let mut sc = valid_scorecard();
+        sc.target.mode = TargetMode::NewTopic;
+        sc.validate_invariants()
+            .expect("naming an unverified marker topic is coherent, if not what we write");
+    }
+
+    /// `mode` serialises to NOTHING for `Scratch`, which is what keeps the
+    /// three checked-in signed fixtures under `e2e/fixtures/signed/`
+    /// byte-identical — GC12's price, paid without re-minting them.
+    #[test]
+    fn a_scratch_scorecard_adds_no_mode_key_at_all() {
+        let v = serde_json::to_value(valid_scorecard()).expect("a scorecard serialises");
+        let t = &v["target"];
+        assert!(
+            t.get("mode").is_none(),
+            "the default mode must add no key, not a `\"scratch\"` one: {t}"
+        );
+        assert_eq!(
+            t.get("marker_topic").and_then(serde_json::Value::as_str),
+            Some("logweir.scratch"),
+            "and the scratch document still names its marker topic: {t}"
+        );
+    }
+
+    /// The converse, on the wire: a `newTopic` document CARRIES the mode and
+    /// carries no `marker_topic` key at all — not a null one.
+    #[test]
+    fn a_new_topic_scorecard_writes_its_mode_and_omits_the_marker_topic() {
+        let mut sc = valid_scorecard();
+        sc.target.mode = TargetMode::NewTopic;
+        sc.target.marker_topic = None;
+        let v = serde_json::to_value(&sc).expect("a scorecard serialises");
+        let t = &v["target"];
+        assert_eq!(
+            t.get("mode").and_then(serde_json::Value::as_str),
+            Some("newTopic"),
+            "the wire spelling is the CRD's own enum value: {t}"
+        );
+        assert!(
+            t.get("marker_topic").is_none(),
+            "an absent marker topic must add no key, not a null one: {t}"
+        );
+        // …and it round-trips, so a reader gets back what was signed.
+        let back: Scorecard = serde_json::from_value(v).expect("a scorecard deserialises");
+        assert_eq!(back.target.mode, TargetMode::NewTopic);
+        assert_eq!(back.target.marker_topic, None);
+    }
+
+    /// A document written before either field existed — no `mode`, a
+    /// `marker_topic` — still means exactly what it meant.
+    #[test]
+    fn a_document_with_no_mode_key_reads_as_scratch() {
+        let mut v = serde_json::to_value(valid_scorecard()).expect("serialises");
+        v["target"]
+            .as_object_mut()
+            .expect("target is an object")
+            .remove("mode");
+        let back: Scorecard = serde_json::from_value(v).expect("a scorecard deserialises");
+        assert!(back.target.mode.is_scratch());
+        back.validate_invariants()
+            .expect("every document v0.1 wrote is a scratch document and still verifies");
     }
 
     #[test]

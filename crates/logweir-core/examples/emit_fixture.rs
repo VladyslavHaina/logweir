@@ -4,6 +4,7 @@ use logweir_core::det_json::to_deterministic_json;
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::outcome::*;
 use logweir_core::scorecard::*;
+use logweir_core::spec::TargetMode;
 
 fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(s)
@@ -51,7 +52,13 @@ fn main() {
         },
         target: TargetInfo {
             cluster_id: "MkU3OEVBNTcwNTJENDM2Qk".into(),
-            marker_topic: "logweir.scratch".into(),
+            // `Scratch`, which `skip_serializing_if` keeps OUT of the bytes —
+            // the same reason `auth: None` is absent below. This example is
+            // byte-compared against the checked-in SIGNED fixture by
+            // `crates/logweir-core/tests/fixture_regen.rs`, and the fixtures
+            // are never re-minted here (ruling R-G).
+            mode: TargetMode::Scratch,
+            marker_topic: Some("logweir.scratch".into()),
             topic_mapping_prefix: "drill-".into(),
             topic_mapping_sha256: sha256_prefixed(b"orders: drill-orders\n"),
             topic_mapping_entries: 1,

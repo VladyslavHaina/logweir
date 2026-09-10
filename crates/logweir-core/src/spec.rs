@@ -346,12 +346,28 @@ fn delete() -> String {
 ///
 /// `Default` is `Scratch`, so `#[serde(default)]` on `TargetSpec::mode` makes
 /// every spec written before this field existed mean exactly what it meant.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `JsonSchema` is derived because `crate::scorecard::TargetInfo::mode` carries
+/// this type into the SIGNED document and therefore into
+/// `schemas/logweir-drill-scorecard-1.0.0.json` (global ruling GR3). It is the
+/// only spec type that does: nothing else in this module reaches a schema.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum TargetMode {
     #[default]
     Scratch,
     NewTopic,
+}
+
+impl TargetMode {
+    /// `true` for the default. Named here rather than written as a closure at
+    /// the `skip_serializing_if` site so the scorecard's "absent means
+    /// scratch" rule has one owner, beside the `Default` impl it agrees with.
+    pub fn is_scratch(&self) -> bool {
+        matches!(self, TargetMode::Scratch)
+    }
 }
 
 impl std::fmt::Display for TargetMode {

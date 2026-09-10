@@ -806,7 +806,14 @@ fn each_phases_result_reaches_the_signed_document() {
 
     // 0 — admission
     assert_eq!(sc.target.cluster_id, fixtures::FIXTURE_CLUSTER_ID);
-    assert_eq!(sc.target.marker_topic, fixtures::FIXTURE_MARKER_TOPIC);
+    // `Some`, because the fixture spec is a SCRATCH restore — the mode whose
+    // phase 0 verifies the marker topic. A `newTopic` run carries `None` here
+    // and `restore_mode.rs` owns that arm.
+    assert_eq!(
+        sc.target.marker_topic.as_deref(),
+        Some(fixtures::FIXTURE_MARKER_TOPIC)
+    );
+    assert!(sc.target.mode.is_scratch());
     assert_eq!(sc.target.topic_mapping_entries, 1);
     assert_eq!(
         sc.target.topic_mapping_sha256,

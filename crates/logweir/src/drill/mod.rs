@@ -1967,7 +1967,14 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
         },
         target: TargetInfo {
             cluster_id: String::new(),
-            marker_topic: c.spec.target.marker_topic.clone(),
+            // The mode is a property of the SPEC, so it is known before
+            // anything is measured and the draft can carry it truthfully.
+            // `marker_topic` is NOT: it means "phase 0 verified this topic
+            // exists on an allowlisted cluster", so it is written only for the
+            // mode whose phase 0 checks that — see `target_info` below, which
+            // makes the same choice for the document that gets signed.
+            mode: c.spec.target.mode,
+            marker_topic: marker_topic_for(&c.spec),
             topic_mapping_prefix: c.spec.target.topic_mapping_prefix.clone(),
             topic_mapping_sha256: String::new(),
             topic_mapping_entries: 0,
@@ -2070,6 +2077,19 @@ fn source_info(facts: &logweir_core::engine::BackupSetFacts) -> SourceInfo {
 /// `expect`: an unreachable refusal that becomes reachable through somebody
 /// else's edit must exit 3 with its `refusal-reason=` line, not abort the
 /// process.
+/// `TargetInfo::marker_topic` for a spec: the spec's value in `Scratch` mode
+/// and `None` in `NewTopic` mode.
+///
+/// ONE owner, called from both `new_scorecard`'s draft and `target_info`'s
+/// signed document, because a draft that carried the field and a signed
+/// document that did not would be two answers to the same question.
+fn marker_topic_for(spec: &DrillSpec) -> Option<String> {
+    match spec.target.mode {
+        logweir_core::spec::TargetMode::Scratch => Some(spec.target.marker_topic.clone()),
+        logweir_core::spec::TargetMode::NewTopic => None,
+    }
+}
+
 fn target_info(
     spec: &DrillSpec,
     admitted: &phase0_admit::Admitted,
@@ -2079,7 +2099,20 @@ fn target_info(
             .map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
     Ok(TargetInfo {
         cluster_id: admitted.target_cluster_id.clone(),
-        marker_topic: spec.target.marker_topic.clone(),
+        // The DISCRIMINATOR the signed document was missing (review F1). It
+        // is `skip_serializing_if`-absent for `Scratch`, so no byte of any
+        // scratch document moves, and present for `NewTopic` — the one run
+        // whose phase 0 skipped the marker and allowlist checks.
+        mode: spec.target.mode,
+        // ABSENT in `newTopic` mode. The field's own doc comment defines it as
+        // the phase-0 segregation proof — `cluster_id ∈ allowedClusterIds` AND
+        // this topic exists — and in `newTopic` mode neither is checked, so
+        // writing the spec's value here would put a verified-sounding claim
+        // about an unrun check into a DSSE-signed document. The reviewer
+        // measured exactly that: a real run with `logweir.scratch` DELETED and
+        // an EMPTY allowlist still reported `target.marker_topic:
+        // "logweir.scratch"`.
+        marker_topic: marker_topic_for(spec),
         // The prefix PHASE 0 ACTUALLY MAPPED THROUGH, taken off `Admitted`
         // rather than re-read from the spec. In `newTopic` mode the name comes
         // from `target.topic_naming.prefix` or from
@@ -3103,6 +3136,81 @@ mod tests {
     /// **M8.** `notification_spec` actually reads the spec file, and its
     /// failures are silent and non-fatal.
     ///
+    /// **The signed document says WHICH MODE the run was in, and names a
+    /// marker topic only in the mode that verified one** (fix round 1, review
+    /// F1).
+    ///
+    /// Through `target_info`, not through `marker_topic_for` alone: the helper
+    /// is the rule's owner but `target_info` is the CALL SITE, and the mutant
+    /// this row exists for — write `spec.target.marker_topic` into a
+    /// `newTopic` document, which is what shipped — is spellable at either.
+    ///
+    /// The reviewer's live counterexample is the reason: a real run with
+    /// `logweir.scratch` DELETED from the cluster and an EMPTY allowlist
+    /// exited 0 and signed `target.marker_topic: "logweir.scratch"` anyway,
+    /// with nothing in the document to say the two checks behind that field
+    /// had been skipped.
+    #[test]
+    fn the_target_block_carries_the_mode_and_the_marker_topic_only_in_scratch() {
+        use logweir_core::spec::TargetMode;
+
+        let mut spec: DrillSpec = serde_yaml::from_str(
+            "source:\n  storage:\n    backend: filesystem\n    path: /a\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [x:9092]\n  marker_topic: logweir.scratch\n  \
+             topic_mapping_prefix: \"drill-\"\n\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {}\n\
+             evidence:\n  backend: filesystem\n  path: /b\n",
+        )
+        .unwrap();
+
+        let admitted = phase0_admit::Admitted {
+            target_cluster_id: "CLUSTER00000000000000AA".into(),
+            topic_mapping: [("orders".to_string(), "drill-orders".to_string())]
+                .into_iter()
+                .collect(),
+            topic_mapping_prefix: "drill-".into(),
+            topic_preflight: phase0_admit::TopicPreflight {
+                timestamp_type: "CreateTime".into(),
+                retention_ms: "-1".into(),
+                timestamp_bound_ms: None,
+                configs_set: Vec::new(),
+                topics_created: Vec::new(),
+            },
+        };
+
+        // `scratch` — v0.1's document, unchanged, and the mode absent on the
+        // wire so the three checked-in signed fixtures keep their bytes.
+        let t = target_info(&spec, &admitted).expect("the scratch target block");
+        assert!(t.mode.is_scratch());
+        assert_eq!(t.marker_topic.as_deref(), Some("logweir.scratch"));
+        let wire = serde_json::to_value(&t).expect("a target block serialises");
+        assert!(
+            wire.get("mode").is_none(),
+            "scratch is the default and must add no key: {wire}"
+        );
+
+        // `newTopic` — the mode is stated and the marker topic is GONE, key
+        // and all, because phase 0 skipped both checks the field stands for.
+        spec.target.mode = TargetMode::NewTopic;
+        let t = target_info(&spec, &admitted).expect("the newTopic target block");
+        assert_eq!(t.mode, TargetMode::NewTopic);
+        assert_eq!(
+            t.marker_topic, None,
+            "a newTopic run verified no marker topic, so its document names none"
+        );
+        let wire = serde_json::to_value(&t).expect("a target block serialises");
+        assert_eq!(
+            wire.get("mode").and_then(serde_json::Value::as_str),
+            Some("newTopic"),
+            "and the mode is on the wire, in the CRD's own spelling: {wire}"
+        );
+        assert!(
+            wire.get("marker_topic").is_none(),
+            "an absent marker topic is an absent KEY, not a null one: {wire}"
+        );
+    }
+
     /// It is the only thing standing between `report`'s failure paths and the
     /// notification config: `RunArgs` carries paths, not a parsed spec, and
     /// on the exit-1 path `execute` returned `Err` so there is no `Ctx` to

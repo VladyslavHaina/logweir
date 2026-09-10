@@ -196,5 +196,20 @@
     "python_exit": 1,
     "reason": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together; a key with no digest names bytes nothing binds, and a digest with no key binds bytes nobody can fetch",
     "arm": "evidence.offset_report_key and evidence.offset_report_sha256 are present or absent together"
+  },
+  {
+    "id": "new_topic_without_a_marker_topic",
+    "file": "new_topic_without_a_marker_topic.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": ""
+  },
+  {
+    "id": "scratch_without_a_marker_topic",
+    "file": "scratch_without_a_marker_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "target.marker_topic is absent but target.mode is scratch; the marker topic is the segregation proof phase 0 verified, and a scratch document that omits it claims a check nothing recorded",
+    "arm": "target.marker_topic is absent but target.mode is scratch"
   }
 ]

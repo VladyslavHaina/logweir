@@ -43,13 +43,24 @@ pub fn render_table(sc: &Scorecard) -> String {
             sc.engine.levers.dry_run_check_segments.wire_name()
         ),
     );
+    // The MODE is printed, and `marker=` appears only when the document
+    // carries a marker topic (review F1). It used to print
+    // `marker=logweir.scratch` for a `newTopic` run too, from a field the run
+    // had never verified, with no mode anywhere on the screen to say so. A
+    // reader of `drill show` could not tell the two kinds of run apart.
     row(
         &mut o,
         "target",
-        format!(
-            "{}  marker={}  {} mapping entry/ies",
-            sc.target.cluster_id, sc.target.marker_topic, sc.target.topic_mapping_entries
-        ),
+        match sc.target.marker_topic.as_deref() {
+            Some(m) => format!(
+                "{}  mode={}  marker={m}  {} mapping entry/ies",
+                sc.target.cluster_id, sc.target.mode, sc.target.topic_mapping_entries
+            ),
+            None => format!(
+                "{}  mode={}  {} mapping entry/ies",
+                sc.target.cluster_id, sc.target.mode, sc.target.topic_mapping_entries
+            ),
+        },
     );
     row(
         &mut o,
