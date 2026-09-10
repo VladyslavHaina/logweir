@@ -9,6 +9,11 @@ use logweir_kafka::reader::{
 };
 use std::collections::BTreeMap;
 
+/// Kafka's topic-name length limit, in characters. `kafka.common.Topic`'s own
+/// `MAX_NAME_LENGTH`; the broker refuses a longer name at `CreateTopics`, and
+/// `phase0_admit::run` refuses it before anything runs (review F2).
+const MAX_TOPIC_NAME_CHARS: usize = 249;
+
 #[derive(Debug)]
 pub struct Admitted {
     pub target_cluster_id: String,
@@ -224,6 +229,68 @@ pub fn run(
                 logweir_core::guard::GLOB_METACHARACTERS
                     .iter()
                     .collect::<String>()
+            ))
+            .into());
+        }
+    }
+
+    // **The mapped target names are LEGAL KAFKA TOPIC NAMES**, checked here
+    // and not at the broker (fix round 1, review F2).
+    //
+    // Kafka's rule is three clauses: at most 249 characters, drawn from
+    // `[a-zA-Z0-9._-]`, and never `.` or `..` (those two collide with the
+    // directory entries a log segment lives in). A name that broke any of
+    // them used to reach `create_target_topics` and come back as a broker
+    // error — `EngineError::Operational`, exit **1**, no artifact — from
+    // `drill/mod.rs`, i.e. AFTER phase 5's `engine.preflight` had already
+    // written into the workdir. Global Constraint 11 reserves exit 3 for a
+    // plan refused BEFORE anything runs, and a target name's SHAPE is
+    // knowable with no broker, no bucket and no engine, exactly like the
+    // glob rail above.
+    //
+    // **The TARGET side only**, and the asymmetry is deliberate: a source
+    // topic name was read out of an archive a Kafka broker had already
+    // accepted, so it is legal by construction; the mapped name is the one
+    // THIS build synthesises, out of `target_topic_prefix` — either
+    // `topic_mapping_prefix` or an adopter-written `topic_naming.prefix`,
+    // and `examples/restore.yaml` itself suggests writing one by hand
+    // (`incident-4471-`). The exposure is therefore WIDENED by `newTopic`
+    // mode and not created by it: `target.topic_mapping_prefix` has always
+    // been able to do this.
+    //
+    // AFTER the glob and `${` arms, so a `drill-*` prefix is still reported
+    // as a pattern rather than as an illegal character — every glob
+    // metacharacter is also outside the legal charset, and the specific
+    // message is the useful one.
+    //
+    // Length is counted in CHARACTERS, not bytes: a non-ASCII name is
+    // refused by the charset clause anyway, so the two agree on everything
+    // this arm accepts, and `chars().count()` is the number the message
+    // quotes.
+    for name in &targets {
+        let why = if name.is_empty() {
+            Some("is empty".to_string())
+        } else if name.chars().count() > MAX_TOPIC_NAME_CHARS {
+            Some(format!(
+                "is {} characters long; Kafka's limit is {MAX_TOPIC_NAME_CHARS}",
+                name.chars().count()
+            ))
+        } else if name == "." || name == ".." {
+            Some(format!(
+                "is `{name}`, which Kafka reserves: a topic's log lives in a directory and those two are its own entries"
+            ))
+        } else {
+            name.chars()
+                .find(|c| !(c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-'))
+                .map(|c| {
+                    format!(
+                        "contains {c:?}, which is not one of Kafka's legal topic-name characters [a-zA-Z0-9._-]"
+                    )
+                })
+        };
+        if let Some(why) = why {
+            return Err(GuardRefusal(format!(
+                "mapped target topic `{name}` {why}. The broker would refuse to create it, and it would do so at phase 5 — after the engine had already written into the workdir — as an operational error with no refusal reason and no artifact. The name is a function of the approved plan alone, so it is refused here instead, before anything runs (target.topic_naming.prefix or target.topic_mapping_prefix in this spec)."
             ))
             .into());
         }

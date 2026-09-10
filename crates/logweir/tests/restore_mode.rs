@@ -414,6 +414,107 @@ fn a_restore_refuses_a_target_topic_that_already_exists() {
 // THE NAMING (interface I33)
 // ===========================================================================
 
+/// **A mapped target name that Kafka would refuse is refused at PHASE 0**
+/// (fix round 1, review F2), not at phase 5 by the broker.
+///
+/// Three shapes, each through an explicit `topic_naming.prefix` because that
+/// is the adopter-written half — `examples/restore.yaml` suggests writing one
+/// by hand — and the exposure is the same for `target.topic_mapping_prefix`
+/// in `scratch` mode, which has always had it.
+///
+/// Every row asserts the EXIT CODE, because the whole point of the finding is
+/// that these used to arrive as `EngineError::Operational` (exit 1, no
+/// artifact, no `refusal-reason=` line) from `create_target_topics` AFTER
+/// phase 5 had written into the workdir.
+///
+/// The mutant this exists for: delete the arm. All four assertions below then
+/// report `ExitCode::Ok` where they assert `GuardRefused`.
+#[test]
+fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
+    // (a) 250 characters. `orders` is six, so a 244-character prefix puts the
+    //     SHORTER of the two mapped names one over Kafka's 249.
+    let prefix = "a".repeat(244);
+    let spec = spec_in(
+        TargetMode::NewTopic,
+        Some(TopicNaming {
+            prefix: prefix.clone(),
+        }),
+    );
+    let r = phase0(&spec, &NoMarkerBroker::new());
+    assert_eq!(
+        exit_of(&r),
+        ExitCode::GuardRefused,
+        "a 250-character mapped name is refused before anything runs"
+    );
+    let m = message_of(r);
+    assert!(
+        m.contains(&format!("mapped target topic `{prefix}orders`")),
+        "the refusal names the offending topic: {m}"
+    );
+    assert!(
+        m.contains("is 250 characters long; Kafka's limit is 249"),
+        "…and says which clause it broke: {m}"
+    );
+
+    // (b) a SPACE — legal in YAML, illegal in a Kafka topic name, and not a
+    //     glob metacharacter, so the existing rail does not reach it.
+    let spec = spec_in(
+        TargetMode::NewTopic,
+        Some(TopicNaming {
+            prefix: "incident 4471-".into(),
+        }),
+    );
+    let r = phase0(&spec, &NoMarkerBroker::new());
+    assert_eq!(exit_of(&r), ExitCode::GuardRefused);
+    let m = message_of(r);
+    assert!(
+        m.contains("mapped target topic `incident 4471-orders`"),
+        "got: {m}"
+    );
+    assert!(
+        m.contains("contains ' ', which is not one of Kafka's legal topic-name characters"),
+        "the refusal names the character: {m}"
+    );
+
+    // (c) a `/`, which would also be a path separator in the broker's log
+    //     directory.
+    let spec = spec_in(
+        TargetMode::NewTopic,
+        Some(TopicNaming {
+            prefix: "restore/2026-".into(),
+        }),
+    );
+    let r = phase0(&spec, &NoMarkerBroker::new());
+    assert_eq!(exit_of(&r), ExitCode::GuardRefused);
+    let m = message_of(r);
+    assert!(
+        m.contains("mapped target topic `restore/2026-orders`"),
+        "got: {m}"
+    );
+    assert!(m.contains("contains '/'"), "got: {m}");
+
+    // (d) THE CONTROL. The same doubles, a legal prefix — 243 characters, so
+    //     the longer mapped name (`payments`, eight) is exactly 251… which is
+    //     over. 240 keeps both under: `240 + 8 = 248`.
+    let spec = spec_in(
+        TargetMode::NewTopic,
+        Some(TopicNaming {
+            prefix: "b".repeat(240),
+        }),
+    );
+    let r = phase0(&spec, &NoMarkerBroker::new());
+    assert_eq!(
+        exit_of(&r),
+        ExitCode::Ok,
+        "248 characters of legal charset is a name Kafka accepts, so phase 0 must too"
+    );
+
+    // (e) …and the arm does not fire on the DEFAULT prefix, which is what
+    //     every `newTopic` run that names no `topic_naming` uses.
+    let r = phase0(&spec_in(TargetMode::NewTopic, None), &NoMarkerBroker::new());
+    assert_eq!(exit_of(&r), ExitCode::Ok);
+}
+
 /// `default_topic_prefix` and the name it produces for `orders`.
 ///
 /// Both halves are asserted: the prefix ALONE (so a mutant that changed the
