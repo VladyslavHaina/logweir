@@ -148,10 +148,16 @@ numbers.
 ## The four invariants
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
-these, and the messages below are the **exact** refusal text — they are compared
-byte-for-byte by
-`crates/logweir-core/tests/backup_receipt.rs::backup_receipt_invariants_have_exactly_four_arms`
-and are not to be reworded.
+these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
+them ARM FOR ARM, IN ORDER. The messages below are the **exact** refusal text of
+BOTH readers — compared byte-for-byte by
+`crates/logweir-core/tests/backup_receipt.rs::backup_receipt_invariants_have_exactly_four_arms`,
+by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
+over the seven documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
+and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
+reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
+from both readers' source and refuses to balance if they are not the same four
+arms in the same order.
 
 1. **`format_version` parses as semver and its major is `1`.** Checked first, so
    a document from a future major is refused before any other arm is evaluated
