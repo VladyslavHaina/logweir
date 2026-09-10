@@ -210,13 +210,37 @@ fn required_source(relative: &str) -> String {
 }
 
 /// `src` with every comment, string and character literal replaced by spaces,
-/// positions and line structure preserved.
+/// positions and line structure preserved. **LIFETIMES ARE LEFT ALONE.**
 ///
 /// WHY SANITISE AT ALL. Two of the assertions below are about where a token
 /// appears in CODE, and this file's own subjects are files whose doc comments
 /// discuss exactly those tokens at length. Brace matching has the same
 /// problem from the other end: `format!("{a}")` would unbalance any counter
 /// that did not know it was inside a string.
+///
+/// # A `'` IS NOT ALWAYS A CHARACTER LITERAL, AND THAT WAS A REAL BLINDNESS
+///
+/// This function used to treat every `'` as the opener of a character literal
+/// and blank forward to the next one. Rust spells LIFETIMES with the same
+/// byte, so a signature like `-> BoxFuture<'static, …>` blanked every byte
+/// from that tick to the following tick anywhere later in the file —
+/// including, in `controllers/backup.rs`, the whole `reconcile` closure that
+/// clones the archive handle. **Measured** (Task 17 re-review, concern 1): a
+/// planted `store.get("logweir/probe")` outside `spawn_blocking` in
+/// `controllers/backup.rs` left [`no_store_call_is_made_outside_spawn_blocking`]
+/// green at 32 passed / 0 failed and the whole `weirkeeper` suite green at
+/// 143 passed / 0 failed, while the same plant in
+/// `controllers/backup_schedule.rs` — a file with no lifetime before the
+/// planted line — failed at 30/2. A guard that is blind wherever a lifetime
+/// appears is worse than no guard, because the ledger records it as closed
+/// (STANDING RULE 21).
+///
+/// THE RULE, at a `'`: if the next byte is a backslash, or the byte two on is
+/// a closing `'`, it is a character literal and the literal is consumed.
+/// Anything else is a lifetime, and **only the tick** is consumed so the code
+/// after it is still scanned. `'a'`, `'\n'` and `'\''` are literals;
+/// `'static`, `'a` and `'_` are not. `the_sanitizer_knows_a_lifetime_from_a_character_literal`
+/// tests this before anything trusts it.
 fn sanitize(src: &str) -> String {
     let b = src.as_bytes();
     let mut out = vec![b' '; b.len()];
@@ -276,21 +300,43 @@ fn sanitize(src: &str) -> String {
                 continue;
             }
         }
-        // A normal string or character literal.
-        if b[i] == b'"' || b[i] == b'\'' {
-            let quote = b[i];
+        // A normal string.
+        if b[i] == b'"' {
             i += 1;
             while i < b.len() {
                 if b[i] == b'\\' {
                     i += 2;
                     continue;
                 }
-                if b[i] == quote {
+                if b[i] == b'"' {
                     i += 1;
                     break;
                 }
                 i += 1;
             }
+            continue;
+        }
+        // A character literal — OR a lifetime. See the doc comment for the
+        // rule and for the measurement that made it necessary.
+        if b[i] == b'\'' {
+            let is_char_literal = b.get(i + 1) == Some(&b'\\') || b.get(i + 2) == Some(&b'\'');
+            if is_char_literal {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'\'' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // A LIFETIME. Consume the tick and nothing else.
+            i += 1;
             continue;
         }
         out[i] = b[i];
@@ -353,6 +399,77 @@ fn occurrences(text: &str, needle: &str) -> Vec<usize> {
 
 fn line_of(text: &str, index: usize) -> usize {
     text[..index].matches('\n').count() + 1
+}
+
+/// [`sanitize`] is TESTED BEFORE IT IS TRUSTED, and the case it is here for is
+/// the first one.
+///
+/// **Task 20, ruling 1.** Every source-reading assertion in this file is only
+/// as good as this function, and its previous `'`-handling made
+/// [`no_store_call_is_made_outside_spawn_blocking`] blind to any code that
+/// followed a lifetime — measured on a real plant in
+/// `controllers/backup.rs`, which stayed green at 32 passed / 0 failed while
+/// the identical plant in a lifetime-free file failed at 30/2. A sanitizer
+/// with no test of its own is how a guard comes to assert nothing while the
+/// ledger records it as closed (STANDING RULE 21).
+#[test]
+fn the_sanitizer_knows_a_lifetime_from_a_character_literal() {
+    // THE REGRESSION, exactly. `'static` must not swallow the code after it.
+    let lifetime = "fn f() -> BoxFuture<'static, u8> { let store = store.clone(); }";
+    assert!(
+        sanitize(lifetime).contains("store.clone()"),
+        "a lifetime tick must NOT blank the code after it — this is the exact blindness that let \
+         a planted `store.get(…)` survive this file's I13 guard. Got: {}",
+        sanitize(lifetime)
+    );
+    // An anonymous and a named lifetime, both in a signature this crate has.
+    assert!(
+        sanitize("pub type O<'a> = &'a (dyn Fn() + 'a); fn g(_: &'_ u8) { store.get(k) }")
+            .contains("store.get(k)"),
+        "`'a` and `'_` are lifetimes too"
+    );
+
+    // …and a character literal still IS consumed, in all three shapes.
+    assert!(
+        !sanitize("if c == 'x' { store.get(k) } else { nothing() }").contains("'x'"),
+        "a plain character literal is blanked"
+    );
+    assert!(
+        sanitize("if c == 'x' { store.get(k) }").contains("store.get(k)"),
+        "and blanking it does not eat the code after it"
+    );
+    assert!(
+        sanitize("if c == '\\n' { store.get(k) }").contains("store.get(k)"),
+        "an escaped character literal must not swallow the rest of the line"
+    );
+    assert!(
+        sanitize("if c == '\\'' { store.get(k) }").contains("store.get(k)"),
+        "an escaped-QUOTE character literal must not swallow the rest of the line"
+    );
+
+    // The three cases that were already right, kept as a floor.
+    assert!(
+        !sanitize("let s = \"store.get(\";").contains("store.get("),
+        "a string literal IS blanked"
+    );
+    assert!(
+        !sanitize("// store.get(\n").contains("store.get("),
+        "a line comment IS blanked"
+    );
+    assert!(
+        !sanitize("/* store.get( */").contains("store.get("),
+        "a block comment IS blanked"
+    );
+    assert!(
+        !sanitize("let s = r#\"store.get(\"#;").contains("store.get("),
+        "a raw string IS blanked"
+    );
+    // Line structure survives, which is what makes `line_of` mean anything.
+    assert_eq!(
+        sanitize("a\nb\n").matches('\n').count(),
+        2,
+        "newlines are preserved so a failure message can name a line number"
+    );
 }
 
 // ===========================================================================
@@ -694,14 +811,35 @@ const I13_FILES: [&str; 5] = [
 ];
 
 /// Tokens that mean "this line calls into `Store`".
-const STORE_CALL_TOKENS: [&str; 6] = [
+///
+/// `observe_archive(` NAMES NO `Store` AT ALL, AND THAT IS WHY IT IS HERE.
+/// `controllers::backup::observe_archive` is the single non-async function
+/// holding a reconciler's two `store.get` calls, so its CALL SITE is where
+/// I13 is kept or broken while the site itself mentions neither `Store` nor
+/// `store.`. Added at Task 20 (ruling 1): `tests/backup_controller.rs`'s
+/// module-local twin already had it, and a token list two guards disagree
+/// about is a token list one of them is blind through.
+const STORE_CALL_TOKENS: [&str; 7] = [
     "Store::",
     "store.",
     ".manifest_facts(",
     ".list_manifests(",
     ".list_manifest_keys(",
     "retention::evaluate(",
+    "observe_archive(",
 ];
+
+/// Every marker that opens an ASYNC REGION, as this scan understands one.
+///
+/// AN `async fn` BODY IS NOT THE ONLY PLACE A NESTED RUNTIME PANICS. A future
+/// built by an `async move { … }` block — which is exactly the shape
+/// `controllers::backup::reconcile`'s archive oracle takes, and the shape
+/// `controllers::restore`'s takes — is polled on the reconciler's runtime
+/// wherever it was written, so a `Store` call inside one is the same fatal
+/// call whether or not the enclosing `fn` is `async`. The original walk saw
+/// only `async fn `, which meant an oracle closure declared inside a
+/// SYNCHRONOUS `fn` was invisible to it. Added at Task 20 (ruling 1).
+const ASYNC_REGION_MARKERS: [&str; 3] = ["async fn ", "async move {", "async {"];
 
 /// **Interface I13.** No `Store` call is made outside `spawn_blocking`, and
 /// the handle is constructed exactly once, in `main.rs`.
@@ -713,10 +851,27 @@ const STORE_CALL_TOKENS: [&str; 6] = [
 /// therefore COMPILES CLEANLY and dies at the first retention reconcile — the
 /// one failure mode a type checker cannot see and a green unit suite does not
 /// reach.
+///
+/// # WHAT TASK 20 FIXED HERE, AND WHY IT WAS NOT COSMETIC
+///
+/// Three defects, all found by planting a mutant and watching it survive
+/// (Task 17 re-review, concern 1 — accepted, and routed to this task):
+/// [`sanitize`] blanked everything after a LIFETIME tick, the region walk saw
+/// only `async fn ` and not `async move {`, and [`STORE_CALL_TOKENS`] did not
+/// name `observe_archive(` — the one call whose site holds two `store.get`s
+/// while mentioning no `Store`. Each is fixed at its own declaration, with
+/// the measurement in that declaration's doc comment, and
+/// [`the_sanitizer_knows_a_lifetime_from_a_character_literal`] tests the
+/// sanitizer before this scan trusts it.
 #[test]
 fn no_store_call_is_made_outside_spawn_blocking() {
     let mut scanned = 0;
     let mut offences: Vec<String> = Vec::new();
+    // Counted so a walk that stopped finding regions cannot pass silently:
+    // this scan's whole verdict is "the token is inside an async region and
+    // outside every `spawn_blocking`", and a region list that came back empty
+    // makes every token unreachable and the assertion vacuous.
+    let mut regions_seen = 0usize;
 
     for relative in I13_FILES {
         let Some(raw) = source(relative) else {
@@ -725,13 +880,18 @@ fn no_store_call_is_made_outside_spawn_blocking() {
         scanned += 1;
         let text = sanitize(&raw);
 
-        // Every `async fn` body in the file, as a byte span.
+        // Every ASYNC REGION in the file, as a byte span: `async fn ` bodies
+        // AND `async move {` / `async {` blocks. See
+        // `ASYNC_REGION_MARKERS` for why the blocks are not optional.
         let mut async_bodies: Vec<(usize, usize)> = Vec::new();
-        for start in occurrences(&text, "async fn ") {
-            if let Some(span) = block_after(&text, start) {
-                async_bodies.push(span);
+        for marker in ASYNC_REGION_MARKERS {
+            for start in occurrences(&text, marker) {
+                if let Some(span) = block_after(&text, start) {
+                    async_bodies.push(span);
+                }
             }
         }
+        regions_seen += async_bodies.len();
         // Every `spawn_blocking(…)` argument group, as a byte span.
         let blocking: Vec<(usize, usize)> = occurrences(&text, "spawn_blocking(")
             .into_iter()
@@ -748,13 +908,22 @@ fn no_store_call_is_made_outside_spawn_blocking() {
                     continue;
                 }
                 offences.push(format!(
-                    "{relative}:{} names `{token}` inside an `async fn` body and outside every \
+                    "{relative}:{} names `{token}` inside an async region and outside every \
                      `spawn_blocking(…)` closure",
                     line_of(&text, at)
                 ));
             }
         }
     }
+
+    assert!(
+        regions_seen >= 5,
+        "the walk found {regions_seen} async regions across {scanned} scanned files. The three \
+         files that exist at this slot hold several `async fn`s and at least one `async move` \
+         block each, so a count this low means the sanitizer or the brace matcher is broken and \
+         every token below is unreachable — the shape that let a planted `store.get(…)` survive \
+         this guard at 32 passed / 0 failed."
+    );
 
     assert!(
         scanned >= 2,
