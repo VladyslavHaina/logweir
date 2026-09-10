@@ -439,7 +439,7 @@ def rust_body(text, signature):
 
 
 def read_rust_literal(text, i):
-    """The Rust string literal starting at `text[i] == '"'`, with `\`-newline
+    r"""The Rust string literal starting at `text[i] == '"'`, with `\`-newline
     CONTINUATIONS applied — rustc drops the newline and the following leading
     whitespace, so a gate that did not would compare a string with spaces in it
     against a refusal that never had them."""
