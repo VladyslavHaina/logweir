@@ -510,13 +510,24 @@ fn the_signed_receipt_fixture_verifies() {
         stdout.contains("application/vnd.logweir.backup-receipt+json;version=1.0.0"),
         "the verdict must name the media type it checked, got: {stdout}"
     );
-    // The honest line. An exit 0 here does NOT mean what a scorecard's exit 0
-    // means, and the printer has to say so — otherwise the weaker verdict is
-    // indistinguishable from the stronger one at the only place an operator
-    // looks.
+    // SINCE TASK 5b THIS IS THE FULL-STRENGTH VERDICT for this document type.
+    // Task 5's build checked the signature alone and its printer said so in
+    // as many words (`checked: the SIGNATURE only …`); Task 5b wired the
+    // invariant dispatch, so `--payload-type backup-receipt` now runs all
+    // four of `BackupReceipt::validate_invariants`'s arms and the printer has
+    // to say THAT instead. The line still distinguishes the two strengths —
+    // which is the property the old assertion was protecting — it just names
+    // the stronger one now, and `the_signature_only_verdict_is_still_reachable`
+    // below keeps the weaker sentence honest for the two document types that
+    // still get it.
     assert!(
-        stdout.contains("the SIGNATURE only"),
-        "an exit 0 that checked no invariant must say so on stdout, got: {stdout}"
+        stdout.contains("the signature AND all four backup-receipt invariants"),
+        "an exit 0 that checked the invariants must say so on stdout, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("the SIGNATURE only"),
+        "the receipt path evaluates invariants since Task 5b; printing the weaker sentence \
+         would understate what exit 0 established, got: {stdout}"
     );
 
     let substituted = verify_typed("scorecard");
@@ -534,6 +545,62 @@ fn the_signed_receipt_fixture_verifies() {
         "a payloadType mismatch is evidence of substitution, which is the same class \
          as a bad signature (Global Constraint 11, exit 4), stderr: {}",
         String::from_utf8_lossy(&substituted.stderr)
+    );
+}
+
+/// The `SignatureOnly` verdict is still REACHABLE, and still honest.
+///
+/// Task 5b gave the backup receipt an invariant reader; the drill put receipt
+/// and the teardown attestation have none in tag 1, so their exit 0 means
+/// strictly less and the printer must keep saying so. Without this row, the
+/// sentence could be deleted along with its last caller and nothing would
+/// notice — and the next document type to gain a `--payload-type` would
+/// inherit an exit 0 that reads like a scorecard's.
+#[test]
+fn the_signature_only_verdict_is_still_reachable() {
+    // A teardown attestation, signed under its own payload type with the
+    // checked-in throwaway key. Minted here rather than checked in: the
+    // fixtures under e2e/fixtures/signed/ are never re-minted by this task.
+    let dir = tempfile::tempdir().unwrap();
+    let doc = dir.path().join("teardown.json");
+    let sig = dir.path().join("teardown.sig");
+    let bytes = br#"{"run_id":"01J9X2QK7C4V0R8YB3ZP6MTS5A","topics_deleted":["drill-orders"]}"#;
+    std::fs::write(&doc, bytes).unwrap();
+    let key = logweir_evidence::keys::SigningKey::from_pem_file(std::path::Path::new(&format!(
+        "{FIX}/signing.pem"
+    )))
+    .unwrap();
+    let sidecar =
+        logweir_evidence::sign::sign_detached(&key, logweir_evidence::PAYLOAD_TYPE_TEARDOWN, bytes)
+            .unwrap();
+    std::fs::write(&sig, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+
+    let out = bin()
+        .args([
+            "drill",
+            "verify",
+            "--payload-type",
+            "teardown",
+            "--scorecard",
+        ])
+        .arg(&doc)
+        .arg("--signature")
+        .arg(&sig)
+        .arg("--public-key")
+        .arg(format!("{FIX}/public.pem"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("the SIGNATURE only"),
+        "a document type with no invariant reader must say that exit 0 checked the \
+         signature alone, got: {stdout}"
     );
 }
 

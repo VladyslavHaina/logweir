@@ -117,8 +117,23 @@ byte-identical bytes here.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `covered.from_ms` | integer (int64) | Start of the covered range, **epoch milliseconds**. |
-| `covered.to_ms` | integer (int64) | End of the covered range, **epoch milliseconds**. `>= from_ms` — invariant 4. |
+| `covered.from_ms` | integer (int64) | **Inclusive** start of the covered range, **epoch milliseconds**. |
+| `covered.to_ms` | integer (int64) | **EXCLUSIVE** end of the covered range, **epoch milliseconds**. Strictly `> from_ms` — invariant 4. |
+
+The window is **half-open**: `[from_ms, to_ms)`. That is the convention
+`config/crd/backups.yaml` already documents for
+`Backup.status.windowCovered.toMs`, which Task 17 fills by copying these two
+integers, so the two documents describe one range under one rule. Task 5 shipped
+invariant 4 as `<=` and a test asserting that `from_ms == to_ms` was a legal
+"instantaneous window"; that was the disagreement, and the receipt is the side
+that moved (Task 5's review, F3).
+
+A backup whose records all share one millisecond is still a window, and still
+legal: `crates/logweir/src/backup/phase_run.rs` derives `to_ms` from the newest
+segment's **inclusive** `end_timestamp` and adds one millisecond, so such a run
+publishes `[t, t+1)` — a window containing exactly those records — rather than
+the empty `[t, t]` invariant 4 now refuses. That conversion happens once, where
+the window is measured, and nowhere else.
 
 This is the shape the operator's `Backup.status.windowCovered{fromMs,toMs}`
 mirrors, as two `int64`s. A Kubernetes status subresource has no date-time type
@@ -163,10 +178,12 @@ and are not to be reworded.
 
    > `records covers {"orders"} but the named topic set is {"orders", "payments"}`
 
-4. **`covered.from_ms <= covered.to_ms`.** A window that ends before it begins is
-   not a smaller window, it is a meaningless one.
+4. **`covered.from_ms < covered.to_ms`, strictly.** The end is EXCLUSIVE, so a
+   window that ends before it begins is meaningless and one that ends where it
+   begins is empty — and an archive that captured a record cannot cover an
+   empty range.
 
-   > `covered.from_ms 2 is after covered.to_ms 1`
+   > `covered.from_ms 2 is not before covered.to_ms 1: the covered window's end is EXCLUSIVE, so an empty range covers no record`
 
 ---
 
@@ -200,26 +217,70 @@ The `--scorecard` flag keeps its name even when it names a receipt. Renaming it
 would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
-> **What each reader checks today, stated plainly rather than implied.** The
-> Rust reader accepts `--payload-type backup-receipt` now and compares the
-> sidecar's `payloadType` **in full**, so a genuinely-signed scorecard presented
-> as a receipt is refused as a substitution rather than accepted. The **Python**
-> reader's `--payload-type` already exists but does not yet know the
-> `backup-receipt` name: the command above is the one it will take, and it
-> errors with `unknown --payload-type` until the second half of this work lands
-> it. `logweir drill verify --payload-type backup-receipt` reports the
-> **signature only** and says so on stdout —
-> `checked:   the SIGNATURE only — this build evaluates no invariant for this
-> document type` — because the invariant dispatch that runs the four arms above
-> inside `drill verify`, and the matching block in `docs/verify_scorecard.py`,
-> land together in the second half of this work (Task 5b) so that the two
-> readers gain them in one commit and can never disagree in between. Until then
-> the four arms are enforced where the receipt is **written** (the minter and
-> `logweir backup run` both refuse a document that violates one) and by the Rust
-> test named above. An exit 0 from `--payload-type backup-receipt` means "these
-> bytes are signed by this key under this media type", and the printed line says
-> so rather than letting it be read as the full-strength verdict a scorecard's
-> exit 0 carries.
+> **What each reader checks today, stated plainly rather than implied.** Both
+> readers now run **all four arms above** over a `--payload-type
+> backup-receipt` document, and both were given them in one commit (Task 5b) so
+> that they could never disagree in between. `logweir drill verify` prints
+> `checked:   the signature AND all four backup-receipt invariants …`;
+> `docs/verify_scorecard.py` prints `verifier: verify_scorecard.py 1.9.0
+> (backup-receipt invariant set: …)`. Both compare the sidecar's `payloadType`
+> **in full**, so a genuinely-signed scorecard presented as a receipt is refused
+> as a substitution rather than accepted — `drill verify` exits 4 and says
+> `PAYLOAD TYPE MISMATCH`, which is deliberately not `SIGNATURE INVALID`: the
+> signature may be perfectly valid over some other document.
+>
+> An exit 0 from either reader therefore means "these bytes are signed by this
+> key under this media type **and** the document does not contradict itself".
+> The weaker sentence — `checked:   the SIGNATURE only …` — is still printed for
+> `--payload-type receipt` and `--payload-type teardown`, whose invariant
+> readers are not in tag 1, and
+> `crates/logweir/tests/cli_verify.rs::the_signature_only_verdict_is_still_reachable`
+> keeps it honest.
+>
+> **Where else the four arms are enforced.** At the two places a receipt is
+> WRITTEN: `crates/logweir-evidence/examples/mint_backup_receipt_fixture.rs`
+> validates before it signs, and `logweir backup run` validates the exact
+> document it is about to sign before it signs or uploads anything
+> (`crates/logweir/src/backup/phase_run.rs::persist_receipt`, step 1) — a
+> violating receipt is exit **4** with nothing in the bucket, asserted by
+> `crates/logweir/tests/backup_run.rs::a_receipt_that_cannot_be_signed_is_exit_4_and_puts_nothing`.
+> Before Task 5b this paragraph named `logweir backup run` while that command
+> wrote no receipt at all; it is now true by execution.
+
+## Where `logweir backup run` puts it
+
+Two objects, both create-only, both under Global Constraint 6's `logweir/`
+root:
+
+```
+logweir/backups/<backup_id>/<run_id>.receipt.json
+logweir/backups/<backup_id>/<run_id>.receipt.sig
+```
+
+The prefix is an **assertion**, not a convention: `Store::put_create_only`
+refuses any key outside `logweir/`, so a build that tried to write the receipt
+elsewhere aborts rather than writing it. The evidence handle is derived from the
+archive's own object-store location with the prefix replaced by `logweir/` —
+`Backup.spec` carries one URL, the archive root, and `Store::from_url` refuses
+any evidence prefix that is not exactly `logweir/`.
+
+The **final two stdout lines** of a successful `logweir backup run` are, in this
+order and with nothing after them:
+
+```
+receipt-key=logweir/backups/<backup_id>/<run_id>.receipt.json
+sidecar-key=logweir/backups/<backup_id>/<run_id>.receipt.sig
+```
+
+That is a machine contract (interface **I7**): the Kubernetes pod log API has no
+stream selector, so a controller reading a Job's output cannot separate stdout
+from stderr and reads the last lines instead.
+
+`--receipt-out <path>` additionally writes the same bytes to `<path>` and the
+DSSE sidecar to `<path>` with the extension replaced by `.sig` — the pairing
+`drill run --out` already uses. `--out` is the same flag by another name;
+naming two DIFFERENT paths is refused before anything runs, because this command
+writes exactly one document.
 
 ## Regenerating the fixture
 

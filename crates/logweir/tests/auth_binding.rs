@@ -31,10 +31,11 @@ use logweir_core::engine::{
 };
 use logweir_core::spec::{AuthSpec, DrillSpec};
 use logweir_engine_oso::storage::Store;
+use logweir_evidence::keys::SigningKey;
 use logweir_engine_oso::{render_restore, render_validation};
 use logweir_kafka::reader::{AuthConfig, ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The principal the approver signed off on.
 const APPROVED: &str = "approved-principal";
@@ -221,7 +222,10 @@ fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     let reader = StubReader;
     let engine = StubEngine::new();
     let store = archive_with_one_manifest("mvp-demo");
-    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap();
+    // Six arguments since Task 5b: the ARCHIVE store and the EVIDENCE
+    // store are separate parameters (`backup::execute_with`), and this row
+    // cares about neither destination — one in-memory store plays both.
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(
         outcome.source_auth,
         AuthRender::ScramSha512 {
@@ -690,12 +694,23 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
     )
     .unwrap();
     std::fs::write(&allowed, "{\"allowed_cluster_ids\": [\"SCRATCH-0000001\"]}").unwrap();
+    // AN EPHEMERAL KEY, GENERATED HERE, and never a committed private key.
+    // Since Task 5b `execute_with` SIGNS the receipt, so a bare
+    // `PathBuf::from("signer.pem")` — which was enough while the function
+    // wrote nothing — now fails the run with `key error: signer.pem: No such
+    // file or directory`. Same pattern as `tests/backup_run.rs`'s own
+    // fixture: the key lives and dies with the `TempDir`, and the throwaway
+    // fixture key under `e2e/fixtures/signed/` stays reserved for the corpus
+    // walkers, which verify against a checked-in PUBLIC pem.
+    let key = SigningKey::generate_p256();
+    let key_path = dir.path().join("signer.pem");
+    std::fs::write(&key_path, key.to_pkcs8_pem().unwrap()).unwrap();
     BackupFixture {
         _dir: dir,
         args: BackupRunArgs {
             spec,
             allowed_clusters: allowed,
-            signing_key: PathBuf::from("signer.pem"),
+            signing_key: key_path,
             triggered_by: None,
             out: None,
             receipt_out: None,

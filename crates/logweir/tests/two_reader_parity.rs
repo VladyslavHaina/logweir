@@ -1709,9 +1709,18 @@ fn every_gate_resolves_the_auditors_interpreter_the_same_way() {
 
     // (file, the line that opens the resolver, the line that closes it, the
     // language's comment marker).
-    let resolvers: [(&str, &str, &str, &str); 4] = [
+    let resolvers: [(&str, &str, &str, &str); 5] = [
         (
             "crates/logweir/tests/two_reader_parity.rs",
+            "fn python() -> PathBuf {",
+            "}",
+            "//",
+        ),
+        // FIVE since Task 5b: the backup receipt's corpus walker is its own
+        // test binary (GC22's per-test bound), so it carries its own resolver
+        // and would otherwise be the one gate nothing checked.
+        (
+            "crates/logweir/tests/two_reader_parity_receipt.rs",
             "fn python() -> PathBuf {",
             "}",
             "//",
@@ -1771,7 +1780,7 @@ fn every_gate_resolves_the_auditors_interpreter_the_same_way() {
             seen,
             ORDER.to_vec(),
             "{rel} resolves the auditor's interpreter as {seen:?}, but every other gate \
-             resolves it as {ORDER:?}. All four must agree, or the two-reader parity claim \
+             resolves it as {ORDER:?}. All FIVE must agree, or the two-reader parity claim \
              is checked against two different second readers.\nbody:\n{}",
             body.join("\n")
         );

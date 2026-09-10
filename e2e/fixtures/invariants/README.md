@@ -312,6 +312,88 @@ found three more again — the same three fields at the wrong TYPE — and close
 them by widening it once more, this time to carry the JSON type each field's Rust
 type implies.
 
+## `backup-receipt-index.json` — the BACKUP RECEIPT's corpus (Task 5b)
+
+Seven documents, and a different document type: `logweir_core::backup_receipt::
+BackupReceipt`, whose four arms are mirrored by
+`docs/verify_scorecard.py::check_backup_receipt_invariants`. Same six fields as
+`index.json` (interface **I31**), same accept-control discipline, and the same
+"the cases are UNSIGNED and signed at test time" rule — with one difference that
+matters: they are signed under the **receipt's own media type**
+(`application/vnd.logweir.backup-receipt+json;version=1.0.0`). A receipt signed
+under the scorecard's type is refused by both readers at the `payloadType`
+comparison, and every case would then "agree" for the wrong reason.
+
+`unmodified_receipt.json` is a byte copy of
+`e2e/fixtures/signed/backup-receipt.json` and is the accept-control. The other
+six each differ from it by exactly the override that makes one arm fire:
+
+| case | override | arm |
+|---|---|---|
+| `format_version_major_2` | `format_version` → `2.0.0` | 1 |
+| `exit_code_zero_without_a_manifest` | `archive.manifest_key` → `""` | 2 |
+| `manifest_without_exit_code_zero` | `exit_code` → `1` | 2, the other direction |
+| `records_missing_a_named_topic` | `records` loses `payments` | 3 |
+| `records_names_an_unlisted_topic` | `records` gains `invoices` | 3, the other direction |
+| `covered_from_after_to` | `covered.from_ms` and `to_ms` swapped | 4 |
+
+Arms 2 and 3 are BICONDITIONALS, which is why each has two cases: a single case
+per arm passes against a reader that checks one direction only.
+
+### Why `arm` is the whole reason string here
+
+In `index.json`, `arm` is a verbatim fragment of the message literal in
+`Scorecard::validate_invariants`, and
+`every_invariant_arm_has_a_corpus_case` joins on it by substring. The receipt's
+four messages **interpolate** — a `format_version`, an exit code, two rendered
+topic sets, two timestamps — so no such fragment exists. `arm` is therefore
+byte-equal to `reason`, and the join is on the message **SKELETON**: the format
+string with every `{…}` placeholder normalised, re-derived from BOTH readers'
+source text by `scripts/check-invariant-corpus.sh`.
+
+That gate asserts three things, and the middle one is what the scorecard corpus
+cannot do:
+
+1. every case's reason matches exactly one arm skeleton, and every skeleton is
+   matched by at least one case;
+2. **the two readers implement the same four arms, in the same order, with the
+   same message** — so deleting an arm from ONE reader together with its corpus
+   case and its pytest does not balance, because the other reader still has
+   four;
+3. the accept-control exists, and case ids are unique across all three indexes.
+
+Deleting an arm from **both** readers plus its case plus its pytest is the one
+edit this arithmetic cannot catch — the same limit the `occurrences: 0`
+paragraph above states for `index.json` — and the answer is the same: the
+per-arm Rust unit tests in
+`crates/logweir-core/tests/backup_receipt.rs`, which assert each of the four
+messages in FULL and which such an edit does not touch.
+
+The two-reader walk over these seven documents is
+`crates/logweir/tests/two_reader_parity_receipt.rs` — its **own test binary**,
+because Global Constraint 22's 15 s bound is per `#[test]` and
+`two_reader_parity.rs` already measures 5–12 s.
+
+## The two `target.auth` cases in `index.json` (Task 5b)
+
+`target_auth_mode_absent_is_plaintext` and `target_auth_username_without_mode`
+are Global Constraint 12's price for one nested optional field:
+`TargetInfo.auth`, declared by Task 5b and FILLED by Task 6.
+
+Both are `unmodified_example.json` with a `target.auth` block added, and both
+are refused by both readers with byte-identical text. **An absent block is
+legal** — it means plaintext, and every scorecard this tree has ever written has
+none, which is what the other twenty-one cases keep true. What is refused is a
+block whose `mode` is BLANK (ruling R-A: `trim().is_empty()` in Rust,
+`.strip()` in Python), because a SCRAM run recorded as plaintext by omission is
+the one claim an auditor must never have to guess at — and a `username` beside a
+blank mode is a principal recorded without the mechanism it authenticated with,
+which is the same defect with more evidence that it was not an accident.
+
+Neither message interpolates, so both `arm` fields are verbatim fragments of
+`Scorecard::validate_invariants` and `every_invariant_arm_has_a_corpus_case`
+joins on them exactly as it does for every other case here.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

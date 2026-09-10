@@ -106,40 +106,42 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
 
     // 4. Interface **I6**'s refusal, LAST among the local checks.
     //
-    //    Ordering, both ways round. It is AFTER steps 1–3 because a guard
-    //    refusal must win over an unimplemented flag: a spec carrying
-    //    `purge_topics` and `--receipt-out` is exit 3, on the key, not exit 1
-    //    on the flag. It is inside the LOCAL stage — not after `network`,
-    //    where fix round 1 found it — because a flag this build cannot honour
-    //    is knowable with ZERO I/O, and refusing it after step 5 cost a
-    //    measured 20.1 s and ~360 librdkafka lines against the SOURCE
-    //    cluster, i.e. the production one (review F-3). The tree's own
-    //    precedent (`assert_engine_identity`, `drill/mod.rs:854`, placed
-    //    after phase 0) justifies "after the local guards"; it does not
-    //    require "after the network read".
-    refuse_unwritable_document(args)
+    //    Task 4's placeholder refused `--out`/`--receipt-out` outright,
+    //    because it wrote no receipt. **Task 5b writes one**, so the flags
+    //    work and the only thing left to refuse is the one shape that cannot
+    //    be honoured: two DIFFERENT paths for the one document this command
+    //    writes.
+    //
+    //    Ordering, both ways round, and unchanged. It is AFTER steps 1–3
+    //    because a guard refusal must win over a bad flag combination: a spec
+    //    carrying `purge_topics` and two receipt paths is exit 3, on the key,
+    //    not exit 1 on the flags. It is inside the LOCAL stage — not after
+    //    `network`, where Task 4's fix round 1 found it — because a property
+    //    of the FLAGS is knowable with ZERO I/O, and refusing it after step 5
+    //    cost a measured 20.1 s and ~360 librdkafka lines against the SOURCE
+    //    cluster, i.e. the production one (review F-3).
+    refuse_two_receipt_paths(args)
 }
 
-/// Interface **I6** is Task 5b's. Until it lands, an operator who asked for
-/// the receipt gets a message naming the contract that owes it — never a
-/// silent exit 0 after a real backup with no document to show for it.
+/// Interface **I6** writes ONE document. `--receipt-out` takes precedence over
+/// `--out` (`crate::backup::receipt_out_path`), so two flags naming the SAME
+/// path is fine and two flags naming DIFFERENT paths is a request this command
+/// cannot satisfy: one of the two files would never appear, and an operator
+/// would be left looking for evidence at a path nothing wrote.
 ///
 /// Exit 1, not 3: nothing about the PLAN was found wanting, and GC11 reserves
-/// 3 for a refused plan. Task 5b deletes this function and the flag starts
-/// working.
-fn refuse_unwritable_document(args: &BackupRunArgs) -> Result<(), BackupError> {
-    for (flag, path) in [
-        ("--receipt-out", args.receipt_out.as_ref()),
-        ("--out", args.out.as_ref()),
-    ] {
-        if let Some(p) = path {
+/// 3 for a refused plan.
+fn refuse_two_receipt_paths(args: &BackupRunArgs) -> Result<(), BackupError> {
+    if let (Some(receipt_out), Some(out)) = (&args.receipt_out, &args.out) {
+        if receipt_out != out {
             return Err(BackupError::Operational(format!(
-                "{flag} {} was given, but this build writes no backup receipt: the receipt bytes \
-                 and their `.sig` sidecar are interface I6, owned by Task 5b. NO backup was \
-                 taken: this refusal is raised before the engine is spawned AND before any \
-                 broker client exists, so an operator who asked for a document cannot be handed \
-                 an archive instead. Re-run without {flag}.",
-                p.display()
+                "--receipt-out {} and --out {} name DIFFERENT paths, and `logweir backup run` \
+                 writes exactly one document: the signed backup receipt. --receipt-out would \
+                 win and nothing would ever be written to --out. NO backup was taken: this is \
+                 refused before the engine is spawned AND before any broker client exists. \
+                 Pass one of the two.",
+                receipt_out.display(),
+                out.display()
             )));
         }
     }

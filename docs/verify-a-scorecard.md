@@ -160,9 +160,14 @@ pip install cryptography
 python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
 ```
 
-A drill publishes three signed documents, each under its own payload type.
-`--payload-type scorecard|receipt|teardown` selects which one is being checked;
-the default is the scorecard, so the three-argument form above is unchanged.
+A drill publishes three signed documents and a backup publishes a fourth, each
+under its own payload type.
+`--payload-type scorecard|backup-receipt|receipt|teardown` selects which one is
+being checked; the default is the scorecard, so the three-argument form above is
+unchanged. `backup-receipt` is the signed record of one `logweir backup run`
+([`formats/backup-receipt.md`](formats/backup-receipt.md)) and is checked
+arm-for-arm by both readers; `receipt` is the drill's post-put storage readback
+of a scorecard.
 See [Verifying the receipt's signature](#verifying-the-receipts-signature).
 
 (If you would rather not install into your system Python, create a

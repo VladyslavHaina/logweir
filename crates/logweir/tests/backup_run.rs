@@ -18,11 +18,14 @@
 //! one. Both are the seam; neither names a client constructor.
 use logweir::backup::{execute_with, run_with, BackupError, BackupRunArgs};
 use logweir::exit::ExitCode;
+use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::engine::*;
 use logweir_engine_oso::storage::Store;
+use logweir_evidence::keys::SigningKey;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::Command;
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -82,15 +85,27 @@ fn fixture(spec: &str, allowed: &str) -> Fixture {
     let allowed_path = dir.path().join("allowed-clusters.json");
     std::fs::write(&spec_path, spec).unwrap();
     std::fs::write(&allowed_path, allowed).unwrap();
+    // AN EPHEMERAL KEY, GENERATED HERE, and never a committed private key.
+    // Task 5b signs the receipt with `--signing-key`, so every success-path
+    // row needs a real key — and the throwaway fixture key under
+    // `e2e/fixtures/signed/` is reserved for the corpus walkers, which verify
+    // against a checked-in PUBLIC pem. This one lives and dies with the
+    // `TempDir`; the matching public pem is written beside it so the I6 row
+    // can verify what the run signed.
+    let key = SigningKey::generate_p256();
+    let key_path = dir.path().join("signer.pem");
+    std::fs::write(&key_path, key.to_pkcs8_pem().unwrap()).unwrap();
+    std::fs::write(
+        dir.path().join("signing.pub.pem"),
+        key.verifying_key().to_public_key_pem().unwrap(),
+    )
+    .unwrap();
     Fixture {
         _dir: dir,
         args: BackupRunArgs {
             spec: spec_path,
             allowed_clusters: allowed_path,
-            // NEVER opened by this build (see `BackupRunArgs::signing_key`);
-            // the path is threaded for Task 5b, so a fixture needs no key
-            // material and this suite generates none.
-            signing_key: PathBuf::from("signer.pem"),
+            signing_key: key_path,
             triggered_by: None,
             out: None,
             receipt_out: None,
@@ -234,6 +249,8 @@ fn topic_facts(name: &str, segments: Vec<SegmentFacts>) -> TopicFacts {
 /// are `crates/logweir-engine-oso/tests/render_scram.rs`'s four goldens.
 struct RecordingEngine {
     plans: Mutex<Vec<BackupPlan>>,
+    /// Overrides `id()`. `None` on every row but the engine-identity one.
+    identity: Option<EngineId>,
     /// `None` => the engine fails, as a real one exiting non-zero does.
     facts: Option<BackupFacts>,
     topics: Vec<TopicFacts>,
@@ -243,6 +260,7 @@ impl RecordingEngine {
     fn ok(topics: Vec<TopicFacts>) -> Self {
         Self {
             plans: Mutex::new(Vec::new()),
+            identity: None,
             facts: Some(BackupFacts {
                 started_at: ts("2026-09-09T00:00:00Z"),
                 finished_at: ts("2026-09-09T00:01:00Z"),
@@ -261,9 +279,21 @@ impl RecordingEngine {
     fn failing() -> Self {
         Self {
             plans: Mutex::new(Vec::new()),
+            identity: None,
             facts: None,
             topics: vec![],
         }
+    }
+    /// The engine's IDENTITY, overridden — for the row that asserts a receipt
+    /// must name the image it ran (GC7). `None` means "answer `id()` from the
+    /// defaults below".
+    fn with_identity(mut self, version: &str, digest: &str) -> Self {
+        self.identity = Some(EngineId {
+            id: "double".into(),
+            version: version.into(),
+            digest: digest.into(),
+        });
+        self
     }
     fn recorded_plan(&self) -> BackupPlan {
         self.plans
@@ -281,11 +311,11 @@ fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
 
 impl DataEngine for RecordingEngine {
     fn id(&self) -> EngineId {
-        EngineId {
+        self.identity.clone().unwrap_or(EngineId {
             id: "double".into(),
             version: "v0.21.0".into(),
             digest: "sha256:0".into(),
-        }
+        })
     }
     fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
         unimplemented!("the backup path lists through the Store handle, not the engine")
@@ -362,7 +392,9 @@ fn backup_run_refuses_a_forbidden_key_in_the_spec() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::GuardRefused
     );
-    let msg = guard_message(execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err());
+    let msg = guard_message(
+        execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err(),
+    );
     assert_eq!(
         msg,
         "forbidden key(s) present in the backup spec, at any value: dry_run. \
@@ -394,7 +426,9 @@ fn backup_run_refuses_a_glob_topic() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::GuardRefused
     );
-    let msg = guard_message(execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err());
+    let msg = guard_message(
+        execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err(),
+    );
     assert!(msg.contains("source topic `orders*`"), "{msg}");
     assert!(msg.contains("glob metacharacter"), "{msg}");
     assert!(
@@ -420,7 +454,9 @@ fn backup_run_refuses_an_empty_topic_list() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::GuardRefused
     );
-    let msg = guard_message(execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err());
+    let msg = guard_message(
+        execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err(),
+    );
     assert_eq!(
         msg,
         "a backup spec must name at least one topic; GC18(c) requires a mandatory \
@@ -452,7 +488,9 @@ fn backup_run_refuses_a_source_that_is_a_permitted_target() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::GuardRefused
     );
-    let msg = guard_message(execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err());
+    let msg = guard_message(
+        execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err(),
+    );
     assert_eq!(
         msg,
         "source cluster id CID-A is also listed in allowedClusterIds, which \
@@ -499,7 +537,7 @@ fn backup_run_reads_the_source_cluster_id_from_the_broker() {
     let engine = RecordingEngine::one_topic();
     let (store, _key, _bytes) = archive_with_one_manifest("CID-FROM-SPEC");
 
-    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap();
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(outcome.source_cluster_id, "CID-FROM-BROKER");
     assert_eq!(run_with(&f.args, &reader, &engine, &store), ExitCode::Ok);
 }
@@ -518,7 +556,7 @@ fn an_unreachable_source_cluster_is_operational_not_a_guard_refusal() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::Operational
     );
-    match execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err() {
+    match execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
         BackupError::Kafka(_) => {}
         other => panic!("expected BackupError::Kafka (exit 1), got {other:?}"),
     }
@@ -540,7 +578,9 @@ fn a_local_refusal_does_not_need_a_reachable_broker() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::GuardRefused
     );
-    let msg = guard_message(execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err());
+    let msg = guard_message(
+        execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err(),
+    );
     assert!(msg.contains("glob metacharacter"), "{msg}");
 }
 
@@ -569,7 +609,7 @@ fn backup_id_override_replaces_the_derived_id() {
     // assertion below rather than at an `unwrap` on a missing backup set.
     let store = archive_with_manifests(&["sched-7", "mvp-demo"]);
 
-    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap();
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(outcome.backup_id, "sched-7");
     let doc = logweir_engine_oso::render_backup::render(&engine.recorded_plan()).unwrap();
     assert!(
@@ -581,7 +621,7 @@ fn backup_id_override_replaces_the_derived_id() {
     let f2 = ok_fixture("mvp-demo");
     let engine2 = RecordingEngine::one_topic();
     let store2 = archive_with_manifests(&["sched-7", "mvp-demo"]);
-    let outcome2 = execute_with(&f2.args, "run-2", &reader, &engine2, &store2).unwrap();
+    let outcome2 = execute_with(&f2.args, "run-2", &reader, &engine2, &store2, &store2).unwrap();
     assert_eq!(outcome2.backup_id, "mvp-demo");
     let doc2 = logweir_engine_oso::render_backup::render(&engine2.recorded_plan()).unwrap();
     assert!(
@@ -616,7 +656,7 @@ fn backup_run_records_the_source_auth() {
     let engine = RecordingEngine::one_topic();
     let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
 
-    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap();
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(
         outcome.source_auth,
         AuthRender::ScramSha512 {
@@ -638,7 +678,7 @@ fn backup_run_records_the_source_auth() {
     let f2 = ok_fixture("mvp-demo");
     let engine2 = RecordingEngine::one_topic();
     let (store2, _k2, _b2) = archive_with_one_manifest("mvp-demo");
-    let outcome2 = execute_with(&f2.args, "run-2", &reader, &engine2, &store2).unwrap();
+    let outcome2 = execute_with(&f2.args, "run-2", &reader, &engine2, &store2, &store2).unwrap();
     assert_eq!(outcome2.source_auth, AuthRender::Plaintext);
 }
 
@@ -649,7 +689,17 @@ fn backup_run_records_the_source_auth() {
 /// be attesting without ever having seen the bytes.
 #[test]
 fn the_read_back_reports_the_archives_own_counts_window_and_manifest_digest() {
-    let f = ok_fixture("mvp-demo");
+    // The spec names BOTH topics the archive reports. Task 4's version named
+    // only `orders` while the double described `orders` and `payments`, and
+    // Task 5b's receipt refuses exactly that document: arm 3 requires the
+    // counted set to BE the named set. Naming both keeps every assertion below
+    // unchanged and makes the fixture a run the product could really have
+    // taken; the filtering half — an archive topic this plan did NOT name — is
+    // `the_receipt_counts_only_the_topics_the_plan_named` below.
+    let f = fixture(
+        &spec_yaml("mvp-demo", "[orders, payments]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
     let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
     let engine = RecordingEngine::ok(vec![
         topic_facts(
@@ -666,7 +716,7 @@ fn the_read_back_reports_the_archives_own_counts_window_and_manifest_digest() {
     ]);
     let (store, key, bytes) = archive_with_one_manifest("mvp-demo");
 
-    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap();
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(outcome.manifest_key, key);
     assert_eq!(
         outcome.manifest_sha256,
@@ -679,10 +729,21 @@ fn the_read_back_reports_the_archives_own_counts_window_and_manifest_digest() {
             ("payments".to_string(), 11u64)
         ])
     );
-    // The union of every segment's window, across every topic — not any one
-    // topic's, and not the manifest's own declared range.
+    // The union of every segment's window, across every NAMED topic — not any
+    // one topic's, and not the manifest's own declared range.
+    //
+    // `covered_to_ms` is the newest `end_timestamp` PLUS ONE MILLISECOND,
+    // because the window is half-open and `to_ms` is EXCLUSIVE (interface I22;
+    // `config/crd/backups.yaml` documents `status.windowCovered.toMs` that way
+    // and `BackupReceipt`'s arm 4 requires `from_ms < to_ms` strictly since
+    // Task 5b). The conversion is `phase_run`'s, once, where the window is
+    // measured.
     assert_eq!(outcome.covered_from_ms, 1_755_999_000_000);
-    assert_eq!(outcome.covered_to_ms, 1_756_000_060_000);
+    assert_eq!(
+        outcome.covered_to_ms, 1_756_000_060_001,
+        "the newest segment ends at 1756000060000 INCLUSIVE, so the exclusive bound is one \
+         millisecond later"
+    );
     assert_eq!(outcome.facts.exit_code, 0);
     assert_eq!(outcome.run_id, "run-1");
 }
@@ -700,7 +761,7 @@ fn an_engine_failure_is_operational_not_a_guard_refusal() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::Operational
     );
-    match execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err() {
+    match execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
         BackupError::Engine(_) => {}
         other => panic!("expected BackupError::Engine (exit 1), got {other:?}"),
     }
@@ -721,102 +782,438 @@ fn a_missing_backup_set_after_a_clean_exit_is_operational() {
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::Operational
     );
-    let err = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err();
+    let err = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("holds no backup set `mvp-demo`"), "{msg}");
 }
 
-/// Interface **I6** is Task 5b's. An operator who asked for the receipt gets a
-/// message naming the contract that owes it, exit 1 — never a silent exit 0
-/// after a real backup with nothing to show for it, and never an archive
-/// instead of the document they asked for.
+// ---------------------------------------------------------------------------
+// The receipt: I6, I7 and Global Constraint 6 (Task 5b)
+// ---------------------------------------------------------------------------
+
+/// The two keys every receipt row expects, for a given run.
+fn expected_keys(backup_id: &str, run_id: &str) -> (String, String) {
+    (
+        format!("logweir/backups/{backup_id}/{run_id}.receipt.json"),
+        format!("logweir/backups/{backup_id}/{run_id}.receipt.sig"),
+    )
+}
+
+/// `logweir drill verify --payload-type backup-receipt`, IN PROCESS, over
+/// bytes on disk. `verify::run` is the exact function `main.rs` dispatches to,
+/// so this is the shipped reader and not a re-implementation of it.
+fn verify_receipt(dir: &Path, doc: &[u8], sidecar: &[u8], public_pem: &Path) -> ExitCode {
+    let doc_path = dir.join("receipt-under-test.json");
+    let sig_path = dir.join("receipt-under-test.sig");
+    std::fs::write(&doc_path, doc).unwrap();
+    std::fs::write(&sig_path, sidecar).unwrap();
+    logweir::verify::run(&doc_path, &sig_path, public_pem, "backup-receipt")
+}
+
+/// **The acceptance for I6's evidence half, and for Global Constraint 6.**
+///
+/// One `run_with` against the in-memory store puts EXACTLY TWO objects under
+/// `logweir/backups/<backup_id>/`, both create-only, and the pair verifies
+/// under the receipt's own payload type — signature AND all four invariants,
+/// which is what `--payload-type backup-receipt` checks since Task 5b.
+///
+/// In process, with doubles: no `logweir` binary, no subprocess, no broker
+/// (critique A F1). The signing key is the fixture's EPHEMERAL key.
 #[test]
-fn asking_for_a_receipt_exits_1_naming_task_5bs_contract() {
-    for flag in ["receipt", "out"] {
-        let mut f = ok_fixture("mvp-demo");
-        let p = f._dir.path().join("receipt.json");
-        if flag == "receipt" {
-            f.args.receipt_out = Some(p);
-        } else {
-            f.args.out = Some(p);
-        }
+fn backup_run_writes_a_signed_receipt() {
+    let f = ok_fixture("mvp-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+    let (receipt_key, sidecar_key) = expected_keys("mvp-demo", "run-1");
+    assert_eq!(outcome.receipt_key, receipt_key);
+    assert_eq!(outcome.sidecar_key, sidecar_key);
+
+    // EXACTLY TWO objects under this run's evidence prefix, and they are the
+    // two the outcome names. The archive fixture's own manifest lives at
+    // `logweir/mvp-demo/…`, outside this prefix, so the count is about the
+    // receipt and nothing else.
+    let mut written = store.list_keys("logweir/backups/mvp-demo/").unwrap();
+    written.sort();
+    assert_eq!(
+        written,
+        vec![receipt_key.clone(), sidecar_key.clone()],
+        "one run writes exactly the receipt and its detached sidecar, under `logweir/` \
+         (Global Constraint 6)"
+    );
+
+    // CREATE-ONLY. A second put of the same key is REFUSED, never overwritten,
+    // so one run can never silently replace another's evidence — asserted by
+    // trying it rather than by reading `put_create_only`'s source.
+    let again = store.put_create_only(&receipt_key, b"{}");
+    assert!(
+        again.is_err(),
+        "the receipt key must be create-only; a second put has to be refused"
+    );
+
+    // …and the pair verifies, through the shipped reader.
+    let (doc, _v) = store.get(&receipt_key).unwrap();
+    let (sig, _v2) = store.get(&sidecar_key).unwrap();
+    let dir = f._dir.path();
+    assert_eq!(
+        verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
+        ExitCode::Ok,
+        "`logweir drill verify --payload-type backup-receipt` must exit 0 over the bytes \
+         this run signed and put"
+    );
+
+    // The document says what the run measured — spot-checked on the fields an
+    // auditor reads first, so a receipt full of defaults cannot pass this row.
+    let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
+    assert_eq!(receipt.format_version, "1.0.0");
+    assert_eq!(receipt.run_id, "run-1");
+    assert_eq!(receipt.backup_id, "mvp-demo");
+    assert_eq!(receipt.source.cluster_id, "SOURCE-CLUSTER-00000001");
+    assert_eq!(receipt.source.auth.mode, "plaintext");
+    assert_eq!(receipt.source.auth.username, None);
+    assert_eq!(receipt.source.topics, vec!["orders".to_string()]);
+    assert_eq!(receipt.engine.id, "double");
+    assert_eq!(receipt.engine.digest, "sha256:0");
+    assert_eq!(receipt.exit_code, 0);
+    assert_eq!(
+        receipt.records,
+        BTreeMap::from([("orders".to_string(), 7u64)])
+    );
+    assert_eq!(receipt.covered.from_ms, 1_756_000_000_000);
+    // EXCLUSIVE (I22): the newest segment ends at …060000 inclusive.
+    assert_eq!(receipt.covered.to_ms, 1_756_000_060_001);
+    assert_eq!(
+        receipt.archive.prefix, ARCHIVE_PREFIX,
+        "the prefix is the archive's own, from the spec"
+    );
+}
+
+/// **I6's local half.** `--receipt-out <path>` leaves the receipt at `<path>`
+/// and its DSSE sidecar at the same path with the extension replaced by
+/// `.sig` — the pairing `drill run --out` already uses — and the local pair
+/// verifies on its own, read directly from disk.
+#[test]
+fn receipt_out_writes_both_files() {
+    let mut f = ok_fixture("mvp-demo");
+    let dir = f._dir.path().to_path_buf();
+    let out = dir.join("receipt.json");
+    f.args.receipt_out = Some(out.clone());
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+
+    assert_eq!(run_with(&f.args, &reader, &engine, &store), ExitCode::Ok);
+
+    let sig = dir.join("receipt.sig");
+    assert!(out.exists(), "--receipt-out must write the receipt bytes");
+    assert!(
+        sig.exists(),
+        "the DSSE sidecar lands beside it with the extension replaced by `.sig`, which is \
+         the pairing `drill run --out` already uses"
+    );
+
+    // The local bytes are the SIGNED bytes: verified as read, never
+    // re-serialised.
+    assert_eq!(
+        logweir::verify::run(&out, &sig, &dir.join("signing.pub.pem"), "backup-receipt"),
+        ExitCode::Ok,
+        "the local pair must verify on its own"
+    );
+
+    // And they are byte-identical to what was PUT, or an auditor holding the
+    // local copy would be checking a different document from the one in the
+    // bucket.
+    let (receipt_key, sidecar_key) = expected_keys("mvp-demo", "");
+    let keys = store.list_keys("logweir/backups/mvp-demo/").unwrap();
+    let put_doc = keys
+        .iter()
+        .find(|k| k.ends_with(".receipt.json"))
+        .expect("the receipt was put");
+    let put_sig = keys
+        .iter()
+        .find(|k| k.ends_with(".receipt.sig"))
+        .expect("the sidecar was put");
+    assert!(
+        put_doc.starts_with(receipt_key.trim_end_matches(".receipt.json"))
+            && put_sig.starts_with(sidecar_key.trim_end_matches(".receipt.sig")),
+        "the keys are under this backup's prefix"
+    );
+    assert_eq!(store.get(put_doc).unwrap().0, std::fs::read(&out).unwrap());
+    assert_eq!(store.get(put_sig).unwrap().0, std::fs::read(&sig).unwrap());
+}
+
+/// `--out` is honoured exactly as `--receipt-out` is (they name the one
+/// document this command writes), and naming two DIFFERENT paths is refused
+/// locally, before anything runs.
+#[test]
+fn out_is_the_same_flag_and_two_different_paths_are_refused() {
+    // `--out` alone works.
+    let mut f = ok_fixture("mvp-demo");
+    let out = f._dir.path().join("elsewhere.json");
+    f.args.out = Some(out.clone());
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+    assert_eq!(run_with(&f.args, &reader, &engine, &store), ExitCode::Ok);
+    assert!(out.exists() && f._dir.path().join("elsewhere.sig").exists());
+
+    // Two different paths for one document: refused, exit 1, with no engine
+    // run and no broker read.
+    let mut g = ok_fixture("mvp-demo");
+    g.args.receipt_out = Some(g._dir.path().join("a.json"));
+    g.args.out = Some(g._dir.path().join("b.json"));
+    let unreachable = StubReader::unreachable();
+    let engine2 = RecordingEngine::one_topic();
+    let (store2, _k2, _b2) = archive_with_one_manifest("mvp-demo");
+    assert_eq!(
+        run_with(&g.args, &unreachable, &engine2, &store2),
+        ExitCode::Operational
+    );
+    let msg = execute_with(&g.args, "run-1", &unreachable, &engine2, &store2, &store2)
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("name DIFFERENT paths"), "{msg}");
+    assert!(
+        !msg.contains("no broker answered"),
+        "a property of the FLAGS must be refused before the network step: {msg}"
+    );
+    assert!(
+        engine2.plans.lock().unwrap().is_empty(),
+        "the engine must not run when the flags cannot be honoured"
+    );
+
+    // The same path twice is NOT a refusal: `--receipt-out` wins and the one
+    // document lands where both flags asked for it.
+    let mut h = ok_fixture("mvp-demo");
+    let same = h._dir.path().join("same.json");
+    h.args.receipt_out = Some(same.clone());
+    h.args.out = Some(same.clone());
+    let engine3 = RecordingEngine::one_topic();
+    let (store3, _k3, _b3) = archive_with_one_manifest("mvp-demo");
+    assert_eq!(run_with(&h.args, &reader, &engine3, &store3), ExitCode::Ok);
+    assert!(same.exists());
+}
+
+/// A receipt this build cannot sign is a run that exits **4**, with NOTHING
+/// uploaded — Global Constraint 11's "signing or lock-proof failed".
+///
+/// Driven with an unreadable `--signing-key`, which is the one signing failure
+/// a test can produce without key material: the key path is opened inside
+/// `persist_receipt`, after the archive has been read back, so this row also
+/// pins that the failure is NOT reported as a guard refusal or as a bad plan.
+#[test]
+fn a_receipt_that_cannot_be_signed_is_exit_4_and_puts_nothing() {
+    let mut f = ok_fixture("mvp-demo");
+    f.args.signing_key = f._dir.path().join("no-such-key.pem");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+
+    assert_eq!(
+        run_with(&f.args, &reader, &engine, &store),
+        ExitCode::SigningOrLock,
+        "exit 4: the archive exists and the evidence does not"
+    );
+    match execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
+        BackupError::Signing(_) => {}
+        other => panic!("expected BackupError::Signing (exit 4), got {other:?}"),
+    }
+    assert!(
+        store
+            .list_keys("logweir/backups/mvp-demo/")
+            .unwrap()
+            .is_empty(),
+        "signing precedes every put, so a signing failure uploads nothing"
+    );
+}
+
+/// An empty `engine.version`/`engine.digest` is refused BEFORE the engine
+/// runs: a signed receipt must name the engine image it ran (GC7 pins by
+/// digest, and a receipt naming only a version would be satisfied by any
+/// binary claiming it).
+///
+/// Task 4 left this to Task 5b in as many words, because Task 4 signed
+/// nothing.
+#[test]
+fn an_unnamed_engine_is_refused_before_the_backup_runs() {
+    for (version, digest, want) in [
+        ("", "sha256:0", "engine.version"),
+        ("v0.21.0", "", "engine.digest"),
+    ] {
+        let f = ok_fixture("mvp-demo");
         let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
-        let engine = RecordingEngine::one_topic();
+        let engine = RecordingEngine::one_topic().with_identity(version, digest);
         let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
 
         assert_eq!(
             run_with(&f.args, &reader, &engine, &store),
-            ExitCode::Operational,
-            "flag {flag}"
+            ExitCode::Operational
         );
-        let msg = execute_with(&f.args, "run-1", &reader, &engine, &store)
+        let msg = execute_with(&f.args, "run-1", &reader, &engine, &store, &store)
             .unwrap_err()
             .to_string();
-        assert!(msg.contains("interface I6"), "{msg}");
-        assert!(msg.contains("Task 5b"), "{msg}");
+        assert!(msg.contains(want), "{msg}");
         assert!(msg.contains("NO backup was taken"), "{msg}");
         assert!(
             engine.plans.lock().unwrap().is_empty(),
-            "the engine must not run when the document cannot be written"
+            "the engine must not run when the receipt could not name it"
         );
     }
 }
 
-/// **Task 4 review, F-3.** The I6 refusal is phase −1's LOCAL step 4, so it
-/// does not need a reachable broker — and therefore does not open a socket to
-/// the SOURCE cluster to answer a question about a command-line flag.
+/// The receipt counts the topics the PLAN named, and only those — which is
+/// what makes `BackupReceipt`'s arm 3 satisfiable by construction.
 ///
-/// The reader here is `unreachable()`, the same double
-/// `a_local_refusal_does_not_need_a_reachable_broker` uses: with the check
-/// after phase −1's NETWORK step, `cluster_id()` fails FIRST and the error is
-/// `BackupError::Kafka` carrying *"no broker answered"* — which is exactly the
-/// mutant this row kills, at assertion time on the message. Both placements
-/// exit 1, so the exit code alone cannot tell them apart; the message can.
-///
-/// The process-level half — zero librdkafka lines and no 20 s metadata timeout
-/// — is `e2e/tests/backup_argv.rs::a_receipt_flag_is_refused_without_opening_a_socket`.
+/// `DataEngine::describe` answers about the whole backup SET: a set an earlier
+/// run appended to holds that run's topics too. Counting them would produce a
+/// receipt describing two runs at once, and arm 3 would refuse it — an archive
+/// on disk with no evidence for it, on a path an adopter reaches by reusing a
+/// `backup_id`. A named topic the archive does not mention keeps its `0`,
+/// because a backup of an empty topic is a real backup.
 #[test]
-fn asking_for_a_receipt_refuses_before_the_network_step() {
-    for flag in ["receipt", "out"] {
-        let mut f = ok_fixture("mvp-demo");
-        let p = f._dir.path().join("receipt.json");
-        if flag == "receipt" {
-            f.args.receipt_out = Some(p);
-        } else {
-            f.args.out = Some(p);
-        }
-        let reader = StubReader::unreachable();
-        let engine = RecordingEngine::one_topic();
-        let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+fn the_receipt_counts_only_the_topics_the_plan_named() {
+    let f = fixture(
+        &spec_yaml("mvp-demo", "[orders, ledger]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    // The archive reports `orders` (named) and `payments` (NOT named); the
+    // plan also names `ledger`, which the archive does not mention.
+    let engine = RecordingEngine::ok(vec![
+        topic_facts(
+            "orders",
+            vec![segment(4, 1_756_000_000_000, 1_756_000_030_000)],
+        ),
+        topic_facts(
+            "payments",
+            vec![segment(99, 1_700_000_000_000, 1_800_000_000_000)],
+        ),
+    ]);
+    let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
 
-        assert_eq!(
-            run_with(&f.args, &reader, &engine, &store),
-            ExitCode::Operational,
-            "flag {flag}"
-        );
-        let err = execute_with(&f.args, "run-1", &reader, &engine, &store).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("interface I6"),
-            "the I6 refusal must be raised BEFORE phase −1's network step, so an unreachable \
-             broker cannot pre-empt it (flag {flag}); got: {msg}"
-        );
-        assert!(
-            !msg.contains("no broker answered"),
-            "the broker was dialled before a flag this build cannot honour was refused \
-             (flag {flag}): {msg}"
-        );
-        // And it is `Operational`, not `Kafka`: the refusal is about the flag,
-        // and nothing was observed about any cluster.
-        match err {
-            BackupError::Operational(_) => {}
-            other => panic!("expected BackupError::Operational, got {other:?}"),
-        }
-        assert!(
-            engine.plans.lock().unwrap().is_empty(),
-            "the engine must not run when the document cannot be written"
-        );
-    }
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+    assert_eq!(
+        outcome.records_per_topic,
+        BTreeMap::from([("ledger".to_string(), 0u64), ("orders".to_string(), 4u64)]),
+        "one entry per NAMED topic and no others; a named topic with no segment is 0"
+    );
+    // `payments`'s segment spans 1.7e12..1.8e12 and must not widen this run's
+    // window: the window is over the named topics' segments.
+    assert_eq!(outcome.covered_from_ms, 1_756_000_000_000);
+    assert_eq!(outcome.covered_to_ms, 1_756_000_030_001);
+
+    // And the receipt that comes out of it satisfies its own arm 3 — asserted
+    // through the reader, because that is the claim.
+    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
+    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let dir = f._dir.path();
+    assert_eq!(
+        verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
+        ExitCode::Ok
+    );
+}
+
+/// **I7.** The final two stdout lines of a successful `backup run` are
+/// `receipt-key=<key>` then `sidecar-key=<key>`, in that order, with nothing
+/// after them.
+///
+/// # Why this row re-execs the test binary
+///
+/// The claim is about the PROCESS's stdout, and `println!` cannot be captured
+/// in process without an fd redirect (which would mean a new dependency,
+/// forbidden by Global Constraint 38) — while `run_with`'s doubles cannot be
+/// handed to the `logweir` binary, which would additionally need a broker and
+/// a bucket. So the parent runs THIS binary's `#[ignore]`d child row, which
+/// performs the same in-process `run_with` against the same doubles and calls
+/// `std::process::exit` so that libtest's own summary never reaches stdout
+/// after the two lines under test.
+///
+/// The child asserts nothing about ordering; the parent asserts everything,
+/// over bytes the child actually wrote to fd 1.
+#[test]
+fn the_runner_prints_its_two_evidence_keys_last() {
+    let out = Command::new(std::env::current_exe().expect("this test binary's own path"))
+        .args([
+            "--ignored",
+            "--exact",
+            "the_i7_child_runs_one_backup_and_exits",
+            "--nocapture",
+        ])
+        .output()
+        .expect("re-exec this test binary");
+    let stdout = String::from_utf8(out.stdout).expect("stdout is utf-8");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the child must succeed, or its stdout is not a successful run's stdout. \
+         stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let lines: Vec<&str> = stdout.lines().collect();
+    let last_two = &lines[lines.len().saturating_sub(2)..];
+    assert_eq!(
+        last_two.len(),
+        2,
+        "a successful run prints at least the two evidence keys, got:\n{stdout}"
+    );
+    assert!(
+        last_two[0].starts_with("receipt-key=logweir/backups/i7-demo/")
+            && last_two[0].ends_with(".receipt.json"),
+        "the PENULTIMATE line is `receipt-key=<key>`, got {:?} in:\n{stdout}",
+        last_two[0]
+    );
+    assert!(
+        last_two[1].starts_with("sidecar-key=logweir/backups/i7-demo/")
+            && last_two[1].ends_with(".receipt.sig"),
+        "the FINAL line is `sidecar-key=<key>`, got {:?} in:\n{stdout}",
+        last_two[1]
+    );
+    // The ORDER is the contract, and this is the assertion the "swap the two
+    // lines" mutant fails at: with the two `println!`s exchanged, the
+    // penultimate line is the sidecar and the two `starts_with` rows above
+    // both fail.
+    assert!(
+        stdout.ends_with(&format!("{}\n{}\n", last_two[0], last_two[1])),
+        "nothing may be printed after the two keys — a controller reads the LAST lines of \
+         the pod log, which has no stream selector:\n{stdout}"
+    );
+    // The two keys name one run: same prefix, same run id stem.
+    let stem = |line: &str| {
+        line.split('=')
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(".receipt.json")
+            .trim_end_matches(".receipt.sig")
+            .to_string()
+    };
+    assert_eq!(
+        stem(last_two[0]),
+        stem(last_two[1]),
+        "the two keys must name the same run"
+    );
+}
+
+/// The child process of `the_runner_prints_its_two_evidence_keys_last`.
+///
+/// `#[ignore]`d so the default suite never runs it: on its own it asserts only
+/// that the run succeeds, and it ends in `std::process::exit`, which would
+/// truncate a normal `cargo test` run's own output. The parent drives it with
+/// `--ignored --exact`.
+#[test]
+#[ignore = "driven as a child process by the_runner_prints_its_two_evidence_keys_last"]
+fn the_i7_child_runs_one_backup_and_exits() {
+    let f = ok_fixture("i7-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_with_one_manifest("i7-demo");
+    let code = run_with(&f.args, &reader, &engine, &store);
+    assert_eq!(code, ExitCode::Ok, "the child must take a real backup");
+    // EXIT HERE. libtest would otherwise print `test … ok` and its summary
+    // AFTER the two lines the parent is asserting are last.
+    std::process::exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -875,7 +1272,17 @@ fn the_backup_path_never_scopes_a_deleter() {
 /// tomorrow is covered without editing this list.
 #[test]
 fn only_the_wrapper_constructs_a_client() {
-    const CONSTRUCTORS: [&str; 2] = ["RdKafkaReader::connect(", "Store::read_only_from_url("];
+    // THREE since Task 5b: the receipt needs a WRITABLE store, and
+    // `Store::from_url(` is the constructor for one. It is on this list for
+    // the same reason the other two are — it is a dial token in STANDING RULE
+    // 18's own audit — and adding it is what keeps the claim "only the wrapper
+    // constructs a client" true of the evidence handle as well as the reader
+    // and the archive.
+    const CONSTRUCTORS: [&str; 3] = [
+        "RdKafkaReader::connect(",
+        "Store::read_only_from_url(",
+        "Store::from_url(",
+    ];
     let mod_rs = backup_src("mod.rs");
     for c in CONSTRUCTORS {
         assert!(

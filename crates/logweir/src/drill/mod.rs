@@ -19,8 +19,8 @@ use crate::exit::ExitCode;
 use logweir_core::engine::{BackupSetRef, DataEngine, RestorePlan};
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult, LeverState, MatrixVerdict, Outcome};
 use logweir_core::scorecard::{
-    ApprovalInfo, EngineInfo, EvidenceInfo, Integrity, Levers, Measured, Objectives, PhaseRecord,
-    SampleInfo, Scorecard, SourceInfo, TargetDiffSummary, TargetInfo, TopicParity,
+    ApprovalInfo, AuthSummary, EngineInfo, EvidenceInfo, Integrity, Levers, Measured, Objectives,
+    PhaseRecord, SampleInfo, Scorecard, SourceInfo, TargetDiffSummary, TargetInfo, TopicParity,
 };
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_engine_oso::storage::Store;
@@ -1522,6 +1522,11 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             topic_mapping_prefix: c.spec.target.topic_mapping_prefix.clone(),
             topic_mapping_sha256: String::new(),
             topic_mapping_entries: 0,
+            // Task 5b declares the SHAPE of `target.auth`; Task 6 fills it.
+            // `None` is the honest value for a draft nothing has measured
+            // yet — and absent means plaintext, which is what every
+            // scorecard this tree has written says by omission.
+            auth: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -1627,32 +1632,30 @@ fn target_info(
         // engine was handed cannot drift.
         topic_mapping_sha256: logweir_core::ids::sha256_prefixed(block.as_bytes()),
         topic_mapping_entries: admitted.topic_mapping.len() as u32,
-        // **THE ONE LINE TASK 6 OWES AND CANNOT WRITE — the slot-7 late
-        // binding to Task 5b, recorded here rather than claimed.**
+        // **Interface I1's scorecard end, now closed on both sides.** Task 5b
+        // declares `AuthSummary`/`TargetInfo.auth` and pays Global Constraint
+        // 12's price for it (both readers, the corpus, the schema); TASK 6
+        // owns the VALUE, and this is the assignment its own `target_info`
+        // comment spelled out verbatim while the field did not yet exist on
+        // its branch. Applied at the rebase of 5b onto Task 6, which is the
+        // first tree where both halves are present.
         //
-        // `TargetInfo` has no `auth` field on this branch. The scorecard's
-        // `target.auth` block — the `AuthSummary` type, both readers' tolerant
-        // read, `verify_scorecard.py`'s `SCRIPT_VERSION` bump, the two corpus
-        // cases and the schema `cmp` on the CI drift gate — is Task 5b's, in
-        // this same dispatch slot, and is the whole of Global Constraint 12's
-        // price for a nested optional field. Task 6 pays none of it and edits
-        // neither reader, neither schema nor the corpus, so it cannot add the
-        // field here without taking a file Task 5b owns.
+        // `mode_str()` returns `"plaintext"` or `"scramSha512"` and nothing
+        // else — a closed set of two `&'static str` (`spec.rs::mode_str`) that
+        // is the `KafkaCluster` CRD's `auth.mode` enum byte for byte, the
+        // receipt's `source.auth.mode`, and exactly what BOTH readers accept
+        // for this field. `crates/logweir/tests/auth_binding.rs::
+        // the_scorecard_auth_block_and_auth_spec_agree` asserts the two
+        // strings and the `{mode, username}` round trip; the two readers'
+        // `target.auth` arms refuse any third spelling.
         //
-        // What Task 6 owes instead is the VALUE, and it ships it: the exact
-        // line is
-        //
-        //     auth: Some(AuthSummary {
-        //         mode: spec.target.auth.mode_str().into(),
-        //         username: spec.target.auth.username().map(str::to_string),
-        //     }),
-        //
-        // and both methods are landed, public and tested — `crates/logweir/
-        // tests/auth_binding.rs::the_scorecard_auth_block_and_auth_spec_agree`
-        // asserts that they return exactly the two strings both readers
-        // accept and that a `{mode, username}` object round-trips through
-        // serde_json with those keys. The controller applies the assignment at
-        // rebase; nothing here claims it is applied.
+        // Always `Some` on a measured drill: a scorecard whose target block
+        // says nothing about auth is read as plaintext by omission, and
+        // omission is the one thing a SCRAM run must not be recorded as.
+        auth: Some(AuthSummary {
+            mode: spec.target.auth.mode_str().into(),
+            username: spec.target.auth.username().map(str::to_string),
+        }),
     })
 }
 

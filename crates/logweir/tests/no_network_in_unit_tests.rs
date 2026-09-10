@@ -104,8 +104,9 @@ const ALLOWED: [(&str, &str); 12] = [
     ),
     (
         "crates/logweir/src/backup/mod.rs",
-        "production: `run` constructs the backup path's reader and its read-only archive \
-         handle; `run_with` takes them as parameters and names neither",
+        "production: `run` constructs the backup path's reader, its read-only archive \
+         handle and (Task 5b) the WRITABLE evidence handle the signed receipt is put \
+         through; `run_with` takes them as parameters and names none of the three",
     ),
     (
         "crates/logweir/tests/backup_run.rs",

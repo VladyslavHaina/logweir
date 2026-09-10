@@ -162,7 +162,19 @@ pub struct ReceiptArchive {
     pub prefix: String,
 }
 
-/// The time range the archive covers, in **EPOCH MILLISECONDS**.
+/// The time range the archive covers, in **EPOCH MILLISECONDS**, as a
+/// HALF-OPEN interval: `from_ms` is inclusive, `to_ms` is EXCLUSIVE.
+///
+/// # The end is exclusive, and both documents now say so (I22)
+///
+/// `config/crd/backups.yaml` documents `Backup.status.windowCovered.toMs` as
+/// the exclusive end, and Task 17 copies these two numbers into it. Task 5
+/// shipped invariant 4 as `<=` — accepting `from_ms == to_ms` as an
+/// "instantaneous window" — which made the receipt and the CRD two
+/// descriptions of one range under rules that disagreed. Invariant 4 is now
+/// strict, and `crates/logweir/src/backup/phase_run.rs` converts the
+/// manifest's inclusive newest `end_timestamp` to an exclusive bound in the
+/// one place that measures it.
 ///
 /// # Not RFC 3339, and this is the interface, not a preference (I22)
 ///
@@ -221,7 +233,8 @@ impl BackupReceipt {
     ///    against fields that build may have redefined.
     /// 2. `exit_code == 0` **iff** `archive.manifest_key` is non-empty.
     /// 3. `records` covers exactly `source.topics`.
-    /// 4. `covered.from_ms <= covered.to_ms`.
+    /// 4. `covered.from_ms < covered.to_ms` STRICTLY — the end is EXCLUSIVE
+    ///    (I22, and Task 5's review finding F3).
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -277,14 +290,31 @@ impl BackupReceipt {
                 render_set(&named_topics)
             ));
         }
-        // ARM 4. A window that ends before it begins is not a smaller window,
-        // it is a meaningless one — the same reasoning
-        // `Scorecard::validate_invariants` applies to a negative RPO. This is
-        // also the shape `Backup.status.windowCovered` mirrors (I22), so an
-        // inverted range would propagate into the operator's status.
-        if self.covered.from_ms > self.covered.to_ms {
+        // ARM 4. THE END IS EXCLUSIVE, so the window is HALF-OPEN and
+        // `from_ms == to_ms` is not an "instantaneous window" — it is an empty
+        // one, and an archive that captured a record cannot cover an empty
+        // range.
+        //
+        // STRICT `<` SINCE TASK 5b (Task 5's review, F3). Task 5 shipped `<=`
+        // and a test asserting `from_ms == to_ms` was legal, while
+        // `config/crd/backups.yaml` already documented
+        // `status.windowCovered.toMs` as the *exclusive* end of the same
+        // window (I22) — two documents describing one range by rules that
+        // disagree, with Task 17 about to copy the numbers from one into the
+        // other. One of the two had to move; the CRD's is the shape an
+        // operator reads and the half-open convention every range API in this
+        // tree uses, so the receipt's is the one that moved.
+        //
+        // The measurement side moved with it: `crates/logweir/src/backup/
+        // phase_run.rs` derives `to_ms` from the newest segment's INCLUSIVE
+        // `end_timestamp` and adds one millisecond, so a single-record topic
+        // yields `[t, t+1)` — a window that contains exactly that record —
+        // rather than the empty `[t, t]` this arm now refuses. That
+        // conversion is stated once, there, and nothing else in the tree
+        // converts between the two conventions.
+        if self.covered.from_ms >= self.covered.to_ms {
             return Err(format!(
-                "covered.from_ms {} is after covered.to_ms {}",
+                "covered.from_ms {} is not before covered.to_ms {}: the covered window's end is EXCLUSIVE, so an empty range covers no record",
                 self.covered.from_ms, self.covered.to_ms
             ));
         }

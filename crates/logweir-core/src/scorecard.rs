@@ -113,6 +113,51 @@ pub struct TargetInfo {
     /// auditor can re-derive exactly what was written.
     pub topic_mapping_sha256: String,
     pub topic_mapping_entries: u32,
+    /// How the TARGET client was told to authenticate. **Interface I1's
+    /// scorecard end (Task 5b declares the shape; Task 6 fills it).**
+    ///
+    /// ABSENT IS LEGAL AND MEANS PLAINTEXT. Every scorecard this tree has ever
+    /// written has no `auth` block, and a reader that demanded one would
+    /// refuse all of them — which is why the field is `Option` with
+    /// `#[serde(default)]` and why `two_reader_parity.rs`'s existing cases are
+    /// the test that keeps it tolerant.
+    ///
+    /// `skip_serializing_if` is NOT decoration. `crates/logweir-core/tests/
+    /// fixture_regen.rs::emit_fixture_reproduces_the_committed_scorecard_bytes`
+    /// compares the generator's bytes against the checked-in SIGNED fixture
+    /// byte for byte, and the signed fixtures are never re-minted here (ruling
+    /// R-G). A field that serialised as `"auth": null` would change every
+    /// document Logweir writes and orphan a signature this task may not
+    /// replace, so the absent case stays absent on the wire.
+    ///
+    /// Global Constraint 12 as amended permits this as a NESTED optional
+    /// field: `TargetInfo`'s own properties are not the scorecard's 21, so the
+    /// top-level shape is unchanged (21 properties, 17 required) and
+    /// `the_scorecard_top_level_shape_is_unchanged` still holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthSummary>,
+}
+
+/// A nested optional block. GC12 as amended permits nested optional fields in
+/// tag 1 and no new top-level property: TargetInfo's own properties are not
+/// the scorecard's 21.
+///
+/// **Never a password, and no field that could hold one** — the same rule
+/// `crate::backup_receipt::ReceiptAuth` and `crate::engine::AuthRender` state,
+/// for the same reason: the secret reaches the engine through its own `${VAR}`
+/// expansion and is never interpolated by us, so it can never be interpolated
+/// into a document we then sign and publish.
+///
+/// `mode` is REQUIRED once the block is present, and blank is not a synonym
+/// for `plaintext`: `validate_invariants`'s two `target.auth` arms refuse a
+/// blank mode outright (ruling R-A's `trim().is_empty()`), because a SCRAM run
+/// recorded as plaintext by omission is exactly the claim an auditor would
+/// read the wrong way round. The way to say plaintext is to write no block.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AuthSummary {
+    pub mode: String,
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -747,6 +792,46 @@ impl Scorecard {
         if !(-1..=9).contains(&self.last_phase_completed) {
             return Err(InvariantError("last_phase_completed outside -1..=9".into()));
         }
+        // `target.auth` (Task 5b — Global Constraint 12's price for one nested
+        // optional block). ABSENT IS LEGAL and means plaintext; these two arms
+        // fire only on a block that IS present.
+        //
+        // BLANK IS NOT PLAINTEXT (ruling R-A: `trim().is_empty()` here,
+        // `.strip()` in `docs/verify_scorecard.py`). A blank mode read as
+        // "plaintext" would let a SCRAM run be recorded as an unauthenticated
+        // one by omission — the one direction an auditor must never have to
+        // guess at — and a `username` beside a blank mode is a principal
+        // recorded without the mechanism it authenticated with, which is the
+        // same defect with more evidence that it was not an accident.
+        //
+        // NEITHER MESSAGE INTERPOLATES. `docs/verify_scorecard.py` mirrors
+        // both word for word and `crates/logweir/tests/two_reader_parity.rs::
+        // every_invariant_arm_has_a_corpus_case` joins `index.json`'s `arm`
+        // field against this body by literal substring — a username in the
+        // message would make that join impossible and would additionally put
+        // an adopter-supplied string into a refusal line.
+        //
+        // Task 6 FILLS this field and adds no arm here; the agreement between
+        // this block and `AuthSpec` is closed by its own named test.
+        if let Some(auth) = &self.target.auth {
+            let mode_blank = auth.mode.trim().is_empty();
+            let username_named = auth
+                .username
+                .as_deref()
+                .is_some_and(|u| !u.trim().is_empty());
+            if mode_blank && username_named {
+                return Err(InvariantError(
+                    "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated"
+                        .into(),
+                ));
+            }
+            if mode_blank {
+                return Err(InvariantError(
+                    "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
+                        .into(),
+                ));
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -831,6 +916,10 @@ mod tests {
                 topic_mapping_prefix: "drill-".into(),
                 topic_mapping_sha256: "sha256:0".into(),
                 topic_mapping_entries: 1,
+                // Absent, which is legal and means plaintext. The two
+                // `target.auth` arms have their own unit tests below, over
+                // this same base document.
+                auth: None,
             },
             approval: ApprovalInfo {
                 approver: "sre-oncall@example.com".into(),

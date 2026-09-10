@@ -1,0 +1,42 @@
+{
+  "format_version": "1.0.0",
+  "run_id": "01J8Z9QK7V6M3F2R5T8W1XB0CD",
+  "backup_id": "logweir-backup-01J8Z9QK7V",
+  "requested_at": "2026-09-09T11:02:14Z",
+  "started_at": "2026-09-09T11:02:19Z",
+  "finished_at": "2026-09-09T11:04:46Z",
+  "exit_code": 0,
+  "triggered_by": "release-engineering",
+  "source": {
+    "cluster_id": "kRtQ7yZ1S0uPq9AeVxN2Lg",
+    "bootstrap_servers": [
+      "kafka-broker-1:9094"
+    ],
+    "auth": {
+      "mode": "scram-sha-512",
+      "username": "logweir-backup"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ]
+  },
+  "engine": {
+    "id": "oso-cli",
+    "version": "v0.21.0",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "archive": {
+    "manifest_key": "logweir/backups/logweir-backup-01J8Z9QK7V/manifest.json",
+    "manifest_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "prefix": "logweir/backups/logweir-backup-01J8Z9QK7V/"
+  },
+  "records": {
+    "orders": 4211,
+    "payments": 917
+  },
+  "covered": {
+    "from_ms": 1757419486000,
+    "to_ms": 1757415734000
+  }
+}

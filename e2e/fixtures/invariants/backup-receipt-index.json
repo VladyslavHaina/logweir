@@ -1,0 +1,58 @@
+[
+  {
+    "id": "unmodified_receipt",
+    "file": "unmodified_receipt.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "format_version_major_2",
+    "file": "format_version_major_2.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "format_version \"2.0.0\" is not a 1.x version this reader understands",
+    "arm": "format_version \"2.0.0\" is not a 1.x version this reader understands"
+  },
+  {
+    "id": "exit_code_zero_without_a_manifest",
+    "file": "exit_code_zero_without_a_manifest.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "exit_code 0 and manifest_key absent disagree: a receipt names a manifest if and only if the backup exited 0",
+    "arm": "exit_code 0 and manifest_key absent disagree: a receipt names a manifest if and only if the backup exited 0"
+  },
+  {
+    "id": "manifest_without_exit_code_zero",
+    "file": "manifest_without_exit_code_zero.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "exit_code 1 and manifest_key \"logweir/backups/logweir-backup-01J8Z9QK7V/manifest.json\" disagree: a receipt names a manifest if and only if the backup exited 0",
+    "arm": "exit_code 1 and manifest_key \"logweir/backups/logweir-backup-01J8Z9QK7V/manifest.json\" disagree: a receipt names a manifest if and only if the backup exited 0"
+  },
+  {
+    "id": "records_missing_a_named_topic",
+    "file": "records_missing_a_named_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "records covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "records covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "records_names_an_unlisted_topic",
+    "file": "records_names_an_unlisted_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "records covers {\"invoices\", \"orders\", \"payments\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "records covers {\"invoices\", \"orders\", \"payments\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "covered_from_after_to",
+    "file": "covered_from_after_to.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "covered.from_ms 1757419486000 is not before covered.to_ms 1757415734000: the covered window's end is EXCLUSIVE, so an empty range covers no record",
+    "arm": "covered.from_ms 1757419486000 is not before covered.to_ms 1757415734000: the covered window's end is EXCLUSIVE, so an empty range covers no record"
+  }
+]

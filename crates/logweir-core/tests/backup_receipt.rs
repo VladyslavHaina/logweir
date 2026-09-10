@@ -88,7 +88,9 @@ fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     let mut arm3 = pristine();
     arm3.records.insert("invoices".to_string(), 1);
 
-    // Arm 4: a window that ends before it begins.
+    // Arm 4: a window that ends before it begins. The END IS EXCLUSIVE since
+    // Task 5b, so `from_ms == to_ms` is refused by the same arm — that
+    // direction is `arm_4_refuses_an_empty_window` below.
     let mut arm4 = pristine();
     arm4.covered.from_ms = 2;
     arm4.covered.to_ms = 1;
@@ -120,7 +122,9 @@ fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
             4,
             "the covered window ends before it begins",
             arm4,
-            "covered.from_ms 2 is after covered.to_ms 1".to_string(),
+            "covered.from_ms 2 is not before covered.to_ms 1: the covered window's end is \
+             EXCLUSIVE, so an empty range covers no record"
+                .to_string(),
         ),
     ]
 }
@@ -317,15 +321,41 @@ fn arm_3_refuses_records_that_omit_a_named_topic() {
     );
 }
 
-/// Arm 4 is `<=`, not `<`: an instantaneous window (a backup of a topic with
-/// one record, or one whose records share a timestamp) is legal.
+/// Arm 4 is `<`, not `<=`, since Task 5b (Task 5's review, F3): `to_ms` is the
+/// EXCLUSIVE end of the window, so `from_ms == to_ms` describes a range that
+/// contains nothing and cannot be the window of an archive holding a record.
+///
+/// Task 5 asserted the opposite here — `arm_4_accepts_an_instantaneous_window`
+/// — while `config/crd/backups.yaml` already documented the same window's
+/// `toMs` as exclusive (I22). This test is that assertion turned round, and it
+/// is the mutant guard for the change: reverting the arm to `>` makes it fail
+/// at assertion time.
+///
+/// The single-record backup that motivated the old test is still legal, and
+/// still a window: `crates/logweir/src/backup/phase_run.rs` converts the
+/// manifest's inclusive newest timestamp to an exclusive bound, so that run
+/// produces `[t, t+1)` rather than `[t, t]`.
 #[test]
-fn arm_4_accepts_an_instantaneous_window() {
+fn arm_4_refuses_an_empty_window() {
     let mut doc = pristine();
     doc.covered.from_ms = 1_757_415_734_000;
     doc.covered.to_ms = 1_757_415_734_000;
-    doc.validate_invariants()
-        .expect("from_ms == to_ms is a zero-length window, not an inverted one");
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(
+            "covered.from_ms 1757415734000 is not before covered.to_ms 1757415734000: the \
+             covered window's end is EXCLUSIVE, so an empty range covers no record"
+                .to_string()
+        ),
+        "from_ms == to_ms is an EMPTY half-open range, not an instantaneous window"
+    );
+    // …and the one-millisecond window a single-record backup really produces
+    // is accepted, which is what makes the arm a bound and not a ban.
+    let mut ok = pristine();
+    ok.covered.from_ms = 1_757_415_734_000;
+    ok.covered.to_ms = 1_757_415_734_001;
+    ok.validate_invariants()
+        .expect("[t, t+1) contains exactly one millisecond and is a real window");
 }
 
 /// The checked-in signed fixture is a document THIS type parses and THIS

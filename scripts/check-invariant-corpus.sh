@@ -35,6 +35,22 @@
 # inside `docs/` — left this gate at 0 and put `integrity.mismatches: 2**64`
 # back to `drill verify` exit 1 against `VALID` from the script.
 #
+# Task 5b: it also walks `backup-receipt-index.json` — the BACKUP RECEIPT's own
+# corpus — and closes the same kind of arithmetic over its four invariant arms.
+# The fixed point there is `crates/logweir-core/src/backup_receipt.rs`'s
+# `validate_invariants`: the gate re-derives each arm's message SKELETON (the
+# format string with every `{...}` placeholder normalised) from that function's
+# body, re-derives the same list from `docs/verify_scorecard.py::
+# check_backup_receipt_invariants`, requires the two lists to be equal in
+# order, and requires every case in the index to match exactly one skeleton and
+# every skeleton to be matched by at least one case. Deleting an arm from ONE
+# reader together with its corpus case and its pytest therefore cannot balance:
+# the other reader still has four arms. Deleting it from BOTH is what
+# `crates/logweir-core/tests/backup_receipt.rs::
+# backup_receipt_invariants_have_exactly_four_arms` is for — the per-arm Rust
+# unit test the corpus README already names as the only thing that survives a
+# fully coordinated deletion.
+#
 # The corpus cases are UNSIGNED on disk (see e2e/fixtures/invariants/README.md).
 # `verify_scorecard.py` checks the signature before it evaluates any invariant,
 # so each case is signed here, at test time, into a temp dir with the checked-in
@@ -378,6 +394,204 @@ if [ "$arith_rc" -ne 0 ]; then
     fail "the shape corpus arithmetic does not close (see above)"
 fi
 
+# CLOSED ARITHMETIC FOR THE BACKUP-RECEIPT CORPUS (Task 5b). Same shape as the
+# block above and for the same reason, with one difference that decides the
+# mechanism: the receipt's four arm messages INTERPOLATE, so an arm cannot be
+# joined to a corpus case by literal substring the way `index.json`'s `arm`
+# field is joined to `Scorecard::validate_invariants`. The join is the message
+# SKELETON instead — the format string with every placeholder normalised to
+# `{}` — read out of both readers' source text, which is what lets the gate
+# compare the two readers' arm SETS as well as the corpus's coverage of them.
+set +e
+"$PY" - "$ROOT" <<'PYEOF'
+import json, pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+corpus = root / "e2e/fixtures/invariants"
+rust_src = (root / "crates/logweir-core/src/backup_receipt.rs").read_text()
+py_src = (root / "docs/verify_scorecard.py").read_text()
+
+
+def normalise(literal):
+    """A message literal as a SKELETON: every `{...}` placeholder to `{}`.
+
+    Rust's `{:?}`/`{}` and Python's `{value!r}`/`{name}` are the same hole in
+    the same sentence, and the sentence is what the two readers must agree on.
+    What the hole is FILLED with is compared separately and exactly, by the
+    corpus walk below and by `crates/logweir/tests/two_reader_parity_receipt.rs`.
+    """
+    return re.sub(r"\{[^{}]*\}", "{}", literal)
+
+
+def rust_body(text, signature):
+    """From the line carrying `signature` to the first line that is exactly
+    four spaces and a closing brace — the same slice
+    `crates/logweir/tests/two_reader_parity.rs::validate_invariants_body` takes,
+    and for the same reason: a `trim()` would close the body at the first inner
+    brace."""
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if signature in l)
+    end = next(i for i, l in enumerate(lines[start + 1:], start + 1) if l == "    }")
+    return "\n".join(lines[start:end + 1])
+
+
+def read_rust_literal(text, i):
+    """The Rust string literal starting at `text[i] == '"'`, with `\`-newline
+    CONTINUATIONS applied — rustc drops the newline and the following leading
+    whitespace, so a gate that did not would compare a string with spaces in it
+    against a refusal that never had them."""
+    i += 1
+    out = []
+    escapes = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+    while True:
+        c = text[i]
+        if c == '"':
+            return "".join(out), i + 1
+        if c == "\\":
+            nxt = text[i + 1]
+            if nxt == "\n":
+                i += 2
+                while i < len(text) and text[i] in " \t":
+                    i += 1
+                continue
+            out.append(escapes.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+
+
+def rust_arms(body):
+    """One skeleton per `return Err(format!(` STATEMENT, in order."""
+    arms, i = [], 0
+    while True:
+        j = body.find("return Err(format!(", i)
+        if j < 0:
+            return arms
+        lit, i = read_rust_literal(body, body.index('"', j))
+        arms.append(normalise(lit))
+
+
+PY_LIT = re.compile(r'(?:f|r|rf|fr)?"((?:[^"\\]|\\.)*)"')
+
+
+def py_arms(body):
+    """One skeleton per `return` statement, in order, with Python's implicit
+    concatenation applied and `return ""` (the ACCEPT) dropped."""
+    lines = body.splitlines()
+    arms, i = [], 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("return ") and stripped != "return":
+            chunk, depth = [], 0
+            while i < len(lines):
+                chunk.append(lines[i])
+                depth += lines[i].count("(") - lines[i].count(")")
+                i += 1
+                if depth <= 0:
+                    break
+            pieces = [m.group(1) for m in PY_LIT.finditer("\n".join(chunk))]
+            joined = normalise("".join(pieces).replace('\\"', '"'))
+            if joined:
+                arms.append(joined)
+            continue
+        i += 1
+    return arms
+
+
+rust = rust_arms(rust_body(rust_src, "pub fn validate_invariants"))
+python = py_arms(
+    py_src.split("def check_backup_receipt_invariants(", 1)[1].split("\ndef ", 1)[0])
+
+if not rust:
+    raise SystemExit(
+        "crates/logweir-core/src/backup_receipt.rs's validate_invariants has no "
+        "`return Err(format!(` statement; this gate is reading the wrong function or "
+        "the arms no longer report a message, and either way the corpus below is "
+        "walking documents nothing accounts for.")
+if rust != python:
+    raise SystemExit(
+        "the two readers do not implement the same backup-receipt arms.\n"
+        f"  rust   ({len(rust)}): {json.dumps(rust, indent=4)}\n"
+        f"  python ({len(python)}): {json.dumps(python, indent=4)}\n"
+        "Every arm of BackupReceipt::validate_invariants must have a mirrored arm in "
+        "docs/verify_scorecard.py::check_backup_receipt_invariants, in the same order, "
+        "with the same message and the same placeholders. This is the assertion that "
+        "fails when an arm is deleted from ONE reader together with its corpus case "
+        "and its pytest.")
+
+entries = json.loads((corpus / "backup-receipt-index.json").read_text())
+if not entries:
+    raise SystemExit("backup-receipt-index.json is empty; a walk over nothing proves nothing")
+
+SIX = {"id", "file", "rust_exit", "python_exit", "reason", "arm"}
+for e in entries:
+    if set(e) != SIX:
+        raise SystemExit(
+            f"backup-receipt-index.json entry {e.get('id')!r} has fields {sorted(e)}; "
+            f"interface I31 fixes the shape at exactly {sorted(SIX)}")
+    if e["arm"] != e["reason"]:
+        raise SystemExit(
+            f"{e['id']}: `arm` and `reason` differ. For this corpus the arm IS the "
+            "refusal text the arm returns (the messages interpolate, so there is no "
+            "shorter fragment to name), and the join below is on it.")
+
+
+def matches(skeleton, message):
+    """`message` is this skeleton's sentence with the holes filled."""
+    parts = [re.escape(p) for p in skeleton.split("{}")]
+    return re.fullmatch(".*?".join(parts), message, re.S) is not None
+
+
+covered = {s: 0 for s in rust}
+for e in entries:
+    if not e["reason"]:
+        continue  # the accept-control
+    hits = [s for s in rust if matches(s, e["reason"])]
+    if len(hits) != 1:
+        raise SystemExit(
+            f"{e['id']}: its recorded reason matches {len(hits)} of the {len(rust)} arms "
+            "of BackupReceipt::validate_invariants; every refusing case must name exactly "
+            f"one.\n  reason: {e['reason']!r}\n  arms:   {json.dumps(rust, indent=4)}")
+    covered[hits[0]] += 1
+
+missing = [s for s, n in covered.items() if n == 0]
+if missing:
+    raise SystemExit(
+        "the backup-receipt corpus does not account for every invariant arm.\n"
+        f"  arms ({len(rust)}): {json.dumps(rust, indent=4)}\n"
+        f"  uncovered ({len(missing)}): {json.dumps(missing, indent=4)}\n"
+        "Every arm needs at least one backup-receipt-index.json case whose `reason` is "
+        "the message that arm returns. The arm list comes from "
+        "crates/logweir-core/src/backup_receipt.rs, which a deletion inside docs/ and "
+        "e2e/fixtures/ does not touch.")
+
+if not any(not e["reason"] for e in entries):
+    raise SystemExit(
+        "backup-receipt-index.json has no ACCEPT case; without one, a reader that "
+        "refused every receipt would walk this corpus green.")
+
+# Ids key the temp files every gate signs into, so a duplicate across ANY of the
+# three indexes makes one gate compare the wrong document against another's
+# expectations. Checked across all three here, which is what makes adding a
+# fourth safe.
+ids = []
+for name in ("index.json", "shape-index.json", "backup-receipt-index.json"):
+    ids += [e["id"] for e in json.loads((corpus / name).read_text())]
+dupes = sorted({i for i in ids if ids.count(i) > 1})
+if dupes:
+    raise SystemExit(f"the corpus indexes have duplicate id(s): {dupes}")
+
+print(f"check-invariant-corpus: {len(rust)} backup-receipt invariant arms in both "
+      f"readers, {len(entries) - 1} refusing corpus case(s) covering all of them, "
+      f"{len(ids)} unique case ids across three indexes — closed")
+PYEOF
+receipt_arith_rc=$?
+set -e
+if [ "$receipt_arith_rc" -ne 0 ]; then
+    fail "the backup-receipt corpus arithmetic does not close (see above)"
+fi
+
 # Sign every case into $tmp and emit one TAB-separated line per case:
 #   id <TAB> python_exit <TAB> reason
 # PAE is re-derived from the spec here rather than imported from the verifier,
@@ -475,3 +689,89 @@ if [ "$count" -eq 0 ]; then
     fail "walked zero cases; e2e/fixtures/invariants/index.json is empty or unreadable"
 fi
 echo "check-invariant-corpus: the auditor's verifier agrees with index.json + shape-index.json on all $count cases"
+
+# ---------------------------------------------------------------------------
+# THE BACKUP-RECEIPT CORPUS (Task 5b), with the second reader alone.
+#
+# A separate signing block and a separate loop rather than a widened one,
+# because the payload type is different: a receipt signed under the SCORECARD
+# media type would be refused by `--payload-type backup-receipt` at the
+# payloadType comparison and this walk would pass for the wrong reason on every
+# case. The two-reader claim on these documents is
+# `crates/logweir/tests/two_reader_parity_receipt.rs`'s; this is the half an
+# auditor with python3 and no Rust toolchain can run.
+# ---------------------------------------------------------------------------
+mkdir -p "$tmp/receipt"
+"$PY" - "$CORPUS" "$tmp/receipt" > "$tmp/receipt-cases.tsv" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+corpus, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+signing_pem = corpus.parent / "signed" / "signing.pem"
+# The receipt's own media type. Written out rather than imported from the
+# verifier, exactly as PAE is: a gate that asks the thing it is checking cannot
+# fail. `docs/test_verify_scorecard.py::
+# test_the_four_payload_types_match_the_rust_constants` is what keeps this
+# literal and `crates/logweir-verify/src/lib.rs` in step.
+PT = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+
+key = serialization.load_pem_private_key(signing_pem.read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+
+entries = json.loads((corpus / "backup-receipt-index.json").read_text())
+if not entries:
+    raise SystemExit("backup-receipt-index.json is empty; a walk over nothing proves nothing")
+for e in entries:
+    payload = (corpus / e["file"]).read_bytes()
+    t = PT.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{e['id']}.json").write_bytes(payload)
+    (out / f"{e['id']}.sig").write_text(json.dumps(
+        {"payloadType": PT,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+    if "\t" in e["reason"] or "\n" in e["reason"]:
+        raise SystemExit(f"{e['id']}: `reason` must be a single TAB-free line")
+    print(f"{e['id']}\t{e['python_exit']}\t{e['reason']}")
+PYEOF
+
+receipt_count=0
+while IFS=$'\t' read -r id want_py reason; do
+    [ -n "$id" ] || continue
+    receipt_count=$((receipt_count + 1))
+
+    set +e
+    "$PY" "$VERIFIER" --payload-type backup-receipt \
+        "$tmp/receipt/$id.json" "$tmp/receipt/$id.sig" \
+        "$ROOT/e2e/fixtures/signed/public.pem" >"$tmp/out" 2>"$tmp/err"
+    py_rc=$?
+    set -e
+
+    if [ "$py_rc" -ne "$want_py" ]; then
+        cat "$tmp/err" >&2
+        fail "$id: verify_scorecard.py exited $py_rc, backup-receipt-index.json expects $want_py"
+    fi
+
+    got=""
+    while IFS= read -r line; do
+        case "$line" in
+            "INVALID: "*) got="${line#INVALID: }"; break ;;
+        esac
+    done < "$tmp/err"
+
+    if [ "$got" != "$reason" ]; then
+        fail "$id: the refusal text is not the one backup-receipt-index.json records.
+  got:  $got
+  want: $reason"
+    fi
+    echo "check-invariant-corpus: $id  python=$py_rc  ok  (backup receipt)"
+done <<< "$(cat "$tmp/receipt-cases.tsv")"
+
+if [ "$receipt_count" -eq 0 ]; then
+    fail "walked zero backup-receipt cases; e2e/fixtures/invariants/backup-receipt-index.json is empty or unreadable"
+fi
+echo "check-invariant-corpus: the auditor's verifier agrees with backup-receipt-index.json on all $receipt_count cases"

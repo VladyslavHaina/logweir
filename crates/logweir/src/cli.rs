@@ -196,19 +196,22 @@ pub enum BackupCmd {
         /// permitted scratch target.
         #[arg(long)]
         allowed_clusters: PathBuf,
-        /// The key the backup receipt is signed with (interface I6, Task 5b).
-        /// Declared and threaded by this build; nothing here opens it.
+        /// The key the backup receipt is signed with (interface I6). Opened
+        /// once, after the archive has been read back, to sign the receipt.
         #[arg(long)]
         signing_key: PathBuf,
         #[arg(long)]
         triggered_by: Option<String>,
-        /// Where the backup receipt is written locally. Interface I6 (Task
-        /// 5b): until it lands, passing this exits 1 naming that contract
-        /// rather than taking a backup it cannot document.
+        /// Where the backup receipt is written locally. Its DSSE sidecar
+        /// lands beside it with the extension replaced by `.sig`. The receipt
+        /// is ALSO put in the evidence bucket under
+        /// `logweir/backups/<backup_id>/<run_id>.receipt.{json,sig}`, whose
+        /// two keys are the command's final two stdout lines.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// The receipt's own path, when it differs from `--out`. Interface I6
-        /// (Task 5b); see `--out`.
+        /// The receipt's own path. Takes precedence over `--out`; naming two
+        /// DIFFERENT paths is refused, because this command writes exactly
+        /// one document.
         #[arg(long)]
         receipt_out: Option<PathBuf>,
         /// Replaces the spec's `backup_id` for this run (interface I10). Task

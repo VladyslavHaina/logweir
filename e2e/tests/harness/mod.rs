@@ -788,6 +788,20 @@ pub fn python_verify(r: &Run) -> std::process::ExitStatus {
 /// This function used to read `LOGWEIR_E2E_PYTHON` ONLY, so it was the outlier
 /// of the four: `$LOGWEIR_PYTHON` is the name the README and `scripts/demo.sh`
 /// document, and setting it moved every gate except this one.
+/// `python()` for the e2e rows that need the auditor's interpreter directly
+/// (Task 5b's receipt row runs `docs/verify_scorecard.py` over a receipt the
+/// runner just signed).
+///
+/// A WRAPPER and not a `pub` on `python` itself: the line `fn python() ->
+/// PathBuf {` is matched verbatim by
+/// `crates/logweir/tests/two_reader_parity.rs::
+/// every_gate_resolves_the_auditors_interpreter_the_same_way`, which slices
+/// this resolver's body between that exact line and the next `}` at column 0.
+/// Renaming it would make that gate stop looking at the chain below.
+pub fn auditor_python() -> PathBuf {
+    python()
+}
+
 fn python() -> PathBuf {
     for var in ["LOGWEIR_PYTHON", "LOGWEIR_E2E_PYTHON"] {
         if let Ok(p) = std::env::var(var) {

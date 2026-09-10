@@ -99,6 +99,10 @@ def run_typed(kind, doc, sig, pub):
 RECEIPT_TYPE = "application/vnd.logweir.drill-put-receipt+json;version=1.0.0"
 TEARDOWN_TYPE = "application/vnd.logweir.drill-teardown+json;version=1.0.0"
 SCORECARD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
+# The BACKUP receipt (Task 5's document, Task 5b's second reader) — not
+# RECEIPT_TYPE above, which is the drill's post-put storage readback of a
+# SCORECARD. Two documents, two media types.
+BACKUP_RECEIPT_TYPE = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
 
 
 def _sign(payload_type: str, payload: bytes) -> dict:
@@ -230,7 +234,7 @@ def test_the_full_media_type_may_be_passed_instead_of_the_short_name():
     assert "VALID" in r.stdout
 
 
-def test_the_three_payload_types_match_the_rust_constants():
+def test_the_four_payload_types_match_the_rust_constants():
     # The verifier is only independent if it agrees with the signer on the
     # exact media types. A drift here means one of them signs or checks a
     # string the other never uses, and every fixture would still pass.
@@ -241,11 +245,14 @@ def test_the_three_payload_types_match_the_rust_constants():
     # three media-type literals — so reading the old file would assert a
     # property of a `pub use` line. Read the file that DECLARES them.
     rust = (ROOT / "crates" / "logweir-verify" / "src" / "lib.rs").read_text()
-    for t in (SCORECARD_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
+    for t in (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
         assert t in rust, f"{t} is not declared in logweir-verify/src/lib.rs"
     py = VERIFIER.read_text()
-    for t in (SCORECARD_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
+    for t in (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
         assert t in py, f"{t} is not declared in verify_scorecard.py"
+    # …and the map really has FOUR entries, so a fifth type added to the Rust
+    # crate and forgotten here is not silently covered by the loop above.
+    assert len(_verifier_module().PAYLOAD_TYPES) == 4
 
 
 # ------------------------------------------------------------------ PAE lengths
@@ -560,7 +567,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.8.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.9.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -570,6 +577,10 @@ def test_the_version_line_names_the_current_invariant_set():
             "type implies"
         ) in r.stdout, r.stdout
         assert "u64 domain with null refused where Rust has no Option" in r.stdout, r.stdout
+        # 1.9.0's addition: Global Constraint 12's price for `target.auth`.
+        assert (
+            "target.auth's mode present and not blank when the block is"
+        ) in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -1633,3 +1644,210 @@ def test_a_u64_owned_by_a_block_outside_the_old_literal_does_not_raise():
     got = dict((name, value) for name, value, _o in mod._u64_fields(doc))
     assert got["target.topic_mapping_entries"] == doc["target"]["topic_mapping_entries"]
     assert mod.check_invariants(doc) == "", "the added entry must not change the verdict"
+
+
+# --------------------------------------------------- Task 5b: the backup receipt
+# The second reader's half of the backup receipt. Every test below drives the
+# SHIPPED SCRIPT as a subprocess over a document it signs with the checked-in
+# throwaway fixture key, because the auditor's copy is what the two-reader claim
+# is about; the pure-function tests reach `check_backup_receipt_invariants`
+# directly, which is what makes an arm's exact message assertable.
+
+BACKUP_RECEIPT = json.loads(
+    (FIX / "backup-receipt.json").read_bytes()
+) if (FIX / "backup-receipt.json").exists() else None
+
+
+def _receipt(**overrides):
+    """The checked-in signed receipt as a dict, with dotted overrides applied.
+
+    Derived from the FIXTURE rather than hand-written, so a document this
+    script accepts here is a document the Rust minter really produced and
+    `BackupReceipt::validate_invariants` really accepted.
+    """
+    doc = json.loads(json.dumps(BACKUP_RECEIPT))
+    for path, value in overrides.items():
+        parts = path.split(".")
+        node = doc
+        for part in parts[:-1]:
+            node = node[part]
+        if value is _DELETE:
+            node.pop(parts[-1], None)
+        else:
+            node[parts[-1]] = value
+    return doc
+
+
+_DELETE = object()
+
+
+def test_the_signed_backup_receipt_fixture_verifies_under_its_own_type():
+    r = run_typed("backup-receipt", FIX / "backup-receipt.json",
+                  FIX / "backup-receipt.sig", FIX / "public.pem")
+    assert r.returncode == 0, r.stderr
+    assert "VALID" in r.stdout
+    # The verdict must say WHICH invariant set ran, or an exit 0 that checked
+    # only the signature is indistinguishable from this one.
+    assert "backup-receipt invariant set" in r.stdout, r.stdout
+    # The window's end is EXCLUSIVE (I22) and the printer says so, because that
+    # is the one thing a reader can get wrong by a whole record.
+    assert "the end is EXCLUSIVE" in r.stdout, r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_a_backup_receipt_never_verifies_as_a_scorecard():
+    # The default path must keep refusing it: that refusal is the property the
+    # payload type exists to give.
+    r = run(FIX / "backup-receipt.json", FIX / "backup-receipt.sig", FIX / "public.pem")
+    assert r.returncode == 1
+    assert "unexpected payloadType" in r.stdout + r.stderr
+
+
+def test_a_scorecard_never_verifies_as_a_backup_receipt():
+    r = run_typed("backup-receipt", FIX / "scorecard.json",
+                  FIX / "scorecard.sig", FIX / "public.pem")
+    assert r.returncode == 1
+    assert "unexpected payloadType" in r.stdout + r.stderr
+
+
+def test_a_flipped_byte_in_a_backup_receipt_fails_under_the_right_type():
+    # Selecting the right payload type must not become a way to pass.
+    with tempfile.TemporaryDirectory() as d:
+        bad = pathlib.Path(d) / "bad.json"
+        raw = bytearray((FIX / "backup-receipt.json").read_bytes())
+        raw[raw.index(b"1")] = ord("2")
+        bad.write_bytes(bytes(raw))
+        r = run_typed("backup-receipt", bad, FIX / "backup-receipt.sig", FIX / "public.pem")
+        assert r.returncode == 1
+        assert "does not verify" in r.stdout + r.stderr
+
+
+def test_each_backup_receipt_arm_refuses_with_its_exact_message():
+    # THE REFUSAL TEXT IS THE INTERFACE. Every string here is asserted in FULL
+    # against `crates/logweir-core/tests/backup_receipt.rs`'s own assertions —
+    # a `contains` would let the two readers say different things and still go
+    # green, which is the exact defect the parity gate exists because of.
+    check = _verifier_module().check_backup_receipt_invariants
+    cases = [
+        (
+            _receipt(format_version="2.0.0"),
+            'format_version "2.0.0" is not a 1.x version this reader understands',
+        ),
+        (
+            # Arm 1 is STRICTER than the scorecard's `_major`: the whole string
+            # must be three integers.
+            _receipt(format_version="1.0"),
+            'format_version "1.0" is not a 1.x version this reader understands',
+        ),
+        (
+            _receipt(**{"archive.manifest_key": "   "}),
+            "exit_code 0 and manifest_key absent disagree: a receipt names a manifest "
+            "if and only if the backup exited 0",
+        ),
+        (
+            _receipt(exit_code=1),
+            'exit_code 1 and manifest_key "logweir/backups/logweir-backup-01J8Z9QK7V/'
+            'manifest.json" disagree: a receipt names a manifest if and only if the '
+            "backup exited 0",
+        ),
+        (
+            _receipt(records={"orders": 1}),
+            'records covers {"orders"} but the named topic set is {"orders", "payments"}',
+        ),
+        (
+            _receipt(records={"orders": 1, "payments": 2, "invoices": 3}),
+            'records covers {"invoices", "orders", "payments"} but the named topic set '
+            'is {"orders", "payments"}',
+        ),
+        (
+            _receipt(**{"covered.from_ms": 2, "covered.to_ms": 1}),
+            "covered.from_ms 2 is not before covered.to_ms 1: the covered window's end "
+            "is EXCLUSIVE, so an empty range covers no record",
+        ),
+        (
+            # F3: the end is EXCLUSIVE, so an empty range is refused. Task 5
+            # accepted this document.
+            _receipt(**{"covered.from_ms": 7, "covered.to_ms": 7}),
+            "covered.from_ms 7 is not before covered.to_ms 7: the covered window's end "
+            "is EXCLUSIVE, so an empty range covers no record",
+        ),
+    ]
+    for doc, want in cases:
+        assert check(doc) == want, (check(doc), want)
+    # …and the arms are not simply always refusing.
+    assert check(_receipt()) == ""
+    # A one-millisecond window is a real window: `[t, t+1)` is what a
+    # single-record backup produces.
+    assert check(_receipt(**{"covered.from_ms": 7, "covered.to_ms": 8})) == ""
+
+
+def test_a_backup_receipt_missing_a_block_is_one_line_not_a_traceback():
+    # The Rust reader gets this layer from `serde_json` and reports "the
+    # payload is not a backup receipt: missing field `covered`" WITHOUT
+    # reaching an invariant. This script has no such layer, so the shape is
+    # asserted before the arms — and the contract is that no field access ever
+    # surfaces as a traceback.
+    mod = _verifier_module()
+    for path, name in [("covered", "covered"), ("archive", "archive"),
+                       ("records", "records"), ("source", "source")]:
+        doc = _receipt(**{path: _DELETE})
+        assert mod._receipt_shape(doc) == (
+            f"the document has no {name} block; it is not a backup receipt")
+    assert mod._receipt_shape(_receipt(run_id=_DELETE)) == (
+        "the document has no run_id field; it is not a backup receipt")
+    assert mod._receipt_shape(_receipt(exit_code="0")) == "exit_code is not an integer"
+    # End to end, through the shipped script: one INVALID line, no traceback.
+    with tempfile.TemporaryDirectory() as d:
+        doc = _receipt(covered=_DELETE)
+        pth, sig = _write_signed(d, "receipt", BACKUP_RECEIPT_TYPE, doc)
+        r = run_typed("backup-receipt", pth, sig, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "no covered block" in r.stderr, r.stderr
+
+
+def test_script_version_was_bumped_with_the_payload_type_map():
+    # Task 5b's acceptance. `SCRIPT_VERSION` tells an auditor WHICH checks ran,
+    # and the fourth payload type came with a whole invariant set — so the two
+    # must have moved together. A version left at 1.8.0 beside a four-entry map
+    # is a document claiming it was checked by a reader that did not know the
+    # type it was handed.
+    mod = _verifier_module()
+    assert len(mod.PAYLOAD_TYPES) == 4, sorted(mod.PAYLOAD_TYPES)
+    assert mod.SCRIPT_VERSION == "1.9.0", mod.SCRIPT_VERSION
+    assert "backup-receipt" in mod.PAYLOAD_TYPES
+    assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
+
+
+def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():
+    mod = _verifier_module()
+    for short, media in mod.PAYLOAD_TYPES.items():
+        assert mod.resolve_payload_type(short) == media
+        # Clause 2: a full media type passes straight through.
+        assert mod.resolve_payload_type(media) == media
+
+
+def test_the_target_auth_arms_refuse_with_their_exact_messages():
+    # Global Constraint 12's price for `target.auth` (Task 5b declares the
+    # shape; Task 6 fills it). ABSENT IS LEGAL — every scorecard this tree has
+    # written has no block — and BLANK IS NOT PLAINTEXT (ruling R-A).
+    mod = _verifier_module()
+    base = json.loads(SCORECARD_PASS.read_bytes())
+    assert mod.check_invariants(base) == "", "no auth block at all must stay legal"
+
+    def with_auth(auth):
+        doc = json.loads(json.dumps(base))
+        doc["target"]["auth"] = auth
+        return doc
+
+    assert mod.check_invariants(with_auth({"mode": "plaintext"})) == ""
+    assert mod.check_invariants(
+        with_auth({"mode": "scram-sha-512", "username": "logweir"})) == ""
+    assert mod.check_invariants(with_auth(None)) == "", "null is absent"
+    assert mod.check_invariants(with_auth({"mode": "   ", "username": "logweir"})) == (
+        "target.auth names a username with no auth mode; a username without its "
+        "mechanism is not a record of how the client authenticated"
+    )
+    assert mod.check_invariants(with_auth({"mode": ""})) == (
+        "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
+    )

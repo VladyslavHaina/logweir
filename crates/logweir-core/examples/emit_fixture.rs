@@ -55,6 +55,14 @@ fn main() {
             topic_mapping_prefix: "drill-".into(),
             topic_mapping_sha256: sha256_prefixed(b"orders: drill-orders\n"),
             topic_mapping_entries: 1,
+            // ABSENT, which is what every scorecard this tree has written
+            // says — and what `#[serde(skip_serializing_if)]` keeps out of
+            // the bytes, so this fixture is byte-identical to the SIGNED one
+            // under e2e/fixtures/signed/ and needs no re-mint (ruling R-G).
+            // Task 6 fills the live field; the fixture's own value is a
+            // separate decision and stays `None` until a task changes it
+            // deliberately.
+            auth: None,
         },
         approval: ApprovalInfo {
             approver: "sre-oncall@example.com".into(),

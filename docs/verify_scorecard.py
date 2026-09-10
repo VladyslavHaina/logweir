@@ -39,16 +39,28 @@ Requires only the `cryptography` package:
   pip install cryptography
   python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
 
-A Logweir drill publishes THREE signed documents, each under its own DSSE
-payload type. `--payload-type` selects which one is being checked; the default
-is the scorecard, so the three-positional-argument form above is unchanged.
+A Logweir drill publishes THREE signed documents and a Logweir BACKUP publishes
+a fourth, each under its own DSSE payload type. `--payload-type` selects which
+one is being checked; the default is the scorecard, so the
+three-positional-argument form above is unchanged.
 
-  scorecard  application/vnd.logweir.drill-scorecard+json;version=1.0.0   (default)
-  receipt    application/vnd.logweir.drill-put-receipt+json;version=1.0.0
-  teardown   application/vnd.logweir.drill-teardown+json;version=1.0.0
+  scorecard       application/vnd.logweir.drill-scorecard+json;version=1.0.0   (default)
+  backup-receipt  application/vnd.logweir.backup-receipt+json;version=1.0.0
+  receipt         application/vnd.logweir.drill-put-receipt+json;version=1.0.0
+  teardown        application/vnd.logweir.drill-teardown+json;version=1.0.0
 
   python3 verify_scorecard.py --payload-type receipt \
       <run_id>.receipt.json <run_id>.receipt.sig public.pem
+
+  python3 verify_scorecard.py --payload-type backup-receipt \
+      <run_id>.receipt.json <run_id>.receipt.sig public.pem
+
+`backup-receipt` is the signed record of one `logweir backup run` — a DIFFERENT
+document from `receipt`, which is the drill's post-put storage readback of a
+scorecard. Two of the four are checked ARM FOR ARM against their Rust reader
+(`scorecard` and `backup-receipt`); for the other two this script verifies the
+signature and says so rather than inventing semantics for a document it does
+not model.
 
 The full media type may be given instead of the short name. Passing the wrong
 one is a REFUSAL, not a warning: a sidecar for one kind of document must never
@@ -103,6 +115,11 @@ import base64
 import binascii
 import hashlib
 import json
+# `re` is stdlib, like every other import here: this script's ONLY third-party
+# dependency is `cryptography` (see the module docstring), and Task 5b's
+# `_receipt_parse_semver` needs a pattern rather than Python's `int()`, whose
+# accepted set is wider than Rust's `str::parse::<u64>` in four different ways.
+import re
 import sys
 
 # `cryptography` is this script's ONE third-party dependency, and it is not in
@@ -254,15 +271,38 @@ FORMAT_VERSION = "1.0.0"
 # written down anywhere yet; Task 23 owns writing it. Until it is, err towards
 # bumping: an unnecessary bump costs an auditor one question, a missing one
 # costs them a wrong answer.
-SCRIPT_VERSION = "1.8.0"
+# 1.9.0 (Task 5b) adds THREE things in one commit, which is why one bump
+# covers them: (a) this reader learns the BACKUP RECEIPT — a fourth payload
+# type and a mirror of `logweir_core::backup_receipt::BackupReceipt`'s four
+# invariant arms, so `logweir backup run`'s signed document is checkable by an
+# auditor with this script and no Rust toolchain; (b) the scorecard gains two
+# `target.auth` arms, Global Constraint 12's price for one nested optional
+# field (`target.auth` is declared by Task 5b and FILLED by Task 6); (c) the
+# payload-type map gains its fourth entry, which
+# `test_script_version_was_bumped_with_the_payload_type_map` ties to this
+# constant so the two can never move apart.
+SCRIPT_VERSION = "1.9.0"
 
-# The three payload types Logweir signs. Keep byte-for-byte in step with
-# `crates/logweir-evidence/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
-# PAYLOAD_TYPE_PUT_RECEIPT and PAYLOAD_TYPE_TEARDOWN; `docs/
-# test_verify_scorecard.py::test_the_three_payload_types_match_the_rust_constants`
-# fails if they ever drift.
+# The FOUR payload types Logweir signs. Keep byte-for-byte in step with
+# `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
+# PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_PUT_RECEIPT and
+# PAYLOAD_TYPE_TEARDOWN; `docs/test_verify_scorecard.py::
+# test_the_four_payload_types_match_the_rust_constants` fails if they ever
+# drift.
+#
+# THE PATH FOLLOWED THE CONSTANTS. Task 14 moved them into the verify-only
+# crate `logweir-verify`, which is the crate the control plane links;
+# `logweir-evidence` re-exports them with `pub use logweir_verify::*;` and a
+# re-export contains none of the four literals, so a test reading the old file
+# would assert a property of a `pub use` line.
+#
+# `backup-receipt` is NOT `receipt`. `receipt` is the drill's post-put storage
+# readback of a SCORECARD; `backup-receipt` is the signed record of one
+# `logweir backup run`. Two documents, two media types, and the short names
+# are the ones `logweir drill verify --payload-type` takes.
 PAYLOAD_TYPES = {
     "scorecard": PAYLOAD_TYPE,
+    "backup-receipt": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
     "receipt": "application/vnd.logweir.drill-put-receipt+json;version=1.0.0",
     "teardown": "application/vnd.logweir.drill-teardown+json;version=1.0.0",
 }
@@ -275,6 +315,15 @@ def resolve_payload_type(name: str) -> str:
     that happens to contain a slash: a typo'd media type would otherwise turn
     into "unexpected payloadType" and read like a bad artifact rather than a
     bad command line.
+
+    THIS CONTRACT IS SHARED WITH `crates/logweir/src/verify.rs::
+    resolve_payload_type`, byte for byte, including the `{name!r}` quoting and
+    the "or a full media type" clause — `crates/logweir/tests/
+    two_reader_parity_receipt.rs::the_two_payload_type_resolvers_agree` drives
+    both readers over the same values and compares the messages. The Rust half
+    reproduces CPython's `repr` rule for a `str` rather than using Rust's own
+    `{:?}` (which quotes with `"`), because this script is the one an auditor
+    is told to read and its message is the one the interface register quotes.
     """
     if name in PAYLOAD_TYPES:
         return PAYLOAD_TYPES[name]
@@ -284,6 +333,26 @@ def resolve_payload_type(name: str) -> str:
         f"unknown --payload-type {name!r}; use one of "
         + ", ".join(sorted(PAYLOAD_TYPES)) + " or a full media type"
     )
+
+
+def _rust_debug_str(value) -> str:
+    r"""A string as Rust's `{:?}` renders it: double quotes, `\` and `"` escaped.
+
+    THE MIRRORED ARMS' REFUSAL TEXT IS THE INTERFACE, and Python's own `!r`
+    renders `'x'` where Rust renders `"x"`. Two arms that differ by one
+    character are two arms that disagree, and `scripts/check-verifier-parity.sh`
+    compares the FULL refusal text since Task 5b, so this is not cosmetic.
+    Rust's convention wins inside the invariant messages because
+    `crates/logweir-core/tests/backup_receipt.rs` asserts them in full and
+    those assertions are what a reviewer applies a mutant against; Python's
+    convention wins in `resolve_payload_type`'s usage error, which is a
+    command-line message and not a document's refusal. Each is stated where it
+    is used, and both are pinned by tests.
+
+    Rust escapes only `\` and the quote for a printable ASCII string, which is
+    every value these arms interpolate (a `format_version` or a manifest key).
+    """
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def key_id(public_key) -> str:
@@ -703,6 +772,7 @@ def check_invariants(doc) -> str:
     # arms below can read through them without a second guard.
     engine = doc["engine"]
     source = doc["source"]
+    target = doc["target"]
     measured = doc["measured"]
     objectives = doc["objectives"]
     sample = doc["sample"]
@@ -924,6 +994,41 @@ def check_invariants(doc) -> str:
     if not (-1 <= last_phase <= 9):
         return "last_phase_completed outside -1..=9"
 
+    # `target.auth` (Task 5b), mirrored ARM FOR ARM and IN THIS POSITION from
+    # `Scorecard::validate_invariants` — the two arms sit between the
+    # `last_phase_completed` arm and the `redactions` arm in both readers, so a
+    # document violating two of them gets the same message from each.
+    #
+    # ABSENT IS LEGAL and means plaintext: every scorecard this tree has ever
+    # written has no `auth` block, and `crates/logweir/tests/
+    # two_reader_parity.rs`'s twenty-one existing cases are what keep both
+    # readers tolerant of that.
+    #
+    # BLANK IS NOT PLAINTEXT (ruling R-A — `.strip()` here, `trim().is_empty()`
+    # in Rust). A blank mode read as "plaintext" would record a SCRAM run as an
+    # unauthenticated one by omission, and a `username` beside a blank mode is a
+    # principal recorded without the mechanism it authenticated with.
+    #
+    # A NON-DICT `auth` is not this layer's business: `TargetInfo.auth` is
+    # `Option<AuthSummary>`, so Rust refuses `"auth": "plaintext"` at
+    # DESERIALISATION with its own serde message — the class `shape-index.json`
+    # records, where the two readers' texts are recorded separately because
+    # neither reaches an invariant. `"auth": null` is absent in both.
+    target_auth = target.get("auth")
+    if isinstance(target_auth, dict):
+        mode_blank = not str(target_auth.get("mode") or "").strip()
+        username_named = bool(str(target_auth.get("username") or "").strip())
+        if mode_blank and username_named:
+            return (
+                "target.auth names a username with no auth mode; a username without its "
+                "mechanism is not a record of how the client authenticated"
+            )
+        if mode_blank:
+            return (
+                "target.auth.mode is blank; an absent auth block is how a scorecard says "
+                "plaintext"
+            )
+
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
     # for the full argument. `docs/formats/drill-scorecard.md` states "Always
@@ -938,6 +1043,177 @@ def check_invariants(doc) -> str:
         return (
             f"redactions is non-empty but format_version {version} has no way to "
             "produce one; --redact is a v0.1.1 feature"
+        )
+
+    return ""
+
+
+# EVERY REQUIRED BLOCK AND FIELD of `logweir_core::backup_receipt::
+# BackupReceipt`, in the struct's own declaration order.
+#
+# The receipt's counterpart of `REQUIRED_BLOCKS` / `REQUIRED_FIELDS`, and it
+# exists for the same reason: over there `serde_json` refuses a document
+# missing any of them at DESERIALISATION, and `logweir drill verify` reports
+# "signature verified but the payload is not a backup receipt: missing field
+# `covered`" without ever reaching an invariant. Python has no such layer, so
+# the shape is asserted here — FIRST, before any arm that would otherwise read
+# a block that is not there and raise the traceback this script's contract
+# promises never to emit.
+#
+# THESE ARE NOT INVARIANT ARMS, and they are deliberately in their own
+# function: `check_backup_receipt_invariants` below is the arm-for-arm mirror
+# of `BackupReceipt::validate_invariants`, and `scripts/
+# check-invariant-corpus.sh` derives the arm list from that function's body and
+# from the Rust one. A shape message living in the same function would be
+# counted as a fifth arm the Rust reader does not have.
+RECEIPT_BLOCKS = ("source", "engine", "archive", "records", "covered")
+RECEIPT_FIELDS = (
+    ("format_version", "string"),
+    ("run_id", "string"),
+    ("backup_id", "string"),
+    ("requested_at", "string"),
+    ("started_at", "string"),
+    ("finished_at", "string"),
+    ("exit_code", "integer"),
+    ("triggered_by", "string"),
+)
+
+
+def _receipt_shape(doc) -> str:
+    """"" when `doc` has the shape a `BackupReceipt` deserialises from."""
+    if not isinstance(doc, dict):
+        return "the payload is not a JSON object"
+    for name in RECEIPT_BLOCKS:
+        if not isinstance(doc.get(name), dict):
+            return f"the document has no {name} block; it is not a backup receipt"
+    for name, want in RECEIPT_FIELDS:
+        if name not in doc:
+            return f"the document has no {name} field; it is not a backup receipt"
+        value = doc[name]
+        if not isinstance(value, _JSON_TYPES[want]) or (
+            want == "integer" and isinstance(value, bool)
+        ):
+            return f"{name} is not {_JSON_TYPE_WORDS[want]}"
+    for name in ("cluster_id", "topics"):
+        if name not in doc["source"]:
+            return f"the document has no source.{name} field; it is not a backup receipt"
+    if not isinstance(doc["source"].get("topics"), list):
+        return "source.topics is not an array"
+    for name in ("from_ms", "to_ms"):
+        value = doc["covered"].get(name)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return f"covered.{name} is not an integer"
+    if "manifest_key" not in doc["archive"]:
+        return "the document has no archive.manifest_key field; it is not a backup receipt"
+    return ""
+
+
+def _receipt_parse_semver(v):
+    """`(major, minor, patch)` or None — the twin of `backup_receipt.rs`'s
+    `parse_semver`, which is STRICTER than the scorecard's `_major`.
+
+    Exactly three dot-separated non-negative integers: `"1"`, `"1.0"`,
+    `"1.0.0.0"` and `"1.0.0-rc1"` are all refused, because invariant 1 claims
+    the WHOLE string parses. Rust's `str::parse::<u64>` accepts an optional
+    leading `+` and nothing else — no whitespace, no underscore, no unicode
+    digit, and nothing above 2**64-1 — so the pattern and the bound below are
+    that function's accepted set and not Python's `int()`, which is wider on
+    every one of those points.
+    """
+    parts = str(v).split(".") if isinstance(v, str) else []
+    if len(parts) != 3:
+        return None
+    out = []
+    for part in parts:
+        if not re.fullmatch(r"\+?[0-9]+", part):
+            return None
+        n = int(part)
+        if n >= 2 ** 64:
+            return None
+        out.append(n)
+    return tuple(out)
+
+
+def _render_topic_set(names) -> str:
+    """`{"a", "b"}` — sorted, de-duplicated, Rust-debug-quoted.
+
+    The twin of `backup_receipt.rs`'s `render_set`, whose input is a
+    `BTreeSet<&str>`: sorted and unique by the type, quoted by `{:?}`. Arm 3's
+    message interpolates two of these, so the ordering and the quoting are
+    part of the refusal text the two readers must agree on byte for byte.
+    """
+    return "{" + ", ".join(_rust_debug_str(n) for n in sorted(set(names))) + "}"
+
+
+def check_backup_receipt_invariants(doc) -> str:
+    """The backup receipt's self-consistency rules, or "" when it holds.
+
+    ARM FOR ARM, IN ORDER, WITH `BackupReceipt::validate_invariants`
+    (crates/logweir-core/src/backup_receipt.rs), and with BYTE-IDENTICAL
+    refusal text: `crates/logweir-core/tests/backup_receipt.rs` asserts each
+    Rust message in full, `crates/logweir/tests/two_reader_parity_receipt.rs`
+    walks `e2e/fixtures/invariants/backup-receipt-index.json` with both readers
+    and compares their refusals to each other and to the recorded text, and
+    `scripts/check-invariant-corpus.sh` derives the arm list from BOTH bodies
+    and fails if they are not the same four arms in the same order.
+
+    Called only after `_receipt_shape` returns "", so every field read here is
+    present and of the right JSON type.
+
+    1. `format_version` parses as semver and its major is 1.
+    2. `exit_code == 0` **iff** `archive.manifest_key` is non-blank.
+    3. `records` covers exactly `source.topics`.
+    4. `covered.from_ms < covered.to_ms` — the end is EXCLUSIVE.
+    """
+    # ARM 1. GC12 for this document: a reader refuses a major it has never
+    # seen rather than guessing at a shape. FIRST, so a document from a future
+    # major is refused before any other arm is evaluated against fields that
+    # build may have redefined.
+    version = doc.get("format_version")
+    parsed = _receipt_parse_semver(version)
+    if parsed is None or parsed[0] != 1:
+        return (
+            f"format_version {_rust_debug_str(version)} is not a 1.x version this reader "
+            "understands"
+        )
+
+    # ARM 2. A biconditional, both directions, one message. TRIMMED-EMPTY
+    # COUNTS AS ABSENT (ruling R-A): naming no manifest and naming a manifest
+    # made of spaces are the same claim.
+    manifest_key = doc["archive"].get("manifest_key")
+    named = bool(str(manifest_key or "").strip())
+    exit_code = doc["exit_code"]
+    if (exit_code == 0) != named:
+        rendered = _rust_debug_str(manifest_key) if named else "absent"
+        return (
+            f"exit_code {exit_code} and manifest_key {rendered} disagree: a receipt names a "
+            "manifest if and only if the backup exited 0"
+        )
+
+    # ARM 3. The counted set and the named set are the same set. Both sides are
+    # rendered SORTED and DEDUPLICATED so the message is deterministic — over
+    # there `records` is a BTreeMap and the comparison is between two
+    # BTreeSets.
+    counted = list(doc["records"].keys())
+    named_topics = [str(x) for x in doc["source"]["topics"]]
+    if sorted(set(counted)) != sorted(set(named_topics)):
+        return (
+            f"records covers {_render_topic_set(counted)} but the named topic set is "
+            f"{_render_topic_set(named_topics)}"
+        )
+
+    # ARM 4. THE END IS EXCLUSIVE (Task 5b, from Task 5's review finding F3):
+    # the window is half-open, `config/crd/backups.yaml` documents
+    # `status.windowCovered.toMs` the same way (I22), and `from_ms == to_ms` is
+    # an EMPTY range rather than an instantaneous one. A single-record backup
+    # is still a window: the writer converts the manifest's inclusive newest
+    # timestamp to an exclusive bound, producing `[t, t+1)`.
+    from_ms = doc["covered"]["from_ms"]
+    to_ms = doc["covered"]["to_ms"]
+    if from_ms >= to_ms:
+        return (
+            f"covered.from_ms {from_ms} is not before covered.to_ms {to_ms}: the covered "
+            "window's end is EXCLUSIVE, so an empty range covers no record"
         )
 
     return ""
@@ -972,8 +1248,9 @@ def main(
     if payload_type != payload_type_wanted:
         print(
             f"INVALID: unexpected payloadType {payload_type!r} "
-            f"(expected {payload_type_wanted!r}; pass --payload-type to check "
-            "a receipt or a teardown attestation)",
+            f"(expected {payload_type_wanted!r}; pass --payload-type "
+            + "|".join(sorted(PAYLOAD_TYPES))
+            + " to check one of the other documents)",
             file=sys.stderr,
         )
         return 1
@@ -1163,8 +1440,66 @@ def main(
             "(invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, "
             "outcome-entailment, all eleven required blocks in serde order, "
             "the six required non-block fields present and of the type their Rust type "
-            "implies, u64 domain with null refused where Rust has no Option; "
+            "implies, u64 domain with null refused where Rust has no Option, "
+            "target.auth's mode present and not blank when the block is; "
             "approval.self_attested derived, not echoed)"
+        )
+        return 0
+
+    if payload_type_wanted == PAYLOAD_TYPES["backup-receipt"]:
+        # THE BACKUP RECEIPT'S OWN INVARIANTS (Task 5b). This is the second
+        # document this script EVALUATES rather than merely authenticates, and
+        # the dispatch is on the RESOLVED media type — never on what the bytes
+        # happen to parse as — so the scorecard's arms and the receipt's arms
+        # can never run over the other's document.
+        #
+        # Shape first, then the arms: `logweir drill verify` gets the shape
+        # layer from `serde_json` and reports a missing block WITHOUT reaching
+        # an invariant, so a reader that went straight to the arms here would
+        # raise a KeyError where the Rust reader prints one line.
+        problem = _receipt_shape(doc) or check_backup_receipt_invariants(doc)
+        if problem:
+            print(f"INVALID: {problem}", file=sys.stderr)
+            return 1
+        archive = doc["archive"]
+        covered = doc["covered"]
+        records = doc["records"]
+        print(f"VALID  backup receipt for {doc.get('backup_id')}")
+        print(f"       run_id={doc.get('run_id')}  exit_code={doc.get('exit_code')}")
+        print(
+            f"       source cluster {doc['source'].get('cluster_id')} "
+            f"auth={doc['source'].get('auth', {}).get('mode')} "
+            f"topics={len(doc['source'].get('topics', []))}"
+        )
+        # The manifest and its digest are what an auditor goes and looks with.
+        # An empty key is LEGAL and means the backup did not exit 0 (arm 2), so
+        # it is spelled out rather than printed blank.
+        if str(archive.get("manifest_key") or "").strip():
+            print(f"       manifest {archive.get('manifest_key')}")
+            print(f"       manifest_sha256={archive.get('manifest_sha256')}")
+        else:
+            print("       manifest: none — this receipt is for a backup that did not exit 0")
+        print(
+            f"       records={sum(v for v in records.values() if isinstance(v, int))} "
+            f"across {len(records)} topic(s)"
+        )
+        # HALF-OPEN, and said so: `to_ms` is EXCLUSIVE (I22), which is the one
+        # thing about these two integers a reader can get wrong by a whole
+        # record.
+        print(
+            f"       covered [{covered.get('from_ms')}, {covered.get('to_ms')}) "
+            "epoch ms — the end is EXCLUSIVE"
+        )
+        print(
+            "       This signature covers the receipt only. It says what THIS run "
+            "captured; it is not a claim about any other backup of the same topics."
+        )
+        print(
+            f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
+            "(backup-receipt invariant set: format_version's major, the "
+            "exit_code/manifest_key biconditional with trimmed-empty counted as absent, "
+            "records covering exactly the named topic set, and a covered window whose "
+            "EXCLUSIVE end is after its start)"
         )
         return 0
 
@@ -1239,7 +1574,8 @@ if __name__ == "__main__":
         i += 1
     if len(rest) != 3:
         print(
-            f"usage: {sys.argv[0]} [--payload-type scorecard|receipt|teardown] "
+            f"usage: {sys.argv[0]} "
+            "[--payload-type " + "|".join(sorted(PAYLOAD_TYPES)) + "] "
             "<document.json> <document.sig> <public.pem>",
             file=sys.stderr,
         )

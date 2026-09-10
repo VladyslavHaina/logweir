@@ -164,5 +164,21 @@
     "rust_exit": 0,
     "python_exit": 0,
     "reason": ""
+  },
+  {
+    "id": "target_auth_mode_absent_is_plaintext",
+    "file": "target_auth_mode_absent_is_plaintext.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext",
+    "arm": "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
+  },
+  {
+    "id": "target_auth_username_without_mode",
+    "file": "target_auth_username_without_mode.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated",
+    "arm": "target.auth names a username with no auth mode; a username without its mechanism is not a record of how the client authenticated"
   }
 ]

@@ -436,81 +436,237 @@ fn the_real_engine_accepts_the_rendered_sasl_block() {
     }
 }
 
-/// **Fix round 1, review F-3.** `--out` / `--receipt-out` is interface I6's
-/// refusal — a flag this build cannot honour, knowable with ZERO I/O — and it
-/// is now phase −1's LOCAL step 4, so it is answered before a broker client
-/// exists.
+/// **Fix round 1, review F-3, carried forward by Task 5b.** A flag
+/// combination this build cannot honour is refused with ZERO I/O, in phase
+/// −1's LOCAL step 4 — before a broker client exists.
 ///
-/// As landed it ran after phase −1's NETWORK step: the reviewer measured
-/// **20.1 s and ~360 librdkafka lines against the SOURCE cluster** (the
-/// production one) to say "this build writes no receipt". `bootstrap_servers`
-/// names a port nothing listens on, so a client-first ordering has something
-/// to fail at and cannot pass quietly.
+/// Task 4 refused `--out`/`--receipt-out` outright, because it wrote no
+/// receipt; **Task 5b writes one**, so both flags work and the row now drives
+/// the one shape that remains impossible: two DIFFERENT paths for the single
+/// document this command writes. The property under test is unchanged and is
+/// the one the reviewer measured — as landed, the check ran after phase −1's
+/// NETWORK step and cost **20.1 s and ~360 librdkafka lines against the SOURCE
+/// cluster** (the production one) to answer a question about argv.
 ///
-/// Three independent assertions, because each catches the move-it-back mutant
+/// `bootstrap_servers` names a port nothing listens on, so a client-first
+/// ordering has something to fail at and cannot pass quietly.
+///
+/// Four independent assertions, because each catches the move-it-back mutant
 /// on its own: the message (the mutant reports `kafka: unreachable` instead),
-/// the absence of every rdkafka token, and the wall clock (the mutant blocks
-/// on `rdkafka_reader.rs:16`'s 20 s metadata timeout; the bound here is 10 s,
-/// half of it, against a measured sub-second refusal).
+/// the absence of every rdkafka token, the wall clock (the mutant blocks on
+/// `rdkafka_reader.rs:16`'s 20 s metadata timeout; the bound here is 10 s,
+/// half of it, against a measured sub-second refusal), and that neither
+/// document was written.
 #[test]
-fn a_receipt_flag_is_refused_without_opening_a_socket() {
-    for flag in ["--receipt-out", "--out"] {
-        let spec = backup_spec(
-            "backup-i6.yaml",
-            "[orders]",
-            "",
-            // Not the compose broker: nothing is bound here.
-            "localhost:19099",
-        );
-        let doc = demo_dir().join("t4-i6-refused.json");
-        let _ = std::fs::remove_file(&doc);
+fn two_receipt_paths_are_refused_without_opening_a_socket() {
+    let spec = backup_spec(
+        "backup-i6.yaml",
+        "[orders]",
+        "",
+        // Not the compose broker: nothing is bound here.
+        "localhost:19099",
+    );
+    let a = demo_dir().join("t5b-i6-a.json");
+    let b = demo_dir().join("t5b-i6-b.json");
+    for doc in [&a, &b] {
+        let _ = std::fs::remove_file(doc);
+    }
 
-        let started = Instant::now();
-        let out = backup_run(&spec, None)
-            .arg(flag)
-            .arg(&doc)
-            .output()
-            .expect("logweir");
-        let elapsed = started.elapsed();
+    let started = Instant::now();
+    let out = backup_run(&spec, None)
+        .arg("--receipt-out")
+        .arg(&a)
+        .arg("--out")
+        .arg(&b)
+        .output()
+        .expect("logweir");
+    let elapsed = started.elapsed();
 
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "{flag}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        assert!(
-            stderr.contains("interface I6") && stderr.contains("Task 5b"),
-            "{flag}: the refusal must name the contract that owes the document:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains("no broker answered") && !stderr.contains("unreachable"),
-            "{flag}: the SOURCE cluster was dialled before a purely local refusal:\n{stderr}"
-        );
-        for stream in [&stdout, &stderr] {
-            for needle in ["rdkafka", "librdkafka", "Connect to", "Connection refused"] {
-                assert!(
-                    !stream.contains(needle),
-                    "{flag}: a locally-refusable run emitted `{needle}`, so it built a broker \
-                     client against the SOURCE cluster before the guards ran (review \
-                     F-3):\nstdout:\n{stdout}\nstderr:\n{stderr}"
-                );
-            }
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("name DIFFERENT paths"),
+        "the refusal must say what cannot be honoured:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no broker answered") && !stderr.contains("unreachable"),
+        "the SOURCE cluster was dialled before a purely local refusal:\n{stderr}"
+    );
+    for stream in [&stdout, &stderr] {
+        for needle in ["rdkafka", "librdkafka", "Connect to", "Connection refused"] {
+            assert!(
+                !stream.contains(needle),
+                "a locally-refusable run emitted `{needle}`, so it built a broker client \
+                 against the SOURCE cluster before the guards ran (review \
+                 F-3):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
         }
-        assert!(
-            elapsed.as_secs() < 10,
-            "{flag}: the refusal took {elapsed:?}; a purely local refusal must not wait on \
-             rdkafka_reader.rs:16's 20 s metadata timeout"
-        );
-        // Exit 1 prints no `refusal-reason=` line — Task 3's contract is
-        // exit-3-only — and nothing was written where the operator asked.
-        assert!(!stdout.contains("refusal-reason="), "{flag}:\n{stdout}");
+    }
+    assert!(
+        elapsed.as_secs() < 10,
+        "the refusal took {elapsed:?}; a purely local refusal must not wait on \
+         rdkafka_reader.rs:16's 20 s metadata timeout"
+    );
+    // Exit 1 prints no `refusal-reason=` line — Task 3's contract is
+    // exit-3-only — and no I7 key line either, because nothing was uploaded.
+    assert!(!stdout.contains("refusal-reason="), "{stdout}");
+    assert!(
+        !stdout.contains("receipt-key=") && !stdout.contains("sidecar-key="),
+        "a refused run must name no evidence key:\n{stdout}"
+    );
+    for doc in [&a, &b] {
         assert!(
             !doc.exists(),
-            "{flag}: a document was written by a build that refuses to write one"
+            "{}: a document was written by a run that refused the flags",
+            doc.display()
         );
     }
+}
+
+/// **I6 and I7 at PROCESS level, over the real bucket.**
+///
+/// The in-process rows in `crates/logweir/tests/backup_run.rs` assert the
+/// receipt's content, its two create-only keys and the order of the two stdout
+/// lines against doubles. This row asserts the parts only a real process and a
+/// real object store can answer: that the receipt really lands in MinIO under
+/// Global Constraint 6's `logweir/` root, that `--receipt-out` leaves a
+/// verifiable local pair on disk, and that the two `*-key=` lines an operator
+/// (and Task 20) reads are the LAST two lines of the process's stdout.
+///
+/// It runs against the SEEDED archive (`drill-demo`) with the argv-recording
+/// stub, exactly as `backup_run_renders_and_invokes_the_engine_backup_command`
+/// does: the read-back needs an archive that exists, and this row is about the
+/// evidence rather than about the engine. Its two evidence objects are swept
+/// at both ends, so the shared bucket is left as it was found.
+#[test]
+fn backup_run_writes_and_prints_its_receipt_keys() {
+    sweep_seeded_receipts();
+    let spec = backup_spec("backup-i7.yaml", "[orders, payments]", "", BOOTSTRAP);
+    let local = demo_dir().join("t5b-receipt.json");
+    let local_sig = demo_dir().join("t5b-receipt.sig");
+    for f in [&local, &local_sig] {
+        let _ = std::fs::remove_file(f);
+    }
+
+    let out = backup_run(&spec, None)
+        .arg("--receipt-out")
+        .arg(&local)
+        .output()
+        .expect("logweir");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // **I7.** The final two lines, in order, with nothing after them.
+    let lines: Vec<&str> = stdout.lines().collect();
+    let n = lines.len();
+    assert!(n >= 2, "stdout is too short:\n{stdout}");
+    let receipt_line = lines[n - 2];
+    let sidecar_line = lines[n - 1];
+    assert!(
+        receipt_line.starts_with("receipt-key=logweir/backups/drill-demo/")
+            && receipt_line.ends_with(".receipt.json"),
+        "the PENULTIMATE stdout line is `receipt-key=<key>`, got {receipt_line:?} \
+         in:\n{stdout}"
+    );
+    assert!(
+        sidecar_line.starts_with("sidecar-key=logweir/backups/drill-demo/")
+            && sidecar_line.ends_with(".receipt.sig"),
+        "the FINAL stdout line is `sidecar-key=<key>`, got {sidecar_line:?} in:\n{stdout}"
+    );
+
+    // **GC6 / I6's evidence half.** Both objects are really in the bucket, at
+    // exactly those keys.
+    let receipt_key = receipt_line.split_once('=').unwrap().1;
+    let sidecar_key = sidecar_line.split_once('=').unwrap().1;
+    let listed = mc(&[
+        "--json",
+        "ls",
+        "--recursive",
+        &format!("local/{ARCHIVE_BUCKET}/{RECEIPT_PREFIX}"),
+    ]);
+    let keys: Vec<String> = listed
+        .stdout_utf8()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["key"].as_str().map(|k| format!("{RECEIPT_PREFIX}{k}")))
+        .collect();
+    for want in [receipt_key, sidecar_key] {
+        assert!(
+            keys.iter().any(|k| k == want),
+            "{want} is not in the bucket; listed: {keys:?}"
+        );
+    }
+
+    // **I6's local half**, and it verifies — through the auditor's reader, so
+    // this row also proves the SHIPPED python verifier accepts what the
+    // shipped runner signs.
+    assert!(local.exists() && local_sig.exists(), "{stdout}");
+    let py = auditor_python();
+    let verify = Command::new(&py)
+        .current_dir(root())
+        .arg("docs/verify_scorecard.py")
+        .args(["--payload-type", "backup-receipt"])
+        .arg(&local)
+        .arg(&local_sig)
+        .arg(root().join("e2e/fixtures/signed/public.pem"))
+        .output()
+        .expect("run docs/verify_scorecard.py");
+    assert_eq!(
+        verify.status.code(),
+        Some(0),
+        "the auditor's verifier refused the receipt this run signed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    sweep_seeded_receipts();
+}
+
+/// Everything `logweir backup run` puts lives under this, and nothing an
+/// archive contains does (Global Constraint 6).
+const RECEIPT_PREFIX: &str = "logweir/";
+
+/// Remove the evidence objects the two seeded-archive rows leave behind, and
+/// prove they are gone.
+///
+/// `logweir/backups/drill-demo/` only — never the archive, and never another
+/// row's prefix. The keys are unique per run (`<run_id>.receipt.json`), so
+/// nothing here is create-only-blocked; the sweep exists so the shared bucket
+/// is left exactly as it was found, which is the rule every row that adds an
+/// object to it follows.
+fn sweep_seeded_receipts() {
+    let _ = mc(&[
+        "rm",
+        "--recursive",
+        "--force",
+        &format!("local/{ARCHIVE_BUCKET}/{RECEIPT_PREFIX}backups/{SEEDED_BACKUP_ID}/"),
+    ]);
+    let after = mc(&[
+        "--json",
+        "ls",
+        "--recursive",
+        &format!("local/{ARCHIVE_BUCKET}/{RECEIPT_PREFIX}backups/{SEEDED_BACKUP_ID}/"),
+    ]);
+    let left: Vec<String> = after
+        .stdout_utf8()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["key"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "receipts left under {RECEIPT_PREFIX}backups/{SEEDED_BACKUP_ID}/: {left:?}"
+    );
 }
 
 /// **Fix round 1, review F-1 — THE ROW A STUB CANNOT BE.**
@@ -681,16 +837,33 @@ fn sweep_real_engine_archives() {
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|v| v["key"].as_str().map(str::to_string))
-        .filter(|k| k.starts_with(REAL_ENGINE_ID_PREFIX))
+        // The archive keys, AND (since Task 5b) the two evidence objects this
+        // row's own run puts under Global Constraint 6's `logweir/` root:
+        // `logweir/backups/t4real-<nanos>/<run_id>.receipt.{json,sig}`. Both
+        // classes name this row's `backup_id`, which is what makes the sweep
+        // exact rather than heuristic.
+        .filter(|k| {
+            k.starts_with(REAL_ENGINE_ID_PREFIX)
+                || k.starts_with(&format!("{RECEIPT_PREFIX}backups/{REAL_ENGINE_ID_PREFIX}"))
+        })
         .collect();
     if !mine.is_empty() {
-        let mut prefixes: Vec<&str> = mine
+        // The directory to remove: the archive's top-level `t4real-…/`, or the
+        // evidence's `logweir/backups/t4real-…/` (three segments).
+        let mut prefixes: Vec<String> = mine
             .iter()
-            .filter_map(|k| k.split('/').next())
+            .map(|k| {
+                let segs: Vec<&str> = k.split('/').collect();
+                if k.starts_with(RECEIPT_PREFIX) {
+                    segs[..3].join("/")
+                } else {
+                    segs[0].to_string()
+                }
+            })
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        prefixes.sort_unstable();
+        prefixes.sort();
         for p in prefixes {
             let _ = mc(&[
                 "rm",
@@ -712,7 +885,10 @@ fn sweep_real_engine_archives() {
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|v| v["key"].as_str().map(str::to_string))
-        .filter(|k| k.starts_with(REAL_ENGINE_ID_PREFIX))
+        .filter(|k| {
+            k.starts_with(REAL_ENGINE_ID_PREFIX)
+                || k.starts_with(&format!("{RECEIPT_PREFIX}backups/{REAL_ENGINE_ID_PREFIX}"))
+        })
         .collect();
     assert!(
         left.is_empty(),

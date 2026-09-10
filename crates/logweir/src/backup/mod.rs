@@ -65,24 +65,27 @@ use logweir_core::spec::{AllowedClusters, AuthSpec, BackupSpec};
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::ClusterReader;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `logweir backup run`'s flag set. **I10** (`--backup-id-override`) is this
 /// task's; Task 18's `BackupSchedule` reconciler only passes it.
 pub struct BackupRunArgs {
     pub spec: PathBuf,
     pub allowed_clusters: PathBuf,
-    /// Declared and threaded here; **read by Task 5b**, which signs the
-    /// backup receipt with it (**I6**).
-    ///
-    /// Deliberately NOT opened by this task. Task 4 emits no signed document,
-    /// and reading a private key that nothing uses is handling key material
-    /// for no purpose. `--receipt-out` below is what refuses, so an operator
-    /// who asks for the document the key would sign gets a message rather
-    /// than a silent success.
+    /// The key the backup receipt is signed with (**I6**). Opened by
+    /// `phase_run::persist_receipt`, once, AFTER every guard has run and after
+    /// the engine has produced an archive — so a refused plan never reads key
+    /// material at all.
     pub signing_key: PathBuf,
-    /// Copied into `BackupReceipt` by Task 5b.
+    /// Copied into `BackupReceipt.triggered_by` verbatim. Absent becomes the
+    /// empty string: the field is required in the document (a receipt says
+    /// what triggered it or says nothing, never `null`), and an operator who
+    /// passes no `--triggered-by` has said nothing rather than said "".
     pub triggered_by: Option<String>,
+    /// Where the receipt is written locally (**I6**), with its DSSE sidecar
+    /// beside it under the extension `.sig`. `receipt_out` takes precedence
+    /// when both are given; two different paths for the one document this
+    /// command writes is refused locally, before anything runs.
     pub out: Option<PathBuf>,
     pub receipt_out: Option<PathBuf>,
     /// **I10.** Replaces the derived `backup_id` in both `BackupPlan` and
@@ -98,16 +101,42 @@ pub struct BackupRunArgs {
 pub struct BackupOutcome {
     pub backup_id: String,
     pub run_id: String,
+    /// When the run was requested — read ONCE, at the top of `execute_with`,
+    /// and carried from there into `BackupReceipt.requested_at`. Not measured
+    /// inside the receipt builder, which is a pure projection of this struct.
+    pub requested_at: chrono::DateTime<chrono::Utc>,
+    /// `--triggered-by`, or `""` when the operator passed none.
+    pub triggered_by: String,
     pub source_cluster_id: String,
-    /// Filled from `spec.source.auth`; Task 5b puts it in the receipt.
+    /// The bootstrap list the plan named, for `BackupReceipt.source`.
+    pub bootstrap_servers: Vec<String>,
+    /// The named topic allowlist (GC18(c) rail 1: named, never a pattern).
+    pub topics: Vec<String>,
+    /// The engine that took the backup — id, version and DIGEST (GC7 pins by
+    /// digest and never by tag, and a receipt naming only a version would be
+    /// satisfied by any binary claiming it).
+    pub engine: logweir_core::engine::EngineId,
+    /// The archive prefix everything the engine wrote lives under.
+    pub archive_prefix: String,
+    /// Filled from `spec.source.auth`; `phase_run::build_receipt` renders it
+    /// into `BackupReceipt.source.auth`.
     pub source_auth: AuthRender,
     pub manifest_key: String,
     /// `"sha256:<hex>"`, over the exact manifest bytes this run READ back.
     pub manifest_sha256: String,
     pub records_per_topic: BTreeMap<String, u64>,
     pub covered_from_ms: i64,
+    /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered_to_ms`,
+    /// which is where the manifest's inclusive bound is converted.
     pub covered_to_ms: i64,
     pub facts: BackupFacts,
+    /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
+    /// the receipt was PUT to. Printed as the runner's penultimate stdout line
+    /// (**I7**) and read by Task 17's reconciler.
+    pub receipt_key: String,
+    /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`. The runner's FINAL
+    /// stdout line (**I7**).
+    pub sidecar_key: String,
 }
 
 /// The backup path's error type, with the same GC11 mapping discipline
@@ -136,18 +165,31 @@ pub enum BackupError {
     /// describe it.
     #[error("engine: {0}")]
     Engine(#[from] logweir_core::engine::EngineError),
+    /// The receipt could not be validated, signed or uploaded. **Exit 4**
+    /// (Global Constraint 11: "signing or lock-proof failed, nothing
+    /// uploaded"), and Task 5b is the task that makes this variant reachable —
+    /// Task 4's `exit_code` comment said as much.
+    ///
+    /// It covers the whole atomic step, deliberately: a validation failure
+    /// (Logweir measured a document its own reader refuses), a key that will
+    /// not load, a signature that will not compute, and a create-only put that
+    /// was refused all leave the same state behind — an archive with no
+    /// verifiable evidence — and GC11 gives that state one code.
+    #[error("signing: {0}")]
+    Signing(String),
 }
 
 impl BackupError {
     /// Global Constraint 11, in ONE place — the `DrillError::exit_code`
-    /// pattern (`crates/logweir/src/drill/mod.rs:87-113`). Exit 2 and exit 4
-    /// are unreachable from this command in tag 1: exit 2 means "a signed
-    /// scorecard exists and does not pass", and a backup emits no scorecard;
-    /// exit 4 means "signing failed", and Task 5b owns the only signing this
-    /// command will ever do.
+    /// pattern (`crates/logweir/src/drill/mod.rs:87-113`). Exit 2 is
+    /// unreachable from this command in tag 1: it means "a signed scorecard
+    /// exists and does not pass", and a backup emits no scorecard. Exit 4 is
+    /// reachable since Task 5b, through `Signing`, which is the only signing
+    /// this command does.
     pub fn exit_code(&self) -> ExitCode {
         match self {
             BackupError::Guard(_) => ExitCode::GuardRefused, // 3
+            BackupError::Signing(_) => ExitCode::SigningOrLock, // 4
             BackupError::Operational(_) | BackupError::Kafka(_) | BackupError::Engine(_) => {
                 ExitCode::Operational // 1
             }
@@ -236,16 +278,40 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
 /// `run_with` below is the `ExitCode`-returning wrapper. Both are the seam and
 /// both are public on purpose: a refusal test asserts an `ExitCode` and calls
 /// `run_with`; an outcome test asserts a `BackupOutcome` FIELD (the source
-/// cluster id, the overridden backup id, the recorded auth) and has to be able
-/// to see the value, which an `ExitCode` cannot carry. Neither of them names a
-/// constructor.
+/// cluster id, the overridden backup id, the recorded auth, the two evidence
+/// keys) and has to be able to see the value, which an `ExitCode` cannot
+/// carry. Neither of them names a constructor.
+///
+/// # TWO store handles, and why they are not one (Global Constraint 6)
+///
+/// `store` is the ARCHIVE — read-only on the live path
+/// (`Store::read_only_from_url`), so it physically cannot put, which is what
+/// makes "a backup never writes to the archive" a property of the handle
+/// rather than of this code's good behaviour. `evidence` is the writable
+/// handle over the `logweir/` root, and it is the ONLY thing this command
+/// writes through. Collapsing them into one would mean a writable handle over
+/// the adopter's archive prefix, which is the single outcome GC6 exists to
+/// prevent.
+///
+/// `run_with` passes ONE handle for both, which is correct for the in-process
+/// seam: `Store::in_memory("logweir/")` is the only writable store a test can
+/// build without a backend, so an in-memory ARCHIVE fixture is seeded under
+/// that root too (see `crates/logweir/tests/backup_run.rs`'s
+/// `ARCHIVE_PREFIX`). Nothing in production reads or writes an archive there.
 pub fn execute_with(
     args: &BackupRunArgs,
     run_id: &str,
     reader: &dyn ClusterReader,
     engine: &dyn DataEngine,
     store: &Store,
+    evidence: &Store,
 ) -> Result<BackupOutcome, BackupError> {
+    // READ ONCE, and FIRST: `requested_at` is when the run was requested, so
+    // it is measured before the guards rather than after them — a plan refused
+    // at phase −1 took no time it should be credited with, and a receipt whose
+    // `requested_at` were taken after the engine ran would understate the
+    // elapsed time an auditor reads.
+    let requested_at = chrono::Utc::now();
     let inputs = read_inputs(args)?;
     // Phase −1. EVERY guard, before the engine and before any document is
     // written. The reader is already built by the time this function is
@@ -270,13 +336,50 @@ pub fn execute_with(
         .clone()
         .unwrap_or_else(|| inputs.spec.backup_id.clone());
     let plan = build_plan(&inputs.spec, &backup_id);
+
+    // **The engine identity, BEFORE the engine runs** (Task 4 left this to
+    // Task 5b in as many words: "The identity is NOT refused when empty …
+    // Task 5b, which does, owns that check for the receipt").
+    //
+    // An empty `engine.version`/`engine.digest` would enter a SIGNED receipt
+    // naming no engine, and GC7 pins by digest precisely so that a receipt
+    // says WHICH binary took the backup. Checked here, before the subprocess,
+    // so a misconfigured image costs an operator nothing but a message —
+    // refusing after the archive exists would leave an unattested backup
+    // behind for a fact that was knowable from the environment.
+    //
+    // Exit 1 and the same wording discipline as the drill's
+    // `assert_engine_identity`: nothing about the PLAN was found wanting, so
+    // GC11's exit 3 does not describe it.
+    let engine_id = engine.id();
+    for (field, value, var) in [
+        (
+            "engine.version",
+            &engine_id.version,
+            "LOGWEIR_ENGINE_VERSION",
+        ),
+        ("engine.digest", &engine_id.digest, "LOGWEIR_ENGINE_DIGEST"),
+    ] {
+        if value.trim().is_empty() {
+            return Err(BackupError::Operational(format!(
+                "{field} is empty; a signed backup receipt must name the engine image it                  ran. Set {var} to the value of the digest-pinned image this binary was                  extracted from. NO backup was taken: this is refused before the engine is                  spawned."
+            )));
+        }
+    }
+
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
 
-    Ok(BackupOutcome {
+    let mut outcome = BackupOutcome {
         backup_id,
         run_id: run_id.to_string(),
+        requested_at,
+        triggered_by: args.triggered_by.clone().unwrap_or_default(),
         source_cluster_id: admitted.source_cluster_id,
+        bootstrap_servers: inputs.spec.source.bootstrap_servers.clone(),
+        topics: inputs.spec.source.topics.clone(),
+        engine: engine_id,
+        archive_prefix: inputs.spec.storage.prefix().to_string(),
         // From the SPEC, by the explicit match — the only field here that is
         // not measured, because there is nothing to measure it against: a
         // broker does not report which mechanism a client chose.
@@ -287,7 +390,38 @@ pub fn execute_with(
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
         facts: ran.facts,
-    })
+        // Filled by `persist_receipt` below, from the one function that
+        // derives them. Empty here for exactly as long as it takes to put the
+        // two objects, and never observable empty: `execute_with` returns the
+        // outcome only after the puts succeeded, and a failure is an `Err`.
+        receipt_key: String::new(),
+        sidecar_key: String::new(),
+    };
+
+    // **I6 / I7 / GC6.** The archive exists; now it gets evidence. Validate,
+    // sign, put both objects under `logweir/`, and write the local pair when
+    // `--receipt-out` (or `--out`) asked for it.
+    let persisted = phase_run::persist_receipt(
+        &outcome,
+        &args.signing_key,
+        receipt_out_path(args),
+        evidence,
+    )?;
+    outcome.receipt_key = persisted.receipt_key;
+    outcome.sidecar_key = persisted.sidecar_key;
+
+    Ok(outcome)
+}
+
+/// The ONE local path the receipt is written to, or `None`.
+///
+/// `--receipt-out` wins over `--out`; the two naming DIFFERENT paths is
+/// refused in phase −1's local step, before any I/O, because this command
+/// writes exactly one document and an operator who named two paths for it has
+/// asked for something that cannot happen. Both flags are honoured because
+/// `logweir --help` documents both (`crates/logweir/src/cli.rs`).
+pub fn receipt_out_path(args: &BackupRunArgs) -> Option<&Path> {
+    args.receipt_out.as_deref().or(args.out.as_deref())
 }
 
 /// The TESTABLE seam. Every named test in Tasks 4, 5b and 6 calls this (or
@@ -300,7 +434,11 @@ pub fn run_with(
     store: &Store,
 ) -> ExitCode {
     let run_id = crate::ids::new_run_id();
-    let outcome = execute_with(args, &run_id, reader, engine, store);
+    // ONE handle for both roles — see `execute_with`'s doc comment. The
+    // signature is deliberately unchanged from Task 4's: every named test in
+    // Tasks 4, 5b and 6 calls this function, and an in-memory store is both
+    // the archive fixture and the evidence bucket for all of them.
+    let outcome = execute_with(args, &run_id, reader, engine, store, store);
     report(&run_id, outcome)
 }
 
@@ -319,6 +457,16 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
     };
     // NO `ExitCode` literal but `Ok` — `BackupError::exit_code` is the single
     // place the GC11 contract lives for this command.
+    // **I7.** The two evidence keys, carried out of the outcome so `exiting`
+    // can print them as the process's FINAL two stdout lines — for the reason
+    // Task 3's I9 prints `refusal-reason=` there: `tracing_subscriber::fmt`
+    // writes its JSON to STDOUT, so a line printed before the "backup
+    // finished" event is not the last line of stdout, and the pod log API has
+    // no stream selector for a controller to separate them with.
+    let evidence_keys: Option<(String, String)> = match &outcome {
+        Ok(o) => Some((o.receipt_key.clone(), o.sidecar_key.clone())),
+        Err(_) => None,
+    };
     let code = match &outcome {
         Ok(o) => {
             tracing::info!(
@@ -326,6 +474,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
                 backup_id = %o.backup_id,
                 source_cluster_id = %o.source_cluster_id,
                 manifest_key = %o.manifest_key,
+                receipt_key = %o.receipt_key,
                 "backup captured"
             );
             println!("{}", summary_line(o));
@@ -339,7 +488,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
             e.exit_code()
         }
     };
-    exiting(run_id, code, refusal_message.as_deref())
+    exiting(run_id, code, refusal_message.as_deref(), evidence_keys)
 }
 
 /// One line on stdout so `backup run` is not silent, quoting only measured
@@ -366,10 +515,32 @@ fn summary_line(o: &BackupOutcome) -> String {
 /// "the drill passed" / "a drill ran and did not pass" are false on this
 /// command. `drill::exiting` is also inside `drill/mod.rs`'s emitter-closure
 /// gate region, which this task must leave untouched.
-fn exiting(run_id: &str, code: ExitCode, refusal_message: Option<&str>) -> ExitCode {
+fn exiting(
+    run_id: &str,
+    code: ExitCode,
+    refusal_message: Option<&str>,
+    evidence_keys: Option<(String, String)>,
+) -> ExitCode {
     let meaning = match code {
-        ExitCode::Ok => "the backup completed and its archive was read back",
-        ExitCode::Operational => "logweir could not take the backup; NO receipt was written",
+        ExitCode::Ok => {
+            "the backup completed, its archive was read back, and the receipt is signed and \
+             uploaded"
+        }
+        // TRUE ON EVERY PATH THAT REACHES IT (Task 4's carried finding). The
+        // old wording was "logweir could not take the backup; NO receipt was
+        // written", and half of that is not knowable here: exit 1 is also
+        // reached AFTER the engine ran — a backup set that is not in the
+        // archive, a manifest that bounds no window, a `--receipt-out` path
+        // that could not be written once the evidence was already uploaded. So
+        // the line says exactly what this code does establish: no receipt was
+        // written LOCALLY by this run's flags, and an archive may exist. The
+        // receipt's own absence or presence is the bucket's answer, and the
+        // two evidence keys are printed only on the success path.
+        ExitCode::Operational => {
+            "logweir could not complete the backup; an archive may exist and the two evidence \
+             keys were not printed, so treat this run as unattested until the bucket says \
+             otherwise"
+        }
         // Unreachable from this command in tag 1 — see `BackupError::exit_code`.
         // Named rather than folded into a catch-all so that a future variant
         // reaching either code gets a truthful line instead of the wrong one.
@@ -377,7 +548,15 @@ fn exiting(run_id: &str, code: ExitCode, refusal_message: Option<&str>) -> ExitC
         ExitCode::GuardRefused => {
             "the plan was refused before anything ran; no archive was written"
         }
-        ExitCode::SigningOrLock => "the run's result is unattested; nothing uploaded",
+        // Reachable since Task 5b, through `BackupError::Signing`. "Nothing
+        // uploaded" is about the EVIDENCE and is exact: the validate → sign →
+        // put order means a failure at any of those three steps leaves no
+        // receipt and no sidecar in the bucket. The ARCHIVE may exist; the
+        // engine ran before any of this.
+        ExitCode::SigningOrLock => {
+            "the backup's result is unattested: no receipt was signed or uploaded, though the \
+             archive may exist"
+        }
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "backup finished");
     // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout.
@@ -386,6 +565,16 @@ fn exiting(run_id: &str, code: ExitCode, refusal_message: Option<&str>) -> ExitC
     // satisfies GC11 rather than printing nothing.
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+    }
+    // **I7, and the ORDER is the contract.** `receipt-key=` then
+    // `sidecar-key=`, as the FINAL two stdout lines of a successful run, with
+    // nothing after them — Task 20 reads exactly this and a controller cannot
+    // tell stdout from stderr through the pod log API. Printed only on exit 0:
+    // on any other code there is no pair of keys to name, and a line naming a
+    // key nothing was written to would be the worst possible output.
+    if let (ExitCode::Ok, Some((receipt_key, sidecar_key))) = (code, evidence_keys) {
+        println!("receipt-key={receipt_key}");
+        println!("sidecar-key={sidecar_key}");
     }
     code
 }
@@ -542,8 +731,73 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         Err(e) => return report(&run_id, Err(e)),
     };
 
-    let outcome = execute_with(args, &run_id, &reader, &engine, &store);
+    // THE EVIDENCE HANDLE — the only writable store this command holds, and
+    // the only one it puts through (**GC6**).
+    //
+    // It is derived from the archive's own location with the prefix replaced
+    // by `logweir/`, because `Backup.spec` (`config/crd/backups.yaml`) carries
+    // ONE object-store URL — the archive root — and `BackupSpec` mirrors it.
+    // There is no second bucket to name, and inventing a spec field for one
+    // would be a format change this task has no mandate for. `Store::from_url`
+    // refuses any evidence prefix that is not exactly `logweir/`
+    // (`crates/logweir-store/src/lib.rs:194-205`), so the derivation cannot
+    // point at the archive's own keys even by accident.
+    let evidence_url = evidence_location(&inputs.spec.storage);
+    let evidence = match Store::from_url(&evidence_url) {
+        Ok(s) => s,
+        Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
+    };
+
+    let outcome = execute_with(args, &run_id, &reader, &engine, &store, &evidence);
     report(&run_id, outcome)
+}
+
+/// The archive's location, with the key prefix replaced by Global Constraint
+/// 6's `logweir/` root — the evidence side of the same bucket.
+///
+/// PURE, and separate from `run`, so it is testable without a backend: the
+/// claim that the receipt cannot land outside `logweir/` is asserted twice,
+/// here by construction and again inside `Store::put_create_only`.
+/// `Filesystem` carries no prefix at all (its variant is `{path}`), so it is
+/// returned unchanged and `Store::from_url` exempts it for that reason.
+pub fn evidence_location(
+    archive: &logweir_core::engine::StorageUrl,
+) -> logweir_core::engine::StorageUrl {
+    use logweir_core::engine::StorageUrl as U;
+    // `logweir_engine_oso::storage` IS `logweir_store` (`lib.rs:16`'s re-export);
+    // this crate depends on the engine crate, not on the store crate directly.
+    use logweir_engine_oso::storage::LOGWEIR_ROOT;
+    match archive.clone() {
+        U::S3 {
+            bucket,
+            region,
+            endpoint,
+            path_style,
+            allow_http,
+            ..
+        } => U::S3 {
+            bucket,
+            prefix: LOGWEIR_ROOT.to_string(),
+            region,
+            endpoint,
+            path_style,
+            allow_http,
+        },
+        U::Azure {
+            account_name,
+            container_name,
+            ..
+        } => U::Azure {
+            account_name,
+            container_name,
+            prefix: LOGWEIR_ROOT.to_string(),
+        },
+        U::Gcs { bucket, .. } => U::Gcs {
+            bucket,
+            prefix: LOGWEIR_ROOT.to_string(),
+        },
+        U::Filesystem { path } => U::Filesystem { path },
+    }
 }
 
 /// The engine handle, built exactly as `drill::context` builds it: the ONE
