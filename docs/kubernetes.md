@@ -619,7 +619,7 @@ strings.
 ```bash
 kubectl --context docker-desktop get backupschedule nightly \
   -o jsonpath='{.status.retentionReport.awsCli[*]}'
-# aws s3 rm s3://kafka-backups/mvp-demo/backup-001/ --recursive
+# aws s3 rm 's3://kafka-backups/mvp-demo/backup-001/' --recursive
 ```
 
 **Logweir prints them. An operator runs them.** Nothing in the report was
