@@ -1,0 +1,158 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkaclusters.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: KafkaCluster
+    plural: kafkaclusters
+    shortNames: []
+    singular: kafkacluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: source or target
+      jsonPath: .spec.role
+      name: ROLE
+      type: string
+    - description: the controller's last probe
+      jsonPath: .status.reachable
+      name: REACHABLE
+      type: string
+    - description: read from the broker, never from the spec
+      jsonPath: .status.clusterId
+      name: CLUSTER-ID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A Kafka cluster Logweir connects to: bootstrap servers, auth mode and username, role, and the marker topic that proves a scratch target. The password lives in a Secret; `status.clusterId` is read from the broker and never from this spec. `spec` is immutable.'
+        properties:
+          spec:
+            description: '`KafkaCluster.spec`.'
+            properties:
+              auth:
+                description: How Logweir authenticates here.
+                properties:
+                  mode:
+                    description: The SASL mechanism, or `plaintext` for none.
+                    enum:
+                    - plaintext
+                    - scramSha512
+                    type: string
+                  secretRef:
+                    description: A Secret in this namespace holding the SASL password. Logweir never reads its value into a status field, a log line or a rendered document.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tls:
+                    default: false
+                    description: Whether the transport is TLS. Independent of `mode` — see the type's own note.
+                    type: boolean
+                  username:
+                    description: The SASL principal. Required in practice when `mode` is `scramSha512`; it is what `planBytes` binds, so changing it after an approval invalidates that approval's plan hash.
+                    nullable: true
+                    type: string
+                required:
+                - mode
+                type: object
+              bootstrapServers:
+                description: The broker bootstrap addresses, `host:port`.
+                items:
+                  type: string
+                type: array
+              markerTopic:
+                description: 'The marker topic that proves a target is a scratch cluster. v0.1 proves scratch-ness with a marker topic because a guard needing a kubeconfig cannot run in the unit suite; absent here, no marker proof is offered and a `mode: scratch` restore against this cluster is refused.'
+                nullable: true
+                type: string
+              role:
+                description: 'What this cluster is to Logweir — `source` or `target`. A free-form string rather than an enum: the value is a label the adopter picks and the controller reports, and `allowedClusterIds` on the cluster-scoped `TrustRoster` is what actually authorises a target, never a role written next to the address it authorises.'
+                type: string
+            required:
+            - auth
+            - bootstrapServers
+            - role
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`KafkaCluster.status` — entirely observations.'
+            nullable: true
+            properties:
+              clusterId:
+                description: The cluster id READ FROM THE BROKER. Never copied from a spec, and re-asserted `!= target` before a backup runs (Global Constraint 18's fourth rail).
+                nullable: true
+                type: string
+              conditions:
+                description: '`Reachable`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              observedAt:
+                description: When the probe above was performed.
+                format: date-time
+                nullable: true
+                type: string
+              reachable:
+                description: Whether the controller's last probe reached a broker.
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: KafkaCluster
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

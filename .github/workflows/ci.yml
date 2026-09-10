@@ -60,6 +60,27 @@ jobs:
         run: |
           cargo run -p logweir-core --example emit_schema > /tmp/schema.json
           diff -u schemas/logweir-drill-scorecard-1.0.0.json /tmp/schema.json
+      # Task 15b: THE THIRD DRIFT ARM, beside the schema arm above and for the
+      # same reason. A CRD change is a FORMAT change — config/crd/ is what
+      # `kubectl apply` consumes, what the UI's forms are written against and
+      # what Tasks 16-24 read — so it has to appear as a diff a reviewer sees
+      # rather than as a surprise at apply time.
+      #
+      # SIX EXPLICIT DIFFS, NOT `diff -r`. A recursive diff of two directories
+      # says nothing when a file is missing from BOTH sides, which is exactly
+      # what a deleted kind looks like. Naming each file means a seventh kind
+      # (an extra file in /tmp/crd) and a vanished kind (a missing file here)
+      # are both non-zero. `just crds` is the regenerator.
+      - name: crd drift
+        run: |
+          cargo run -p weirkeeper --example emit_crds -- --out /tmp/crd
+          diff -u config/crd/kafkaclusters.yaml   /tmp/crd/kafkaclusters.yaml
+          diff -u config/crd/backupschedules.yaml /tmp/crd/backupschedules.yaml
+          diff -u config/crd/backups.yaml         /tmp/crd/backups.yaml
+          diff -u config/crd/restores.yaml        /tmp/crd/restores.yaml
+          diff -u config/crd/approvals.yaml       /tmp/crd/approvals.yaml
+          diff -u config/crd/trustrosters.yaml    /tmp/crd/trustrosters.yaml
+          test "$(ls -1 /tmp/crd | wc -l)" -eq 6
       - name: known-TODO tracker (Task 19 fix round 2, review FIX 6)
         # Runs every `#[ignore]`d marker test in the workspace — currently only
         # `oso_cli_engine_must_override_validation_run_once_docker_is_available`

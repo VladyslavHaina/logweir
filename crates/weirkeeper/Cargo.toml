@@ -104,6 +104,34 @@ http-body-util = "0.1"
 # the ambiguity in the `-p weirkeeper` build an image uses. `std` is supplied
 # by `tokio-rustls`, which declares `rustls` with `features = ["std"]`.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# TASK 15B — THE FIVE ENTRIES THE `CustomResource` DERIVE AND THE EMITTER NEED,
+# ALL OF THEM WORKSPACE REQUIREMENTS, SO ALL OF THEM ADD NO PACKAGE (Global
+# Constraint 38). `kube-derive` 0.99 expands to `::schemars::JsonSchema`,
+# `::serde::{Serialize, Deserialize}` and `::serde_json::json!` at their DEFAULT
+# crate paths, so all three have to be named here rather than reached through
+# `kube`; `chrono` is what `crds::Time` is (see its doc comment for why not
+# `k8s-openapi`'s own `Time`, which would cost a second k8s-openapi feature and
+# reopen the pinned list above); `serde_yaml` is the emitter's serialiser and is
+# permitted in this workspace by Global Constraint 1.
+#
+# `workspace = true` throughout, so the versions and feature sets stay the root
+# manifest's single decision — which is also why
+# `tests/linkage.rs::no_new_package_enters_the_graph_for_the_mock` leaves them
+# out of its commented-out set: that test measures the entries whose
+# justification is "already in `Cargo.lock`" as a plain third-party
+# requirement, and a workspace requirement is a different claim, already held
+# elsewhere in the tree.
+#
+# `serde_json` MOVED HERE FROM `[dev-dependencies]` in this task. It was a dev
+# dependency while nothing in the library parsed or built JSON; the
+# `printcolumn` attributes are `serde_json::json!` literals in expanded derive
+# code, so the library itself now needs it. Tests still see it — a normal
+# dependency is available to every target.
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
 # The VERIFYING half of the DSSE machinery — `VerifyingKey`, `Sidecar`,
 # `verify_detached` and the three payload-type constants (Task 14, interface
 # I4). Declared NOW and used from Task 16: the controller checks the scorecard
@@ -119,10 +147,12 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # `tests/linkage.rs` reads `cargo metadata`'s JSON, the same shape and for the
-# same reason as `crates/logweir-verify/tests/deps.rs`. It is a DEV
-# dependency here because the library itself parses no JSON yet, and it is
-# already in `Cargo.lock`, so it adds no package.
-serde_json.workspace = true
+# same reason as `crates/logweir-verify/tests/deps.rs`. `serde_json` used to be
+# declared HERE, with the reason "the library itself parses no JSON yet"; Task
+# 15B moved it to `[dependencies]` above, because `kube-derive`'s expansion of
+# the `printcolumn` attributes builds `serde_json::json!` literals in library
+# code. Nothing is lost: a normal dependency is visible to `tests/` too, and
+# the package was already in `Cargo.lock` either way.
 
 [features]
 default = []

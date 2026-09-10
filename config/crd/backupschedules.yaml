@@ -1,0 +1,217 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backupschedules.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: BackupSchedule
+    plural: backupschedules
+    shortNames: []
+    singular: backupschedule
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.schedule
+      name: SCHEDULE
+      type: string
+    - description: the one mutable spec field
+      jsonPath: .spec.suspend
+      name: SUSPEND
+      type: string
+    - jsonPath: .status.lastFireTime
+      name: LAST
+      type: date
+    - jsonPath: .status.nextFireTime
+      name: NEXT
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A recurring backup of a named topic set into an archive. `spec.suspend` is the only mutable field; every other field is sealed by an object-level CEL rule. Retention REPORTS what it would remove and deletes nothing.
+        properties:
+          spec:
+            description: '`BackupSchedule.spec`. Only `suspend` is mutable — see the module header.'
+            properties:
+              archive:
+                description: Where the backup is written.
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              retention:
+                description: '`{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.'
+                nullable: true
+                properties:
+                  keepDays:
+                    description: Keep backup sets newer than N days; older sets are REPORTED as removable.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  keepLast:
+                    description: Keep the most recent N backup sets; older sets are REPORTED as removable.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              schedule:
+                description: A five-field cron expression, in UTC.
+                type: string
+              sourceRef:
+                description: The `KafkaCluster` to back up, in this namespace.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              suspend:
+                default: false
+                description: Stop firing new `Backup`s. **The only mutable field on this spec**, and the only `.spec` write the controller performs on any kind in tag 1.
+                type: boolean
+              topics:
+                description: 'NAMED topics, never patterns. Global Constraint 18''s first rail and guard **G-GLOB**: a glob metacharacter is refused, and an omitted list is not permitted at all — the one shape that would mean "everything" to the engine. A mandatory allowlist whose absence means "all topics" is not an allowlist.'
+                items:
+                  type: string
+                type: array
+            required:
+            - archive
+            - schedule
+            - sourceRef
+            - topics
+            type: object
+            x-kubernetes-validations:
+            - message: only spec.suspend is mutable; create a new BackupSchedule instead
+              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)
+          status:
+            description: '`BackupSchedule.status`.'
+            nullable: true
+            properties:
+              activeBackupRef:
+                description: The `Backup` currently running for this schedule, if any.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              conditions:
+                description: '`Ready`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              lastFireTime:
+                description: When this schedule last created a `Backup`.
+                format: date-time
+                nullable: true
+                type: string
+              lastMissedSlot:
+                description: 'The most recent slot that came due and was NOT fired — the controller was down, or the previous run was still active. Recorded because object identity is a pure function of the trigger (guard **G-SLOT**): a missed slot is never silently re-fired under a different name.'
+                nullable: true
+                type: string
+              nextFireTime:
+                description: When it will next create one, given `schedule` and `suspend`.
+                format: date-time
+                nullable: true
+                type: string
+              retentionReport:
+                description: What retention WOULD remove. Nothing was deleted — see [`RetentionReport`].
+                nullable: true
+                properties:
+                  command:
+                    description: The exact command an operator can run to remove the sets above, for their own object store. Reported, never executed.
+                    nullable: true
+                    type: string
+                  evaluatedAt:
+                    description: When the controller last evaluated retention.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  kept:
+                    description: The `backupId`s the policy would keep.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  note:
+                    description: Why the evaluation is incomplete, when it is.
+                    nullable: true
+                    type: string
+                  removable:
+                    description: The `backupId`s the policy WOULD remove. They are still in the archive; Logweir deleted nothing.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                type: object
+            type: object
+        required:
+        - spec
+        title: BackupSchedule
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

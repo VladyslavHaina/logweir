@@ -3669,13 +3669,17 @@ dependencies = [
 name = "weirkeeper"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "http",
  "http-body-util",
  "k8s-openapi",
  "kube",
  "logweir-verify",
  "rustls",
+ "schemars",
+ "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
  "tower",
  "tracing",

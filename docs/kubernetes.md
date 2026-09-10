@@ -340,8 +340,10 @@ textfile.
 
 Stated so nobody goes looking:
 
-- **No operator, no CRDs.** `weirkeeper`, `logweir.dev/v1alpha1`, `RestoreDrill`
-  and `MetadataSnapshot` are SP5.
+- **No operator, no CRDs — in v0.1.** `weirkeeper` and `logweir.dev/v1alpha1`
+  are not in the v0.1 tag; §7 below is the kind list they ship as, and
+  `RestoreDrill` is not among them (Global Constraint 34 retires it for
+  `Restore`, and `MetadataSnapshot` stays reserved and unbuilt).
 - **No Kubernetes Job execution of the engine.** v0.1 spawns a local
   subprocess inside the drill pod; it does not create a Job of its own.
 - **No namespace-label segregation proof.** v0.1 proves the target is a scratch
@@ -354,6 +356,54 @@ Stated so nobody goes looking:
   node_exporter's textfile collector — see §5 for where that file has to live,
   and [../dashboards/logweir.json](../dashboards/logweir.json) for the
   dashboard it feeds.
+
+## 7. The control plane: six kinds on `logweir.dev/v1alpha1`
+
+**Minimum Kubernetes: 1.29.** That floor is not about the client library — it
+is about **CEL validation rules** (`x-kubernetes-validations`), which reached GA
+in 1.29 and are how every one of the six CRDs below makes its `.spec`
+immutable. On an older API server the rules are dropped rather than rejected,
+and a dropped immutability rule is worse than no rule: the object would accept
+an edit after approval and nothing would say so.
+
+The CRDs are checked in at [../config/crd/](../config/crd/) and regenerated
+with `just crds`; CI re-renders them and diffs the result, so a schema change
+arrives as a reviewable diff. Do not hand-edit those files.
+
+| Kind | Scope | What it is |
+|---|---|---|
+| `KafkaCluster` | Namespaced | A cluster connection: bootstrap servers, `auth{mode, username, secretRef, tls}`, role, and the marker topic that proves a scratch target. `status.clusterId` is read from the broker, never from the spec. |
+| `BackupSchedule` | Namespaced | A recurring backup of a **named** topic set (no wildcard, no glob metacharacter). `spec.suspend` is the only mutable field. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
+| `Backup` | Namespaced | One archive run, as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets `AlreadyExists` rather than a second partial archive. |
+| `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
+| `Approval` | Namespaced | A DSSE-signed authorisation for one `Restore` or `Backup`. **Four required spec fields**; `approvalBytes` and `sidecarBytes` are the UTF-8 document text, verbatim, never base64. |
+| `TrustRoster` | **Cluster** | The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`) — **both carrying public key material** — plus `allowedClusterIds`. Cluster-scoped so a namespace tenant cannot widen its own allowlist. |
+
+`Switchover` is tag 2 and ships in none of the above, not even as a value of
+`Approval.spec.subjectRef.kind`. `MetadataSnapshot` is reserved and unbuilt.
+
+**Every `kubectl` invocation in this repository names its context explicitly**
+— `kubectl --context docker-desktop …` — including `kubectl proxy`.
+
+### The immutability seals
+
+Five kinds carry one rule on `.spec`: `self == oldSelf`, message *spec is
+immutable; create a new object instead*. `BackupSchedule` carries one
+**object-level** rule instead, naming every field except `suspend`.
+
+The object level is load-bearing and not a style choice. A **per-field**
+transition rule is evaluated only when `oldSelf` exists for that field, so an
+optional field — `retention`, and `retention.keepDays` inside it — could be
+**added** after creation (absent → present) and a per-field `self == oldSelf`
+would never fire. `optionalOldSelf` closes exactly that and is **1.30+**, above
+this floor. An object-level rule is evaluated on every update, and its
+`has(self.x) == has(oldSelf.x)` halves are what refuse the absent → present
+transition.
+
+**The `ValidatingAdmissionPolicy` example is 1.30+ and ships commented.** It is
+an alternative expression of the same property, at cluster scope rather than
+per-CRD, and it is not a substitute: nothing in the shipped install depends on
+it, and uncommenting it on a 1.29 API server would fail to apply.
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

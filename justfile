@@ -271,3 +271,25 @@ image:
 smoke: image
     bash scripts/check-image.sh logweir:check
     cargo test -p e2e --features e2e --test check_image -- --ignored --test-threads=1
+
+# Task 15b (chain J, slot 5). Regenerate the six checked-in CRDs.
+#
+# THE SIBLING OF `schema`, ABOVE, AND FOR THE SAME REASON. A CRD change is a
+# FORMAT change: the six files under config/crd/ are what `kubectl apply`
+# consumes, what the UI's forms are written against and what Tasks 16-24 read,
+# so a change to one has to appear as a diff in a pull request rather than as a
+# surprise at apply time. `.github/workflows/ci.yml`'s third drift arm renders
+# into a temporary directory and `diff -u`s these files against it, beside the
+# scorecard-schema arm that has done the same job since Phase 1.
+#
+# DELIBERATELY NOT PART OF `lint`. This recipe WRITES the tracked files, and a
+# gate that rewrites the thing it is checking cannot fail. The checking half is
+# `crates/weirkeeper/tests/crd_shape.rs::the_checked_in_crds_are_what_the_emitter_renders`,
+# which is in the default `cargo test` set and compares the checked-in bytes
+# against the same renderer IN-PROCESS — no subprocess, no shell, so it holds
+# on a laptop as well as in CI (ci.yml has never executed on any commit).
+#
+# `crds` and `schema` stay independent: two formats, two gates, no dependency
+# edge between them.
+crds:
+    cargo run -p weirkeeper --example emit_crds -- --out config/crd

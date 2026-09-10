@@ -1,0 +1,166 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: trustrosters.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: TrustRoster
+    plural: trustrosters
+    shortNames: []
+    singular: trustroster
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: the approver key ids; the signing key ids are in spec.signingKeys
+      jsonPath: .spec.approverKeys[*].keyId
+      name: KEYS
+      type: string
+    - jsonPath: .status.loaded
+      name: LOADED
+      type: string
+    - jsonPath: .status.expiredKeyIds[*]
+      name: EXPIRED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Cluster-scoped. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`), both carrying public key material, plus the cluster ids a restore may target. `spec` is immutable.
+        properties:
+          spec:
+            description: '`TrustRoster.spec`. **Cluster-scoped** — see the module header.'
+            properties:
+              allowedClusterIds:
+                description: The cluster ids a restore may target. Read from here and never from a plan, so an edited spec cannot widen its own allowlist.
+                items:
+                  type: string
+                type: array
+              approverKeys:
+                description: The keys that may **authorise** a restore or a backup. An `Approval` verifies against one of these.
+                items:
+                  description: One key on the roster. The same four fields for approvers and for signers.
+                  properties:
+                    keyId:
+                      description: The key id an evidence sidecar names, and the id `status.matchedKeyId` reports. **Required.**
+                      type: string
+                    notAfter:
+                      description: When this key stops being accepted. A key past `notAfter` is reported in `status.expiredKeyIds` and does not verify.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    spkiPem:
+                      description: The **public** key, SubjectPublicKeyInfo in PEM form. **Required** — this is the field whose absence would make every verification `NotAttempted`. Never a private key.
+                      type: string
+                    subject:
+                      description: Who or what this key belongs to, for display.
+                      nullable: true
+                      type: string
+                  required:
+                  - keyId
+                  - spkiPem
+                  type: object
+                type: array
+              signingKeys:
+                description: 'The keys that may **attest** — the runners'' own signing keys, whose public halves verify a scorecard, a backup receipt or a teardown record. Interface **I17**: key material, not ids.'
+                items:
+                  description: One key on the roster. The same four fields for approvers and for signers.
+                  properties:
+                    keyId:
+                      description: The key id an evidence sidecar names, and the id `status.matchedKeyId` reports. **Required.**
+                      type: string
+                    notAfter:
+                      description: When this key stops being accepted. A key past `notAfter` is reported in `status.expiredKeyIds` and does not verify.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    spkiPem:
+                      description: The **public** key, SubjectPublicKeyInfo in PEM form. **Required** — this is the field whose absence would make every verification `NotAttempted`. Never a private key.
+                      type: string
+                    subject:
+                      description: Who or what this key belongs to, for display.
+                      nullable: true
+                      type: string
+                  required:
+                  - keyId
+                  - spkiPem
+                  type: object
+                type: array
+            required:
+            - allowedClusterIds
+            - approverKeys
+            - signingKeys
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`TrustRoster.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: '`Loaded`, per-key `Expired`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              expiredKeyIds:
+                description: The `keyId`s past their `notAfter`, from both lists. Declared here so no consumer has to derive expiry itself from a clock it does not share with the controller.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              loaded:
+                description: Whether the controller parsed every entry on this roster.
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: TrustRoster
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

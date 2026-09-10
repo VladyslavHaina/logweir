@@ -6,8 +6,14 @@
 //! decision, the one network fetch this plan performs, and the linkage
 //! property that keeps the controller away from the signer — are settled and
 //! tested on their own, before a single CRD field or reconciler arrives. The
-//! six kinds land in Task 15b and the first reconciler in Task 16; both append
-//! to what is here rather than reshaping it.
+//! six kinds landed in Task 15b, in [`crds`], and the first reconciler lands
+//! in Task 16; both append to what is here rather than reshaping it.
+//!
+//! WHAT TASK 15B ADDED. [`crds`] holds the six kinds of
+//! `logweir.dev/v1alpha1`, the CEL immutability seals and the deterministic
+//! emitter whose output is checked in under `config/crd/` and diffed in CI;
+//! [`job`] holds the one constant that names the runner image, and nothing
+//! else until Task 17 grows `job::build` around it.
 //!
 //! WHAT THIS CRATE LINKS, AND WHAT IT MUST NOT. `logweir-verify` — the
 //! verifying half of the DSSE machinery — and never `logweir-evidence`, which
@@ -26,6 +32,8 @@
 //! `http-body-util` are normal dependencies here rather than
 //! `[dev-dependencies]`.
 
+pub mod crds;
+pub mod job;
 pub mod testing;
 
 /// Install the process-level rustls [`CryptoProvider`] this binary's TLS stack
