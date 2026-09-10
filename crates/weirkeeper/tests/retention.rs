@@ -885,7 +885,28 @@ const I13_FILES: [&str; 5] = [
 /// `store.`. Added at Task 20 (ruling 1): `tests/backup_controller.rs`'s
 /// module-local twin already had it, and a token list two guards disagree
 /// about is a token list one of them is blind through.
-const STORE_CALL_TOKENS: [&str; 7] = [
+///
+/// `observe_scorecard(` IS THE `Restore` TWIN, AND ITS ABSENCE MADE THIS
+/// GUARD BLIND TO THIS TASK'S OWN FILE. `controllers::restore::observe_scorecard`
+/// holds the single `Store::get` on the `Restore` path, and its call site —
+/// inside `reconcile`'s `async move` oracle — names neither `Store` nor
+/// `store.` either. Added at Task 20 fix round 1 (review H1), MEASURED BOTH
+/// WAYS on the review's own plant: `observe_scorecard(&handle, &key)` called
+/// directly in that oracle, outside `spawn_blocking`, left
+/// [`no_store_call_is_made_outside_spawn_blocking`] GREEN at **34 passed / 0
+/// failed** against the seven-token list, and FAILS at **33 passed / 1
+/// failed** naming `crates/weirkeeper/src/controllers/restore.rs:2336` with
+/// this eighth token in place; the unplanted tree is **34 / 0** either way.
+/// The shipped call IS inside `spawn_blocking` — this was a guard-coverage
+/// defect, and the task-20 report's M6/P4 claim that the fixed guard already
+/// caught this plant was FALSE as measured (STANDING RULE 21: a guard the
+/// ledger records as closed while it asserts nothing is worse than none).
+///
+/// The re-plant of `observe_archive(` in `controllers/backup.rs` was measured
+/// in the same round and still dies: **33 passed / 1 failed** naming
+/// `crates/weirkeeper/src/controllers/backup.rs`, so the seventh token's own
+/// coverage is intact and the eighth is additive.
+const STORE_CALL_TOKENS: [&str; 8] = [
     "Store::",
     "store.",
     ".manifest_facts(",
@@ -893,6 +914,7 @@ const STORE_CALL_TOKENS: [&str; 7] = [
     ".list_manifest_keys(",
     "retention::evaluate(",
     "observe_archive(",
+    "observe_scorecard(",
 ];
 
 /// Every marker that opens an ASYNC REGION, as this scan understands one.
