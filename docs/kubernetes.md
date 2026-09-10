@@ -1018,5 +1018,159 @@ Both, and nothing else. A `Backup` carries **no `outcome`** — that field is
 with. Verification itself is not this reconciler's work; it records the two
 keys and leaves `evidence.verification` alone.
 
+## 11. Task 7 — the five-listener compose stack, and the one string CI overrides
+
+`e2e/compose/docker-compose.yml` has exactly one editor (STANDING RULE 15), and
+from Task 7 onward every task that brings the stack up gets a broker with
+**five listeners** plus a `scram-setup` step that must have exited 0 before any
+SASL client authenticates.
+
+| listener | `listeners` | `advertised.listeners` | protocol | published | who reaches it |
+|---|---|---|---|---|---|
+| `PLAINTEXT` | `kafka-broker-1:9094` | `kafka-broker-1:9094` | PLAINTEXT | no | inter-broker; every in-network setup step |
+| `EXTERNAL` | `kafka-broker-1:9092` | `localhost:9092` | PLAINTEXT | `9092:9092` | the host-side e2e harness |
+| `CONTROLLER` | `kafka-broker-1:9093` | — | PLAINTEXT | no | the KRaft quorum |
+| `SASL` | `kafka-broker-1:9096` | `kafka-broker-1:9096` | SASL_PLAINTEXT | no | in-network SCRAM |
+| `SASLEXT` | `kafka-broker-1:9097` | `localhost:9097` | SASL_PLAINTEXT | `9097:9097` | host-side SCRAM |
+| `K8S` | `kafka-broker-1:9095` | `${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095` | PLAINTEXT | `9095:9095` | **a pod** |
+
+`SASL` and `SASLEXT` are **one credential store advertised twice**, not two
+security configurations. A broker's metadata redirects a client to the
+*advertised* name whatever address it bootstrapped against, so a single
+`SASL://kafka-broker-1:9096` is unreachable from the host and a single
+`SASLEXT://localhost:9097` is the container's own loopback. Both, or neither
+client works.
+
+### `host.docker.internal:9095` is the pod bootstrap, and it is a Docker Desktop behaviour
+
+`KafkaCluster.spec.bootstrapServers` in Demo 1 is exactly
+`host.docker.internal:9095`. `EXTERNAL://localhost:9092` cannot serve a pod at
+all — the broker hands back `localhost:9092`, which inside a pod is the pod's
+own loopback — so the K8S listener exists for the Kubernetes path and nothing
+else.
+
+**A published port is not the same claim as a resolvable name inside a pod.**
+`host.docker.internal` resolution inside pods comes from Docker Desktop, not
+from Kubernetes, so it is verified with a real pod:
+
+```
+kubectl --context docker-desktop create ns logweir-t7
+kubectl --context docker-desktop -n logweir-t7 run probe --rm -i --restart=Never \
+  --image=busybox -- sh -c 'nc -z host.docker.internal 9095'; echo "rc=$?"
+kubectl --context docker-desktop delete ns logweir-t7 --ignore-not-found
+```
+
+Measured on `docker-desktop` v1.34.1, 2026-09-10: **rc=0**. The same probe
+against the unpublished 9096 returns **rc=1**, which is what makes the 0 mean
+something. If the NAME does not resolve on some host, the fallback
+(`hostNetwork`, or the host's LAN address written into
+`KafkaCluster.spec.bootstrapServers`) is a controller decision, not an
+implementer's.
+
+### `LOGWEIR_K8S_ADVERTISED_HOST` is the one string a CI runner overrides
+
+`host.docker.internal` does not resolve inside a `kind` node on a Linux GitHub
+runner. The advertised K8S name is therefore a compose **parameter** with
+`host.docker.internal` as its default, which every local gate uses:
+
+```
+docker compose -f e2e/compose/docker-compose.yml config -q; echo "rc=$?"
+# rc=0 → K8S://host.docker.internal:9095
+
+LOGWEIR_K8S_ADVERTISED_HOST=172.18.0.1 \
+  docker compose -f e2e/compose/docker-compose.yml config -q; echo "rc=$?"
+# rc=0 → K8S://172.18.0.1:9095
+```
+
+Set it to the address the cluster's nodes can reach (on `kind`, the docker
+bridge gateway) and change nothing else. Without a parameter here, a later task
+would have to edit the compose file and break STANDING RULE 15 to get one.
+
+### `scram-setup` runs third, and its exit code is load-bearing
+
+In KRaft there is no ZooKeeper to pre-seed and no `--zookeeper` path: a SCRAM
+credential is a user config record in the metadata log, so it has to be written
+by a **client**, after the quorum is serving, **over the PLAINTEXT listener** —
+the credential being created is the credential a SASL client would need, so
+bootstrapping it over a SASL listener is circular and fails. `just e2e-up` runs
+it as a third foreground step and `just` checks its status:
+
+```
+docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm scram-setup
+# /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-broker-1:9094 --alter \
+#   --add-config 'SCRAM-SHA-512=[password=…]' --entity-type users --entity-name logweir
+# → Completed updating config for user logweir.
+```
+
+`--alter --add-config` is idempotent, so `just e2e-up` against a stack that is
+already up still exits 0.
+
+### The listener-scoped JAAS variable: the spelling, measured
+
+Spec §15's sixth `[UNVERIFIED]` mark was the exact spelling of the
+listener-scoped JAAS environment variable under the `apache/kafka` entrypoint.
+**It is closed by execution.** `kafka.docker.KafkaDockerWrapper` strips the
+`KAFKA_` prefix, lowercases, and then maps `___` → `-`, `__` → `_`, `_` → `.`,
+so the two variables
+
+```yaml
+KAFKA_LISTENER_NAME_SASL_SCRAM___SHA___512_SASL_JAAS_CONFIG:    'org.apache.kafka.common.security.scram.ScramLoginModule required;'
+KAFKA_LISTENER_NAME_SASLEXT_SCRAM___SHA___512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
+```
+
+produce these properties. Read back off the RUNNING broker with
+`docker compose -f e2e/compose/docker-compose.yml exec kafka-broker-1 cat /opt/kafka/config/server.properties`
+on 2026-09-10, `apache/kafka:3.7.1`:
+
+```
+listener.name.saslext.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
+listener.name.sasl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
+```
+
+and as the exit code the e2e row reads directly:
+
+```
+docker compose -f e2e/compose/docker-compose.yml exec kafka-broker-1 \
+  grep -q 'listener.name.sasl.scram-sha-512.sasl.jaas.config' /opt/kafka/config/server.properties; echo "rc=$?"
+# rc=0   (and rc=0 for listener.name.saslext.…)
+```
+
+The alternative form the procedure allowed for — a single
+`KAFKA_SASL_JAAS_CONFIG` plus `KAFKA_LISTENER_NAME_SASL_SASL_ENABLED_MECHANISMS`
+— was **not needed** and is not shipped.
+
+**Why this is asserted where it lands, and not by "the broker started".** A
+misspelled `KAFKA_…` variable is not an error under that entrypoint: the
+wrapper translates whatever it is given and the broker starts happily without
+the property. The failure then surfaces as an authentication error in some
+other test — the same silently-ignored-key shape as the rendered documents'
+`security:` block. So the property is checked in `server.properties`.
+
+### Both SCRAM clients, because they do not agree on the spelling
+
+`e2e/tests/scram.rs` exercises the two independent implementations:
+
+* **Logweir's** client is librdkafka — `sasl.mechanism=SCRAM-SHA-512`, two
+  hyphens, configured through `AuthConfig::from_spec`;
+* **the engine's** is a from-scratch RFC 5802 client —
+  `sasl_mechanism: "SCRAM-SHA512"`, ONE hyphen, configured by the four keys
+  under `security:`.
+
+One enabled broker mechanism (`sasl.enabled.mechanisms=SCRAM-SHA-512`) serves
+both. A wrong password fails as an **authentication** failure and never as
+`No available brokers`, which is what a silent PLAINTEXT downgrade against a
+SASL-only listener looks like:
+
+```
+librdkafka: Global error: Authentication (Local: Authentication failure):
+sasl_plaintext://localhost:9097/bootstrap: SASL authentication error: Authentication
+failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-512
+```
+
+The compose SCRAM password is a **fixture constant**, not key material: it
+authenticates to one throwaway broker on one developer machine. It appears in
+the compose file, the harness and the e2e config on purpose. No signing key
+appears anywhere in this repository.
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

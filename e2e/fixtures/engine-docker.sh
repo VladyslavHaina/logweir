@@ -50,10 +50,26 @@ fi
 mount=${LOGWEIR_E2E_ENGINE_MOUNT:-"$root/.e2e/tmp"}
 mkdir -p "$mount"
 
+# THE TWO SASL PASSWORD VARIABLES (Task 7).
+#   The rendered document carries the RAW placeholder `${LOGWEIR_SOURCE_PASSWORD}`
+#   / `${LOGWEIR_TARGET_PASSWORD}` — deliberately, so the secret is never in the
+#   bytes Logweir hashes (`logweir_engine_oso::yaml::render_security_block`) —
+#   and the ENGINE expands it out of its OWN process environment before parsing
+#   the text as YAML. `logweir` passes the variable to its engine child by
+#   inheritance, which reaches this script but stops at the container boundary:
+#   without these two flags the engine answers
+#   `Environment variable 'LOGWEIR_SOURCE_PASSWORD' is not set, using empty
+#   string` and then fails the handshake with a REAL SCRAM authentication error,
+#   which looks exactly like a wrong password. Measured on Task 7's first full
+#   run of e2e/tests/scram.rs.
+#   `docker run -e NAME` with no `=` passes the caller's value and passes
+#   NOTHING when the caller does not have it set, so a plaintext run is
+#   unaffected: no variable is created inside the container.
 exec docker run --rm -i \
   --platform linux/amd64 \
   --user 0:0 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e RUST_LOG \
+  -e LOGWEIR_SOURCE_PASSWORD -e LOGWEIR_TARGET_PASSWORD \
   -v "$mount:$mount" \
   -w "$mount" \
   --entrypoint /bin/bash \

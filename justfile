@@ -192,10 +192,22 @@ fixtures-sign-bogus:
 # precisely so they are not in that wait set (`--wait` exits 1 the moment a
 # container it is waiting on exits, even with status 0); they run here, in
 # order, as foreground commands whose exit codes `just` checks.
+#
+# Task 7 (chain J, slot 10) adds the THIRD setup step, `scram-setup`, and its
+# exit code is load-bearing: in KRaft the SCRAM credential is a user config
+# record that has to be written by a client after the quorum is serving, so
+# every SASL client in this suite depends on this line having exited 0. `just`
+# checks each recipe line's status, and `docker compose run --rm` returns the
+# container's own exit code, so a broker that refused the alter fails
+# `just e2e-up` here rather than surfacing as an authentication error in a test
+# twenty minutes later. It runs LAST of the three because it is the only one
+# that needs the broker to be answering client requests, and `topic-setup`
+# already proves that.
 e2e-up:
     docker compose -f e2e/compose/docker-compose.yml up -d --wait
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
+    docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm scram-setup
 
 # Both profiles are named on purpose. `down` only removes containers for
 # services in the ACTIVE profile set, so a plain `down -v` walks past any

@@ -21,18 +21,61 @@ services:
     hostname: kafka-broker-1
     restart: always
     networks: [kafka-net]
-    ports: ["9092:9092"]
+    # THREE published ports, and each one is published for a client that
+    # cannot reach the broker any other way (Task 7, spec §10):
+    #   9092  EXTERNAL — the host-side harness (`harness::BOOTSTRAP`).
+    #   9095  K8S      — a POD on docker-desktop Kubernetes. `EXTERNAL` is
+    #                    useless there: the broker's metadata redirects every
+    #                    client to `localhost:9092`, which inside a pod is the
+    #                    pod's own loopback.
+    #   9097  SASLEXT  — the host-side SCRAM client. `SASL://kafka-broker-1:9096`
+    #                    is advertised for in-network clients and its name does
+    #                    not resolve on the host, so the ONE SASL listener is
+    #                    advertised twice rather than once.
+    # 9096 is deliberately NOT published: it is the in-network advertisement of
+    # the same SCRAM credential store, reached over `kafka-net`.
+    ports: ["9092:9092", "9095:9095", "9097:9097"]
     environment:
       KAFKA_NODE_ID: 1001
       KAFKA_MIN_INSYNC_REPLICAS: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://kafka-broker-1:9092,CONTROLLER://kafka-broker-1:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://kafka-broker-1:9092,CONTROLLER://kafka-broker-1:9093,SASL://kafka-broker-1:9096,SASLEXT://kafka-broker-1:9097,K8S://kafka-broker-1:9095
+      # `K8S` is the one advertised name a CI runner has to change, and it is
+      # therefore a PARAMETER and not a literal: `kind` on a Linux GitHub
+      # runner has no `host.docker.internal` inside a node, and STANDING
+      # RULE 15 makes Task 7 the only editor of this file — so the override
+      # has to exist here or a later task has to break that rule to get one.
+      # The default is the docker-desktop name every local gate uses.
+      # Documented in `docs/kubernetes.md`, "Task 7 — the five-listener stack".
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://localhost:9092,SASL://kafka-broker-1:9096,SASLEXT://localhost:9097,K8S://${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,SASL:SASL_PLAINTEXT,SASLEXT:SASL_PLAINTEXT,K8S:PLAINTEXT
+      # SCRAM-SHA-512 and nothing else: `sasl_mechanism: "SCRAM-SHA512"` is the
+      # engine's spelling of the same mechanism and `SCRAM-SHA-512` is
+      # librdkafka's; both authenticate against this one enabled mechanism.
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      # THE LISTENER-SCOPED JAAS VARIABLE, and its spelling was MEASURED, not
+      # read. `kafka.docker.KafkaDockerWrapper` strips `KAFKA_`, lowercases,
+      # and then maps `___` -> `-`, `__` -> `_`, `_` -> `.`, so these two
+      # variables become, in /opt/kafka/config/server.properties:
+      #
+      #   listener.name.sasl.scram-sha-512.sasl.jaas.config=…
+      #   listener.name.saslext.scram-sha-512.sasl.jaas.config=…
+      #
+      # read back with `docker compose exec kafka-broker-1 cat
+      # /opt/kafka/config/server.properties` — the transcript is in
+      # `docs/kubernetes.md`, and it is what closed spec §15's sixth
+      # `[UNVERIFIED]` mark.
+      #
+      # No username/password in the module options: on a listener the broker
+      # SERVES, `ScramLoginModule` validates against the broker's own
+      # credential store (the one `scram-setup` writes). Inter-broker traffic
+      # is PLAINTEXT here, so the broker is never its own SASL client.
+      KAFKA_LISTENER_NAME_SASL_SCRAM___SHA___512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
+      KAFKA_LISTENER_NAME_SASLEXT_SCRAM___SHA___512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_PROCESS_ROLES: controller,broker
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1001@kafka-broker-1:9093
@@ -75,6 +118,55 @@ services:
       kafka-topics --create --if-not-exists --bootstrap-server kafka-broker-1:9094 --partitions 1 --replication-factor 1 --topic logweir.scratch &&
       kafka-topics --create --if-not-exists --bootstrap-server kafka-broker-1:9094 --partitions 3 --replication-factor 1 --topic test-topic &&
       echo READY'
+
+  # Creates the ONE SCRAM credential the SASL listeners authenticate against.
+  #
+  # IT MUST HAVE EXITED 0 BEFORE ANY SASL CLIENT AUTHENTICATES. In KRaft there
+  # is no ZooKeeper to pre-seed and no `--zookeeper` path: the SCRAM credential
+  # is a user config record in the metadata log, so it has to be written by a
+  # client after the quorum is serving. `just e2e-up` runs this as a third
+  # FOREGROUND step whose exit code `just` checks, after `minio-setup` and
+  # `topic-setup`.
+  #
+  # OVER THE EXISTING PLAINTEXT LISTENER (`kafka-broker-1:9094`), and that is
+  # not a convenience. The credential this step creates is the credential a
+  # client would need to reach `SASL://kafka-broker-1:9096` — so bootstrapping
+  # this over a SASL listener is a circular dependency, and it fails, which is
+  # exactly what Task 7's third mutant asserts.
+  #
+  # `--alter --add-config` is idempotent: a second run overwrites the same
+  # credential with the same value and still exits 0, so `just e2e-up` on a
+  # stack that is already up is not a failure.
+  #
+  # THE PASSWORD IS A FIXTURE CONSTANT AND NOT KEY MATERIAL. It is the same
+  # literal in `e2e/tests/harness/mod.rs::SCRAM_PASSWORD` and in
+  # `e2e/compose/config/backup-scram.yaml`'s `${LOGWEIR_SOURCE_PASSWORD}`
+  # expansion; it authenticates to one throwaway broker on one developer
+  # machine and to nothing else. No SIGNING key ever appears in this tree.
+  #
+  # The broker's OWN image, so the binary is `kafka-configs.sh` verbatim as
+  # spec §10 writes it; `/opt/kafka/bin` is not on that image's PATH, so the
+  # path is absolute for the same reason the healthcheck above spells out
+  # `/opt/kafka/bin/kafka-topics.sh`. `entrypoint:` is overridden because the
+  # image's own entrypoint is the broker's `run` script, and the argv is a LIST
+  # so no shell stands between `kafka-configs.sh` and its exit code.
+  scram-setup:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    networks: [kafka-net]
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+    profiles: [setup]
+    entrypoint: ["/opt/kafka/bin/kafka-configs.sh"]
+    command:
+      - "--bootstrap-server"
+      - "kafka-broker-1:9094"
+      - "--alter"
+      - "--add-config"
+      - "SCRAM-SHA-512=[password=logweir-e2e-not-a-secret]"
+      - "--entity-type"
+      - "users"
+      - "--entity-name"
+      - "logweir"
 
   minio:
     image: minio/minio:latest

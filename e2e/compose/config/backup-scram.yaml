@@ -1,0 +1,64 @@
+# The ENGINE-SIDE SCRAM config: `backup-drill.yaml` with a `security:` block,
+# aimed at the `SASL` listener from INSIDE the compose network.
+#
+# WHY THIS FILE EXISTS, and what it proves that a rendered document cannot.
+#   Everything `logweir` drives is a document `logweir` RENDERED
+#   (`logweir_engine_oso::yaml::render_security_block`), and on this host that
+#   document is read by the engine running under `e2e/fixtures/engine-docker.sh`
+#   — a container that is NOT on `kafka-net` and that rewrites `localhost` to
+#   the Docker host gateway. So the rendered path can only ever exercise the
+#   PUBLISHED SASL advertisement, `SASLEXT://localhost:9097`.
+#   This file is the other half: it is read by the `kafka-backup` compose
+#   service, which IS on `kafka-net`, so it exercises `SASL://kafka-broker-1:9096`
+#   — the in-network advertisement of the same one credential store, and the
+#   address `e2e/tests/harness/mod.rs::BOOTSTRAP_SASL_INNET` names for Tasks 11,
+#   12, 28 and 31. Run by `e2e/tests/scram.rs::
+#   scram_authenticates_through_the_engines_own_client_in_network`.
+#
+# THE FOUR KEYS ARE UNDER `security:`, AND THE INDENTATION IS THE CONTRACT.
+#   They are fields of the engine's `SecurityConfig`, reached through
+#   `KafkaConfig.security` — not fields of `KafkaConfig`. At two-space indent
+#   directly under `source:` the pinned engine answers `Ignoring unknown config
+#   key `source.security_protocol`` (and three more) and dials the cluster
+#   UNAUTHENTICATED (plan erratum E3). This file therefore mirrors, key for key
+#   and indent for indent, what `render_security_block` emits.
+#
+# THE MECHANISM SPELLING HAS ONE HYPHEN: `SCRAM-SHA512`. That is the engine's
+#   own `SaslMechanism` variant; `SCRAM-SHA-512` is librdkafka's spelling of the
+#   same mechanism and is a serde TYPE error here that aborts config load.
+#
+# `${LOGWEIR_SOURCE_PASSWORD}` is expanded by the ENGINE, out of its own process
+# environment, before the text is parsed as YAML. The value never appears in
+# this file, and this file is never hashed as plan bytes. The compose password
+# is a fixture constant (`logweir-e2e-not-a-secret`) that authenticates to one
+# throwaway broker; no signing key is ever checked in.
+mode: backup
+backup_id: "mvp-scram-innet"
+
+source:
+  bootstrap_servers:
+    - kafka-broker-1:9096
+  security:
+    security_protocol: "SASL_PLAINTEXT"
+    sasl_mechanism: "SCRAM-SHA512"
+    sasl_username: "logweir"
+    sasl_password: ${LOGWEIR_SOURCE_PASSWORD}
+  topics:
+    include:
+      - orders
+
+storage:
+  backend: s3
+  bucket: kafka-backups
+  region: us-east-1
+  prefix: mvp-scram-innet
+  endpoint: http://minio:9000
+  path_style: true
+  allow_http: true
+
+backup:
+  compression: zstd
+  continuous: false
+  segment_max_records: 1000
+  segment_max_bytes: 10485760  # 10MB
+  max_concurrent_partitions: 3

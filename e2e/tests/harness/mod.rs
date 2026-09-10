@@ -1,8 +1,24 @@
 #![cfg(feature = "e2e")]
 #![allow(dead_code)]
-//! Shared by every `e2e/tests/*.rs`. Host-side, so every bootstrap is
+//! Shared by every `e2e/tests/*.rs`. Host-side, so the default bootstrap is
 //! `localhost:9092` (the EXTERNAL listener); container-side is
 //! `kafka-broker-1:9094`.
+//!
+//! # The broker has FIVE listeners from Task 7 onward (STANDING RULE 15)
+//!
+//! | listener | address | protocol | who reaches it |
+//! |---|---|---|---|
+//! | `PLAINTEXT` | `kafka-broker-1:9094` | PLAINTEXT | inter-broker, and every in-network setup step |
+//! | `EXTERNAL` | `localhost:9092` | PLAINTEXT | this harness, host-side (`BOOTSTRAP`) |
+//! | `CONTROLLER` | `kafka-broker-1:9093` | PLAINTEXT | the KRaft quorum |
+//! | `SASL` | `kafka-broker-1:9096` | SASL_PLAINTEXT | in-network SCRAM (`BOOTSTRAP_SASL_INNET`) |
+//! | `SASLEXT` | `localhost:9097` | SASL_PLAINTEXT | host-side SCRAM (`BOOTSTRAP_SASL`) |
+//! | `K8S` | `host.docker.internal:9095` | PLAINTEXT | a POD on docker-desktop (`BOOTSTRAP_K8S`) |
+//!
+//! `SASL` and `SASLEXT` are ONE credential store advertised twice, because a
+//! host-side client cannot resolve `kafka-broker-1` and a pod cannot use
+//! `localhost:9092` — the broker's metadata redirects every client to the
+//! advertised name whatever address it bootstrapped against.
 //!
 //! Each file under `e2e/tests/` is its own test binary, so without one shared
 //! module the helpers get reinvented incompatibly — the same reason
@@ -41,6 +57,38 @@ use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicDeleter};
 
 /// The EXTERNAL listener, as published by `e2e/compose/docker-compose.yml`.
 pub const BOOTSTRAP: &str = "localhost:9092";
+/// The `SASLEXT` listener — SASL_PLAINTEXT, published on 9097 and advertised as
+/// `localhost:9097`. **The host-side SCRAM bootstrap**, and also the one the
+/// containerised engine uses: `e2e/fixtures/engine-docker.sh` rewrites
+/// `localhost` to the Docker host gateway inside the engine container, so a
+/// `localhost:9097` bootstrap resolves to this published port from both sides
+/// of that boundary. The native (linux/amd64) engine route runs on the host
+/// and resolves it directly.
+pub const BOOTSTRAP_SASL: &str = "localhost:9097";
+/// The `SASL` listener — the SAME SCRAM credential store as `BOOTSTRAP_SASL`,
+/// advertised for clients ON `kafka-net`. Unresolvable from the host by
+/// design; used by the `kafka-backup` compose service, which is the only
+/// engine invocation in this repository that really runs inside the compose
+/// network.
+pub const BOOTSTRAP_SASL_INNET: &str = "kafka-broker-1:9096";
+/// The `K8S` listener — PLAINTEXT, published on 9095 and advertised as
+/// `${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095`. **The bootstrap
+/// a POD uses**, and the literal value of `KafkaCluster.spec.bootstrapServers`
+/// in Demo 1. `host.docker.internal` resolution inside a pod is a Docker
+/// Desktop behaviour and not a Kubernetes one, which is why Task 7 probes it
+/// with a real pod rather than with a host-side port check.
+pub const BOOTSTRAP_K8S: &str = "host.docker.internal:9095";
+/// The SCRAM principal `scram-setup` creates, and the `sasl_username` every
+/// SCRAM spec in this suite names (**G-ID**: the plan binds the principal).
+pub const SCRAM_USER: &str = "logweir";
+/// **A FIXTURE CONSTANT, NOT KEY MATERIAL.** The same literal appears in
+/// `e2e/compose/docker-compose.yml`'s `scram-setup` command and in
+/// `e2e/compose/config/backup-scram.yaml`'s documented expansion: it
+/// authenticates to one throwaway compose broker and to nothing else. It is
+/// projected into a child process's environment, never written into a spec, a
+/// plan, a rendered document or a receipt — and no signing key is ever
+/// checked in anywhere.
+pub const SCRAM_PASSWORD: &str = "logweir-e2e-not-a-secret";
 /// `scripts/e2e-seed.sh`'s `backup_id`, and therefore the archive prefix.
 pub const ARCHIVE_PREFIX: &str = "drill-demo";
 pub const ARCHIVE_BUCKET: &str = "kafka-backups";
@@ -227,6 +275,76 @@ pub fn mc(args: &[&str]) -> Output {
 
 pub fn kafka_topics(args: &[&str]) -> Output {
     compose("topic-setup", "kafka-topics", args)
+}
+
+/// `docker compose exec -T kafka-broker-1 …` against the RUNNING broker.
+///
+/// `exec` and not `run`: the question every caller of this asks is about the
+/// configuration the live broker was started with — `/opt/kafka/config/
+/// server.properties`, which `kafka.docker.KafkaDockerWrapper` writes from the
+/// container's environment at launch. A fresh `run` container would rewrite
+/// that file from the same environment and prove nothing about the process
+/// that is actually serving.
+///
+/// The `Output`'s status is handed back untouched so a caller can read the
+/// exit code DIRECTLY (STANDING RULE 20); nothing here pipes it.
+pub fn compose_exec_broker(args: &[&str]) -> Output {
+    let mut c = Command::new("docker");
+    c.args([
+        "compose",
+        "-f",
+        "e2e/compose/docker-compose.yml",
+        "exec",
+        "-T",
+        "kafka-broker-1",
+    ]);
+    c.args(args);
+    c.current_dir(root()).output().expect("docker compose exec")
+}
+
+/// The broker's live `server.properties`, read off the running container.
+pub fn broker_server_properties() -> String {
+    let o = compose_exec_broker(&["cat", "/opt/kafka/config/server.properties"]);
+    assert!(
+        o.status.success(),
+        "could not read the broker's server.properties — is the stack up? \
+         run `just e2e-up`\n{}",
+        o.stderr_utf8()
+    );
+    o.stdout_utf8()
+}
+
+/// The pinned engine, run as the `kafka-backup` compose service — i.e. **on
+/// `kafka-net`**, which is the one engine invocation in this repository that
+/// can use `BOOTSTRAP_SASL_INNET`.
+///
+/// `e2e/fixtures/engine-docker.sh` (the route `engine_bin()` picks on this
+/// arm64 host) deliberately does NOT join `kafka-net`: it rewrites `localhost`
+/// to the Docker host gateway so the rendered document's `localhost:9092` /
+/// `http://localhost:9000` mean the same thing to the engine as they do to
+/// `logweir`. That makes it the right route for everything Logweir renders and
+/// the wrong one for an in-network advertised name, so the in-network SCRAM
+/// arm goes through this service and its bind-mounted `./config` instead.
+///
+/// `envs` are passed with `-e NAME=value`, which is how the engine's own
+/// `expand_env_vars` gets a value for a `${…}` placeholder inside the
+/// container.
+pub fn compose_engine_innet(envs: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut c = Command::new("docker");
+    c.args([
+        "compose",
+        "-f",
+        "e2e/compose/docker-compose.yml",
+        "run",
+        "--rm",
+        "-T",
+    ]);
+    for (k, v) in envs {
+        c.args(["-e", &format!("{k}={v}")]);
+    }
+    c.arg("kafka-backup");
+    c.args(args);
+    c.current_dir(root()).output().expect("docker compose run")
 }
 
 fn ok(o: Output, what: &str) -> Output {
@@ -607,6 +725,16 @@ pub struct RunOpts<'a> {
     /// `drill-` namespace unconditionally, so a topic the row created before
     /// calling it would be deleted again before the drill ever saw it.
     pub pre_create: Vec<(String, i32)>,
+    /// Extra environment for the `logweir` child, on top of the fixed set
+    /// `run_with` always sets.
+    ///
+    /// Task 7 needs exactly one entry — `LOGWEIR_TARGET_PASSWORD` — for the
+    /// SCRAM drill rows. It is a field rather than a `std::env::set_var` in the
+    /// row because `set_var` is process-wide and this suite's rows share one
+    /// process; a leaked `LOGWEIR_TARGET_PASSWORD` would make every LATER
+    /// plaintext drill carry a projected credential it never asked for, which
+    /// is the shape of a false green rather than a false red.
+    pub env: Vec<(String, String)>,
 }
 
 impl<'a> RunOpts<'a> {
@@ -618,6 +746,7 @@ impl<'a> RunOpts<'a> {
             allowlist: None,
             approval: Approval::Valid,
             pre_create: Vec::new(),
+            env: Vec::new(),
         }
     }
 }
@@ -693,8 +822,8 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
     let _ = std::fs::remove_file(&out_json);
     let _ = std::fs::remove_file(out_json.with_extension("sig"));
 
-    let out = Command::new(bin())
-        .args(["drill", "run", "--spec"])
+    let mut cmd = Command::new(bin());
+    cmd.args(["drill", "run", "--spec"])
         .arg(&sp)
         .arg("--approval")
         .arg(&approval)
@@ -718,9 +847,15 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
         // restore.yaml and the checkpoint inside the one directory the engine
         // container has mounted.
         .env("TMPDIR", engine_mount())
-        .env("LOGWEIR_E2E_ENGINE_MOUNT", engine_mount())
-        .output()
-        .unwrap();
+        .env("LOGWEIR_E2E_ENGINE_MOUNT", engine_mount());
+    // Per-row additions, LAST, so a row can override nothing above by
+    // accident and everything above it deliberately. Task 7's SCRAM drill
+    // rows use this for `LOGWEIR_TARGET_PASSWORD`; every other row passes an
+    // empty list and gets exactly the environment it always got.
+    for (k, v) in &o.env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
 
     Run {
         out,
@@ -862,11 +997,17 @@ fn python() -> PathBuf {
 /// Decodes `engine_subreport.body_b64` to a file and hands the EXACT bytes to
 /// OSO's own verifier. Anything that re-serialises here defeats the test.
 ///
-/// Global Constraint 3 binds the `logweir` BINARY to
-/// {restore, validate-restore, validation run}; `validation evidence-verify`
-/// here is spec §14 SP1c's exit criterion and is explicitly permitted in this
-/// file. The directory is under `engine_mount()` so the containerised engine
-/// route can see it.
+/// Global Constraint 3 — **as REVISED by Task 1, and it is FOUR commands, not
+/// three** — binds the `logweir` BINARY to
+/// {`backup`, `restore`, `validate-restore`, `validation run`}. This comment
+/// read `{restore, validate-restore, validation run}` while the gate it
+/// describes, `scripts/check-no-oso.sh:96`, already spelled
+/// `ENGINE_RUNTIME_ALLOWLIST="backup restore validate-restore validation"` —
+/// Task 1's carry F1, fixed here by Task 7, the next task to edit this file.
+/// `validation evidence-verify` is NOT in that set; it is spec §14 SP1c's exit
+/// criterion, it is run by this HARNESS and never by the binary, and it is
+/// explicitly permitted in this file. The directory is under `engine_mount()`
+/// so the containerised engine route can see it.
 pub fn oso_evidence_verify(sub: &serde_json::Value) -> std::process::ExitStatus {
     use base64::Engine as _;
     let raw = base64::engine::general_purpose::STANDARD
