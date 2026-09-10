@@ -109,6 +109,178 @@ pub fn reject_glob_metacharacters(entries: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The five characters a projected password may not contain, and interface
+/// **I11**'s producer half.
+///
+/// # Why escaping cannot be the answer here
+///
+/// The password is NOT in the bytes Logweir renders. `crate::spec::AuthSpec`
+/// carries no secret and `crate::engine::AuthRender` says so in its own doc
+/// comment: the rendered document names `${LOGWEIR_SOURCE_PASSWORD}` and the
+/// engine substitutes the value out of its OWN process environment, as raw
+/// text, BEFORE the document is parsed as YAML
+/// [U:crates/kafka-backup-cli/src/commands/config.rs:1-34]. So there is no
+/// interpolation site to escape at: by the time the value meets the document,
+/// every escaper in this workspace has already run. The value itself has to be
+/// safe to substitute into pre-parse text, and this is the predicate that says
+/// so.
+///
+/// A `\n` in the value ends the physical line and whatever follows it becomes
+/// a NEW YAML key at whatever indentation it carries — `sasl_password:
+/// "hunter2\ndry_run: true"` is two keys, not one. `\r` does the same on a
+/// CRLF reader. `"` closes the double-quoted scalar the placeholder sits
+/// inside, and `'` closes a single-quoted one, so either can end the scalar
+/// early and leave the rest of the value as document structure. `$` is
+/// refused because upstream's expansion pass is not idempotent-safe: a value
+/// containing `${OTHER}` is itself scanned for expansion on some readings of
+/// that pass, and a password that can name an environment variable is a
+/// password that can read one.
+///
+/// # Where it is called, and where it is DELIBERATELY NOT called
+///
+/// **The runner** calls it, on the projected value, at the moment it reads
+/// `LOGWEIR_SOURCE_PASSWORD`/`LOGWEIR_TARGET_PASSWORD`
+/// (`crates/logweir/src/drill/mod.rs::check_projected_credentials`). The
+/// CONTROLLER does not: `weirkeeper` holds no `get` on Secrets anywhere
+/// (spec §9), so it never sees the projected value and has nothing to
+/// validate. A predicate the controller re-used would be a check performed on
+/// a value the controller does not have — see spec §7 amendment 4, "the runner
+/// refuses, not the controller", and critique B H11.
+pub const UNRENDERABLE_CREDENTIAL_CHARACTERS: [char; 5] = ['\n', '\r', '"', '\'', '$'];
+
+/// The one reason string every `CredentialRefusal` carries. It names the
+/// MECHANISM, never the value.
+const CREDENTIAL_REFUSAL_REASON: &str = "a projected password is substituted into the config \
+     text before it is parsed, so a newline or a quote in the value can introduce a new YAML key";
+
+/// A refused credential: the offending character and the mechanism.
+///
+/// **It never carries the value, and its `Display` is a pure function of
+/// `character`.** That is a stronger property than "does not print the
+/// secret": two different unrenderable passwords with the same first
+/// offending character produce byte-identical messages, so the message cannot
+/// carry a fragment of either one, and `tests/guard.rs` asserts exactly that
+/// rather than asserting the absence of a list of substrings somebody has to
+/// keep complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRefusal {
+    pub character: char,
+    pub reason: &'static str,
+}
+
+impl CredentialRefusal {
+    /// The character CLASS, as prose. A refusal that printed the character
+    /// itself would be printing one byte of the secret, and for `\n` and `\r`
+    /// it would print something invisible in a log line.
+    fn class(&self) -> &'static str {
+        match self.character {
+            '\n' => "a newline",
+            '\r' => "a carriage return",
+            '"' => "a double quote",
+            '\'' => "a single quote",
+            '$' => "a dollar sign",
+            // Unreachable while `UNRENDERABLE_CREDENTIAL_CHARACTERS` is the
+            // only source of this type, and deliberately value-free if the
+            // list ever grows without this match growing with it.
+            _ => "a character this build cannot render",
+        }
+    }
+}
+
+impl std::fmt::Display for CredentialRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the projected credential contains {}, which is not renderable; {}",
+            self.class(),
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for CredentialRefusal {}
+
+/// Interface **I11**: a password that will be textually substituted into a
+/// pre-parse YAML template. See `UNRENDERABLE_CREDENTIAL_CHARACTERS` for the
+/// full argument.
+///
+/// Returns the FIRST offending character in scan order, so a value that opens
+/// with `"` is reported as a double quote even when it also carries a
+/// newline — the operator fixes the value, and the first thing wrong with it
+/// is the thing to name.
+pub fn credential_is_renderable(secret: &str) -> Result<(), CredentialRefusal> {
+    for ch in secret.chars() {
+        if UNRENDERABLE_CREDENTIAL_CHARACTERS.contains(&ch) {
+            return Err(CredentialRefusal {
+                character: ch,
+                reason: CREDENTIAL_REFUSAL_REASON,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// [I9] The runner's machine-readable refusal discriminator, and the default.
+///
+/// A guard refusal that names no more specific state is this one, which is why
+/// `terminal_state` returns it rather than an `Option`: a controller reading
+/// `refusal-reason=` must always get a state, and "the message did not open
+/// with a state name" is not a different fact about the run — it is a plain
+/// guard refusal.
+pub const TERMINAL_STATE_GUARD_REFUSED: &str = "GuardRefused";
+/// [I9] Spec §3.2's terminal state for a projected credential that cannot be
+/// substituted into the config text (`credential_is_renderable`). Its call
+/// site is Task 6's; the runner's own read
+/// (`crates/logweir/src/drill/mod.rs::check_projected_credentials`) already
+/// emits it.
+pub const TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE: &str = "CredentialNotRenderable";
+/// [I9] Spec §3.2's terminal state for a target topic whose configuration the
+/// drill refuses to write to. Its call site is **Task 8**'s; the constant
+/// lives here so the three states are one list and a controller's mapping can
+/// be written against it before the third producer lands.
+pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigRefused";
+/// [I9] Every tag-1 terminal state a guard refusal can name. **Task 20**
+/// (Phase B) is the only consumer.
+pub const TERMINAL_STATES: [&str; 3] = [
+    TERMINAL_STATE_GUARD_REFUSED,
+    TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+];
+
+/// [I9] A refusal message MAY open with `<State>: `, naming one of
+/// `TERMINAL_STATES`. Returns that state, or `TERMINAL_STATE_GUARD_REFUSED`
+/// when the message opens with none of them.
+///
+/// **It matches a PREFIX and never a substring**, and the separator is part of
+/// the prefix. A message that merely MENTIONS a state name is not that state:
+/// `"the projected password is not CredentialNotRenderable-safe"` is a plain
+/// guard refusal, and a `contains` match would classify it as the credential
+/// state and tell a controller that a Secret is malformed when nothing about a
+/// Secret was observed. Requiring `": "` also stops
+/// `"CredentialNotRenderableXyz: …"` — a state name that is a prefix of a
+/// longer word — from matching.
+pub fn terminal_state(message: &str) -> &'static str {
+    for state in TERMINAL_STATES {
+        if let Some(rest) = message.strip_prefix(state) {
+            if rest.starts_with(": ") {
+                return state;
+            }
+        }
+    }
+    TERMINAL_STATE_GUARD_REFUSED
+}
+
+/// [I9] `refusal-reason=<state>`.
+///
+/// Pure, and here rather than in the binary, because `logweir-core` does no
+/// I/O (`crate` doc, `lib.rs:1`): this crate produces the LINE and
+/// `crates/logweir/src/exit.rs::print_refusal_reason` prints it. Splitting it
+/// that way is what lets the line's format be unit-tested without a process,
+/// and what stops a `println!` appearing in the pure layer.
+pub fn refusal_reason_line(message: &str) -> String {
+    format!("refusal-reason={}", terminal_state(message))
+}
+
 /// Every selected topic must have a mapping entry whose target DIFFERS from
 /// its source, or the restore would write over the topic it came from.
 pub fn check_topic_mapping_coverage(

@@ -30,8 +30,17 @@ pub mod render_restore;
 pub mod render_validation;
 // The workspace's SINGLE YAML scalar escaper, extracted from
 // `render_restore.rs` so the three renderers import it instead of one of them
-// owning it and the others reaching into it. `pub(crate)`: nothing outside
-// this crate renders an engine document, and `tests/render_backup.rs::
+// owning it and the others reaching into it. `tests/render_backup.rs::
 // there_is_exactly_one_yaml_escaper` pins the "exactly one" half by reading
 // the three renderer sources rather than by calling the function.
-pub(crate) mod yaml;
+//
+// The module was `pub(crate)` under Task 2, on the argument that nothing
+// outside this crate renders an engine document. Task 3 makes it `pub`
+// because **G-EXP**'s post-render sweep, `yaml::assert_no_unnamed_dollar_brace`,
+// is a PREDICATE OVER A DOCUMENT rather than a step in rendering one: it is
+// named in this task's Interfaces block, `tests/expansion.rs` asserts its
+// behaviour over hand-written documents that no renderer produced, and a
+// guard that can only be reached through the code it guards cannot be tested
+// against an adversarial input. `yaml_scalar` itself stays `pub(crate)`, so
+// the unchecked escaper is still unreachable from outside.
+pub mod yaml;

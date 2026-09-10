@@ -61,6 +61,78 @@ pub fn run(
     // converts it into `DrillError::Guard` via the `#[from]` impl.
     check_topic_mapping_coverage(&spec.source.topics, &topic_mapping)?;
 
+    // **G-GLOB and G-EXP, at phase 0.** Both are also enforced by
+    // `render_restore::render`, and that is NOT where a plan gets refused.
+    //
+    // This arm is Task 2's review finding F2. Before it, a wildcard such as
+    // `orders*` in `source.topics` was ADMITTED here and refused only in
+    // `preflight` — at phase 5, as `EngineError::Operational`, which is exit
+    // **1** with no `refusal-reason=` line. Ruling R-E is right that a
+    // renderer refusal reached at phase 5 is exit 1 ("by phase 6 phases 0-5
+    // have run", `logweir-engine-oso/src/engine.rs:243-250`), and that ruling
+    // is not reopened here. The defect was the missing arm, not the mapping:
+    // Global Constraint 11 reserves exit 3 for a plan refused BEFORE anything
+    // runs, and a glob in a spec is exactly that — an adopter-written string
+    // this drill will never accept, knowable with no broker, no bucket and no
+    // engine. So it is refused here, where the exit code is 3 and the
+    // `refusal-reason=GuardRefused` line is emitted, and phase 5 keeps its
+    // fail-closed backstop for a value that reached a renderer by some other
+    // route.
+    //
+    // BOTH SIDES, exactly as the renderer checks both: the keys become
+    // `target.topics.include` entries and the values become
+    // `restore.topic_mapping` targets, which the engine also treats as topic
+    // selectors. Checking only the keys would leave the half an operator is
+    // more likely to template — and the values are the half that carries
+    // `target.topic_mapping_prefix`, so a prefix of `drill-*` is refused here
+    // and nowhere else in phase 0.
+    //
+    // **G-EXP is checked BEFORE G-GLOB**, in the same order and for the same
+    // reason as the renderers (`logweir_engine_oso::yaml::reject_dollar_brace`):
+    // `${` contains `{` and `}`, two of `GLOB_METACHARACTERS`, so a
+    // glob-first order reports `orders${X}` as a pattern and sends the
+    // operator to escape a brace instead of to stop an expansion.
+    let sources: Vec<String> = topic_mapping.keys().cloned().collect();
+    let targets: Vec<String> = topic_mapping.values().cloned().collect();
+    for (side, entries) in [("source topic", &sources), ("mapped target", &targets)] {
+        // **G-EXP** at the spec layer. The renderer refuses a `${` at every
+        // interpolation site (`logweir_engine_oso::yaml::yaml_scalar_checked`)
+        // and sweeps the finished document, but that is a phase-5 refusal and
+        // exit 1. The hazard is not only an attacker: the engine expands
+        // `${NAME}` over the whole config as raw text before parsing and
+        // replaces an UNSET name with the EMPTY STRING behind a warning
+        // [U:crates/kafka-backup-cli/src/commands/config.rs:1-34], so a topic
+        // named `orders${X}` becomes `orders` and the drill restores a
+        // different topic than the plan named — while every hash still
+        // matches, because the bytes logweir hashed are a template and the
+        // bytes the engine executed are its expansion.
+        if let Some(entry) = entries.iter().find(|e| e.contains("${")) {
+            return Err(GuardRefusal(format!(
+                "{side} `{entry}` contains `${{`, which the engine expands textually BEFORE the \
+                 config is parsed [U:crates/kafka-backup-cli/src/commands/config.rs:1-34], \
+                 replacing an unset name with the empty string behind nothing but a warning. The \
+                 document logweir hashes would be a TEMPLATE and the document the engine executes \
+                 its expansion, so the approved plan_hash would not cover what runs."
+            ))
+            .into());
+        }
+        if let Err(entry) = logweir_core::guard::reject_glob_metacharacters(entries) {
+            return Err(GuardRefusal(format!(
+                "{side} `{entry}` contains a glob metacharacter (one of {}); the engine's \
+                 TopicSelection treats include entries as GLOB PATTERNS \
+                 [U/kafka-backup/crates/kafka-backup-core/src/config.rs:334-343], so one named \
+                 entry would silently widen to a set and the drill would restore topics the \
+                 approved plan never named. GC18(c) rail 1 is a mandatory named-topic allowlist \
+                 with no wildcard; if the topic is genuinely called that, this build cannot \
+                 restore it.",
+                logweir_core::guard::GLOB_METACHARACTERS
+                    .iter()
+                    .collect::<String>()
+            ))
+            .into());
+        }
+    }
+
     // v0.1 implements `head` and refuses the other two, HERE, before anything
     // runs. `logweir_core::spec::Anchor`'s doc comment carries the full
     // reasoning and the measurement; the short version is that phase 4 honours

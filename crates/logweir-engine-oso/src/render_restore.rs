@@ -8,7 +8,7 @@
 //! [VERIFIED config.rs:776-778] reaching phase 6 would produce a no-op restore,
 //! exit 0, and a signed scorecard whose RTO was measured around nothing.
 use crate::render_backup::RenderError;
-use crate::yaml::yaml_scalar;
+use crate::yaml::{assert_no_unnamed_dollar_brace, reject_dollar_brace, yaml_scalar_checked};
 use logweir_core::engine::{RestorePlan, StorageUrl};
 
 /// The rendered restore document and the SHA-256 of the EXACT bytes that
@@ -18,6 +18,9 @@ use logweir_core::engine::{RestorePlan, StorageUrl};
 /// can prove the two are the same document.
 pub fn render_and_digest(plan: &RestorePlan) -> Result<(String, String), RenderError> {
     let doc = render(plan)?;
+    // **G-EXP**, post-render leg, BEFORE the digest — see
+    // `render_backup::render_and_digest` for why the order is the property.
+    assert_no_unnamed_dollar_brace(&doc)?;
     let digest = logweir_core::ids::sha256_prefixed(doc.as_bytes());
     Ok((doc, digest))
 }
@@ -35,9 +38,14 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // entry it found — an operator fixing `a]b` needs to know whether it is
     // the topic or the prefix that produced it.
     let sources: Vec<String> = plan.topic_mapping.keys().cloned().collect();
+    let targets: Vec<String> = plan.topic_mapping.values().cloned().collect();
+    // **G-EXP** ahead of **G-GLOB** on both sides — `${` is two glob
+    // metacharacters, and the reason an operator is given decides which fix
+    // they attempt (`crate::yaml::reject_dollar_brace`).
+    reject_dollar_brace(&sources)?;
+    reject_dollar_brace(&targets)?;
     logweir_core::guard::reject_glob_metacharacters(&sources)
         .map_err(RenderError::GlobMetacharacter)?;
-    let targets: Vec<String> = plan.topic_mapping.values().cloned().collect();
     logweir_core::guard::reject_glob_metacharacters(&targets)
         .map_err(RenderError::GlobMetacharacter)?;
 
@@ -46,21 +54,21 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     s.push_str("mode: restore\n");
     s.push_str(&format!(
         "backup_id: {}\n\n",
-        yaml_scalar(&plan.set.backup_id)
+        yaml_scalar_checked(&plan.set.backup_id)?
     ));
 
     s.push_str("target:\n  bootstrap_servers:\n");
     for b in &plan.target_bootstrap {
-        s.push_str(&format!("    - {}\n", yaml_scalar(b)));
+        s.push_str(&format!("    - {}\n", yaml_scalar_checked(b)?));
     }
     s.push_str("  topics:\n    include:\n");
     for src in plan.topic_mapping.keys() {
-        s.push_str(&format!("      - {}\n", yaml_scalar(src)));
+        s.push_str(&format!("      - {}\n", yaml_scalar_checked(src)?));
     }
     s.push('\n');
 
     s.push_str("storage:\n");
-    s.push_str(&render_storage_block(&plan.storage));
+    s.push_str(&render_storage_block(&plan.storage)?);
 
     s.push_str("restore:\n");
     // config.rs:768-770 — "Topic mapping (original -> target)". There is NO
@@ -69,7 +77,7 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // explicit entry per selected topic. Both sides go through `yaml_scalar`:
     // an operator-influenced topic name is exactly the kind of value GC4
     // cares about ("never emitted, at any value") — see that function's doc.
-    s.push_str(&render_topic_mapping_block(&plan.topic_mapping));
+    s.push_str(&render_topic_mapping_block(&plan.topic_mapping)?);
     // config.rs:860-863 — create_topics DEFAULTS TO FALSE ("safe default -
     // won't create topics unexpectedly"). A scratch target contains none of
     // the prefixed topics, so without this the restore has nothing to write to.
@@ -96,7 +104,7 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     // `yaml_scalar` for the same reason.
     s.push_str(&format!(
         "  checkpoint_state: {}\n",
-        yaml_scalar(&plan.checkpoint_state.display().to_string())
+        yaml_scalar_checked(&plan.checkpoint_state.display().to_string())?
     ));
     s.push_str(&format!(
         "  checkpoint_interval_secs: {}\n",
@@ -149,12 +157,18 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
 /// actually handed. A second, independently-formatted rendering of the same
 /// map would be free to drift from this one, and an auditor re-deriving the
 /// hash would then get a different answer than the drill published.
-pub fn render_topic_mapping_block(mapping: &std::collections::BTreeMap<String, String>) -> String {
+pub fn render_topic_mapping_block(
+    mapping: &std::collections::BTreeMap<String, String>,
+) -> Result<String, RenderError> {
     let mut s = String::from("  topic_mapping:\n");
     for (src, dst) in mapping {
-        s.push_str(&format!("    {}: {}\n", yaml_scalar(src), yaml_scalar(dst)));
+        s.push_str(&format!(
+            "    {}: {}\n",
+            yaml_scalar_checked(src)?,
+            yaml_scalar_checked(dst)?
+        ));
     }
-    s
+    Ok(s)
 }
 
 /// One arm per upstream `StorageBackendConfig` variant, field-for-field.
@@ -164,8 +178,8 @@ pub fn render_topic_mapping_block(mapping: &std::collections::BTreeMap<String, S
 /// `render_validation::render` so the two documents can never disagree about
 /// the archive: one arm set, one golden per backend. Every free-text field
 /// goes through `yaml_scalar`.
-pub(crate) fn render_storage_block(storage: &StorageUrl) -> String {
-    match storage {
+pub(crate) fn render_storage_block(storage: &StorageUrl) -> Result<String, RenderError> {
+    Ok(match storage {
         StorageUrl::S3 {
             bucket,
             prefix,
@@ -177,14 +191,14 @@ pub(crate) fn render_storage_block(storage: &StorageUrl) -> String {
             let mut b = String::new();
             b.push_str(&format!(
                 "  backend: s3\n  bucket: {}\n  prefix: {}\n",
-                yaml_scalar(bucket),
-                yaml_scalar(prefix)
+                yaml_scalar_checked(bucket)?,
+                yaml_scalar_checked(prefix)?
             ));
             if let Some(r) = region {
-                b.push_str(&format!("  region: {}\n", yaml_scalar(r)));
+                b.push_str(&format!("  region: {}\n", yaml_scalar_checked(r)?));
             }
             if let Some(e) = endpoint {
-                b.push_str(&format!("  endpoint: {}\n", yaml_scalar(e)));
+                b.push_str(&format!("  endpoint: {}\n", yaml_scalar_checked(e)?));
             }
             b.push_str(&format!(
                 "  path_style: {path_style}\n  allow_http: {allow_http}\n\n"
@@ -197,18 +211,18 @@ pub(crate) fn render_storage_block(storage: &StorageUrl) -> String {
             prefix,
         } => format!(
             "  backend: azure\n  account_name: {}\n  container_name: {}\n  prefix: {}\n\n",
-            yaml_scalar(account_name),
-            yaml_scalar(container_name),
-            yaml_scalar(prefix)
+            yaml_scalar_checked(account_name)?,
+            yaml_scalar_checked(container_name)?,
+            yaml_scalar_checked(prefix)?
         ),
         StorageUrl::Gcs { bucket, prefix } => format!(
             "  backend: gcs\n  bucket: {}\n  prefix: {}\n\n",
-            yaml_scalar(bucket),
-            yaml_scalar(prefix)
+            yaml_scalar_checked(bucket)?,
+            yaml_scalar_checked(prefix)?
         ),
         StorageUrl::Filesystem { path } => format!(
             "  backend: filesystem\n  path: {}\n\n",
-            yaml_scalar(&path.display().to_string())
+            yaml_scalar_checked(&path.display().to_string())?
         ),
-    }
+    })
 }

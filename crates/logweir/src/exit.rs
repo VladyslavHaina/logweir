@@ -27,3 +27,32 @@ impl From<ExitCode> for std::process::ExitCode {
         std::process::ExitCode::from(c as u8)
     }
 }
+
+/// [I9] Prints `refusal-reason=<TerminalState>` on STDOUT, as the process's
+/// FINAL stdout line, for exit 3 only.
+///
+/// # Why stdout, and why last
+///
+/// The pod log API has no stream selector: `GET /api/v1/namespaces/{ns}/pods/
+/// {pod}/log` returns the container's stdout and stderr interleaved into one
+/// stream with no marker saying which byte came from which, so **nothing a
+/// runner writes on stderr is distinguishable by a controller** (spec §7
+/// amendment 4; critique B H9). A refusal reason on stderr is therefore not a
+/// machine-readable channel at all — it is a string in a blob a human reads.
+/// Being LAST is the other half: a controller tailing the log reads the final
+/// line, so the reason must come after the `drill finished` tracing line and
+/// after any summary line, which is why the call sits at the end of
+/// `crate::drill::exiting` rather than at the refusal site.
+///
+/// The state is derived, never passed in: `logweir_core::guard::
+/// refusal_reason_line` owns the mapping from a refusal message to a terminal
+/// state, so a caller cannot invent a fourth state or spell an existing one
+/// differently. `logweir-core` does no I/O, which is why the `println!` is
+/// here and the string is there.
+///
+/// Rust's `Stdout` is a `LineWriter`, so the newline flushes; this shares the
+/// one global stdout handle with the tracing subscriber's writer, which is
+/// what makes "after the tracing line" an ordering and not a race.
+pub fn print_refusal_reason(message: &str) {
+    println!("{}", logweir_core::guard::refusal_reason_line(message));
+}

@@ -267,11 +267,23 @@ fn there_is_exactly_one_yaml_escaper() {
     /// function by name on purpose — a test that made naming the escaper in a
     /// comment a failure would be paid for by deleting the explanation, which
     /// is the opposite of what this pins.
+    ///
+    /// The token is `fn yaml_scalar(`, WITH the opening parenthesis, and Task
+    /// 3 sharpened it from the bare `fn yaml_scalar` for a reason worth
+    /// stating: Task 3 added `yaml_scalar_checked` in `src/yaml.rs`, which the
+    /// looser token counted as a second escaper. It is not one — it is a
+    /// **G-EXP** pre-check that delegates to the single escaper below, and
+    /// `tests/expansion.rs::every_renderer_calls_the_checked_escaper` is what
+    /// pins the other half (no renderer may call the unchecked
+    /// `yaml_scalar(` any more). Widening the expected count to 2 was the
+    /// alternative and was rejected: the number would then no longer mean
+    /// "there is one escaper", and a genuine copy of `yaml_scalar` would be
+    /// absorbed by the allowance.
     fn definitions(body: &str) -> usize {
         body.lines()
             .filter(|l| {
                 let t = l.trim_start();
-                !t.starts_with("//") && t.contains("fn yaml_scalar")
+                !t.starts_with("//") && t.contains("fn yaml_scalar(")
             })
             .count()
     }
@@ -312,7 +324,7 @@ fn there_is_exactly_one_yaml_escaper() {
     }
     assert_eq!(
         total, 1,
-        "exactly one `fn yaml_scalar` may exist under crates/logweir-engine-oso/src/"
+        "exactly one `fn yaml_scalar(` may exist under crates/logweir-engine-oso/src/"
     );
 }
 

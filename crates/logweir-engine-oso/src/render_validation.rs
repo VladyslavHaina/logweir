@@ -9,16 +9,52 @@
 //! and produces NO unknown-key warning list, so a key we get wrong here is
 //! dropped SILENTLY (spec §7.2(b)). The stdout+stderr readback of Task 12 does not
 //! cover this document.
+use crate::render_backup::RenderError;
 use crate::render_restore::render_storage_block;
-use crate::yaml::yaml_scalar;
+use crate::yaml::{assert_no_unnamed_dollar_brace, yaml_scalar_checked};
 use logweir_core::engine::RestorePlan;
 
-pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> String {
+/// The rendered validation document and the SHA-256 of the EXACT bytes a
+/// caller will write to disk.
+///
+/// # This function did not exist before Task 3, and its absence was the hole
+///
+/// `render_restore` and `render_backup` both had a `render_and_digest`; this
+/// renderer had only `render`. So the post-render **G-EXP** sweep, which lives
+/// in `render_and_digest` by design (a digest may only ever be taken over a
+/// document that passed), would have covered two of the three documents and
+/// missed a third of the surface — critique A F11. The body is deliberately
+/// the same shape as `render_restore::render_and_digest`'s, in the same order:
+/// render, sweep, hash.
+///
+/// `render` remains `pub` because its callers are this crate's test files
+/// (`tests/render.rs`, `tests/render_equality.rs`), which pin the document's
+/// bytes and its goldens; every PRODUCTION caller goes through this function.
+/// `DataEngine::validation_run` has no override at all today
+/// (`logweir-core/src/engine.rs:317`), so there is no production caller yet to
+/// convert — the sweep is here so that whoever lands that override cannot
+/// reach a digest without passing it.
+pub fn render_and_digest(
+    plan: &RestorePlan,
+    run_id: &str,
+    triggered_by: Option<&str>,
+) -> Result<(String, String), RenderError> {
+    let doc = render(plan, run_id, triggered_by)?;
+    assert_no_unnamed_dollar_brace(&doc)?;
+    let digest = logweir_core::ids::sha256_prefixed(doc.as_bytes());
+    Ok((doc, digest))
+}
+
+pub fn render(
+    plan: &RestorePlan,
+    run_id: &str,
+    triggered_by: Option<&str>,
+) -> Result<String, RenderError> {
     let mut s = String::new();
     s.push_str("# Rendered by logweir. Do not edit.\n");
     s.push_str(&format!(
         "backup_id: {}\n\n",
-        yaml_scalar(&plan.set.backup_id)
+        yaml_scalar_checked(&plan.set.backup_id)?
     ));
 
     // Same per-variant rendering as render_restore.rs, and for the same reason:
@@ -26,11 +62,11 @@ pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> S
     // fields per variant, so one shape for all four backends fails the config
     // load with a serde error the unknown-key readback cannot see.
     s.push_str("storage:\n");
-    s.push_str(&render_storage_block(&plan.storage));
+    s.push_str(&render_storage_block(&plan.storage)?);
 
     s.push_str("target:\n  bootstrap_servers:\n");
     for b in &plan.target_bootstrap {
-        s.push_str(&format!("    - {}\n", yaml_scalar(b)));
+        s.push_str(&format!("    - {}\n", yaml_scalar_checked(b)?));
     }
     s.push('\n');
 
@@ -69,11 +105,14 @@ pub fn render(plan: &RestorePlan, run_id: &str, triggered_by: Option<&str>) -> S
     // document, indistinguishable from the honest one v0.1 publishes.
     let evidence_prefix = format!("logweir/{run_id}/engine-validation");
     s.push_str("evidence:\n  formats:\n    - json\n  storage:\n");
-    s.push_str(&format!("    prefix: {}\n", yaml_scalar(&evidence_prefix)));
+    s.push_str(&format!(
+        "    prefix: {}\n",
+        yaml_scalar_checked(&evidence_prefix)?
+    ));
     s.push_str("    retention_days: 2555\n");
 
     if let Some(t) = triggered_by {
-        s.push_str(&format!("\ntriggered_by: {}\n", yaml_scalar(t)));
+        s.push_str(&format!("\ntriggered_by: {}\n", yaml_scalar_checked(t)?));
     }
-    s
+    Ok(s)
 }

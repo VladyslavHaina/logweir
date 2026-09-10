@@ -40,23 +40,47 @@
 //! up their own cluster needs a document Logweir produced from a plan the
 //! guards accepted, digested so the bytes that ran can be re-derived.
 use crate::render_restore::render_storage_block;
-use crate::yaml::yaml_scalar;
+use crate::yaml::{assert_no_unnamed_dollar_brace, reject_dollar_brace, yaml_scalar_checked};
 use logweir_core::engine::{AuthRender, BackupPlan};
 
 /// Why a renderer has an error type at all: two of GC18(c)'s rails are
 /// REFUSALS, and a refusal that is not in the return type is a refusal
 /// somebody deletes.
 ///
-/// Deliberately just these two variants. Both renderers share it —
-/// `render_restore::render` returns the same type for its G-GLOB arm — so a
-/// third variant is a change to every call site in the workspace, and neither
-/// rail needs one.
+/// All THREE renderers share it — `render_restore::render` and
+/// `render_validation::render` return the same type — so a new variant is a
+/// change to every call site in the workspace and is added only when a rail
+/// needs one. Task 2 shipped the first two; Task 3 adds the three below,
+/// because each is a distinct refusal an operator has to act on differently:
+/// a `${` in an INPUT VALUE names the field to fix, a `${…}` in the FINISHED
+/// DOCUMENT names a sequence no input could explain, and an unsupported auth
+/// mode names a capability this build does not have.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RenderError {
     #[error("topic include entry `{0}` contains a glob metacharacter (one of * ? [ ] {{ }}); the engine's TopicSelection treats include entries as glob patterns, so a single name would silently widen to a set")]
     GlobMetacharacter(String),
     #[error("the rendered backup document names forbidden key `{0}`, which Global Constraint 4 forbids at any value")]
     ForbiddenKey(String),
+    /// **G-EXP**, per-value leg. The payload is the offending INPUT VALUE, so
+    /// a caller can name the field; the message deliberately does not
+    /// interpolate it, because the same wording has to be right for a topic,
+    /// a bootstrap server, a storage prefix and a checkpoint path.
+    #[error("input value contains \"${{\", which the engine expands textually BEFORE parsing (U:kafka-backup-cli/src/commands/config.rs:1-34) — the rendered bytes are a template, not the executed document, so the plan hash would not cover what runs")]
+    DollarBrace(String),
+    /// **G-EXP**, post-render leg. The payload is the whole `${…}` sequence as
+    /// found, read to its closing `}` or to the end of its physical line.
+    #[error("the rendered document contains the unnamed placeholder `{0}`; the engine substitutes every ${{NAME}} textually before the document is parsed and replaces an UNSET name with the empty string behind a warning, so the only sequences permitted in a document logweir hashed are the two named password placeholders in `crate::yaml`")]
+    UnnamedPlaceholder(String),
+    /// An auth mode this build cannot render. A TYPED REFUSAL and never a
+    /// `todo!()`: the arm is reachable from a public enum variant, and Task 4
+    /// wires backup runs before Task 6 fills the SASL block in, so the window
+    /// in which a plan asking for SCRAM meets a renderer that cannot write it
+    /// is real. A panic there would be an unrecoverable abort where Global
+    /// Constraint 11 requires a refusal, and a silent fallthrough to the
+    /// `Plaintext` arm would be an authentication DOWNGRADE performed on the
+    /// operator's behalf.
+    #[error("auth mode `{0}` is not supported by this build; the SASL block is Task 6 (interface I1). A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named SCRAM would be a downgrade performed on the operator's behalf")]
+    UnsupportedAuthMode(String),
 }
 
 /// The rendered backup document and the SHA-256 of the EXACT bytes a caller
@@ -68,6 +92,11 @@ pub enum RenderError {
 pub fn render_and_digest(plan: &BackupPlan) -> Result<(String, String), RenderError> {
     let doc = render(plan)?;
     scan_rendered_document(&doc)?;
+    // **G-EXP**, post-render leg, and BEFORE the digest — never after. The
+    // whole point of the guard is that the hashed bytes are the executed
+    // bytes, so a sweep that ran after `sha256_prefixed` would have handed the
+    // caller a digest over a template and only then refused.
+    assert_no_unnamed_dollar_brace(&doc)?;
     let digest = logweir_core::ids::sha256_prefixed(doc.as_bytes());
     Ok((doc, digest))
 }
@@ -103,6 +132,11 @@ pub fn scan_rendered_document(doc: &str) -> Result<(), RenderError> {
 }
 
 pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
+    // **G-EXP** before **G-GLOB**, and the order is load-bearing: `${`
+    // contains two glob metacharacters, so without this line `orders${X}` is
+    // refused as a PATTERN and the operator is sent to fix the wrong thing.
+    // See `crate::yaml::reject_dollar_brace`.
+    reject_dollar_brace(&plan.topics)?;
     // GC18(c) rail 1 / **G-GLOB**. FIRST, before a single byte is pushed: a
     // renderer that refuses halfway has already decided what the document
     // would have said, and the temptation next time is to keep the prefix.
@@ -112,32 +146,46 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
     let mut s = String::new();
     s.push_str("# Rendered by logweir. Do not edit; regenerate with `logweir backup run`.\n");
     s.push_str("mode: backup\n");
-    s.push_str(&format!("backup_id: {}\n\n", yaml_scalar(&plan.backup_id)));
+    s.push_str(&format!(
+        "backup_id: {}\n\n",
+        yaml_scalar_checked(&plan.backup_id)?
+    ));
 
     s.push_str("source:\n  bootstrap_servers:\n");
     for b in &plan.source_bootstrap {
-        s.push_str(&format!("    - {}\n", yaml_scalar(b)));
+        s.push_str(&format!("    - {}\n", yaml_scalar_checked(b)?));
     }
     // A NAMED allowlist. `exclude` is deliberately absent: an exclude list is
     // only meaningful against a wider include, and the rail above is that
     // there is no wider include.
     s.push_str("  topics:\n    include:\n");
     for t in &plan.topics {
-        s.push_str(&format!("      - {}\n", yaml_scalar(t)));
+        s.push_str(&format!("      - {}\n", yaml_scalar_checked(t)?));
     }
     // The SASL block. `Plaintext` emits NOTHING AT ALL rather than a
     // `security_protocol: PLAINTEXT` line, because the engine's own default is
     // plaintext and an explicit key here would be a fourth thing to keep in
     // step with upstream's spelling for no behavioural gain. The
     // `ScramSha512` arm — the username, the mechanism and the TLS switch, and
-    // never the password — is Task 6's (interface **I1**); it is `todo!()`
-    // rather than a silently-plaintext fallthrough, because a plan that ASKED
-    // for SCRAM and got an unauthenticated document would be a downgrade
-    // performed on the operator's behalf.
+    // never the password — is Task 6's (interface **I1**).
+    //
+    // A TYPED REFUSAL, not a `todo!()` and not a fallthrough. Task 2 shipped
+    // `todo!()` here and Task 2's own review carried it forward as F1: this
+    // was the workspace's only shipped `todo!()`, on an arm reachable from a
+    // public enum variant, and Task 4 wires backup RUNS before Task 6 fills
+    // this block in — so the window in which a plan asking for SCRAM meets a
+    // renderer that cannot write it is real, not hypothetical. Global
+    // Constraint 11 says a refusal exits with its contract code; a panic
+    // aborts instead and prints no `refusal-reason=` line at all. The other
+    // wrong answer, falling through to `Plaintext`, is worse than the panic:
+    // it would emit a document the engine runs unauthenticated, from a plan
+    // that named SCRAM.
     match &plan.source_auth {
         AuthRender::Plaintext => {}
         AuthRender::ScramSha512 { .. } => {
-            todo!("the SASL block is Task 6 (I1); this task renders only the Plaintext arm")
+            return Err(RenderError::UnsupportedAuthMode(
+                "sasl-scram-sha-512".to_string(),
+            ))
         }
     }
     s.push('\n');
@@ -146,12 +194,12 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
     // The same shared per-variant function both other renderers use, so the
     // three documents can never disagree about the archive. It already ends
     // with a blank line.
-    s.push_str(&render_storage_block(&plan.storage));
+    s.push_str(&render_storage_block(&plan.storage)?);
 
     s.push_str("backup:\n");
     s.push_str(&format!(
         "  compression: {}\n",
-        yaml_scalar(&plan.compression)
+        yaml_scalar_checked(&plan.compression)?
     ));
     // FALSE, pinned: `continuous: true` makes `backup` a long-running tail of
     // the source cluster with no terminal exit code, and every phase in this

@@ -371,6 +371,16 @@ fn report_with(
     // the set the pre-Task-11 `_ =>` arm carried — exits 1, 3 and 4, the three
     // codes on which the PagerDuty route used to say nothing at all.
     let mut failure_message: Option<String> = None;
+    // [I9] The GuardRefusal's OWN message, not `DrillError`'s `Display`. The
+    // enum wraps it as `guard: plan refused by the admission guard: <message>`
+    // (`DrillError::Guard`'s `#[error]` and `GuardRefusal`'s), and
+    // `logweir_core::guard::terminal_state` matches a PREFIX — so handing it
+    // the wrapped form would classify every credential refusal as a plain
+    // `GuardRefused` and the state would never be reported at all.
+    let refusal_message: Option<String> = match &outcome {
+        Err(DrillError::Guard(refusal)) => Some(refusal.0.clone()),
+        _ => None,
+    };
     if sc.is_none() {
         // The no-scorecard branch: exits 1, 3 and 4. This replaces the `_ =>`
         // arm of the `3e448da` inner `match &e` — there is no `_ =>` arm any
@@ -420,7 +430,7 @@ fn report_with(
             sink,
         );
     }
-    exiting(run_id, code)
+    exiting(run_id, code, refusal_message.as_deref())
 }
 
 /// Everything a terminal path owes the outside world, whether or not a
@@ -459,7 +469,7 @@ fn publish(args: &RunArgs, run_id: &str, code: ExitCode, sc: Option<&Scorecard>)
 /// The log line is the one place that distinction survives into a log
 /// aggregator. Documenting it for operators is Tasks 22/23's job; emitting it
 /// is this one's.
-fn exiting(run_id: &str, code: ExitCode) -> ExitCode {
+fn exiting(run_id: &str, code: ExitCode, refusal_message: Option<&str>) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
         ExitCode::Operational => "logweir could not do its job; NO scorecard was written",
@@ -468,6 +478,20 @@ fn exiting(run_id: &str, code: ExitCode) -> ExitCode {
         ExitCode::SigningOrLock => "the drill ran but its result is unattested; nothing uploaded",
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "drill finished");
+    // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout —
+    // a controller tailing the pod log reads the final line, and the pod log
+    // API has no stream selector, so stderr would not be distinguishable at
+    // all (`crate::exit::print_refusal_reason`'s doc comment carries the
+    // measurement). Global Constraint 11: EVERY guard refusal prints it.
+    //
+    // `unwrap_or("")` is the fail-safe direction, not a shrug: `GuardRefused`
+    // is reachable only from `DrillError::Guard`, which always carries a
+    // message, and an empty message classifies as `GuardRefused` — so a future
+    // path that reaches exit 3 without one still satisfies the contract
+    // instead of printing nothing.
+    if code == ExitCode::GuardRefused {
+        crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+    }
     code
 }
 
@@ -737,7 +761,84 @@ fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
 /// that phases 7 and 8 are wired in the scoring order, and a `Ctx` built from
 /// doubles is the only way to reach that check without a live broker and the
 /// engine binary (which belong to Task 21c).
+/// The two environment variables through which a projected SASL password
+/// reaches this process. Named here, once, so the runner's read and Task 6's
+/// rendered `${…}` placeholder cannot drift
+/// (`logweir_engine_oso::yaml::PLACEHOLDER_SOURCE_PASSWORD`).
+pub const SOURCE_PASSWORD_VAR: &str = "LOGWEIR_SOURCE_PASSWORD";
+/// The target cluster's twin of `SOURCE_PASSWORD_VAR`.
+pub const TARGET_PASSWORD_VAR: &str = "LOGWEIR_TARGET_PASSWORD";
+
+/// Interface **I11**, the runner's half: validate every projected password
+/// this process can see, at the moment it reads it, and REFUSE an
+/// unrenderable one before anything runs.
+///
+/// # Why the runner and not the controller
+///
+/// `weirkeeper` holds no `get` on Secrets anywhere (spec §9), so it never sees
+/// the projected value and has nothing to validate. Spec §7 amendment 4 —
+/// "the runner refuses, not the controller" — settles it in writing, and
+/// Task 20 forbids the controller re-using the predicate. This is the only
+/// place in the workspace that calls `credential_is_renderable`.
+///
+/// # Why here, before `context`
+///
+/// Global Constraint 11 reserves exit 3 for "refused by a guard, BEFORE
+/// anything runs". This runs ahead of `context`, so no broker client and no
+/// object-store handle is constructed on the refusal path, and ahead of phase
+/// 0, so the refusal cannot be confused with a spec refusal.
+///
+/// # Scope, precisely
+///
+/// It validates the variables that are PRESENT. Nothing in tag 1's
+/// `DrillSpec` can ask for SASL — `context` hardcodes
+/// `AuthConfig::Plaintext` and says why — so a password in the environment is
+/// today either a projection made in advance of Task 6 or a misconfiguration,
+/// and in both cases a value that cannot be substituted into pre-parse text is
+/// a fact worth refusing on rather than carrying into a run. **Task 6 wires
+/// the value's CONSUMER** (the rendered SASL block and the engine's own
+/// environment); it does not need to repeat this check, and repeating it would
+/// be harmless — the predicate is pure.
+///
+/// A non-UTF-8 value is refused, not skipped: it cannot be substituted into a
+/// text document at all, and `std::env::var`'s `NotUnicode` is exactly the
+/// case a bare `if let Ok(..)` would silently admit.
+fn check_projected_credentials() -> Result<(), DrillError> {
+    for var in [SOURCE_PASSWORD_VAR, TARGET_PASSWORD_VAR] {
+        let secret = match std::env::var(var) {
+            Ok(v) => v,
+            Err(std::env::VarError::NotPresent) => continue,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(logweir_core::guard::GuardRefusal(format!(
+                    "{}: the value projected into `{var}` is not valid UTF-8, so it cannot be \
+                     substituted into the engine's config text at all. The refusal names the \
+                     variable and never the value.",
+                    logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
+                ))
+                .into())
+            }
+        };
+        if let Err(refusal) = logweir_core::guard::credential_is_renderable(&secret) {
+            // The message OPENS with the terminal state, which is what
+            // `logweir_core::guard::terminal_state` matches on and therefore
+            // what `refusal-reason=CredentialNotRenderable` depends on. The
+            // refusal's own `Display` names the character class and is a pure
+            // function of that class, so no fragment of the secret can reach
+            // this string.
+            return Err(logweir_core::guard::GuardRefusal(format!(
+                "{}: {refusal} (projected into `{var}`)",
+                logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 pub fn execute(args: &RunArgs, run_id: &str) -> Result<Scorecard, DrillError> {
+    // I11, and BEFORE `context`: no client of any kind is constructed on this
+    // refusal path.
+    check_projected_credentials()?;
     let c = context(args)?;
     execute_with(args, run_id, &c)
 }
@@ -777,7 +878,7 @@ pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, 
     let admitted = record(&mut sc, 0, "admit", || {
         phase0_admit::run(&c.spec, &c.spec_text, &c.allowed, reader)
     })?;
-    sc.target = target_info(&c.spec, &admitted);
+    sc.target = target_info(&c.spec, &admitted)?;
     assert_engine_identity(&c.engine.id())?;
 
     // 1
@@ -1393,20 +1494,32 @@ fn source_info(facts: &logweir_core::engine::BackupSetFacts) -> SourceInfo {
     }
 }
 
-fn target_info(spec: &DrillSpec, admitted: &phase0_admit::Admitted) -> TargetInfo {
-    TargetInfo {
+/// Fallible only because of **G-EXP**: `render_topic_mapping_block` now
+/// escapes through `yaml_scalar_checked`, which REFUSES a `${`. The refusal is
+/// unreachable from here — `phase0_admit::run` has already refused a `${` in
+/// any selected topic and in `target.topic_mapping_prefix`, and
+/// `admitted.topic_mapping` is built from exactly those two — so this is a
+/// fail-closed propagation rather than a live path. It is a `?` and not an
+/// `expect`: an unreachable refusal that becomes reachable through somebody
+/// else's edit must exit 3 with its `refusal-reason=` line, not abort the
+/// process.
+fn target_info(
+    spec: &DrillSpec,
+    admitted: &phase0_admit::Admitted,
+) -> Result<TargetInfo, DrillError> {
+    let block =
+        logweir_engine_oso::render_restore::render_topic_mapping_block(&admitted.topic_mapping)
+            .map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
+    Ok(TargetInfo {
         cluster_id: admitted.target_cluster_id.clone(),
         marker_topic: spec.target.marker_topic.clone(),
         topic_mapping_prefix: spec.target.topic_mapping_prefix.clone(),
         // sha256 over the topic_mapping block AS RENDERED into restore.yaml —
         // the same function that renders it, so the hash and the bytes the
         // engine was handed cannot drift.
-        topic_mapping_sha256: logweir_core::ids::sha256_prefixed(
-            logweir_engine_oso::render_restore::render_topic_mapping_block(&admitted.topic_mapping)
-                .as_bytes(),
-        ),
+        topic_mapping_sha256: logweir_core::ids::sha256_prefixed(block.as_bytes()),
         topic_mapping_entries: admitted.topic_mapping.len() as u32,
-    }
+    })
 }
 
 fn sample_info(
@@ -2227,7 +2340,11 @@ mod tests {
         ];
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
-            assert_eq!(exiting("01TEST", c), c, "exiting must not alter the code");
+            assert_eq!(
+                exiting("01TEST", c, None),
+                c,
+                "exiting must not alter the code"
+            );
             seen.push(c as u8);
         }
         seen.sort_unstable();

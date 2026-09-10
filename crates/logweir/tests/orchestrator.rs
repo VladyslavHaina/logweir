@@ -816,6 +816,7 @@ fn each_phases_result_reaches_the_signed_document() {
                     .into_iter()
                     .collect()
             )
+            .expect("G-EXP: the fixture mapping holds no `${`")
             .as_bytes()
         ),
         "the hash must cover the block AS RENDERED into restore.yaml"

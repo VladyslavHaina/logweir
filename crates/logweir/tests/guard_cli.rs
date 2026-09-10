@@ -57,3 +57,172 @@ fn an_unmapped_selected_topic_exits_3_on_the_mapping_check_not_on_a_dead_broker(
         "must fail on the mapping check, not on an unreachable broker: {e}"
     );
 }
+
+// ------------------------------------------------- Task 2 review carry F2
+// **G-GLOB and G-EXP at phase 0.**
+//
+// Both properties were already enforced by `render_restore::render`. That is
+// not where a plan gets REFUSED. A wildcard such as `orders*` in a spec was
+// admitted at phase 0 and refused only in `preflight` — at phase 5, as
+// `EngineError::Operational`, which is exit **1** with no `refusal-reason=`
+// line — where Global Constraint 11 reserves exit 3 for "refused by a guard,
+// before anything runs" and requires the reason line on every guard refusal.
+//
+// Ruling R-E (`logweir-engine-oso/src/engine.rs:243-250`) is not reopened: a
+// renderer refusal REACHED AT PHASE 5 is exit 1, because by then phases 0-5
+// have run. The defect was the missing phase-0 arm, and these two tests are
+// what stop it being deleted again.
+
+/// `(exit_code, stdout_text, stderr_text)`, with the code read from
+/// `Command::status()` and both streams captured into real FILES — no pipe
+/// carries any of the three (STANDING RULE 20).
+fn run_with_spec_capturing_streams(spec: &str) -> (Option<i32>, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("drill.yaml");
+    std::fs::write(&p, spec).unwrap();
+    let out_path = dir.path().join("stdout.txt");
+    let err_path = dir.path().join("stderr.txt");
+    let out_file = std::fs::File::create(&out_path).unwrap();
+    let err_file = std::fs::File::create(&err_path).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_logweir"))
+        .args(["drill", "run", "--spec"])
+        .arg(&p)
+        .args([
+            "--approval",
+            "../../examples/approval.json",
+            "--approver-key",
+            "../../e2e/fixtures/signed/public.pem",
+            "--allowed-clusters",
+            "../../examples/allowed-clusters.json",
+            "--signing-key",
+            "../../e2e/fixtures/signed/signing.pem",
+        ])
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .env_remove("LOGWEIR_TARGET_PASSWORD")
+        .stdout(std::process::Stdio::from(out_file))
+        .stderr(std::process::Stdio::from(err_file))
+        .status()
+        .unwrap();
+    (
+        status.code(),
+        std::fs::read_to_string(&out_path).unwrap(),
+        std::fs::read_to_string(&err_path).unwrap(),
+    )
+}
+
+/// The last non-empty stdout line — what a controller tailing `pods/log`
+/// reads.
+fn last_line(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .next_back()
+        .unwrap_or("")
+}
+
+fn spec_with_topics(topics: &str) -> String {
+    std::fs::read_to_string("../../examples/drill.yaml")
+        .unwrap()
+        .replace("topics: [orders, payments]", topics)
+}
+
+/// **G-GLOB at phase 0.** A topic carrying a glob metacharacter is refused
+/// with no broker, no bucket and no engine — the fact is knowable from the
+/// spec text alone, which is exactly what exit 3 means.
+///
+/// Upstream's `TopicSelection.include` "supports glob patterns"
+/// [U/kafka-backup/crates/kafka-backup-core/src/config.rs:334-343], so one
+/// named entry silently widens to a set and the drill restores topics the
+/// approved plan never named. All six metacharacters, closing halves included.
+#[test]
+fn a_globbed_topic_in_the_spec_exits_3_at_phase_0_with_its_reason_line() {
+    for bad in ["orders*", "orders?", "events[1]", "a]b"] {
+        let (code, stdout, stderr) =
+            run_with_spec_capturing_streams(&spec_with_topics(&format!("topics: [\"{bad}\"]")));
+        assert_eq!(
+            code,
+            Some(3),
+            "`{bad}` must be refused at phase 0 (exit 3), not carried to phase 5's exit 1: \
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert_eq!(
+            last_line(&stdout),
+            "refusal-reason=GuardRefused",
+            "`{bad}`: a guard refusal owes its reason line:\n{stdout}"
+        );
+        // The REASON, not only the code: with no broker up, a bare
+        // `assert_eq!(code, 3)` would also pass if this arm were deleted and
+        // some later guard happened to refuse. The message must name the glob.
+        assert!(
+            stderr.contains("glob metacharacter") && stderr.contains(bad),
+            "`{bad}`: the refusal must name the glob and the entry:\n{stderr}"
+        );
+    }
+    // The mapped-target side too: `target.topic_mapping_prefix` is the half an
+    // operator is more likely to template, and it reaches an include-style
+    // position through `restore.topic_mapping`.
+    let spec = std::fs::read_to_string("../../examples/drill.yaml")
+        .unwrap()
+        .replace(
+            "topic_mapping_prefix: \"drill-\"",
+            "topic_mapping_prefix: \"drill-*\"",
+        );
+    let (code, stdout, stderr) = run_with_spec_capturing_streams(&spec);
+    assert_eq!(code, Some(3), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        last_line(&stdout),
+        "refusal-reason=GuardRefused",
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("glob metacharacter") && stderr.contains("mapped target"),
+        "the prefix side must be named as the MAPPED TARGET, so the operator knows \
+         which of the two to fix:\n{stderr}"
+    );
+}
+
+/// **G-EXP at phase 0.** A `${` in a spec topic is refused before anything
+/// runs, and refused as an EXPANSION rather than as a glob — `${` contains two
+/// glob metacharacters, so the order of the two arms decides which fix the
+/// operator attempts.
+///
+/// The hazard needs no attacker: the engine expands `${NAME}` over the whole
+/// config as raw text before parsing and replaces an UNSET name with the empty
+/// string behind a warning
+/// [U:crates/kafka-backup-cli/src/commands/config.rs:1-34], so `orders${X}`
+/// becomes `orders` and the drill restores a different topic than the plan
+/// named — while `plan_hash` still matches, because the hashed bytes are a
+/// template and the executed bytes are its expansion.
+#[test]
+fn a_dollar_brace_in_a_spec_topic_exits_3_at_phase_0_naming_the_expansion() {
+    let (code, stdout, stderr) =
+        run_with_spec_capturing_streams(&spec_with_topics("topics: [\"orders${X}\"]"));
+    assert_eq!(
+        code,
+        Some(3),
+        "a `${{` in a spec topic must be refused before anything runs: stdout:\n{stdout}\n\
+         stderr:\n{stderr}"
+    );
+    assert_eq!(
+        last_line(&stdout),
+        "refusal-reason=GuardRefused",
+        "{stdout}"
+    );
+    // THE REASON IS LOAD-BEARING HERE, and this assertion is what makes the
+    // arm's own mutant killable. `orders${X}` also trips the G-GLOB arm two
+    // lines below it — `{` and `}` are glob metacharacters — so deleting the
+    // G-EXP arm still yields exit 3 and still prints
+    // `refusal-reason=GuardRefused`. Only the message distinguishes them, and
+    // the message is what the operator acts on: escaping a brace does not
+    // stop an expansion.
+    assert!(
+        stderr.contains("expands textually BEFORE the"),
+        "the refusal must name the EXPANSION, not the glob:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("glob metacharacter"),
+        "G-EXP must be checked before G-GLOB, or the operator is sent to escape a brace:\n\
+         {stderr}"
+    );
+    assert!(stderr.contains("orders${X}"), "{stderr}");
+}

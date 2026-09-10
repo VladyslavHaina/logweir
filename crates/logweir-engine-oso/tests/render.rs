@@ -50,6 +50,7 @@ fn validation_yaml_matches_the_golden() {
     insta::assert_snapshot!(
         "validation_yaml",
         render_validation::render(&plan(), "01J9X2QK7C4V0R8YB3ZP6MTS5A", Some("KPMG Q3"))
+            .expect("G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`")
     );
 }
 
@@ -109,6 +110,7 @@ fn validation_yaml_matches_the_golden_with_no_triggered_by() {
     insta::assert_snapshot!(
         "validation_yaml_no_triggered_by",
         render_validation::render(&plan(), "01J9X2QK7C4V0R8YB3ZP6MTS5A", None)
+            .expect("G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`")
     );
 }
 
@@ -124,7 +126,8 @@ fn validation_yaml_matches_the_golden_with_no_triggered_by() {
 fn neither_document_ever_contains_a_forbidden_key() {
     for doc in [
         render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter"),
-        render_validation::render(&plan(), "r", None),
+        render_validation::render(&plan(), "r", None)
+            .expect("G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`"),
     ] {
         assert_no_forbidden_key_line(&doc);
     }
@@ -215,8 +218,12 @@ fn forbidden_keys_are_unreachable_across_every_storage_variant_and_plan_shape() 
                     for doc in [
                         render_restore::render(&p)
                             .expect("G-GLOB: this fixture holds no glob metacharacter"),
-                        render_validation::render(&p, "run-id", None),
-                        render_validation::render(&p, "run-id", Some("someone")),
+                        render_validation::render(&p, "run-id", None).expect(
+                            "G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`",
+                        ),
+                        render_validation::render(&p, "run-id", Some("someone")).expect(
+                            "G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`",
+                        ),
                     ] {
                         assert_no_forbidden_key_line(&doc);
                     }
@@ -346,7 +353,8 @@ fn forbidden_keys_survive_adversarial_string_content() {
     for (label, p, run_id, triggered_by) in cases {
         let restore_doc =
             render_restore::render(&p).expect("G-GLOB: this fixture holds no glob metacharacter");
-        let validation_doc = render_validation::render(&p, run_id, triggered_by);
+        let validation_doc = render_validation::render(&p, run_id, triggered_by)
+            .expect("G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`");
 
         assert_no_forbidden_key_line(&restore_doc);
         assert_no_forbidden_key_line(&validation_doc);
@@ -404,7 +412,8 @@ fn topic_mapping_is_one_explicit_entry_per_selected_topic() {
 
 #[test]
 fn validation_yaml_points_evidence_storage_at_the_per_run_logweir_prefix() {
-    let doc = render_validation::render(&plan(), "01J9X2QK7C4V0R8YB3ZP6MTS5A", None);
+    let doc = render_validation::render(&plan(), "01J9X2QK7C4V0R8YB3ZP6MTS5A", None)
+        .expect("G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`");
     // Review fix ("FIX 1"): the whole composed value is one `yaml_scalar`
     // call, so it is rendered as a single double-quoted scalar.
     assert!(doc.contains("prefix: \"logweir/01J9X2QK7C4V0R8YB3ZP6MTS5A/engine-validation\""));
