@@ -180,6 +180,10 @@ fn a_successful_restore_prints_three_keys_and_uploads_the_offset_report() {
 /// It cleans up after itself with `kafka-topics --delete`, by exact name.
 /// Nothing else in the suite would: `delete_all_drill_topics` is scoped to the
 /// `drill-` prefix, and phase 9 deliberately leaves these behind.
+///
+/// Cleanup is a `Drop` guard, `RestoredBrokerState`, so it runs on EVERY exit
+/// path including a panicking assertion. See that type for why the alternative
+/// — never deleting the marker topic — is not open to this row.
 #[test]
 fn a_new_topic_restore_names_its_topics_and_tears_nothing_down() {
     let mut spec = spec_default();
@@ -196,37 +200,39 @@ fn a_new_topic_restore_names_its_topics_and_tears_nothing_down() {
         point_in_time.as_str().expect("an RFC 3339 window end")
     ))
     .expect("a one-field restore block");
+    // The expected names come from the PRODUCT's own rule — the spec goes
+    // through the very `DrillSpec` the binary parses and the very
+    // `target_topic_prefix` phase 0 maps through, which for this spec (mode
+    // `newTopic`, no `topic_naming`) is `default_topic_prefix` of the recovery
+    // point. Fix round 1, F5a: this was derived by `replace(['-', ':'], "")`
+    // plus `replace(".000", "")` over the RFC 3339 string, and `harness::rfc3339`
+    // emits `SecondsFormat::Millis` UNCONDITIONALLY, so the guard stripped a
+    // literal `.000` that is present about one run in a thousand while the
+    // product formats `%Y%m%dT%H%M%SZ` and never emits a fraction. A test that
+    // re-implements the rule it is checking asserts a property of itself.
+    let parsed: logweir_core::spec::DrillSpec = serde_yaml::from_value(spec.clone())
+        .expect("the harness spec is the one the binary parses, as a DrillSpec");
+    let prefix = logweir_core::spec::target_topic_prefix(&parsed);
+    let expected: Vec<String> = ["orders", "payments"]
+        .iter()
+        .map(|t| format!("{prefix}{t}"))
+        .collect();
+
+    // Armed BEFORE the marker is deleted, so even a panic inside
+    // `delete_marker_topic` itself puts the broker back.
+    let _restored = RestoredBrokerState {
+        targets: expected.clone(),
+    };
     // `newTopic` skips the marker check, so prove it by removing the marker.
     delete_marker_topic();
 
-    let stamp = point_in_time
-        .as_str()
-        .expect("an RFC 3339 window end")
-        .replace(['-', ':'], "")
-        .replace(".000", "");
-    let expected: Vec<String> = ["orders", "payments"]
-        .iter()
-        .map(|t| format!("restore-{stamp}-{t}"))
-        .collect();
-
     let r = drill_run(&spec);
-    let cleanup = || {
-        for t in &expected {
-            let _ = kafka_topics(&[
-                "--bootstrap-server",
-                "kafka-broker-1:9094",
-                "--delete",
-                "--topic",
-                t,
-            ]);
-        }
-        recreate_marker_topic();
-    };
-    if r.out.status.code() != Some(0) {
-        let err = r.out.stderr_utf8();
-        cleanup();
-        panic!("a newTopic restore must pass with no marker topic:\n{err}");
-    }
+    assert_eq!(
+        r.out.status.code(),
+        Some(0),
+        "a newTopic restore must pass with no marker topic:\n{}",
+        r.out.stderr_utf8()
+    );
 
     // 1 — the names.
     for t in &expected {
@@ -240,7 +246,7 @@ fn a_new_topic_restore_names_its_topics_and_tears_nothing_down() {
     let sc = read_scorecard(&r);
     assert_eq!(
         sc["target"]["topic_mapping_prefix"].as_str(),
-        Some(format!("restore-{stamp}-").as_str()),
+        Some(prefix.as_str()),
         "the scorecard records the prefix this run mapped through, not the scratch one"
     );
 
@@ -257,7 +263,6 @@ fn a_new_topic_restore_names_its_topics_and_tears_nothing_down() {
     let again = drill_run(&spec);
     let e = again.out.stderr_utf8();
     let code = again.out.status.code();
-    cleanup();
     assert_eq!(code, Some(3), "the second run must be REFUSED:\n{e}");
     assert!(
         e.contains("already exists on cluster")
@@ -267,4 +272,47 @@ fn a_new_topic_restore_names_its_topics_and_tears_nothing_down() {
             ),
         "spec §6.1's own sentence, with the cluster named:\n{e}"
     );
+}
+
+/// Puts the SHARED broker state `a_new_topic_restore_names_its_topics_and_tears_nothing_down`
+/// perturbs back, on **every** exit path.
+///
+/// **Why a `Drop` guard and not simply never deleting the marker topic:**
+/// deleting `logweir.scratch` IS one of that row's four claims — `newTopic`
+/// skips phase 0's marker check, and the only way to prove a check was skipped
+/// is to make it fail if it ran. So the row must delete, and therefore it must
+/// restore unconditionally. Fix round 1, F5b: cleanup used to be a closure
+/// called on the early-return path and again just before the last assertion,
+/// with three assertions in between it did not cover. One panicking assertion
+/// left the broker with `logweir.scratch` absent and two `restore-<pit>-*`
+/// topics behind (`delete_all_drill_topics` is `drill-` scoped), which turned
+/// one red row into four in the review's first run of this file. `#[test]`
+/// unwinds — this workspace sets no `panic = "abort"` — so `Drop` runs on the
+/// panicking path too, and no later e2e row depends on this row reaching its
+/// end.
+struct RestoredBrokerState {
+    targets: Vec<String>,
+}
+
+impl Drop for RestoredBrokerState {
+    fn drop(&mut self) {
+        for t in &self.targets {
+            let _ = kafka_topics(&[
+                "--bootstrap-server",
+                "kafka-broker-1:9094",
+                "--delete",
+                "--topic",
+                t,
+            ]);
+        }
+        // `recreate_marker_topic` asserts, and a panic escaping `drop` DURING
+        // an unwind aborts the process — which would destroy the test report
+        // that says why the row failed. So it is caught here and reported.
+        if std::panic::catch_unwind(recreate_marker_topic).is_err() {
+            eprintln!(
+                "[e2e] FAILED to restore the marker topic `{MARKER_TOPIC}` — later rows in \
+                 this suite will refuse at phase 0 until `just e2e-up` recreates it"
+            );
+        }
+    }
 }
