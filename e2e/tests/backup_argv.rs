@@ -125,6 +125,15 @@ fn backup_run(spec: &Path, argv_log: Option<&Path>) -> Command {
             "LOGWEIR_ENGINE_BIN",
             root().join("e2e/fixtures/fake-engine-argv-check.sh"),
         )
+        // THE ENGINE IDENTITY, as the runner image sets it — the same two
+        // variables `harness::mod.rs`'s drill runner exports, from the same two
+        // sources (the engine's own `--version`, and the digest pinned in
+        // `third_party/`). Task 5b's `backup run` REFUSES to take a backup it
+        // could not name the engine for, because the receipt it signs carries
+        // `engine.digest` and GC7 pins by digest and never by tag; without
+        // these two the command exits 1 before the engine is spawned.
+        .env("LOGWEIR_ENGINE_VERSION", engine_version())
+        .env("LOGWEIR_ENGINE_DIGEST", engine_digest())
         // `std::env::temp_dir()` reads TMPDIR, and that is what puts the
         // rendered backup.yaml inside the one directory this suite knows.
         .env("TMPDIR", engine_mount());
@@ -157,6 +166,10 @@ fn backup_run_real_engine(spec: &Path) -> Command {
         .env("AWS_SECRET_ACCESS_KEY", "minioadmin")
         .env("AWS_REGION", "us-east-1")
         .env("LOGWEIR_ENGINE_BIN", engine_bin())
+        // See `backup_run` above: the receipt names the engine, so the runner
+        // is given the same identity the image would set.
+        .env("LOGWEIR_ENGINE_VERSION", engine_version())
+        .env("LOGWEIR_ENGINE_DIGEST", engine_digest())
         .env("LOGWEIR_E2E_ENGINE_MOUNT", engine_mount())
         .env("TMPDIR", engine_mount());
     c
