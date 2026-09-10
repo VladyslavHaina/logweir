@@ -298,12 +298,16 @@ fn scram_authenticates_through_the_rdkafka_client() {
 /// current SASL state: broker's supported mechanisms:
 /// ```
 ///
-/// so the wrong password is still refused, and THIS ROW STILL PASSES. The row
-/// that fails under mutant 5 is
-/// `scram_authenticates_through_the_rdkafka_client` above, where the CORRECT
-/// password can no longer read the cluster id. Recorded here rather than left
-/// as a comment that claims more than the run supports: under the six mutants
-/// the brief lists, this row is the unique killer of none of them. It exists
+/// so the wrong password is still refused, and THIS ROW STILL PASSES. What
+/// fails under the brief's literal mutant 5 (`SASL:PLAINTEXT` alone) is
+/// `the_broker_advertises_five_listeners` and its in-network twin, on the
+/// protocol map they read back; under the broader form (both `SASL` and
+/// `SASLEXT` mapped to `PLAINTEXT`)
+/// `scram_authenticates_through_the_rdkafka_client` above fails as well, where
+/// the CORRECT password can no longer read the cluster id (plan erratum E8).
+/// Recorded here rather than left as a comment that claims more than the run
+/// supports: under the six mutants the brief lists, this row is the unique
+/// killer of none of them. It exists
 /// because "a wrong password does not get in" is a property the success row
 /// cannot state, and the success row is what makes this row's `Err` mean "the
 /// password was rejected" rather than "nothing was listening".
