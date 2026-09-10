@@ -1,0 +1,36 @@
+---
+source: crates/logweir-engine-oso/tests/render_scram.rs
+expression: "render_backup::render(&backup_plan(scram(true))).expect(\"no glob metacharacter, no `${`\")"
+---
+# Rendered by logweir. Do not edit; regenerate with `logweir backup run`.
+mode: backup
+backup_id: "scram-demo"
+
+source:
+  bootstrap_servers:
+    - "kafka-broker-1:9094"
+  topics:
+    include:
+      - "orders"
+  security:
+    security_protocol: "SASL_SSL"
+    sasl_mechanism: "SCRAM-SHA512"
+    sasl_username: "logweir-backup"
+    sasl_password: ${LOGWEIR_SOURCE_PASSWORD}
+
+storage:
+  backend: s3
+  bucket: "kafka-backups"
+  prefix: "scram-demo"
+  region: "us-east-1"
+  endpoint: "http://minio:9000"
+  path_style: true
+  allow_http: true
+
+backup:
+  compression: "zstd"
+  continuous: false
+  segment_max_records: 1000
+  segment_max_bytes: 10485760
+  max_concurrent_partitions: 3
+  include_offset_headers: true

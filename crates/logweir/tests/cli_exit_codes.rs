@@ -310,3 +310,94 @@ fn a_credential_refusal_is_a_guard_refusal() {
          credential problem:\n{stdout}"
     );
 }
+
+/// **Task 6.** The two failure modes of a SCRAM spec's password are two
+/// different exit codes, and the difference is what a reconciler acts on.
+///
+/// * The variable is **UNSET** while `auth.mode` is `scramSha512` → **exit 1**,
+///   operational, and **no** `refusal-reason=` line. Nothing was refused: the
+///   plan is probably fine and the fix is to project the Secret, which is
+///   exactly what "retry" means to Task 18's cron reconciler. A guard refusal
+///   here would tell it to stop retrying a condition an operator is about to
+///   fix.
+/// * The variable holds a value that **cannot be substituted** into the
+///   engine's pre-parse config text → **exit 3**, with
+///   `refusal-reason=CredentialNotRenderable`. No projection of that value
+///   will ever work.
+///
+/// Both codes are read directly from `Command::status()` (STANDING RULE 20),
+/// and both refuse before a client is constructed — `AuthConfig::from_spec` is
+/// reached in `drill::context` before `RdKafkaReader::connect`, so neither arm
+/// waits on `rdkafka_reader.rs`'s 20 s `const T` and neither reaches Global
+/// Constraint 22's 15 s per-test bound.
+#[test]
+fn a_missing_password_is_operational_and_a_broken_one_is_a_guard_refusal() {
+    // The shipped example with a SCRAM target bolted on. It is otherwise the
+    // CLEAN example — it would be admitted — so the exit code can only have
+    // come from the credential path.
+    // The auth block is spliced in ahead of `marker_topic` — NOT by rewriting
+    // the `bootstrap_servers` line. Naming a loopback endpoint here, even
+    // inside a `replace` pattern, trips
+    // `tests/no_network_in_unit_tests.rs`'s source grep, which is a plain
+    // `contains` over the file by design: an entry in its `ALLOWED` is meant
+    // to be argued for, and this file has no need of one.
+    const MARKER: &str = "  marker_topic: logweir.scratch\n";
+    let example = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    assert!(example.contains(MARKER), "the shipped example moved");
+    let spec = example.replace(
+        MARKER,
+        &format!("  auth:\n    mode: scramSha512\n    username: logweir\n{MARKER}"),
+    );
+    assert!(
+        spec.contains("mode: scramSha512"),
+        "the fixture must actually ask for SCRAM, or this test asserts nothing"
+    );
+
+    // ---- UNSET: exit 1, and no refusal-reason line at all ----
+    // `drill_run_capturing_stdout` removes both variables itself, so "unset"
+    // here is unset regardless of the developer's own environment.
+    let (code, stdout) = drill_run_capturing_stdout(&spec, &[]);
+    assert_eq!(
+        code,
+        Some(1),
+        "an absent Secret is operational, not a refused plan: stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("refusal-reason="),
+        "exit 1 prints no refusal-reason line — the contract is exit-3-only:\n{stdout}"
+    );
+
+    // ---- UNRENDERABLE: exit 3, and the credential terminal state ----
+    let (code, stdout) = drill_run_capturing_stdout(
+        &spec,
+        &[("LOGWEIR_TARGET_PASSWORD", "x\"\n bootstrap_servers:")],
+    );
+    assert_eq!(
+        code,
+        Some(3),
+        "a value that cannot be substituted into pre-parse config text is refused before \
+         anything runs: stdout:\n{stdout}"
+    );
+    assert_eq!(
+        final_stdout_line(&stdout),
+        "refusal-reason=CredentialNotRenderable",
+        "{stdout}"
+    );
+    // And no fragment of it reaches any stream.
+    for fragment in ["bootstrap_servers:", "x\""] {
+        assert!(!stdout.contains(fragment), "{stdout}");
+    }
+
+    // ---- The SOURCE variable is not consulted by a drill ----
+    // A drill dials the TARGET. Projecting the source variable instead leaves
+    // the target's still unset, so this is exit 1 again — not a silent
+    // plaintext downgrade, and not a success.
+    let (code, stdout) =
+        drill_run_capturing_stdout(&spec, &[("LOGWEIR_SOURCE_PASSWORD", "renderable-Aa1")]);
+    assert_eq!(
+        code,
+        Some(1),
+        "the drill reads $LOGWEIR_TARGET_PASSWORD; the source variable cannot stand in for \
+         it: stdout:\n{stdout}"
+    );
+}

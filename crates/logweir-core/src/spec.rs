@@ -188,6 +188,17 @@ fn latest() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetSpec {
     pub bootstrap_servers: Vec<String>,
+    /// How Logweir's own client AND the engine authenticate to the restore
+    /// TARGET (Task 6, interface **I1**). `#[serde(default)]` so every
+    /// checked-in spec that predates this field keeps parsing as `Plaintext`.
+    ///
+    /// It is HERE and deliberately NOT on `SourceSpec` (critique A F15):
+    /// `SourceSpec` is the ARCHIVE's location — `{storage, backup, topics}`,
+    /// no `bootstrap_servers` and no broker — so an auth block on it would
+    /// ship a field nothing reads. `BackupSourceSpec`, which does name a
+    /// broker, carries its own.
+    #[serde(default)]
+    pub auth: AuthSpec,
     /// The v0.1 segregation proof. Must EXIST on the target.
     #[serde(default = "marker")]
     pub marker_topic: String,
@@ -326,13 +337,13 @@ pub struct ObjectivesSpec {
     pub pass_rate: Option<f64>,
 }
 
-/// How a cluster's client authenticates. **The SHAPE only** — critique A F4.
+/// How a cluster's client authenticates. Task 2 landed the SHAPE; Task 6
+/// landed the three methods below that wire it to a client and to a rendered
+/// document (interface **I1**).
 ///
-/// It lands in this task rather than in Task 6 because `BackupSourceSpec`
+/// It landed in Task 2 rather than in Task 6 because `BackupSourceSpec`
 /// below is declared with an `auth` field, so a Task-2 implementer reading
-/// only Task 2 could not compile the type it is told to produce. The methods
-/// that wire it to a client (`to_render()`, `mode_str()`, `username()`) are
-/// Task 6's (interface **I1**).
+/// only Task 2 could not compile the type it was told to produce.
 ///
 /// **No password field, at any variant.** A SCRAM secret reaches the engine
 /// through the engine's own `${VAR}` expansion of its config file
@@ -360,6 +371,70 @@ pub enum AuthSpec {
         #[serde(default)]
         tls: bool,
     },
+}
+
+impl AuthSpec {
+    /// The render-side twin, for `BackupPlan::source_auth` and
+    /// `RestorePlan::target_auth`. It maps and never refuses: the mode a spec
+    /// names is carried faithfully into the plan, so a plan that asked for
+    /// SCRAM can never be rendered unauthenticated on the operator's behalf.
+    ///
+    /// **It carries no password, at any variant** — see `AuthRender`'s own doc
+    /// comment. The secret reaches the engine through the engine's own
+    /// `${VAR}` expansion of its config text and reaches Logweir's client
+    /// through `AuthConfig::from_spec`; neither path passes through a plan.
+    pub fn to_render(&self) -> crate::engine::AuthRender {
+        match self {
+            AuthSpec::Plaintext => crate::engine::AuthRender::Plaintext,
+            AuthSpec::ScramSha512 { username, tls } => crate::engine::AuthRender::ScramSha512 {
+                username: username.clone(),
+                tls: *tls,
+            },
+        }
+    }
+
+    /// The mode as the two documents spell it: `"plaintext"` or
+    /// `"scramSha512"`.
+    ///
+    /// **These are the serde tag values of this enum, and they are the
+    /// `KafkaCluster` CRD's `auth.mode` enum, byte for byte and in that
+    /// order** (Task 15b, interface **I33**). Three surfaces have to agree —
+    /// the YAML an adopter writes, the CRD an adopter applies, and the signed
+    /// documents a reader parses — so the strings are asserted equal by
+    /// `crates/weirkeeper/tests/crd_shape.rs::the_crd_auth_mode_enum_and_auth_spec_agree`
+    /// and by
+    /// `crates/logweir/tests/auth_binding.rs::the_scorecard_auth_block_and_auth_spec_agree`
+    /// rather than kept in step by three comments.
+    ///
+    /// `&'static str` on purpose: a closed set of two literals cannot be
+    /// handed a value computed at run time.
+    pub fn mode_str(&self) -> &'static str {
+        match self {
+            AuthSpec::Plaintext => "plaintext",
+            AuthSpec::ScramSha512 { .. } => "scramSha512",
+        }
+    }
+
+    /// The SASL principal, when there is one.
+    ///
+    /// **This is what `planBytes` binds — guard G-ID.** The Secret named by a
+    /// `secretRef` is mutable and covered by no hash, so binding only the
+    /// address would let anyone with `update` on that Secret change WHICH
+    /// PRINCIPAL Logweir authenticates as, after approval, with no plan-hash
+    /// change and no new signature; on SASL/SCRAM the credential *is* the
+    /// authorisation. Logweir cannot OBSERVE the principal the broker
+    /// authenticated — Kafka exposes no such call and neither client offers
+    /// one — so the binding is structural, not observational: `sasl_username`
+    /// is rendered from the plan and never from a cluster object read at run
+    /// time.
+    ///
+    /// `None` under `Plaintext`, which is not the same as an empty username.
+    pub fn username(&self) -> Option<&str> {
+        match self {
+            AuthSpec::Plaintext => None,
+            AuthSpec::ScramSha512 { username, .. } => Some(username),
+        }
+    }
 }
 
 /// The adopter-facing shape of a `--from-cluster` backup. `render_backup`

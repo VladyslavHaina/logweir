@@ -413,9 +413,37 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
         Ok(al) => al,
         Err(e) => return CheckResult::Failed(e.to_string()),
     };
+    // **Interface I1.** The second of the two sites that hard-coded the
+    // plaintext arm. `doctor` exists to tell an adopter whether a
+    // drill would work, so it must dial the target the way `drill run` will:
+    // with plaintext against a SCRAM cluster it reported "target unreachable"
+    // on a cluster that was perfectly reachable and simply required
+    // authentication — the single most misleading answer this command can
+    // give.
+    //
+    // Every failure here is a `CheckResult::Failed`, never an exit code:
+    // `doctor` reports, it does not refuse. So an unrenderable projected
+    // credential and an absent one both land in the same place, and the
+    // message says which — a `doctor` run is exactly where an operator wants
+    // to be told that the Secret is missing.
+    let auth = match AuthConfig::from_spec(
+        &sp.target.auth,
+        match crate::drill::validated_password(crate::drill::TARGET_PASSWORD_VAR) {
+            Ok(p) => p,
+            Err(refusal) => return CheckResult::Failed(refusal.to_string()),
+        },
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            return CheckResult::Failed(
+                crate::drill::naming_the_password_var(e, crate::drill::TARGET_PASSWORD_VAR)
+                    .to_string(),
+            )
+        }
+    };
     let r = match logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
         &sp.target.bootstrap_servers,
-        AuthConfig::Plaintext,
+        auth,
     ) {
         Ok(r) => r,
         Err(e) => {

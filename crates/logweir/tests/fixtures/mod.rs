@@ -127,6 +127,7 @@ pub fn plan() -> RestorePlan {
             allow_http: true,
         },
         target_bootstrap: vec!["kafka-broker-1:9094".into()],
+        target_auth: logweir_core::engine::AuthRender::Plaintext,
         topic_mapping: mapping("orders", "drill-orders"),
         time_window: (ts("2026-08-29T00:00:00Z"), ts("2026-08-30T02:00:00Z")),
         default_replication_factor: 1,

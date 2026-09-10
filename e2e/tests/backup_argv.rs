@@ -16,8 +16,9 @@
 //! 2. that a refused plan opens NO socket, and prints `refusal-reason=` last;
 //! 3. that a flag this build cannot honour is refused with no socket either
 //!    (fix round 1, review F-3);
-//! 4. that a SCRAM spec routes through Task 3's typed renderer refusal rather
-//!    than through a panic;
+//! 4. that a SCRAM spec RENDERS and is refused only for the reason the local
+//!    stack actually gives (Task 6 replaced Task 3's renderer refusal with the
+//!    real render);
 //! 5. **that the REAL, digest-pinned engine accepts the document this product
 //!    renders** and the whole command exits 0 (fix round 1, review F-1).
 //!
@@ -274,52 +275,165 @@ fn backup_run_refuses_without_opening_a_socket() {
     assert!(stderr.contains("glob metacharacter"), "{stderr}");
 }
 
-/// Task 2's review carry: a SCRAM spec on the backup path must route through
-/// Task 3's TYPED refusal and never reach a placeholder arm.
+/// Task 2's review carry, as it stands after **Task 6**: a SCRAM spec on the
+/// backup path RENDERS. It used to route through Task 3's typed
+/// `RenderError::UnsupportedAuthMode`; that refusal is gone, and this row now
+/// asserts the two things a process can still answer with `63066d2`'s compose
+/// stack.
 ///
-/// It exits **1**, not 3, and prints no `refusal-reason=` line — and that is
-/// the contract, not an oversight. The refusal is raised by
-/// `render_backup::render` inside `OsoCliEngine::backup`, i.e. after phase −1
-/// admitted the plan, so ruling R-E's mapping applies exactly as it does to
-/// the phase-5/phase-6 renderer refusals: `EngineError::Operational`, exit 1,
-/// no artifact. Task 3's `exit::print_refusal_reason` is exit-3-only by
-/// contract. `crates/logweir/tests/backup_run.rs::backup_run_records_the_source_auth`
-/// is the other half: the spec's mechanism is recorded faithfully rather than
-/// downgraded to plaintext on the operator's behalf.
+/// # What this row can and cannot prove, and why
+///
+/// **`63066d2`'s stack has no SCRAM listener.** STANDING RULE 15 gives
+/// `e2e/compose/docker-compose.yml` one owner — Task 7, at slot 10 — which
+/// adds `SASL://kafka-broker-1:9096` + `SASLEXT://localhost:9097` and the
+/// `scram-setup` service that must have exited 0 before any SASL client
+/// authenticates. Until then **no test anywhere may claim that a SCRAM
+/// connection succeeds**, and this one does not: it asserts the exit code and
+/// the message of the two paths that do not need a listener.
+///
+///   * `$LOGWEIR_SOURCE_PASSWORD` **unset** → exit **1**, before any client
+///     exists, naming the variable. Operational and not a refusal: nothing
+///     about the plan was found wanting.
+///   * `$LOGWEIR_SOURCE_PASSWORD` **unrenderable** → exit **3** with
+///     `refusal-reason=CredentialNotRenderable` as the final stdout line, and
+///     no socket opened.
+///
+/// Neither prints a panic, which is what Task 2's F1 was really about.
 #[test]
-fn a_scram_backup_spec_is_a_typed_refusal_never_a_panic() {
+fn a_scram_backup_spec_renders_and_refuses_only_for_a_credential_reason() {
     let spec = backup_spec(
         "backup-scram.yaml",
         "[orders]",
         "  auth:\n    mode: scramSha512\n    username: logweir\n",
         BOOTSTRAP,
     );
-    let out = backup_run(&spec, None).output().expect("logweir");
+
+    // ---- unset: exit 1, naming the variable, no refusal-reason line ----
+    let out = backup_run(&spec, None)
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .env_remove("LOGWEIR_TARGET_PASSWORD")
+        .output()
+        .expect("logweir");
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert_eq!(
         out.status.code(),
         Some(1),
-        "stdout:\n{}\nstderr:\n{stderr}",
-        String::from_utf8_lossy(&out.stdout)
+        "an absent Secret is operational: stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("auth mode `sasl-scram-sha-512` is not supported by this build"),
-        "{stderr}"
+        stderr.contains("auth.mode is scramSha512 but $LOGWEIR_SOURCE_PASSWORD is unset"),
+        "the message must name the variable an operator has to project:\n{stderr}"
     );
     assert!(
-        stderr.contains("interface I1"),
-        "the refusal must name where the capability lands:\n{stderr}"
+        !stdout.contains("refusal-reason="),
+        "exit 1 prints no refusal-reason line (the contract is exit-3-only):\n{stdout}"
     );
     for panicky in ["panicked at", "not yet implemented", "RUST_BACKTRACE"] {
         assert!(!stderr.contains(panicky), "{stderr}");
     }
-    // And nothing was rendered unauthenticated: no backup.yaml naming a
-    // plaintext source was left behind for this run.
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // The refusal Task 3 raised here is GONE — the arm renders now.
     assert!(
-        !stdout.contains("refusal-reason="),
-        "exit 1 prints no refusal-reason line (Task 3's contract is exit-3-only):\n{stdout}"
+        !stderr.contains("is not supported by this build"),
+        "Task 6 implemented the arm; a refusal here would be the capability taken back out:\n         {stderr}"
     );
+
+    // ---- unrenderable: exit 3, the credential state, and no value leaked ----
+    let out = backup_run(&spec, None)
+        .env("LOGWEIR_SOURCE_PASSWORD", "x\"\n bootstrap_servers:")
+        .output()
+        .expect("logweir");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .next_back()
+            .unwrap_or(""),
+        "refusal-reason=CredentialNotRenderable",
+        "stdout:\n{stdout}"
+    );
+    for stream in [&stdout, &stderr] {
+        assert!(
+            !stream.contains("bootstrap_servers:") || !stream.contains("x\""),
+            "no fragment of the projected credential may reach any stream:\n{stream}"
+        );
+    }
+}
+
+/// **THE REAL ENGINE ACCEPTS THE RENDERED SASL BLOCK** — the nesting and the
+/// mechanism spelling, proved against the digest-pinned binary rather than
+/// against a stub (review F-1's whole point: a stub accepts any document
+/// carrying `mode: backup` and therefore structurally cannot reject one).
+///
+/// It does **not** authenticate: `63066d2`'s stack has no SCRAM listener
+/// (STANDING RULE 15 — Task 7, slot 10), so the run fails on the connection.
+/// What it proves is everything up to that point, which is exactly the part
+/// only the real engine can answer:
+///
+///   * **no unknown-key warning**, so
+///     `OsoCliEngine::assert_no_dropped_logweir_key` did not abort — rendered
+///     one level too high, the four keys come back as
+///     *"Ignoring unknown config key `source.security_protocol`"* and the run
+///     exits 1 AFTER writing the document;
+///   * **no config PARSE error**, so `sasl_mechanism: "SCRAM-SHA512"` is a
+///     value the engine's `SaslMechanism` accepts — the two-hyphen spelling is
+///     a serde TYPE error that aborts config load.
+///
+/// The failure it DOES expect is a broker failure, which is a fact about the
+/// stack and not about the document.
+#[test]
+fn the_real_engine_accepts_the_rendered_sasl_block() {
+    let spec = backup_spec(
+        "backup-scram-real-engine.yaml",
+        "[orders]",
+        "  auth:\n    mode: scramSha512\n    username: logweir\n",
+        BOOTSTRAP,
+    );
+    let out = backup_run_real_engine(&spec)
+        .env("LOGWEIR_SOURCE_PASSWORD", "not-a-real-secret-Aa1")
+        .output()
+        .expect("logweir");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let both = format!("{stdout}\n{stderr}");
+
+    for dropped in [
+        "Ignoring unknown config key `source.security_protocol`",
+        "Ignoring unknown config key `source.sasl_mechanism`",
+        "Ignoring unknown config key `source.sasl_username`",
+        "Ignoring unknown config key `source.sasl_password`",
+    ] {
+        assert!(
+            !both.contains(dropped),
+            "the engine DROPPED a key logweir rendered — the four SASL keys are fields of \
+             KafkaConfig.security, not of KafkaConfig, so a two-space nesting makes the whole \
+             block a no-op:\n{both}"
+        );
+    }
+    assert!(
+        !both.contains("unknown variant `SCRAM-SHA-512`"),
+        "the engine's mechanism spelling has ONE hyphen:\n{both}"
+    );
+    assert!(
+        !both.contains("Failed to parse config"),
+        "the rendered document must be a document this engine can load:\n{both}"
+    );
+    // And the placeholder was expanded, not left in the file: an UNSET
+    // variable would produce the engine's own warning instead.
+    assert!(
+        !both.contains("Environment variable 'LOGWEIR_SOURCE_PASSWORD' is not set"),
+        "logweir must project the password before spawning the engine:\n{both}"
+    );
+    for panicky in ["panicked at", "not yet implemented"] {
+        assert!(!both.contains(panicky), "{both}");
+    }
 }
 
 /// **Fix round 1, review F-3.** `--out` / `--receipt-out` is interface I6's

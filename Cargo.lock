@@ -1828,6 +1828,7 @@ name = "logweir-kafka"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "logweir-core",
  "rdkafka",
  "sha2",
  "thiserror 1.0.69",

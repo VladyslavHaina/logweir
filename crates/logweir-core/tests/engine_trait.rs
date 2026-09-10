@@ -52,6 +52,7 @@ fn validation_run_defaults_to_an_operational_refusal_not_a_fabricated_pass() {
             path: "/tmp".into(),
         },
         target_bootstrap: vec!["broker:9092".into()],
+        target_auth: logweir_core::engine::AuthRender::Plaintext,
         topic_mapping: Default::default(),
         // A fixed timestamp, not `Utc::now()` — Task 19 fix round 1, review
         // finding F14: `logweir-core` is otherwise clock-free by convention

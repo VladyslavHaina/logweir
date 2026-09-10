@@ -1661,3 +1661,82 @@ fn first_difference(left: &str, right: &str) -> (usize, String, String) {
 // `kafka_cluster_auth_mode_accepts_only_plaintext_or_scram_sha512` and
 // `restore_target_mode_accepts_only_scratch_or_new_topic` — are the contract.
 // `enum_values` is the helper each of them needs for the CRD half.
+
+/// **I33, Task 6's half.** `AuthSpec`'s serde tag values are exactly the
+/// `KafkaCluster` CRD's `auth.mode` enum, in that order.
+///
+/// Three surfaces name this mode and all three have to agree: the YAML an
+/// adopter writes into a `DrillSpec`/`BackupSpec` (`AuthSpec`, serde), the
+/// custom resource an adopter applies (this CRD's enum), and the signed
+/// documents a reader parses (`ReceiptAuth.mode`, and Task 5b's
+/// `AuthSummary.mode`). A `kubectl apply` that succeeds and a `drill run` that
+/// then refuses to parse the same string is the failure this closes — and it
+/// is not hypothetical: the receipt's own field doc still describes the value
+/// as `"scram-sha-512"`, a spelling nothing emits.
+///
+/// The order is asserted too, not just the set: `enum_values` returns the
+/// declaration order, the CRD's enum is what `kubectl explain` prints in that
+/// order, and an adopter reading the two lists side by side should not have to
+/// wonder whether they are the same list.
+///
+/// The mutant this exists for: spell `AuthSpec::mode_str()` as
+/// `"scram-sha-512"` and this fails at assertion time, together with
+/// `crates/logweir/tests/auth_binding.rs::
+/// the_scorecard_auth_block_and_auth_spec_agree`. That is the whole point of a
+/// same-slot late binding having a test rather than a comment.
+#[test]
+fn the_crd_auth_mode_enum_and_auth_spec_agree() {
+    let doc = crd("kafkaclusters.yaml");
+    let crd_enum = enum_values(at(
+        spec_schema(&doc),
+        &["properties", "auth", "properties", "mode"],
+    ));
+
+    // The Rust half: the SERDE TAG of each variant, read out of serde itself
+    // rather than retyped, so this cannot pass against a type whose wire
+    // spelling has drifted from its variant name.
+    let rust_tags: Vec<String> = [
+        logweir_core::spec::AuthSpec::Plaintext,
+        logweir_core::spec::AuthSpec::ScramSha512 {
+            username: "logweir".into(),
+            tls: false,
+        },
+    ]
+    .iter()
+    .map(|a| {
+        serde_json::to_value(a)
+            .expect("AuthSpec serialises")
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .expect("`#[serde(tag = \"mode\")]`")
+            .to_string()
+    })
+    .collect();
+
+    assert_eq!(
+        rust_tags, crd_enum,
+        "`AuthSpec`'s serde tags and the CRD's `auth.mode` enum must be the same two strings in \
+         the same order (interface I33)"
+    );
+    assert_eq!(crd_enum, vec!["plaintext", "scramSha512"]);
+
+    // And `mode_str()` — the accessor the two documents are filled from — is
+    // the same string again, so a document cannot carry a third spelling.
+    assert_eq!(
+        logweir_core::spec::AuthSpec::Plaintext.mode_str(),
+        crd_enum[0]
+    );
+    assert_eq!(
+        logweir_core::spec::AuthSpec::ScramSha512 {
+            username: "logweir".into(),
+            tls: true
+        }
+        .mode_str(),
+        crd_enum[1]
+    );
+
+    // NO THIRD MODE. The CRD's own doc comment says `mtls`, `gssapi`,
+    // `oauthbearer` and `scramSha256` are not in tag 1; the Rust enum must not
+    // have quietly grown one either.
+    assert_eq!(rust_tags.len(), 2, "{rust_tags:?}");
+}

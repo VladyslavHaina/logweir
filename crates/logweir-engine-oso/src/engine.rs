@@ -572,11 +572,12 @@ impl DataEngine for OsoCliEngine {
     /// Task 5b's receipt can re-derive it from the same plan, since
     /// `render_backup::render` is a pure function of `BackupPlan`.
     ///
-    /// An auth mode this build cannot render (SCRAM, until Task 6) reaches
-    /// this method as `RenderError::UnsupportedAuthMode` — Task 3's TYPED
-    /// refusal — and leaves it as `EngineError::Operational`, exit 1 by
-    /// ruling R-E. It is never a panic and never a silent downgrade to an
-    /// unauthenticated document.
+    /// SASL/SCRAM-SHA-512 renders since Task 6, so nothing on this path
+    /// refuses an auth mode any more. `RenderError::UnsupportedAuthMode` is
+    /// kept as the rail for a mode `AuthRender` does not yet have (see the
+    /// variant's own doc comment) and would still leave this method as
+    /// `EngineError::Operational`, exit 1 by ruling R-E — never a panic and
+    /// never a silent downgrade to an unauthenticated document.
     fn backup(
         &self,
         plan: &BackupPlan,

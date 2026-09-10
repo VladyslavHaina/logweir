@@ -240,6 +240,7 @@ mod tests {
             },
             target: TargetSpec {
                 bootstrap_servers: vec!["localhost:9092".into()],
+                auth: logweir_core::spec::AuthSpec::Plaintext,
                 marker_topic: "logweir.scratch".into(),
                 topic_mapping_prefix: prefix.into(),
                 default_replication_factor: 1,

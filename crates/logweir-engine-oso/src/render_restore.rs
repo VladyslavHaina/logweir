@@ -65,6 +65,22 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
     for src in plan.topic_mapping.keys() {
         s.push_str(&format!("      - {}\n", yaml_scalar_checked(src)?));
     }
+    // THE SASL BLOCK (Task 6, interface **I1**), and the reason the whole task
+    // exists on this side: before it, the rendered `restore.yaml` emitted a
+    // bare `target: bootstrap_servers:` with no security keys at all, so even a
+    // correctly authenticated Logweir handed the engine a config that could not
+    // authenticate. `Plaintext` emits nothing, which is what keeps the four
+    // `restore_yaml*` goldens byte-identical.
+    //
+    // `plan.target_auth` is the ONLY source this block has — **G-ID**. The
+    // username is a field of the PLAN, which `plan_hash` covers; it is never
+    // read from a `KafkaCluster` object at render time, because that object is
+    // mutable after approval and on SASL/SCRAM the principal IS the
+    // authorisation.
+    s.push_str(&crate::yaml::render_security_block(
+        &plan.target_auth,
+        crate::yaml::PLACEHOLDER_TARGET_PASSWORD,
+    )?);
     s.push('\n');
 
     s.push_str("storage:\n");

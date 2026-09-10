@@ -103,6 +103,71 @@ pub enum AuthConfig {
     Token(std::sync::Arc<dyn crate::token::TokenProvider>),
 }
 
+impl AuthConfig {
+    /// Interface **I1**: the ONE construction site every caller uses.
+    ///
+    /// Three call sites in the workspace build a client — `drill::context`,
+    /// `doctor::check_target` and `backup::run` — and all three went through
+    /// this function in Task 6. Before it, two of them hard-coded
+    /// `AuthConfig::Plaintext` with a comment explaining that `TargetSpec`
+    /// carried no auth block to render one from, so SASL was unreachable from
+    /// any shipped spec. `crates/logweir/tests/auth_binding.rs::
+    /// no_construction_site_hardcodes_plaintext` reads those three sources and
+    /// asserts each names this function and none names a bare
+    /// `AuthConfig::Plaintext`, so the next editor cannot quietly re-pin one.
+    ///
+    /// # `password` is `Option<String>`, and why the absent case is exit 1
+    ///
+    /// The secret is NEVER in a spec, a plan, a rendered document or a
+    /// receipt: it is projected into the process environment and read there
+    /// (`LOGWEIR_SOURCE_PASSWORD` / `LOGWEIR_TARGET_PASSWORD`). This function
+    /// takes what the caller read, so it can be unit-tested with no
+    /// environment at all.
+    ///
+    /// `ScramSha512` with `None` is `KafkaError::Client` — **operational,
+    /// exit 1, NOT a guard refusal**. Nothing was refused: the plan is
+    /// probably fine and the fix is to project the Secret, which is exactly
+    /// what "retry" means to a reconciler. A guard refusal (exit 3) is
+    /// reserved for a plan this build will never accept, and would tell
+    /// Task 18's cron reconciler to stop retrying a condition an operator is
+    /// about to fix. The unrenderable-VALUE case is the refusal, and it is
+    /// raised by the caller before this function is reached
+    /// (`logweir_core::guard::credential_is_renderable`, interface **I11**).
+    ///
+    /// The message cannot name WHICH of the two variables the caller read —
+    /// this crate never saw it, and the signature above is interface I1's
+    /// pinned shape — so `crates/logweir`'s
+    /// `drill::naming_the_password_var` re-states it with the variable that
+    /// call site actually reads.
+    ///
+    /// `Plaintext` ignores `password` rather than refusing a present one: a
+    /// Secret left projected after a spec was switched back to plaintext is a
+    /// tidiness problem, not a reason to fail a backup, and the runner's own
+    /// `check_projected_credentials` has already validated whatever is there.
+    pub fn from_spec(
+        auth: &logweir_core::spec::AuthSpec,
+        password: Option<String>,
+    ) -> Result<AuthConfig, KafkaError> {
+        match auth {
+            logweir_core::spec::AuthSpec::Plaintext => Ok(AuthConfig::Plaintext),
+            logweir_core::spec::AuthSpec::ScramSha512 { username, tls } => match password {
+                Some(password) => Ok(AuthConfig::ScramSha512 {
+                    username: username.clone(),
+                    password,
+                    tls: *tls,
+                }),
+                None => Err(KafkaError::Client(
+                    "auth.mode is scramSha512 but no SASL password was projected into this \
+                     process; set $LOGWEIR_SOURCE_PASSWORD for a source cluster or \
+                     $LOGWEIR_TARGET_PASSWORD for a target cluster. Nothing was refused: this \
+                     is operational (exit 1), not a guard refusal (exit 3)"
+                        .to_string(),
+                )),
+            },
+        }
+    }
+}
+
 // Manual `Debug`, not `#[derive]`: a derived impl would print `password`
 // verbatim, and `AuthConfig` reaches `{:?}` far too easily to trust — a
 // tracing field, an error context, a config dump — for a derive to be safe

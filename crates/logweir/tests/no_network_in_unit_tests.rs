@@ -88,7 +88,7 @@ const DIAL_TOKENS: [&str; 13] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 11] = [
+const ALLOWED: [(&str, &str); 12] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -140,6 +140,12 @@ const ALLOWED: [(&str, &str); 11] = [
         "crates/logweir/tests/notify.rs",
         "names ureq's agentless builders in the assertion message of the structural \
          test that FORBIDS them; posts only to 127.0.0.1 with a bound",
+    ),
+    (
+        "crates/logweir/tests/auth_binding.rs",
+        "test support: builds `DrillSpec`/`BackupSpec` YAML whose `bootstrap_servers` is \
+         localhost:9092, handed to a `ClusterReader` double and to the renderers; \
+         constructs no client (Task 6, chain N)",
     ),
 ];
 

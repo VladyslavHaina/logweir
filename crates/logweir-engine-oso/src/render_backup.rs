@@ -41,7 +41,7 @@
 //! guards accepted, digested so the bytes that ran can be re-derived.
 use crate::render_restore::render_storage_block;
 use crate::yaml::{assert_no_unnamed_dollar_brace, reject_dollar_brace, yaml_scalar_checked};
-use logweir_core::engine::{AuthRender, BackupPlan};
+use logweir_core::engine::BackupPlan;
 
 /// Why a renderer has an error type at all: two of GC18(c)'s rails are
 /// REFUSALS, and a refusal that is not in the return type is a refusal
@@ -72,14 +72,22 @@ pub enum RenderError {
     #[error("the rendered document contains the unnamed placeholder `{0}`; the engine substitutes every ${{NAME}} textually before the document is parsed and replaces an UNSET name with the empty string behind a warning, so the only sequences permitted in a document logweir hashed are the two named password placeholders in `crate::yaml`")]
     UnnamedPlaceholder(String),
     /// An auth mode this build cannot render. A TYPED REFUSAL and never a
-    /// `todo!()`: the arm is reachable from a public enum variant, and Task 4
-    /// wires backup runs before Task 6 fills the SASL block in, so the window
-    /// in which a plan asking for SCRAM meets a renderer that cannot write it
-    /// is real. A panic there would be an unrecoverable abort where Global
+    /// `todo!()`: a panic would be an unrecoverable abort where Global
     /// Constraint 11 requires a refusal, and a silent fallthrough to the
     /// `Plaintext` arm would be an authentication DOWNGRADE performed on the
     /// operator's behalf.
-    #[error("auth mode `{0}` is not supported by this build; the SASL block is Task 6 (interface I1). A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named SCRAM would be a downgrade performed on the operator's behalf")]
+    ///
+    /// **Task 6 made it unreachable from `render`, and it stays.** Both of
+    /// `AuthRender`'s arms render, so nothing in `crate::yaml::
+    /// render_security_block` constructs this today. It is the rail for the
+    /// THIRD mode — `logweir_kafka::reader::AuthConfig::Token` (OAUTHBEARER /
+    /// MSK IAM, SP4) has no `AuthRender` twin yet, and the task that adds one
+    /// must decide, in the type system, whether the engine can render it. A
+    /// variant kept for that is cheaper than the `todo!()` its absence
+    /// invites; `crates/logweir-engine-oso/tests/render_scram.rs::
+    /// the_unsupported_auth_mode_rail_is_unreachable_from_both_arms` pins
+    /// which of the two claims is true today.
+    #[error("auth mode `{0}` is not supported by this build; tag 1 renders PLAINTEXT and SASL/SCRAM-SHA-512 and no other. A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named a SASL mode would be a downgrade performed on the operator's behalf")]
     UnsupportedAuthMode(String),
 }
 
@@ -162,32 +170,24 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
     for t in &plan.topics {
         s.push_str(&format!("      - {}\n", yaml_scalar_checked(t)?));
     }
-    // The SASL block. `Plaintext` emits NOTHING AT ALL rather than a
-    // `security_protocol: PLAINTEXT` line, because the engine's own default is
-    // plaintext and an explicit key here would be a fourth thing to keep in
-    // step with upstream's spelling for no behavioural gain. The
-    // `ScramSha512` arm — the username, the mechanism and the TLS switch, and
-    // never the password — is Task 6's (interface **I1**).
+    // THE SASL BLOCK (Task 6, interface **I1**). `Plaintext` emits NOTHING AT
+    // ALL, which is why the two backup goldens that predate SCRAM are
+    // byte-identical after this task; the `ScramSha512` arm emits the engine's
+    // `security:` map — the protocol, the ONE-hyphen mechanism, the username
+    // FROM THE PLAN BYTES (**G-ID**) and the password PLACEHOLDER, never the
+    // password. `crate::yaml::render_security_block` is the single
+    // implementation all three renderers share, and its doc comment carries
+    // the measured evidence for the nesting and for the unquoted placeholder.
     //
-    // A TYPED REFUSAL, not a `todo!()` and not a fallthrough. Task 2 shipped
-    // `todo!()` here and Task 2's own review carried it forward as F1: this
-    // was the workspace's only shipped `todo!()`, on an arm reachable from a
-    // public enum variant, and Task 4 wires backup RUNS before Task 6 fills
-    // this block in — so the window in which a plan asking for SCRAM meets a
-    // renderer that cannot write it is real, not hypothetical. Global
-    // Constraint 11 says a refusal exits with its contract code; a panic
-    // aborts instead and prints no `refusal-reason=` line at all. The other
-    // wrong answer, falling through to `Plaintext`, is worse than the panic:
-    // it would emit a document the engine runs unauthenticated, from a plan
-    // that named SCRAM.
-    match &plan.source_auth {
-        AuthRender::Plaintext => {}
-        AuthRender::ScramSha512 { .. } => {
-            return Err(RenderError::UnsupportedAuthMode(
-                "sasl-scram-sha-512".to_string(),
-            ))
-        }
-    }
+    // Task 2 shipped a `todo!()` here and Task 3 replaced it with
+    // `RenderError::UnsupportedAuthMode` — a typed refusal, because Task 4
+    // wired backup RUNS before this block existed. That variant stays (see
+    // its own doc comment): it is the rail for a mode `AuthRender` does not
+    // yet have, not a placeholder for this one.
+    s.push_str(&crate::yaml::render_security_block(
+        &plan.source_auth,
+        crate::yaml::PLACEHOLDER_SOURCE_PASSWORD,
+    )?);
     s.push('\n');
 
     s.push_str("storage:\n");

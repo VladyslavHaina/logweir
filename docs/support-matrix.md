@@ -51,6 +51,29 @@ so nobody quotes a projected verdict as a tested one.
 | 0.16.0 – 0.18.x | **unsupported**, by floor | Below the full-drill floor; only the unknown-key warning mechanism works. |
 | < 0.16.0 | **unsupported (lever-absent)**, by floor | The warning mechanism this project depends on does not exist. |
 
+## Authentication modes, and what each one has actually been run against
+
+Task 6 made SASL/SCRAM-SHA-512 reachable end to end. The matrix rows above are
+all **PLAINTEXT** drills, and that is stated here rather than left to be
+inferred from a table that does not mention auth at all.
+
+| `auth.mode` | Logweir's client | The engine's client | Exercised |
+|---|---|---|---|
+| `plaintext` (default) | `security.protocol: PLAINTEXT` | no `security:` block rendered — the engine's own default | **Yes**, by the 0.21.0 row above and by every e2e drill. |
+| `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Rendered bytes and engine config-load only.** The digest-pinned engine loads the rendered document with **no** unknown-key warning and **no** parse error; no automated gate completes a SCRAM handshake, because the compose stack's SASL listeners land in a later task (STANDING RULE 15). |
+| `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Rendered bytes only.** TLS is not exercised locally at all — the compose stack speaks no TLS — and `tls` flips exactly one match arm on each side. A private-CA adopter configures **two** trust stores (Global Constraint 29; `docs/stability.md`). |
+| OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered | **Not in tag 1.** |
+
+**Nothing here is an MSK row.** `[UNVERIFIED — needs an MSK cluster]`: MSK
+holds SCRAM credentials in AWS Secrets Manager and requires TLS on its
+`:9096` SASL endpoint, so the sentence that would verify it is *"point
+`auth.tls: true` and `bootstrap_servers` at an MSK cluster's
+`*.kafka.<region>.amazonaws.com:9096` endpoint, project the Secrets Manager
+value into `LOGWEIR_TARGET_PASSWORD`, and record that `drill run` reaches
+phase 2"*. It needs a provisioned cluster, which Global Constraint 17 forbids,
+so it is recorded as **blocked, never as closed** — and the two `tls: true`
+claims above are deliberately about rendered bytes and not about a handshake.
+
 ## What the weekly job will add
 
 `.github/workflows/engine-matrix.yml` runs the full compose drill against each

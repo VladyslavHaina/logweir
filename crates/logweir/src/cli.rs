@@ -95,6 +95,16 @@ pub enum DrillCmd {
     },
     /// Run the drill: restore a sampled window into the scratch cluster,
     /// reconcile it per record, and emit a signed scorecard.
+    ///
+    /// With `target.auth.mode: scramSha512` in the spec, the SASL password is
+    /// read from the environment variable `LOGWEIR_TARGET_PASSWORD` and from
+    /// nowhere else: there is deliberately NO flag for it, at any command. A
+    /// secret on an argv is visible in `/proc/<pid>/cmdline`, in a shell
+    /// history and in every process listing on the host, and it would land in
+    /// the Job spec a controller creates. An UNSET variable under that mode
+    /// exits 1 (nothing was refused — project the Secret and re-run); a value
+    /// that cannot be substituted into the engine's pre-parse config text
+    /// exits 3 with `refusal-reason=CredentialNotRenderable`.
     Run {
         #[arg(long)]
         spec: PathBuf,
@@ -166,6 +176,11 @@ pub enum DrillCmd {
 pub enum BackupCmd {
     /// Take a backup of the named source topics with the pinned engine, behind
     /// phase −1's admission guard, and read the resulting archive back.
+    ///
+    /// With `source.auth.mode: scramSha512` in the spec, the SASL password is
+    /// read from the environment variable `LOGWEIR_SOURCE_PASSWORD` and from
+    /// nowhere else — see `drill run` for why there is no flag, and for the
+    /// two exit codes an unset and an unrenderable value produce.
     //
     // GC18(c)'s four rails all bind this command; `crates/logweir/src/backup/mod.rs`
     // says where each one is enforced. It is a SUBCOMMAND under `backup` rather

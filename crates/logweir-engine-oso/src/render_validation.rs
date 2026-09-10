@@ -68,6 +68,28 @@ pub fn render(
     for b in &plan.target_bootstrap {
         s.push_str(&format!("    - {}\n", yaml_scalar_checked(b)?));
     }
+    // THE SASL BLOCK (Task 6, interface **I1**) — and it belongs HERE too,
+    // though Task 6's Files block names only the other two renderers. The
+    // brief's own mutant census settles it: flipping the `Plaintext` arm to
+    // emit `security_protocol: "PLAINTEXT"` is predicted to diff "the four
+    // `restore_yaml*` and two `validation_yaml*` goldens plus Task 2's two
+    // backup goldens", i.e. the validation document is expected to carry a
+    // `target:` auth block.
+    //
+    // And it must, on the merits: `ValidationConfig.target` is the SAME
+    // `KafkaConfig` type the restore document's `target:` is
+    // [U:crates/kafka-backup-core/src/config.rs:173-189], and `validation run`
+    // dials the target cluster to count messages and read offset ranges. Left
+    // out, a SCRAM drill would render an authenticating `restore.yaml` and an
+    // unauthenticated `validation.yaml`, and phase 6 would fail to connect
+    // after phase 5 had succeeded — with NO unknown-key warning to explain it,
+    // because `validation run` parses with a bare
+    // `serde_yaml::from_str::<ValidationConfig>` and produces no ignored-key
+    // list at all (this module's own WARNING, above).
+    s.push_str(&crate::yaml::render_security_block(
+        &plan.target_auth,
+        crate::yaml::PLACEHOLDER_TARGET_PASSWORD,
+    )?);
     s.push('\n');
 
     s.push_str(

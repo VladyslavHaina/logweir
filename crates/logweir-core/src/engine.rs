@@ -129,6 +129,14 @@ pub struct RestorePlan {
     pub set: BackupSetRef,
     pub storage: StorageUrl,
     pub target_bootstrap: Vec<String>,
+    /// How the TARGET cluster's client is told to authenticate — the restore
+    /// twin of `BackupPlan::source_auth`, and **guard G-ID's carrier**.
+    ///
+    /// It is a field of the PLAN, which is what `plan_hash` covers, precisely
+    /// so the rendered `sasl_username` is a function of the approved bytes and
+    /// not of a `KafkaCluster` object a controller could re-read after
+    /// approval. Never a password — see `AuthRender`.
+    pub target_auth: AuthRender,
     /// One explicit entry per selected topic: "<source>" -> "<prefix><source>".
     pub topic_mapping: BTreeMap<String, String>,
     pub time_window: (DateTime<Utc>, DateTime<Utc>),
@@ -137,16 +145,23 @@ pub struct RestorePlan {
     pub checkpoint_interval_secs: u64,
 }
 
-/// How the SOURCE cluster's client is told to authenticate, as the renderer
-/// needs it — the render-side twin of `crate::spec::AuthSpec`.
+/// How a cluster's client is told to authenticate, as the renderer needs it —
+/// the render-side twin of `crate::spec::AuthSpec`. Carried by
+/// `BackupPlan::source_auth` and by `RestorePlan::target_auth`.
 ///
 /// **It never carries a password.** `ScramSha512` names the username only;
 /// the secret reaches the engine through its own `${VAR}` environment
 /// expansion, which is the one thing `yaml_scalar` explicitly cannot defend
 /// against and therefore the one thing that must never be interpolated by us.
-/// The `to_render()` / `mode_str()` / `username()` methods that map a spec to
-/// this type belong to Task 6 (interface **I1**); this task renders only the
-/// `Plaintext` arm, which emits nothing at all.
+/// `crate::spec::AuthSpec::to_render()` is the one mapping into this type
+/// (interface **I1**).
+///
+/// The `Plaintext` arm renders **nothing at all** in all three documents: the
+/// engine's own `SecurityProtocol` default is `PLAINTEXT`
+/// [U:crates/kafka-backup-core/src/config.rs:261-269], so an explicit key
+/// would be a fourth spelling to keep in step with upstream for no
+/// behavioural gain — and it is what keeps every golden that predates SCRAM
+/// byte-identical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRender {
     Plaintext,

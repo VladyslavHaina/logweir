@@ -7,6 +7,20 @@ license.workspace = true
 
 [dependencies]
 hex.workspace = true
+# `AuthConfig::from_spec` (Task 6, interface **I1**) maps
+# `logweir_core::spec::AuthSpec` — the shape an adopter writes — onto this
+# crate's client-side `AuthConfig`, so that the mapping exists ONCE instead of
+# at each of the three construction sites.
+#
+# ADDS NO PACKAGE (Global Constraint 38): `logweir-core` is a workspace member
+# already in the resolved graph — `cargo metadata` holds at 392. THE EDGE
+# POINTS THE PERMITTED WAY and stays inside the pure layer: Global Constraint 1
+# names both crates in it and forbids `aws-*`/`rusoto`/`kube`/`k8s-openapi`/
+# `kafka-backup`; `logweir-core` carries none of those and takes `ulid` with
+# `default-features = false`, so `cargo build -p logweir-kafka
+# --no-default-features` is unaffected. There is no cycle: `logweir-core`
+# declares no edge back to this crate.
+logweir-core = { path = "../logweir-core" }
 sha2.workspace = true
 thiserror.workspace = true
 # `tokio` is in rdkafka's default feature set and must be kept: without it

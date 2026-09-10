@@ -85,6 +85,7 @@ fn restore_plan() -> RestorePlan {
             allow_http: true,
         },
         target_bootstrap: vec!["kafka-broker-1:9094".into()],
+        target_auth: logweir_core::engine::AuthRender::Plaintext,
         topic_mapping,
         time_window: (
             chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
@@ -459,56 +460,64 @@ fn every_renderer_calls_the_checked_escaper() {
     }
 }
 
-/// Task 2's review finding **F1**: `AuthRender::ScramSha512` was a public enum
-/// variant whose render arm was `todo!()` — the workspace's only shipped
-/// `todo!()`. Nothing reached it at that slot, but Task 4 wires backup RUNS
-/// before Task 6 fills the SASL block in, so the window is real.
+/// Task 2's review finding **F1**, as it stands after Task 6:
+/// `AuthRender::ScramSha512` was a public enum variant whose render arm was
+/// `todo!()` — the workspace's only shipped `todo!()`. Task 3 replaced it with
+/// a typed `RenderError::UnsupportedAuthMode`; **Task 6 replaced the refusal
+/// with the real render**, so the assertion here inverts: the arm no longer
+/// refuses, and what F1 was really about — that no reachable arm panics, and
+/// that no plan naming SASL is ever rendered unauthenticated — is what is
+/// asserted now.
 ///
-/// A typed refusal, and the two wrong answers it replaces:
+/// The three wrong answers this pins against:
 ///   * a `todo!()` PANICS, which aborts where Global Constraint 11 requires a
 ///     refusal and prints no `refusal-reason=` line at all;
 ///   * falling through to the `Plaintext` arm emits a document the engine runs
 ///     UNAUTHENTICATED, from a plan that named SCRAM — an authentication
-///     downgrade performed on the operator's behalf. That is the mutant for
-///     this test, and it is the one a tired editor would actually write.
-///
-/// SCRAM is NOT implemented here: the refusal names the mode and points at
-/// Task 6.
+///     downgrade performed on the operator's behalf. That is still the mutant
+///     for this test, and it is the one a tired editor would actually write;
+///   * refusing again, now that the capability exists, would take a whole
+///     mode back out of the product silently.
 #[test]
-fn an_unsupported_auth_mode_is_a_typed_refusal_and_never_a_panic() {
+fn a_scram_plan_renders_and_never_panics_and_is_never_downgraded() {
     let mut p = backup_plan();
     p.source_auth = AuthRender::ScramSha512 {
         username: "logweir-drill".into(),
         tls: true,
     };
-    let err = render_backup::render(&p).unwrap_err();
-    assert_eq!(
-        err,
-        RenderError::UnsupportedAuthMode("sasl-scram-sha-512".to_string())
+    let doc = render_backup::render(&p).expect("the SCRAM arm renders since Task 6");
+    // NOT a downgrade: the document authenticates, and says so with the
+    // engine's own spellings.
+    assert!(doc.contains("  security:\n"), "{doc}");
+    assert!(doc.contains("security_protocol: \"SASL_SSL\""), "{doc}");
+    assert!(doc.contains("sasl_mechanism: \"SCRAM-SHA512\""), "{doc}");
+    assert!(doc.contains("sasl_username: \"logweir-drill\""), "{doc}");
+    // And the placeholder, never a value: the whole point of the exception.
+    assert!(
+        doc.contains("sasl_password: ${LOGWEIR_SOURCE_PASSWORD}"),
+        "{doc}"
     );
-    // And through `render_and_digest`, so the refusal does not live only on
-    // the `render` path.
-    assert_eq!(
-        render_backup::render_and_digest(&p).unwrap_err(),
-        RenderError::UnsupportedAuthMode("sasl-scram-sha-512".to_string())
-    );
+    // Through `render_and_digest` too, so the post-render `${` sweep accepts
+    // the one named placeholder rather than refusing the document it is in.
+    let (doc2, digest) = render_backup::render_and_digest(&p)
+        .expect("the named placeholder is what `assert_no_unnamed_dollar_brace` permits");
+    assert_eq!(doc2, doc);
+    assert!(digest.starts_with("sha256:"), "{digest}");
 
-    // The refusal-reason contract for it: an unsupported auth mode is a plain
-    // guard refusal, NOT `CredentialNotRenderable` — nothing about a projected
-    // credential was observed, and telling a controller otherwise would send
-    // an operator to look at a Secret. `logweir backup run`'s exit path is
-    // Task 4's; this pins the classification the moment it lands.
+    // The `UnsupportedAuthMode` rail still exists, still carries the mode, and
+    // still classifies as a plain guard refusal rather than
+    // `CredentialNotRenderable` — nothing about a projected credential is
+    // observed by a renderer, and telling a controller otherwise would send an
+    // operator to look at a Secret. Constructed directly: no `AuthRender` arm
+    // reaches it any more, which is the point of keeping it typed rather than
+    // deleting it (see the variant's own doc comment).
+    let err = RenderError::UnsupportedAuthMode("oauthbearer".to_string());
     assert_eq!(
         logweir_core::guard::refusal_reason_line(&err.to_string()),
         "refusal-reason=GuardRefused"
     );
-
-    // The message names the mode and the task, and carries no password —
-    // `AuthRender` has no field that could hold one, and the username is not
-    // repeated into the error either.
     let msg = err.to_string();
-    assert!(msg.contains("sasl-scram-sha-512"), "{msg}");
-    assert!(msg.contains("Task 6"), "{msg}");
+    assert!(msg.contains("oauthbearer"), "{msg}");
     assert!(!msg.contains("logweir-drill"), "{msg}");
 
     // There is no `todo!()` anywhere in the crate's sources any more.

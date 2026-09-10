@@ -95,6 +95,111 @@ pub const PLACEHOLDER_SOURCE_PASSWORD: &str = "${LOGWEIR_SOURCE_PASSWORD}";
 /// The target cluster's twin of `PLACEHOLDER_SOURCE_PASSWORD`.
 pub const PLACEHOLDER_TARGET_PASSWORD: &str = "${LOGWEIR_TARGET_PASSWORD}";
 
+/// The engine's SASL/SCRAM-SHA-512 wire spelling — **ONE hyphen**.
+///
+/// `SaslMechanism` is `#[serde(rename_all = "SCREAMING-KEBAB-CASE")]` over
+/// `Plain, ScramSha256, ScramSha512, Gssapi`
+/// [U:crates/kafka-backup-core/src/config.rs:318-331], so `ScramSha512`
+/// serialises as `SCRAM-SHA512`. **librdkafka spells the same mechanism
+/// `SCRAM-SHA-512`** (`crates/logweir-kafka/src/rdkafka_reader.rs`), and
+/// upstream's own `config/example-backup.yaml` comments the librdkafka form
+/// and is wrong.
+///
+/// VERIFIED BY EXECUTION against the digest-pinned engine
+/// (`third_party/kafka-backup-binary.digest`): the two-hyphen form is a serde
+/// TYPE error that aborts config load —
+/// *"Failed to parse config: source.security.sasl_mechanism: unknown variant
+/// `SCRAM-SHA-512`, expected one of `PLAIN`, `SCRAM-SHA256`, `SCRAM-SHA512`,
+/// `GSSAPI`"* — and **not** an unknown key, so `subprocess`'s unknown-key
+/// readback cannot see it. Exactly what `render_restore.rs` already records
+/// about `time_window_start`.
+pub const ENGINE_SCRAM_SHA_512: &str = "SCRAM-SHA512";
+
+/// The `security:` block, as all THREE rendered documents carry it — the
+/// engine's `KafkaConfig.security` under a `source:` or a `target:` key.
+///
+/// # The nesting is `security:`, and it was measured, not read
+///
+/// The four keys are fields of `SecurityConfig`
+/// [U:crates/kafka-backup-core/src/config.rs:191-208], reached through
+/// `KafkaConfig.security` (`:173-189`), **not** fields of `KafkaConfig`
+/// itself. Rendered one level too high — at two-space indent directly under
+/// `source:` — the digest-pinned engine answers:
+///
+/// ```text
+/// WARN Ignoring unknown config key `source.security_protocol`
+/// WARN Ignoring unknown config key `source.sasl_mechanism`
+/// WARN Ignoring unknown config key `source.sasl_username`
+/// WARN Ignoring unknown config key `source.sasl_password`
+/// ```
+///
+/// which is the `strip_offset_headers` defect exactly (Task 4 review F-1):
+/// `OsoCliEngine::assert_no_dropped_logweir_key` aborts the run at exit 1
+/// AFTER the document was written, and short of that abort a plan that named
+/// SCRAM would have dialled the cluster unauthenticated. Under `security:`
+/// the same engine emits **no** unknown-key warning at all.
+///
+/// # The password line is the raw placeholder, and never the value
+///
+/// `sasl_password` is emitted as the RAW LITERAL `${LOGWEIR_*_PASSWORD}`,
+/// unquoted, and is the ONE interpolation in this workspace that does not go
+/// through `yaml_scalar_checked` — which would refuse it, since it refuses
+/// `${` in any input by construction. That is the deliberate G-EXP exception
+/// and the reason for it: **the secret must not be in the bytes Logweir
+/// hashes.** The engine substitutes it out of its own process environment
+/// (`expand_env_vars`), the projected Secret supplies the value, and
+/// `assert_no_unnamed_dollar_brace` then passes because these two names are
+/// the only `${…}` sequences a rendered document may carry.
+///
+/// Unquoted rather than `"${…}"`, and that is a choice with a reason: the
+/// expanded value lands as a YAML PLAIN scalar. A plain scalar's hazards —
+/// a `#` after a space, a `: `, a leading flow indicator — produce a config
+/// PARSE ERROR or a truncated password, i.e. a failed authentication; they
+/// cannot open a new key, because `\n` and `\r` are refused by
+/// `logweir_core::guard::credential_is_renderable` before the value is ever
+/// projected. Double-quoting would instead make `\` an escape introducer, so
+/// a password containing a backslash would be silently REWRITTEN (`\n` inside
+/// a double-quoted scalar is a newline) and a trailing one would unterminate
+/// the scalar — a silent-corruption class the five refused characters do not
+/// cover. Unquoted trades a parse error for a wrong password, which is the
+/// right way round.
+pub(crate) fn render_security_block(
+    auth: &logweir_core::engine::AuthRender,
+    password_placeholder: &str,
+) -> Result<String, RenderError> {
+    use logweir_core::engine::AuthRender;
+    match auth {
+        // NOTHING AT ALL — see `AuthRender`'s doc comment. This is also what
+        // keeps every golden that predates SCRAM byte-identical.
+        AuthRender::Plaintext => Ok(String::new()),
+        AuthRender::ScramSha512 { username, tls } => {
+            let mut s = String::from("  security:\n");
+            // SCREAMING_SNAKE_CASE over Plaintext|Ssl|SaslPlaintext|SaslSsl
+            // [U:config.rs:261-269]. `tls` is separate from the mechanism
+            // because SASL/SCRAM over PLAINTEXT and over SSL are two
+            // `security.protocol` values for ONE mechanism.
+            s.push_str(&format!(
+                "    security_protocol: {}\n",
+                yaml_scalar_checked(if *tls { "SASL_SSL" } else { "SASL_PLAINTEXT" })?
+            ));
+            s.push_str(&format!(
+                "    sasl_mechanism: {}\n",
+                yaml_scalar_checked(ENGINE_SCRAM_SHA_512)?
+            ));
+            // **G-ID.** FROM THE PLAN BYTES, never from a cluster object read
+            // at run time — `plan.<source|target>_auth` is the only source
+            // this line has, and `plan_hash` covers it.
+            s.push_str(&format!(
+                "    sasl_username: {}\n",
+                yaml_scalar_checked(username)?
+            ));
+            // The raw placeholder literal. See this function's doc comment.
+            s.push_str(&format!("    sasl_password: {password_placeholder}\n"));
+            Ok(s)
+        }
+    }
+}
+
 /// Guard **G-EXP**, first leg: `yaml_scalar` plus a pre-check that REFUSES any
 /// input containing `${`.
 ///

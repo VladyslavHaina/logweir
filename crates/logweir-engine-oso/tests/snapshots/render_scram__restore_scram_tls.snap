@@ -1,0 +1,41 @@
+---
+source: crates/logweir-engine-oso/tests/render_scram.rs
+expression: "render_restore::render(&restore_plan(scram(true))).expect(\"no glob metacharacter, no `${`\")"
+---
+# Rendered by logweir. Do not edit; regenerate with `logweir drill run`.
+mode: restore
+backup_id: "backup-2026-08-30T02:00:00Z"
+
+target:
+  bootstrap_servers:
+    - "kafka-broker-1:9096"
+  topics:
+    include:
+      - "orders"
+  security:
+    security_protocol: "SASL_SSL"
+    sasl_mechanism: "SCRAM-SHA512"
+    sasl_username: "logweir-backup"
+    sasl_password: ${LOGWEIR_TARGET_PASSWORD}
+
+storage:
+  backend: s3
+  bucket: "kafka-backups"
+  prefix: "scram-demo"
+  region: "us-east-1"
+  endpoint: "http://minio:9000"
+  path_style: true
+  allow_http: true
+
+restore:
+  topic_mapping:
+    "orders": "drill-20260903-orders"
+  create_topics: true
+  default_replication_factor: 1
+  header_preflight: full
+  dry_run_check_segments: true
+  checkpoint_state: "/var/lib/logweir/01J9X/checkpoint.json"
+  checkpoint_interval_secs: 30
+  time_window_start: 1787961600000
+  time_window_end: 1788055200000
+  strip_offset_headers: false

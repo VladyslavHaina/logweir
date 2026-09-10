@@ -399,6 +399,114 @@ restore process dies mid-run, there is no checkpoint to resume from: the drill r
 phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
 imply resumability, and Logweir does not offer it in v0.1.
 
+### SASL/SCRAM-SHA-512: two clients, two trust stores, and one password variable
+
+Logweir dials a cluster with **two different clients**, and a SCRAM adopter
+configures both.
+
+1. **Logweir's own client** is librdkafka (`rdkafka`, the `ssl` and `sasl`
+   features). It sets `security.protocol` to `SASL_SSL` when `auth.tls` is true
+   and `SASL_PLAINTEXT` otherwise, with `sasl.mechanism: SCRAM-SHA-512`.
+2. **The engine's client** is `kafka-backup`'s own, driven by the
+   `security:` block Logweir renders into `backup.yaml`, `restore.yaml` and
+   `validation.yaml` — `security_protocol`, `sasl_mechanism`, `sasl_username`,
+   `sasl_password`.
+
+**The trust stores are separate, and this is Global Constraint 29.** The
+engine falls back to bundled `webpki-roots` unless `ssl_ca_location` is set
+[U:crates/kafka-backup-core/src/kafka/tls.rs:22-23,126-129]; Logweir's rdkafka
+path uses the runtime image's `ca-certificates`. So a **private-CA adopter
+configures two things**, not one: the CA file for the engine, and a CA bundle
+the image trusts for Logweir. Tag 1 renders no `ssl_ca_location` — an adopter
+with a private CA is a case tag 1 does not configure for them.
+
+**The mechanism has two spellings and they are both correct.** The engine's
+wire value is `SCRAM-SHA512`, with **one** hyphen: its `SaslMechanism` is
+`#[serde(rename_all = "SCREAMING-KEBAB-CASE")]` over
+`Plain, ScramSha256, ScramSha512, Gssapi`
+[U:crates/kafka-backup-core/src/config.rs:318-331]. librdkafka's is
+`SCRAM-SHA-512`, with **two**. Upstream's own `config/example-backup.yaml`
+comments the librdkafka form and is wrong for its own parser. Verified by
+execution against the digest-pinned engine: the two-hyphen value in an engine
+config is a serde **type** error that aborts config load —
+`Failed to parse config: source.security.sasl_mechanism: unknown variant
+"SCRAM-SHA-512", expected one of "PLAIN", "SCRAM-SHA256", "SCRAM-SHA512",
+"GSSAPI"` — and **not** an unknown key, so the stderr unknown-key readback
+cannot catch it. Both spellings are read out of source by
+`crates/logweir-engine-oso/tests/render_scram.rs::the_engine_spelling_is_one_hyphen_and_librdkafkas_is_two`,
+so neither can drift alone.
+
+**The four keys are nested under `security:`, and the nesting was measured.**
+They are fields of `SecurityConfig`, reached through `KafkaConfig.security`
+[U:config.rs:173-208] — not fields of `KafkaConfig`. Rendered one level too
+high, the pinned engine returns four *"Ignoring unknown config key
+`source.security_protocol`"* warnings and `OsoCliEngine`'s
+`assert_no_dropped_logweir_key` aborts the run at exit 1 **after** the document
+was written. Short of that abort, a plan that named SCRAM would have dialled
+the cluster unauthenticated.
+
+**The password is never in a spec, a plan, a rendered document, a receipt or a
+plan hash.** It is projected into the runner's environment as
+`LOGWEIR_SOURCE_PASSWORD` (source/backup) or `LOGWEIR_TARGET_PASSWORD`
+(target/restore); the rendered documents carry the literal
+`sasl_password: ${LOGWEIR_*_PASSWORD}` and the engine substitutes it out of its
+own process environment. There is **no CLI flag** for it, at any command.
+
+Three consequences an operator should know:
+
+- **An unset variable under `auth.mode: scramSha512` exits 1, not 3.** Nothing
+  was refused; project the Secret and re-run. The check happens in Logweir,
+  before the engine is spawned, and that ordering is load-bearing: with the
+  variable unset the engine substitutes the **empty string** behind nothing
+  but a `WARN Environment variable 'LOGWEIR_SOURCE_PASSWORD' is not set, using
+  empty string` and **still loads the config and starts the run** — verified by
+  execution against the pinned engine.
+- **Five characters make a password unrenderable and are refused (exit 3,
+  `refusal-reason=CredentialNotRenderable`):** newline, carriage return,
+  double quote, single quote and `$`. The refusal names the character *class*
+  and the variable, never the value.
+
+  On `$`, specifically, the reason was settled by execution rather than left
+  as a reading. The engine's `expand_env_vars`
+  [U:crates/kafka-backup-cli/src/commands/config.rs:6-34] is a **single**
+  left-to-right pass over the input: substituted text is appended to the
+  output and never re-scanned. Probed against the pinned engine with
+  `OUTER='${INNER}'`, the engine logged
+  ``Ignoring unknown config key `probe_${INNER}` `` — the literal, unexpanded.
+  So a `$`, and even a whole `${VAR}`, inside a projected password provably
+  **cannot** name or read an environment variable at engine 0.21.0. The
+  refusal is kept anyway, and the reason is now forward-defence rather than
+  ambiguity: **GC8's 0.21.0 is a floor, not a ceiling**, upstream describes its
+  own approach as *"this simple approach is sufficient"*, and the failure mode
+  of a future recursive pass is a password that reads an environment variable
+  — while the cost of the refusal is one refused password and a message that
+  says why. Narrowing it to `${` would buy `pa$$word` and no security.
+- **The placeholder is rendered unquoted, so the expanded value is a YAML
+  plain scalar.** Its residual hazards — a `#` preceded by a space, a `: `, a
+  leading flow indicator — produce a config **parse error** or a **truncated
+  password**, i.e. a failed authentication. They cannot open a new YAML key,
+  because newline and carriage return are refused before the value is ever
+  projected. Double-quoting would be worse, not better: `\` becomes an escape
+  introducer, so a password containing a backslash would be silently rewritten
+  and a trailing one would unterminate the scalar. A parse error is the right
+  way to fail.
+
+**What is not verified.** Nothing in tag 1 authenticates against a real SCRAM
+listener in an automated gate: `e2e/compose/docker-compose.yml` gains its
+`SASL://kafka-broker-1:9096` + `SASLEXT://localhost:9097` listeners and its
+`scram-setup` service in a later task (STANDING RULE 15), and until then every
+SCRAM test asserts rendered bytes, exit codes and refusals — never a successful
+handshake. **`[UNVERIFIED — needs an MSK cluster]`** for everything
+MSK-specific: MSK's SCRAM credentials are held in AWS Secrets Manager and its
+brokers require TLS, so the sentence that would verify it is *"point
+`auth.tls: true` and `bootstrap_servers` at an MSK cluster's
+`*.kafka.<region>.amazonaws.com:9096` endpoint, project the Secrets Manager
+value into `LOGWEIR_TARGET_PASSWORD`, and record that `drill run` reaches
+phase 2"* — which needs a provisioned MSK cluster and is therefore forbidden by
+Global Constraint 17 (zero cloud spend). It is recorded as blocked, never as
+closed. **`[UNVERIFIED — needs an MSK cluster]`** likewise for MSK IAM /
+OAUTHBEARER, which is `AuthConfig::Token` and is not in tag 1 at all.
+
 ### The unit suite dials nothing; the e2e suite dials
 
 Recorded rulings from Task 5b. They bind every later task in this repository.

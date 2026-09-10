@@ -228,10 +228,10 @@ fn topic_facts(name: &str, segments: Vec<SegmentFacts>) -> TopicFacts {
 /// A `DataEngine` that RECORDS the `BackupPlan` it was handed and answers
 /// `describe` from a value the test supplies. It renders nothing and spawns
 /// nothing, which is what makes the whole default suite socket-free and
-/// subprocess-free — and it is also why a SCRAM spec reaches
-/// `BackupOutcome.source_auth` here: rendering (and therefore Task 3's typed
-/// `RenderError::UnsupportedAuthMode`) happens inside `OsoCliEngine::backup`,
-/// not in this seam.
+/// subprocess-free. Rendering happens inside `OsoCliEngine::backup`, not in
+/// this seam, so what a SCRAM spec proves here is that the MODE reached
+/// `BackupOutcome.source_auth` and the plan the engine was handed — the BYTES
+/// are `crates/logweir-engine-oso/tests/render_scram.rs`'s four goldens.
 struct RecordingEngine {
     plans: Mutex<Vec<BackupPlan>>,
     /// `None` => the engine fails, as a real one exiting non-zero does.
@@ -591,17 +591,17 @@ fn backup_id_override_replaces_the_derived_id() {
     assert!(doc2.contains("backup_id: \"mvp-demo\""), "{doc2}");
 }
 
-/// `BackupOutcome.source_auth` is filled by the explicit `match` over
-/// `spec.source.auth` (Task 6 replaces it with `AuthSpec::to_render()` and
-/// changes nothing else), so Task 5b has a populated field without depending
-/// on Task 6.
+/// `BackupOutcome.source_auth` is filled from `spec.source.auth` through
+/// `AuthSpec::to_render()` (Task 6 replaced Task 4's explicit `match` with that
+/// call and changed nothing else), so Task 5b has a populated field.
 ///
-/// A SCRAM spec is RECORDED faithfully here and never downgraded. It is
-/// REFUSED at render time by Task 3's typed
-/// `RenderError::UnsupportedAuthMode` — which lives inside
-/// `OsoCliEngine::backup`, so it is reached with the real engine and not with
-/// this seam's double. `e2e/tests/backup_argv.rs` proves that refusal at
-/// process level.
+/// A SCRAM spec is RECORDED faithfully here and never downgraded — and since
+/// Task 6 it is also RENDERED. It used to be refused at render time by Task 3's
+/// typed `RenderError::UnsupportedAuthMode` inside `OsoCliEngine::backup`; that
+/// arm now emits the engine's `security:` block, and
+/// `e2e/tests/backup_argv.rs::the_real_engine_accepts_the_rendered_sasl_block`
+/// proves the pinned engine loads it with no dropped key and no parse error.
+/// The broader SCRAM acceptance lives in `crates/logweir/tests/auth_binding.rs`.
 #[test]
 fn backup_run_records_the_source_auth() {
     let f = fixture(

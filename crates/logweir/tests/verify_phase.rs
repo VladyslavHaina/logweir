@@ -270,6 +270,7 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
             path: "/tmp".into(),
         },
         target_bootstrap: vec!["broker:9092".into()],
+        target_auth: logweir_core::engine::AuthRender::Plaintext,
         topic_mapping: fixtures::mapping("orders", "drill-orders"),
         time_window: (
             fixtures::ts("2026-08-29T00:00:00Z"),

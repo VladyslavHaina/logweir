@@ -161,27 +161,26 @@ impl From<BackupError> for ExitCode {
     }
 }
 
-/// The explicit `match` GC18's backup path needs before Task 6 exists.
+/// `spec.source.auth` as the plan and the receipt carry it.
 ///
-/// Task 6 replaces this function's body with `AuthSpec::to_render()`
-/// (interface **I1**) and changes nothing else. It is HERE and not in Task 6
-/// so that Task 5b — which reads `BackupOutcome.source_auth` into
-/// `BackupReceipt.source.auth`, and shares slot 7 with Task 6 — has a
-/// populated field without depending on Task 6.
+/// Task 4 shipped this as an explicit `match`, because `AuthSpec::to_render()`
+/// was Task 6's; Task 6 replaced the body with that call and changed nothing
+/// else, so there is now ONE mapping from a spec's auth to a plan's auth and
+/// the backup and restore paths cannot drift apart on it (interface **I1**).
 ///
-/// It maps and does not refuse. The refusal for an auth mode this build
-/// cannot RENDER is Task 3's typed `RenderError::UnsupportedAuthMode`, raised
-/// inside `OsoCliEngine::backup` over the plan this value lands in — so a
-/// SCRAM spec is recorded faithfully here and then refused by the renderer
-/// (exit 1, ruling R-E), never downgraded to `Plaintext` and never a panic.
+/// The thin wrapper is kept rather than inlined at its two call sites: it is
+/// the name `BackupOutcome::source_auth`'s own doc comment points at, and it
+/// is where the paragraph below belongs.
+///
+/// It maps and does not refuse, and since Task 6 there is nothing left to
+/// refuse: both `AuthRender` arms render (`crate::yaml::
+/// render_security_block`), so a SCRAM spec is recorded faithfully here AND
+/// rendered faithfully downstream. Before Task 6 it was recorded here and
+/// then refused by the renderer as `RenderError::UnsupportedAuthMode` —
+/// exit 1, which told Task 18's cron reconciler to retry a plan this build
+/// could never accept. That arm is now reachable and passes.
 pub fn source_auth_render(auth: &AuthSpec) -> AuthRender {
-    match auth {
-        AuthSpec::Plaintext => AuthRender::Plaintext,
-        AuthSpec::ScramSha512 { username, tls } => AuthRender::ScramSha512 {
-            username: username.clone(),
-            tls: *tls,
-        },
-    }
+    auth.to_render()
 }
 
 /// A spec the guards have accepted becomes a plan. Never the other way round:
@@ -477,16 +476,47 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     // must never be able to do. (Identifiers omitted on purpose; see the
     // module doc's rail 2.)
     //
-    // `AuthConfig::Plaintext` and not the spec's own `auth`: Logweir's OWN
-    // client for the source cluster gets its SASL wiring in Task 6 (interface
-    // I1), together with the rendered SASL block. Until then a spec asking for
-    // SCRAM is refused by the renderer before the engine is spawned
-    // (`RenderError::UnsupportedAuthMode`), so this cannot silently read a
-    // cluster over an authentication mode the operator did not ask for — the
-    // run does not get that far.
+    // **Interface I1**, the third of the three construction sites. It used to
+    // hard-code the plaintext arm and say that Logweir's own source-cluster
+    // client got its SASL wiring in Task 6; this is that wiring.
+    //
+    // **The whole of this happens AFTER `phase_minus1_admit::local` and
+    // BEFORE `RdKafkaReader::connect`**, which is what makes the two exit
+    // codes mean what GC11 says. `validated_password` refuses an unrenderable
+    // projected value with a `GuardRefusal` — exit 3,
+    // `refusal-reason=CredentialNotRenderable`, before any librdkafka handle
+    // exists and therefore before a single packet reaches the SOURCE cluster,
+    // i.e. the production one. `from_spec` reports an ABSENT variable under
+    // `mode: scramSha512` as a `KafkaError::Client` — exit 1, operational,
+    // because nothing was refused and the fix is to project the Secret.
+    //
+    // Logweir's client and the engine's client authenticate as the SAME
+    // principal from the SAME spec field: this call and
+    // `render_backup`'s `security:` block both read `spec.source.auth`, and
+    // the password both use is the one value in `$LOGWEIR_SOURCE_PASSWORD` —
+    // Logweir reads it here, the engine expands it out of the environment it
+    // inherits.
+    let source_auth = match logweir_kafka::reader::AuthConfig::from_spec(
+        &inputs.spec.source.auth,
+        match crate::drill::validated_password(crate::drill::SOURCE_PASSWORD_VAR) {
+            Ok(p) => p,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        },
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            return report(
+                &run_id,
+                Err(
+                    crate::drill::naming_the_password_var(e, crate::drill::SOURCE_PASSWORD_VAR)
+                        .into(),
+                ),
+            )
+        }
+    };
     let reader = match logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
         &inputs.spec.source.bootstrap_servers,
-        logweir_kafka::reader::AuthConfig::Plaintext,
+        source_auth,
     ) {
         Ok(r) => r,
         Err(e) => return report(&run_id, Err(e.into())),

@@ -24,7 +24,7 @@ use logweir_core::scorecard::{
 };
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_engine_oso::storage::Store;
-use logweir_kafka::reader::{ClusterReader, TopicDeleter};
+use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicDeleter};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -698,14 +698,25 @@ fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| DrillError::Operational(format!("allowed-clusters does not parse: {e}")))?;
 
-    // v0.1 ships PLAINTEXT and SASL/SCRAM over TLS, but `TargetSpec` carries
-    // no auth block, so there is nothing in the spec to render a
-    // `ScramSha512` from. Plaintext is what the shipped spec can express;
-    // widening it is a spec change, not an orchestrator change.
+    // **Interface I1.** Was a hard-coded plaintext arm with a comment saying
+    // `TargetSpec` carried no auth block to render one from;
+    // Task 6 gave `TargetSpec` that block, so the mode is the spec's and this
+    // is the one construction site
+    // (`logweir_kafka::reader::AuthConfig::from_spec`).
+    //
+    // The environment read happens ONCE, here, and not inside the closure:
+    // the closure is called twice (see the `with_scratch_prefix` fallback
+    // below) and `AuthConfig` is `Clone`, so re-reading would be two reads of
+    // a Secret for one run. An unrenderable value refuses with exit 3 before
+    // any client exists; an ABSENT value under `mode: scramSha512` is exit 1,
+    // named by `naming_the_password_var`.
+    let target_auth =
+        AuthConfig::from_spec(&spec.target.auth, validated_password(TARGET_PASSWORD_VAR)?)
+            .map_err(|e| naming_the_password_var(e, TARGET_PASSWORD_VAR))?;
     let connect = || {
         logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
             &spec.target.bootstrap_servers,
-            logweir_kafka::reader::AuthConfig::Plaintext,
+            target_auth.clone(),
         )
     };
     // Scope deletion to this drill's own scratch namespace before the handle
@@ -815,49 +826,107 @@ pub const TARGET_PASSWORD_VAR: &str = "LOGWEIR_TARGET_PASSWORD";
 ///
 /// # Scope, precisely
 ///
-/// It validates the variables that are PRESENT. Nothing in tag 1's
-/// `DrillSpec` can ask for SASL — `context` hardcodes
-/// `AuthConfig::Plaintext` and says why — so a password in the environment is
-/// today either a projection made in advance of Task 6 or a misconfiguration,
-/// and in both cases a value that cannot be substituted into pre-parse text is
-/// a fact worth refusing on rather than carrying into a run. **Task 6 wires
-/// the value's CONSUMER** (the rendered SASL block and the engine's own
-/// environment); it does not need to repeat this check, and repeating it would
-/// be harmless — the predicate is pure.
+/// It validates the variables that are PRESENT, whatever the spec asks for.
+/// Since Task 6 a `DrillSpec` CAN ask for SASL (`spec.target.auth`), so a
+/// projected value normally has a consumer — but the check is deliberately
+/// not conditional on the mode: a value that cannot be substituted into
+/// pre-parse text is a fact worth refusing on before anything runs, and a
+/// spec switched back to plaintext with the Secret still projected is the
+/// case where a mode-conditional check would let it through.
+///
+/// It runs a SECOND time, per variable, at the moment of use
+/// (`validated_password`, which is this function's own body). That is not
+/// redundancy to be tidied away: the predicate is pure, and the two calls
+/// answer two questions — "is this process's environment renderable at all"
+/// and "is the value I am about to hand a client renderable".
 ///
 /// A non-UTF-8 value is refused, not skipped: it cannot be substituted into a
 /// text document at all, and `std::env::var`'s `NotUnicode` is exactly the
 /// case a bare `if let Ok(..)` would silently admit.
-fn check_projected_credentials() -> Result<(), DrillError> {
+pub fn check_projected_credentials() -> Result<(), logweir_core::guard::GuardRefusal> {
     for var in [SOURCE_PASSWORD_VAR, TARGET_PASSWORD_VAR] {
-        let secret = match std::env::var(var) {
-            Ok(v) => v,
-            Err(std::env::VarError::NotPresent) => continue,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(logweir_core::guard::GuardRefusal(format!(
-                    "{}: the value projected into `{var}` is not valid UTF-8, so it cannot be \
-                     substituted into the engine's config text at all. The refusal names the \
-                     variable and never the value.",
-                    logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
-                ))
-                .into())
-            }
-        };
-        if let Err(refusal) = logweir_core::guard::credential_is_renderable(&secret) {
-            // The message OPENS with the terminal state, which is what
-            // `logweir_core::guard::terminal_state` matches on and therefore
-            // what `refusal-reason=CredentialNotRenderable` depends on. The
-            // refusal's own `Display` names the character class and is a pure
-            // function of that class, so no fragment of the secret can reach
-            // this string.
-            return Err(logweir_core::guard::GuardRefusal(format!(
-                "{}: {refusal} (projected into `{var}`)",
-                logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
-            ))
-            .into());
-        }
+        validated_password(var)?;
     }
     Ok(())
+}
+
+/// Interface **I1**'s environment half: read one variable, validate it, and
+/// hand back what `logweir_kafka::reader::AuthConfig::from_spec` takes.
+///
+/// **`Ok(None)` for an ABSENT variable, deliberately.** Whether absence is
+/// fatal depends on the spec's `auth.mode`, which this function does not see;
+/// `from_spec` is the half that does, and it answers with an operational
+/// `KafkaError` (exit 1), never a refusal. Splitting it that way is what keeps
+/// the exit-3 case ("this value can never be rendered") and the exit-1 case
+/// ("nobody projected the Secret yet") from collapsing into one code — which
+/// would tell Task 18's cron reconciler to retry a plan forever, or to stop
+/// retrying a condition an operator is about to fix.
+///
+/// It refuses (exit 3, `refusal-reason=CredentialNotRenderable`) exactly what
+/// `check_projected_credentials` refuses, by calling the same code: this IS
+/// that function's per-variable body, so the guard the runner applies at
+/// startup and the guard applied at the moment of use cannot drift.
+///
+/// **The value never reaches a log, an error message or a return path other
+/// than the caller's `AuthConfig`.** `CredentialRefusal`'s `Display` is a pure
+/// function of the offending character CLASS (`logweir_core::guard`), so two
+/// different unrenderable passwords with the same first offending character
+/// produce byte-identical messages.
+pub fn validated_password(var: &str) -> Result<Option<String>, logweir_core::guard::GuardRefusal> {
+    let secret = match std::env::var(var) {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(logweir_core::guard::GuardRefusal(format!(
+                "{}: the value projected into `{var}` is not valid UTF-8, so it cannot be \
+                 substituted into the engine's config text at all. The refusal names the \
+                 variable and never the value.",
+                logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
+            )))
+        }
+    };
+    if let Err(refusal) = logweir_core::guard::credential_is_renderable(&secret) {
+        // The message OPENS with the terminal state, which is what
+        // `logweir_core::guard::terminal_state` matches on and therefore
+        // what `refusal-reason=CredentialNotRenderable` depends on. The
+        // refusal's own `Display` names the character class and is a pure
+        // function of that class, so no fragment of the secret can reach
+        // this string.
+        return Err(logweir_core::guard::GuardRefusal(format!(
+            "{}: {refusal} (projected into `{var}`)",
+            logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE
+        )));
+    }
+    Ok(Some(secret))
+}
+
+/// `AuthConfig::from_spec`'s "no password was projected" error, re-stated with
+/// the variable THIS process actually read.
+///
+/// `from_spec` lives in `logweir-kafka`, takes `Option<String>` (interface
+/// I1's pinned signature) and therefore cannot know which of the two variables
+/// a caller took — so the crate that does know says so. Only the `Client` arm
+/// is rewritten; every other `KafkaError` is a real broker fact and is passed
+/// through untouched, because a message about an environment variable would be
+/// a lie about a timeout.
+pub fn naming_the_password_var(
+    e: logweir_kafka::reader::KafkaError,
+    var: &str,
+) -> logweir_kafka::reader::KafkaError {
+    match e {
+        logweir_kafka::reader::KafkaError::Client(_) => {
+            logweir_kafka::reader::KafkaError::Client(format!(
+                "auth.mode is scramSha512 but ${var} is unset. Nothing was refused: this is \
+                 operational (exit 1), not a guard refusal (exit 3) — project the Secret and \
+                 re-run. The engine would otherwise substitute the EMPTY STRING for the \
+                 placeholder behind nothing but a warning \
+                 [U:crates/kafka-backup-cli/src/commands/config.rs:20-27, verified by \
+                 execution against the pinned engine] and attempt an unauthenticated \
+                 connection, which is why this is checked before the engine is spawned."
+            ))
+        }
+        other => other,
+    }
 }
 
 pub fn execute(args: &RunArgs, run_id: &str) -> Result<Scorecard, DrillError> {
@@ -1351,7 +1420,17 @@ fn pick_backup_set(engine: &dyn DataEngine, spec: &DrillSpec) -> Result<BackupSe
 /// The one plan both phase 5 and phase 6 run against, unchanged — that
 /// identity is what binds the approved plan to the executed one (see
 /// `logweir_engine_oso::render_restore`'s module doc).
-fn build_plan(
+///
+/// **`pub` for guard G-ID**, and for nothing else. It is the seam where the
+/// approved spec BYTES become the plan `plan_hash` covers, so it is the seam
+/// where "the rendered `sasl_username` comes from the plan and never from a
+/// cluster object" is a testable claim rather than a comment:
+/// `crates/logweir/tests/auth_binding.rs::
+/// rendered_sasl_username_comes_from_plan_bytes_not_from_the_cluster_object`
+/// calls it with a live cluster view in scope and asserts the view cannot
+/// reach the document. A test that constructed a `RestorePlan` literal
+/// instead would be asserting a property of the test.
+pub fn build_plan(
     spec: &DrillSpec,
     set: &BackupSetRef,
     mapping: &BTreeMap<String, String>,
@@ -1361,6 +1440,10 @@ fn build_plan(
         set: set.clone(),
         storage: spec.source.storage.clone(),
         target_bootstrap: spec.target.bootstrap_servers.clone(),
+        // **G-ID.** The principal is bound into the plan — and therefore into
+        // `plan_hash` — from the SPEC BYTES the approver signed off, and is
+        // read from nothing else. See `AuthSpec::username`.
+        target_auth: spec.target.auth.to_render(),
         topic_mapping: mapping.clone(),
         time_window: (spec.sample.window_start, spec.sample.window_end),
         default_replication_factor: spec.target.default_replication_factor,
@@ -1544,6 +1627,32 @@ fn target_info(
         // engine was handed cannot drift.
         topic_mapping_sha256: logweir_core::ids::sha256_prefixed(block.as_bytes()),
         topic_mapping_entries: admitted.topic_mapping.len() as u32,
+        // **THE ONE LINE TASK 6 OWES AND CANNOT WRITE — the slot-7 late
+        // binding to Task 5b, recorded here rather than claimed.**
+        //
+        // `TargetInfo` has no `auth` field on this branch. The scorecard's
+        // `target.auth` block — the `AuthSummary` type, both readers' tolerant
+        // read, `verify_scorecard.py`'s `SCRIPT_VERSION` bump, the two corpus
+        // cases and the schema `cmp` on the CI drift gate — is Task 5b's, in
+        // this same dispatch slot, and is the whole of Global Constraint 12's
+        // price for a nested optional field. Task 6 pays none of it and edits
+        // neither reader, neither schema nor the corpus, so it cannot add the
+        // field here without taking a file Task 5b owns.
+        //
+        // What Task 6 owes instead is the VALUE, and it ships it: the exact
+        // line is
+        //
+        //     auth: Some(AuthSummary {
+        //         mode: spec.target.auth.mode_str().into(),
+        //         username: spec.target.auth.username().map(str::to_string),
+        //     }),
+        //
+        // and both methods are landed, public and tested — `crates/logweir/
+        // tests/auth_binding.rs::the_scorecard_auth_block_and_auth_spec_agree`
+        // asserts that they return exactly the two strings both readers
+        // accept and that a `{mode, username}` object round-trips through
+        // serde_json with those keys. The controller applies the assignment at
+        // rebase; nothing here claims it is applied.
     })
 }
 

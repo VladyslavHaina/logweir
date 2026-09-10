@@ -2763,6 +2763,7 @@ mod tests {
                 path: "/tmp".into(),
             },
             target_bootstrap: vec!["broker:9092".into()],
+            target_auth: logweir_core::engine::AuthRender::Plaintext,
             topic_mapping: BTreeMap::new(),
             time_window: (chrono::Utc::now(), chrono::Utc::now()),
             default_replication_factor: 1,

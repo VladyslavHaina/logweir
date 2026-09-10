@@ -18,6 +18,7 @@ fn plan() -> RestorePlan {
             allow_http: true,
         },
         target_bootstrap: vec!["kafka-broker-1:9092".into()],
+        target_auth: logweir_core::engine::AuthRender::Plaintext,
         topic_mapping: [
             ("orders".to_string(), "drill-20260903-orders".to_string()),
             (
