@@ -229,11 +229,20 @@ fn now() -> DateTime<Utc> {
 
 /// An `Approval` as the API server would hand it over.
 ///
-/// `doc_hash` is the hash INSIDE the signed bytes; `status_hash` is what the
-/// STATUS claims. They are separate parameters because the whole property of
+/// `doc_hash` is the hash INSIDE the signed bytes; `cached_hash` is what
+/// `spec.planHash` claims. They are separate parameters because the whole
+/// property of
 /// `the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation`'s second
 /// arm is that only the first one is read.
-fn approval_json(verified: bool, doc_hash: &str, status_hash: &str) -> String {
+///
+/// **`spec.planHash` IS THE ONE AN AUTHOR TYPES, AND IT IS NOT SIGNED.** It is
+/// a plain CRD field beside `approvalBytes`, so it can say anything at all
+/// while the DOCUMENT says something else — which is exactly what the mutant
+/// exploits. `Approval.status` carries no plan hash of any kind (measured
+/// against the shipped schema in the second arm below), so the nearest
+/// reachable form of "read it from a status" is "read it from this unsigned
+/// spec field".
+fn approval_json(verified: bool, doc_hash: &str, cached_hash: &str) -> String {
     let doc = serde_json::to_string(&approval_doc(doc_hash)).expect("the doc is a JSON string");
     format!(
         r#"{{
@@ -242,14 +251,13 @@ fn approval_json(verified: bool, doc_hash: &str, status_hash: &str) -> String {
   "metadata": {{ "name": "{APPROVAL}", "namespace": "{NS}", "uid": "aaaaaaaa-0000-4000-8000-00000000000a" }},
   "spec": {{
     "subjectRef": {{ "kind": "Restore", "name": "{NAME}" }},
-    "planHash": "{status_hash}",
+    "planHash": "{cached_hash}",
     "approvalBytes": {doc},
     "sidecarBytes": "{{}}"
   }},
   "status": {{
     "verified": {verified},
     "matchedKeyId": "{KEY_ID_LIVE}",
-    "planHash": "{status_hash}",
     "conditions": [{{ "type": "Verified", "status": "{}", "reason": "{}" }}]
   }}
 }}"#,
@@ -947,10 +955,26 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
          {message}"
     );
 
-    // ---- arm 2: the STATUS carries the CORRECT hash. It changes nothing.
+    // ---- arm 2: the UNSIGNED CACHED FIELD carries the CORRECT hash, and it
+    //             changes nothing.
+    //
+    // `Approval.status` carries no plan hash at all — asserted below — so the
+    // nearest reachable mutant is "read `spec.planHash`", the plain CRD field
+    // an author types beside the signed bytes. It can say anything while the
+    // document says something else, which is the whole reason check 7 on the
+    // Approval side and `admit` on this side both RECOMPUTE.
+    let shipped = workspace_yaml("config/crd/approvals.yaml");
+    let status_props = &shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
+        ["status"]["properties"];
+    assert!(
+        status_props.get("planHash").is_none(),
+        "Approval.status declares NO plan hash, so there is nothing on a status to read; the \
+         mutant this arm kills reads the unsigned spec.planHash instead"
+    );
     let (client2, _rec2, bodies2) = mock_client_recording_bodies(admission_routes(
         200,
-        // doc says the wrong thing; status says the right thing
+        // the document says the wrong thing; the unsigned cached field says
+        // the right thing
         approval_json(true, wrong, &plan_hash()),
         200,
         cluster_json(true, PLAINTEXT_AUTH),
@@ -965,9 +989,9 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
     assert_eq!(
         post_count(&seen2, "/jobs"),
         0,
-        "a status field is written by a controller and is not part of anything anyone signed, so \
-         it cannot rescue an approval that binds different bytes. A reconciler that read \
-         Approval.status.planHash would have created a Job here"
+        "spec.planHash is a plain field an author typed and is not part of anything anyone \
+         signed, so it cannot rescue an approval that binds different bytes. A reconciler that \
+         read it instead of parsing spec.approvalBytes would have created a Job here"
     );
     assert_eq!(
         outcome2.terminal_state.as_deref(),
@@ -1984,6 +2008,19 @@ fn assert_no_duplicate_condition_types(status: &Value) {
 ///
 /// KILLS: pick the first terminal state on a tie instead of reading the
 /// refusal line; guess a terminal state when the line is absent.
+///
+/// # ROW 3 IS THE TIE, AND IT WAS ADDED BECAUSE THE MUTANT SURVIVED WITHOUT IT
+///
+/// Measured: a mutant that answered *"the first member of
+/// `conditions::TERMINAL_STATES` the log body mentions anywhere"* instead of
+/// reading the `refusal-reason=` line passed this table at 32 / 0. Every row
+/// mentioned exactly ONE terminal state, so "the state on the refusal line"
+/// and "the first state the body mentions" could not disagree — the table was
+/// a table of one case written three ways. Row 3 makes them disagree: the
+/// prose mentions `TargetTopicConfigRefused` and the refusal line names
+/// `CredentialNotRenderable`, so a reader that scans for state NAMES rather
+/// than for the KEY answers the wrong one. Row 4 does the same to a
+/// first-line-wins reader with two refusal lines.
 #[tokio::test]
 async fn an_exit_three_maps_to_the_terminal_state_its_refusal_line_names() {
     for (label, tail, expect) in [
@@ -2000,6 +2037,28 @@ async fn an_exit_three_maps_to_the_terminal_state_its_refusal_line_names() {
             format!(
                 "refusal-reason={TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE}\n\
                  guard: $LOGWEIR_TARGET_PASSWORD is unset\n"
+            ),
+            TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+        ),
+        (
+            // THE TIE. Two terminal states appear in the body; only one is on
+            // the refusal line, and it is not the one a name-scan finds first.
+            "two states named, one on the refusal line",
+            format!(
+                "guard: the target topic config was fine, so \
+                 {TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED} was not the problem\n\
+                 refusal-reason={TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE}\n"
+            ),
+            TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+        ),
+        (
+            // TWO refusal lines: the LAST one in the tail wins, because a
+            // runner that logged an earlier draft would have the final one be
+            // the one it refused on.
+            "two refusal lines",
+            format!(
+                "refusal-reason={TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED}\n\
+                 refusal-reason={TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE}\n"
             ),
             TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
         ),
