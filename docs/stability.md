@@ -663,6 +663,19 @@ topic exists, so the name it creates was free, and it is deleted before any verd
 but on a `LogAppendTime` broker an exit-3 run has therefore created and deleted one topic, and this
 sentence is the record of it.
 
+### The restore window's end is inclusive; the backup receipt's `covered.to_ms` is exclusive
+
+A `Restore`'s window is a closed interval: the engine's PITR filter is `timestamp >= start &&
+timestamp <= end`, so a record whose timestamp equals `restore.point_in_time` exactly **is**
+restored. The `BackupReceipt`'s covered range is half-open in the other direction: `covered.from_ms`
+is the oldest segment's inclusive start and `covered.to_ms` is the newest segment's end **plus one
+millisecond** (`backup/phase_run.rs`), so it is the first instant the archive does *not* cover.
+Copying a `covered.to_ms` into a `restore.point_in_time` is therefore harmless — one millisecond
+wide of a region that holds nothing — while treating `point_in_time` as exclusive silently drops the
+boundary record. Both documents' floors are the minimum segment start over the topics that document
+names, so a receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same
+archive and the same topics.
+
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
 Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once

@@ -141,8 +141,25 @@ impl BackupSetFacts {
     }
 }
 
-/// Where `RestorePlan.time_window.0` came from. An enum, not a bool: phase 5's
-/// refusal reads this and a caller cannot get it backwards silently.
+/// Where `RestorePlan.time_window.0` came from. An enum, not a bool, so the
+/// plan's claim about its own floor is a VALUE that can be checked against the
+/// floor it describes — and the one place that check happens is plan
+/// construction: `logweir::drill::build_plan_with_floor` refuses, exit 3, an
+/// `ArchiveManifest` plan whose `time_window.0` is not the manifest floor it
+/// was handed. In tag 1 that check is this enum's only reader.
+///
+/// **Phase 5 does not read it.**
+/// `logweir::drill::phase5_preflight::check_rendered_window_floor` renders the
+/// document, parses the `time_window_start` INTEGER back off the bytes and
+/// compares it with a floor re-derived from the manifest, so it refuses an
+/// `InheritedFromSpec` plan whose start is not the archive's exactly as it
+/// refuses an `ArchiveManifest` one: by the integer, never by the claim. A
+/// guard that read the claim could be talked out of refusing by the very plan
+/// it is refusing.
+///
+/// `InheritedFromSpec` is constructed nowhere in tag 1 (plan erratum E7): it
+/// is the negative arm of the plan-construction check, and the variant a later
+/// restore mode may use (interface I33).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowFloorSource {
     ArchiveManifest,

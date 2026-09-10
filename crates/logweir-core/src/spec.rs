@@ -61,6 +61,21 @@ pub struct DrillSpec {
 /// `point_in_time` is the window's END when it is present, and
 /// `sample.window_end` when it is absent — which preserves every existing
 /// drill's behaviour for the end of the window.
+///
+/// # It is INCLUSIVE, and its receipt twin is not
+///
+/// The window is a closed interval: the engine filters `timestamp >= start &&
+/// timestamp <= end`, so a record whose timestamp equals `point_in_time`
+/// exactly is restored. The `BackupReceipt`'s `covered.to_ms` is the opposite
+/// convention — the newest segment's end plus one millisecond, i.e. the first
+/// instant the archive does NOT cover (`logweir::backup::phase_run`). Copying
+/// a `covered.to_ms` in here is harmless; assuming `point_in_time` is
+/// exclusive silently drops the boundary record. Recorded in
+/// `docs/stability.md`.
+///
+/// A `point_in_time` at or before the archive set's earliest covered
+/// timestamp is refused, exit 3, naming both integers: the window would hold
+/// no instant and the restore would produce nothing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RestoreSpecBlock {
     #[serde(default)]
