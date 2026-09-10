@@ -68,7 +68,7 @@
 //! compiles cleanly and dies at the first retention reconcile.
 
 use chrono::{DateTime, TimeZone as _, Utc};
-use logweir_core::engine::StorageUrl;
+use logweir_core::engine::{EngineError, StorageUrl};
 use logweir_store::{Store, StoreError};
 
 use crate::crds::backup_schedule::Retention;
@@ -132,6 +132,35 @@ impl RemovalReason {
     }
 }
 
+/// One manifest key the evaluation could not read, and why.
+/// **Task 19 review, finding F-5.**
+///
+/// WHY A SKIP AND NOT AN ERROR. `evaluate` used to return `Err` on the first
+/// manifest that did not parse, so an archive of fifty good backup sets plus
+/// one stray `x/manifest.json` — a sibling JSON object the `/manifest.json`
+/// filter picked up, which is the exact case `StoreError::NotAManifest`'s own
+/// doc comment names — produced NO retention report at all. One unreadable
+/// object is a fact about that object; it is not a reason to stop reporting on
+/// the other fifty.
+///
+/// SKIPPING CANNOT INVENT A REMOVAL, which is why it is the safe direction.
+/// A skipped set is not ranked and not aged, so it appears in neither
+/// `sets_kept` nor `sets_that_would_be_removed`; and because ranks are
+/// assigned over the sets that DID parse, dropping one can only ever move a
+/// surviving set to a lower (safer) rank. A report over a partly unreadable
+/// archive therefore under-reports removals and never over-reports them — the
+/// defensible direction for a field whose siblings are `aws s3 rm` commands.
+/// The skip is recorded here, and warned once per key, so it is never silent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkippedManifest {
+    /// The manifest key, exactly as the archive listed it.
+    pub key: String,
+    /// Why it was skipped — the `StoreError`'s own message, so the
+    /// `NotAManifest` / `Backend` distinction Task 13 landed survives into the
+    /// status block a reader sees.
+    pub reason: String,
+}
+
 /// One backup set a retention rule selects. **It is still in the archive.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemovableSet {
@@ -167,6 +196,10 @@ pub struct RetentionReport {
     /// The `mc` spelling of the same commands, same order. Rendered, never
     /// executed.
     pub mc_cli: Vec<String>,
+    /// The manifest keys the evaluation could not read, and why — see
+    /// [`SkippedManifest`]. Empty on a wholly readable archive; NEVER an
+    /// error, and never silent.
+    pub skipped: Vec<SkippedManifest>,
     /// Why the evaluation removed nothing, when the reason is not "there is
     /// nothing to remove" — see [`NO_RULE_NOTE`].
     pub note: Option<String>,
@@ -189,7 +222,9 @@ impl RetentionReport {
     /// THAT is where "no evaluation happened" is said.
     #[must_use]
     pub fn to_status(&self) -> crate::crds::backup_schedule::RetentionReport {
-        use crate::crds::backup_schedule::{RemovableSetReport, RetentionReport as Status};
+        use crate::crds::backup_schedule::{
+            RemovableSetReport, RetentionReport as Status, SkippedManifestReport,
+        };
         Status {
             evaluated_at: Some(self.evaluated_at),
             keep_last: self.keep_last.map(i64::from),
@@ -215,6 +250,15 @@ impl RetentionReport {
             ),
             aws_cli: Some(self.aws_cli.clone()),
             mc_cli: Some(self.mc_cli.clone()),
+            skipped: Some(
+                self.skipped
+                    .iter()
+                    .map(|s| SkippedManifestReport {
+                        key: s.key.clone(),
+                        reason: s.reason.clone(),
+                    })
+                    .collect(),
+            ),
             note: self.note.clone(),
         }
     }
@@ -252,12 +296,24 @@ impl RetentionReport {
 /// runtime. Interface **I13**: a reconciler calls it inside
 /// `tokio::task::spawn_blocking`, never directly.
 ///
+/// # A manifest that cannot be read is skipped, not fatal
+///
+/// **Task 19 review, finding F-5.** One unreadable object under the prefix — a
+/// sibling JSON body the `/manifest.json` filter picked up, a truncated read —
+/// lands in [`RetentionReport::skipped`] with the `StoreError`'s own message
+/// and is warned once; the other sets are still evaluated and still reported.
+/// See [`SkippedManifest`] for why that is the safe direction: a skipped set is
+/// neither kept nor listed as removable, and ranks are assigned over the sets
+/// that parsed, so a partly unreadable archive under-reports removals and can
+/// never over-report them.
+///
 /// # Errors
 ///
-/// [`StoreError`] from the list or from any manifest read. A manifest that is
-/// not a manifest answers `StoreError::NotAManifest` and a manifest-shaped
-/// body bounding no window answers `StoreError::Backend` — two different
-/// facts, two different errors (Task 13 review carry).
+/// [`StoreError`] from the LIST — a report over an archive nobody could
+/// enumerate would be a claim about an unknown number of sets, so that one
+/// still fails hard. An individual manifest read never fails this function;
+/// the `NotAManifest`-versus-`Backend` distinction Task 13 landed travels into
+/// [`SkippedManifest::reason`] instead.
 pub fn evaluate(
     store: &Store,
     archive_url: &str,
@@ -273,14 +329,44 @@ pub fn evaluate(
     // derivation — and it is the right half here because this function is
     // handed a prefix STRING, not a `StorageUrl`. The `backup_id` comes back
     // from `manifest_facts` below, derived by the one shared function.
-    let keys = store
-        .list_manifest_keys(prefix)
-        .map_err(|e| StoreError::Io(e.to_string()))?;
+    //
+    // THE LIST FAILURE KEEPS ITS VARIANT (Task 19 review, finding F-6). A
+    // `map_err(|e| StoreError::Io(e.to_string()))` collapsed
+    // `EngineError::Unsupported` — "this backend cannot do that at all" —
+    // into `Io`, "storage said no", which is the `NotFound`-versus-`Io`
+    // defect `StoreError`'s own doc comments argue about, one enum along.
+    // `EngineError` has exactly two variants, so the mapping is total and
+    // needs no wildcard.
+    let keys = store.list_manifest_keys(prefix).map_err(|e| match e {
+        EngineError::Unsupported(m) => StoreError::Backend(m),
+        EngineError::Operational(m) => StoreError::Io(m),
+    })?;
 
+    // A MALFORMED SIBLING IS SKIPPED, NOT FATAL (Task 19 review, finding
+    // F-5). `?` here used to lose the whole report to one stray
+    // `x/manifest.json` — see [`SkippedManifest`] for why skipping is both
+    // honest and the safe direction. The list itself still fails hard above:
+    // a report over an archive nobody could enumerate would be a claim about
+    // an unknown number of sets.
     let mut sets: Vec<(String, DateTime<Utc>)> = Vec::with_capacity(keys.len());
+    let mut skipped: Vec<SkippedManifest> = Vec::new();
     for key in &keys {
-        let facts = store.manifest_facts(key)?;
-        sets.push((facts.backup_id, from_ms(facts.newest_record_ms)));
+        match store.manifest_facts(key) {
+            Ok(facts) => sets.push((facts.backup_id, from_ms(facts.newest_record_ms))),
+            Err(e) => {
+                tracing::warn!(
+                    key = %key,
+                    error = %e,
+                    "this manifest key could not be read; it is SKIPPED and recorded in \
+                     status.retentionReport.skipped, and the rest of the archive is still \
+                     reported. A skipped set is neither kept nor listed as removable."
+                );
+                skipped.push(SkippedManifest {
+                    key: key.clone(),
+                    reason: e.to_string(),
+                });
+            }
+        }
     }
 
     // NEWEST FIRST, BY THE WINDOW AND NEVER BY THE KEY. `backup_id` is the tie
@@ -340,27 +426,57 @@ pub fn evaluate(
         sets_that_would_be_removed: removable,
         aws_cli,
         mc_cli,
+        skipped,
         note,
     })
 }
 
+/// `value` as exactly one POSIX shell word. **Task 19 review, finding F-1.**
+///
+/// WHY THIS EXISTS AT ALL. The two renderers below are documented — in this
+/// module, in the CRD's own field description and in `docs/kubernetes.md` — as
+/// "the exact commands an operator would run", so copy-and-paste IS the
+/// intended workflow. Everything they interpolate comes from outside Logweir:
+/// `backup_id` is the parent directory of a key the ARCHIVE reported, and the
+/// bucket and prefix come from `spec.archive.url`. S3 object keys and
+/// filesystem directory names may legally contain a space, a `$`, a backtick,
+/// a single quote, a newline — and a `;`. Rendered raw,
+/// `backup_id = "a;rm -rf ~"` produced TWO shell commands, the second of them
+/// destructive, in a status field an operator is invited to paste into a
+/// shell. That is not a G-RET break — Logweir still deletes nothing, and the
+/// archive is untouched — but the ADVICE Logweir prints has to be safe for a
+/// hostile or merely unusual key.
+///
+/// THE QUOTING IS UNCONDITIONAL, AND SINGLE-QUOTE. Inside `'…'` a POSIX shell
+/// expands nothing at all — no `$`, no backtick, no `~`, no glob — and a
+/// newline is a literal newline rather than a command separator. The one
+/// character that cannot appear inside single quotes is the single quote
+/// itself, so an embedded `'` closes the string, escapes a literal quote and
+/// reopens it: `'` → `'\''`. There is deliberately no "does this value need
+/// quoting?" branch, because that branch is where the holes grow.
+#[must_use]
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// The command an operator runs against `aws s3`. **Rendered, never executed.**
 ///
-/// `aws s3 rm <url>/<id>/ --recursive`, with exactly one slash between the
-/// archive URL and the id whatever the spec's trailing slash looked like.
+/// `aws s3 rm '<url>/<id>/' --recursive`, with exactly one slash between the
+/// archive URL and the id whatever the spec's trailing slash looked like, and
+/// the whole path as ONE shell word — see [`shell_quote`].
 #[must_use]
 pub fn aws_rm(archive_url: &str, backup_id: &str) -> String {
-    format!(
-        "aws s3 rm {}/{backup_id}/ --recursive",
-        archive_url.trim_end_matches('/')
-    )
+    let target = format!("{}/{backup_id}/", archive_url.trim_end_matches('/'));
+    format!("aws s3 rm {} --recursive", shell_quote(&target))
 }
 
 /// The command an operator runs against `mc`. **Rendered, never executed.**
 ///
-/// `mc rm --recursive --force local/<bucket>/<prefix>/<id>/`. `local` is
+/// `mc rm --recursive --force 'local/<bucket>/<prefix>/<id>/'`. `local` is
 /// `mc`'s own alias for a configured endpoint and is the adopter's to change;
-/// the bucket and prefix are split out of `archive_url` by [`bucket_and_prefix`].
+/// the bucket and prefix are split out of `archive_url` by
+/// [`bucket_and_prefix`], and the whole target is ONE shell word — see
+/// [`shell_quote`].
 #[must_use]
 pub fn mc_rm(archive_url: &str, backup_id: &str) -> String {
     let (bucket, prefix) = bucket_and_prefix(archive_url);
@@ -369,7 +485,10 @@ pub fn mc_rm(archive_url: &str, backup_id: &str) -> String {
         target.push('/');
         target.push_str(&prefix);
     }
-    format!("mc rm --recursive --force {target}/{backup_id}/")
+    target.push('/');
+    target.push_str(backup_id);
+    target.push('/');
+    format!("mc rm --recursive --force {}", shell_quote(&target))
 }
 
 /// The `(bucket, prefix)` an object-store URL names.
@@ -450,8 +569,20 @@ pub fn storage_url_for(archive_url: &str) -> Result<StorageUrl, String> {
                 prefix: prefix.to_string(),
             })
         }
+        // A TWO-SLASH `file://` URL IS REFUSED, NOT REINTERPRETED (Task 19
+        // review, finding F-7). `file:///tmp/x` names `/tmp/x`; but
+        // `file://relative/x` used to be rewritten to `/relative/x`, silently
+        // turning an authority-shaped value into an absolute root. The
+        // controller's ONE archive handle is not the place to guess: an error
+        // naming the form is how an adopter finds out, and the alternative is
+        // a handle rooted somewhere nobody asked for.
+        "file" if !rest.starts_with('/') => Err(format!(
+            "`{archive_url}` has only two slashes, so `{rest}` is a URL authority and not a \
+             path: the form is `file:///absolute/path`. Reading it as `/{rest}` would root \
+             the controller's archive handle somewhere nobody named"
+        )),
         "file" => Ok(StorageUrl::Filesystem {
-            path: std::path::PathBuf::from(format!("/{}", rest.trim_start_matches('/'))),
+            path: std::path::PathBuf::from(rest),
         }),
         other => Err(format!(
             "`{other}://` is not a storage backend Logweir can read: Global Constraint 9 fixes \

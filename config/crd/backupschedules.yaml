@@ -252,6 +252,23 @@ spec:
                       type: object
                     nullable: true
                     type: array
+                  skipped:
+                    description: 'The manifest keys under the prefix that could not be read, and why. Each was SKIPPED: it is in neither `setsKept` nor `setsThatWouldBeRemoved`, and the rest of the archive was still evaluated. An empty list means every manifest under the prefix was read.'
+                    items:
+                      description: One manifest key the evaluation could not read. **Task 19 review, F-5.**
+                      properties:
+                        key:
+                          description: The manifest key, exactly as the archive listed it.
+                          type: string
+                        reason:
+                          description: Why it could not be read — `is not a backup manifest` for a sibling JSON object the `/manifest.json` filter picked up, or the storage error's own message.
+                          type: string
+                      required:
+                      - key
+                      - reason
+                      type: object
+                    nullable: true
+                    type: array
                 type: object
             type: object
         required:

@@ -127,10 +127,40 @@ pub struct RetentionReport {
     /// The same commands in `mc`'s spelling. Reported, never executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mc_cli: Option<Vec<String>>,
+    /// The manifest keys under the prefix that could not be read, and why.
+    /// Each was SKIPPED: it is in neither `setsKept` nor
+    /// `setsThatWouldBeRemoved`, and the rest of the archive was still
+    /// evaluated. An empty list means every manifest under the prefix was
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Vec<SkippedManifestReport>>,
     /// Why the evaluation removed nothing, when the reason is not "there is
     /// nothing to remove" — set when no retention rule is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// One manifest key the evaluation could not read. **Task 19 review, F-5.**
+// WHY A SKIP IS A REPORTED FACT AND NOT AN ERROR.
+// `retention::evaluate` used to return `Err` on the first manifest that did
+// not parse, so an archive of fifty good backup sets plus one stray
+// `x/manifest.json` yielded NO `retentionReport` at all — the controller
+// warned and omitted the whole block, which is indistinguishable in the status
+// from "no evaluation has happened". Skipping the one key and naming it here
+// keeps the other forty-nine reportable and makes the gap visible.
+//
+// Kept out of the doc comment because `schemars` publishes doc comments as
+// `description` in the shipped CRD — the same reason `crds::Condition`'s own
+// provenance note is a `//` comment.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedManifestReport {
+    /// The manifest key, exactly as the archive listed it.
+    pub key: String,
+    /// Why it could not be read — `is not a backup manifest` for a sibling
+    /// JSON object the `/manifest.json` filter picked up, or the storage
+    /// error's own message.
+    pub reason: String,
 }
 
 /// One set retention WOULD remove. **It is still in the archive.**

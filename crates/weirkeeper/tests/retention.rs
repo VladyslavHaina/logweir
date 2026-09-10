@@ -463,12 +463,12 @@ fn arm_the_command_is_reported_not_run(tag: &str) {
         .expect("the fixture archive evaluates");
 
     assert_eq!(
-        report.aws_cli[0], "aws s3 rm s3://kafka-backups/mvp-demo/backup-003/ --recursive",
+        report.aws_cli[0], "aws s3 rm 's3://kafka-backups/mvp-demo/backup-003/' --recursive",
         "the first rendered command must name the first set the policy would remove, spelled \
          exactly as an operator would run it"
     );
     assert_eq!(
-        report.mc_cli[0], "mc rm --recursive --force local/kafka-backups/mvp-demo/backup-003/",
+        report.mc_cli[0], "mc rm --recursive --force 'local/kafka-backups/mvp-demo/backup-003/'",
         "the `mc` spelling is rendered from the same archive URL"
     );
     assert_eq!(
@@ -858,12 +858,19 @@ fn gate_source() -> String {
     required_source(GATE)
 }
 
-/// The token list the gate greps for, read out of its own heredoc.
-fn gate_tokens() -> Vec<String> {
+/// One of the gate's two token lists, read out of its own heredoc.
+///
+/// TWO LISTS, BECAUSE THERE ARE TWO ROOTS (Task 19 review, G-RET (c)).
+/// `TOKENS_CONTROL_PLANE` covers `crates/weirkeeper/src`, where a Kubernetes
+/// `api.delete(` is legitimate and the delete token must therefore be
+/// receiver-anchored; `TOKENS_STORE` covers `crates/logweir-store/src`, which
+/// holds no Kubernetes client and where an unanchored `.delete(` is correct.
+fn gate_tokens(list: &str) -> Vec<String> {
     let src = gate_source();
+    let opener = format!("{list}=\"$(cat <<'EOF'");
     let start = src
-        .find("TOKENS=\"$(cat <<'EOF'")
-        .expect("the gate declares its token list in a heredoc a test can read");
+        .find(&opener)
+        .unwrap_or_else(|| panic!("the gate declares `{list}` in a heredoc a test can read"));
     let rest = &src[start..];
     let body_start = rest
         .find('\n')
@@ -947,11 +954,11 @@ fn the_gate_has_no_path_exemptions() {
         }
     }
 
-    let tokens = gate_tokens();
+    let tokens = gate_tokens("TOKENS_CONTROL_PLANE");
     assert!(
         tokens.len() >= 5,
-        "the gate's token list is {tokens:?} — a list this short is not covering the write \
-         surface it claims to"
+        "the gate's control-plane token list is {tokens:?} — a list this short is not covering \
+         the write surface it claims to"
     );
     for expected in [
         "Store::from_url\\(",
@@ -962,27 +969,110 @@ fn the_gate_has_no_path_exemptions() {
     ] {
         assert!(
             tokens.iter().any(|t| t == expected),
-            "the gate must grep for /{expected}/; it greps {tokens:?}"
+            "the gate must grep for /{expected}/ in the control plane; it greps {tokens:?}"
         );
     }
 
+    // ------------------------------------------------------------------
+    // The control plane's delete tokens are ANCHORED, every one of them.
+    // ------------------------------------------------------------------
+    //
+    // An unanchored `\.delete\(` here would fire on `api.delete(` on a Job —
+    // a correct, legitimate call — and a gate that fires on a correct
+    // implementation gets an exemption added or a token removed. So every
+    // control-plane token that is about deleting must either name a receiver
+    // (an alternation ending in `\.delete\(`) or name a method no Kubernetes
+    // client has.
+    let unanchored_methods = ["delete_objects\\(", "delete_stream\\("];
     let delete_tokens: Vec<&String> = tokens.iter().filter(|t| t.contains("delete")).collect();
-    assert_eq!(
-        delete_tokens.len(),
-        1,
-        "exactly one token is about deleting: {delete_tokens:?}"
-    );
-    let delete = delete_tokens[0];
     assert!(
-        delete.ends_with("\\.delete\\("),
-        "the delete token must match `.delete(` and not a bare word: {delete}"
+        delete_tokens.len() >= 2,
+        "the control plane must grep for more than one delete spelling — the review's plants \
+         showed `delete_objects(` and a `cargo fmt`-split chain both slipped past a single \
+         token: {delete_tokens:?}"
+    );
+    for delete in &delete_tokens {
+        if unanchored_methods.contains(&delete.as_str()) {
+            continue;
+        }
+        assert!(
+            delete.ends_with("\\.delete\\("),
+            "a control-plane delete token must match `.delete(` and not a bare word, or be one \
+             of {unanchored_methods:?}: {delete}"
+        );
+        assert!(
+            delete.contains('|'),
+            "a control-plane `.delete(` token must be RECEIVER-ANCHORED — an alternation of the \
+             receiver names an object-store handle is spelled with — so `api.delete(` on a Job \
+             stays legal: {delete}"
+        );
+        assert_ne!(
+            delete.trim(),
+            "\\.delete\\(",
+            "the control plane must never grep an UNANCHORED `.delete(`: `api.delete(` on a Job \
+             and a ConfigMap is a correct call this controller makes"
+        );
+    }
+    assert!(
+        delete_tokens
+            .iter()
+            .any(|t| t.contains("store") && t.contains("Store")),
+        "one control-plane delete token must anchor on a store-shaped receiver name: \
+         {delete_tokens:?}"
     );
     assert!(
-        delete.contains("store") && delete.contains("Store") && delete.contains('|'),
-        "the delete token must be RECEIVER-ANCHORED — an alternation of Store/ObjectStore-shaped \
-         receivers before `.delete(` — so `api.delete(` on a Job stays legal: {delete}"
+        delete_tokens
+            .iter()
+            .any(|t| t.contains("(s|st)") || t.contains("(st|s)")),
+        "and one must anchor on the bare abbreviations the review planted — `s.delete(` and \
+         `st.delete(` both passed the first version of this gate: {delete_tokens:?}"
     );
-    for t in &tokens {
+    for expected in unanchored_methods {
+        assert!(
+            tokens.iter().any(|t| t == expected),
+            "`object_store`'s bulk delete /{expected}/ needs no receiver anchor — no Kubernetes \
+             client has that method name — and the review planted it: {tokens:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The STORE crate's list is deliberately unanchored, and has no puts.
+    // ------------------------------------------------------------------
+    //
+    // `crates/logweir-store/src` is the crate that HOLDS the object-store
+    // handle and the crate where a delete method would be added — the
+    // review's plant of `.delete(` there left the first version of this gate
+    // at rc 0, because its root was `crates/weirkeeper/src` alone. There is no
+    // Kubernetes client in that crate, so no anchor is needed or wanted.
+    let store_tokens = gate_tokens("TOKENS_STORE");
+    assert!(
+        store_tokens.iter().any(|t| t == "\\.delete\\("),
+        "the store crate's list must grep an UNANCHORED `.delete(`: that crate holds no \
+         Kubernetes client, so there is no legitimate delete in it to protect. Got: \
+         {store_tokens:?}"
+    );
+    assert!(
+        store_tokens
+            .iter()
+            .any(|t| t.contains("fn") && t.contains("delete")),
+        "and it must forbid a delete method DEFINITION — `fn delete…` — because that is the \
+         edit that would give the whole workspace a delete capability: {store_tokens:?}"
+    );
+    for put in [
+        "put_create_only\\(",
+        "\\.put\\(",
+        "\\.put_opts\\(",
+        "PutMode",
+    ] {
+        assert!(
+            !store_tokens.iter().any(|t| t == put),
+            "the store crate's list must NOT contain /{put}/: `put_create_only` is DEFINED \
+             there, and it is the one write Global Constraint 6 allows. A gate that fires on \
+             the correct implementation gets edited until it fires on nothing."
+        );
+    }
+
+    for t in tokens.iter().chain(store_tokens.iter()) {
         assert_ne!(
             t.trim(),
             "delete",
@@ -991,6 +1081,74 @@ fn the_gate_has_no_path_exemptions() {
              word in the doc comments this design requires"
         );
     }
+}
+
+/// The DEFAULT, argument-free run scans the store crate too.
+/// **Task 19 review, G-RET (c).**
+///
+/// WHY THIS PLANTS IN THE REAL TREE. The reviewer's finding was not that the
+/// gate's regexes were weak — it was that its ROOT was `crates/weirkeeper/src`
+/// alone, so a `.delete(` added to `crates/logweir-store/src` (the crate that
+/// actually holds the `Arc<dyn ObjectStore>`) left `just lint` green. A test
+/// over a scratch fixture cannot observe that: the property is about which
+/// directories the no-argument invocation walks. So this writes one file into
+/// the real store crate's `src/`, runs the gate with **no arguments**, and
+/// removes the file in a `Drop` guard that runs on a panic too.
+///
+/// The plant is a NEW, undeclared `.rs` file rather than an edit to
+/// `lib.rs`: no `mod` declaration names it, so it is invisible to `rustc`
+/// while it exists, and its removal cannot lose a byte of real source.
+#[test]
+fn the_gate_scans_the_store_crate_by_default() {
+    let plant = repo_root().join(format!(
+        "crates/logweir-store/src/zz_g_ret_plant_{}.rs",
+        std::process::id()
+    ));
+    struct Unplant(PathBuf);
+    impl Drop for Unplant {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    // The baseline first: a clean tree passes, so the rc 1 below is the plant
+    // and not some pre-existing hit.
+    let (rc, out) = run_gate_default();
+    assert_eq!(
+        rc,
+        Some(0),
+        "the clean tree must pass the gate before this test plants anything.\n{out}"
+    );
+
+    {
+        let _unplant = Unplant(plant.clone());
+        std::fs::write(
+            &plant,
+            "pub fn prune(s: &Store, k: &str) {\n    s.delete(k);\n}\n",
+        )
+        .expect("the store crate's src/ is writable");
+        let (rc, out) = run_gate_default();
+        assert_eq!(
+            rc,
+            Some(1),
+            "a `.delete(` planted in crates/logweir-store/src must fail the DEFAULT run. That \
+             crate is where the object-store handle lives and where a delete method would be \
+             added; a gate rooted only at crates/weirkeeper/src leaves it unguarded and \
+             `just lint` stays green.\n{out}"
+        );
+        assert!(
+            out.contains("logweir-store"),
+            "and the failure must name the store crate: {out}"
+        );
+    }
+
+    let (rc, out) = run_gate_default();
+    assert_eq!(
+        rc,
+        Some(0),
+        "the plant must be gone: this test leaves the tree exactly as it found it.\n{out}"
+    );
+    assert!(!plant.exists(), "the plant file is removed");
 }
 
 /// The gate passes a doc comment that says delete, and fires on the same word
@@ -1061,10 +1219,34 @@ fn the_gate_passes_a_doc_comment_that_says_delete() {
 ///
 /// The status comes from `Output::status`, never through a pipe (STANDING
 /// RULE 20).
+/// Run the gate against a fixture CONTROL-PLANE root.
+///
+/// THE STORE ROOT IS A SCRATCH DIRECTORY TOO, and it has to be: this binary's
+/// `the_gate_scans_the_store_crate_by_default` plants a file in the real
+/// `crates/logweir-store/src` and `cargo test` runs these tests as threads of
+/// one process, so a fixture run that let the store root default would
+/// intermittently see that plant. Both roots are therefore explicit and
+/// hermetic, and the DEFAULT roots are exercised by `run_gate_default` alone.
 fn run_gate(root: &Path) -> (Option<i32>, String) {
-    let out = std::process::Command::new("bash")
-        .arg(repo_root().join(GATE))
-        .arg(root)
+    let store = root.join("store-root");
+    std::fs::create_dir_all(&store).expect("the fixture store root is creatable");
+    std::fs::write(store.join("clean.rs"), "pub fn ok() {}\n")
+        .expect("the fixture store root gets one benign file");
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(repo_root().join(GATE)).arg(root).arg(&store);
+    finish_gate(cmd)
+}
+
+/// Run the gate with NO arguments — i.e. exactly as `just lint` runs it, over
+/// both of its default roots.
+fn run_gate_default() -> (Option<i32>, String) {
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(repo_root().join(GATE));
+    finish_gate(cmd)
+}
+
+fn finish_gate(mut cmd: std::process::Command) -> (Option<i32>, String) {
+    let out = cmd
         .current_dir(repo_root())
         .output()
         .expect("bash runs the gate");
@@ -1174,7 +1356,7 @@ fn the_retention_report_lands_on_the_schedule_status() {
     assert_eq!(removed[0]["reason"], "OlderThanKeepDays");
     assert_eq!(removed[0]["days"], 7);
     assert_eq!(
-        report["awsCli"][0], "aws s3 rm s3://kafka-backups/mvp-demo/backup-001/ --recursive",
+        report["awsCli"][0], "aws s3 rm 's3://kafka-backups/mvp-demo/backup-001/' --recursive",
         "the command is a RENDERED STRING in the status. Logweir prints it, an operator runs \
          it, and no Logweir component in tag 1 holds any delete capability against object \
          storage."
@@ -1320,8 +1502,12 @@ fn the_status_block_carries_the_whole_report() {
                 reason: RemovalReason::OlderThanKeepDays { days: 7 },
             },
         ],
-        aws_cli: vec!["aws s3 rm s3://b/c/ --recursive".into()],
-        mc_cli: vec!["mc rm --recursive --force local/b/c/".into()],
+        aws_cli: vec!["aws s3 rm 's3://b/c/' --recursive".into()],
+        mc_cli: vec!["mc rm --recursive --force 'local/b/c/'".into()],
+        skipped: vec![weirkeeper::retention::SkippedManifest {
+            key: "x/manifest.json".into(),
+            reason: "is not a backup manifest".into(),
+        }],
         note: None,
     };
     let status = report.to_status();
@@ -1341,6 +1527,13 @@ fn the_status_block_carries_the_whole_report() {
     assert_eq!(removed[1].rank, None);
     assert_eq!(status.aws_cli.as_ref().map(Vec::len), Some(1));
     assert_eq!(status.mc_cli.as_ref().map(Vec::len), Some(1));
+    let skipped = status
+        .skipped
+        .as_ref()
+        .expect("the projection keeps the skipped manifests");
+    assert_eq!(skipped.len(), 1, "the skip is reported, never dropped");
+    assert_eq!(skipped[0].key, "x/manifest.json");
+    assert_eq!(skipped[0].reason, "is not a backup manifest");
 
     // AN EMPTY EVALUATION IS `Some([])`, NEVER `None`: "no evaluation
     // happened" is said by the whole block being absent, and a UI has to be
@@ -1353,9 +1546,579 @@ fn the_status_block_carries_the_whole_report() {
         sets_that_would_be_removed: vec![],
         aws_cli: vec![],
         mc_cli: vec![],
+        skipped: vec![],
         note: Some(NO_RULE_NOTE.to_string()),
     }
     .to_status();
     assert_eq!(empty.sets_that_would_be_removed, Some(vec![]));
+    assert_eq!(empty.skipped, Some(vec![]));
     assert_eq!(empty.note.as_deref(), Some(NO_RULE_NOTE));
+}
+
+// ===========================================================================
+// The rendered commands are shell-quoted — Task 19 review, finding F-1
+// ===========================================================================
+
+/// Ask the REAL shell how many arguments the rendered command has.
+///
+/// WHY `/bin/sh` AND NOT A PARSER WRITTEN HERE. The claim under test is
+/// "an operator can paste this", and the authority on what a pasted string
+/// means is the shell that would parse it — not a second implementation of
+/// POSIX quoting written by the same hand as the first, which would be free to
+/// be wrong in the same direction.
+///
+/// NEITHER `aws` NOR `mc` CAN RUN. Both are defined as shell FUNCTIONS that
+/// print their own argv and nothing else, and a function shadows every `PATH`
+/// lookup; `PATH` is additionally set to empty, so there is no path by which
+/// the real tools could be reached even if the shadowing failed. The argv is
+/// printed NUL-separated because one of the values under test IS a newline.
+fn argv_of(rendered: &str) -> Vec<String> {
+    let script = format!(
+        "aws() {{ printf '%s\\0' \"$@\"; }}\nmc() {{ printf '%s\\0' \"$@\"; }}\n{rendered}\n"
+    );
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .env_clear()
+        .env("PATH", "")
+        .output()
+        .expect("/bin/sh parses the rendered command");
+    assert!(
+        out.status.success(),
+        "the rendered command must PARSE and run the stub cleanly. Rendered:\n{rendered}\n\
+         stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut args: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    assert_eq!(
+        args.pop().as_deref(),
+        Some(""),
+        "every argument is terminated by a NUL, so the split leaves one empty tail"
+    );
+    args
+}
+
+/// Both renderers turn `backup_id` into EXACTLY ONE path argument, whatever is
+/// in it.
+///
+/// This is the assertion the whole finding comes down to. Before the fix,
+/// `backup_id = "a;rm -rf ~"` rendered
+/// `aws s3 rm s3://kafka-backups/mvp-demo/a;rm -rf ~/ --recursive` — which the
+/// shell reads as TWO commands, the second of them `rm -rf ~/ --recursive`, in
+/// a status field documented as "the exact commands an operator would run".
+fn assert_one_path_argument(what: &str, backup_id: &str) {
+    let aws = weirkeeper::retention::aws_rm(ARCHIVE_URL, backup_id);
+    let argv = argv_of(&aws);
+    assert_eq!(
+        argv,
+        vec![
+            "s3".to_string(),
+            "rm".to_string(),
+            format!("s3://kafka-backups/mvp-demo/{backup_id}/"),
+            "--recursive".to_string(),
+        ],
+        "aws_rm must render {what} as ONE path argument and nothing else. Rendered:\n{aws}"
+    );
+
+    let mc = weirkeeper::retention::mc_rm(ARCHIVE_URL, backup_id);
+    let argv = argv_of(&mc);
+    assert_eq!(
+        argv,
+        vec![
+            "rm".to_string(),
+            "--recursive".to_string(),
+            "--force".to_string(),
+            format!("local/kafka-backups/mvp-demo/{backup_id}/"),
+        ],
+        "mc_rm must render {what} as ONE path argument and nothing else. Rendered:\n{mc}"
+    );
+}
+
+/// A `;` in a key rendered a SECOND, destructive command. This is F-1's own
+/// reproduction.
+#[test]
+fn a_semicolon_in_a_backup_id_is_a_path_and_not_a_second_command() {
+    assert_one_path_argument("a semicolon", "a;rm -rf ~");
+}
+
+#[test]
+fn a_space_in_a_backup_id_is_one_argument_and_not_two() {
+    assert_one_path_argument("a space", "has space");
+}
+
+#[test]
+fn a_dollar_sign_in_a_backup_id_is_not_expanded() {
+    assert_one_path_argument("a variable reference", "$HOME");
+}
+
+#[test]
+fn a_backtick_in_a_backup_id_is_not_command_substituted() {
+    assert_one_path_argument("a command substitution", "a`id`b");
+}
+
+#[test]
+fn a_newline_in_a_backup_id_is_one_argument() {
+    assert_one_path_argument("a newline", "a\nb");
+}
+
+/// The one character single quoting cannot contain: `'` → `'\''`.
+#[test]
+fn a_single_quote_in_a_backup_id_closes_escapes_and_reopens() {
+    assert_one_path_argument("a single quote", "it's");
+    assert_eq!(
+        weirkeeper::retention::shell_quote("it's"),
+        r"'it'\''s'",
+        "the POSIX form is close, escaped literal quote, reopen — there is no backslash escape \
+         for a quote INSIDE single quotes"
+    );
+}
+
+/// The happy path is still legible, and the quoting is unconditional.
+///
+/// NO "DOES THIS NEED QUOTING?" BRANCH. That branch is where the holes grow:
+/// every such predicate is a list of characters someone believed were safe.
+#[test]
+fn the_ordinary_command_is_quoted_too_and_still_reads_as_one_command() {
+    let aws = weirkeeper::retention::aws_rm(ARCHIVE_URL, "backup-003");
+    assert_eq!(
+        aws, "aws s3 rm 's3://kafka-backups/mvp-demo/backup-003/' --recursive",
+        "the quoting is unconditional"
+    );
+    assert_eq!(
+        argv_of(&aws)[2],
+        "s3://kafka-backups/mvp-demo/backup-003/",
+        "and an ordinary id still parses to the same one path"
+    );
+    let mc = weirkeeper::retention::mc_rm(ARCHIVE_URL, "backup-003");
+    assert_eq!(
+        mc, "mc rm --recursive --force 'local/kafka-backups/mvp-demo/backup-003/'",
+        "the `mc` spelling is quoted the same way"
+    );
+}
+
+/// The BUCKET and PREFIX are quoted too, not only the id.
+///
+/// They come from `spec.archive.url`, which is also not Logweir's to trust.
+#[test]
+fn the_bucket_and_prefix_are_quoted_as_well_as_the_backup_id() {
+    let hostile = "s3://buck et/pre;fix";
+    let aws = weirkeeper::retention::aws_rm(hostile, "id");
+    assert_eq!(
+        argv_of(&aws),
+        vec![
+            "s3".to_string(),
+            "rm".to_string(),
+            "s3://buck et/pre;fix/id/".to_string(),
+            "--recursive".to_string(),
+        ],
+        "a space or a `;` in the archive URL is part of the path, not a word break. \
+         Rendered:\n{aws}"
+    );
+    let mc = weirkeeper::retention::mc_rm(hostile, "id");
+    assert_eq!(
+        argv_of(&mc),
+        vec![
+            "rm".to_string(),
+            "--recursive".to_string(),
+            "--force".to_string(),
+            "local/buck et/pre;fix/id/".to_string(),
+        ],
+        "and the same for the `mc` target. Rendered:\n{mc}"
+    );
+}
+
+// ===========================================================================
+// One malformed manifest does not lose the report — Task 19 review, F-5
+// ===========================================================================
+
+/// N manifests with one malformed → N−1 evaluated, one skipped, rest correct.
+///
+/// THE FAILURE THIS REPLACES. `evaluate` returned `Err` on the first manifest
+/// that did not parse, so an archive of five good backup sets plus one stray
+/// `x/manifest.json` — the exact case `StoreError::NotAManifest`'s own doc
+/// comment names, "a sibling JSON object was picked up by the
+/// `/manifest.json` filter" — produced NO retention report at all: the
+/// reconciler warned and omitted the whole block, which in the status is
+/// indistinguishable from "no evaluation has happened".
+#[test]
+fn one_malformed_manifest_is_skipped_and_the_rest_of_the_archive_is_still_reported() {
+    let scratch = Scratch::of("f5-skip", "");
+    let store = scratch.read_only_handle();
+
+    // The five checked-in sets, evaluated with no stray sibling — the answer
+    // the skip must not disturb.
+    let clean = evaluate(&store, ARCHIVE_URL, "", &rule(Some(3), Some(7)), now())
+        .expect("the fixture archive evaluates");
+    assert!(clean.skipped.is_empty(), "the fixture archive is readable");
+
+    // N = 6: the five sets plus one sibling JSON object that is not a
+    // manifest at all.
+    let stray = scratch.path().join("stray");
+    std::fs::create_dir_all(&stray).expect("the scratch subdirectory is creatable");
+    std::fs::write(stray.join("manifest.json"), br#"{"hello":"world"}"#)
+        .expect("the stray sibling is writable");
+
+    let before = scratch.walk();
+    let report = evaluate(&store, ARCHIVE_URL, "", &rule(Some(3), Some(7)), now())
+        .expect("ONE malformed manifest must not cost the whole report");
+
+    // N − 1 evaluated…
+    assert_eq!(
+        report.sets_kept.len() + report.sets_that_would_be_removed.len(),
+        5,
+        "six manifest keys, one unreadable — five sets must still be evaluated. Got kept \
+         {:?} and removable {:?}",
+        report.sets_kept,
+        report.sets_that_would_be_removed
+    );
+
+    // …and the five are evaluated EXACTLY as they were without the stray, so
+    // "keep the rest correct" is asserted and not assumed.
+    assert_eq!(
+        report.sets_kept, clean.sets_kept,
+        "the skip must not change which sets are kept"
+    );
+    assert_eq!(
+        report.sets_that_would_be_removed, clean.sets_that_would_be_removed,
+        "nor which are removable, nor their ranks: ranks are counted over the sets that were \
+         READ, so a skip can only ever move a surviving set to a lower rank — it can never \
+         invent a removal"
+    );
+    assert_eq!(report.aws_cli, clean.aws_cli, "nor the rendered commands");
+    assert_eq!(report.mc_cli, clean.mc_cli);
+
+    // …plus ONE skipped entry, with the key and the reason.
+    assert_eq!(
+        report.skipped.len(),
+        1,
+        "the unreadable key is RECORDED, never silent. Got: {:?}",
+        report.skipped
+    );
+    assert_eq!(
+        report.skipped[0].key, "stray/manifest.json",
+        "the entry names the key exactly as the archive listed it"
+    );
+    assert!(
+        report.skipped[0]
+            .reason
+            .contains("is not a backup manifest"),
+        "and the reason keeps the `NotAManifest` distinction Task 13 landed rather than \
+         flattening it: {}",
+        report.skipped[0].reason
+    );
+    assert!(
+        report.skipped[0].reason.contains("no `topics` key"),
+        "including WHY it is not a manifest: {}",
+        report.skipped[0].reason
+    );
+
+    // A skipped set is in neither list, and no command names it.
+    assert!(
+        !report.sets_kept.iter().any(|s| s == "stray"),
+        "a skipped key is not a kept set"
+    );
+    assert!(
+        !report
+            .sets_that_would_be_removed
+            .iter()
+            .any(|s| s.backup_id == "stray"),
+        "and it is certainly not reported as removable — a set nobody could read must never \
+         appear beside an `aws s3 rm`"
+    );
+    assert!(
+        !report.aws_cli.iter().any(|c| c.contains("stray")),
+        "and no rendered command names it: {:?}",
+        report.aws_cli
+    );
+
+    // G-RET still: reading a broken manifest changes nothing.
+    assert_eq!(
+        before,
+        scratch.walk(),
+        "skipping an unreadable manifest writes nothing and removes nothing"
+    );
+}
+
+/// Every kind of unreadable manifest is skipped, and each keeps its own
+/// reason.
+///
+/// FOUR SHAPES, THREE OF THEM DISTINCT ERRORS. `{"hello":"world"}` and
+/// `{"topics":5}` are `NotAManifest` (Task 13's carry: the TYPE, never the
+/// value); a manifest-SHAPED body that bounds no window is `Backend`; and a
+/// body that is not JSON at all is an `Io` parse failure. All four are facts
+/// about one object, and none of them is a reason to stop reporting on the
+/// others.
+#[test]
+fn every_unreadable_manifest_shape_is_skipped_with_its_own_reason() {
+    let scratch = Scratch::of("f5-shapes", "");
+    let store = scratch.read_only_handle();
+
+    for (dir, body) in [
+        ("no-topics", &br#"{"hello":"world"}"#[..]),
+        ("topics-not-an-array", &br#"{"topics":5}"#[..]),
+        (
+            "no-segment",
+            &br#"{"topics":[{"name":"t","partitions":[]}]}"#[..],
+        ),
+        ("not-json", &b"}{"[..]),
+    ] {
+        let d = scratch.path().join(dir);
+        std::fs::create_dir_all(&d).expect("the scratch subdirectory is creatable");
+        std::fs::write(d.join("manifest.json"), body).expect("the fixture body is writable");
+    }
+
+    let report = evaluate(&store, ARCHIVE_URL, "", &rule(Some(3), Some(7)), now())
+        .expect("four unreadable manifests must not cost the report either");
+
+    assert_eq!(
+        report.sets_kept.len() + report.sets_that_would_be_removed.len(),
+        5,
+        "the five real sets are still evaluated"
+    );
+    assert_eq!(
+        report.skipped.len(),
+        4,
+        "each unreadable key is its own entry: {:?}",
+        report.skipped
+    );
+
+    let reason_for = |dir: &str| -> String {
+        report
+            .skipped
+            .iter()
+            .find(|s| s.key == format!("{dir}/manifest.json"))
+            .unwrap_or_else(|| panic!("{dir} is skipped: {:?}", report.skipped))
+            .reason
+            .clone()
+    };
+    assert!(
+        reason_for("no-topics").contains("declares no `topics` key"),
+        "{}",
+        reason_for("no-topics")
+    );
+    assert!(
+        reason_for("topics-not-an-array").contains("`topics` is a number, not an array"),
+        "the TYPE and never the value (Task 13 carry): {}",
+        reason_for("topics-not-an-array")
+    );
+    assert!(
+        reason_for("no-segment").contains("segment"),
+        "a manifest-shaped body bounding no window is a different fact: {}",
+        reason_for("no-segment")
+    );
+    assert!(
+        !reason_for("not-json").is_empty(),
+        "and a body that is not JSON still gets a reason"
+    );
+}
+
+/// An archive nobody can LIST still fails hard.
+///
+/// THE ASYMMETRY IS DELIBERATE. A skipped manifest is a report with a named
+/// gap; a failed list is a report about an unknown number of sets, which is
+/// not a report at all. `evaluate` therefore returns `Err` for the list and
+/// never for an individual manifest.
+#[test]
+fn a_list_failure_is_still_an_error_and_keeps_its_variant() {
+    let scratch = Scratch::of("f5-list", "");
+    let store = Store::read_only_from_url(&StorageUrl::Filesystem {
+        path: scratch.path().join("does-not-exist"),
+    });
+    match store {
+        // A handle over a missing directory either refuses to build or fails
+        // the list; both are the hard failure this asserts, and neither is a
+        // skip.
+        Err(_) => {}
+        Ok(store) => {
+            let e = evaluate(&store, ARCHIVE_URL, "", &rule(Some(3), None), now())
+                .expect_err("a list that cannot enumerate the archive is an error");
+            assert!(
+                matches!(
+                    e,
+                    StoreError::Io(_) | StoreError::Backend(_) | StoreError::NotFound(_)
+                ),
+                "the list failure keeps a variant rather than being flattened (F-6): {e:?}"
+            );
+        }
+    }
+
+    // AND THE MAPPING IS THE ONE F-6 ASKED FOR, asserted on the source
+    // because `EngineError::Unsupported` is answered by a backend this test
+    // cannot construct — `object_store`'s filesystem store supports listing.
+    // `.map_err(|e| StoreError::Io(e.to_string()))` collapsed "this backend
+    // cannot do that at all" into "storage said no", which is the
+    // `NotFound`-versus-`Io` defect `StoreError`'s own doc comments argue
+    // about, one enum along.
+    let src = sanitize(&required_source("crates/weirkeeper/src/retention.rs"));
+    assert!(
+        src.contains("EngineError::Unsupported") && src.contains("StoreError::Backend"),
+        "`evaluate` must map `EngineError::Unsupported` onto `StoreError::Backend` rather than \
+         flattening every list failure to `Io` (Task 19 review, F-6)"
+    );
+    assert!(
+        !src.contains("StoreError::Io(e.to_string())"),
+        "and it must not flatten the list error to `Io` by stringifying it"
+    );
+}
+
+// ===========================================================================
+// A two-slash `file://` URL is refused — Task 19 review, finding F-7
+// ===========================================================================
+
+/// `file://relative/x` is an error, not `/relative/x`.
+#[test]
+fn a_two_slash_file_url_is_refused_rather_than_reinterpreted_as_a_root() {
+    let e = weirkeeper::retention::storage_url_for("file://relative/x")
+        .expect_err("a two-slash `file://` URL names no absolute path");
+    assert!(
+        e.contains("file:///absolute/path"),
+        "the error must name the form an adopter should have written: {e}"
+    );
+
+    // The three-slash form still resolves, and to the path it names.
+    match weirkeeper::retention::storage_url_for("file:///tmp/x")
+        .expect("`file:///tmp/x` is an absolute path")
+    {
+        StorageUrl::Filesystem { path } => assert_eq!(path, std::path::PathBuf::from("/tmp/x")),
+        other => panic!("a `file://` URL builds a filesystem handle, got {other:?}"),
+    }
+}
+
+/// Every delete spelling the review planted, and every legitimate one it
+/// showed must keep passing. **Task 19 review, G-RET (c).**
+///
+/// WHY A MATRIX AND NOT A SENTENCE. The reviewer's finding was a table of
+/// eighteen plants, of which eight passed a gate that claimed to catch them.
+/// STANDING RULE 21 says a guard whose mutant passes is worse than no guard,
+/// so the widened token list and the `cargo fmt` chain join both need a test
+/// that dies when they are narrowed back. The left column is what must FAIL
+/// the gate; the right column is what must still pass, and it is the half that
+/// keeps the gate from being edited into uselessness the first time it fires
+/// on a correct Kubernetes delete.
+#[test]
+fn the_gate_catches_every_delete_spelling_the_review_planted() {
+    let scratch = std::env::temp_dir().join(format!("logweir-t19-{}-plants", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let cp = scratch.join("cp");
+    std::fs::create_dir_all(&cp).expect("the scratch directory is creatable");
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(scratch.clone());
+
+    let probe = cp.join("probe.rs");
+    let run = |body: &str| -> (Option<i32>, String) {
+        std::fs::write(&probe, body).expect("the probe file is writable");
+        run_gate(&cp)
+    };
+
+    // MUST FAIL. The six the first version of this gate MISSED are marked.
+    for (what, body) in [
+        (
+            "store.delete(",
+            "pub fn f(store: &Store) { store.delete(\"k\"); }\n",
+        ),
+        (
+            "self.inner.delete(",
+            "pub fn f(&self) { self.inner.delete(\"k\"); }\n",
+        ),
+        (
+            "archive.delete(",
+            "pub fn f(archive: &Store) { archive.delete(\"k\"); }\n",
+        ),
+        // MISSED: an abbreviated receiver.
+        ("s.delete(", "pub fn f(s: &Store) { s.delete(\"k\"); }\n"),
+        ("st.delete(", "pub fn f(st: &Store) { st.delete(\"k\"); }\n"),
+        (
+            "obj.delete(",
+            "pub fn f(obj: &Store) { obj.delete(\"k\"); }\n",
+        ),
+        // MISSED: the method name, not the receiver.
+        (
+            "delete_objects(",
+            "pub fn f(x: &Store) { x.delete_objects(v); }\n",
+        ),
+        (
+            "delete_stream(",
+            "pub fn f(x: &Store) { x.delete_stream(v); }\n",
+        ),
+        // MISSED: a chain `cargo fmt` split across two lines. The receiver and
+        // the method are on DIFFERENT lines, which is what a receiver-anchored
+        // per-line regex cannot see.
+        (
+            "a fmt-split store chain",
+            "pub fn f(store: &Store) {\n    store\n        .delete(\"k\");\n}\n",
+        ),
+        (
+            "a fmt-split self.inner chain",
+            "pub fn f(&self) {\n    self.inner\n        .delete(\"k\");\n}\n",
+        ),
+        // The write surface, unchanged from round zero.
+        (
+            "Store::from_url(",
+            "pub fn f() { let s = Store::from_url(&u); }\n",
+        ),
+        (
+            "put_create_only(",
+            "pub fn f(s: &S) { s.put_create_only(\"k\", b\"\"); }\n",
+        ),
+        ("PutMode", "pub fn f() { let m = PutMode::Create; }\n"),
+        (".put(", "pub fn f(s: &S) { s.put(&p, b); }\n"),
+        (".put_opts(", "pub fn f(s: &S) { s.put_opts(&p, b, o); }\n"),
+    ] {
+        let (rc, out) = run(body);
+        assert_eq!(
+            rc,
+            Some(1),
+            "the gate must catch `{what}`. This is the plant matrix the reviewer built; \
+             narrowing the token list or dropping the chain join re-opens exactly these \
+             holes.\n{out}"
+        );
+    }
+
+    // MUST PASS. Every one of these is a correct call this control plane
+    // either makes today or will make, and a gate that fires on any of them
+    // gets an exemption added or a token deleted.
+    for (what, body) in [
+        (
+            "api.delete( on a Job",
+            "pub async fn f(api: &Api<Job>) { api.delete(\"j\", &dp).await.ok(); }\n",
+        ),
+        (
+            "configmaps.delete(",
+            "pub async fn f(configmaps: &Api<ConfigMap>) { configmaps.delete(\"c\", &dp).await; }\n",
+        ),
+        (
+            "secrets.delete(",
+            "pub async fn f(secrets: &Api<Secret>) { secrets.delete(\"s\", &dp).await; }\n",
+        ),
+        (
+            "a fmt-split jobs chain",
+            "pub async fn f(jobs: &Api<Job>) {\n    jobs\n        .delete(\"j\", &dp).await;\n}\n",
+        ),
+        (
+            "api.delete_collection(",
+            "pub async fn f(api: &Api<Job>) { api.delete_collection(&dp, &lp).await; }\n",
+        ),
+        (
+            "Store::read_only_from_url(",
+            "pub fn f() { let s = Store::read_only_from_url(&u); }\n",
+        ),
+    ] {
+        let (rc, out) = run(body);
+        assert_eq!(
+            rc,
+            Some(0),
+            "the gate must NOT fire on `{what}`: `delete` is a Kubernetes verb this controller \
+             legitimately holds on Jobs and ConfigMaps. A gate that fires on a correct \
+             implementation gets edited until it fires on nothing.\n{out}"
+        );
+    }
 }

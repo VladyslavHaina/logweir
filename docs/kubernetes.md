@@ -627,10 +627,38 @@ deleted, and **no Logweir component in tag 1 holds any delete capability
 against object storage** — the controller's archive handle is built with the
 read-only constructor, which refuses every write before it checks anything
 else, and guard **G-RET** (`scripts/check-no-archive-write.sh`, in `just
-lint`) fails the build if any source file in the control plane so much as
-names a writable constructor or an object-store put or delete. The adopter's
-own bucket lifecycle policy does the deleting. Retention never touches a Kafka
-topic, in any tag.
+lint`) fails the build if a source file in the control plane names the
+writable constructor or an object-store put, or names a delete on a
+store-shaped receiver, or if a source file in the store crate names an
+object-store delete at all or defines a `delete` method. That gate reads
+source text, so it is a tripwire on the spellings a delete would be written
+in and not a proof: a raw HTTP `DELETE` issued through some crate that is not
+in the dependency graph would pass it, and what actually makes that
+unwritable is the type — `Store` exposes no delete method and its inner
+object-store handle is private — together with Global Constraint 38, which
+closes the graph. The adopter's own bucket lifecycle policy does the deleting.
+Retention never touches a Kafka topic, in any tag.
+
+The rendered commands are **shell-quoted**. A backup id, bucket or prefix is
+whatever the archive's own keys say it is, and an S3 key may legally contain a
+space, a `$`, a backtick, a newline — or a `;`. Every interpolated value is
+therefore rendered as one single-quoted POSIX shell word, so the command you
+paste acts on exactly one path and a key like `a;rm -rf ~` is a path and not a
+second command.
+
+An unreadable manifest under the prefix is **skipped, not fatal**. A sibling
+JSON object the `manifest.json` filter picked up used to cost the whole
+report; it now lands in `status.retentionReport.skipped` with the key and the
+reason, and every other backup set is still evaluated:
+
+```bash
+kubectl --context docker-desktop get backupschedule nightly \
+  -o jsonpath='{.status.retentionReport.skipped[*].key}'
+```
+
+A skipped set is in neither `setsKept` nor `setsThatWouldBeRemoved`, and ranks
+are counted over the sets that were read — so a partly unreadable archive
+under-reports what would be removed and never over-reports it.
 
 The report is a union of the two rules, and it says which one applies:
 `reason` is `BeyondKeepLast` with the set's `rank`, or `OlderThanKeepDays`
