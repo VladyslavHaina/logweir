@@ -19,7 +19,8 @@
 //! So this is its own media type
 //! (`logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT`), its own schema
 //! (`schemas/logweir-backup-receipt-1.0.0.json`), its own
-//! `format_version: "1.0.0"` and its own four invariants. Spec §7: "new
+//! `format_version: "1.0.0"` and its own five arms — four
+//! self-contradiction invariants and one closed value set. Spec §7: "new
 //! payload types, not new scorecard fields."
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
@@ -127,7 +128,21 @@ pub struct ReceiptSource {
 /// interpolated into a document we then sign and publish.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReceiptAuth {
-    /// `"plaintext"` or `"scram-sha-512"`.
+    /// **A CLOSED SET OF TWO: `"plaintext"` or `"scramSha512"`.** Any other
+    /// value is refused by BOTH readers (arm 5 below, and
+    /// `docs/verify_scorecard.py::check_backup_receipt_invariants`'s mirror),
+    /// so a receipt naming a third spelling is never signed and never
+    /// verifies.
+    ///
+    /// These are `logweir_core::spec::AuthSpec`'s serde tag values, which is
+    /// what makes ONE spelling possible at all: they are the strings an
+    /// adopter writes in a spec, `KafkaCluster.spec.auth.mode`'s CRD enum
+    /// byte for byte, the only two values `AuthSpec::mode_str()` can return,
+    /// and — since Task 17 copies this field — what
+    /// `Backup.status.auth.mode`'s CRD description promises. A `String` and
+    /// not an enum on the wire because a reader must be able to REPORT a
+    /// value it refuses; the closed set is enforced by the arm, where both
+    /// readers can state it in the same words.
     pub mode: String,
     /// The SASL username, when there is one. `null` under `plaintext` —
     /// which is not the same as an empty username.
@@ -210,15 +225,20 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 impl BackupReceipt {
-    /// The four invariants a signed receipt cannot contradict.
+    /// The five arms of a signed receipt: the four claims it cannot
+    /// contradict, and the one field whose value set is closed.
     ///
     /// Called before signing and by `logweir drill verify --payload-type
     /// backup-receipt`, so no signed receipt can carry a self-contradicting
     /// claim. `Err` is the exact message, and the messages are **not to be
     /// reworded**: `docs/verify_scorecard.py`'s mirrored block compares
     /// byte-for-byte against them, and `crates/logweir-core/tests/
-    /// backup_receipt.rs::backup_receipt_invariants_have_exactly_four_arms`
-    /// asserts each one in full.
+    /// backup_receipt.rs` asserts each one in full —
+    /// `backup_receipt_invariants_have_exactly_four_arms` over the four
+    /// self-contradiction arms, `arm_5_refuses_an_auth_mode_outside_the_closed_two`
+    /// over arm 5, and
+    /// `validate_invariants_has_exactly_five_return_err_statements` over the
+    /// total, so neither the four nor the five can go stale on its own.
     ///
     /// `Result<(), String>` rather than a `thiserror` newtype, because the
     /// interface this task publishes is the STRING: the comparison the two
@@ -235,6 +255,12 @@ impl BackupReceipt {
     /// 3. `records` covers exactly `source.topics`.
     /// 4. `covered.from_ms < covered.to_ms` STRICTLY — the end is EXCLUSIVE
     ///    (I22, and Task 5's review finding F3).
+    /// 5. `source.auth.mode` is one of the two values this format defines.
+    ///    The first arm that is not a self-contradiction check: the document
+    ///    does not disagree with itself, it names a mechanism the format has
+    ///    no spelling for. LAST on purpose — the four consistency arms are
+    ///    what an auditor reads first, and a receipt that contradicts itself
+    ///    should say so before it is told its auth mode is unknown.
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -316,6 +342,42 @@ impl BackupReceipt {
             return Err(format!(
                 "covered.from_ms {} is not before covered.to_ms {}: the covered window's end is EXCLUSIVE, so an empty range covers no record",
                 self.covered.from_ms, self.covered.to_ms
+            ));
+        }
+        // ARM 5. THE AUTH MODE'S VALUE SET IS CLOSED, and this is where it is
+        // closed (controller ruling, Task 5b fix round 1; Task 6's review
+        // Ruling 3).
+        //
+        // Before this arm the field was an unconstrained `String` that no
+        // reader looked at: a receipt carrying
+        // `"auth": {"mode": "totally-made-up"}` verified 0/0 at BOTH readers,
+        // which was proved by execution in Task 5b's review. That is worse
+        // than a documentation defect, because `Backup.status.auth.mode` is
+        // copied FROM here by Task 17 and its CRD description promises the
+        // two values below — so an unrefused third spelling propagates into
+        // the control plane as an attested claim.
+        //
+        // The two values are `logweir_core::spec::AuthSpec`'s serde tags, the
+        // only strings `AuthSpec::mode_str()` returns, and the
+        // `KafkaCluster` CRD's `auth.mode` enum byte for byte. There is
+        // therefore no legitimate writer of a third value anywhere in this
+        // tree, and `crates/logweir/src/backup/phase_run.rs::receipt_auth` —
+        // the ONE site that fills this field on a real run — cannot drift
+        // back to `scram-sha-512` without `logweir backup run` refusing its
+        // own receipt at `persist_receipt`'s step 1, before it signs or puts
+        // anything.
+        //
+        // The mode IS interpolated, unlike the scorecard's two `target.auth`
+        // arms: every arm of THIS document already echoes an adopter-supplied
+        // string (`format_version` in arm 1, `manifest_key` in arm 2), a
+        // reader that refuses a value without naming it makes the refusal
+        // unactionable, and `{:?}` is the same rendering
+        // `docs/verify_scorecard.py::_rust_debug_str` reproduces.
+        if !matches!(self.source.auth.mode.as_str(), "plaintext" | "scramSha512") {
+            return Err(format!(
+                "source.auth.mode {:?} is not one of the two values this format defines: \
+                 \"plaintext\" or \"scramSha512\"",
+                self.source.auth.mode
             ));
         }
         Ok(())

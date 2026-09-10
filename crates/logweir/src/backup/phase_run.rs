@@ -263,10 +263,30 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
 /// `AuthRender` -> `ReceiptAuth`. The wire spellings, and the ONE place they
 /// are chosen for this document.
 ///
-/// `"scram-sha-512"` and not `scramSha512`: the receipt is read by auditors and
-/// by `Backup.status`, and the mechanism's own RFC name is what a Kafka
-/// operator recognises. `AuthSpec`'s camelCase is the SPEC's spelling, which is
-/// a different surface with a different audience.
+/// **`scramSha512`, and there is ONE spelling in this product** (controller
+/// ruling, Task 5b fix round 1; Task 6's review Ruling 3). Task 5 chose
+/// `scram-sha-512` here on the argument that the RFC's own name is what a
+/// Kafka operator recognises, and that argument does not survive contact with
+/// the rest of the tree: `scramSha512` is `AuthSpec`'s `#[serde(tag =
+/// "mode")]` value, so it is the string an adopter writes in a
+/// `KafkaCluster`/`BackupSpec`; it is `KafkaCluster.spec.auth.mode`'s CRD enum
+/// byte for byte (`crates/weirkeeper/tests/crd_shape.rs::
+/// the_crd_auth_mode_enum_and_auth_spec_agree`); it is what
+/// `Backup.status.auth.mode`'s own CRD description already promised while this
+/// function wrote something else, and Task 17 copies THIS field into THAT one;
+/// and it is the only value `AuthSpec::mode_str()` — the sole accessor any
+/// receipt-writing code can fill the field from — can return. Two spellings
+/// meant the same product signed two evidence documents describing one
+/// mechanism by different names, with a landed test
+/// (`crates/logweir/tests/auth_binding.rs::
+/// the_scorecard_auth_block_and_auth_spec_agree`) asserting that
+/// `"scram-sha-512"` does not parse at all.
+///
+/// The set is CLOSED at both readers since this round: `BackupReceipt::
+/// validate_invariants`'s arm 5 and `docs/verify_scorecard.py::
+/// check_backup_receipt_invariants`'s mirror refuse any third value, so this
+/// literal cannot drift back without `logweir backup run` refusing its own
+/// receipt before it signs it.
 fn receipt_auth(render: &logweir_core::engine::AuthRender) -> ReceiptAuth {
     match render {
         logweir_core::engine::AuthRender::Plaintext => ReceiptAuth {
@@ -276,7 +296,7 @@ fn receipt_auth(render: &logweir_core::engine::AuthRender) -> ReceiptAuth {
             username: None,
         },
         logweir_core::engine::AuthRender::ScramSha512 { username, .. } => ReceiptAuth {
-            mode: "scram-sha-512".to_string(),
+            mode: "scramSha512".to_string(),
             username: Some(username.clone()),
         },
     }

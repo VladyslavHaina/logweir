@@ -129,7 +129,7 @@ pub enum Verdict {
     /// approval claim held. The full-strength verdict, and the only one
     /// `--payload-type scorecard` (the default) can produce.
     Scorecard(VerifyReport),
-    /// The signature verified AND all four of
+    /// The signature verified AND all five of
     /// `logweir_core::backup_receipt::BackupReceipt`'s invariants held. The
     /// backup receipt's full-strength verdict, and the second document type
     /// this command evaluates rather than merely authenticates (Task 5b).
@@ -417,7 +417,7 @@ fn print_backup_receipt(
         }
     );
     println!(
-        "checked:   the signature AND all four backup-receipt invariants \
+        "checked:   the signature AND all five backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window)"
     );
 }

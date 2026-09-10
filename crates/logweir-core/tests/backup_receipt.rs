@@ -1,5 +1,16 @@
-//! `BackupReceipt::validate_invariants` has exactly four arms, and each one
-//! refuses with an exact message.
+//! `BackupReceipt::validate_invariants` has exactly FIVE arms — the four
+//! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
+//! CLOSED VALUE SET (`source.auth.mode`) — and each one refuses with an exact
+//! message.
+//!
+//! The four and the five are asserted SEPARATELY and on purpose:
+//! `arm_cases()` carries the four self-contradiction arms and
+//! `backup_receipt_invariants_have_exactly_four_arms` closes over them, while
+//! `validate_invariants_has_exactly_five_return_err_statements` closes over
+//! the function's TOTAL by reading its source text. So an arm added to the
+//! function without a case here fails the second test, and a case deleted
+//! from `arm_cases()` fails the first — neither number can go stale under
+//! cover of the other.
 //!
 //! # Why the messages are asserted in FULL and not by `contains`
 //!
@@ -10,9 +21,9 @@
 //! would let one reader say something the other does not and still go green —
 //! which is the exact defect the scorecard's parity gate exists because of.
 //!
-//! # Why there is an aggregate test AND four per-arm tests
+//! # Why there is an aggregate test AND a per-arm test for every arm
 //!
-//! The four per-arm tests are what a failure should be NAMED after: a
+//! The per-arm tests are what a failure should be NAMED after: a
 //! reviewer applying "delete arm 2" wants to read `arm_2_…` in the failure
 //! list, not scan a table. The aggregate `backup_receipt_invariants_have_
 //! exactly_four_arms` is what makes "exactly four" a claim rather than a
@@ -30,7 +41,7 @@ use logweir_core::backup_receipt::{
 };
 use std::collections::BTreeMap;
 
-/// A receipt that satisfies all four arms. Every case below mutates exactly
+/// A receipt that satisfies all five arms. Every case below mutates exactly
 /// ONE thing about it, so a refusal is provably about that one thing.
 fn pristine() -> BackupReceipt {
     let mut records = BTreeMap::new();
@@ -72,8 +83,17 @@ fn pristine() -> BackupReceipt {
     }
 }
 
-/// One case per arm: the arm's number, a one-line label, the mutated receipt
-/// and the EXACT message it must produce.
+/// One case per SELF-CONTRADICTION arm (1..=4): the arm's number, a one-line
+/// label, the mutated receipt and the EXACT message it must produce.
+///
+/// Arm 5 is deliberately NOT here. It is the only arm that is not a claim the
+/// document makes against itself — it refuses a value the format has no
+/// spelling for — and it has its own case and its own named test
+/// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
+/// `backup_receipt_invariants_have_exactly_four_arms` keeps saying exactly
+/// what its name says while
+/// `validate_invariants_has_exactly_five_return_err_statements` pins the
+/// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
     let mut arm1 = pristine();
@@ -169,9 +189,129 @@ fn arm_4_refuses_a_covered_window_that_ends_before_it_begins() {
     assert_arm(4);
 }
 
+/// **ARM 5 — the closed value set.** `source.auth.mode` is `"plaintext"` or
+/// `"scramSha512"` and nothing else (controller ruling, Task 5b fix round 1).
+///
+/// Three cases, because the arm has three distinct jobs. `scram-sha-512` is
+/// the LEGACY spelling this product used to write and now refuses, which is
+/// the whole point of closing the set: the value Task 17 copies into
+/// `Backup.status.auth.mode` must be the one that field's CRD description
+/// promises. `totally-made-up` is the value Task 5b's review signed and
+/// verified 0/0 at both readers, i.e. the defect this arm removes. And the
+/// two accepted values are asserted too, so an arm that refused everything
+/// could not pass this test.
+#[test]
+fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
+    for (mode, want) in [
+        (
+            "scram-sha-512",
+            "source.auth.mode \"scram-sha-512\" is not one of the two values this format \
+             defines: \"plaintext\" or \"scramSha512\"",
+        ),
+        (
+            "totally-made-up",
+            "source.auth.mode \"totally-made-up\" is not one of the two values this format \
+             defines: \"plaintext\" or \"scramSha512\"",
+        ),
+        (
+            " plaintext ",
+            "source.auth.mode \" plaintext \" is not one of the two values this format \
+             defines: \"plaintext\" or \"scramSha512\"",
+        ),
+    ] {
+        let mut doc = pristine();
+        doc.source.auth.mode = mode.to_string();
+        match doc.validate_invariants() {
+            Ok(()) => panic!("arm 5 accepted source.auth.mode {mode:?}"),
+            Err(got) => assert_eq!(
+                got, want,
+                "arm 5 refused {mode:?} with the wrong message. The refusal TEXT is the \
+                 interface docs/verify_scorecard.py's mirrored arm reproduces byte for \
+                 byte, and e2e/fixtures/invariants/backup-receipt-index.json records it \
+                 verbatim; do not reword it."
+            ),
+        }
+    }
+    // …and the two values the format DOES define are accepted, so this arm
+    // cannot pass by refusing every mode.
+    for mode in ["plaintext", "scramSha512"] {
+        let mut doc = pristine();
+        doc.source.auth.mode = mode.to_string();
+        doc.source.auth.username = match mode {
+            "plaintext" => None,
+            _ => Some("logweir-backup".to_string()),
+        };
+        assert_eq!(
+            doc.validate_invariants(),
+            Ok(()),
+            "{mode:?} is one of the two values this format defines and must be accepted"
+        );
+    }
+}
+
+/// **THE TOTAL.** `validate_invariants` has exactly five refusing statements.
+///
+/// Read out of the SOURCE TEXT, which is the only way to make the count a
+/// claim about the function rather than about this file's case list: an arm
+/// added without a case, or a sixth arm added without updating this number,
+/// fails here. It is the same slice
+/// `scripts/check-invariant-corpus.sh` takes — from the signature line to the
+/// first line that is exactly four spaces and a closing brace — so the two
+/// gates cannot disagree about where the function ends, and comments are
+/// required not to inflate the count (the same rule
+/// `crates/logweir/tests/two_reader_parity.rs::
+/// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
+#[test]
+fn validate_invariants_has_exactly_five_return_err_statements() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/backup_receipt.rs"
+    ))
+    .expect("read crates/logweir-core/src/backup_receipt.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("pub fn validate_invariants"))
+        .expect("backup_receipt.rs declares validate_invariants");
+    let end = start
+        + 1
+        + lines[start + 1..]
+            .iter()
+            .position(|l| *l == "    }")
+            .expect("the function closes on a line that is exactly four spaces and a brace");
+    let body = lines[start..=end].join("\n");
+
+    let total = body.matches("return Err(format!(").count();
+    assert_eq!(
+        total, 5,
+        "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
+         statement(s), not 5. Every one of them needs a per-arm test in this file with \
+         its exact message AND a case in \
+         e2e/fixtures/invariants/backup-receipt-index.json — \
+         scripts/check-invariant-corpus.sh derives the list from this same slice and \
+         from docs/verify_scorecard.py and refuses to balance otherwise."
+    );
+    // A COMMENT quoting the marker would inflate the count, which is how a
+    // deleted arm hides behind prose.
+    let code_only: String = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        code_only.matches("return Err(format!(").count(),
+        total,
+        "a COMMENT in validate_invariants contains `return Err(format!(`, so the \
+         statement count above is inflated by prose"
+    );
+}
+
 /// The acceptance criterion, and the test every mutant in Task 5's brief is
-/// named against: four arms, each refusing with its exact message, and a
-/// pristine receipt accepted.
+/// named against: the four SELF-CONTRADICTION arms, each refusing with its
+/// exact message, and a pristine receipt accepted. Arm 5 — the closed value
+/// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
+/// function's total is
+/// `validate_invariants_has_exactly_five_return_err_statements`.
 #[test]
 fn backup_receipt_invariants_have_exactly_four_arms() {
     let cases = arm_cases();
@@ -260,6 +400,10 @@ fn arm_2_treats_a_blank_manifest_key_as_absent() {
 /// Arm 1 is checked FIRST, like `Scorecard::refuse_unreadable_major`: a
 /// document from a future major is refused before any other arm is evaluated
 /// against fields that build may have redefined.
+///
+/// The name says "the other three" because it predates arm 5; the property
+/// asserted is the general one — before EVERY other arm — and the body below
+/// violates all four of them, arm 5 included.
 #[test]
 fn arm_1_is_evaluated_before_the_other_three() {
     let mut doc = pristine();
@@ -269,6 +413,7 @@ fn arm_1_is_evaluated_before_the_other_three() {
     doc.records.insert("invoices".to_string(), 1);
     doc.covered.from_ms = 2;
     doc.covered.to_ms = 1;
+    doc.source.auth.mode = "scram-sha-512".to_string();
     assert_eq!(
         doc.validate_invariants(),
         Err("format_version \"2.0.0\" is not a 1.x version this reader understands".to_string()),

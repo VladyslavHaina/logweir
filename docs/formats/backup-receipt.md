@@ -33,7 +33,7 @@ something about a backup it never observed.
 
 So the receipt has its own media type, its own schema, its own
 `format_version: "1.0.0"` — **independent of the scorecard's** — and its own
-four invariants.
+five arms.
 
 ## Reading rules a consumer must honour
 
@@ -77,7 +77,7 @@ no report file, so its start, finish and exit code are ours to time.
 |---|---|---|
 | `source.cluster_id` | string | **Read from the broker**, never from the spec. The fourth rail of the backup guard records this value and re-asserts it is not the restore target; this is where the recorded value is attested. |
 | `source.bootstrap_servers` | array of string | The bootstrap list the source client was given. |
-| `source.auth.mode` | string | `plaintext` or `scram-sha-512`. |
+| `source.auth.mode` | string | **A closed set of two: `plaintext` or `scramSha512`.** These are `AuthSpec`'s serde tag values, the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only two strings `AuthSpec::mode_str()` returns — so the spec an adopter writes, the CRD they apply and this signed document all spell the mechanism the same way. **Any other value is refused by both readers** (arm 5). |
 | `source.auth.username` | string \| null | The SASL username, when there is one. `null` under `plaintext` — which is not the same as an empty username. |
 | `source.topics` | array of string | The named topic allowlist. A **named set with no glob metacharacter**, so this is the exact set of topics and not a pattern a reader would have to re-expand against a cluster it cannot see. |
 
@@ -145,18 +145,20 @@ numbers.
 
 ---
 
-## The four invariants
+## The five arms
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
 them ARM FOR ARM, IN ORDER. The messages below are the **exact** refusal text of
 BOTH readers — compared byte-for-byte by
-`crates/logweir-core/tests/backup_receipt.rs::backup_receipt_invariants_have_exactly_four_arms`,
+`crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_invariants_have_exactly_four_arms`
+over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` over arm 5, and
+`validate_invariants_has_exactly_five_return_err_statements` over the total),
 by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
-over the seven documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
+over the eight documents in `e2e/fixtures/invariants/backup-receipt-index.json`,
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
-from both readers' source and refuses to balance if they are not the same four
+from both readers' source and refuses to balance if they are not the same five
 arms in the same order.
 
 1. **`format_version` parses as semver and its major is `1`.** Checked first, so
@@ -191,6 +193,18 @@ arms in the same order.
 
    > `covered.from_ms 2 is not before covered.to_ms 1: the covered window's end is EXCLUSIVE, so an empty range covers no record`
 
+5. **`source.auth.mode` is `plaintext` or `scramSha512`, and nothing else.** The
+   only arm that is not a claim the document makes against itself: the receipt
+   does not contradict itself, it names a mechanism this format has no spelling
+   for. It is last for that reason — a document that contradicts itself should
+   be told so first. The two values are `AuthSpec`'s serde tags, so `logweir`
+   itself has exactly one writer of this field and no way to reach a third
+   value; the arm is here for the documents this tree did not write, and
+   because `Backup.status.auth.mode` — which the operator copies FROM this
+   field — promises the same two in its own CRD description.
+
+   > `source.auth.mode "scram-sha-512" is not one of the two values this format defines: "plaintext" or "scramSha512"`
+
 ---
 
 ## Verifying a receipt
@@ -224,11 +238,11 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers now run **all four arms above** over a `--payload-type
+> readers now run **all five arms above** over a `--payload-type
 > backup-receipt` document, and both were given them in one commit (Task 5b) so
 > that they could never disagree in between. `logweir drill verify` prints
-> `checked:   the signature AND all four backup-receipt invariants …`;
-> `docs/verify_scorecard.py` prints `verifier: verify_scorecard.py 1.9.0
+> `checked:   the signature AND all five backup-receipt invariants …`;
+> `docs/verify_scorecard.py` prints `verifier: verify_scorecard.py 1.10.0
 > (backup-receipt invariant set: …)`. Both compare the sidecar's `payloadType`
 > **in full**, so a genuinely-signed scorecard presented as a receipt is refused
 > as a substitution rather than accepted — `drill verify` exits 4 and says
@@ -243,7 +257,7 @@ would break every existing invocation, every document and
 > `crates/logweir/tests/cli_verify.rs::the_signature_only_verdict_is_still_reachable`
 > keeps it honest.
 >
-> **Where else the four arms are enforced.** At the two places a receipt is
+> **Where else the five arms are enforced.** At the two places a receipt is
 > WRITTEN: `crates/logweir-evidence/examples/mint_backup_receipt_fixture.rs`
 > validates before it signs, and `logweir backup run` validates the exact
 > document it is about to sign before it signs or uploads anything
@@ -298,8 +312,8 @@ just fixtures-sign
 `e2e/fixtures/signed/signing.pem` and never mints one — a fresh key would orphan
 the fingerprint [`../verify-a-scorecard.md`](../verify-a-scorecard.md) teaches
 auditors to pin. It writes the document and the signature over exactly those
-bytes itself, in one process, after validating the document against all four
-invariants, so there is no window in which the tracked document and the tracked
+bytes itself, in one process, after validating the document against all five
+arms, so there is no window in which the tracked document and the tracked
 signature over it disagree.
 
 ## Regenerating the schema

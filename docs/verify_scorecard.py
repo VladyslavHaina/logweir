@@ -281,7 +281,18 @@ FORMAT_VERSION = "1.0.0"
 # payload-type map gains its fourth entry, which
 # `test_script_version_was_bumped_with_the_payload_type_map` ties to this
 # constant so the two can never move apart.
-SCRIPT_VERSION = "1.9.0"
+# 1.10.0 (Task 5b fix round 1) CLOSES THE AUTH MODE'S VALUE SET in both
+# documents, which is one arm in each: `target.auth.mode` and
+# `source.auth.mode` are `plaintext` or `scramSha512` and nothing else. Until
+# this version neither field's VALUE was read by either reader — a document
+# carrying `{"mode": "totally-made-up"}` verified 0/0, proved by execution in
+# Task 5b's review — while `Backup.status.auth.mode`'s CRD description already
+# promised the two values and Task 17 copies the receipt's field into it. The
+# minor moves because the invariant SET grew, not because either format did:
+# `FORMAT_VERSION` stays `1.0.0` for both documents (only a `description`
+# changed in the receipt's schema), which is exactly the distinction
+# `test_the_script_version_is_not_the_format_version` exists to keep.
+SCRIPT_VERSION = "1.10.0"
 
 # The FOUR payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -1028,6 +1039,17 @@ def check_invariants(doc) -> str:
                 "target.auth.mode is blank; an absent auth block is how a scorecard says "
                 "plaintext"
             )
+        # THE VALUE SET IS CLOSED (SCRIPT_VERSION 1.10.0): exactly
+        # `AuthSpec`'s two serde tags, which are the `KafkaCluster` CRD's
+        # `auth.mode` enum and the only two strings `AuthSpec::mode_str()` can
+        # return. The EXACT value, not a stripped one — the blank arm above
+        # has already refused a whitespace-only mode, and the receipt's arm 5
+        # does not strip either, so one spelling means one comparison.
+        if str(target_auth.get("mode")) not in ("plaintext", "scramSha512"):
+            return (
+                "target.auth.mode is not one of the two values this format defines; it "
+                "is \"plaintext\" or \"scramSha512\" and nothing else"
+            )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -1099,6 +1121,17 @@ def _receipt_shape(doc) -> str:
             return f"the document has no source.{name} field; it is not a backup receipt"
     if not isinstance(doc["source"].get("topics"), list):
         return "source.topics is not an array"
+    # `ReceiptSource.auth` is a required `ReceiptAuth` and `mode` a required
+    # `String`, so Rust refuses both of these at DESERIALISATION, before any
+    # arm runs. They belong in the SHAPE layer here for the same reason every
+    # other check in this function does: arm 5 below reads
+    # `source.auth.mode`, and a reader that reached an invariant on a document
+    # the other reader never parsed would refuse the same bytes in a different
+    # layer with a different sentence.
+    if not isinstance(doc["source"].get("auth"), dict):
+        return "the document has no source.auth block; it is not a backup receipt"
+    if not isinstance(doc["source"]["auth"].get("mode"), str):
+        return "source.auth.mode is not a string"
     for name in ("from_ms", "to_ms"):
         value = doc["covered"].get(name)
         if not isinstance(value, int) or isinstance(value, bool):
@@ -1155,7 +1188,7 @@ def check_backup_receipt_invariants(doc) -> str:
     walks `e2e/fixtures/invariants/backup-receipt-index.json` with both readers
     and compares their refusals to each other and to the recorded text, and
     `scripts/check-invariant-corpus.sh` derives the arm list from BOTH bodies
-    and fails if they are not the same four arms in the same order.
+    and fails if they are not the same five arms in the same order.
 
     Called only after `_receipt_shape` returns "", so every field read here is
     present and of the right JSON type.
@@ -1164,6 +1197,7 @@ def check_backup_receipt_invariants(doc) -> str:
     2. `exit_code == 0` **iff** `archive.manifest_key` is non-blank.
     3. `records` covers exactly `source.topics`.
     4. `covered.from_ms < covered.to_ms` — the end is EXCLUSIVE.
+    5. `source.auth.mode` is `plaintext` or `scramSha512` and nothing else.
     """
     # ARM 1. GC12 for this document: a reader refuses a major it has never
     # seen rather than guessing at a shape. FIRST, so a document from a future
@@ -1214,6 +1248,24 @@ def check_backup_receipt_invariants(doc) -> str:
         return (
             f"covered.from_ms {from_ms} is not before covered.to_ms {to_ms}: the covered "
             "window's end is EXCLUSIVE, so an empty range covers no record"
+        )
+
+    # ARM 5 (Task 5b fix round 1). THE AUTH MODE'S VALUE SET IS CLOSED: two
+    # values, which are `AuthSpec`'s serde tags, the `KafkaCluster` CRD's
+    # `auth.mode` enum byte for byte, and the only strings
+    # `AuthSpec::mode_str()` returns. Until this arm the field was an
+    # unconstrained string neither reader looked at, so a receipt naming
+    # `"totally-made-up"` verified 0/0 — while Task 17 copies this exact field
+    # into `Backup.status.auth.mode`, whose CRD description promises these two.
+    #
+    # The value IS interpolated, unlike the scorecard's `target.auth` arms:
+    # every arm of this document already echoes an adopter-supplied string,
+    # and `_rust_debug_str` is what makes `{:?}`'s rendering reproducible here.
+    mode = doc["source"]["auth"]["mode"]
+    if mode not in ("plaintext", "scramSha512"):
+        return (
+            f"source.auth.mode {_rust_debug_str(mode)} is not one of the two values this "
+            "format defines: \"plaintext\" or \"scramSha512\""
         )
 
     return ""
@@ -1441,7 +1493,8 @@ def main(
             "outcome-entailment, all eleven required blocks in serde order, "
             "the six required non-block fields present and of the type their Rust type "
             "implies, u64 domain with null refused where Rust has no Option, "
-            "target.auth's mode present and not blank when the block is; "
+            "target.auth's mode present, not blank, and one of the two values the "
+            "format defines when the block is; "
             "approval.self_attested derived, not echoed)"
         )
         return 0
@@ -1498,8 +1551,9 @@ def main(
             f"       verifier: verify_scorecard.py {SCRIPT_VERSION} "
             "(backup-receipt invariant set: format_version's major, the "
             "exit_code/manifest_key biconditional with trimmed-empty counted as absent, "
-            "records covering exactly the named topic set, and a covered window whose "
-            "EXCLUSIVE end is after its start)"
+            "records covering exactly the named topic set, a covered window whose "
+            "EXCLUSIVE end is after its start, and source.auth.mode inside the closed "
+            "two-value set)"
         )
         return 0
 

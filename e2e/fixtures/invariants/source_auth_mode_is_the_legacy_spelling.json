@@ -13,7 +13,7 @@
       "kafka-broker-1:9094"
     ],
     "auth": {
-      "mode": "scramSha512",
+      "mode": "scram-sha-512",
       "username": "logweir-backup"
     },
     "topics": [
@@ -36,7 +36,7 @@
     "payments": 917
   },
   "covered": {
-    "from_ms": 1757419486000,
-    "to_ms": 1757415734000
+    "from_ms": 1757415734000,
+    "to_ms": 1757419486000
   }
 }

@@ -521,7 +521,7 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all four backup-receipt invariants"),
+        stdout.contains("the signature AND all five backup-receipt invariants"),
         "an exit 0 that checked the invariants must say so on stdout, got: {stdout}"
     );
     assert!(

@@ -36,7 +36,7 @@
 # back to `drill verify` exit 1 against `VALID` from the script.
 #
 # Task 5b: it also walks `backup-receipt-index.json` — the BACKUP RECEIPT's own
-# corpus — and closes the same kind of arithmetic over its four invariant arms.
+# corpus — and closes the same kind of arithmetic over its five invariant arms.
 # The fixed point there is `crates/logweir-core/src/backup_receipt.rs`'s
 # `validate_invariants`: the gate re-derives each arm's message SKELETON (the
 # format string with every `{...}` placeholder normalised) from that function's
@@ -45,9 +45,12 @@
 # order, and requires every case in the index to match exactly one skeleton and
 # every skeleton to be matched by at least one case. Deleting an arm from ONE
 # reader together with its corpus case and its pytest therefore cannot balance:
-# the other reader still has four arms. Deleting it from BOTH is what
+# the other reader still has five arms. Deleting it from BOTH is what
 # `crates/logweir-core/tests/backup_receipt.rs::
-# backup_receipt_invariants_have_exactly_four_arms` is for — the per-arm Rust
+# backup_receipt_invariants_have_exactly_four_arms` (plus
+# `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
+# `validate_invariants_has_exactly_five_return_err_statements`) is for — the
+# per-arm Rust
 # unit test the corpus README already names as the only thing that survives a
 # fully coordinated deletion.
 #

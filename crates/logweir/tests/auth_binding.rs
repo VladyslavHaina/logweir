@@ -31,8 +31,8 @@ use logweir_core::engine::{
 };
 use logweir_core::spec::{AuthSpec, DrillSpec};
 use logweir_engine_oso::storage::Store;
-use logweir_evidence::keys::SigningKey;
 use logweir_engine_oso::{render_restore, render_validation};
+use logweir_evidence::keys::SigningKey;
 use logweir_kafka::reader::{AuthConfig, ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -111,7 +111,7 @@
       ],
       "properties": {
         "mode": {
-          "description": "`\"plaintext\"` or `\"scram-sha-512\"`.",
+          "description": "**A CLOSED SET OF TWO: `\"plaintext\"` or `\"scramSha512\"`.** Any other value is refused by BOTH readers (arm 5 below, and `docs/verify_scorecard.py::check_backup_receipt_invariants`'s mirror), so a receipt naming a third spelling is never signed and never verifies.\n\nThese are `logweir_core::spec::AuthSpec`'s serde tag values, which is what makes ONE spelling possible at all: they are the strings an adopter writes in a spec, `KafkaCluster.spec.auth.mode`'s CRD enum byte for byte, the only two values `AuthSpec::mode_str()` can return, and — since Task 17 copies this field — what `Backup.status.auth.mode`'s CRD description promises. A `String` and not an enum on the wire because a reader must be able to REPORT a value it refuses; the closed set is enforced by the arm, where both readers can state it in the same words.",
           "type": "string"
         },
         "username": {

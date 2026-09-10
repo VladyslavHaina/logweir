@@ -32,11 +32,24 @@
 //!
 //! A SUCCESSFUL two-topic backup: `exit_code: 0`, a named manifest,
 //! per-topic counts over exactly the named topic set, and a covered window
-//! that begins before it ends — so it satisfies all four of
+//! that begins before it ends, and `source.auth.mode` inside the closed
+//! two-value set — so it satisfies all five of
 //! `BackupReceipt::validate_invariants`' arms, which are asserted here before
 //! anything is signed. Every value is a plausible constant, not a measured
 //! one: this is an example of the FORMAT, and `logweir backup run` writing a
 //! real one is Task 5b's.
+//!
+//! # The one re-mint, and why the key id does not move
+//!
+//! Task 5b fix round 1 re-mints the pair, on controller ruling, because
+//! `source.auth.mode` moved from `scram-sha-512` to **`scramSha512`** — the
+//! product's one spelling, and now a value BOTH readers close (arm 5). The
+//! key is still READ from the same checked-in throwaway PEM, so the
+//! `917cf9a2…` fingerprint `docs/verify-a-scorecard.md` teaches auditors to
+//! pin is unchanged, and the three other signed pairs under
+//! `e2e/fixtures/signed/` are not touched by this program at all. ECDSA over
+//! P-256 here is RFC 6979 deterministic, so re-running this program over an
+//! unchanged document reproduces both files byte for byte.
 
 use logweir_core::backup_receipt::{
     BackupReceipt, ReceiptArchive, ReceiptAuth, ReceiptCovered, ReceiptEngine, ReceiptSource,
@@ -69,7 +82,7 @@ fn receipt() -> BackupReceipt {
             cluster_id: "kRtQ7yZ1S0uPq9AeVxN2Lg".to_string(),
             bootstrap_servers: vec!["kafka-broker-1:9094".to_string()],
             auth: ReceiptAuth {
-                mode: "scram-sha-512".to_string(),
+                mode: "scramSha512".to_string(),
                 username: Some("logweir-backup".to_string()),
             },
             // Named, in the spec's order, with no glob metacharacter
@@ -114,7 +127,7 @@ fn main() {
     // `docs/verify_scorecard.py` printed over it.
     receipt
         .validate_invariants()
-        .expect("the fixture receipt must satisfy its own four invariants before it is signed");
+        .expect("the fixture receipt must satisfy its own five arms before it is signed");
 
     let bytes = to_deterministic_json(&receipt).expect("receipt serialises");
 

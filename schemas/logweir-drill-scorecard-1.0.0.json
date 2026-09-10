@@ -153,6 +153,7 @@
       ],
       "properties": {
         "mode": {
+          "description": "**A CLOSED SET OF TWO: `\"plaintext\"` or `\"scramSha512\"`** — the same two values `crate::backup_receipt::ReceiptAuth::mode` carries, and for the same reason: they are `crate::spec::AuthSpec`'s serde tag values, the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only two strings `AuthSpec::mode_str()` — which is what `logweir::drill::target_info` fills this field from — can return.\n\nTask 5b shipped this field with NO documented value set at all, and its review proved by execution that a scorecard carrying `target.auth = {\"mode\": \"totally-made-up\"}` verified 0/0 at both readers. `validate_invariants`'s THIRD `target.auth` arm closes it, mirrored word for word in `docs/verify_scorecard.py`.",
           "type": "string"
         },
         "username": {

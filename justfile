@@ -158,7 +158,7 @@ verify-py:
 # Task 5's `mint_backup_receipt_fixture` needs no redirect and no `mv` at all:
 # it writes e2e/fixtures/signed/backup-receipt.json AND the .sig over exactly
 # those bytes itself, in one process, after validating the document against its
-# own four invariants — so there is no window in which the tracked document and
+# own five arms — so there is no window in which the tracked document and
 # the tracked signature over it disagree.
 fixtures-sign:
     mkdir -p target/fixtures-tmp

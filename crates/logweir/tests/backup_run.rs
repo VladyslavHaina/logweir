@@ -814,7 +814,7 @@ fn verify_receipt(dir: &Path, doc: &[u8], sidecar: &[u8], public_pem: &Path) -> 
 ///
 /// One `run_with` against the in-memory store puts EXACTLY TWO objects under
 /// `logweir/backups/<backup_id>/`, both create-only, and the pair verifies
-/// under the receipt's own payload type — signature AND all four invariants,
+/// under the receipt's own payload type — signature AND all five invariants,
 /// which is what `--payload-type backup-receipt` checks since Task 5b.
 ///
 /// In process, with doubles: no `logweir` binary, no subprocess, no broker

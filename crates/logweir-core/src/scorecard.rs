@@ -155,6 +155,18 @@ pub struct TargetInfo {
 /// read the wrong way round. The way to say plaintext is to write no block.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct AuthSummary {
+    /// **A CLOSED SET OF TWO: `"plaintext"` or `"scramSha512"`** — the same
+    /// two values `crate::backup_receipt::ReceiptAuth::mode` carries, and for
+    /// the same reason: they are `crate::spec::AuthSpec`'s serde tag values,
+    /// the `KafkaCluster` CRD's `auth.mode` enum byte for byte, and the only
+    /// two strings `AuthSpec::mode_str()` — which is what
+    /// `logweir::drill::target_info` fills this field from — can return.
+    ///
+    /// Task 5b shipped this field with NO documented value set at all, and
+    /// its review proved by execution that a scorecard carrying
+    /// `target.auth = {"mode": "totally-made-up"}` verified 0/0 at both
+    /// readers. `validate_invariants`'s THIRD `target.auth` arm closes it,
+    /// mirrored word for word in `docs/verify_scorecard.py`.
     pub mode: String,
     #[serde(default)]
     pub username: Option<String>,
@@ -811,8 +823,21 @@ impl Scorecard {
         // message would make that join impossible and would additionally put
         // an adopter-supplied string into a refusal line.
         //
-        // Task 6 FILLS this field and adds no arm here; the agreement between
-        // this block and `AuthSpec` is closed by its own named test.
+        // THE VALUE SET IS CLOSED (third arm, Task 5b fix round 1 — the
+        // controller's one-spelling ruling). `mode` is a `String` on the wire
+        // so that a reader can REPORT a value it refuses, but the accepted
+        // set is exactly `AuthSpec`'s two serde tags. Before the third arm a
+        // scorecard carrying `{"mode": "totally-made-up"}` verified 0/0 at
+        // both readers — proved by execution in Task 5b's review — which made
+        // the agreement between this block and `AuthSpec` an assertion about
+        // serde in one test file rather than a property of the document
+        // (Task 6's review, finding F-2).
+        //
+        // Task 6 FILLS this field from `AuthSpec::mode_str()`, whose return
+        // type is `&'static str` over exactly those two literals, so no
+        // scorecard this tree writes can reach the third arm; it exists for
+        // the documents this tree did not write, which is every document a
+        // reader is handed.
         if let Some(auth) = &self.target.auth {
             let mode_blank = auth.mode.trim().is_empty();
             let username_named = auth
@@ -828,6 +853,27 @@ impl Scorecard {
             if mode_blank {
                 return Err(InvariantError(
                     "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
+                        .into(),
+                ));
+            }
+            // NOT INTERPOLATED, like the two arms above it and unlike the
+            // receipt's arm 5: the value here is `AuthSummary.mode`, and
+            // these three messages are joined to `index.json`'s `arm` field
+            // by LITERAL substring against this body
+            // (`crates/logweir/tests/two_reader_parity.rs::
+            // every_invariant_arm_has_a_corpus_case`). A placeholder would
+            // make that join a pattern match, and it would put an
+            // adopter-supplied string into a scorecard refusal line, which is
+            // the rule this block already states above.
+            // The EXACT wire value, not a trimmed one: the accepted set is two
+            // exact literals, the blank arm above has already refused a
+            // whitespace-only mode, and `" plaintext "` is a value no writer
+            // in this tree produces. Both documents use the same rule —
+            // `ReceiptAuth::mode`'s arm 5 does not trim either — so one
+            // spelling means one comparison as well as one string.
+            if !matches!(auth.mode.as_str(), "plaintext" | "scramSha512") {
+                return Err(InvariantError(
+                    "target.auth.mode is not one of the two values this format defines; it is \"plaintext\" or \"scramSha512\" and nothing else"
                         .into(),
                 ));
             }

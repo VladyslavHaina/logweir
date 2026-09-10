@@ -567,7 +567,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.9.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.10.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -578,8 +578,11 @@ def test_the_version_line_names_the_current_invariant_set():
         ) in r.stdout, r.stdout
         assert "u64 domain with null refused where Rust has no Option" in r.stdout, r.stdout
         # 1.9.0's addition: Global Constraint 12's price for `target.auth`.
+        # 1.10.0 extends the same clause: the mode's VALUE SET is closed, which
+        # is the third `target.auth` arm.
         assert (
-            "target.auth's mode present and not blank when the block is"
+            "target.auth's mode present, not blank, and one of the two values the "
+            "format defines when the block is"
         ) in r.stdout, r.stdout
 
 
@@ -1812,9 +1815,14 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # must have moved together. A version left at 1.8.0 beside a four-entry map
     # is a document claiming it was checked by a reader that did not know the
     # type it was handed.
+    #
+    # 1.10.0 (fix round 1) closed the auth mode's value set in BOTH documents:
+    # one more arm in `check_invariants` and one more in
+    # `check_backup_receipt_invariants`, which is an invariant-set change and
+    # therefore a minor bump, with the payload-type map unchanged at four.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 4, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.9.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.10.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
 
@@ -1842,7 +1850,7 @@ def test_the_target_auth_arms_refuse_with_their_exact_messages():
 
     assert mod.check_invariants(with_auth({"mode": "plaintext"})) == ""
     assert mod.check_invariants(
-        with_auth({"mode": "scram-sha-512", "username": "logweir"})) == ""
+        with_auth({"mode": "scramSha512", "username": "logweir"})) == ""
     assert mod.check_invariants(with_auth(None)) == "", "null is absent"
     assert mod.check_invariants(with_auth({"mode": "   ", "username": "logweir"})) == (
         "target.auth names a username with no auth mode; a username without its "
@@ -1851,3 +1859,59 @@ def test_the_target_auth_arms_refuse_with_their_exact_messages():
     assert mod.check_invariants(with_auth({"mode": ""})) == (
         "target.auth.mode is blank; an absent auth block is how a scorecard says plaintext"
     )
+
+    # THE VALUE SET IS CLOSED (SCRIPT_VERSION 1.10.0, controller ruling). The
+    # first value is the spelling this product's own receipt writer used until
+    # the same round; the second is the one Task 5b's review signed and got
+    # 0/0 from BOTH readers, which is the defect this arm removes. The trailing
+    # case pins that the comparison is on the EXACT value, like the Rust arm's.
+    closed = (
+        "target.auth.mode is not one of the two values this format defines; it "
+        'is "plaintext" or "scramSha512" and nothing else'
+    )
+    for mode in ["scram-sha-512", "totally-made-up", "SCRAMSHA512", " plaintext "]:
+        assert mod.check_invariants(with_auth({"mode": mode})) == closed, mode
+    # …and a username beside a good mode is still fine, so the arm cannot pass
+    # by refusing every block that has one.
+    assert mod.check_invariants(
+        with_auth({"mode": "scramSha512", "username": "logweir"})) == ""
+
+
+def test_the_receipts_auth_mode_value_set_is_closed_at_this_reader():
+    # Arm 5, mirrored (Task 5b fix round 1). `Backup.status.auth.mode` is
+    # copied FROM this field by the operator and its CRD description promises
+    # these two values, so a third spelling reaching an auditor as an attested
+    # claim is the failure this arm exists to prevent. The messages are
+    # byte-identical to `BackupReceipt::validate_invariants`' arm 5, which
+    # `scripts/check-invariant-corpus.sh` re-derives from both sources.
+    mod = _verifier_module()
+    base = json.loads((FIX / "backup-receipt.json").read_bytes())
+    assert base["source"]["auth"]["mode"] == "scramSha512", (
+        "the checked-in receipt fixture must carry the product's ONE spelling"
+    )
+    assert mod.check_backup_receipt_invariants(base) == ""
+
+    def with_mode(mode):
+        doc = json.loads(json.dumps(base))
+        doc["source"]["auth"]["mode"] = mode
+        return doc
+
+    assert mod.check_backup_receipt_invariants(with_mode("plaintext")) == ""
+    for mode in ["scram-sha-512", "totally-made-up", "SCRAMSHA512", " plaintext "]:
+        assert mod.check_backup_receipt_invariants(with_mode(mode)) == (
+            f"source.auth.mode {mod._rust_debug_str(mode)} is not one of the two values "
+            'this format defines: "plaintext" or "scramSha512"'
+        ), mode
+
+    # A receipt with no `source.auth` block at all is refused in the SHAPE
+    # layer, which is where Rust refuses it (serde, before any arm runs) —
+    # never as an invariant, or the two readers would refuse one document in
+    # two different layers with two different sentences.
+    doc = json.loads(json.dumps(base))
+    del doc["source"]["auth"]
+    assert mod._receipt_shape(doc) == (
+        "the document has no source.auth block; it is not a backup receipt"
+    )
+    doc = json.loads(json.dumps(base))
+    doc["source"]["auth"]["mode"] = 512
+    assert mod._receipt_shape(doc) == "source.auth.mode is not a string"

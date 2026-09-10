@@ -54,5 +54,13 @@
     "python_exit": 1,
     "reason": "covered.from_ms 1757419486000 is not before covered.to_ms 1757415734000: the covered window's end is EXCLUSIVE, so an empty range covers no record",
     "arm": "covered.from_ms 1757419486000 is not before covered.to_ms 1757415734000: the covered window's end is EXCLUSIVE, so an empty range covers no record"
+  },
+  {
+    "id": "source_auth_mode_is_the_legacy_spelling",
+    "file": "source_auth_mode_is_the_legacy_spelling.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \"plaintext\" or \"scramSha512\"",
+    "arm": "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \"plaintext\" or \"scramSha512\""
   }
 ]

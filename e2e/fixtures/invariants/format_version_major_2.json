@@ -13,7 +13,7 @@
       "kafka-broker-1:9094"
     ],
     "auth": {
-      "mode": "scram-sha-512",
+      "mode": "scramSha512",
       "username": "logweir-backup"
     },
     "topics": [

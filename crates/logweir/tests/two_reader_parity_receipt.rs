@@ -28,7 +28,7 @@
 //!
 //! The ARM ARITHMETIC — every arm of `BackupReceipt::validate_invariants`
 //! accounted for by a corpus case, and the two readers implementing the same
-//! four arms — is `scripts/check-invariant-corpus.sh`'s, because it must be
+//! five arms — is `scripts/check-invariant-corpus.sh`'s, because it must be
 //! runnable by an auditor with python3 and no Rust toolchain. The per-arm
 //! message assertions are `crates/logweir-core/tests/backup_receipt.rs`'s,
 //! which is the only thing that survives an arm deleted from BOTH readers

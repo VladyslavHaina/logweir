@@ -314,8 +314,8 @@ type implies.
 
 ## `backup-receipt-index.json` — the BACKUP RECEIPT's corpus (Task 5b)
 
-Seven documents, and a different document type: `logweir_core::backup_receipt::
-BackupReceipt`, whose four arms are mirrored by
+Eight documents, and a different document type: `logweir_core::backup_receipt::
+BackupReceipt`, whose five arms are mirrored by
 `docs/verify_scorecard.py::check_backup_receipt_invariants`. Same six fields as
 `index.json` (interface **I31**), same accept-control discipline, and the same
 "the cases are UNSIGNED and signed at test time" rule — with one difference that
@@ -326,7 +326,7 @@ comparison, and every case would then "agree" for the wrong reason.
 
 `unmodified_receipt.json` is a byte copy of
 `e2e/fixtures/signed/backup-receipt.json` and is the accept-control. The other
-six each differ from it by exactly the override that makes one arm fire:
+seven each differ from it by exactly the override that makes one arm fire:
 
 | case | override | arm |
 |---|---|---|
@@ -336,16 +336,27 @@ six each differ from it by exactly the override that makes one arm fire:
 | `records_missing_a_named_topic` | `records` loses `payments` | 3 |
 | `records_names_an_unlisted_topic` | `records` gains `invoices` | 3, the other direction |
 | `covered_from_after_to` | `covered.from_ms` and `to_ms` swapped | 4 |
+| `source_auth_mode_is_the_legacy_spelling` | `source.auth.mode` → `scram-sha-512` | 5 |
 
 Arms 2 and 3 are BICONDITIONALS, which is why each has two cases: a single case
 per arm passes against a reader that checks one direction only.
+
+Arm 5 — the CLOSED VALUE SET on `source.auth.mode` — arrived in Task 5b's fix
+round 1 with the controller's one-spelling ruling, and its case names the value
+the product itself used to write (`scram-sha-512`). That is deliberate: the
+cheapest way for this fix to regress is for the writer at
+`crates/logweir/src/backup/phase_run.rs::receipt_auth` to drift back, and this
+case is what refuses the document that drift would produce. Every OTHER receipt
+case — the accept-control included — carries `scramSha512`, because a corpus
+whose documents all violated the newest arm would refuse each case for the
+wrong reason.
 
 ### Why `arm` is the whole reason string here
 
 In `index.json`, `arm` is a verbatim fragment of the message literal in
 `Scorecard::validate_invariants`, and
 `every_invariant_arm_has_a_corpus_case` joins on it by substring. The receipt's
-four messages **interpolate** — a `format_version`, an exit code, two rendered
+five messages **interpolate** — a `format_version`, an exit code, two rendered
 topic sets, two timestamps — so no such fragment exists. `arm` is therefore
 byte-equal to `reason`, and the join is on the message **SKELETON**: the format
 string with every `{…}` placeholder normalised, re-derived from BOTH readers'
@@ -356,32 +367,36 @@ cannot do:
 
 1. every case's reason matches exactly one arm skeleton, and every skeleton is
    matched by at least one case;
-2. **the two readers implement the same four arms, in the same order, with the
+2. **the two readers implement the same five arms, in the same order, with the
    same message** — so deleting an arm from ONE reader together with its corpus
    case and its pytest does not balance, because the other reader still has
-   four;
+   five;
 3. the accept-control exists, and case ids are unique across all three indexes.
 
 Deleting an arm from **both** readers plus its case plus its pytest is the one
 edit this arithmetic cannot catch — the same limit the `occurrences: 0`
 paragraph above states for `index.json` — and the answer is the same: the
 per-arm Rust unit tests in
-`crates/logweir-core/tests/backup_receipt.rs`, which assert each of the four
-messages in FULL and which such an edit does not touch.
+`crates/logweir-core/tests/backup_receipt.rs`, which assert each of the five
+messages in FULL and which such an edit does not touch — plus
+`validate_invariants_has_exactly_five_return_err_statements` in the same file,
+which reads the function's own source text, so an arm deleted from both readers
+and from this corpus still fails a named test.
 
-The two-reader walk over these seven documents is
+The two-reader walk over these eight documents is
 `crates/logweir/tests/two_reader_parity_receipt.rs` — its **own test binary**,
 because Global Constraint 22's 15 s bound is per `#[test]` and
 `two_reader_parity.rs` already measures 5–12 s.
 
-## The two `target.auth` cases in `index.json` (Task 5b)
+## The three `target.auth` cases in `index.json` (Task 5b, +1 in fix round 1)
 
-`target_auth_mode_absent_is_plaintext` and `target_auth_username_without_mode`
-are Global Constraint 12's price for one nested optional field:
-`TargetInfo.auth`, declared by Task 5b and FILLED by Task 6.
+`target_auth_mode_absent_is_plaintext`, `target_auth_username_without_mode` and
+`target_auth_mode_is_the_legacy_spelling` are Global Constraint 12's price for
+one nested optional field: `TargetInfo.auth`, declared by Task 5b and FILLED by
+Task 6.
 
-Both are `unmodified_example.json` with a `target.auth` block added, and both
-are refused by both readers with byte-identical text. **An absent block is
+All three are `unmodified_example.json` with a `target.auth` block added, and all
+three are refused by both readers with byte-identical text. **An absent block is
 legal** — it means plaintext, and every scorecard this tree has ever written has
 none, which is what the other twenty-one cases keep true. What is refused is a
 block whose `mode` is BLANK (ruling R-A: `trim().is_empty()` in Rust,
@@ -389,6 +404,14 @@ block whose `mode` is BLANK (ruling R-A: `trim().is_empty()` in Rust,
 the one claim an auditor must never have to guess at — and a `username` beside a
 blank mode is a principal recorded without the mechanism it authenticated with,
 which is the same defect with more evidence that it was not an accident.
+
+The THIRD case is fix round 1's, and it closes the hole Task 5b's own review
+proved by execution: a scorecard carrying `{"mode": "totally-made-up"}`
+verified 0/0 at BOTH readers, because the two arms above look only at whether
+the mode is blank. The accepted set is now exactly `AuthSpec`'s two serde tags,
+`plaintext` and `scramSha512`, and the case names `scram-sha-512` — the spelling
+this product's own receipt writer used until the same round — so the corpus
+refuses the document a regression would produce rather than an invented one.
 
 Neither message interpolates, so both `arm` fields are verbatim fragments of
 `Scorecard::validate_invariants` and `every_invariant_arm_has_a_corpus_case`
