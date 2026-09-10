@@ -385,4 +385,32 @@ pub trait DataEngine {
             "validation_run is not implemented by this engine".into(),
         ))
     }
+
+    /// PRECONDITION: none. Runs the engine's `backup` subcommand over the
+    /// rendered document.
+    ///
+    /// The default body returns `EngineError::Operational` so every existing
+    /// test double keeps compiling — exactly the `DataEngine::validation_run`
+    /// pattern above, and for the same reason: this trait is implemented by
+    /// `OsoCliEngine` and by a double in `logweir-core`,
+    /// `logweir-engine-oso` and `crates/logweir`, none of which can be made
+    /// to override a new REQUIRED method in the task that adds it.
+    ///
+    /// **Never a fabricated `Ok(BackupFacts { exit_code: 0, .. })`.** Phase
+    /// −1's caller reads this result and then reads the ARCHIVE the run was
+    /// supposed to produce; a default that claimed a clean exit would put a
+    /// `records_per_topic` and a covered window from somebody else's archive
+    /// behind a backup that never ran, which is the same class of defect as
+    /// `validation_run`'s silent fake pass.
+    /// `default_data_engine_backup_is_operational`
+    /// (`logweir-core/tests/engine_trait.rs`) pins it.
+    fn backup(
+        &self,
+        _plan: &BackupPlan,
+        _obs: &mut dyn PhaseObserver,
+    ) -> Result<BackupFacts, EngineError> {
+        Err(EngineError::Operational(
+            "backup is not implemented by this engine".into(),
+        ))
+    }
 }

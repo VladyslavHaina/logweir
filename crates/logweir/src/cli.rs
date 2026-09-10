@@ -23,6 +23,12 @@ pub enum Command {
     /// Run a restore drill, or show and verify the scorecard one produced.
     #[command(subcommand)]
     Drill(DrillCmd),
+    // Chain L, Task 4. The `///` line below is what clap renders in
+    // `logweir --help`; the build rationale stays in `//` comments so it is
+    // not printed to users (the same rule the `Drill` arm above records).
+    /// Back up a source cluster into an archive, from a Logweir spec.
+    #[command(subcommand)]
+    Backup(BackupCmd),
     /// Print a JSON Schema. v0.1 accepts only `scorecard`.
     Schema { which: String },
     /// Check credentials, engine VERSION and glibc floor, target reachability,
@@ -131,5 +137,46 @@ pub enum DrillCmd {
         signature: PathBuf,
         #[arg(long)]
         public_key: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BackupCmd {
+    /// Take a backup of the named source topics with the pinned engine, behind
+    /// phase −1's admission guard, and read the resulting archive back.
+    //
+    // GC18(c)'s four rails all bind this command; `crates/logweir/src/backup/mod.rs`
+    // says where each one is enforced. It is a SUBCOMMAND under `backup` rather
+    // than a bare `logweir backup` so Task 18's scheduler and a future
+    // `backup verify` have somewhere to land without changing this one's argv.
+    Run {
+        #[arg(long)]
+        spec: PathBuf,
+        /// The restore-TARGET allowlist. Supplied as a SEPARATE file argument,
+        /// never read from the spec, so an edited spec cannot widen its own
+        /// allowlist. GC18(c) rail 4 refuses a SOURCE cluster that appears in
+        /// it: a cluster cannot be both the source of an archive and a
+        /// permitted scratch target.
+        #[arg(long)]
+        allowed_clusters: PathBuf,
+        /// The key the backup receipt is signed with (interface I6, Task 5b).
+        /// Declared and threaded by this build; nothing here opens it.
+        #[arg(long)]
+        signing_key: PathBuf,
+        #[arg(long)]
+        triggered_by: Option<String>,
+        /// Where the backup receipt is written locally. Interface I6 (Task
+        /// 5b): until it lands, passing this exits 1 naming that contract
+        /// rather than taking a backup it cannot document.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The receipt's own path, when it differs from `--out`. Interface I6
+        /// (Task 5b); see `--out`.
+        #[arg(long)]
+        receipt_out: Option<PathBuf>,
+        /// Replaces the spec's `backup_id` for this run (interface I10). Task
+        /// 18's `BackupSchedule` reconciler passes `<schedule>-<slot>`.
+        #[arg(long)]
+        backup_id_override: Option<String>,
     },
 }

@@ -2,6 +2,8 @@
 //! `crates/logweir/tests/*.rs` can link them (Tasks 15-20 depend on this).
 #![forbid(unsafe_code)]
 pub mod approve;
+/// GC18's phase −1: `logweir backup run`, the source-side capture.
+pub mod backup;
 pub mod cli;
 pub mod doctor;
 pub mod drill;

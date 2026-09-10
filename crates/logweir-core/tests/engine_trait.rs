@@ -69,3 +69,49 @@ fn validation_run_defaults_to_an_operational_refusal_not_a_fabricated_pass() {
     let err = NullEngine.validation_run(&plan).unwrap_err();
     assert!(matches!(err, EngineError::Operational(_)));
 }
+
+/// Task 4 added `backup` to this trait WITH a default body, for the same
+/// reason `validation_run` has one: `NullEngine` above and every other
+/// pre-existing implementor keeps compiling unchanged.
+///
+/// That default must fail loudly, never fabricate `Ok(BackupFacts { exit_code:
+/// 0, .. })`. A silent fake pass here is worse than the `validation_run` case
+/// it mirrors: `crates/logweir/src/backup/phase_run.rs` reads the ARCHIVE
+/// immediately after this call returns, so a fabricated clean exit would put a
+/// real `records_per_topic` and a real covered window — read from whatever
+/// archive happens to be at the configured location — behind a backup that
+/// never ran.
+#[test]
+fn default_data_engine_backup_is_operational() {
+    struct Obs;
+    impl PhaseObserver for Obs {
+        fn phase_started(&mut self, _: i8, _: &str) {}
+        fn phase_finished(&mut self, _: i8, _: &str) {}
+        fn engine_line(&mut self, _: &str, _: &str) {}
+    }
+    let plan = BackupPlan {
+        backup_id: "mvp-demo".into(),
+        source_bootstrap: vec!["broker:9092".into()],
+        source_auth: AuthRender::Plaintext,
+        topics: vec!["orders".into()],
+        storage: StorageUrl::Filesystem {
+            path: "/tmp".into(),
+        },
+        compression: "zstd".into(),
+        segment_max_records: 1000,
+        segment_max_bytes: 10_485_760,
+        max_concurrent_partitions: 3,
+    };
+    // `matches!` on the whole `Result`, not `unwrap_err()`: a mutant that
+    // returns `Ok(BackupFacts { exit_code: 0, .. })` must fail HERE, at the
+    // assertion, and `unwrap_err()` would instead panic one line earlier with
+    // rustc's own "called `Result::unwrap_err()` on an `Ok` value" — a real
+    // failure, but not the one this test is about, and not a message that
+    // names what went wrong.
+    let r = NullEngine.backup(&plan, &mut Obs);
+    assert!(
+        matches!(r, Err(EngineError::Operational(_))),
+        "the default body must refuse operationally, never fabricate a clean BackupFacts; \
+         got {r:?}"
+    );
+}

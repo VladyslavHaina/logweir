@@ -26,6 +26,23 @@ fn main() -> std::process::ExitCode {
     };
     let code = match args.command {
         cli::Command::Schema { which } => schema::run(&which),
+        cli::Command::Backup(cli::BackupCmd::Run {
+            spec,
+            allowed_clusters,
+            signing_key,
+            triggered_by,
+            out,
+            receipt_out,
+            backup_id_override,
+        }) => logweir::backup::run(&logweir::backup::BackupRunArgs {
+            spec,
+            allowed_clusters,
+            signing_key,
+            triggered_by,
+            out,
+            receipt_out,
+            backup_id_override,
+        }),
         cli::Command::Doctor {
             spec,
             allowed_clusters,

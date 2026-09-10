@@ -1,7 +1,7 @@
 //! `impl DataEngine for OsoCliEngine` — the point where the renderers (Task
 //! 11), the subprocess runner (this task) and the vendored wire structs (Task
 //! 8/8b) meet the trait boundary logweir-core defines.
-use crate::{render_restore, subprocess, vendored};
+use crate::{render_backup, render_restore, subprocess, vendored};
 use logweir_core::engine::*;
 use logweir_core::spec::Anchor;
 use std::path::PathBuf;
@@ -551,6 +551,82 @@ impl DataEngine for OsoCliEngine {
         }
         all.sort_by_key(|f| f.offset);
         select_sample(all, sel.anchor, sel.count)
+    }
+
+    /// GC18's `--from-cluster` half, and the SECOND shipped `run_engine` call
+    /// site (Task 1's `ENGINE_ARGV_ALLOWLIST` / interface **I32**).
+    ///
+    /// The engine's `backup` takes `--config` and nothing else
+    /// [VERIFIED U:crates/kafka-backup-cli/src/main.rs:35-39,559-561] — no
+    /// `--format`, no report file — so the WHOLE surface is the rendered
+    /// document, and every fact about the run other than its exit code is
+    /// ours to time and to read back off its streams. That is why
+    /// `BackupFacts` looks like `RestoreFacts` and not like
+    /// `PreflightReport`.
+    ///
+    /// `render_and_digest` rather than `render`: it is the entry point that
+    /// carries GC18(c) rail 3 (`scan_rendered_document`, fail-closed) and
+    /// **G-EXP**'s post-render sweep, both of which must run over the exact
+    /// bytes about to be written. The digest is bound and dropped here
+    /// because `BackupFacts` has no field for it (Task 2 froze that type);
+    /// Task 5b's receipt can re-derive it from the same plan, since
+    /// `render_backup::render` is a pure function of `BackupPlan`.
+    ///
+    /// An auth mode this build cannot render (SCRAM, until Task 6) reaches
+    /// this method as `RenderError::UnsupportedAuthMode` — Task 3's TYPED
+    /// refusal — and leaves it as `EngineError::Operational`, exit 1 by
+    /// ruling R-E. It is never a panic and never a silent downgrade to an
+    /// unauthenticated document.
+    fn backup(
+        &self,
+        plan: &BackupPlan,
+        obs: &mut dyn PhaseObserver,
+    ) -> Result<BackupFacts, EngineError> {
+        let (doc, _rendered_backup_sha256) = render_backup::render_and_digest(plan)
+            .map_err(|e| EngineError::Operational(e.to_string()))?;
+        let cfg = self.write("backup.yaml", &doc)?;
+        let started_at = chrono::Utc::now();
+        let run = subprocess::run_engine(
+            &self.binary,
+            &[
+                "backup",
+                "--config",
+                cfg.to_str().ok_or_else(|| {
+                    EngineError::Operational(format!("{}: not valid UTF-8", cfg.display()))
+                })?,
+            ],
+            &mut |stream, line| obs.engine_line(stream, line),
+        )?;
+        let finished_at = chrono::Utc::now();
+        // The exit code is checked BEFORE the dropped-key check, matching the
+        // ordering fix recorded at `engine.rs:422-428` for `restore`: with the
+        // order reversed, a run that both dropped a key we rendered AND failed
+        // returns only the dropped-key error, losing the exit code and the
+        // streams, which are the primary evidence for an outright failure. A
+        // run that dropped a key but EXITED 0 still gets the dropped-key error,
+        // from the `assert_no_dropped_logweir_key` call below.
+        //
+        // Both streams in the message, for the reason `restore` records: this
+        // engine's log lines go to STDOUT, so a failure carrying only stderr
+        // can omit the line that explains it.
+        if run.exit_code != 0 {
+            return Err(EngineError::Operational(format!(
+                "kafka-backup backup exited {}\nstdout: {}\nstderr: {}",
+                run.exit_code,
+                captured(&run.stdout),
+                captured(&run.stderr)
+            )));
+        }
+        // Rendered documents are the coupling surface: a key WE rendered that
+        // this engine tag dropped aborts the run (spec §7.2(a)), exactly as
+        // `preflight` (engine.rs:270) and `restore` (engine.rs:443) already do.
+        self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
+        Ok(BackupFacts {
+            started_at,
+            finished_at,
+            exit_code: run.exit_code,
+            unknown_key_warnings: run.unknown_key_warnings,
+        })
     }
 }
 

@@ -1,0 +1,54 @@
+# logweir backup spec (GC18's phase −1). Run:
+#   logweir backup run --spec backup.yaml \
+#     --allowed-clusters allowed-clusters.json --signing-key signer.pem
+#
+# THIS IS THE HOST-SIDE SHAPE. `logweir` and the engine both run on the HOST in
+# the drill path (the engine binary is `.engine/kafka-backup`, extracted by
+# `scripts/extract-engine.sh`), so the compose SERVICE name for MinIO does not
+# resolve here — only the published `localhost` port does.
+# `examples/drill.yaml:17` and `:69-71` use `http://localhost:9000` for both of
+# their storage blocks for the same reason, and
+# `e2e/compose/config/backup-drill.yaml:6-13` writes the container-side lesson
+# out in full: that file is loaded INSIDE the compose network, where the service
+# name is the only one that works and `localhost:9000` is the container's own
+# loopback.
+#
+# `the_shipped_backup_example_is_host_side` (crates/logweir/tests/backup_run.rs)
+# reads this file's RAW text and refuses the container-side endpoint anywhere in
+# it, comments included — which is why the service name is described above
+# rather than spelled out.
+#
+# GC18(c) rail 4: `--allowed-clusters` is the restore-TARGET allowlist. If the
+# cluster named in `source.bootstrap_servers` reports a cluster id that appears
+# in it, this command REFUSES (exit 3) — a cluster cannot be both the source of
+# an archive and a permitted scratch target.
+#
+# `source.auth` is omitted, so it defaults to plaintext. `mode: scramSha512`
+# parses today and is REFUSED by the renderer (never rendered unauthenticated,
+# never a panic); the SASL block is interface I1, Task 6.
+backup_id: mvp-demo
+
+source:
+  bootstrap_servers: [localhost:9092]
+  # NAMED topics, never patterns. One entry is one topic: the engine's
+  # TopicSelection reads include entries as glob patterns, so a wildcard here
+  # is refused by phase −1 (exit 3) rather than silently widened to a set.
+  topics: [orders, payments]
+
+storage:
+  backend: s3
+  bucket: kafka-backups
+  prefix: mvp-demo
+  region: us-east-1
+  endpoint: http://localhost:9000
+  path_style: true
+  allow_http: true
+
+backup:
+  compression: zstd
+  segment_max_records: 1000
+  segment_max_bytes: 10485760
+  max_concurrent_partitions: 3
+#
+# Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+# Foundation. Logweir is not affiliated with or endorsed by the ASF.
