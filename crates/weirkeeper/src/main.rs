@@ -206,7 +206,10 @@ fn run() -> ExitCode {
         // Task 16 pushed the first two, so the `#[allow(unused_mut)]` Task 15
         // left here for exactly this moment is gone. Task 18 pushed the third
         // — the `BackupSchedule` cron reconciler — as one line, which is what
-        // this shape is for.
+        // this shape is for, and Task 17 pushed the FOURTH, the `Backup`
+        // reconciler that runs each archive capture as one Job and lifts its
+        // exit code onto the status. `tests/linkage.rs`'s `"controllers":4`
+        // moved in this same commit.
         //
         // `Vec::new()` + `push`, AND NOT `vec![…]` — see the
         // `clippy::vec_init_then_push` allow on `run` for why.
@@ -225,6 +228,16 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(
             weirkeeper::controllers::backup_schedule::controller(client.clone(), archive.clone()),
         ));
+        // Task 17's fix round threads the SAME one read-only handle here: the
+        // `Backup` reconciler's archive oracle reads a finished run's receipt
+        // and its sidecar to fill `status.windowCovered` and to detect an
+        // orphaned scorecard (interface I13 and I22). `archive.clone()` is an
+        // `Option<Arc<Store>>` clone, not a second constructor — the handle is
+        // built exactly once, above, before this runtime existed.
+        controllers.push(Box::pin(weirkeeper::controllers::backup::controller(
+            client.clone(),
+            archive.clone(),
+        )));
 
         let registered = controllers.len();
         info!(

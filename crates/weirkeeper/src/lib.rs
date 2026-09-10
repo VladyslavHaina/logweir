@@ -61,6 +61,17 @@
 //! `http-body-util` are normal dependencies here rather than
 //! `[dev-dependencies]`.
 
+//! WHAT TASK 17 ADDED. [`conditions`] — Global Constraint 11's five exit
+//! codes as wire strings, plus the ten terminal states that are NOT an exit
+//! code; [`job::build`], which turns a [`job::RunnerJobSpec`] into the one
+//! `Job` shape that keeps an exit code readable; and
+//! [`controllers::backup`], the reconciler that creates that Job, lifts the
+//! code off `pod.status.containerStatuses[].state.terminated.exitCode`, reads
+//! the receipt keys off the final two stdout lines, and writes a TERMINAL
+//! status for the case nothing else in the corpus handled — a Job that
+//! finished with no terminated state at all.
+
+pub mod conditions;
 pub mod controllers;
 pub mod crds;
 pub mod job;

@@ -94,10 +94,32 @@ found a real problem leaves behind no evidence of which problem it was.
 
 Do not use `OnFailure` for a drill.
 
-**Unverified:** `podFailurePolicy` (GA) supports exit-code-specific Job actions
-and would express "code 2 is a real result, do not retry; code 1 may be
-retried" declaratively. It was **not** tested live and is recorded here as an
-option to evaluate, not as a recommendation.
+**Partly verified on 2026-09-10, and the remaining half is still a mark.**
+`podFailurePolicy` (GA) supports exit-code-specific Job actions and would
+express "code 2 is a real result, do not retry; code 1 may be retried"
+declaratively. Every Job the `Backup` reconciler creates now carries one (§10).
+
+**Verified live** on `docker-desktop` (server v1.34.1), with a controller-built
+Job whose runner exited **3**: the rule was **evaluated and matched**, and it
+changes the Job's own failure reason. The Job's conditions came back as —
+
+```
+FailureTarget, Failed   reason: PodFailurePolicy
+```
+
+— and **not** `BackoffLimitExceeded`, which is what a `backoffLimit: 0` Job
+without the field reports (§1's first transcript). So the field is **not inert
+in the sense of unobservable**: it is what makes `kubectl describe job` say "a
+policy rule matched this exit code" rather than "this Job ran out of retries",
+which are different facts about the same failure.
+
+**Still a mark:** the *no-retry* half. With `backoffLimit: 0` a single pod
+failure already fails the Job, so nothing here demonstrates that the rule
+prevents a retry. **The sentence that would verify it:** run a Job with
+`backoffLimit: 3`, `restartPolicy: Never`, the same `onExitCodes` rule and a
+container that `exit 2`s, and observe **exactly one** pod and no second attempt;
+then repeat with the rule removed and observe four. Until someone runs that,
+"code 1 may be retried" is a declaration and not a measured behaviour.
 
 ### 1b. The log line is how you correlate a drill, and it works at the shipped default
 
@@ -677,6 +699,324 @@ still fire, because a report is not a backup. An absent `retentionReport`
 block therefore means *no evaluation has happened*; an empty
 `setsThatWouldBeRemoved` means *the evaluation found nothing to remove*, and
 they are different answers.
+## 10. The exit-code contract, as the `Backup` reconciler makes it visible
+
+§1 says the exit code is nearly invisible in Kubernetes and gives you the two
+lines that keep it readable. This section is the other half: what the control
+plane does with the code once it can read it, and where you look for it.
+
+### The table
+
+`weirkeeper`'s `Backup` reconciler lifts the code off the one path that carries
+it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
+`status.exitReason` and a condition. One row per Global-Constraint-11 code:
+
+| Exit | `status.phase` | `status.exitReason` | Condition | What it means |
+|---|---|---|---|---|
+| **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
+| **1** | `Failed` | `operational` | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** |
+| **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
+| **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
+| **4** | `Failed` | `signing-or-lock`, or `OrphanedScorecard` | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. |
+| *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
+| *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
+
+**TWO VOCABULARIES, AND EACH STAYS IN ITS OWN FIELD.** `exitReason`'s five wire
+values are lowercase-hyphenated (`ok`, `operational`, `drill-not-pass`,
+`guard-refused`, `signing-or-lock`) — the same spellings `logweir drill`'s own
+outcome strings use — and it also carries the CamelCase terminal states, which
+are the more specific answer when there is one. A **condition `reason` is
+always CamelCase**: `metav1.Condition`'s upstream validation pattern admits a
+leading letter and then only letters, digits, `_`, `,` and `:` — it **forbids
+`-`** — so a hyphenated reason is a value the API server rejects the day this
+CRD's hand-rolled condition schema is given that pattern. Nothing accepts both
+spellings of either:
+`the_two_reason_vocabularies_never_overlap` asserts the sets are disjoint and
+`the_condition_reasons_are_valid_metav1_reasons` walks every reason this
+controller can write against that regex.
+
+Reading it back:
+
+```bash
+kubectl --context docker-desktop get backups
+kubectl --context docker-desktop get backup <name> \
+  -o jsonpath='{.status.exitCode} {.status.exitReason}{"\n"}'
+```
+
+The `EXIT` printer column is why `kubectl get backups` is worth running at all:
+without it, §1's problem is unchanged and exit 2 still looks like exit 1.
+
+### The Job the controller generates
+
+One Job per `Backup`, **named after the `Backup` object verbatim** — not
+`logweir-backup-<name>`, because a scheduled `Backup` is already called
+`logweir-backup-<schedule>-<slot>` and re-prefixing would push the
+`batch.kubernetes.io/job-name` label past its 63-character cap for any schedule
+name of 18 characters or more. That label is how the pod carrying the exit code
+is found, so a name that overflows it loses the code.
+
+The shape, which is `examples/cronjob-drill.yaml`'s shape with a controller
+behind it:
+
+```yaml
+spec:
+  backoffLimit: 0                    # exactly ONE pod
+  activeDeadlineSeconds: <spec.deadlineSeconds>
+  podFailurePolicy:
+    rules:
+      - onPodConditions: [{type: DisruptionTarget, status: "True"}]
+        action: FailJob
+      - onExitCodes: {containerName: runner, operator: In, values: [2, 3, 4]}
+        action: FailJob
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: logweir-runner
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      containers:
+        - name: runner                # ALWAYS this name
+          imagePullPolicy: Never
+```
+
+Four things about it are worth knowing before you debug one:
+
+- **There is no `Ignore` rule on exit 1.** The obvious-looking third rule ("code
+  1 was operational, retry it") needs `backoffLimit > 0`, which yields several
+  pods while `status.exitCode` is a single value. Two pods with two codes and
+  one field is a status that is either wrong or arbitrary.
+- **`automountServiceAccountToken: false`, and the ServiceAccount is still
+  named.** The runner makes zero Kubernetes API calls, and it is the component
+  that holds the signing key — so it gets no token. The *name* still matters:
+  with none set, a pod silently gets `default`, which is the account most likely
+  to have been granted something.
+- **`fsGroup: 65532` is what makes the signing key readable**, not the `0440`
+  mode beside it. Kubelet writes Secret files `root:root`; without `fsGroup` the
+  container reads nothing through the owner bits and the run exits 1 having done
+  nothing. All four combinations were run live (§3).
+- **No `ttlSecondsAfterFinished` at creation time.** The controller patches one
+  on (7 days) **only after** the status patch carrying the exit code has
+  returned 200. The TTL controller deletes the Job *and its pods*, and the code
+  lives on the pod, so a TTL that existed earlier would be a race pod garbage
+  collection can win.
+
+### The plan ConfigMap: the reconciler renders it, and it renders it first
+
+The Job mounts a ConfigMap named `<backup name>-plan` at `/plan`, and the runner
+argv points `--spec` at `/plan/backup.yaml` and `--allowed-clusters` at
+`/plan/allowed-clusters.json`. **The `Backup` reconciler renders that ConfigMap
+in the same pass that creates the Job, and the ConfigMap `POST` comes first.**
+The order is the whole point: a Job created first is a pod stuck in
+`ContainerCreating` on `MountVolume.SetUp failed for volume "plan": configmap
+"<name>-plan" not found` until `activeDeadlineSeconds` fires, after which the
+job controller deletes the pod and the exit code goes with it — a terminal
+`NoExitCode` that explains nothing.
+
+It has **exactly two keys**, owner-referenced to the `Backup` with
+`controller: true` and `blockOwnerDeletion: true`, so deleting the `Backup`
+collects the plan and a half-deleted `Backup` cannot orphan one:
+
+- **`backup.yaml`** — the typed `BackupSpec` document `logweir backup run
+  --spec` parses. `source.bootstrapServers` and `source.auth` come from the
+  `KafkaCluster` that `spec.sourceRef` names, never from `Backup.spec`, which
+  carries neither; `source.topics` is `spec.topics` **verbatim**; `storage` is
+  `spec.archive.url` through the same parser the controller's own read-only
+  archive handle is built with. The document is built as the Rust type and
+  serialised, not assembled as text: `storage` is an internally tagged enum
+  whose variants have incompatible required fields, and a stringly-typed
+  renderer emits `backend: filesystem` beside a `bucket:` key, which fails the
+  engine's config load with a hard missing-field error.
+- **`allowed-clusters.json`** — the cluster allowlist, in the format the CLI's
+  own reader parses.
+
+Two refusals live on this path, both **terminal and never a requeue**, because
+`Backup.spec` is CEL-immutable and the next pass would read the same spec:
+`spec.sourceRef` naming a `KafkaCluster` that does not exist is
+`ReferentNotFound`, and a topic carrying a glob metacharacter (`*`, `?`, `[`,
+`]`, `{`, `}`) is `GuardRefused` **before anything is created** — topics are a
+mandatory named allowlist, and the rail is the same one the runner uses.
+
+A **409** on the ConfigMap `POST` is success only when the existing object
+carries a controller owner reference with **this** `Backup`'s UID. That is the
+ordinary case — a previous pass of this same reconcile, whose bytes are
+identical because the plan is a pure function of an immutable spec. A 409 on
+somebody else's object is `PlanConfigMapConflict`: writing the Job then would
+mount a plan document a stranger wrote, at the mount path of the pod that holds
+the signing key.
+
+**Why the allowlist is a ConfigMap key here when the drill path keeps its own in
+a Secret.** On the drill path `allowedClusterIds` authorises a restore
+*target*, so a subject with `patch configmaps` could widen it, and it lives in
+the `logweir-approval-bundle` Secret. On the backup path the direction is
+reversed: **the allowlist is a consistency rail, not a boundary.** The address
+the run dials comes from the CEL-immutable `sourceRef` and never from this file,
+and the backup guard *refuses* a run whose broker-observed source cluster id
+appears in `allowedClusterIds` — a cluster cannot be both the source of an
+archive and a scratch cluster whose topics a drill deletes. So the rendered file
+carries an **empty** `allowedClusterIds` and the observed cluster id in
+`sourceClusterId`, which the backup path does not read; every id an attacker
+could add makes the backup **refuse**, and none widens it.
+
+Neither key carries a credential. The auth block has a username and no password
+at any variant, and the object-store credential reaches the runner as
+`secretKeyRef` environment — a ConfigMap has no encryption at rest and a much
+wider read surface than a Secret, and nothing in it is secret.
+
+### A name longer than 63 characters is refused, and the refusal is on the object
+
+A Kubernetes object *name* may be 253 characters; a **label value** may be 63.
+The runner Job's pods carry `batch.kubernetes.io/job-name`, whose value is the
+Job's name, which is the `Backup`'s name verbatim — so a `Backup` named longer
+than 63 characters yields a Job the API server refuses outright:
+
+```
+Job.batch "bbb…" is invalid: spec.template.labels: Invalid value: "bbb…":
+  must be no more than 63 characters
+```
+
+The reconciler checks the length **before any `POST`** and writes a terminal
+status — `phase: Failed`, `exitReason: operational`, condition `Failed=True`
+reason `NameTooLong`, `exitCode` absent because nothing ran. It used to turn
+the API server's refusal into a 15-second requeue instead, which left the
+`Backup` with `status: null` and an empty `PHASE` column **forever**: an object
+nothing would ever explain. `BackupSchedule` refuses the same thing earlier, at
+name-minting time, under the same reason string; this is the same refusal for a
+`Backup` created by hand or by the UI.
+
+### Where the two evidence keys come from
+
+`logweir backup run` prints, as its **final two stdout lines** and in this
+order, `receipt-key=<key>` then `sidecar-key=<key>`. The controller reads them
+back through the **`pods/log` subresource** and writes them to
+`status.evidence.receiptKey` and `status.evidence.sidecarKey`.
+
+It matches them **by key name, not by position.** A log body with the two lines
+reversed still puts each key in its own field, and a log body with neither
+leaves **both keys unset**. No key is ever derived from the backup id: a
+guessed key points at an object that may not exist, and a verifier would then
+report `Invalid` for a run whose evidence was merely unread.
+
+**The evidence fact is its own condition, and it exists only at exit 0.**
+`EvidenceRecorded` is `True` with reason `EvidenceKeysRecorded` when both lines
+were read, `False` with reason `EvidenceKeysUnreadable` when they were not, and
+**absent at exits 1, 3 and 4** — those runs write no artifact by contract
+(Global Constraint 11), so there is nothing about them that could be
+"unreadable". A failed `Backup` therefore carries exactly **one** `Failed`
+condition. It did not always: before this was fixed, every refused `Backup`
+came back with `Failed=True` *and* a second `Failed=False` reason
+`EvidenceKeysUnreadable`, measured live. That is a malformed status, not a
+cosmetic one — a condition array is a **map keyed by `type`**, so a standard
+`FindStatusCondition` reader sees whichever comes first, `kubectl wait
+--for=condition=Failed` matched the `True` one only by array order, and the day
+the array is given the standard `x-kubernetes-list-type: map` the API server
+would reject every failed `Backup`'s status patch.
+
+Two RBAC notes, because both are easy to get wrong:
+
+- **`pods/log` is a subresource and `pods` does not cover it.** A role granting
+  `get` on `pods` reads every pod's spec and cannot read one line of any pod's
+  stdout — and the failure is a 403 that looks like a transient API error.
+- The controller requests **no verb on `secrets`, and no `pods/exec` or
+  `pods/attach`**. The runner's key reaches its pod because kubelet projects it;
+  the controller never reads it and cannot start a process inside the pod that
+  holds it. `config/rbac/` carries the request; the install file carries the
+  grant.
+
+### The crashed Job: when there is no exit code at all
+
+A Job can finish having produced no terminated state for `runner` — the node
+went away, the pod never scheduled, the pod was garbage-collected. There is no
+code to read and there never will be, so the controller writes a **terminal**
+status rather than watching forever, and **never invents a code**: a fabricated
+`1` is indistinguishable from a real operational failure, and a fabricated `0`
+turns a lost run into a green badge.
+
+| What the pod says | `status.exitReason` | Condition reason |
+|---|---|---|
+| `DisruptionTarget=True` | `operational` | `DisruptedMidDrill` |
+| `Pending` with `PodScheduled=False` reason `Unschedulable` | `operational` | `PodUnschedulable` |
+| the job-name label selector returns **zero** pods | `operational` | `NoExitCode` |
+| anything else | `operational` | `NoExitCode` |
+
+`status.exitCode` is **absent** in all four rows. An absent `EXIT` column with
+`PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
+
+The pod is found by `batch.kubernetes.io/job-name=<job>`, falling back to the
+legacy unprefixed `job-name=<job>` when that returns nothing — both are set on
+1.29 and only the prefixed one is current — and the container is selected **by
+name**, never by index, because an init container or a logging sidecar would put
+an unrelated `exitCode: 0` at index 0.
+
+### Verified live, 2026-09-10, `docker-desktop` v1.34.1
+
+A controller-built Job (the real output of `job::build`, applied into
+`logweir-t17`) whose runner was handed a plan the phase-−1 admission guard
+refuses. What the cluster actually showed:
+
+```
+$ kubectl --context docker-desktop -n logweir-t17 get pods -l batch.kubernetes.io/job-name=logweir-backup-t17-live
+NAME                            READY   STATUS   RESTARTS   AGE
+logweir-backup-t17-live-wf42j   0/1     Error    0          8s          # ONE pod; "Error", no code
+
+$ kubectl --context docker-desktop -n logweir-t17 get pod logweir-backup-t17-live-wf42j \
+    -o jsonpath='{range .status.containerStatuses[*]}{.name}={.state.terminated.exitCode}{"\n"}{end}'
+runner=3                                                                # the code, at the one path
+
+$ kubectl --context docker-desktop -n logweir-t17 get job logweir-backup-t17-live \
+    -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].reason}'
+FailureTarget Failed=PodFailurePolicy PodFailurePolicy                  # not BackoffLimitExceeded
+```
+
+Four other things were confirmed on the same pod: `spec.ttlSecondsAfterFinished`
+was **empty** at creation and took the 604800 patch afterwards; the pod's
+`securityContext` landed as `{fsGroup: 65532, runAsUser: 65532, runAsGroup:
+65532, runAsNonRoot: true, seccompProfile: RuntimeDefault}`; its volume list was
+exactly `signing`, `plan`, `work` with **no `kube-api-access-*` projection**, so
+`automountServiceAccountToken: false` really does keep a token out of the
+key-holding pod; and **both** job-name labels were present —
+`batch.kubernetes.io/job-name` and the legacy `job-name` — each selector
+returning the one pod, which is what the reconciler's prefixed-then-legacy
+fallback is written against.
+
+### One surprise worth knowing: `refusal-reason=` is the last line of *stdout*, not of the pod log
+
+`logweir backup run` prints `refusal-reason=<TerminalState>` as its **final
+stdout line** for exit 3 — that is the CLI's contract and it holds. But a pod
+log is **stdout and stderr merged in nondeterministic order**, and `backup run`
+also writes the guard's full explanation to stderr. Measured **twice on
+`docker-desktop` v1.34.1, from the same refusal**, `kubectl logs` returned the
+discriminator in two different positions — second-to-last in one run:
+
+```
+refusal-reason=GuardRefused
+guard: plan refused by the admission guard: source topic `orders*` contains a glob metacharacter …
+```
+
+and last in the other:
+
+```
+guard: plan refused by the admission guard: source topic `orders*` contains a glob metacharacter …
+INFO backup finished
+refusal-reason=GuardRefused
+```
+
+So the position is not a rule, in either direction: **no controller-side reader
+may take "the last line of the pod log", and none may take the second-to-last
+either.** This is the practical consequence of the fact §1 already states — the
+pod log API has no stream selector — and it is why every reader in this
+controller scans a **bounded tail** and matches **by key name**
+(`controllers::backup::{evidence_keys, refusal_state}`, with
+`KEY_SCAN_TAIL_LINES = 8`). A reader written against a POSITION would have
+reported no terminal state at all on whichever of the two runs did not match
+it.
+
+### What a green `Backup` requires
+
+`status.evidence.verification.result == Valid` **and** `status.exitCode == 0`.
+Both, and nothing else. A `Backup` carries **no `outcome`** — that field is
+`Restore`'s — so there is no second source of truth for the badge to disagree
+with. Verification itself is not this reconciler's work; it records the two
+keys and leaves `evidence.verification` alone.
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

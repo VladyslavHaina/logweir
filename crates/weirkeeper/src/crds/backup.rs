@@ -122,9 +122,28 @@ pub struct BackupStatus {
     /// path in Kubernetes that carries it. `0` pass · `1` operational, no
     /// artifact · `2` a result that is not a pass, document written and
     /// signed · `3` refused by a guard · `4` signing or lock proof failed
-    /// (Global Constraint 11).
+    /// (Global Constraint 11). Spec §8's green badge for a `Backup` requires
+    /// `evidence.verification.result == Valid` AND `exitCode == 0` — green
+    /// requires verification Valid and exitCode 0, and a `Backup` carries no
+    /// `outcome` for the badge to read instead. ABSENT is a real value: a Job
+    /// that finished with no terminated state for the `runner` container has
+    /// no recoverable code, and the controller records the absence rather
+    /// than fabricating a `0` or a `1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Why the run ended, as one of Global Constraint 11's wire reasons —
+    /// `ok`, `operational`, `drill-not-pass`, `guard-refused`,
+    /// `signing-or-lock` — or, when the run reached a **terminal state** more
+    /// specific than its code, that state: the `refusal-reason=` line the
+    /// runner printed for exit 3, or `OrphanedScorecard` for an exit-4 run
+    /// whose payload exists without its sidecar.
+    ///
+    /// `operational` for the crashed-Job case, where `exitCode` is absent: a
+    /// run whose code is unrecoverable produced no artifact either, and the
+    /// SUB-CASE (`DisruptedMidDrill`, `PodUnschedulable`, `NoExitCode`) is the
+    /// condition's `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
     /// The archive's backup id, derived from this object's UID and
     /// `spec.slot`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

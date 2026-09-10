@@ -36,7 +36,16 @@
 //! [`approval::ApprovalRefusal::reason`] is a `match` with no wildcard: a new
 //! variant fails to compile until someone names its reason.
 
+//! WHAT A RECONCILER IN THIS DIRECTORY MAY DO TO A `Job` (Task 17).
+//! [`backup`] is the first reconciler that creates a `batch/v1` Job and then
+//! patches it — with `ttlSecondsAfterFinished`, and ONLY after the status
+//! patch carrying the exit code has returned 200. That ordering is the whole
+//! property: pod garbage collection must never race the exit-code read, and
+//! the exit code lives on the POD, not on the Job. It still deletes nothing —
+//! not the Job, not the pod, and not an orphaned scorecard.
+
 pub mod approval;
+pub mod backup;
 pub mod backup_schedule;
 pub mod trust_roster;
 

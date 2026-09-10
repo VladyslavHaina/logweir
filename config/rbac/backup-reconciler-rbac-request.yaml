@@ -1,0 +1,147 @@
+# What the `Backup` reconciler NEEDS — a REQUEST, not a grant. Interface I28.
+#
+# ------------------------------------------------------------------------
+# READ THIS FIRST: THIS FILE IS NOT INSTALLED BY ANYTHING.
+# ------------------------------------------------------------------------
+# The `Backup` reconciler (Task 17) is the requesting half of the plan's one
+# deliberate late binding. It reads the `KafkaCluster` its `Backup` names,
+# renders and CREATES the plan ConfigMap the runner Job mounts at `/plan`,
+# creates the Job, lists the pod that Job produced, reads that pod's LOG
+# through the `pods/log` subresource, and patches both the `Backup`'s status
+# and the Job's `ttlSecondsAfterFinished`. Every one of those needs a rule, and
+# the ClusterRole that carries them is Task 21's `logweir.yaml`, at slot 14.
+#
+# The rules below are the request, written in the shape the grant will take, so
+# that Task 21's implementer has something to DIFF rather than a sentence to
+# interpret. `crates/weirkeeper/tests/backup_controller.rs`'s
+# `the_rbac_fragments_request_pod_logs_and_nothing_more` parses this file and
+# asserts what it asks for; Task 21's `weirkeeper_can_read_pod_logs_and_nothing_more`
+# asserts what the installed role grants. The pair is what closes I28.
+#
+# ------------------------------------------------------------------------
+# `pods/log` IS A SUBRESOURCE, AND `pods` DOES NOT COVER IT (critique B H8).
+# ------------------------------------------------------------------------
+# `{apiGroups: [""], resources: ["pods"], verbs: ["get"]}` grants the pod
+# OBJECT and nothing else: a `GET /api/v1/namespaces/<ns>/pods/<p>/log` is
+# authorised against the resource string `pods/log`, which has to be named
+# separately. A ClusterRole that lists only `pods` produces a controller that
+# reads every pod's spec, cannot read one line of any pod's stdout, and fails
+# at exactly the step interface I7 exists for — with a 403 that looks like a
+# transient API error.
+#
+# ------------------------------------------------------------------------
+# WHAT IS DELIBERATELY NOT REQUESTED
+# ------------------------------------------------------------------------
+# * `secrets`, at any verb. Spec §9: `weirkeeper` holds NO `get` on Secrets
+#   anywhere. The runner's signing key and object-store credential reach the
+#   pod because KUBELET projects them from the Job's volume and env references
+#   — a read the controller never performs and must not be able to. This is
+#   what makes Global Constraint 27's narrowed claim narrow but true: the
+#   controller cannot read the key, and it CAN create a pod that mounts it.
+# * `pods/exec` and `pods/attach`. Both would let the controller run a process
+#   inside the key-holding pod, which is strictly more than reading its
+#   stdout. `the_exit_code_and_the_keys_come_from_the_logs_subresource`
+#   asserts ZERO requests naming either, so the absence is a test and not an
+#   intention.
+# * `delete`, on anything. Global Constraint 6: no Logweir component holds a
+#   delete capability in tag 1. The Job is removed by its own
+#   `ttlSecondsAfterFinished` (patched on by the API server's TTL controller,
+#   not by this one), and a failed pod is the ONLY place its exit code exists.
+# * `create` on `pods`. The controller creates JOBS; the job controller creates
+#   pods. Requesting pod creation would make the "Job CRUD over the signing-key
+#   namespace" surface wider than the one Global Constraint 27 already
+#   discloses.
+# * `patch` or `update` on `configmaps`. The plan is rendered ONCE, from a
+#   CEL-immutable spec, at Job-creation time; a second pass that could REWRITE
+#   it is a pass that could change the document a running pod already mounted.
+#   `create` plus `get` is exactly enough: `get` is how the 409 is decided
+#   (whose ConfigMap is it?), and a 409 on an object this `Backup` owns is
+#   success because the bytes are a pure function of a spec that cannot change.
+#
+# ------------------------------------------------------------------------
+# WHY `configmaps` IS HERE AT ALL, AND WHY THE ALLOWLIST STAYS IN ONE
+# ------------------------------------------------------------------------
+# Plan errata E5a. The runner Job mounts `<backup name>-plan` at `/plan` and
+# reads two files out of it — `backup.yaml` (`--spec`) and
+# `allowed-clusters.json` (`--allowed-clusters`) — and no task rendered it, so
+# every scheduled backup failed as an unexplained `NoExitCode` after its pod
+# stalled in `ContainerCreating`. Task 17 renders it in the same reconcile pass
+# that creates the Job, ConfigMap `POST` first.
+#
+# ON THIS PATH THE ALLOWLIST IS A CONSISTENCY RAIL, NOT A BOUNDARY. Task 22
+# moved the DRILL path's allowlist into the `logweir-approval-bundle` Secret
+# because there `allowedClusterIds` authorises a restore TARGET, and a subject
+# with `patch configmaps` could widen it. Here the direction is reversed: the
+# address the run dials comes from the CEL-immutable `sourceRef` and never from
+# this file, and on the backup path Global Constraint 18(c) rail 4 REFUSES a
+# run whose observed source cluster id appears in `allowedClusterIds`
+# (`crates/logweir/src/backup/phase_minus1_admit.rs:183-190`). So every id an
+# attacker could add makes the backup REFUSE and none widens it. The rendered
+# file carries an EMPTY `allowed_cluster_ids` and the broker-observed cluster
+# id in `source_cluster_id`, which the backup path does not read at all.
+#
+# NEITHER KEY CARRIES A CREDENTIAL. `AuthSpec` has a username and no password
+# at any variant; the object-store credential reaches the runner as
+# `secretKeyRef` env. A ConfigMap has no encryption at rest and a much wider
+# read surface than a Secret, and nothing in it is secret.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # `-request` in the name on purpose: applying this file would create a role
+  # nothing is bound to. Task 21 folds these rules into the real
+  # `weirkeeper` ClusterRole and this file stays as the record of why each
+  # rule is there.
+  name: weirkeeper-backup-request
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: control-plane
+    logweir.dev/rbac-request: "task-17"
+rules:
+  # The custom resource this reconciler reconciles, and its status subresource.
+  # `patch` and not `update`: every write in `controllers/backup.rs` is a
+  # merge patch, so an absent key means "leave it alone" — which is what lets a
+  # running reconcile avoid clobbering the fields a finished one will write.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backups"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["backups/status"]
+    verbs: ["get", "patch"]
+  # The Job. `create` for step 1, `get` for every later pass, `patch` for
+  # `ttlSecondsAfterFinished` — and NOT `delete`.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch"]
+  # The pod carrying the exit code. `list` is what finds it, by the
+  # `batch.kubernetes.io/job-name` label (and the legacy `job-name` label as a
+  # fallback); `get` is what reads `status.containerStatuses`.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # THE SUBRESOURCE, NAMED SEPARATELY. `get` only: interface I7's final two
+  # stdout lines are read, nothing is written, and no process is started.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # THE PLAN CONFIGMAP THE RUNNER JOB MOUNTS AT `/plan` — errata E5a.
+  # `create` writes it, in the same pass as the Job and BEFORE it; `get` is how
+  # a 409 is decided, by reading the existing object's owner reference. NOT
+  # `patch`, NOT `update`, NOT `delete`: the plan is rendered once from an
+  # immutable spec, and the `Backup`'s own ownerReference garbage-collects it.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get"]
+  # The `KafkaCluster` `spec.sourceRef` names. `get` only, and it is where the
+  # bootstrap addresses and the auth block in the rendered `backup.yaml` come
+  # from — never from `Backup.spec`, which carries neither. `list`/`watch` are
+  # NOT requested: this is a referent read on one named object, not a cache.
+  - apiGroups: ["logweir.dev"]
+    resources: ["kafkaclusters"]
+    verbs: ["get"]
+  # Events, so a refused Job or an unschedulable pod leaves a trail an operator
+  # sees with `kubectl describe backup`. `create` and `patch` only — the
+  # aggregated event API patches an existing series rather than appending.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
