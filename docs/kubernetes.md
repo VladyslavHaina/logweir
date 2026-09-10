@@ -35,17 +35,18 @@ measured, and your backup did not meet its objective. That is the finding you
 scheduled the drill to get.
 
 **Verified — and re-verified independently on 2026-09-05** with a job whose
-container simply `exit 2`s: `kubectl get pods` showed `Error` with no code, the
-Job's `.status` carried only `BackoffLimitExceeded`, and the exit code `2` was
-readable at exactly one path. In Kubernetes the code appears only at —
+container simply `exit 2`s: `kubectl --context docker-desktop get pods` showed
+`Error` with no code, the Job's `.status` carried only `BackoffLimitExceeded`,
+and the exit code `2` was readable at exactly one path. In Kubernetes the code
+appears only at —
 
 ```
 pod.status.containerStatuses[].state.terminated.exitCode
 ```
 
 (or `.lastState.terminated.exitCode` after a restart). It is **not** in Job
-status, and `kubectl get pods` renders every non-zero exit as a generic
-`Error`. So to an operator glancing at the namespace, **exit 2 is
+status, and `kubectl --context docker-desktop get pods` renders every non-zero
+exit as a generic `Error`. So to an operator glancing at the namespace, **exit 2 is
 indistinguishable from exit 1** — "your backup failed its drill" looks exactly
 like "the drill could not run".
 
@@ -59,12 +60,13 @@ spec:
       restartPolicy: Never # exactly one pod, one attempt
 ```
 
-That yields **exactly one pod** (re-verified: `kubectl get pods -l job-name=... |
-wc -l` returned 1), an immediate `Failed` Job condition, and a cleanly readable
+That yields **exactly one pod** (re-verified: `kubectl --context docker-desktop get
+pods -l job-name=... | wc -l` returned 1), an immediate `Failed` Job condition, and a
+cleanly readable
 exit code at the path above:
 
 ```bash
-kubectl get pod -l job-name=<job> \
+kubectl --context docker-desktop get pod -l job-name=<job> \
   -o jsonpath='{.items[0].status.containerStatuses[0].state.terminated.exitCode}'
 ```
 
@@ -84,7 +86,8 @@ Warning  BackoffLimitExceeded  Job has reached the specified backoff limit
 ```
 
 The container was restarted **in place**, and then the job controller
-**DELETED THE POD**. `kubectl get pods` afterwards: `No resources found`. Since
+**DELETED THE POD**. `kubectl --context docker-desktop get pods` afterwards:
+`No resources found`. Since
 the exit code lives only on the pod object, **it is not buried in `lastState` —
 it is gone**, and the Job records only `BackoffLimitExceeded`. A drill that
 found a real problem leaves behind no evidence of which problem it was.
@@ -126,18 +129,20 @@ configured still emits a correlatable log. Three facts follow:
 `examples/cronjob-drill.yaml` pins `RUST_LOG: info` in the container's `env:`
 anyway. That is belt-and-braces rather than the mechanism: it holds the level
 where a cluster-wide policy or a base image might otherwise inject a quieter
-one, and it makes the level visible in `kubectl get cronjob -o yaml` without
-reading Logweir's source.
+one, and it makes the level visible in
+`kubectl --context docker-desktop get cronjob -o yaml` without reading
+Logweir's source.
 
 Pulling the run id out of a failed pod, from your laptop:
 
 ```bash
-kubectl logs job/<job> > drill.log
+kubectl --context docker-desktop logs job/<job> > drill.log
 jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
 ```
 
 `jq` is a laptop-side tool here — it is **not** in the runtime image (§2), and
-the redirect is deliberate: `kubectl logs … | jq` would work, but piping
+the redirect is deliberate: `kubectl --context docker-desktop logs … | jq`
+would work, but piping
 `logweir` itself into `jq` replaces the drill's exit code with `jq`'s, and §1
 is about not losing that code.
 
@@ -382,8 +387,12 @@ arrives as a reviewable diff. Do not hand-edit those files.
 `Switchover` is tag 2 and ships in none of the above, not even as a value of
 `Approval.spec.subjectRef.kind`. `MetadataSnapshot` is reserved and unbuilt.
 
-**Every `kubectl` invocation in this repository names its context explicitly**
-— `kubectl --context docker-desktop …` — including `kubectl proxy`.
+**Every `kubectl` command line in this repository names its context
+explicitly** — `kubectl --context docker-desktop …`, the `proxy` subcommand
+included. That covers every copy-pasteable block and every quoted transcript
+above, §1's two `bash` blocks and its verified transcripts included. A bare
+`kubectl get pods` in prose or in a code comment names what the tool renders
+rather than a line to run, and is not one of them.
 
 ### The immutability seals
 

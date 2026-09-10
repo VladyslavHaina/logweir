@@ -360,6 +360,321 @@ fn no_vendor_crd_group_is_named_anywhere() {
 }
 
 // ---------------------------------------------------------------------------
+// The CRD ENVELOPE — printer columns, the status subresource, the scope
+// ---------------------------------------------------------------------------
+//
+// FIX ROUND 1, FINDINGS 1, 2 AND 3. Every test above this section reads the
+// CHECKED-IN files, which is right for the field schemas and WRONG for the
+// three properties below. Both medium findings were found the same way: mutate
+// the EMITTER, then run `just crds`. That moves the checked-in bytes with the
+// mutant, so every file-reading test and all six CI `diff -u`s stay green, and
+// a dropped printer column or a dropped `subresources.status` ships silently.
+//
+// So these three read `render_all()` — the renderer's own output, independent
+// of `config/crd/` — and compare it against a LITERAL copied from
+// `task-15b-brief.md`'s Produces table. The two halves are complementary and
+// both are needed: the drift gate
+// (`the_checked_in_crds_are_what_the_emitter_renders`) catches a hand edit to
+// `config/crd/` with no re-render, and these catch an emitter edit WITH one.
+
+/// Every kind as the RENDERER produces it, parsed: `(kind, file_name, doc)`.
+///
+/// `render_all` is the single renderer the `emit_crds` example and the drift
+/// test both go through, so this is exactly the document that would be written
+/// to `config/crd/` by the next `just crds` — which is the point: a test that
+/// re-read the files after that command could not see the change.
+fn rendered() -> Vec<(&'static str, &'static str, Value)> {
+    weirkeeper::crds::render_all()
+        .into_iter()
+        .map(|r| {
+            let doc: Value = serde_yaml::from_str(&r.yaml)
+                .unwrap_or_else(|e| panic!("the rendered {} parses as YAML: {e}", r.kind));
+            (r.kind, r.file_name, doc)
+        })
+        .collect()
+}
+
+/// The sole served version of a rendered CRD.
+///
+/// One version, asserted rather than indexed blindly: `versions[0]` on a
+/// two-version CRD would silently check half of it, and a second version is a
+/// conversion-webhook decision this tag has not taken.
+fn sole_version<'a>(kind: &str, doc: &'a Value) -> &'a Value {
+    let versions = at(doc, &["spec", "versions"])
+        .as_sequence()
+        .expect("spec.versions is a list");
+    assert_eq!(
+        versions.len(),
+        1,
+        "{kind}: `v1alpha1` is the one served, stored version of this group at tag 1; a \
+         second version is a conversion decision, not a rendering detail"
+    );
+    &versions[0]
+}
+
+/// One printer column, as `kubectl get` reads it: `(NAME, jsonPath, type)`.
+type Column = (&'static str, &'static str, &'static str);
+
+/// The brief's Produces table, per kind, IN ORDER.
+///
+/// A LITERAL, AND DELIBERATELY NOT DERIVED FROM ANYTHING. The column NAMES and
+/// their ORDER are copied verbatim from `task-15b-brief.md`'s Produces table
+/// (`KafkaCluster` ROLE/REACHABLE/CLUSTER-ID/AGE, `BackupSchedule`
+/// SCHEDULE/SUSPEND/LAST/NEXT/READY/AGE, `Backup` PHASE/EXIT/RECORDS/SIGNED/AGE,
+/// `Restore` MODE/PHASE/EXIT/REASON/OUTCOME/INTEGRITY/RTO/SIGNED/AGE, `Approval`
+/// SUBJECT/VERIFIED/APPROVER/KEY-ID/AGE, `TrustRoster` KEYS/LOADED/EXPIRED/AGE);
+/// the `jsonPath` and `type` beside each name are the declarations those names
+/// are required to keep, so a column that survives a RENAME of the field it
+/// reads fails here too.
+///
+/// Reading these back out of `config/crd/` — or out of the derive — would make
+/// the expectation a copy of the thing under test, which is exactly the hole
+/// mutant MA walked through: it dropped `REASON` from `Restore`, ran
+/// `just crds`, and 16 of 16 tests passed with all six CI diffs green.
+/// `kubectl get restore` is the operator's whole view of a run and Task 26's UI
+/// reads these columns, so the table is an interface and not decoration.
+const PRINTER_COLUMNS: [(&str, &[Column]); 6] = [
+    (
+        "KafkaCluster",
+        &[
+            ("ROLE", ".spec.role", "string"),
+            ("REACHABLE", ".status.reachable", "string"),
+            ("CLUSTER-ID", ".status.clusterId", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "BackupSchedule",
+        &[
+            ("SCHEDULE", ".spec.schedule", "string"),
+            ("SUSPEND", ".spec.suspend", "string"),
+            ("LAST", ".status.lastFireTime", "date"),
+            ("NEXT", ".status.nextFireTime", "date"),
+            (
+                "READY",
+                ".status.conditions[?(@.type==\"Ready\")].status",
+                "string",
+            ),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "Backup",
+        &[
+            ("PHASE", ".status.phase", "string"),
+            ("EXIT", ".status.exitCode", "integer"),
+            ("RECORDS", ".status.records", "integer"),
+            ("SIGNED", ".status.evidence.verification.result", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "Restore",
+        &[
+            ("MODE", ".spec.target.mode", "string"),
+            ("PHASE", ".status.phase", "string"),
+            ("EXIT", ".status.exitCode", "integer"),
+            ("REASON", ".status.exitReason", "string"),
+            ("OUTCOME", ".status.outcome", "string"),
+            ("INTEGRITY", ".status.integrity.result", "string"),
+            ("RTO", ".status.measured.rtoSeconds", "integer"),
+            ("SIGNED", ".status.evidence.verification.result", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "Approval",
+        &[
+            ("SUBJECT", ".spec.subjectRef.name", "string"),
+            ("VERIFIED", ".status.verified", "string"),
+            ("APPROVER", ".status.approver", "string"),
+            ("KEY-ID", ".status.matchedKeyId", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "TrustRoster",
+        &[
+            ("KEYS", ".spec.approverKeys[*].keyId", "string"),
+            ("LOADED", ".status.loaded", "string"),
+            ("EXPIRED", ".status.expiredKeyIds[*]", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+];
+
+/// The brief's Scope column: five workload kinds Namespaced, the roster
+/// Cluster.
+///
+/// A LITERAL for the same reason [`PRINTER_COLUMNS`] is. `TrustRoster` is
+/// Cluster-scoped because `allowedClusterIds` must not sit where a namespace
+/// tenant can widen its own allowlist; the other five are Namespaced because
+/// [`weirkeeper::crds::LocalRef`] carries no namespace and a cross-namespace
+/// reference is a privilege-escalation surface. A kind that quietly became
+/// Cluster-scoped would move its objects out of every namespaced RBAC rule
+/// Task 21 writes.
+const SCOPES: [(&str, &str); 6] = [
+    ("KafkaCluster", "Namespaced"),
+    ("BackupSchedule", "Namespaced"),
+    ("Backup", "Namespaced"),
+    ("Restore", "Namespaced"),
+    ("Approval", "Namespaced"),
+    ("TrustRoster", "Cluster"),
+];
+
+/// FIX ROUND 1, FINDING 1: every kind's printer columns are exactly the
+/// brief's table — name, `jsonPath` and `type`, in order.
+#[test]
+fn the_printer_columns_are_exactly_the_briefs_table() {
+    let docs = rendered();
+    assert_eq!(
+        docs.len(),
+        PRINTER_COLUMNS.len(),
+        "the brief's Produces table fixes printer columns for six kinds; the renderer \
+         produced {}",
+        docs.len()
+    );
+
+    for (kind, _file, doc) in &docs {
+        let want: Vec<(String, String, String)> = PRINTER_COLUMNS
+            .iter()
+            .find(|(k, _)| k == kind)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the brief's Produces table fixes the printer columns of every kind this \
+                     group ships, and `{kind}` is not in it"
+                )
+            })
+            .1
+            .iter()
+            .map(|(n, p, t)| (n.to_string(), p.to_string(), t.to_string()))
+            .collect();
+
+        // An ABSENT block is the empty list and not a panic, so the count
+        // assertion below is what reports it: `additionalPrinterColumns`
+        // deleted wholesale is the same defect as one column dropped, only
+        // larger.
+        let empty: Vec<Value> = Vec::new();
+        let cols: &Vec<Value> = sole_version(kind, doc)
+            .get("additionalPrinterColumns")
+            .and_then(Value::as_sequence)
+            .unwrap_or(&empty);
+
+        let got: Vec<(String, String, String)> = cols
+            .iter()
+            .map(|c| {
+                let f = |key: &str| {
+                    c.get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!("{kind}: a printer column declares `{key}`; got {c:?}")
+                        })
+                        .to_string()
+                };
+                (f("name"), f("jsonPath"), f("type"))
+            })
+            .collect();
+
+        // COUNT FIRST. A dropped or an added column is the likeliest drift and
+        // its own sentence reads better than a diff of two nine-element lists.
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "{kind}: the brief's Produces table fixes {} printer columns and the renderer \
+             produced {}. `kubectl get` is the operator's whole view of a run and Task 26's \
+             UI reads these columns — a column is an interface, not decoration.\n  \
+             wanted: {:?}\n  got:    {:?}",
+            want.len(),
+            got.len(),
+            want.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(),
+            got.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            got, want,
+            "{kind}: the printer columns must be the brief's table exactly — name, jsonPath \
+             and type, IN ORDER"
+        );
+    }
+}
+
+/// FIX ROUND 1, FINDING 2: all six kinds declare `subresources.status`, and
+/// losing it is otherwise silent.
+///
+/// MEASURED CONSEQUENCE, not a style rule. With `subresources` dropped from
+/// `Restore` and the CRD applied to a live 1.34 API server,
+/// `kubectl --context docker-desktop patch restore <name> --subresource=status`
+/// returns
+/// `Error from server (NotFound)` while `get restore <name>` still shows the
+/// object. Tasks 16-20 write every `.status` through that subresource
+/// (kube-rs `patch_status` / `replace_status`), so the loss lands as a runtime
+/// failure in a later slot with no gate pointing at the cause — and the CRD
+/// still applies, so nothing upstream of the controller complains either.
+///
+/// `status: {}` is the whole declaration: an EMPTY mapping is what enables the
+/// subresource, and a non-empty one would be a shape this tag has not chosen.
+#[test]
+fn every_kind_declares_the_status_subresource() {
+    let docs = rendered();
+    assert_eq!(
+        docs.len(),
+        6,
+        "six kinds carry a status subresource; the renderer produced {}",
+        docs.len()
+    );
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (kind, _file, doc) in &docs {
+        let status = sole_version(kind, doc)
+            .get("subresources")
+            .and_then(|s| s.get("status"));
+        match status {
+            Some(Value::Mapping(m)) if m.is_empty() => {}
+            Some(other) => wrong.push(format!("{kind}: subresources.status is {other:?}")),
+            None => wrong.push(format!("{kind}: subresources.status is ABSENT")),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "every kind of this group declares `subresources.status: {{}}`, because Tasks 16-20 \
+         write every `.status` through it. Without it a `patch --subresource=status` \
+         returns NotFound on an object that still exists, and the CRD applies cleanly — so \
+         nothing but this test would report it:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// FIX ROUND 1, FINDING 3: the scope of ALL SIX kinds, not only the roster's.
+///
+/// `the_roster_carries_key_material_for_both_lists` asserts
+/// `TrustRoster.scope == Cluster` and nothing asserted the other five, so a
+/// kind that silently became Cluster-scoped passed every gate — and would then
+/// sit outside every namespaced RBAC rule Task 21 writes.
+#[test]
+fn five_kinds_are_namespaced_and_only_the_roster_is_cluster_scoped() {
+    let got: Vec<(&str, String)> = rendered()
+        .iter()
+        .map(|(kind, _file, doc)| {
+            (
+                *kind,
+                at(doc, &["spec", "scope"])
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{kind}: spec.scope is a string"))
+                    .to_string(),
+            )
+        })
+        .collect();
+    let want: Vec<(&str, String)> = SCOPES.iter().map(|(k, s)| (*k, s.to_string())).collect();
+    assert_eq!(
+        got, want,
+        "the brief's Scope column: the five workload kinds are Namespaced and `TrustRoster` \
+         alone is Cluster-scoped, so `allowedClusterIds` does not sit where a namespace \
+         tenant can widen its own allowlist and no workload kind escapes a namespaced RBAC \
+         rule"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The CEL seals
 // ---------------------------------------------------------------------------
 
@@ -1282,13 +1597,47 @@ fn the_checked_in_crds_are_what_the_emitter_renders() {
         let path = crd_dir().join(r.file_name);
         let on_disk = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        assert_eq!(
-            on_disk,
-            r.yaml,
-            "{} has drifted from the emitter. Run `just crds` — never hand-edit a generated \
-             CRD.",
-            path.display()
+        // FIX ROUND 1, FINDING 5: REPORT THE FIRST DIFFERING LINE, NOT TWO
+        // BLOBS. An `assert_eq!` of two ~10 KB YAML documents prints ~20 KB of
+        // near-identical text and hides the one line that moved, which is the
+        // whole information the failure carries. CI's arm is a `diff -u` and
+        // reads well; the local half of the same gate now does too.
+        if on_disk != r.yaml {
+            let (line, want, got) = first_difference(&on_disk, &r.yaml);
+            panic!(
+                "{} has drifted from the emitter. Run `just crds` — never hand-edit a \
+                 generated CRD.\n  first difference at line {line}:\n    checked in: \
+                 {want}\n    rendered:   {got}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// The first line at which two documents differ, as
+/// `(1-based line number, the left line, the right line)`.
+///
+/// `<end of file>` stands in for a document that ran out of lines, and a pair
+/// of them means the two differ only in trailing bytes that `lines()` does not
+/// yield — a missing or a doubled final newline.
+fn first_difference(left: &str, right: &str) -> (usize, String, String) {
+    let eof = || "<end of file>".to_string();
+    let mut l = left.lines();
+    let mut r = right.lines();
+    let mut n = 0usize;
+    loop {
+        n += 1;
+        let (a, b) = (l.next(), r.next());
+        if a.is_none() && b.is_none() {
+            return (n, eof(), eof());
+        }
+        let (a, b) = (
+            a.map(str::to_string).unwrap_or_else(eof),
+            b.map(str::to_string).unwrap_or_else(eof),
         );
+        if a != b {
+            return (n, a, b);
+        }
     }
 }
 
