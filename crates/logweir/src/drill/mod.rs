@@ -1602,8 +1602,14 @@ pub fn build_plan_with_floor(
     floor: WindowFloor,
 ) -> Result<RestorePlan, DrillError> {
     // The window's END: the requested recovery point when the spec states one,
-    // else the sample window's end.
-    let window_end = spec.restore.point_in_time.unwrap_or(spec.sample.window_end);
+    // else the sample window's end. The FIELD's name travels with the value,
+    // because it is the half of the refusal below an operator can act on —
+    // the same pairing `phase0_admit::target_topic_preflight` makes for the
+    // broker's timestamp bound.
+    let (window_end_field, window_end) = match spec.restore.point_in_time {
+        Some(t) => ("restore.point_in_time", t),
+        None => ("sample.window_end", spec.sample.window_end),
+    };
     let plan = RestorePlan {
         set: set.clone(),
         storage: spec.source.storage.clone(),
@@ -1640,6 +1646,44 @@ pub fn build_plan_with_floor(
              the spec's",
             plan.time_window.0.timestamp_millis(),
             floor.manifest_floor_ms
+        ))));
+    }
+    // **AND THE WINDOW IS NEVER INVERTED OR EMPTY** (plan erratum E7(a)).
+    // `time_window.0` is the archive's floor and `time_window.1` is the
+    // requested recovery point, so a recovery point at or before the floor
+    // describes an interval holding no instant at all. The engine validates
+    // only `start <= end` [U:crates/kafka-backup-core/src/config.rs:1184-1187],
+    // so before this check an inverted window reached `engine.preflight` and
+    // came back as the engine's own config-validator text — ruling R-E's
+    // `EngineError`, exit **1, operational**, after phases 0-4 had run. That
+    // misfiled the one failure an operator can actually fix: asking for a
+    // recovery point from before the archive begins is not an operational
+    // fault, it is a plan the archive cannot satisfy.
+    //
+    // `>=`, not `>`: at equality the window is `[t, t]` for a filter the
+    // engine reads as `>= start && <= end`, which is one instant wide and
+    // restores whatever shares that exact millisecond — almost always nothing,
+    // and never the recovery the operator asked for. An empty restore that
+    // reports `pass` is precisely G-WIN's silent loss.
+    //
+    // Exit 3, refused before anything runs (Global Constraint 11), and it
+    // names BOTH integers plus the spec field the end came from, so the
+    // refusal is actionable without reading the manifest by hand.
+    //
+    // It lives HERE, at the one place a `RestorePlan` is constructed, so no
+    // caller — `build_plan`, a restore mode of Task 9b, or a test — can
+    // produce an inverted window at all. Not a `debug_assert!`, for the same
+    // reason as the check above: that macro is compiled out in release.
+    if plan.time_window.0 >= plan.time_window.1 {
+        return Err(DrillError::Guard(GuardRefusal(format!(
+            "this plan's {window_end_field} is epoch-ms {end}, at or before the archive set \
+             `{set_id}`'s earliest covered timestamp of epoch-ms {start}, so the restore \
+             window [{start}, {end}] holds no instant and would restore nothing; a Restore's \
+             window start is the archive set's earliest covered timestamp, never the spec's, \
+             so a recovery point must be LATER than epoch-ms {start}",
+            end = plan.time_window.1.timestamp_millis(),
+            start = plan.time_window.0.timestamp_millis(),
+            set_id = plan.set.backup_id,
         ))));
     }
     Ok(plan)

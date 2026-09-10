@@ -402,6 +402,114 @@ fn the_point_in_time_is_the_window_end_when_present() {
     );
 }
 
+/// **A recovery point at or before the archive floor is REFUSED** — exit 3,
+/// naming both integers (plan erratum E7(a)).
+///
+/// The window's start is the archive's floor and its end is the requested
+/// recovery point, so a point at or before the floor describes an interval
+/// holding no instant. Before this refusal `build_plan` returned `Ok` with
+/// `time_window.0 > time_window.1`, phase 5 passed it (that check reads only
+/// the START), and the failure surfaced from the ENGINE's `start <= end`
+/// config validation as ruling R-E's `EngineError` — exit **1, operational**,
+/// after phases 0-4 had already run (task-9 review, MED-2).
+///
+/// Both arms are asserted because `>` would let the equality case through: a
+/// window `[t, t]` against the engine's `>= start && <= end` filter is one
+/// millisecond wide, restores whatever happens to share that instant — almost
+/// always nothing — and would still be scored.
+#[test]
+fn a_recovery_point_at_or_before_the_archive_floor_is_refused() {
+    for (what, pit_ms) in [
+        ("a recovery point BEFORE the floor", FLOOR_MS - 60_000),
+        ("a recovery point EXACTLY AT the floor", FLOOR_MS),
+    ] {
+        let text = spec_yaml(&format!(
+            "restore:\n  point_in_time: \"{}\"\n",
+            rfc3339(pit_ms)
+        ));
+        let spec: DrillSpec = serde_yaml::from_str(&text).expect("the spec bytes parse");
+        assert_eq!(
+            spec.restore
+                .point_in_time
+                .expect("the fixture states a recovery point")
+                .timestamp_millis(),
+            pit_ms,
+            "{what}: the fixture must actually carry the integer under test"
+        );
+
+        let r = build_plan(
+            &spec,
+            &set(),
+            &mapping(),
+            &facts_with_two_segments(),
+            "01J9X",
+        );
+        // THE EXIT CODE FIRST, as its own assertion: a mutant that drops the
+        // check fails HERE, on the code, rather than at an `expect_err`
+        // unwrap — and the `Ok` it would return carries the inverted window.
+        assert_eq!(
+            exit_of(&r),
+            ExitCode::GuardRefused,
+            "{what}: refused by a guard, before anything ran (Global Constraint 11) — \
+             NOT the engine's operational exit 1"
+        );
+        let e = r.expect_err("a window that holds no instant is refused");
+        assert_eq!(
+            guard_message(&e),
+            format!(
+                "this plan's restore.point_in_time is epoch-ms {pit_ms}, at or before the \
+                 archive set `backup-2023-11-14T23:00:00Z`'s earliest covered timestamp of \
+                 epoch-ms {FLOOR_MS}, so the restore window [{FLOOR_MS}, {pit_ms}] holds no \
+                 instant and would restore nothing; a Restore's window start is the archive \
+                 set's earliest covered timestamp, never the spec's, so a recovery point must \
+                 be LATER than epoch-ms {FLOOR_MS}"
+            ),
+            "{what}: the refusal names the spec field and BOTH integers"
+        );
+    }
+
+    // One millisecond later is a window, and is not refused: the check is
+    // `>=` on the pair, not a blanket refusal of a `point_in_time` near the
+    // floor.
+    let text = spec_yaml(&format!(
+        "restore:\n  point_in_time: \"{}\"\n",
+        ts(FLOOR_MS + 1).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    ));
+    let spec: DrillSpec = serde_yaml::from_str(&text).expect("the spec bytes parse");
+    let plan = build_plan(
+        &spec,
+        &set(),
+        &mapping(),
+        &facts_with_two_segments(),
+        "01J9X",
+    )
+    .expect("a window one millisecond wide is still a window");
+    assert_eq!(plan.time_window.0.timestamp_millis(), FLOOR_MS);
+    assert_eq!(plan.time_window.1.timestamp_millis(), FLOOR_MS + 1);
+}
+
+/// The same refusal reaches `sample.window_end`, because that is
+/// `time_window.1` whenever the spec states no recovery point — and it names
+/// THAT field, so an operator is not sent looking for a `restore:` block the
+/// spec does not have.
+#[test]
+fn a_sample_window_end_at_or_before_the_archive_floor_is_refused_too() {
+    // The floor is `LATER_SEGMENT_MS` here, which is AFTER the fixture's
+    // `sample.window_end`.
+    let facts = facts_from(&[SPEC_END_MS + 60_000]);
+    let r = build_plan(&spec(), &set(), &mapping(), &facts, "01J9X");
+    assert_eq!(exit_of(&r), ExitCode::GuardRefused);
+    let msg = guard_message(&r.expect_err("a window that holds no instant is refused"));
+    assert!(
+        msg.starts_with(&format!(
+            "this plan's sample.window_end is epoch-ms {SPEC_END_MS}, at or before the archive \
+             set `backup-2023-11-14T23:00:00Z`'s earliest covered timestamp of epoch-ms {}",
+            SPEC_END_MS + 60_000
+        )),
+        "{msg}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // G-WIN, first half — the phase-5 refusal
 // ---------------------------------------------------------------------------
