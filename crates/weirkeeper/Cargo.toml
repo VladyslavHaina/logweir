@@ -127,6 +127,22 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # `printcolumn` attributes are `serde_json::json!` literals in expanded derive
 # code, so the library itself now needs it. Tests still see it — a normal
 # dependency is available to every target.
+# TASK 18 — NO ENTRY AT ALL, AND THAT IS THE DECISION BEING RECORDED.
+# `BackupSchedule`'s five-field cron expression is parsed by a HAND-WRITTEN
+# parser in `src/slot.rs`, not by `cron`, `croner`, `saffron` or
+# `cron-parser`. Global Constraint 38 closes the workspace graph: the only
+# packages this plan adds are `kube`, `k8s-openapi` and their closure, and none
+# of the cron crates is in `Cargo.lock` — so any of them would be a NEW package
+# and a stop-and-report. Five integer fields, five syntactic forms (`*`, a
+# literal, a comma list, an `a-b` range, a `*/n` step) and three `@` aliases do
+# not justify a dependency edge, and the parser's compensating obligation is
+# written into `slot.rs` and tested by
+# `tests/schedule_controller.rs::cron_parse_refuses_what_it_does_not_understand`:
+# it refuses what it does not understand, NAMING THE FIELD, so an unknown token
+# never becomes a silent `*`.
+#
+# `chrono` below is the only thing `slot.rs` needs, and it was already declared
+# for `crds::Time`. This task adds no manifest ENTRY of any kind.
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

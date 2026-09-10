@@ -14,6 +14,14 @@
 //! reach; if it built a client first it would exit non-zero in exactly the
 //! place it is used.
 //!
+//! ONE TYPE ALIAS, NOT TWO (Task 18). Task 15 declared a local
+//! `type ControllerTask` here and Task 16 added
+//! `weirkeeper::controllers::ControllerTask` beside it; two spellings of one
+//! type is how the registration point below comes to be typed against the
+//! wrong one. The local alias is GONE and this file names the library's, which
+//! is the one `controllers/mod.rs` documents as "the type `main`'s registration
+//! point holds".
+//!
 //! ONE THING PRECEDES THE ARGV MATCH: THE rustls PROVIDER INSTALL. It is not a
 //! client and it is not I/O — it builds a struct and sets a `OnceLock` — and
 //! it has to be unconditional, because it is the difference between this
@@ -24,14 +32,10 @@
 //! guarantee is unchanged: it still builds no client and touches no cluster,
 //! which is what Task 23's `scripts/check-image-weirkeeper.sh` check 2 runs.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::process::ExitCode;
 
 use tracing::{error, info};
-
-/// One registered reconciler, spawned for the life of the process.
-type ControllerTask = Pin<Box<dyn Future<Output = ()> + Send>>;
+use weirkeeper::controllers::ControllerTask;
 
 const HELP: &str = "weirkeeper — the Logweir control plane. It watches the six \
 logweir.dev/v1alpha1 kinds and runs each restore, drill and backup as a Job; it \
@@ -131,7 +135,9 @@ fn run() -> ExitCode {
         // rewrite of `main`.
         //
         // Task 16 pushed the first two, so the `#[allow(unused_mut)]` Task 15
-        // left here for exactly this moment is gone.
+        // left here for exactly this moment is gone. Task 18 pushed the third
+        // — the `BackupSchedule` cron reconciler — as one line, which is what
+        // this shape is for.
         //
         // `Vec::new()` + `push`, AND NOT `vec![…]` — see the
         // `clippy::vec_init_then_push` allow on `run` for why.
@@ -142,6 +148,9 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::approval::controller(
             client.clone(),
         )));
+        controllers.push(Box::pin(
+            weirkeeper::controllers::backup_schedule::controller(client.clone()),
+        ));
 
         let registered = controllers.len();
         info!(

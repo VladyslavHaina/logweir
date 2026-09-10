@@ -15,6 +15,15 @@
 //! [`job`] holds the one constant that names the runner image, and nothing
 //! else until Task 17 grows `job::build` around it.
 //!
+//! WHAT TASK 18 ADDED. [`slot`] — the trigger, and the names that are a pure
+//! function of it (guard **G-SLOT**): a hand-written five-field [`slot::Cron`]
+//! parser that refuses what it does not understand naming the field, and the
+//! three name functions [`slot::slot_name`], [`slot::scheduled_backup_name`]
+//! and [`slot::backup_id_for`]. Nothing in that module reads a clock, which is
+//! what makes a duplicate reconcile compute the same object name and get **409
+//! `AlreadyExists`** from the API server instead of writing a second, partial
+//! archive. [`controllers::backup_schedule`] is the reconciler that uses them.
+//!
 //! WHAT TASK 16 ADDED. [`controllers`] holds the first two reconcilers —
 //! [`controllers::approval`], whose five checks in a stated order are what
 //! turn an `Approval` object into an authorisation, and
@@ -43,6 +52,7 @@
 pub mod controllers;
 pub mod crds;
 pub mod job;
+pub mod slot;
 pub mod testing;
 
 /// The name of the one cluster-scoped `TrustRoster` — interface **I16**.

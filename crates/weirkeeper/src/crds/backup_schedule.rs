@@ -133,7 +133,13 @@ pub struct RetentionReport {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BackupScheduleSpec {
-    /// A five-field cron expression, in UTC.
+    /// A five-field cron expression, in UTC: minute hour day-of-month month
+    /// day-of-week. `*`, a literal, a comma list, an `a-b` range and a `*/n`
+    /// step are accepted, as are `@hourly`, `@daily` and `@weekly`; anything
+    /// else is refused with a `Ready` condition naming the field, never read as
+    /// a silent match-all. A slot that comes due more than the ONE-HOUR
+    /// missed-slot horizon before the controller looks is skipped and recorded
+    /// in `status.lastMissedSlot`.
     pub schedule: String,
     /// The `KafkaCluster` to back up, in this namespace.
     pub source_ref: LocalRef,
@@ -171,6 +177,14 @@ pub struct BackupScheduleStatus {
     /// was down, or the previous run was still active. Recorded because
     /// object identity is a pure function of the trigger (guard **G-SLOT**):
     /// a missed slot is never silently re-fired under a different name.
+    ///
+    /// THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one
+    /// hour before the controller looked is skipped and recorded here, with a
+    /// `Ready` condition whose reason is `SlotMissed`; a controller restarted
+    /// after a week therefore fires at most the current slot and never six
+    /// days of backlog. The field is written when a slot is skipped and is
+    /// never cleared afterwards — it is the audit trail of the skip, so a
+    /// correct implementation is distinguishable from a broken schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_missed_slot: Option<String>,
     /// What retention WOULD remove. Nothing was deleted — see

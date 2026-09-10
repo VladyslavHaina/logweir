@@ -38,6 +38,7 @@
 use std::sync::{Arc, Mutex};
 
 use http::{Request, Response};
+use http_body_util::BodyExt as _;
 use kube::client::Body;
 use tower::util::service_fn;
 
@@ -134,6 +135,43 @@ pub fn answer(routes: &[Route], recorder: &Recorder, method: &str, uri: &str) ->
     }
 }
 
+/// One request the double was asked for, **with its body**.
+///
+/// WHY A SECOND TYPE AND NOT A FOURTH FIELD ON [`SeenRequest`] (Task 18). A
+/// request body is only reachable asynchronously — `http_body::Body` is a
+/// stream — so the plain [`answer`] route resolver, which is a synchronous
+/// function two existing tests call directly, cannot produce one. Adding a
+/// `body` field to `SeenRequest` would either force that function async or
+/// leave the field empty in the one place a test can observe it; a separate
+/// log, filled by the service closure that already owns the whole `Request`,
+/// keeps both truthful.
+///
+/// WHY ANY TEST NEEDS IT. A `POST` to a collection carries the object's
+/// `metadata.name` in its **body**, never in its path — `Api::create` targets
+/// `…/namespaces/<ns>/backups` with no name in the URI at all. Guard
+/// **G-SLOT**'s property is "both `POST`s carried the identical
+/// `metadata.name`", so it is unassertable from method and URI alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenBody {
+    /// The method as the client sent it.
+    pub method: String,
+    /// The request target, query string included.
+    pub uri: String,
+    /// The request body as UTF-8. Empty for a request with no body, and for a
+    /// body that did not collect — neither of which any test in this tree
+    /// asserts over.
+    pub body: String,
+}
+
+/// The ordered log of every request body the double was asked for.
+pub type BodyRecorder = Arc<Mutex<Vec<SeenBody>>>;
+
+/// A fresh, empty [`BodyRecorder`].
+#[must_use]
+pub fn body_recorder() -> BodyRecorder {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
 /// A [`kube::Client`] answering `routes`, plus the [`Recorder`] it writes to.
 ///
 /// # Panics
@@ -160,6 +198,57 @@ pub fn mock_client_recording(routes: Vec<Route>) -> (kube::Client, Recorder) {
     // `Api::default_namespaced` would use when a test does not say. Every
     // route in this plan's tests names its namespace in the path.
     (kube::Client::new(svc, "default"), recorder)
+}
+
+/// A [`kube::Client`] answering `routes`, plus both recorders.
+///
+/// The form for a test whose property is what a request **contained** — see
+/// [`SeenBody`] for why method and URI are not enough for a `POST` to a
+/// collection. The [`Recorder`] end is returned unchanged, so a test can assert
+/// the call sequence and the bodies off one client.
+///
+/// # Panics
+///
+/// As [`mock_client_recording`]: this builds a `tower::buffer::Buffer` and must
+/// be called from inside a tokio runtime.
+#[must_use]
+pub fn mock_client_recording_bodies(routes: Vec<Route>) -> (kube::Client, Recorder, BodyRecorder) {
+    let recorder = recorder();
+    let bodies = body_recorder();
+    let table = Arc::new(routes);
+    let svc = {
+        let recorder = Arc::clone(&recorder);
+        let bodies = Arc::clone(&bodies);
+        service_fn(move |req: Request<Body>| {
+            let recorder = Arc::clone(&recorder);
+            let bodies = Arc::clone(&bodies);
+            let table = Arc::clone(&table);
+            async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                // The body is COLLECTED BEFORE the route is resolved, so an
+                // unmatched request's body is in the log the panic is about —
+                // the same ordering `answer` uses for the request log, and for
+                // the same reason.
+                let body = req
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+                    .unwrap_or_default();
+                bodies
+                    .lock()
+                    .expect("the body recorder mutex is never held across a panic")
+                    .push(SeenBody {
+                        method: method.clone(),
+                        uri: uri.clone(),
+                        body,
+                    });
+                Ok::<_, std::convert::Infallible>(answer(&table, &recorder, &method, &uri))
+            }
+        })
+    };
+    (kube::Client::new(svc, "default"), recorder, bodies)
 }
 
 /// A [`kube::Client`] answering `routes`.

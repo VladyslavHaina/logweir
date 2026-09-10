@@ -20,6 +20,14 @@
 //! double that records every request and panics on one it was not given a
 //! route for.
 //!
+//! WHAT A RECONCILER IN THIS DIRECTORY MAY **CREATE**. Task 18 adds the first
+//! reconciler that creates an object rather than only patching one:
+//! [`backup_schedule`] `POST`s a `Backup` for a due slot. The rule above is
+//! unchanged for the object it reconciles — it patches the `BackupSchedule`'s
+//! `/status` and nothing else — and the object it creates is a DIFFERENT kind,
+//! named by a pure function of the trigger so that a duplicate `POST` is a 409
+//! rather than a second archive run (guard **G-SLOT**).
+//!
 //! WHY THE CONDITION REASONS ARE VARIANT NAMES. `Verified`'s `reason` is the
 //! name of the [`approval::ApprovalRefusal`] variant that produced it and its
 //! `message` is that variant's `Display`. That makes the machine-readable half
@@ -29,6 +37,7 @@
 //! variant fails to compile until someone names its reason.
 
 pub mod approval;
+pub mod backup_schedule;
 pub mod trust_roster;
 
 use std::future::Future;
