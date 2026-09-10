@@ -578,3 +578,88 @@ fn logweir_creates_the_target_topics_with_the_pinned_config_set() {
     // `phase3_diff::restore_partition_count`.
     assert_eq!(count_partitions("drill-orders"), 3);
 }
+
+/// **Spec §6.1 at the binary level, on the compose broker** (review finding
+/// 1). A mapped target topic that already exists is refused — exit 3,
+/// `refusal-reason=GuardRefused` as the final stdout line, no scorecard,
+/// nothing uploaded — and the pre-existing topic is left exactly as it was
+/// found: not deleted, not reconfigured, and no OTHER target topic created
+/// beside it.
+///
+/// The pre-created topic carries the CLUSTER DEFAULT retention on purpose. It
+/// is the case that made reuse a false claim: `TopicPreflight.configs_set`
+/// reported `retention.ms=-1` "as applied" while the topic it reused kept
+/// `604800000`, and Task 20 copies that block to
+/// `Restore.status.topicPreflight`.
+#[test]
+fn a_mapped_target_topic_that_already_exists_is_refused() {
+    use logweir_kafka::reader::ClusterReader;
+
+    let spec = spec_default();
+    let before = list_evidence_bucket();
+    let mut opts = RunOpts::new(&spec);
+    // `drill-orders` is the first mapped target of the default spec. One
+    // partition, against the manifest's three, so the topic is also visibly
+    // NOT the topic this restore needs.
+    opts.pre_create = vec![("drill-orders".to_string(), 1)];
+    let r = run_with(opts);
+
+    let stdout = r.out.stdout_utf8();
+    let stderr = r.out.stderr_utf8();
+    assert_eq!(
+        r.out.status.code(),
+        Some(3),
+        "a pre-existing mapped target topic is a plan refused before anything ran:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("drill-orders"),
+        "the refusal must name the topic:\n{stderr}"
+    );
+    // Interface **I9**: the runner's FINAL non-empty stdout line. Not
+    // `TargetTopicConfigRefused` — that state is for a target CONFIGURATION
+    // this build refuses, and spec §3.2 names no state for mere existence.
+    let last = stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    assert_eq!(last, "refusal-reason=GuardRefused", "stdout was:\n{stdout}");
+    assert!(
+        !r.scorecard.exists(),
+        "a guard refusal writes NO scorecard: {} exists",
+        r.scorecard.display()
+    );
+    assert_eq!(
+        before,
+        list_evidence_bucket(),
+        "a guard refusal must upload nothing"
+    );
+
+    // The target is exactly as it was found.
+    assert!(
+        topic_exists("drill-orders"),
+        "the refusal must not delete the operator's topic"
+    );
+    assert_eq!(
+        count_partitions("drill-orders"),
+        1,
+        "nor recreate it at another count"
+    );
+    let reader = reader();
+    let configs = ClusterReader::topic_configs(&reader, "drill-orders").expect("drill-orders");
+    assert_ne!(
+        configs.get("retention.ms").map(String::as_str),
+        Some("-1"),
+        "the refusal must not have applied the pinned configuration to a topic it did not \
+         create; a reused topic keeps its own retention, which is the whole reason this plan is \
+         refused rather than continued: {configs:?}"
+    );
+    assert!(
+        !topic_exists("drill-payments"),
+        "and it must create nothing: the second mapped target must be absent"
+    );
+
+    // Leave the namespace clean for the rows that follow, even though every
+    // `run_with` empties it first.
+    delete_all_drill_topics();
+}

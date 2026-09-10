@@ -42,8 +42,17 @@ pub struct TopicPreflight {
     /// `log.message.timestamp.difference.max.ms` (< 3.6), when either is
     /// present and parses.
     pub timestamp_bound_ms: Option<i64>,
-    /// Exactly `TARGET_TOPIC_CONFIGS`, as applied.
+    /// Exactly `TARGET_TOPIC_CONFIGS`, as applied — and it IS applied to every
+    /// name in `topics_created`, because `create_target_topics` pushes a name
+    /// only when the broker confirmed the creation carrying this set, and
+    /// `run` refuses at phase 0 rather than reusing a target that already
+    /// exists. A reused topic keeps its own `retention.ms` and
+    /// `message.timestamp.type`, so reporting this pair over one would be a
+    /// false claim in `Restore.status.topicPreflight`.
     pub configs_set: Vec<(String, String)>,
+    /// The mapped target topics THIS RUN created, in the order the broker
+    /// confirmed them. Never a topic that already existed: that plan is
+    /// refused at phase 0.
     pub topics_created: Vec<String>,
 }
 
@@ -281,8 +290,67 @@ pub fn run(
         }
     }
 
-    // **Guard G-TS.** The target-topic preflight, after the cluster-identity
-    // and marker checks and before anything else.
+    // **Spec §6.1: "A `Restore` refuses if any mapped target topic already
+    // exists."** Twice stated there — once as the reason `broker_configs` and
+    // not `topic_configs` is the preflight's instrument ("the mapped target
+    // topics do not exist at phase 0 (a `Restore` refuses if any of them
+    // does)"), once as the rule itself under **New-topic naming**, with the
+    // measurement: appending into a half-populated topic is the false-pass
+    // class measured at `e2e-seed.sh:81-91`, where a second run left the
+    // manifest describing 2048 records while the broker held 6000.
+    //
+    // **A refusal, not a reuse.** Reusing the topic was the behaviour this
+    // task shipped first, and it made `TopicPreflight.configs_set` a false
+    // claim: the pinned pair is reported "as applied" while a reused topic
+    // keeps whatever `retention.ms` and `message.timestamp.type` it had —
+    // `Restore.status.topicPreflight` would then say `retention.ms=-1` over a
+    // target on `604800000`, exactly the silent-failure class G-TS exists to
+    // prevent. There is no way to make the claim true after the fact either:
+    // `TopicCreator` creates, it does not alter, and `alter_configs` is
+    // surface `logweir-kafka` deliberately does not have.
+    //
+    // **HERE, and not at the creation step**, because this is where exit 3
+    // still means what Global Constraint 11 says it means: refused before
+    // anything ran, before phase 1 consumes the approval, before the archive
+    // is opened, with nothing created and no client write of any kind. The
+    // topic list is the one `list_topics()` read above — no extra round trip,
+    // and the same metadata the marker check just used.
+    //
+    // The refusal message does NOT open with a terminal state, so
+    // `logweir_core::guard::terminal_state` classifies it as the general
+    // `GuardRefused` and the runner's last stdout line reads
+    // `refusal-reason=GuardRefused`. `TargetTopicConfigRefused` is this task's
+    // state for a target CONFIGURATION this build refuses (the two arms in
+    // `target_topic_preflight`); a target that merely exists is not a
+    // configuration finding, spec §3.2 names no state of its own for it, and
+    // widening the declared state to cover it would make the terminal state a
+    // worse signal for the operator, not a better one.
+    let already_present: Vec<&String> = topic_mapping
+        .values()
+        .filter(|t| topics.iter().any(|m| &m.name == *t))
+        .collect();
+    if !already_present.is_empty() {
+        return Err(GuardRefusal(format!(
+            "mapped target topic(s) already exist on cluster {target_cluster_id}: {}. A restore \
+             appends into them, so the drill would reconcile the archive against records it did \
+             not write, and their message.timestamp.type and retention.ms are whatever they were \
+             created with — this build sets the pinned pair by CREATING each target and cannot \
+             alter an existing one. Delete them on the SCRATCH cluster, or restore under a \
+             target.topic_mapping_prefix nothing has used yet.",
+            already_present
+                .iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .into());
+    }
+
+    // **Guard G-TS.** The target-topic preflight, after the cluster-identity,
+    // marker and target-absence checks and before anything else. The absence
+    // check comes FIRST on purpose: the `LogAppendTime` arm below creates the
+    // first mapped target name as its probe, and it may only do that to a name
+    // this phase has just proved absent.
     let topic_preflight = target_topic_preflight(spec, &topic_mapping, reader, creator, deleter)?;
 
     Ok(Admitted {
@@ -518,13 +586,28 @@ fn target_topic_preflight(
 /// `validate-restore`, which force-sets `dry_run = true` and writes nothing, so
 /// it needs no target topic; `restore` does.
 ///
-/// # An already-existing target topic is not fatal here
+/// # Every per-topic failure here is `Operational`, including "already exists"
 ///
-/// Phase 3 has already recorded it as a collision in the document an auditor
-/// reads, so refusing again here would add nothing and would break a re-run
-/// against a target somebody chose not to tear down. Every other per-topic
-/// failure is `DrillError::Operational` (exit 1, no artifact): nothing about
-/// the archive was established, and the fix is on the cluster.
+/// `run` has already REFUSED, at phase 0 and with exit 3, any plan whose
+/// mapped target topics existed (spec §6.1). So a broker answering
+/// `TopicAlreadyExists` at this point means the target changed under the run
+/// after admission — someone else created it, or a previous drill's teardown
+/// completed late — and the topic's `message.timestamp.type` and
+/// `retention.ms` are then NOT the pinned pair, whatever `configs_set` says.
+/// Continuing would append into it and make that claim false, which is the
+/// silent-failure class this guard exists to prevent.
+///
+/// It is `DrillError::Operational` (exit 1, no artifact) rather than exit 3
+/// because by here phases 0-5 have run: Global Constraint 11 reserves exit 3
+/// for a plan refused BEFORE anything runs, and the recorded ruling in
+/// `docs/stability.md` ("a phase-5 / phase-6 divergence is exit 1, not exit
+/// 3") is the same boundary. Nothing about the archive was established and the
+/// fix is on the cluster.
+///
+/// Consequently `TopicPreflight.topics_created` names ONLY topics this run
+/// created, and `configs_set` describes what was applied to every one of them
+/// —  the property `topics_created_names_only_the_topics_this_run_created`
+/// asserts.
 pub fn create_target_topics(
     creator: &dyn TopicCreator,
     topic_mapping: &BTreeMap<String, String>,
@@ -557,16 +640,6 @@ pub fn create_target_topics(
     for (name, r) in results {
         match r {
             Ok(()) => preflight.topics_created.push(name),
-            Err(e) if already_exists(&e) => {
-                tracing::warn!(
-                    topic = %name,
-                    error = %e,
-                    "target topic already exists; phase 3 recorded it as a collision and the \
-                     restore will write into it as it stands — its message.timestamp.type and \
-                     retention.ms are NOT the pinned ones"
-                );
-                preflight.topics_created.push(name);
-            }
             Err(e) => {
                 return Err(DrillError::Operational(format!(
                     "target topic `{name}` could not be created with the pinned configuration \
@@ -581,17 +654,6 @@ pub fn create_target_topics(
         }
     }
     Ok(())
-}
-
-/// The broker's `TopicAlreadyExists` (code 36), by the string rdkafka's
-/// `RDKafkaErrorCode::Display` produces. A code comparison would be better, but
-/// `TopicCreator`'s contract returns `Result<(), String>` per topic so a double
-/// can be written without linking rdkafka (Global Constraint 1: `crates/logweir`
-/// takes no rdkafka dependency), and the string is what both the real impl and
-/// every double can produce.
-fn already_exists(e: &str) -> bool {
-    let e = e.to_ascii_lowercase();
-    e.contains("already exists") || e.contains("topicalreadyexists")
 }
 
 #[cfg(test)]

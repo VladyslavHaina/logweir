@@ -647,6 +647,22 @@ unchanged.
 
 ## Recorded rulings that have no ADR yet
 
+### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
+
+Exit 3 means "refused by a guard, before anything runs", and there is exactly one write that
+happens before the approval is verified: on a target broker whose effective
+`log.message.timestamp.type` is `LogAppendTime` — and only then — phase 0 creates the first mapped
+target topic with `message.timestamp.type=CreateTime`, reads the value back, and deletes the topic
+again on both branches. The reason it is a write and not a read is that no read answers the
+question: whether a broker on `LogAppendTime` honours a per-topic `CreateTime` override is a
+property of the broker, so the only way to find out is to ask this one, and getting it wrong means
+every restored timestamp is silently replaced by the restore's wall clock. The probe is confined to
+the drill's own scratch namespace (`TopicDeleter` refuses every name outside
+`target.topic_mapping_prefix`), it runs only after phase 0 has established that no mapped target
+topic exists, so the name it creates was free, and it is deleted before any verdict is returned —
+but on a `LogAppendTime` broker an exit-3 run has therefore created and deleted one topic, and this
+sentence is the record of it.
+
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
 Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once

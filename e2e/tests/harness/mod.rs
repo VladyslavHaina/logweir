@@ -323,6 +323,35 @@ pub fn delete_marker_topic() {
     panic!("marker topic still present 15s after --delete");
 }
 
+/// Creates one topic and waits for the broker's metadata to agree, so a row
+/// can set up a target state the drill is supposed to REFUSE (spec §6.1: a
+/// `Restore` refuses if any mapped target topic already exists). Deletion is
+/// `delete_all_drill_topics`'s job, which every `run_with` does first.
+pub fn create_topic(topic: &str, partitions: i32) {
+    ok(
+        kafka_topics(&[
+            "--bootstrap-server",
+            "kafka-broker-1:9094",
+            "--create",
+            "--if-not-exists",
+            "--partitions",
+            &partitions.to_string(),
+            "--replication-factor",
+            "1",
+            "--topic",
+            topic,
+        ]),
+        "create topic",
+    );
+    for _ in 0..60 {
+        if topic_exists(topic) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    panic!("topic {topic} still absent 15s after --create");
+}
+
 pub fn recreate_marker_topic() {
     ok(
         kafka_topics(&[
@@ -570,6 +599,14 @@ pub struct RunOpts<'a> {
     pub signing: Option<&'a Path>,
     pub allowlist: Option<&'a Path>,
     pub approval: Approval,
+    /// Topics to create AFTER `run_with`'s `delete_all_drill_topics()` and
+    /// before the binary runs, as `(name, partitions)`.
+    ///
+    /// Empty for every row but the one that proves spec §6.1's refusal, and it
+    /// has to be here rather than in the row itself: `run_with` empties the
+    /// `drill-` namespace unconditionally, so a topic the row created before
+    /// calling it would be deleted again before the drill ever saw it.
+    pub pre_create: Vec<(String, i32)>,
 }
 
 impl<'a> RunOpts<'a> {
@@ -580,6 +617,7 @@ impl<'a> RunOpts<'a> {
             signing: None,
             allowlist: None,
             approval: Approval::Valid,
+            pre_create: Vec::new(),
         }
     }
 }
@@ -590,6 +628,10 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
     // would reconcile against doubled offsets — a red for a reason that has
     // nothing to do with the thing under test.
     delete_all_drill_topics();
+    // …and then, for the one row that needs it, puts a target topic back.
+    for (topic, partitions) in &o.pre_create {
+        create_topic(topic, *partitions);
+    }
 
     let sp = write_spec(o.spec);
     let d = demo_dir();

@@ -109,6 +109,10 @@ struct BrokerDouble {
     /// Topic -> its configuration, for topics that EXIST because Logweir
     /// created them. Any other name panics.
     readable_after_creation: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Topics the target ALREADY HAS, beyond the marker, as `list_topics`
+    /// reports them. Empty for every test but the one that proves spec §6.1's
+    /// "a `Restore` refuses if any mapped target topic already exists".
+    already_there: Vec<TopicMeta>,
 }
 
 impl BrokerDouble {
@@ -119,7 +123,16 @@ impl BrokerDouble {
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
             readable_after_creation: Mutex::new(BTreeMap::new()),
+            already_there: Vec::new(),
         }
+    }
+
+    /// The target already has this topic — healthy metadata, so its presence
+    /// is not in doubt and the refusal cannot be confused with the marker
+    /// check's "present but errored" arm.
+    fn already_has(mut self, topic: &str, partitions: i32) -> Self {
+        self.already_there.push(TopicMeta::new(topic, partitions));
+        self
     }
 
     /// Pre-arm the readback the `LogAppendTime` probe performs: the topic is
@@ -142,7 +155,9 @@ impl ClusterReader for BrokerDouble {
         Ok(CLUSTER.to_string())
     }
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![TopicMeta::new(MARKER, 1)])
+        let mut out = vec![TopicMeta::new(MARKER, 1)];
+        out.extend(self.already_there.iter().cloned());
+        Ok(out)
     }
     fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
         Ok(vec![])
@@ -766,4 +781,282 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
             topics_created: vec!["drill-orders".into(), "drill-payments".into()],
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// Spec §6.1 — a `Restore` refuses if any mapped target topic already exists.
+// Fix round 1, review finding 1.
+// ---------------------------------------------------------------------------
+
+/// A `TopicCreator` that records what it was asked for and answers
+/// `TopicAlreadyExists` for one named topic — the broker's own error string,
+/// which is what `TopicCreator`'s `Result<(), String>` contract carries
+/// (Global Constraint 1: `crates/logweir` links no rdkafka, so a double must
+/// be able to produce the same value the real client does).
+#[derive(Default)]
+struct CreatorThatFindsOneTopicPresent {
+    calls: Mutex<Vec<NewTopicSpec>>,
+    present: String,
+}
+
+impl TopicCreator for CreatorThatFindsOneTopicPresent {
+    fn create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.calls.lock().unwrap().extend_from_slice(topics);
+        Ok(topics
+            .iter()
+            .map(|t| {
+                if t.name == self.present {
+                    (
+                        t.name.clone(),
+                        Err("Broker: Topic already exists".to_string()),
+                    )
+                } else {
+                    (t.name.clone(), Ok(()))
+                }
+            })
+            .collect())
+    }
+}
+
+/// **Spec §6.1, review finding 1.** A mapped target topic that already exists
+/// is REFUSED at phase 0 — exit 3, `refusal-reason=GuardRefused`, the topic
+/// named, nothing created and nothing deleted.
+///
+/// This is the arm that kills the mutant "reuse the existing topic (warn and
+/// continue) instead of refusing": that version returns `Ok`, and every
+/// assertion below expects a `GuardRefusal`. It also pins the two facts that
+/// made the reuse a false claim — `TopicPreflight.configs_set` reports the
+/// pinned pair "as applied" and `topics_created` named a topic Logweir did not
+/// create, both of which reach `Restore.status.topicPreflight`.
+#[test]
+fn a_mapped_target_topic_that_already_exists_is_a_guard_refusal_naming_it() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.retention.ms", "604800000"),
+    ])
+    .already_has("drill-payments", 3);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+
+    let e = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect_err("a mapped target topic that already exists is refused");
+    // `guard_message` asserts exit 3 on the way through.
+    let m = guard_message(e);
+    assert!(
+        m.contains("`drill-payments`"),
+        "the refusal must NAME the topic an operator has to deal with: {m:?}"
+    );
+    assert!(
+        m.contains("already exist"),
+        "and say what is wrong with it: {m:?}"
+    );
+    // NOT the declared terminal state for this task: that one is for a target
+    // CONFIGURATION this build refuses. A target that merely exists is exit 3
+    // under the general state.
+    assert_eq!(
+        logweir_core::guard::refusal_reason_line(&m),
+        "refusal-reason=GuardRefused",
+        "TargetTopicConfigRefused is for a config finding, not for existence"
+    );
+    // Nothing was written. Phase 0's ONLY write is the `LogAppendTime` probe,
+    // and this broker is `CreateTime`; more to the point the existence check
+    // runs BEFORE the probe, so even a `LogAppendTime` broker would not have
+    // created a topic under a name that is already taken.
+    assert!(
+        creator.calls.lock().unwrap().is_empty(),
+        "a refused plan creates nothing: {:?}",
+        creator.calls.lock().unwrap()
+    );
+    assert!(
+        deleter.calls.lock().unwrap().is_empty(),
+        "and deletes nothing: {:?}",
+        deleter.calls.lock().unwrap()
+    );
+}
+
+/// The same refusal on a `LogAppendTime` broker, which is the case that would
+/// otherwise WRITE: the probe creates the first mapped target name, and it may
+/// only do that to a name phase 0 has just proved absent. Ordering, pinned.
+#[test]
+fn the_existence_check_runs_before_the_logappendtime_probe_writes() {
+    let spec = a_recent_spec();
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "LogAppendTime")])
+        // `drill-orders` is the FIRST mapped target, i.e. exactly the name the
+        // probe would create.
+        .already_has("drill-orders", 3);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+
+    let m = guard_message(
+        phase0_admit::run(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &reader,
+            &creator,
+            &deleter,
+        )
+        .expect_err("refused"),
+    );
+    assert!(m.contains("`drill-orders`"), "{m:?}");
+    assert!(
+        creator.calls.lock().unwrap().is_empty(),
+        "the probe must not create a topic that already exists — it would then delete somebody \
+         else's topic on the way out: {:?}",
+        creator.calls.lock().unwrap()
+    );
+    assert!(
+        deleter.calls.lock().unwrap().is_empty(),
+        "and above all it must not DELETE it: {:?}",
+        deleter.calls.lock().unwrap()
+    );
+}
+
+/// **Review finding 1(b).** `topics_created` names only topics THIS RUN
+/// created, so `configs_set`'s "as applied" is true of every one of them.
+///
+/// Two halves, and the second is the one that used to be false: a broker that
+/// answers `TopicAlreadyExists` for a target is `DrillError::Operational`
+/// (exit 1) and that name does NOT enter `topics_created`. The old code
+/// warned, continued, and pushed the name — so
+/// `Restore.status.topicPreflight` claimed `retention.ms=-1` over a topic that
+/// kept whatever retention it had.
+#[test]
+fn topics_created_names_only_the_topics_this_run_created() {
+    let spec = a_recent_spec();
+    let facts = facts_for(&[("orders", 3), ("payments", 1)]);
+
+    // The passing path: every name in `topics_created` is a name the creator
+    // was asked for and confirmed, and `configs_set` is the pinned pair.
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "CreateTime")]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("admitted");
+    let mut preflight = admitted.topic_preflight.clone();
+    phase0_admit::create_target_topics(
+        &creator,
+        &admitted.topic_mapping,
+        &facts,
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect("created");
+    let asked_for: Vec<String> = creator
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    assert_eq!(preflight.topics_created, asked_for);
+    for name in &preflight.topics_created {
+        let spec_for_name = creator
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| &s.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} is in topics_created but was never created"));
+        assert_eq!(
+            spec_for_name.configs,
+            pinned(),
+            "configs_set claims this pair was applied to {name}"
+        );
+    }
+    assert_eq!(preflight.configs_set, pinned());
+
+    // The racing path: admitted, then the target gains one of the names before
+    // the creation step reaches it.
+    let racing = CreatorThatFindsOneTopicPresent {
+        calls: Mutex::new(Vec::new()),
+        present: "drill-payments".to_string(),
+    };
+    let mut preflight = admitted.topic_preflight.clone();
+    let e = phase0_admit::create_target_topics(
+        &racing,
+        &admitted.topic_mapping,
+        &facts,
+        spec.target.default_replication_factor,
+        &mut preflight,
+    )
+    .expect_err("a target topic that appeared after admission is not silently reused");
+    assert_eq!(
+        e.exit_code(),
+        ExitCode::Operational,
+        "by here phases 0-5 have run, so Global Constraint 11 does not allow exit 3: {e:?}"
+    );
+    let DrillError::Operational(m) = e else {
+        panic!("expected an operational failure")
+    };
+    assert!(m.contains("drill-payments"), "{m:?}");
+    assert!(
+        !preflight
+            .topics_created
+            .contains(&"drill-payments".to_string()),
+        "a topic this run did not create must never reach topics_created: {:?}",
+        preflight.topics_created
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review finding 2 — the phase order, in process.
+// ---------------------------------------------------------------------------
+
+/// **Review finding 2.** The creation step runs AFTER phase 5's verdict, and
+/// that ordering was pinned only behind Docker
+/// (`e2e/tests/full_drill.rs::a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`,
+/// which asserts `!topic_exists("drill-orders")`). The whole default suite
+/// stayed green with the call moved before the `Verdict::Block` branch.
+///
+/// This is that assertion in process: a drill whose phase-5 preflight BLOCKS
+/// created nothing on the target, and a drill that passes created the mapped
+/// target — so the test fails both for a creation step moved earlier and for
+/// one deleted altogether.
+#[test]
+fn a_blocked_preflight_creates_no_target_topic() {
+    let blocked = fixtures::orchestrator_fixture(fixtures::Drill::BlocksAtPreflight);
+    let e = logweir::drill::execute_with(&blocked.args, &blocked.run_id, &blocked.ctx)
+        .expect_err("a blocked preflight is not a pass");
+    assert_eq!(
+        e.exit_code(),
+        ExitCode::DrillNotPass,
+        "phase 5 blocked, so the run ends in a signed preflight-failed scorecard: {e:?}"
+    );
+    assert!(
+        fixtures::created_topics(&blocked).is_empty(),
+        "a blocked preflight must not have written to the cluster — the creation step belongs \
+         AFTER phase 5's verdict, because the Verdict::Block branch returns with NO teardown on \
+         the ground that this drill created nothing: {:?}",
+        fixtures::created_topics(&blocked)
+    );
+
+    // The control, so the assertion above cannot pass by the creation step
+    // having been removed: the same fixture, passing, DOES create.
+    let passing = fixtures::orchestrator_fixture(fixtures::Drill::Passes);
+    logweir::drill::execute_with(&passing.args, &passing.run_id, &passing.ctx).expect("passes");
+    let created: Vec<String> = fixtures::created_topics(&passing)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(created, vec!["drill-orders".to_string()]);
 }

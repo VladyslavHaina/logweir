@@ -996,9 +996,17 @@ pub struct FixtureClient {
     pub configs: BTreeMap<String, BTreeMap<String, String>>,
     pub records: BTreeMap<String, Vec<ConsumedRecord>>,
     pub deleted: std::sync::Mutex<Vec<String>>,
-    /// Every `NewTopicSpec` phase 0's creation step handed to `TopicCreator`,
+    /// Every `NewTopicSpec` the drill's creation step handed to `TopicCreator`,
     /// in order (Task 8, guard **G-TS**).
-    pub created: std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>,
+    ///
+    /// `Arc`, not a bare `Mutex`, because the client is moved into
+    /// `Ctx::client` behind `Box<dyn TargetClient>` and is unreachable from a
+    /// test afterwards — the same reason `FixtureEngine::fingerprint_calls` is
+    /// shared. `fixtures::created_topics` reads it back, and
+    /// `topic_preflight.rs::a_blocked_preflight_creates_no_target_topic` is
+    /// what needs it: the ORDER of the creation step against phase 5's verdict
+    /// is otherwise pinned only behind Docker (Task 8 review, finding 2).
+    pub created: std::sync::Arc<std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>>,
     /// Topic names whose deletion the broker refuses, and the error string it
     /// refuses with. Empty for every shape but `Drill::LeavesATopicBehind`, so
     /// every other fixture drill tears down exactly as it always did.
@@ -1009,8 +1017,24 @@ impl ClusterReader for FixtureClient {
     fn cluster_id(&self) -> Result<String, KafkaError> {
         Ok(self.cluster_id.clone())
     }
+    /// The topics this target STARTED with, plus every topic the drill has
+    /// created so far (Task 8, guard **G-TS**).
+    ///
+    /// The second half is not decoration. Phase 0 refuses a plan whose mapped
+    /// target topics already exist (spec §6.1), so a fixture target that lists
+    /// `drill-orders` from the start is a target every fixture drill is now
+    /// refused against. But a double that went on claiming the topic does not
+    /// exist *after* Logweir created it would be lying in the other direction,
+    /// and phase 7 and phase 9 both read the target after creation. So the
+    /// answer is the honest one: absent at phase 0, present from phase 6.
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(self.topics.clone())
+        let mut out = self.topics.clone();
+        for spec in self.created.lock().unwrap().iter() {
+            if !out.iter().any(|t| t.name == spec.name) {
+                out.push(TopicMeta::new(&spec.name, spec.num_partitions));
+            }
+        }
+        Ok(out)
     }
     fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
         Ok(self.end_offsets.get(topic).cloned().unwrap_or_default())
@@ -1099,6 +1123,10 @@ pub struct OrchestratorFixture {
     /// Shared with the `FixtureEngine` inside `ctx`, which is otherwise
     /// unreachable behind `Box<dyn DataEngine>`.
     pub fingerprint_calls: std::sync::Arc<std::sync::Mutex<Vec<SampleSelection>>>,
+    /// Shared with the `FixtureClient` inside `ctx`, which is otherwise
+    /// unreachable behind `Box<dyn TargetClient>` — every `NewTopicSpec` the
+    /// drill's creation step asked for, in order (Task 8, guard **G-TS**).
+    pub created_topics: std::sync::Arc<std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -1232,10 +1260,13 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     };
     let client = FixtureClient {
         cluster_id: FIXTURE_CLUSTER_ID.into(),
-        topics: vec![
-            TopicMeta::new(FIXTURE_MARKER_TOPIC, 1),
-            TopicMeta::new("drill-orders", 1),
-        ],
+        // The MARKER only. `drill-orders` was here until Task 8's fix round 1:
+        // phase 0 refuses a plan whose mapped target topics already exist
+        // (spec §6.1), so a target that starts with `drill-orders` present is
+        // refused at phase 0 and no fixture drill would reach phase 1. It
+        // appears in `list_topics` from the moment the drill creates it, which
+        // is what phases 7 and 9 read.
+        topics: vec![TopicMeta::new(FIXTURE_MARKER_TOPIC, 1)],
         end_offsets: [("drill-orders".to_string(), vec![(0, restored_hi)])]
             .into_iter()
             .collect(),
@@ -1249,7 +1280,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             .into_iter()
             .collect(),
         deleted: std::sync::Mutex::new(Vec::new()),
-        created: std::sync::Mutex::new(Vec::new()),
+        created: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         // T0-11. The one shape whose broker refuses a deletion; every other
         // shape gets an empty map and the deleter it always had.
         refuses_deletion_of: if shape == Drill::LeavesATopicBehind {
@@ -1271,6 +1302,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     let out = dir.path().join("scorecard.json");
     let metrics = dir.path().join("logweir.prom");
     let fingerprint_calls = engine.fingerprint_calls.clone();
+    let created_topics = client.created.clone();
     OrchestratorFixture {
         args: logweir::drill::RunArgs {
             spec: spec_path,
@@ -1296,6 +1328,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         out,
         metrics,
         fingerprint_calls,
+        created_topics,
         _dir: dir,
     }
 }
@@ -1306,4 +1339,14 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
 /// `FixtureEngine` reachable, which is why `orchestrator_fixture` holds one.
 pub fn fingerprint_calls(f: &OrchestratorFixture) -> Vec<SampleSelection> {
     f.fingerprint_calls.lock().unwrap().clone()
+}
+
+/// Every `NewTopicSpec` the drill's creation step handed to the target client,
+/// in order, so a test can assert WHEN in the phase sequence it ran — an empty
+/// list after a run that ended at phase 5 is the assertion that creation
+/// happens after phase 5's verdict (Task 8, guard **G-TS**). Reaches through
+/// `Ctx::client`'s trait object the same way `fingerprint_calls` reaches
+/// through `Ctx::engine`'s.
+pub fn created_topics(f: &OrchestratorFixture) -> Vec<logweir_kafka::reader::NewTopicSpec> {
+    f.created_topics.lock().unwrap().clone()
 }

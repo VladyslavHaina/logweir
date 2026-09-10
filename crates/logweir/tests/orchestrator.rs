@@ -833,12 +833,29 @@ fn each_phases_result_reaches_the_signed_document() {
     assert_eq!(sc.source.backup_id, "backup-2026-08-30T02:00:00Z");
     assert!(!sc.source.manifest_sha256.is_empty());
     assert!(!sc.source.captured_by_logweir, "phase -1 is Task 24's");
-    // 3 — the diff
-    assert_eq!(sc.target_diff.collisions.len(), 1);
+    // 3 — the diff.
+    //
+    // NO collision, and that is now a property rather than an accident: phase
+    // 0 REFUSES a plan whose mapped target topics already exist (spec §6.1,
+    // `phase0_admit::run`), so a drill that reaches phase 3 at all found the
+    // scratch namespace empty. The fixture target lists the marker only for
+    // exactly that reason. `phase3_diff`'s collision path keeps its own
+    // coverage in `tests/phases_2_4.rs`, which drives the phase directly, and
+    // the refusal has its own row in
+    // `tests/topic_preflight.rs::a_mapped_target_topic_that_already_exists_is_a_guard_refusal_naming_it`.
     assert!(
-        sc.target_diff.collisions[0].starts_with("drill-orders: 1 partition(s), 25 record(s)"),
-        "the diff must report what it actually READ off the target: {:?}",
-        sc.target_diff.collisions[0]
+        sc.target_diff.collisions.is_empty(),
+        "a target topic that already existed would have been refused at phase 0: {:?}",
+        sc.target_diff.collisions
+    );
+    // What the diff DID read off the target reaches the document as the
+    // absent/would-create pair, at the manifest's partition count — the same
+    // count the creation step then uses.
+    assert_eq!(sc.target_diff.absent, vec!["drill-orders".to_string()]);
+    assert_eq!(
+        sc.target_diff.would_create,
+        vec![("drill-orders".to_string(), 1)],
+        "the diff must report what it actually READ off the target"
     );
     assert_eq!(sc.target_diff.level, "full");
     // 5 — the lever readback

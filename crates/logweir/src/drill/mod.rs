@@ -1128,11 +1128,12 @@ pub fn execute_with_outcome(
         let signed = sign_and_publish(&mut sc, args, run_id, c)?;
         // NO teardown here, deliberately, and the asymmetry with the phase-6
         // branch below is the point: a blocked preflight means `restore` never
-        // ran, so this drill created NOTHING on the target. The names in
-        // `topic_mapping` may nevertheless exist — phase 3 reports exactly
-        // that as a collision — and deleting a topic this run did not create,
-        // on a plan that never executed, would destroy someone else's data to
-        // tidy up after a drill that touched nothing.
+        // ran, so this drill created NOTHING on the target. Phase 0 now
+        // refuses a plan whose mapped targets already exist (spec §6.1), so
+        // those names should be absent here — but "should be" is not a fact
+        // this branch established, and deleting a topic this run did not
+        // create, on a plan that never executed, would destroy someone else's
+        // data to tidy up after a drill that touched nothing.
         return Err(DrillError::NotPass(Box::new(signed.scorecard)));
     }
 
