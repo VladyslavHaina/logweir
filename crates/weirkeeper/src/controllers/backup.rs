@@ -1237,6 +1237,29 @@ pub fn finished_status_patch(
     status.insert("phase".to_string(), json!(phase));
     status.insert("exitCode".to_string(), json!(exit_code));
     status.insert("exitReason".to_string(), json!(exit_reason));
+    // THE BACKUP ID, AND IT IS THE SAME VALUE THE PLAN ALREADY CARRIES.
+    // `BackupStatus.backup_id` was declared on the CRD from the start and
+    // nothing wrote it; the one producer, [`plan_backup_id`], put the id into
+    // the runner's plan ConfigMap alone (`plan_backup_spec`,
+    // `BackupSpec.backup_id`). So the archive prefix a run wrote under was
+    // readable from the runner's input and from nowhere on the object — and
+    // `ui/pages/restore-wizard.js::initialState` reads `status.backupId` for
+    // `fields.backupSetRef`, which the plan grammar requires, so the restore
+    // wizard threw before its first step rendered on any real cluster. Task 28
+    // found it by walking the page; this is the field it was owed.
+    //
+    // ONE FUNCTION, TWO CONSUMERS, SO THEY CANNOT DISAGREE. `plan_backup_id`
+    // is pure and derives the id from the controller owner's UID and
+    // `spec.slot` — NOT from `metadata.name`, which the archive prefix is not.
+    //
+    // ON THIS PATCH AND NO OTHER. The id names a set in the archive, so it is
+    // written by the patch that speaks for a run that REACHED the archive:
+    // `running_status_patch` speaks before there is one, and
+    // `crashed_status_patch` and `refused_status_patch` speak for runs that
+    // never wrote one at all — a run that produced no archive names no set.
+    // This is the terminal patch for a run that ran, and it is the one the
+    // restore wizard's `Succeeded` rows come from.
+    status.insert("backupId".to_string(), json!(plan_backup_id(backup)));
     // THE EXISTING `Verified` CONDITION IS CARRIED FORWARD, and without this
     // line the controller hot-loops: a merge patch REPLACES arrays, so this
     // one would delete the condition the SECOND patch adds, which would re-add

@@ -1246,6 +1246,47 @@ async fn a_terminal_verified_backup_whose_pod_is_gone_is_not_re_patched() {
     );
 }
 
+/// **`status.backupId` SURVIVES THE VERIFICATION PASS.** Task 28a, defect 1,
+/// third row.
+///
+/// The finished patch writes the id (`controllers::backup::finished_status_patch`);
+/// the verification patch — the SECOND write of the same pass — follows it
+/// milliseconds later. A merge patch leaves a key it does not mention alone,
+/// so the id must still be on the object the API server holds afterwards, and
+/// this asserts that against the object BUILT BY RUNNING BOTH PATCHES rather
+/// than against a hand-written status literal.
+///
+/// It matters because the restore wizard reads `status.backupId` off a
+/// `Succeeded` `Backup`, which is by definition an object that has been
+/// through both patches. A second patch that nulled the field would put the
+/// page back in the error box Task 28 found it in, with every unit test on the
+/// first patch still green.
+///
+/// KILLS: dropping the `backupId` line from `finished_status_patch`; a second
+/// patch that replaced the whole `status` object instead of merging into it.
+#[tokio::test]
+async fn the_backup_id_survives_the_second_status_patch() {
+    let settled = settled_verified_backup().await;
+    let status = settled.status.as_ref().expect("the settled object has one");
+    assert_eq!(
+        status.backup_id.as_deref(),
+        Some(weirkeeper::controllers::backup::plan_backup_id(&backup()).as_str()),
+        "after BOTH of the first pass's patches, applied the way the API server applies them, \
+         the object still carries the archive's backup id. Got {:?}",
+        status.backup_id
+    );
+    assert_eq!(
+        status.backup_id.as_deref(),
+        Some(UID),
+        "…and for this fixture — no controller owner — that is the object's own UID"
+    );
+    assert_eq!(
+        status.phase.as_deref(),
+        Some("Succeeded"),
+        "on the object shape the restore wizard actually reads: a terminal, verified `Backup`"
+    );
+}
+
 /// With no evidence credential the controller constructs `None` and every
 /// verification is `NotAttempted` — the controller STARTS, and says so.
 ///

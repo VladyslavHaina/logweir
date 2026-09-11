@@ -22,7 +22,7 @@ use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     reason_for_exit, wire_reason_for_exit, CONDITION_REASONS, CONDITION_TYPES,
     REASON_DRILL_NOT_PASS, REASON_GUARD_REFUSED, REASON_OK, REASON_OPERATIONAL,
-    REASON_SIGNING_OR_LOCK, TERMINAL_STATES,
+    REASON_SIGNING_OR_LOCK, TERMINAL_STATES, TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
 };
 use weirkeeper::controllers::backup::{
     covered_from_receipt, crash_terminal_state, crashed_status_patch, evidence_keys,
@@ -1941,6 +1941,200 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
          cluster cannot be both the source of an archive and one whose topics a drill deletes. \
          Putting the source id there would make every backup exit 3. Got {:?}",
         allowed.allowed_cluster_ids
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `status.backupId` — Task 28a, defect 1
+// ---------------------------------------------------------------------------
+
+/// **THE TERMINAL STATUS CARRIES THE BACKUP ID, AND NO OTHER PATCH DOES.**
+///
+/// `BackupStatus.backup_id` was declared on the CRD from the first draft and
+/// NOTHING WROTE IT. The one producer, `plan_backup_id`, put the id into the
+/// runner's plan ConfigMap alone, so the archive prefix a run wrote under was
+/// readable from the runner's INPUT and from nowhere on the object it belongs
+/// to. Task 28 found it by walking the UI against a live cluster:
+/// `ui/pages/restore-wizard.js::initialState` sets `fields.backupSetRef =
+/// status.backupId`, `renderPlanBytes` refuses a document without one, and the
+/// restore wizard therefore threw before its first step rendered — the page
+/// was an error box on every real cluster, and the walkthrough had to
+/// `kubectl patch --subresource=status` the field in by hand to get past it.
+///
+/// KILLS: dropping the `backupId` line from `finished_status_patch` (arm 1);
+/// computing it from `metadata.name` instead of from `plan_backup_id` (arm 1's
+/// second assertion and arm 3, and `the_status_backup_id_is_the_plan_document_id`
+/// beside it); putting it on the running patch, where no archive exists yet
+/// (arm 2).
+#[tokio::test]
+async fn the_finished_status_patch_carries_the_backup_id() {
+    // ARM 1: the finished pass, through the reconciler, so this is the body
+    // the API server is actually sent and not a builder call.
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+    assert_eq!(
+        statuses.len(),
+        1,
+        "ONE status write per pass (Task 16b); got {statuses:?}"
+    );
+    assert_eq!(
+        statuses[0]["backupId"].as_str(),
+        Some(plan_backup_id(&backup()).as_str()),
+        "the terminal patch carries `backupId`, and it is `plan_backup_id`'s value — the SAME \
+         pure function the runner's plan document is rendered from. Without this the field the \
+         CRD declares is never written by anything and the restore wizard cannot name a backup \
+         set. Got: {}",
+        statuses[0]
+    );
+    assert_eq!(
+        statuses[0]["backupId"].as_str(),
+        Some(UID),
+        "and for this fixture — a `Backup` with no controller owner — that value is the object's \
+         own UID, which is what `plan_backup_id`'s second arm returns"
+    );
+    assert_ne!(
+        statuses[0]["backupId"].as_str(),
+        Some(NAME),
+        "AND IT IS NOT `metadata.name`. The name is `logweir-backup-<schedule>-<slot>`; the \
+         archive prefix is a UID-derived id. A status that named the object instead of the \
+         archive would send every restore looking for a set that is not there"
+    );
+
+    // ARM 2: THE RUNNING PATCH DOES NOT CARRY IT. An id that named a set
+    // before the run had written one would be a promise, not a record.
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the running reconcile succeeds");
+    let running = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+    assert_eq!(running.len(), 1, "the running pass patches once");
+    assert!(
+        running[0].get("backupId").is_none(),
+        "`running_status_patch` carries no `backupId`: the run has not reached the archive yet. \
+         Got {}",
+        running[0]
+    );
+
+    // ARM 3: THE CRASHED AND REFUSED PATCHES DO NOT CARRY IT EITHER — a run
+    // that produced no archive names no set. Reached through the builders,
+    // which is where the absence is decided.
+    let crashed = crashed_status_patch(&backup(), "NoExitCode", NAME, utc(2026, 11, 9, 3, 20));
+    assert!(
+        crashed["status"].get("backupId").is_none(),
+        "`crashed_status_patch` carries no `backupId`; got {crashed}"
+    );
+    let refused = weirkeeper::controllers::backup::refused_status_patch(
+        &backup(),
+        TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
+        "the archive URL is not an object-store location",
+        utc(2026, 11, 9, 3, 20),
+    );
+    assert!(
+        refused["status"].get("backupId").is_none(),
+        "`refused_status_patch` carries no `backupId` either — a run the guard refused never \
+         reached the archive. Got {refused}"
+    );
+
+    // AND THE SCHEDULED SHAPE, where the id is neither the name nor the
+    // object's own UID: `backup_id_for(<controller owner uid>, <slot>)`. This
+    // is the arm a `metadata.name` implementation cannot satisfy by accident.
+    let scheduled = scheduled_backup();
+    let patch = weirkeeper::controllers::backup::finished_status_patch(
+        &scheduled,
+        0,
+        &evidence_keys(&log_body(&i7_tail())),
+        None,
+        None,
+        None,
+        None,
+        utc(2026, 11, 9, 3, 20),
+    );
+    assert_eq!(
+        patch["status"]["backupId"].as_str(),
+        Some(weirkeeper::slot::backup_id_for(SCHEDULE_UID, "20261109-031700").as_str()),
+        "a SCHEDULED `Backup`'s status id is its schedule's UID and its slot — the same value \
+         Task 18 puts on the runner's `--backup-id-override`, and nothing like either \
+         `metadata.name` or the object's own UID. Got {patch}"
+    );
+}
+
+/// **ONE VALUE, TWO CONSUMERS.** The id on the status is byte-identical to the
+/// `backup_id` in the plan document the runner is handed.
+///
+/// This is the coupling the field exists for. The runner writes its archive
+/// under the plan's `backup_id`; the restore wizard resolves a backup set by
+/// the status's `backupId`; if those two strings could differ, the page would
+/// point an approved restore at a prefix nothing was written to — and the
+/// disagreement would only surface at phase 0 of the drill, after an approver
+/// had signed.
+///
+/// Both values are taken from the bytes the reconciler actually SENT: the
+/// `POST`ed ConfigMap of a create pass and the `PATCH`ed status of a finished
+/// pass, over the same fixture object.
+///
+/// KILLS: computing the status id from `metadata.name` (or from anything other
+/// than `plan_backup_id`) — the two sides part and this fails naming both.
+#[tokio::test]
+async fn the_status_backup_id_is_the_plan_document_id() {
+    // The runner's side: the plan ConfigMap, parsed with the CLI's own call.
+    let (_seen, bodies) = create_pass(create_routes(201, existing_plan_config_map(UID))).await;
+    let cm = posted_config_map(&bodies);
+    let yaml_text = cm["data"]["backup.yaml"]
+        .as_str()
+        .expect("backup.yaml is a string");
+    let spec: logweir_core::spec::BackupSpec = serde_yaml::from_str(yaml_text)
+        .unwrap_or_else(|e| panic!("the rendered backup.yaml does not parse: {e}\n{yaml_text}"));
+
+    // The object's side: the terminal status patch.
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+
+    assert_eq!(
+        statuses[0]["backupId"].as_str(),
+        Some(spec.backup_id.as_str()),
+        "`status.backupId` and the plan document's `backup_id` are ONE value from ONE function. \
+         status: {:?}; plan: {:?}",
+        statuses[0]["backupId"],
+        spec.backup_id
+    );
+    assert!(
+        !spec.backup_id.is_empty(),
+        "…and it is not the empty string on both sides, which would satisfy the equality above \
+         while naming nothing"
     );
 }
 
