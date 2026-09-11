@@ -54,23 +54,43 @@ fn read(rel: &str) -> String {
 /// the brief names — replace the fixed `T` with a clock read — and this test is
 /// what kills it.
 ///
-/// The `Utc::now` spelling is the one that would appear: `e2e/tests/
-/// pitr_boundary.rs` already imports `chrono` transitively through the harness,
-/// and `harness::rfc3339` is the only other place in that suite that renders an
-/// instant. The file's own `SystemTime::now()` is deliberately NOT forbidden
-/// here — it is the `backup_id` nonce, it reaches no assertion, and a fresh
-/// archive prefix per run is required (the engine's `backup` does not
-/// accumulate into an existing prefix).
+/// # Why the DECLARATION and not the literal
+///
+/// Asserting that the file merely *contains* `1_760_000_000_000` is not an
+/// oracle: the literal survives in a doc comment, so `T` can be derived from a
+/// clock — `SystemTime::now()`, say, which this file cannot forbid because
+/// `pitr_boundary.rs` needs it for the `backup_id` nonce — while both needles
+/// still pass. That mutant was run and it SURVIVED (Task 11 review, mutant
+/// M6b, 2 passed, rc 0). The needle is therefore the declaration line itself,
+/// copied byte-for-byte out of `pitr_boundary.rs`: no clock read can be
+/// spelled on the right-hand side of `const T: i64 = 1_760_000_000_000;`,
+/// because a `const` is evaluated at compile time and `SystemTime::now()` is
+/// not a `const fn`.
+///
+/// The one remaining evasion — keep the declaration, add a clock-reading
+/// helper, and repoint every *use* at it — leaves `T` unused, and this
+/// workspace builds its tests under `-D warnings`, so `dead_code` fails the
+/// build before this test is reached.
+///
+/// The `Utc::now` needle stays: it is the spelling a clock read would most
+/// likely take (`pitr_boundary.rs` already has `chrono` through the harness,
+/// and `harness::rfc3339` is the only other place in that suite that renders
+/// an instant), and it also covers the fixture's other instants —
+/// `PIT_RFC3339` and the two 1 ms neighbours — which are literals for the same
+/// reason `T` is.
 #[test]
 fn pitr_fixture_uses_a_fixed_epoch() {
     const FIXTURE: &str = "e2e/tests/pitr_boundary.rs";
+    /// The declaration as `pitr_boundary.rs` spells it, copied from the file.
+    const DECLARATION: &str = "const T: i64 = 1_760_000_000_000;";
     let src = read(FIXTURE);
 
     assert!(
-        src.contains("1_760_000_000_000"),
-        "{FIXTURE} must state its point in time as the fixed literal 1_760_000_000_000 \
-         (2025-10-09T08:53:20Z); a boundary fixture whose boundary moves proves nothing \
-         reproducible"
+        src.contains(DECLARATION),
+        "{FIXTURE} must DECLARE its point in time as `{DECLARATION}` \
+         (2025-10-09T08:53:20Z), spelled exactly so. The literal appearing somewhere in the \
+         file is not enough — it survives in a comment while `T` is derived from a clock — \
+         and a boundary fixture whose boundary moves proves nothing reproducible"
     );
     assert!(
         !src.contains("Utc::now()"),
