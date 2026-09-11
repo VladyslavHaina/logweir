@@ -20,7 +20,7 @@ import { mountSchedules } from "./pages/schedules.js";
 import { mountBackupDetail, mountBackups } from "./pages/backups.js";
 import { mountHistory, mountRestoreDetail } from "./pages/history.js";
 import { mountRestoreWizard } from "./pages/restore-wizard.js";
-import { mountApprovals } from "./pages/approvals.js";
+import { approvalRouteParams, mountApprovals } from "./pages/approvals.js";
 import { mountKeys } from "./pages/keys.js";
 
 // The seven routes, in navigation order. The hash is the whole route.
@@ -53,7 +53,14 @@ const DEFAULT_NAMESPACE = "default";
  *  three values are where `Approval.spec.subjectRef` and `planHash` come from:
  *  the page is forbidden from parsing the two approval documents, so the hash
  *  cannot be lifted out of `approval.json` either, and the create form reads
- *  the ROUTE and never the bytes. */
+ *  the ROUTE and never the bytes.
+ *
+ *  THAT HAND-OFF IS NOT MADE HERE. `pages/approvals.js` exports
+ *  `approvalRouteParams(hash)` and the approvals branch below calls it, because
+ *  this module cannot be imported under `node --test` -- it touches `window` at
+ *  module scope -- and the three values above are worth a test that can
+ *  actually run. This function keeps `params` as the generic bag every route
+ *  can read. */
 export function parseHash(hash) {
   const text = typeof hash === "string" ? hash : "";
   const question = text.indexOf("?");
@@ -166,7 +173,8 @@ function view(route) {
 }
 
 function render() {
-  const here = parseHash(window.location.hash);
+  const hash = window.location.hash;
+  const here = parseHash(hash);
   const current = routeFor(here.route) || routeFor(DEFAULT_HASH);
   const header = document.getElementById("nav-slot");
   const main = document.getElementById("view-slot");
@@ -186,18 +194,15 @@ function render() {
       // The approvals page reads `subject`, `hash` and `name` off the hash the
       // wizard navigated to. They are route parameters and never values parsed
       // out of the two approval documents.
+      //
+      // THE EXTRACTION IS THE PAGE MODULE'S OWN, and deliberately not written
+      // out here. This file touches `window` at module scope and so cannot be
+      // imported under `node --test`; an extraction written inline would be a
+      // hop no test in either language could reach, and swapping two of these
+      // three values left the whole suite green. `approvalRouteParams` is a
+      // pure function of the hash string, and the suite calls it.
       replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
-      current.mount(
-        main,
-        here.ns,
-        {
-          ns: here.ns,
-          subject: here.params.subject || "",
-          hash: here.params.hash || "",
-          name: here.params.name || "",
-        },
-        parseFragment,
-      );
+      current.mount(main, here.ns, approvalRouteParams(hash), parseFragment);
     } else if (typeof current.mount === "function") {
       replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
       current.mount(main, here.ns, parseFragment);

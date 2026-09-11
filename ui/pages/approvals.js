@@ -48,11 +48,62 @@ import { itemsOf } from "./clusters.js";
 
 const PLURAL = "approvals";
 
+/** The namespace a hash that names none means. The same default `app.js`
+ *  carries, because the two read the same hash. */
+const DEFAULT_NAMESPACE = "default";
+
 /** The one kind this form may name. `Switchover` is tag 2 and is not in the
  *  CRD's enum: the subject kind is part of the bytes an approval binds, and
  *  without it an approved restore would double as "a valid signature by a
  *  rostered key exists in this namespace". */
 export const SUBJECT_KIND = "Restore";
+
+/** The three values the wizard hands this page, read out of the hash it
+ *  navigated to: `#/approvals?subject=<restore>&hash=<planHash>&name=<approval>`
+ *  plus the optional `ns`.
+ *
+ *  WHY THE EXTRACTION LIVES HERE AND NOT IN THE ROUTER. These three are where
+ *  `Approval.spec.subjectRef.name`, `spec.planHash` and `metadata.name` come
+ *  from -- this page is forbidden from parsing the two approval documents, so
+ *  none of them can be recovered from the bytes if the hop delivers them
+ *  swapped or empty. It is therefore the most consequential hand-off in the
+ *  application and it was, until this function existed, the only one no test in
+ *  either language could reach: `app.js` touches `window` at module scope and
+ *  cannot be imported under `node --test` (it fails with
+ *  `ReferenceError: window is not defined`), so an extraction written inline in
+ *  the router was unreachable by construction. Swapping `subject` and `name`
+ *  there left the whole suite green. A pure function of the hash string can be
+ *  called from a test, so this is one, and `app.js` calls it.
+ *
+ *  An absent parameter is the empty string and never `undefined`, so the form
+ *  renders an empty control rather than the word "undefined", and a blanked
+ *  value is visible to an assertion rather than merely falsy. */
+export function approvalRouteParams(hash) {
+  const text = typeof hash === "string" ? hash : "";
+  const route = { ns: DEFAULT_NAMESPACE, subject: "", hash: "", name: "" };
+  const question = text.indexOf("?");
+  if (question === -1) {
+    return route;
+  }
+  for (const pair of text.slice(question + 1).split("&")) {
+    const equals = pair.indexOf("=");
+    if (equals === -1) {
+      continue;
+    }
+    const key = pair.slice(0, equals);
+    const value = decodeURIComponent(pair.slice(equals + 1)).trim();
+    if (key === "subject") {
+      route.subject = value;
+    } else if (key === "hash") {
+      route.hash = value;
+    } else if (key === "name") {
+      route.name = value;
+    } else if (key === "ns" && value.length > 0) {
+      route.ns = value;
+    }
+  }
+  return route;
+}
 
 const API = { create: create, list: list };
 

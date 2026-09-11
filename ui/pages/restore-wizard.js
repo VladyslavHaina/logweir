@@ -91,6 +91,7 @@ export function renderArchiveStep(state) {
       cell(((cluster.spec || {}).bootstrapServers || []).join(", ")),
       cell(status.clusterId),
       cell(archiveFor(s, meta.name)),
+      cell(archiveSecretFor(s, meta.name)),
     ];
   });
   return (
@@ -98,9 +99,45 @@ export function renderArchiveStep(state) {
     "<p class=\"blurb\">The source cluster this restore reads an archive of. The archives " +
     "below were read from this namespace's Backup objects: this page holds no bucket " +
     "credential and lists no object storage.</p>" +
-    table(["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "ARCHIVE"], rows) +
+    table(
+      ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "ARCHIVE", "ARCHIVE CREDENTIAL"],
+      rows,
+    ) +
+    renderArchiveCredentialField(s) +
     renderStoreFields(s) +
     "</section>"
+  );
+}
+
+/** The NAME of the Secret the runner reads the archive with -- never a value.
+ *
+ *  `ArchiveRef` is `{url, secretRef}` and both halves belong to the `Restore`
+ *  this wizard creates: `spec.sourceArchive.url` says where the archive is and
+ *  `spec.sourceArchive.secretRef.name` says what reaches it. The controller
+ *  injects the object-store credential into the runner Job ONLY when that
+ *  second half is present, so a `Restore` submitted without it is admitted by
+ *  the API server -- the field is optional in the CRD -- and then fails at the
+ *  ARCHIVE rather than at admission: the Job starts, reaches for the first
+ *  object, and cannot read it.
+ *
+ *  Prefilled from the Backup object's own archive reference, which is where
+ *  this page read the URL beside it. Blank when that archive names none, which
+ *  is an archive reached anonymously or by an instance role -- a real
+ *  configuration, and the reason this is an input and not a refusal. */
+export function renderArchiveCredentialField(state) {
+  const s = state || {};
+  const name = typeof s.archiveSecretName === "string" ? s.archiveSecretName : "";
+  return (
+    "<h4>The credential that reaches that archive</h4>" +
+    "<label for=\"archive-secret\">ARCHIVE CREDENTIAL (Secret name)</label>" +
+    "<input id=\"archive-secret\" name=\"archiveSecret\" value=\"" + esc(name) + "\">" +
+    "<p class=\"note\">The runner reads the archive with this credential: weirkeeper mounts " +
+    "the named Secret's keys into the runner Job as its object-store credential, and does so " +
+    "only when spec.sourceArchive.secretRef is set. A Restore created without it is " +
+    "ADMITTED and then fails at the archive, not at admission -- the field is optional in " +
+    "the CRD, so nothing refuses it until the Job cannot read an object. Leave it blank only " +
+    "for an archive reached anonymously or by an instance role. This page shows and sends " +
+    "the NAME; it never reads the Secret.</p>"
   );
 }
 
@@ -391,12 +428,27 @@ export async function preparePlan(state) {
  *  `spec.approvalRef.name` is the minted approval name, which DOES NOT EXIST
  *  YET -- the reconciler requeues at 30 s on `ApprovalNotVerified` until it
  *  does (interface I19). `spec.planBytes` is the string from `prepared`,
- *  unchanged. */
+ *  unchanged.
+ *
+ *  `spec.sourceArchive` is BOTH HALVES of `ArchiveRef`: the URL, and the name
+ *  of the Secret the runner reads the archive with. The second is what makes
+ *  the first usable -- the controller injects the object-store credential into
+ *  the runner Job only when `secretRef` is set -- and an object that omitted it
+ *  is accepted by the API server and fails later, at the archive.
+ *
+ *  THE KEY IS ABSENT AND NEVER `null` WHEN THERE IS NO NAME. `secretRef` is an
+ *  OBJECT in the CRD schema, and `status` and `spec` are both structural: a
+ *  literal `null` is a type error the API server reports as a 422 over a field
+ *  the operator deliberately left blank. */
 export function restoreBody(state, prepared) {
   const s = state || {};
   const p = prepared || {};
   const fields = s.fields || {};
   const target = fields.target || {};
+  const sourceArchive = { url: s.archiveUrl };
+  if (typeof s.archiveSecretName === "string" && s.archiveSecretName.length > 0) {
+    sourceArchive.secretRef = { name: s.archiveSecretName };
+  }
   return {
     apiVersion: "logweir.dev/v1alpha1",
     kind: "Restore",
@@ -404,7 +456,7 @@ export function restoreBody(state, prepared) {
     spec: {
       planBytes: p.bytes,
       approvalRef: { name: p.approvalName },
-      sourceArchive: { url: s.archiveUrl },
+      sourceArchive: sourceArchive,
       backupSetRef: fields.backupSetRef,
       pointInTime: fields.pointInTime,
       target: {
@@ -456,6 +508,19 @@ function archiveFor(state, clusterName) {
     const spec = backup.spec || {};
     if (((spec.sourceRef || {}).name) === clusterName) {
       return (spec.archive || {}).url;
+    }
+  }
+  return null;
+}
+
+/** The name beside the URL above, off the SAME archive reference. `null` when
+ *  that archive names no Secret, which the table renders as an empty cell. */
+function archiveSecretFor(state, clusterName) {
+  for (const backup of itemsOf(state.backups)) {
+    const spec = backup.spec || {};
+    if (((spec.sourceRef || {}).name) === clusterName) {
+      const secret = ((spec.archive || {}).secretRef) || {};
+      return typeof secret.name === "string" ? secret.name : null;
     }
   }
   return null;
@@ -565,7 +630,13 @@ export function initialState(ns, clusters, backups) {
   const status = (newest || {}).status || {};
   const covered = status.windowCovered || {};
   const pointInTime = rfc3339(covered.toMs);
-  const archiveUrl = (spec.archive || {}).url;
+  const archive = spec.archive || {};
+  const archiveUrl = archive.url;
+  // BOTH HALVES OF THE ARCHIVE REFERENCE, FROM THE SAME OBJECT. A URL taken
+  // from one Backup and a credential taken from another would be two archives
+  // and one name for them.
+  const archiveSecretName =
+    typeof ((archive.secretRef || {}).name) === "string" ? archive.secretRef.name : "";
   const target = firstTarget(clusters);
   const store = { region: "", endpoint: "", pathStyle: false, allowHttp: false };
   return {
@@ -573,6 +644,7 @@ export function initialState(ns, clusters, backups) {
     clusters: clusters,
     backups: backups,
     archiveUrl: archiveUrl,
+    archiveSecretName: archiveSecretName,
     evidenceBucket: "logweir-evidence",
     targetClusterName: ((target || {}).metadata || {}).name,
     editing: null,
@@ -641,6 +713,7 @@ function wire(node, state, parse, api) {
   const region = node.querySelector("#store-region");
   const pathStyle = node.querySelector("#store-pathStyle");
   const evidenceBucket = node.querySelector("#evidence-bucket");
+  const archiveSecret = node.querySelector("#archive-secret");
   const refresh = async () => {
     if (point !== null) {
       state.fields.pointInTime = valueOf(point);
@@ -675,10 +748,27 @@ function wire(node, state, parse, api) {
       state.fields.evidence.bucket = valueOf(evidenceBucket);
       state.evidenceBucket = state.fields.evidence.bucket;
     }
+    // THE NAME ONLY, AND IT IS NOT A PLAN FIELD. It goes on the `Restore`'s
+    // own spec, beside the archive URL, and never into the bytes an approver
+    // signs: the runner takes the credential from its environment, which the
+    // controller fills from the named Secret.
+    if (archiveSecret !== null) {
+      state.archiveSecretName = valueOf(archiveSecret);
+    }
     replace(node, parse(await renderRestoreWizard(state)));
     wire(node, state, parse, api);
   };
-  for (const field of [point, prefix, mode, cluster, endpoint, region, pathStyle, evidenceBucket]) {
+  for (const field of [
+    point,
+    prefix,
+    mode,
+    cluster,
+    endpoint,
+    region,
+    pathStyle,
+    evidenceBucket,
+    archiveSecret,
+  ]) {
     if (field !== null) {
       field.addEventListener("change", refresh);
     }

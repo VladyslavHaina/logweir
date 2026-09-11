@@ -1523,3 +1523,88 @@ fn the_secure_context_spec_imports_nothing_at_module_scope() {
         "the row's name is what `scripts/check-ui-behaviour.sh` reports"
     );
 }
+
+// -------------------- 24. the behaviour gate runs only the spec files
+
+/// The runner line `scripts/check-ui-behaviour.sh` passes to node, verbatim.
+const RUNNER_GLOB: &str = "'ui/tests/*.spec.js'";
+
+/// The glob it used to pass, and must never pass again.
+const RUNNER_GLOB_TOO_WIDE: &str = "'ui/tests/*.js'";
+
+#[test]
+fn the_behaviour_gate_runs_only_the_spec_files() {
+    // WHY THE SUFFIX IS THE GUARD AND NOT A CONVENTION. `ui/tests/` holds two
+    // kinds of file: `*.spec.js` suites, and TOOLS the gate invokes by name --
+    // `emit-plan.js`, which prints the plan golden on stdout for the `diff -u`
+    // arm. Under `ui/tests/*.js` node executed that tool as a test FILE and
+    // counted it as one passing test, so the gate's zero-count refusal could
+    // never fire: with every `*.spec.js` deleted the suite still reported
+    // `# tests 1` and the gate exited 0. A refusal that cannot reach zero is
+    // the state STANDING RULE 21 calls worse than no guard, because the ledger
+    // records it as closed -- so the narrow glob is what holds Task 26's
+    // refusal, and this arm is what holds the narrow glob.
+    let gate_path = repo_root().join("scripts").join("check-ui-behaviour.sh");
+    let gate = read(&gate_path);
+
+    assert!(
+        gate.contains(RUNNER_GLOB),
+        "{} must pass {RUNNER_GLOB} to `node --test`. Anything wider counts a tool in that \
+         directory as a test and disarms the zero-count refusal below it.",
+        shown(&gate_path)
+    );
+    assert!(
+        !gate.contains(RUNNER_GLOB_TOO_WIDE),
+        "{} still names {RUNNER_GLOB_TOO_WIDE}. That glob matches `ui/tests/emit-plan.js`, \
+         which is a tool and not a suite; node runs it, reports it as one passing test, and \
+         the gate's `# tests 0` refusal is then unreachable by construction.",
+        shown(&gate_path)
+    );
+
+    // AND THE DIRECTORY HAS TO HOLD SOMETHING THE GLOB MATCHES, or the line
+    // above pins a glob over an empty set -- which is the same green-and-empty
+    // state from the other side.
+    let mut specs: Vec<PathBuf> = Vec::new();
+    let mut tools: Vec<PathBuf> = Vec::new();
+    for file in behaviour_suite_files() {
+        let name = match file.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        if name.ends_with(".spec.js") {
+            specs.push(file);
+        } else if name.ends_with(".js") {
+            tools.push(file);
+        }
+    }
+    assert!(
+        !specs.is_empty(),
+        "ui/tests/ holds no *.spec.js at all, so {RUNNER_GLOB} matches nothing and the gate \
+         enumerates nothing"
+    );
+
+    // EVERY NON-SUITE `.js` IN THAT DIRECTORY IS REACHED BY NAME. A tool the
+    // glob no longer runs and nothing else names is dead -- and a SUITE
+    // renamed out of the glob would look exactly like one, which is the way
+    // this fix could be undone without touching the line above.
+    let specs_text: Vec<String> = specs.iter().map(|p| read(p)).collect();
+    let mut orphans: Vec<String> = Vec::new();
+    for tool in &tools {
+        let name = tool
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("the tool's file name is utf-8");
+        let named_by_gate = gate.contains(name);
+        let named_by_suite = specs_text.iter().any(|s| s.contains(name));
+        if !named_by_gate && !named_by_suite {
+            orphans.push(shown(tool));
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "these files under ui/tests/ are neither suites the gate's glob runs nor tools \
+         anything names. A suite renamed out of {RUNNER_GLOB} disappears from every gate in \
+         this repository without a single line of it changing:\n{}",
+        orphans.join("\n")
+    );
+}

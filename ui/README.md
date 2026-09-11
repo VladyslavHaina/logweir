@@ -78,6 +78,26 @@ kubectl --context docker-desktop get restore <name> -o jsonpath='{.spec.planByte
 
 Hash exactly what you downloaded, and approve that file.
 
+### The archive credential, and where a Restore without it fails
+
+Step 1 takes an **ARCHIVE CREDENTIAL (Secret name)**, prefilled from the `Backup`
+object's own archive reference -- the same object this page read the archive URL
+from. It is the name of a Secret in the namespace and nothing else: the page
+shows the name, sends the name, and never reads what is in it.
+
+It is not decoration. `spec.sourceArchive` is `ArchiveRef`, which is a URL **and**
+a credential, and `weirkeeper` mounts the object-store credential into the runner
+Job only when `spec.sourceArchive.secretRef` is set. The field is optional in the
+CRD, so **a Restore created without it is admitted** -- the API server has no
+objection to make -- and then **fails at the archive, not at admission**: the Job
+starts, reaches for the first object, and cannot read it. Leave the field blank
+only for an archive reached anonymously or by an instance role.
+
+The credential is **not** in the plan bytes and naming it does not move the plan
+hash. The runner takes it from its environment, which the controller fills from
+the named Secret; `planBytes` carries only where the archive is, never what
+reaches it.
+
 ### What that costs, said plainly
 
 `kubectl proxy` forwards every API path except pod exec and attach, on the same
@@ -201,7 +221,7 @@ not survive.
 ## Running the tests
 
 ```bash
-node --test 'ui/tests/*.js'
+node --test 'ui/tests/*.spec.js'
 ```
 
 from `logweir/`, with **node >= 20.0.0**. Node is a test runner here and nothing
@@ -211,6 +231,14 @@ the tree it detects these files as ES modules from their syntax.
 On the node shipped with this host (v25.6.1) a **directory** argument to
 `--test` is treated as a file to execute and fails with `Cannot find module`;
 the quoted glob above is the form that works, and node expands it itself.
+
+Only `*.spec.js` is a test. `tests/` also holds **tools** -- `emit-plan.js`
+prints the plan golden on stdout, and `scripts/check-ui-behaviour.sh` invokes it
+by name for the `diff -u` arm. Under the wider glob `ui/tests/*.js` node
+executed that tool as a test file and counted it as one passing test, which
+disarmed the gate's zero-count refusal: with every `*.spec.js` deleted the run
+still reported one test and exited 0. The suffix is what keeps that refusal able
+to refuse.
 
 ## What this page does not do
 

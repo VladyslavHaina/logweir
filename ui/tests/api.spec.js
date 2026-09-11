@@ -2,7 +2,7 @@
 // that every identifier `api.js` builds is relative, and that the write path
 // refuses a kind the page may not write BEFORE it reaches the network.
 //
-// Run with `node --test 'ui/tests/*.js'` from `logweir/`. Node is a test runner here
+// Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`. Node is a test runner here
 // and nothing else: it builds no asset, it fetches no package, and there is no
 // `package.json` for it to read. From Task 26 onward `just lint` runs this
 // directory through `scripts/check-ui-behaviour.sh`.

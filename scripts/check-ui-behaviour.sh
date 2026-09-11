@@ -2,7 +2,7 @@
 # THE UI's BEHAVIOUR GATE. Interface register I24. Joined to `just lint`, after
 # `check-ui-offline.sh`.
 #
-# WHAT THIS RUNS. `ui/tests/*.js` under node's own test runner. The page
+# WHAT THIS RUNS. `ui/tests/*.spec.js` under node's own test runner. The page
 # modules are pure functions from a JSON object to an HTML string -- no DOM, no
 # network, no clock -- so every rule the pages carry is asserted by string
 # containment against a checked-in fixture in the shape the API server returns.
@@ -32,6 +32,15 @@
 # as a module: on this host's node the run dies with `Cannot find module`. The
 # glob is quoted so node does its own matching rather than the shell's, which
 # keeps the line identical whatever directory it is invoked from.
+#
+# AND THE `.spec` HALF OF THE SUFFIX IS LOAD-BEARING TOO. `ui/tests/` also
+# holds TOOLS -- `emit-plan.js`, which prints the plan golden on stdout for the
+# `diff -u` arm below. Under the wider glob `ui/tests/*.js` node executed that
+# tool as a test FILE and counted it as one passing test, so the zero-count
+# refusal further down could never fire: with every `*.spec.js` deleted the run
+# still reported `# tests 1` and exited 0. The suffix is therefore what keeps
+# that refusal able to refuse, and a tool added beside the suite is never
+# mistaken for coverage.
 #
 # AND A GREEN RUN THAT ASSERTED NOTHING IS A FAILURE (plan erratum E21f). A
 # bare `node --test` from the repository root reports `tests 0` and exits 0 --
@@ -74,7 +83,7 @@ LOGWEIR_BIN="${LOGWEIR_BIN:-target/release/logweir}"
 prerequisite: cargo build --release -p logweir." >&2; exit 1; }
 
 set +e
-out="$(LOGWEIR_BIN="$LOGWEIR_BIN" node --test --test-reporter=tap 'ui/tests/*.js' 2>&1)"
+out="$(LOGWEIR_BIN="$LOGWEIR_BIN" node --test --test-reporter=tap 'ui/tests/*.spec.js' 2>&1)"
 rc=$?
 set -e
 printf '%s\n' "$out"
@@ -94,8 +103,8 @@ fi
 if [ "$count" -eq 0 ]; then
   echo "check-ui-behaviour: the suite reported 0 tests. A run that asserted nothing is not a \
 pass -- it is what a moved or mis-globbed ui/tests/ looks like from inside this gate. The \
-argument is the quoted glob 'ui/tests/*.js'; check that the directory and its *.spec.js files \
-are where the gate expects them." >&2
+argument is the quoted glob 'ui/tests/*.spec.js'; check that the directory and its *.spec.js \
+files are where the gate expects them." >&2
   exit 1
 fi
 

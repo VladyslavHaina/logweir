@@ -1,12 +1,18 @@
 // pages.spec.js -- the behaviour arm of the four read-and-create pages.
 //
-// Run with `node --test 'ui/tests/*.js'` from `logweir/`, which is what
+// Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`, which is what
 // `scripts/check-ui-behaviour.sh` runs on every `just lint`. The quoted glob is
 // not decoration: `node --test ui/tests/` executes a DIRECTORY argument as a
 // module on node 22 and later and fails with `Cannot find module`, and a bare
 // `node --test` from the repository root reports `tests 0` and exits 0 -- a
 // green run that asserted nothing. The gate uses the glob AND refuses a run
 // whose reported test count is zero.
+//
+// THE `.spec` SUFFIX IS PART OF THAT REFUSAL. `ui/tests/` also holds the tool
+// `emit-plan.js`, and under the wider glob node ran it as a test file and
+// counted it as one passing test -- so with every `*.spec.js` removed the gate
+// still saw `# tests 1` and exited 0. Only files named `*.spec.js` are tests
+// here; anything else in this directory is a tool the gate invokes by name.
 //
 // WHY THESE ASSERTIONS ARE STRING CONTAINMENT. Every function under test is a
 // pure function from a JSON object to an HTML string: no DOM, no network, no
@@ -64,6 +70,7 @@ import {
   submitRestore,
 } from "../pages/restore-wizard.js";
 import {
+  approvalRouteParams,
   refuseKeyMaterial,
   renderApprovalsPage,
   submitApproval,
@@ -1162,4 +1169,210 @@ test("the_plan_step_shows_the_hash_the_names_the_caveat_and_the_command", async 
   const route = approvalRoute(state, prepared);
   assert.ok(route.startsWith("#/approvals?"), "a hash route and nothing else: " + route);
   assert.ok(route.indexOf("ns=logweir-t27") !== -1);
+});
+
+test("the_approvals_route_values_reach_the_form_in_their_own_positions", () => {
+  // THE HOP FROM THE HASH TO THE FORM, WHICH NOTHING USED TO WATCH. These three
+  // values are `Approval.spec.subjectRef.name`, `spec.planHash` and
+  // `metadata.name`. The page is forbidden from parsing the two approval
+  // documents, so not one of them can be recovered from the bytes if the hop
+  // delivers them swapped or blank -- and the router that performs it cannot be
+  // imported here at all (`ui/app.js` touches `window` at module scope and dies
+  // with `ReferenceError: window is not defined`), so the extraction is
+  // `approvalRouteParams`, exported by the page module itself, and this row is
+  // the guard the hop did not have.
+  const digest = "sha256:" + "ab12cd34".repeat(8);
+  const hash =
+    "#/approvals?subject=restore-1a2b3c4d&hash=" + digest + "&name=approval-1a2b3c4d";
+  assert.match(digest, /^sha256:[0-9a-f]{64}$/);
+
+  const route = approvalRouteParams(hash);
+  // DEEP EQUALITY, NOT THREE CONTAINMENTS. A swap of `subject` and `name` keeps
+  // every value present and only moves it, so the assertion has to name which
+  // key holds which string.
+  assert.deepEqual(
+    route,
+    {
+      ns: "default",
+      subject: "restore-1a2b3c4d",
+      hash: digest,
+      name: "approval-1a2b3c4d",
+    },
+    "the three route values arrive under their own keys, and a hash naming no " +
+      "namespace means the default one",
+  );
+
+  // AND THE FORM PUTS EACH ONE WHERE IT BELONGS. The route object above is
+  // exactly what `app.js` hands `mountApprovals`, so rendering the page from it
+  // is the rest of the same hop.
+  const html = renderApprovalsPage({ items: [] }, route, 0);
+  assert.ok(
+    html.includes(
+      "<input id=\"subject-name\" name=\"subjectName\" value=\"restore-1a2b3c4d\">",
+    ),
+    "SUBJECT NAME carries the RESTORE's name -- the subject of the approval, not the " +
+      "approval's own name; the rendered form was:\n" + html,
+  );
+  assert.ok(
+    html.includes(
+      "<input id=\"plan-hash\" name=\"planHash\" readonly value=\"" + digest + "\">",
+    ),
+    "PLAN HASH carries the route's digest and is READ-ONLY: the value that matters is the " +
+      "one the wizard showed beside the bytes, and the controller recomputes it from the " +
+      "referent's own bytes; the rendered form was:\n" + html,
+  );
+  assert.ok(
+    html.includes("metadata.name is approval-1a2b3c4d,"),
+    "and metadata.name is the minted APPROVAL name; the rendered form was:\n" + html,
+  );
+  // The two names are distinguishable, so the three assertions above really do
+  // separate the positions rather than agreeing on one string.
+  assert.notEqual(route.subject, route.name);
+
+  // The namespace travels in the same hash and nowhere else.
+  assert.equal(approvalRouteParams(hash + "&ns=logweir-t27").ns, "logweir-t27");
+  // A hash with no parameters at all is four empty-ish values and never
+  // `undefined`, so the form renders empty controls rather than the word.
+  assert.deepEqual(approvalRouteParams("#/approvals"), {
+    ns: "default",
+    subject: "",
+    hash: "",
+    name: "",
+  });
+});
+
+test("the_restore_names_the_archive_credential_the_runner_reads_it_with", async () => {
+  // WHY THIS ROW EXISTS. `spec.sourceArchive` is `ArchiveRef` -- a URL AND a
+  // Secret name -- and weirkeeper injects the object-store credential into the
+  // runner Job only when the second half is set. `secretRef` is optional in the
+  // CRD, so a Restore created without it is ADMITTED and fails later, at the
+  // archive, with the Job unable to read a single object. Nothing between this
+  // page and that failure would have noticed.
+
+  // (a) THE ARCHIVE NAMES A SECRET -> the body carries its name, beside the URL.
+  const withSecret = wizardState();
+  assert.equal(
+    withSecret.archiveSecretName,
+    "logweir-s3",
+    "the name is read from the SAME Backup.spec.archive the URL came from",
+  );
+  const api = recordingApi();
+  await submitRestore(withSecret, api);
+  const archive = api.calls[0].body.spec.sourceArchive;
+  assert.equal(
+    archive.url,
+    "s3://kafka-backups/drill-demo",
+    "spec.sourceArchive.url is the archive the Backup names",
+  );
+  assert.equal(
+    (archive.secretRef || {}).name,
+    "logweir-s3",
+    "AND spec.sourceArchive.secretRef.name is the credential that reaches it. Without this " +
+      "the Restore is admitted -- the field is optional -- and the runner Job starts with no " +
+      "object-store credential at all and fails at the archive.",
+  );
+  assert.deepEqual(
+    Object.keys(archive).sort(),
+    ["secretRef", "url"],
+    "both halves of ArchiveRef and nothing else",
+  );
+
+  // (b) THE ARCHIVE NAMES NONE AND THE INPUT IS BLANK -> no key at all, and
+  // never `null`. `secretRef` is an OBJECT in a structural schema: a literal
+  // null is a 422 over a field the operator deliberately left empty.
+  const blank = initialState(
+    "logweir-t27",
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups-nocredential.json"),
+  );
+  assert.equal(blank.archiveSecretName, "", "an archive with no secretRef prefills empty");
+  const blankApi = recordingApi();
+  await submitRestore(blank, blankApi);
+  const blankArchive = blankApi.calls[0].body.spec.sourceArchive;
+  assert.deepEqual(
+    Object.keys(blankArchive),
+    ["url"],
+    "the key is ABSENT, not present and null; the submitted sourceArchive was " +
+      JSON.stringify(blankArchive),
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(blankArchive, "secretRef"),
+    false,
+    "`secretRef: null` would be a type error the API server reports as a 422",
+  );
+
+  // (c) THE OPERATOR TYPES ONE -> that name is what is sent.
+  const typed = initialState(
+    "logweir-t27",
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups-nocredential.json"),
+  );
+  typed.archiveSecretName = "logweir-s3-readonly";
+  const typedApi = recordingApi();
+  await submitRestore(typed, typedApi);
+  assert.equal(
+    typedApi.calls[0].body.spec.sourceArchive.secretRef.name,
+    "logweir-s3-readonly",
+    "the name the operator gave, verbatim",
+  );
+
+  // AND THE PLAN BYTES DO NOT CHANGE. The credential is a `Restore` spec field
+  // and reaches the runner as an environment variable the controller fills from
+  // the Secret; it is not in the document an approver signs, so naming it must
+  // not move the hash the approval binds.
+  const before = await preparePlan(blank);
+  const after = await preparePlan(typed);
+  assert.equal(after.bytes, before.bytes, "the plan document is byte-identical either way");
+  assert.equal(after.hash, before.hash, "so the approval still covers it");
+});
+
+test("the_archive_step_shows_the_credential_name_and_says_what_it_is_for", async () => {
+  const state = wizardState();
+  const rendered = await renderRestoreWizard(state);
+  const text = decode(rendered);
+
+  assert.ok(
+    rendered.includes("<input id=\"archive-secret\" name=\"archiveSecret\" value=\"logweir-s3\">"),
+    "step 1 offers the credential as an input, prefilled from the archive reference",
+  );
+  assert.ok(
+    text.includes("ARCHIVE CREDENTIAL (Secret name)"),
+    "labelled for what it is: a NAME",
+  );
+  assert.ok(
+    text.includes(
+      "The runner reads the archive with this credential: weirkeeper mounts the named " +
+        "Secret's keys into the runner Job as its object-store credential, and does so only " +
+        "when spec.sourceArchive.secretRef is set. A Restore created without it is ADMITTED " +
+        "and then fails at the archive, not at admission",
+    ),
+    "and step 1 says where a Restore without it fails -- at the archive, not at admission",
+  );
+  assert.ok(
+    text.includes("ARCHIVE CREDENTIAL</th>"),
+    "the source-cluster table carries the name beside the archive URL",
+  );
+
+  // THE NAME ONLY. A fixture's Secret carries no value, and this page reads
+  // none: the rendered output names the Secret and nothing that could be in it.
+  assert.equal(
+    rendered.indexOf("access-key"),
+    -1,
+    "no key material, no key NAME inside the Secret, nothing but the Secret's own name",
+  );
+
+  // An archive that names none renders an empty control rather than the word
+  // `undefined`, so a blank field reads as a decision and not as a bug.
+  const blank = await renderRestoreWizard(
+    initialState(
+      "logweir-t27",
+      fixture("wizard-clusters.json"),
+      fixture("wizard-backups-nocredential.json"),
+    ),
+  );
+  assert.ok(
+    blank.includes("<input id=\"archive-secret\" name=\"archiveSecret\" value=\"\">"),
+    "prefilled empty when the archive names no Secret",
+  );
+  assert.equal(blank.indexOf("undefined"), -1);
 });
