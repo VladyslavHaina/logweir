@@ -1956,6 +1956,8 @@ not run against it), and the current pins are
 
 And once more, before this task landed: the re-review of fix round 1 rebuilt the controller image from the fixed source to prove the crashed-path fix live, so `a5aa6dc1…` — built before the fix — was superseded by `d198c8e2…`, and the pins above were moved to it by the controller at landing. Same rule (E19a): a local digest is a measurement of the last build; the pinned files are the truth, this paragraph is history.
 
+And once more again, for Task 28a: the controller now writes `Backup.status.backupId` on the terminal status patch — the field the restore wizard reads and the laptop walkthrough had to `kubectl patch` in by hand — so the controller image was rebuilt from that source (240 s, native `arm64`, the runner image untouched) and `weirkeeper@sha256:d198c8e2…` was superseded by **`weirkeeper@sha256:e6e3384e…`** in `config/manager/deployment.yaml` and `logweir.yaml`.
+
 This section is **not** edited to match, and that is deliberate: it is a
 transcript of commands that were run and the values they printed on the day
 they were run, and rewriting a measurement to agree with a later one destroys
