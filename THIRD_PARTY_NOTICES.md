@@ -33,13 +33,22 @@ attributed in [NOTICE](NOTICE) instead.
 
 ## The copyright line has three sources, and each entry names the one it used
 
-1. **licence file** — a `LICENSE*`, `COPYRIGHT*` or `NOTICE*` file beside the crate's own
-   `Cargo.toml`, first line matching `^\s*Copyright` **and** carrying a `(c)`,
-   `(C)`, `©` or four-digit year. The crate author's own words, always
-   preferred. The extra condition is not fussiness: without it the match hits
-   Apache-2.0's own body text and its `Copyright [yyyy] [name of copyright
-   owner]` placeholder, and every crate shipping `LICENSE-APACHE` is attributed
-   to a fragment of the licence it ships.
+1. **licence file** — the `LICENSE*`, `LICENCE*`, `COPYRIGHT*` and `NOTICE*` files beside
+   the crate's own `Cargo.toml`, and **every** holder notice they carry, in
+   file-name order. An entry with four holders prints four `Copyright` lines:
+   the obligation is plural, and a generator that kept only the first
+   attributed `ring` to "The Go Authors" and lost Brian Smith altogether.
+   Where a crate vendors code, the vendored code's holders appear here beside
+   the crate author's own — they are notices the binary redistributes.
+   A line counts as a notice when it begins `Copyright` (case-SENSITIVELY) and
+   **either** carries a `(c)`, `(C)`, `©` or four-digit year, **or** is
+   followed directly by something shaped like a holder. Both halves earn their
+   keep. Without the first, the match hits Apache-2.0's own body text and its
+   `Copyright [yyyy] [name of copyright owner]` placeholder, and every crate
+   shipping `LICENSE-APACHE` is attributed to a fragment of the licence it
+   ships. Without the second, `Copyright Amazon.com, Inc. or its affiliates.`
+   is not a copyright notice, `aws-lc-sys` is attributed to Google, and
+   `aws-lc-rs` and `utf8_iter` are reported as carrying no notice at all.
 2. **`authors` field** — the manifest's `authors`, used only when arm 1 finds nothing. An
    author is not a copyright holder; the entry says which arm it used so that
    the difference is visible rather than implied.
@@ -52,8 +61,8 @@ attributed in [NOTICE](NOTICE) instead.
 
 | arm | entries |
 |---|---|
-| licence file | 297 |
-| `authors` field | 69 |
+| licence file | 299 |
+| `authors` field | 67 |
 | neither; the fact is stated | 16 |
 | this workspace | 10 |
 
@@ -87,6 +96,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2016 Nicolas Silva
+- Copyright: Copyright (c) 2013 Nicolas Silva
 - Copyright source: licence file
 
 ### anstream@0.6.21
@@ -123,18 +133,21 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2020 Yoshua Wuyts
+- Copyright: Copyright (c) 2020 Yoshua Wuyts
 - Copyright source: licence file
 
 ### async-stream@0.3.6
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2019 Carl Lerche
+- Copyright: Copyright (c) 2018 David Tolnay
 - Copyright source: licence file
 
 ### async-stream-impl@0.3.6
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2019 Carl Lerche
+- Copyright: Copyright (c) 2018 David Tolnay
 - Copyright source: licence file
 
 ### async-trait@0.1.92
@@ -147,6 +160,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### autocfg@1.5.1
@@ -158,13 +172,23 @@ attributed in [NOTICE](NOTICE) instead.
 ### aws-lc-rs@1.18.1
 
 - SPDX: `ISC AND (Apache-2.0 OR ISC)`
-- Copyright: AWS-LibCrypto
-- Copyright source: `authors` field
+- Copyright: Copyright Amazon.com, Inc. or its affiliates.
+- Copyright source: licence file
 
 ### aws-lc-sys@0.45.0
 
 - SPDX: `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)`
+- Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 - Copyright: Copyright (c) 2014-2024 Google Inc.
+- Copyright: Copyright (c) 2025-2026 Google Inc.
+- Copyright: Copyright (c) 1998-2011 The OpenSSL Project. All rights reserved.
+- Copyright: Copyright (c) 1995-1998 Eric Young (eay@cryptsoft.com). All rights reserved.
+- Copyright: Copyright (c) The mlkem-native project authors.
+- Copyright: Copyright (c) The mldsa-native project authors.
+- Copyright: Copyright (c) 2015-2020 the fiat-crypto authors.
+- Copyright: Copyright (C) 2017 - 2025, Stephan Mueller <smueller@chronox.de>.
+- Copyright: Copyright 2008 Google Inc.
+- Copyright: Copyright (c) The Go Authors. All rights reserved.
 - Copyright source: licence file
 
 ### backon@1.6.0
@@ -177,6 +201,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
+- Copyright: Copyright (c) 2022 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### base64@0.22.1
@@ -189,6 +214,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
+- Copyright: Copyright (c) 2021-2025 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### bindgen@0.72.1
@@ -387,6 +413,8 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `BSD-3-Clause`
 - Copyright: Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved.
+- Copyright: Copyright (c) 2016-2021 Henry de Valence. All rights reserved.
+- Copyright: Copyright (c) 2012 The Go Authors. All rights reserved.
 - Copyright source: licence file
 
 ### curve25519-dalek-derive@0.1.1
@@ -429,6 +457,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2017-2025 RustCrypto Developers
+- Copyright: Copyright (c) 2017 Artyom Pavlov
 - Copyright source: licence file
 
 ### displaydoc@0.2.7
@@ -465,12 +494,14 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright 2018-2022 RustCrypto Developers
+- Copyright: Copyright (c) 2018-2022 RustCrypto Developers
 - Copyright source: licence file
 
 ### ed25519@2.2.3
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright 2018-2022 RustCrypto Developers
+- Copyright: Copyright (c) 2018-2023 RustCrypto Developers
 - Copyright source: licence file
 
 ### ed25519-dalek@2.2.0
@@ -555,6 +586,8 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0 OR BSD-1-Clause`
 - Copyright: Copyright 2015-2020 the fiat-crypto authors (see the AUTHORS file)
+- Copyright: Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file)
+- Copyright: Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file).
 - Copyright source: licence file
 
 ### find-msvc-tools@0.1.11
@@ -597,54 +630,63 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-channel@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-core@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-executor@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-io@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-macro@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-sink@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-task@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### futures-util@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 Alex Crichton
+- Copyright: Copyright (c) 2017 The Tokio Authors
 - Copyright source: licence file
 
 ### generic-array@0.14.7
@@ -657,18 +699,21 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2018-2024 The rust-random Project Developers
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### getrandom@0.3.4
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2018-2025 The rust-random Project Developers
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### getrandom@0.4.3
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2018-2026 The rust-random Project Developers
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### glob@0.3.4
@@ -729,6 +774,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2013-2014 The Rust Project Developers.
+- Copyright: Copyright (c) 2015-2020 The rust-hex Developers
 - Copyright source: licence file
 
 ### hmac@0.12.1
@@ -747,12 +793,14 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2016 fengcen
+- Copyright: Copyright (c) 2019 svartalf
 - Copyright source: licence file
 
 ### http@1.5.0
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2017 http-rs authors
+- Copyright: Copyright (c) 2017 http-rs authors
 - Copyright source: licence file
 
 ### http-body@1.1.0
@@ -783,6 +831,8 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016 The humantime Developers
+- Copyright: Copyright (c) 2016 Pyfisch
+- Copyright: Copyright © 2005-2013 Rich Felker
 - Copyright source: licence file
 
 ### hybrid-array@0.4.14
@@ -801,12 +851,15 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2017 Johann Tuffe
+- Copyright: Copyright (c) 2024 Natsuki Ikeguchi
+- Copyright: Copyright (c) 2024 MetalBear Tech LTD
 - Copyright source: licence file
 
 ### hyper-rustls@0.27.9
 
 - SPDX: `Apache-2.0 OR ISC OR MIT`
 - Copyright: Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
+- Copyright: Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
 - Copyright source: licence file
 
 ### hyper-timeout@0.5.2
@@ -825,12 +878,14 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2020 Andrew Straw
+- Copyright: Copyright (c) 2020 Andrew D. Straw
 - Copyright source: licence file
 
 ### iana-time-zone-haiku@0.1.2
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2020 Andrew Straw
+- Copyright: Copyright (c) 2020 Andrew D. Straw
 - Copyright source: licence file
 
 ### icu_collections@2.3.0
@@ -987,6 +1042,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2024 Chance Dinkins
+- Copyright: Copyright (c) 2022 Chance Dinkins
 - Copyright source: licence file
 
 ### k8s-openapi@0.24.0
@@ -1047,6 +1103,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2014 Alex Crichton
+- Copyright: Copyright (c) 2020 Josh Triplett
 - Copyright source: licence file
 
 ### linux-raw-sys@0.12.1
@@ -1137,6 +1194,9 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2016-2026 The RustCrypto Project Developers
+- Copyright: Copyright (c) 2016 Artyom Pavlov
+- Copyright: Copyright (c) 2009-2013 Mozilla Foundation
+- Copyright: Copyright (c) 2006-2009 Graydon Hoare
 - Copyright source: licence file
 
 ### memchr@2.8.3
@@ -1161,6 +1221,10 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Zlib OR Apache-2.0`
 - Copyright: Copyright 2013-2014 RAD Game Tools and Valve Software
+- Copyright: Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
+- Copyright: Copyright (c) 2017 Frommi
+- Copyright: Copyright (c) 2017-2024 oyvindln
+- Copyright: Copyright (c) 2020 Frommi
 - Copyright source: licence file
 
 ### mio@1.2.3
@@ -1185,6 +1249,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2014 Benjamin Sago
+- Copyright: Copyright (c) 2021-2022 The Nushell Project Developers
 - Copyright source: licence file
 
 ### num-traits@0.2.19
@@ -1353,6 +1418,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2019 The CryptoCorrosion Contributors
+- Copyright: Copyright (c) 2019 The CryptoCorrosion Contributors
 - Copyright source: licence file
 
 ### primeorder@0.13.6
@@ -1419,18 +1485,21 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2018 Developers of the Rand project
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### rand@0.9.5
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2018 Developers of the Rand project
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### rand_chacha@0.9.0
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2018 Developers of the Rand project
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### rand_core@0.10.1
@@ -1443,18 +1512,21 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2018 Developers of the Rand project
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### rand_core@0.9.5
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2018 Developers of the Rand project
+- Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
 ### rand_pcg@0.10.2
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2014-2017 Melissa O'Neill and PCG Project contributors
+- Copyright: Copyright 2018 Developers of the Rand project
 - Copyright source: licence file
 
 ### rdkafka@0.36.2
@@ -1497,18 +1569,22 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2016 Sean McArthur
+- Copyright: Copyright (c) 2016-2026 Sean McArthur
 - Copyright source: licence file
 
 ### rfc6979@0.4.0
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright 2018-2022 RustCrypto Developers
+- Copyright: Copyright (c) 2018-2022 RustCrypto Developers
 - Copyright source: licence file
 
 ### ring@0.17.14
 
 - SPDX: `Apache-2.0 AND ISC`
 - Copyright: Copyright (c) 2009 The Go Authors. All rights reserved.
+- Copyright: Copyright 2015 The Chromium Authors. All rights reserved.
+- Copyright: Copyright 2015-2025 Brian Smith.
 - Copyright source: licence file
 
 ### rustc-hash@2.1.3
@@ -1533,18 +1609,21 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `Apache-2.0 OR ISC OR MIT`
 - Copyright: Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
+- Copyright: Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
 - Copyright source: licence file
 
 ### rustls-native-certs@0.8.4
 
 - SPDX: `Apache-2.0 OR ISC OR MIT`
 - Copyright: Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
+- Copyright: Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
 - Copyright source: licence file
 
 ### rustls-pki-types@1.15.1
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2023 Dirkjan Ochtman
+- Copyright: Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
 - Copyright source: licence file
 
 ### rustls-platform-verifier@0.7.0
@@ -1695,12 +1774,16 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2006-2009 Graydon Hoare
+- Copyright: Copyright (c) 2009-2013 Mozilla Foundation
+- Copyright: Copyright (c) 2016 Artyom Pavlov
 - Copyright source: licence file
 
 ### sha2@0.10.9
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2006-2009 Graydon Hoare
+- Copyright: Copyright (c) 2009-2013 Mozilla Foundation
+- Copyright: Copyright (c) 2016 Artyom Pavlov
 - Copyright source: licence file
 
 ### sharded-slab@0.1.7
@@ -1719,12 +1802,14 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2015 Nicholas Allegra (comex).
+- Copyright: Copyright (c) 2015 Nicholas Allegra (comex).
 - Copyright source: licence file
 
 ### shlex@2.0.1
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2015 Nicholas Allegra (comex).
+- Copyright: Copyright (c) 2015 Nicholas Allegra (comex).
 - Copyright source: licence file
 
 ### sigchld@0.2.5
@@ -1815,12 +1900,15 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2015 Danny Guo
+- Copyright: Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
+- Copyright: Copyright (c) 2018 Akash Kurdekar
 - Copyright source: licence file
 
 ### subtle@2.6.1
 
 - SPDX: `BSD-3-Clause`
 - Copyright: Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved.
+- Copyright: Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved.
 - Copyright source: licence file
 
 ### syn@2.0.119
@@ -1899,6 +1987,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0 OR Zlib`
 - Copyright: Copyright 2020 Tomasz "Soveu" Marx
+- Copyright: Copyright (c) 2020 Soveu
 - Copyright source: licence file
 
 ### tokio@1.53.1
@@ -1911,12 +2000,14 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2019 Yoshua Wuyts
+- Copyright: Copyright (c) Tokio Contributors
 - Copyright source: licence file
 
 ### tokio-rustls@0.26.4
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2017 quininer kel
+- Copyright: Copyright (c) 2017 quininer kel
 - Copyright source: licence file
 
 ### tokio-util@0.7.19
@@ -2007,6 +2098,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2018-2023 Sean McArthur
+- Copyright: Copyright (c) 2016 Alex Crichton
 - Copyright source: licence file
 
 ### twox-hash@2.1.4
@@ -2019,6 +2111,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2014 Paho Lurie-Gregg
+- Copyright: Copyright (c) 2014 Paho Lurie-Gregg
 - Copyright source: licence file
 
 ### ucd-trie@0.1.7
@@ -2066,8 +2159,8 @@ attributed in [NOTICE](NOTICE) instead.
 ### utf8_iter@1.0.4
 
 - SPDX: `Apache-2.0 OR MIT`
-- Copyright: Henri Sivonen <hsivonen@hsivonen.fi>
-- Copyright source: `authors` field
+- Copyright: Copyright Mozilla Foundation
+- Copyright source: licence file
 
 ### utf8parse@0.2.2
 
@@ -2163,6 +2256,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright 2023 dAxpeDDa
+- Copyright: Copyright (c) 2023 dAxpeDDa
 - Copyright source: licence file
 
 ### webpki-root-certs@1.0.9
@@ -2337,12 +2431,14 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `BSD-2-Clause OR Apache-2.0 OR MIT`
 - Copyright: Copyright 2023 The Fuchsia Authors
+- Copyright: Copyright 2019 The Fuchsia Authors.
 - Copyright source: licence file
 
 ### zerocopy-derive@0.8.56
 
 - SPDX: `BSD-2-Clause OR Apache-2.0 OR MIT`
 - Copyright: Copyright 2023 The Fuchsia Authors
+- Copyright: Copyright 2019 The Fuchsia Authors.
 - Copyright source: licence file
 
 ### zerofrom@0.1.8
@@ -2409,6 +2505,7 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT/Apache-2.0`
 - Copyright: Copyright (c) 2016-present, Facebook, Inc. All rights reserved.
+- Copyright: Copyright (c) 2016 Alexandre Bury
 - Copyright source: licence file
 
 ---

@@ -127,14 +127,29 @@ The copyright line a redistributed binary owes is not a field cargo carries.
 It was MEASURED across this graph rather than assumed, and three sources
 between them cover it:
 
-  1. a licence file beside the crate's own `Cargo.toml` — `LICENSE*`,
-     `COPYRIGHT*` or `NOTICE*` — carrying a line matching `^\\s*Copyright`.
-     This is the real notice, in the crate author's own words, and it is
-     always preferred.
+  1. the licence files beside the crate's own `Cargo.toml` — `LICENSE*`,
+     `LICENCE*`, `COPYRIGHT*` or `NOTICE*` — and EVERY holder notice they
+     carry, not the first one. These are the real notices and they are always
+     preferred.
   2. failing that, the `authors` field of the crate's manifest. It is not a
      copyright statement and is not presented as one: the entry says which
      arm it came from.
   3. failing both, the STATED FACT that the published crate carries neither.
+
+ARM 1 IS PLURAL, AND THAT IS THE POINT. The obligation is to reproduce the
+notices, and a file that carries four holders owes four lines. An earlier
+draft returned the first matching line of the first matching file, which
+attributed `ring` to "The Go Authors" (its `LICENSE-BoringSSL` sorts before
+`LICENSE-other-bits`, where Brian Smith is) and dropped nine of the eleven
+notices `aws-lc-sys` ships. Forty-one of the arm-1 entries come from a file
+with more than one holder in it. So: every licence-family file, in sorted
+order; every matching line, in file order; exact duplicates removed after
+whitespace normalisation; one `- Copyright:` line per notice.
+
+A crate that VENDORS code carries the vendored code's notices too, and they
+appear here beside the crate author's own — `unicode-ident` ships the Unicode
+data licence, `atomic-waker` and `parking` ship a `LICENSE-THIRD-PARTY`. That
+is not noise: those are notices the binary redistributes.
 
 Arm 3 exists because the alternative was measured and rejected: a generator
 that emits an empty copyright field for the packages that reach it produces a
@@ -149,7 +164,7 @@ third arm fails.
 Workspace members are their own arm and take `NOTICE:2` byte for byte.
 
 DETERMINISM. Entries are sorted by `(name, version)`; licence files beside a
-manifest are considered in sorted order and the FIRST matching line wins; no
+manifest are read in sorted order and their matching lines in file order; no
 timestamp, no host path and no absolute path is ever emitted. Two runs on two
 machines with the same `Cargo.lock` produce the same bytes, which is what
 makes the `diff -u` acceptance line mean something.
@@ -171,13 +186,84 @@ import sys
 # out of a licence file is worse than one that says nothing, because it reads
 # as an answer.
 #
-# So: case-SENSITIVE, and the line must carry the mark of a real notice — a
-# `(c)` / `(C)` / `©` marker or a four-digit year immediately after the word,
-# with only punctuation between. That one rule also rejects Apache-2.0's
-# appendix placeholder `Copyright [yyyy] [name of copyright owner]`, which is
-# the other line that would otherwise win in every crate that ships
-# `LICENSE-APACHE` alphabetically before `LICENSE-MIT`.
-COPYRIGHT_RE = re.compile(r"^\s*Copyright\b[^A-Za-z0-9]*(?:\(c\)|\(C\)|©|\d{4})")
+# So: case-SENSITIVE, and either of two shapes.
+#
+# SHAPE 1 — the marked notice. A `(c)` / `(C)` / `©` marker or a four-digit
+# year immediately after the word, with only punctuation between. This branch
+# is byte-for-byte the rule that fixed the false attributions above, and it is
+# unchanged: whatever it accepted before, it accepts now, and whatever it
+# rejected before — Apache-2.0's body text, its `Copyright [yyyy] [name of
+# copyright owner]` appendix placeholder — it still rejects.
+MARKED_RE = re.compile(r"^\s*Copyright\b[^A-Za-z0-9]*(?:\(c\)|\(C\)|©|\d{4})")
+
+# SHAPE 2 — the UNMARKED notice, which is still a notice. `aws-lc-sys`'s
+# `LICENSE:9` is `Copyright Amazon.com, Inc. or its affiliates. All Rights
+# Reserved.` and `utf8_iter`'s `COPYRIGHT:1` is `Copyright Mozilla Foundation`
+# — no `(c)`, no year, and both are the crate's real and only notice. Shape 1
+# alone attributed `aws-lc-sys` to Google and told the reader `aws-lc-rs` and
+# `utf8_iter` had no licence-file notice at all.
+#
+# The risk this branch creates is the one shape 1 exists to prevent — matching
+# a sentence of licence body text — so it is deliberately narrow. What follows
+# `Copyright` must LOOK LIKE A HOLDER:
+#
+#   * it starts with an upper-case letter. A template placeholder opens with
+#     `[`, `{` or `<` (`[yyyy]`, `{yyyy}`, `<year>`, `<copyright holders>`,
+#     `<owner>`) and body text opens lower-case, so both are out on this
+#     clause alone. Note `jsonpath-rust` and `simd-adler32` ship a FILLED-IN
+#     bracket form (`Copyright (c) [2021] [Boris Zhguchev]`) — those carry a
+#     marker and never reach this branch, which is why brackets are not
+#     banned outright.
+#   * its first word is not one of the words a notice never opens with but a
+#     heading or a sentence does — `Notice`, `Holder`, `Year`, `Information`…
+#   * it contains no placeholder token anywhere, in any of the three bracket
+#     spellings.
+#   * it is not Apache-2.0 section 4(c)'s sentence, matched on its own words.
+#   * it is not a paragraph. A holder line is a holder line; 200 characters is
+#     already four times the longest real one in this graph.
+#
+# MEASURED, not assumed: across all 392 packages there are exactly five
+# distinct lines matching `^\s*Copyright` that shape 1 rejects — the two
+# Apache placeholder spellings, which stay rejected, and the three real
+# notices above, which this branch admits. Nothing else changes hands.
+UNMARKED_RE = re.compile(r"^\s*Copyright\s+(?P<rest>\S.*)$")
+PLACEHOLDER_RE = re.compile(
+    r"[\[{<]\s*(?:yyyy|year|name\b|copyright|owner|holder|fullname|author|your\b)",
+    re.IGNORECASE,
+)
+APACHE_BODY_RE = re.compile(r"notice[s]? that (?:is|are) included in or attached to", re.IGNORECASE)
+NOT_A_HOLDER_FIRST_WORD = frozenset(
+    (
+        "notice", "notices", "holder", "holders", "owner", "owners",
+        "year", "years", "date", "dates", "statement", "statements",
+        "header", "headers", "line", "lines", "information", "notation",
+        "and", "or", "shall", "may", "must", "is", "are", "as", "by",
+        "for", "in", "to", "of", "that", "this", "these", "those", "it",
+        "its", "you", "your", "we", "our", "if", "when", "where", "which",
+    )
+)
+
+
+def is_copyright_notice(line):
+    """True for a real holder notice; false for licence body text and templates."""
+    if MARKED_RE.match(line):
+        return True
+    match = UNMARKED_RE.match(line)
+    if not match:
+        return False
+    rest = match.group("rest").strip()
+    if len(rest) > 200:
+        return False
+    if not rest[:1].isupper():
+        return False
+    if PLACEHOLDER_RE.search(rest):
+        return False
+    if APACHE_BODY_RE.search(rest):
+        return False
+    first = re.sub(r"[^A-Za-z]", "", rest.split()[0]).lower()
+    return first not in NOT_A_HOLDER_FIRST_WORD
+
+
 # A NOTICE THAT NAMES NO HOLDER IS STILL THE NOTICE. `either`'s LICENSE-MIT is
 # literally `Copyright (c) 2015` and `indexmap`'s is `Copyright (c) 2016--2017`
 # — no holder, in the published crate, upstream's own text. An earlier draft
@@ -206,12 +292,21 @@ def clean(text):
     return text.replace("\\", "\\\\").replace("`", "\\`").replace("*", "\\*").replace("_", "\\_")
 
 
-def copyright_from_licence_files(manifest_path):
+def copyrights_from_licence_files(manifest_path):
+    """EVERY holder notice beside the manifest, in a stable order.
+
+    Files in sorted order, lines in file order, exact duplicates removed after
+    whitespace normalisation — a crate that ships the same notice in
+    `LICENSE-MIT` and `LICENSE-APACHE` owes one line, not two. Returns a list,
+    empty when the crate carries no notice at all, which is arm 2's cue.
+    """
     directory = os.path.dirname(manifest_path)
     try:
         names = sorted(os.listdir(directory))
     except OSError:
-        return None
+        return []
+    notices = []
+    seen = set()
     for name in names:
         if not name.lower().startswith(LICENCE_FILE_PREFIXES):
             continue
@@ -221,11 +316,16 @@ def copyright_from_licence_files(manifest_path):
         try:
             with open(candidate, "r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:
-                    if COPYRIGHT_RE.match(line):
-                        return line.strip()
+                    if not is_copyright_notice(line):
+                        continue
+                    normalised = re.sub(r"\s+", " ", line.strip())
+                    if normalised in seen:
+                        continue
+                    seen.add(normalised)
+                    notices.append(normalised)
         except OSError:
             continue
-    return None
+    return notices
 
 
 def main():
@@ -247,21 +347,23 @@ def main():
                 spdx = "NOT-SPDX: the published crate declares neither `license` nor `license_file`"
 
         if package["id"] in workspace:
-            line, arm = WORKSPACE_COPYRIGHT, ARM_WORKSPACE
+            lines, arm = [WORKSPACE_COPYRIGHT], ARM_WORKSPACE
         else:
-            line = copyright_from_licence_files(package["manifest_path"])
-            if line:
+            lines = copyrights_from_licence_files(package["manifest_path"])
+            if lines:
                 arm = ARM_LICENCE_FILE
             else:
                 authors = [a for a in package.get("authors") or [] if a.strip()]
                 if authors:
-                    line, arm = ", ".join(authors), ARM_AUTHORS
+                    lines, arm = [", ".join(authors)], ARM_AUTHORS
                 else:
-                    line = "no copyright statement in the published crate; SPDX %s applies" % spdx
+                    lines = [
+                        "no copyright statement in the published crate; SPDX %s applies" % spdx
+                    ]
                     arm = ARM_NONE
 
         tally[arm] += 1
-        entries.append((name, version, spdx, line, arm))
+        entries.append((name, version, spdx, lines, arm))
 
     entries.sort(key=lambda e: (e[0], e[1]))
 
@@ -295,13 +397,22 @@ def main():
         "vendored components, and OpenSSL — is invisible to `cargo metadata` and is\n"
         "attributed in [NOTICE](NOTICE) instead.\n\n"
         "## The copyright line has three sources, and each entry names the one it used\n\n"
-        "1. **%s** — a `LICENSE*`, `COPYRIGHT*` or `NOTICE*` file beside the crate's own\n"
-        "   `Cargo.toml`, first line matching `^\\s*Copyright` **and** carrying a `(c)`,\n"
-        "   `(C)`, `\u00a9` or four-digit year. The crate author's own words, always\n"
-        "   preferred. The extra condition is not fussiness: without it the match hits\n"
-        "   Apache-2.0's own body text and its `Copyright [yyyy] [name of copyright\n"
-        "   owner]` placeholder, and every crate shipping `LICENSE-APACHE` is attributed\n"
-        "   to a fragment of the licence it ships.\n"
+        "1. **%s** — the `LICENSE*`, `LICENCE*`, `COPYRIGHT*` and `NOTICE*` files beside\n"
+        "   the crate's own `Cargo.toml`, and **every** holder notice they carry, in\n"
+        "   file-name order. An entry with four holders prints four `Copyright` lines:\n"
+        "   the obligation is plural, and a generator that kept only the first\n"
+        "   attributed `ring` to \"The Go Authors\" and lost Brian Smith altogether.\n"
+        "   Where a crate vendors code, the vendored code's holders appear here beside\n"
+        "   the crate author's own \u2014 they are notices the binary redistributes.\n"
+        "   A line counts as a notice when it begins `Copyright` (case-SENSITIVELY) and\n"
+        "   **either** carries a `(c)`, `(C)`, `\u00a9` or four-digit year, **or** is\n"
+        "   followed directly by something shaped like a holder. Both halves earn their\n"
+        "   keep. Without the first, the match hits Apache-2.0's own body text and its\n"
+        "   `Copyright [yyyy] [name of copyright owner]` placeholder, and every crate\n"
+        "   shipping `LICENSE-APACHE` is attributed to a fragment of the licence it\n"
+        "   ships. Without the second, `Copyright Amazon.com, Inc. or its affiliates.`\n"
+        "   is not a copyright notice, `aws-lc-sys` is attributed to Google, and\n"
+        "   `aws-lc-rs` and `utf8_iter` are reported as carrying no notice at all.\n"
         "2. **%s** — the manifest's `authors`, used only when arm 1 finds nothing. An\n"
         "   author is not a copyright holder; the entry says which arm it used so that\n"
         "   the difference is visible rather than implied.\n"
@@ -318,10 +429,14 @@ def main():
         out("| %s | %d |\n" % (arm, tally[arm]))
     out("\n## The inventory\n\n")
 
-    for name, version, spdx, line, arm in entries:
+    for name, version, spdx, lines, arm in entries:
         out("### %s@%s\n\n" % (name, version))
         out("- SPDX: `%s`\n" % spdx)
-        out("- Copyright: %s\n" % clean(line))
+        # ONE LINE PER NOTICE. An entry with four holders prints four
+        # `- Copyright:` lines and then the single source line;
+        # `doc_lint.rs::inventory_entries` parses one-or-more per entry.
+        for line in lines:
+            out("- Copyright: %s\n" % clean(line))
         out("- Copyright source: %s\n\n" % arm)
 
     out("---\n\n")
