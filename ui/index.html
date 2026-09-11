@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Logweir</title>
+    <!--
+      EVERY REFERENCE ON THIS PAGE IS RELATIVE, AND THERE ARE ONLY TWO.
+      No font, no stylesheet, no script and no icon is fetched from anywhere
+      outside this directory: the shipped assets are the sources, there is no
+      build step, and `scripts/check-ui-offline.sh` fails the lint gate on any
+      line here that names an external resource.
+
+      The icon is an empty inline one, so the browser asks for no icon at all
+      rather than requesting a file that does not exist.
+    -->
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>Logweir</h1>
+      <p class="tagline">
+        A Kubernetes API client. It runs with the authority of the kubeconfig
+        that started the proxy serving it, and it holds no credential of its own.
+      </p>
+      <div id="nav-slot"></div>
+    </header>
+    <main id="view-slot"></main>
+    <footer class="colophon">
+      <p>
+        Served by <code>kubectl proxy</code>, which attaches the viewer's own
+        kubeconfig credential to every request it forwards. See
+        <code>ui/README.md</code> for what that costs and how to narrow it.
+      </p>
+      <p>
+        Apache Kafka&reg; and Kafka&reg; are registered trademarks of the Apache
+        Software Foundation. Logweir is not affiliated with or endorsed by the ASF.
+      </p>
+    </footer>
+  </body>
+</html>

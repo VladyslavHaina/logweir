@@ -56,6 +56,7 @@ lint:
     test -f crates/logweir/src/drill/phase9_teardown.rs && ! grep -q 'exit 4 rather than a silent success' crates/logweir/src/drill/phase9_teardown.rs
     ./scripts/check-withdrawn-claim.sh
     ./scripts/check-no-archive-write.sh
+    ./scripts/check-ui-offline.sh
 
 # Task 7 (Phase 1 line item 1c). G2′: the set of workspace crates from which
 # the signing API is reachable is exactly {logweir, e2e}, computed from the
@@ -654,3 +655,47 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
       exit 1
     fi
     echo "check-org-root: both images carry third_party/org-root.fingerprint at /etc/logweir/org-root.fingerprint."
+
+# Task 25 (slot 18). SERVE THE UI.
+#
+# `kubectl proxy` serves the static files AND proxies the Kubernetes API on the
+# SAME ORIGIN, attaching the viewer's own kubeconfig credential to every
+# request it forwards, server side. That is the whole serving story: tag 1
+# ships no server-side UI component, no image, no sidecar and no HTTP surface
+# of its own, so this is the one zero-config path that gives the page an
+# authenticated, same-origin API to talk to.
+#
+# `kubectl port-forward` cannot do it: it forwards a port to a pod, gives the
+# browser no credential, and leaves every API call a cross-origin request to a
+# server that sends no CORS headers unless it was started with
+# `--cors-allowed-origins`, which no adopter has set.
+#
+# THE CONTEXT IS NAMED, AND THAT IS NOT COSMETIC (STANDING RULE 12). Without
+# `--context docker-desktop` this recipe proxies whatever context happens to be
+# current, with whatever credential that context carries -- on the one command
+# in this product that hands a browser a cluster credential.
+#
+# THE TWO FLAGS THAT MUST NEVER CHANGE are `--address=127.0.0.1` and
+# `--disable-filter` (never pass it; the default `false` keeps the
+# `--accept-hosts` filter on). Changing either turns a local page holding your
+# cluster authority into a network service holding it.
+ui:
+    @echo "Serving the Logweir UI at http://127.0.0.1:8001/ui/"
+    @echo ""
+    @echo "WHAT THIS COSTS, said plainly: kubectl proxy forwards every API path"
+    @echo "except pod exec and attach, on the same origin as the page, under your"
+    @echo "kubeconfig. The page therefore runs with YOUR ENTIRE CLUSTER AUTHORITY,"
+    @echo "not with the four ClusterRoles logweir.yaml ships -- those bind the user,"
+    @echo "and under this serving path they bind nothing about the page. Run this"
+    @echo "from a cluster-admin kubeconfig and you have given the page cluster-admin."
+    @echo "No bearer token, key or credential of any kind is ever placed in the page."
+    @echo ""
+    @echo "Two flags must never change: --address=127.0.0.1 and --disable-filter"
+    @echo "(never pass it). Changing either turns a local page holding your cluster"
+    @echo "authority into a network service holding it."
+    @echo ""
+    @echo "To narrow it, run the proxy under a kubeconfig bound to logweir-viewer"
+    @echo "and logweir-operator and nothing else -- ui/README.md has the four"
+    @echo "kubectl config commands."
+    @echo ""
+    kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1

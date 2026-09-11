@@ -2131,5 +2131,132 @@ kubectl --context docker-desktop delete ns logweir-system logweir-t23 --ignore-n
 ```
 
 
+## 15. Serving the UI
+
+The UI is a directory of static files -- `ui/` in this repository -- and a
+Kubernetes API client. It is not installed onto the cluster: tag 1 ships **no
+server-side UI component at all**, no `weirkeeper-ui` image, no sidecar and no
+HTTP surface of its own (§11). Nothing below changes what is running in
+`logweir-system`; it changes only what is running on the operator's laptop.
+
+Everything in this section follows the install in §13: the CRDs, the RBAC and
+the controller are already applied, and the cluster-scoped `TrustRoster` of
+install step 1b already exists. The page surfaces that snippet and does not
+submit it -- a `TrustRoster` is cluster-scoped and admin-only, and no page may
+write one.
+
+Serve the directory and the Kubernetes API from one process:
+
+```bash
+kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
+```
+
+Then open `http://127.0.0.1:8001/ui/`.
+
+**One process, one origin, and that is the whole design.** `kubectl proxy` serves
+the static files under `--www-prefix` **and** proxies the Kubernetes API on the
+same origin, `127.0.0.1:8001`, attaching the viewer's own kubeconfig credential
+to every request it forwards, server side. The page therefore addresses
+`/apis/logweir.dev/v1alpha1/...` as a relative path on the origin that served
+it: not a cross-origin request, no preflight, no granted header, and
+**no bearer token, key or credential of any kind is ever placed in the page**.
+It stores nothing either -- no browser storage, no cookie of its own.
+
+A write is the same story. `POST /apis/logweir.dev/v1alpha1/namespaces/<ns>/restores`
+goes to the proxy's own origin, so it is not cross-origin, triggers no preflight
+and needs no granted header. `kubectl proxy`'s own defaults admit it: the shipped
+v1.35.0 client's `--reject-methods='^$'` is a regular expression that matches only
+the empty string, so POST, PUT and PATCH all pass.
+
+`kubectl port-forward` cannot serve this page. It forwards a port to a pod, gives
+the browser no credential, and leaves every call to the apiserver a cross-origin
+request to a server that sends no CORS headers unless it was started with
+`--cors-allowed-origins`, which no adopter has set.
+
+### What that costs, said plainly
+
+`kubectl proxy` forwards every API path except pod exec and attach, on the same
+origin as the page, under the viewer's kubeconfig. So the page runs with the
+**viewer's entire cluster authority**, not with the roles `logweir.yaml` ships:
+`logweir-viewer`, `logweir-operator` and `logweir-approver` bind the **user**,
+and under this serving path they bind nothing at all about the page. Anyone who
+runs the UI from a cluster-admin kubeconfig gives the shipped bundle
+cluster-admin. That residual is why there is no telemetry in this bundle, why
+nothing in it is fetched from anywhere else, and why its contents are listed by
+digest in the release notes.
+
+**Two flags are the one-line escalation of exactly that residual, and neither may
+change:**
+
+- `--address=127.0.0.1` -- the proxy binds loopback only.
+- `--disable-filter` -- **never pass it.** The default, `false`, keeps the
+  `--accept-hosts` cross-site request filter on; the shipped client's default is
+  `--accept-hosts='^localhost$,^127\.0\.0\.1$,^\[::1\]$'`.
+
+**Changing either turns a local page holding your cluster authority into a network service holding it.**
+On the LAN, unauthenticated, with your cluster credential attached to every
+request it receives.
+
+### The hardened alternative: a kubeconfig that holds less
+
+The residual above is the viewer's own authority, so the way to narrow it is to
+start the proxy under a kubeconfig that holds less. Bind a subject to
+`logweir-viewer` (read) and, if the page should be able to write,
+`logweir-operator` -- and nothing else:
+
+```bash
+kubectl --context docker-desktop create rolebinding logweir-ui-viewer \
+  --clusterrole=logweir-viewer --user=logweir-ui -n <namespace>
+kubectl --context docker-desktop create rolebinding logweir-ui-operator \
+  --clusterrole=logweir-operator --user=logweir-ui -n <namespace>
+```
+
+Then build a throwaway kubeconfig that carries that subject and nothing else,
+and serve from it. The context in it is **named `docker-desktop` on purpose**, so
+the serving command above is unchanged and still names its context explicitly:
+
+```bash
+export KUBECONFIG="$PWD/logweir-ui.kubeconfig"
+kubectl config set-cluster docker-desktop --server=https://127.0.0.1:6443 --certificate-authority=<ca.crt> --embed-certs=true
+kubectl config set-credentials logweir-ui --client-certificate=<logweir-ui.crt> --client-key=<logweir-ui.key> --embed-certs=true
+kubectl config set-context docker-desktop --cluster=docker-desktop --user=logweir-ui --namespace=<namespace>
+kubectl config use-context docker-desktop
+kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
+```
+
+`kubectl config` writes the kubeconfig itself and takes no `--context`; every
+other `kubectl` line in this document names `--context docker-desktop`.
+
+Under that kubeconfig a 403 from the page is the API server refusing
+`logweir-ui`, which is the story the page tells: every error it shows carries the
+API server's own `reason` and `message`, verbatim, because the page's whole
+authorisation story is "the API server evaluated the viewer's RBAC".
+
+
+### What the page can and cannot write
+
+`api.js` validates every write against a frozen allowlist of five plurals --
+`kafkaclusters`, `backupschedules`, `backups`, `restores`, `approvals` -- and
+refuses anything else before the request is built. `trustrosters` is deliberately
+absent: it is cluster-scoped, it carries the public key material every approval
+check reads, and a namespace tenant that could write one could widen its own
+allowlist. The page also has exactly one update beyond `create`: a JSON-merge
+patch over a `BackupSchedule` touching `spec.suspend` and nothing else, which is
+the one field that CRD's own `x-kubernetes-validations` rule leaves mutable.
+
+Those are the page's limits, not the cluster's. The API server's limits are
+whatever the kubeconfig that started the proxy carries, which is the subject of
+"What that costs" above, and they are the ones that actually hold.
+
+### The gates that keep it that way
+
+`just lint` runs `scripts/check-ui-offline.sh`, which reads every shipped byte
+under `ui/` except `*.md` and `tests/` and fails, naming file and line, on any
+external resource, any credential in the page, any browser-storage write and any
+module specifier that is not relative. `crates/logweir/tests/ui_lint.rs` asserts
+the rest from the Rust side, including that the serving command above is byte
+identical in `ui/README.md`, in this document and in the `ui` recipe of the
+`justfile`.
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
