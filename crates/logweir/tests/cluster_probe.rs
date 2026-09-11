@@ -331,19 +331,32 @@ fn the_probe_reads_no_allowlist_and_no_approver_key() {
     }
     // And the flags are not on the subcommand either — the other half of the
     // same claim, asserted against the parser rather than against the source.
+    //
+    // THE KIND IS ASSERTED AND NOT MERELY `is_err()`, and the mutation round is
+    // why: a plant that added ONE of the two as a required flag made the whole
+    // command line fail for the OTHER one's absence, so `is_err()` was true and
+    // the row passed while `doctor`'s first mandatory path had landed on the
+    // probe. `UnknownArgument` is the claim — this parser has never heard of the
+    // flag — and nothing else satisfies it.
     for flag in ["--allowed-clusters", "--approver-key"] {
-        let parsed = cli::Cli::try_parse_from([
+        // `match` and not `expect_err`: `Cli` derives no `Debug`, so the `Ok`
+        // arm has nothing to print.
+        let Err(err) = cli::Cli::try_parse_from([
             "logweir",
             "cluster-probe",
             "--bootstrap",
             "kafka:9092",
             flag,
             "/dev/null",
-        ]);
-        assert!(
-            parsed.is_err(),
-            "`cluster-probe {flag}` must not parse: accepting it would be the first half of \
-             inheriting the check"
+        ]) else {
+            panic!("`cluster-probe {flag}` parsed; it must not accept a drill-time path")
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "`cluster-probe {flag}` must be UNKNOWN to this parser, not merely part of a command \
+             line that failed for some other reason; accepting it would be the first half of \
+             inheriting the check. Got {err}"
         );
     }
 }
