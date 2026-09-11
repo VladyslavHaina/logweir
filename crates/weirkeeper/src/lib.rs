@@ -71,6 +71,19 @@
 //! status for the case nothing else in the corpus handled — a Job that
 //! finished with no terminated state at all.
 
+//! WHAT TASK 24 ADDED. [`verification`] — the controller's own reading of the
+//! evidence the UI renders, and the two green-badge rules (interface **I21**).
+//! `verify_evidence` fetches the payload and its detached sidecar through the
+//! read-only evidence handle, checks the digest the status recorded, and
+//! verifies the DSSE signature against `TrustRoster.spec.signingKeys[]`
+//! (interface **I17**) — returning `NotAttempted`, never `Invalid`, when no
+//! credential is configured, when storage would not answer, or when the roster
+//! carries no key material. `Backup` is green on `Valid` + `exitCode == 0`;
+//! `Restore` on `Valid` + `outcome == pass`; there is no `outcome` on the
+//! `Backup` path at all, which is why the rule is two rules. Both reconcilers
+//! write it in a SECOND, separate `/status` patch after the terminal one, so a
+//! verification failure can never prevent the exit code from being recorded.
+//!
 //! WHAT TASK 15C ADDED. [`controllers::kafka_cluster`] — the FIRST loop whose
 //! whole output is an observation, and the producer of the
 //! `KafkaCluster.status.reachable` field Task 15b declared and nobody wrote.
@@ -90,6 +103,7 @@ pub mod job;
 pub mod retention;
 pub mod slot;
 pub mod testing;
+pub mod verification;
 
 /// The name of the one cluster-scoped `TrustRoster` — interface **I16**.
 ///

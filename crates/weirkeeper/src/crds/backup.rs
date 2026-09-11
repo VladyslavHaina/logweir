@@ -59,6 +59,22 @@ pub struct BackupEvidence {
     /// The object key of the signed backup receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_key: Option<String>,
+    /// The sha256 of the receipt at `receiptKey`, as `sha256:<lowercase hex>`
+    /// — the one digest spelling this corpus uses everywhere
+    /// (`logweir_core::ids::sha256_prefixed`). **COMPUTED by the controller
+    /// over the bytes it fetched**, not copied: a document cannot carry its
+    /// own digest.
+    ///
+    /// WHY IT IS HERE AT ALL, AND IT IS NOT DECORATION (Task 24). It is the
+    /// value `verification` is checked against on a LATER pass: the controller
+    /// re-fetches the receipt with its read-only evidence credential and
+    /// compares this recorded digest against the bytes in the bucket right
+    /// now. Without it, `verify_evidence` could only check the signature —
+    /// and a genuinely-signed OLDER receipt put in this one's place would
+    /// verify. `Restore` has carried the same field for the scorecard since
+    /// Task 20 (`restore::RestoreEvidence::scorecard_sha256`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
     /// The object key of the receipt's detached DSSE sidecar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar_key: Option<String>,

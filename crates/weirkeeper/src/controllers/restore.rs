@@ -135,6 +135,10 @@ use crate::job::{
     self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, APPROVAL_MOUNT_PATH,
     APPROVAL_VOLUME, CONTAINER_NAME, PLAN_MOUNT_PATH,
 };
+use crate::verification::{
+    conditions_in, restore_badge, second_patch, stored_verification, verified_condition,
+    EvidenceRef, VerifyOracle,
+};
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
 
@@ -257,6 +261,23 @@ pub const SIDECAR_KEY_PREFIX: &str = backup::SIDECAR_KEY_PREFIX;
 /// Its ABSENCE at exit 0 is therefore a truthful answer about this run and not
 /// an unreadable log — see [`RestoreEvidenceKeys::mandatory_complete`].
 pub const OFFSET_REPORT_KEY_PREFIX: &str = "offset-report-key=";
+
+/// **Interface I8's FOURTH key line**, and plan erratum **E10(c)**'s controller
+/// half — guard **G-TS**.
+///
+/// The runner prints it as `topic-preflight=<one-line JSON object>` on a
+/// successful restore
+/// (`logweir::drill::phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX`), and this
+/// reconciler scans it out of the same bounded tail as the evidence keys, BY
+/// NAME (erratum E4). Until Task 24 it had no producer at all, and
+/// `Restore.status.topicPreflight` rendered a declared absence in both places.
+///
+/// SCANNED, NEVER DERIVED. There is no way to compute a target topic's
+/// `message.timestamp.type` from anything else on the object — the controller
+/// never dials a broker (spec §9) — so an absent or unparseable line leaves
+/// the field absent, which is the truthful answer for a run that reported
+/// none.
+pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
 
 /// How long before an unfinished Job is looked at again. Fifteen seconds, as
 /// on the `Backup` path: a Job's own events wake this controller, so the
@@ -860,7 +881,20 @@ pub fn runner_job_spec(
         // `RUST_LOG` is pinned rather than inherited: below `info` the run id
         // and the exit-code meaning line are lost, and those two are how a pod
         // is correlated with the archive it read.
-        env_literal: vec![("RUST_LOG".to_string(), "info".to_string())],
+        //
+        // …AND THE OBJECT-STORE ADDRESSING THE CONTROLLER WAS GIVEN (Task 24,
+        // critique B H20). The `Restore` path's plan is `spec.planBytes` —
+        // bytes an approver signed — so unlike the `Backup` path it CAN carry
+        // an endpoint in its own `storage` block; forwarding the same four
+        // variables here means a demo or an adopter configures the endpoint
+        // ONCE, on the controller, and both kinds of runner agree. Nothing is
+        // forwarded that is not set, so the default install's runner env is
+        // unchanged. See `backup::ARCHIVE_ADDRESSING_ENV`.
+        env_literal: {
+            let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
+            env.extend(backup::archive_addressing_env());
+            env
+        },
         plan_config_map: Some(plan_config_map_name(&restore.name_any())),
     })
 }
@@ -993,6 +1027,40 @@ pub struct ScorecardObservation {
     /// fetched. **Computed here and not copied**, because a document cannot
     /// carry its own digest.
     pub scorecard_sha256: Option<String>,
+}
+
+/// Guard **G-TS**'s observation, read off the pod log by key name.
+///
+/// Returns the object the runner printed, **filtered to the three fields
+/// `crate::crds::restore::TopicPreflight` declares and no others**: a line
+/// carrying a fourth key would otherwise write a property the CRD's structural
+/// schema prunes, and a client reading the status back would see a field that
+/// was never stored. The LAST occurrence in the tail wins, as for every other
+/// key here.
+///
+/// `None` when no line was printed, when its value is not a JSON object, or
+/// when the object carries none of the three fields — each of which leaves
+/// `status.topicPreflight` absent rather than writing an empty block.
+#[must_use]
+pub fn topic_preflight(log: &str) -> Option<Value> {
+    let mut raw: Option<&str> = None;
+    for line in backup::tail_lines(log) {
+        if let Some(v) = line.strip_prefix(TOPIC_PREFLIGHT_KEY_PREFIX) {
+            raw = Some(v);
+        }
+    }
+    let doc: Value = serde_json::from_str(raw?).ok()?;
+    let doc = doc.as_object()?;
+    let mut out = serde_json::Map::new();
+    for key in ["timestampType", "retentionMs", "timestampBound"] {
+        if let Some(v) = doc.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(Value::Object(out))
 }
 
 /// Read the values [`ScorecardObservation`] names out of a scorecard
@@ -1380,6 +1448,18 @@ pub fn running_status_patch(
 /// condition about it would be a condition about nothing.
 /// [`RestoreEvidenceKeys::mandatory_complete`] is the predicate, and the third
 /// key's absence is recorded as an absence rather than as a failure.
+/// `#[allow(clippy::too_many_arguments)]`, AND THE REASON IS THE FUNCTION'S
+/// WHOLE POINT. This is a PURE patch builder: every parameter is one
+/// independent OBSERVATION the reconcile made, and the value of the function
+/// is that a test can construct any combination of them and assert the exact
+/// bytes that reach `/status`. Bundling them into a struct to satisfy the
+/// seven-argument lint would move the combinations into a constructor and
+/// change nothing about how many facts the status carries — while making every
+/// existing assertion in `tests/{backup,restore}_controller.rs` read one level
+/// further from the patch it is about. Task 24 took the eighth argument (the
+/// receipt digest on the `Backup` path, the topic-preflight observation on the
+/// `Restore` path) and this allow with it.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn finished_status_patch(
@@ -1389,6 +1469,7 @@ pub fn finished_status_patch(
     refusal: Option<&str>,
     observed: Option<&ScorecardObservation>,
     topics: Option<&(Vec<String>, Vec<String>)>,
+    preflight: Option<&Value>,
     now: DateTime<Utc>,
 ) -> Value {
     // TWO VOCABULARIES, TWO FIELDS (errata E5b). The CONDITION's `reason` is
@@ -1506,6 +1587,13 @@ pub fn finished_status_patch(
     if let Some((old, new)) = topics {
         status.insert("oldTopics".to_string(), json!(old));
         status.insert("newTopics".to_string(), json!(new));
+    }
+
+    // GUARD **G-TS**, erratum **E10(c)**. Omitted when the runner printed no
+    // preflight line: a merge patch with no key means "leave it alone", and an
+    // absent observation must not overwrite one a previous pass recorded.
+    if let Some(p) = preflight {
+        status.insert("topicPreflight".to_string(), p.clone());
     }
 
     json!({ "status": Value::Object(status) })
@@ -1945,9 +2033,10 @@ pub async fn reconcile_restore(
     restore: &Restore,
     client: &kube::Client,
     scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<RestoreOutcome, RestoreError> {
-    match reconcile_restore_inner(restore, client, scorecard, now).await {
+    match reconcile_restore_inner(restore, client, scorecard, verify, now).await {
         Err(RestoreError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `RestoreError::Refused`, so the
@@ -1996,6 +2085,7 @@ async fn reconcile_restore_inner(
     restore: &Restore,
     client: &kube::Client,
     scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<RestoreOutcome, RestoreError> {
     let name = restore.name_any();
@@ -2260,6 +2350,9 @@ async fn reconcile_restore_inner(
         None => None,
     };
     let topics = topic_mapping(restore);
+    // GUARD **G-TS**, erratum **E10(c)**'s controller half: scanned by NAME
+    // out of the same bounded tail as the evidence keys.
+    let preflight = topic_preflight(&log);
 
     if !keys.mandatory_complete() {
         if exit_code == 0 {
@@ -2282,21 +2375,21 @@ async fn reconcile_restore_inner(
         }
     }
 
-    patch_status_if_changed(
-        &restores,
+    // BUILT ONCE AND HELD, because the SECOND patch needs the condition array
+    // this one carries: a JSON merge patch REPLACES arrays, and after this
+    // PATCH returns the in-memory `restore` is stale and no longer says what
+    // the object says. See `verification::second_patch`.
+    let terminal = finished_status_patch(
         restore,
-        &name,
-        finished_status_patch(
-            restore,
-            exit_code,
-            &keys,
-            refusal.as_deref(),
-            observed.as_ref(),
-            topics.as_ref(),
-            now,
-        ),
-    )
-    .await?;
+        exit_code,
+        &keys,
+        refusal.as_deref(),
+        observed.as_ref(),
+        topics.as_ref(),
+        preflight.as_ref(),
+        now,
+    );
+    patch_status_if_changed(&restores, restore, &name, terminal.clone()).await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this
@@ -2311,6 +2404,78 @@ async fn reconcile_restore_inner(
     )
     .await
     .map_err(RestoreError::Api)?;
+
+    // ===================================================================
+    // THE SECOND PATCH — Task 24, interface I21's `Restore` half.
+    // ===================================================================
+    //
+    // AFTER the terminal status write and after the TTL, in a patch of its
+    // own, so a verification that fails — or a 500 on this very PATCH — can
+    // never prevent the exit code from being recorded. The `?` on the terminal
+    // patch above is what makes that an ordering guarantee rather than a
+    // comment.
+    //
+    // ATTEMPTED ONLY WHEN THERE IS SOMETHING TO VERIFY: both mandatory keys
+    // and the digest the controller computed over the bytes it fetched. At
+    // exits 1, 3 and 4 the contract says no artifact was written (GC11), so
+    // there is no document to have an opinion about.
+    if let (Some(payload_key), Some(sidecar_key), Some(digest)) = (
+        keys.scorecard.as_deref(),
+        keys.sidecar.as_deref(),
+        observed
+            .as_ref()
+            .and_then(|o| o.scorecard_sha256.as_deref()),
+    ) {
+        let result = verify(EvidenceRef {
+            payload_key: payload_key.to_string(),
+            payload_sha256: digest.to_string(),
+            sidecar_key: sidecar_key.to_string(),
+            payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        })
+        .await;
+        let current = restore
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok());
+        let block = result.to_status_value(stored_verification(current.as_ref()));
+        // THE BADGE IS COMPUTED OVER THE STATUS THAT WILL EXIST, not the one
+        // that did: the terminal patch has landed, so `outcome` is the value
+        // it copied out of the signed scorecard. Interface I21's `Restore`
+        // rule reads `outcome`; the `Backup` rule reads `exitCode`, and the
+        // two are not one rule.
+        let mut projected = terminal
+            .pointer("/status")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        projected["evidence"] = json!({ "verification": block.clone() });
+        let badge = restore_badge(&projected);
+        let verified = verified_condition(
+            &badge,
+            current_condition(
+                restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                crate::conditions::CONDITION_VERIFIED,
+            ),
+            restore.meta().generation,
+            now,
+        );
+        info!(
+            restore = %name,
+            namespace = %namespace,
+            verification = %result.result,
+            matched_key_id = result.matched_key_id.as_deref().unwrap_or("<none>"),
+            green = badge.green,
+            badge = %badge.label,
+            "weirkeeper verified this Restore's signed scorecard with its read-only evidence \
+             credential"
+        );
+        patch_status_if_changed(
+            &restores,
+            restore,
+            &name,
+            second_patch(&conditions_in(&terminal), verified, block),
+        )
+        .await?;
+    }
 
     let coverage = window_not_covered(
         exit_code,
@@ -2380,7 +2545,8 @@ async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action, R
                 .flatten()
         })
     };
-    let outcome = reconcile_restore(&restore, &ctx.client, &oracle, Utc::now()).await?;
+    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
+    let outcome = reconcile_restore(&restore, &ctx.client, &oracle, &verify, Utc::now()).await?;
     Ok(action_for(&outcome))
 }
 

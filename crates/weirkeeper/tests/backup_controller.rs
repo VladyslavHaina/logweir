@@ -35,6 +35,7 @@ use weirkeeper::controllers::backup_schedule::RUNNER_ARGV_ANNOTATION;
 use weirkeeper::crds::backup::{Backup, BackupStatus};
 use weirkeeper::job::{self, ENGINE_DIGEST, ENGINE_VERSION, RUNNER_IMAGE};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
+use weirkeeper::verification::unverified_evidence;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -520,6 +521,7 @@ async fn backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -957,6 +959,7 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -1034,6 +1037,7 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -1085,6 +1089,7 @@ async fn the_container_is_selected_by_name() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -1145,6 +1150,7 @@ async fn ttl_is_patched_only_after_status() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -1211,6 +1217,7 @@ async fn ttl_is_patched_only_after_status() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -1243,6 +1250,7 @@ async fn ttl_is_patched_only_after_status() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -1737,6 +1745,7 @@ async fn create_pass(routes: Vec<Route>) -> (Vec<weirkeeper::testing::SeenReques
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -2058,6 +2067,7 @@ async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -2086,6 +2096,7 @@ async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -2141,6 +2152,7 @@ async fn a_missing_source_cluster_is_terminal_and_not_a_requeue() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -2205,9 +2217,15 @@ async fn a_wildcard_topic_is_refused_before_any_post() {
         );
         let (client, seen, bodies) =
             mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
-        let outcome = reconcile_backup(&b, &client, &unobserved_archive, utc(2026, 11, 9, 3, 17))
-            .await
-            .expect("a refusal is an OUTCOME, never an error");
+        let outcome = reconcile_backup(
+            &b,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an OUTCOME, never an error");
         assert_eq!(
             outcome.terminal_state.as_deref(),
             Some("GuardRefused"),
@@ -2275,6 +2293,7 @@ async fn a_scram_cluster_with_no_username_is_refused() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 17),
     )
     .await
@@ -2303,9 +2322,15 @@ async fn an_unreadable_archive_url_is_refused() {
     let b: Backup = serde_json::from_str(&json).expect("the fixture is a Backup");
     let (client, _seen, bodies) =
         mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
-    let outcome = reconcile_backup(&b, &client, &unobserved_archive, utc(2026, 11, 9, 3, 17))
-        .await
-        .expect("a refusal is an OUTCOME");
+    let outcome = reconcile_backup(
+        &b,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("a refusal is an OUTCOME");
     assert_eq!(
         outcome.terminal_state.as_deref(),
         Some("ArchiveUrlUnreadable"),
@@ -2337,6 +2362,7 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -2371,6 +2397,7 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -2400,6 +2427,7 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -2497,9 +2525,15 @@ async fn a_backup_whose_name_is_too_long_is_refused_before_any_post() {
         },
     ];
     let (client, seen, bodies) = mock_client_recording_bodies(routes);
-    let outcome = reconcile_backup(&b, &client, &unobserved_archive, utc(2026, 11, 9, 3, 17))
-        .await
-        .expect("a refusal is an OUTCOME, never an error: an error requeues and writes nothing");
+    let outcome = reconcile_backup(
+        &b,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("a refusal is an OUTCOME, never an error: an error requeues and writes nothing");
 
     assert_eq!(
         outcome.terminal_state.as_deref(),
@@ -2611,9 +2645,15 @@ async fn a_backup_whose_name_is_too_long_is_refused_before_any_post() {
         },
     ];
     let (client, _seen, _bodies) = mock_client_recording_bodies(routes);
-    let outcome = reconcile_backup(&b, &client, &unobserved_archive, utc(2026, 11, 9, 3, 17))
-        .await
-        .expect("the reconcile succeeds");
+    let outcome = reconcile_backup(
+        &b,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("the reconcile succeeds");
     assert!(
         outcome.created,
         "63 characters fits the label limit exactly and the Job is created"
@@ -2648,6 +2688,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -2697,6 +2738,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -2731,6 +2773,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -2764,6 +2807,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
             &backup(),
             &client,
             &unobserved_archive,
+            &unverified_evidence,
             utc(2026, 11, 9, 3, 20),
         )
         .await
@@ -2818,6 +2862,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
     let oracle = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         Box::pin(async move {
             Some(ArchiveObservation {
+                receipt_sha256: None,
                 presence: EvidencePresence {
                     payload: true,
                     sidecar: true,
@@ -2833,9 +2878,15 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
         200,
         "Complete",
     ));
-    reconcile_backup(&backup(), &client, &oracle, utc(2026, 11, 9, 3, 20))
-        .await
-        .expect("the reconcile succeeds");
+    reconcile_backup(
+        &backup(),
+        &client,
+        &oracle,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
     let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
     let window = &statuses[0]["windowCovered"];
 
@@ -2874,6 +2925,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -3102,6 +3154,7 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
             &backup(),
             &client,
             &unobserved_archive,
+            &unverified_evidence,
             utc(2026, 11, 9, 3, 20),
         )
         .await
@@ -3221,6 +3274,7 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
         |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
             Box::pin(async {
                 Some(ArchiveObservation {
+                    receipt_sha256: None,
                     presence: EvidencePresence {
                         payload: true,
                         sidecar: false,
@@ -3239,6 +3293,7 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
         &backup(),
         &client,
         &payload_without_sidecar,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -3343,6 +3398,7 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -3366,6 +3422,7 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -3407,6 +3464,7 @@ async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 18),
     )
     .await
@@ -3460,9 +3518,15 @@ async fn a_finished_backup_whose_job_is_gone_is_not_re_run() {
         body: not_found_body("jobs.batch", NAME),
     }];
     let (client, seen) = mock_client_recording(routes);
-    let outcome = reconcile_backup(&b, &client, &unobserved_archive, utc(2026, 11, 10, 0, 0))
-        .await
-        .expect("the reconcile succeeds");
+    let outcome = reconcile_backup(
+        &b,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 10, 0, 0),
+    )
+    .await
+    .expect("the reconcile succeeds");
     assert!(!outcome.created, "nothing is created");
     let seen = seen.lock().expect("the recorder is readable");
     assert!(
@@ -3786,6 +3850,7 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         &backup(),
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
     )
     .await
@@ -3814,6 +3879,7 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         &steady,
         &client,
         &unobserved_archive,
+        &unverified_evidence,
         utc(2026, 11, 9, 3, 21),
     )
     .await

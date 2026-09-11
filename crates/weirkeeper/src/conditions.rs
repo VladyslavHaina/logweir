@@ -403,6 +403,41 @@ pub const REASON_EVIDENCE_KEYS_UNREADABLE: &str = "EvidenceKeysUnreadable";
 /// status patch is still in flight.
 pub const REASON_EVIDENCE_KEYS_RECORDED: &str = "EvidenceKeysRecorded";
 
+/// The condition that says whether the UI may render a GREEN badge for this
+/// object — Task 24, interface **I21**.
+///
+/// **ONE TYPE, TWO RULES.** The `type` is `Verified` on both kinds, and the
+/// rule behind it is not: a `Backup` is green on `Valid` + `exitCode == 0`,
+/// a `Restore` on `Valid` + `outcome == pass`
+/// (`crate::verification::{backup_badge, restore_badge}`). The condition's
+/// `message` is the badge label, which is "verified by weirkeeper at
+/// `<verifiedAt>` against key `<matchedKeyId>`" when green and the literal
+/// word `unverified` otherwise — **never** `pass`, and never "verified in your
+/// browser".
+pub const CONDITION_VERIFIED: &str = "Verified";
+
+/// [`CONDITION_VERIFIED`]'s reason when the badge is green.
+pub const REASON_VERIFIED: &str = "Verified";
+
+/// [`CONDITION_VERIFIED`]'s reason when the controller verified the evidence
+/// and the answer was no. A claim about the DOCUMENT.
+pub const REASON_VERIFICATION_INVALID: &str = "VerificationInvalid";
+
+/// [`CONDITION_VERIFIED`]'s reason when no verification happened at all — no
+/// evidence credential, an unreadable object, or a `TrustRoster` with no
+/// signing key material. A claim about the CONTROLLER, and the reason
+/// `NotAttempted` exists as a verdict distinct from `Invalid`.
+pub const REASON_VERIFICATION_NOT_ATTEMPTED: &str = "VerificationNotAttempted";
+
+/// [`CONDITION_VERIFIED`]'s reason when a `Backup`'s evidence verified and the
+/// run did not exit 0. The `Backup` half of interface **I21** — there is no
+/// `outcome` on that path to read instead.
+pub const REASON_EXIT_CODE_NOT_ZERO: &str = "ExitCodeNotZero";
+
+/// [`CONDITION_VERIFIED`]'s reason when a `Restore`'s evidence verified and
+/// its `outcome` is not `pass`. The `Restore` half of interface **I21**.
+pub const REASON_OUTCOME_NOT_PASS: &str = "OutcomeNotPass";
+
 /// Every condition `reason` this crate writes that is NOT one of
 /// [`TERMINAL_STATES`], in one list.
 ///
@@ -422,6 +457,11 @@ pub const CONDITION_REASONS: &[&str] = &[
     CONDITION_JOB_CREATED,
     REASON_ADMITTED,
     REASON_APPROVAL_NOT_VERIFIED,
+    REASON_VERIFIED,
+    REASON_VERIFICATION_INVALID,
+    REASON_VERIFICATION_NOT_ATTEMPTED,
+    REASON_EXIT_CODE_NOT_ZERO,
+    REASON_OUTCOME_NOT_PASS,
 ];
 
 /// The condition TYPES a `Backup` can carry, in one list.
@@ -436,6 +476,7 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_JOB_CREATED,
     CONDITION_EVIDENCE_RECORDED,
     CONDITION_ADMITTED,
+    CONDITION_VERIFIED,
 ];
 
 /// `phase` for a `Restore` whose admission has not passed yet — **interface

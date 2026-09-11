@@ -907,7 +907,17 @@ const I13_FILES: [&str; 5] = [
 /// in the same round and still dies: **33 passed / 1 failed** naming
 /// `crates/weirkeeper/src/controllers/backup.rs`, so the seventh token's own
 /// coverage is intact and the eighth is additive.
-const STORE_CALL_TOKENS: [&str; 8] = [
+///
+/// `verify_evidence(` IS THE TASK-24 TWIN OF THE TWO ABOVE, AND IT IS ADDED
+/// WITH THE FILE IT GUARDS. `verification::verify_evidence` holds the two
+/// `store.get` calls of the verification path and its call site —
+/// `verification::verify_oracle`'s `async move` block — names neither `Store`
+/// nor `store.`, so without this ninth token a mutant that called it directly
+/// from that block would leave this guard green and panic with *Cannot start
+/// a runtime from within a runtime* at the first verification. Same defect
+/// class as `observe_scorecard(`'s, same fix, and measured the same way (see
+/// the task-24 report).
+const STORE_CALL_TOKENS: [&str; 9] = [
     "Store::",
     "store.",
     ".manifest_facts(",
@@ -916,6 +926,7 @@ const STORE_CALL_TOKENS: [&str; 8] = [
     "retention::evaluate(",
     "observe_archive(",
     "observe_scorecard(",
+    "verify_evidence(",
 ];
 
 /// Every marker that opens an ASYNC REGION, as this scan understands one.
@@ -1020,11 +1031,21 @@ fn no_store_call_is_made_outside_spawn_blocking() {
          this guard at 32 passed / 0 failed."
     );
 
-    assert!(
-        scanned >= 2,
-        "the scan reached {scanned} of the {} named files. `retention.rs` and \
-         `controllers/backup_schedule.rs` both exist at this slot, so a scan that found fewer \
-         than two is a broken walk asserting nothing.",
+    // EVERY NAMED FILE, NOT "AT LEAST TWO" — Task 24.
+    //
+    // `I13_FILES` named `crates/weirkeeper/src/verification.rs` from the slot
+    // it was written, against a file that did not exist yet, and the walk
+    // `continue`s past a file it cannot read. With a floor of two, that entry
+    // asserted NOTHING while reading as coverage — the shape STANDING RULE 21
+    // calls worse than no guard, because the ledger records it as closed. All
+    // five exist as of this task, so the floor is all five and a file deleted
+    // or renamed out from under this list fails here instead of going quiet.
+    assert_eq!(
+        scanned,
+        I13_FILES.len(),
+        "the scan reached {scanned} of the {} named files. Every one of them exists at this \
+         slot, so a scan that found fewer is a walk that skipped a file whose `Store` calls \
+         nobody then checked: {I13_FILES:?}",
         I13_FILES.len()
     );
     assert!(

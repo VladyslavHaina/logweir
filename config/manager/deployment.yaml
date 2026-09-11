@@ -120,6 +120,70 @@ spec:
             # the default install is the one every gate in this plan runs.
             - name: LOGWEIR_ARCHIVE_URL
               value: ""
+            # ---------------------------------------------------------------
+            # THE FIFTH SECRET — `logweir-evidence-ro`, AND `optional: true`
+            # ---------------------------------------------------------------
+            # Task 24, spec §9, Global Constraint 6 ("a separate bucket and a
+            # separate principal"). This is the controller's READ-ONLY evidence
+            # credential: with it, `weirkeeper` fetches the signed receipt or
+            # scorecard a run wrote, checks the digest the status recorded and
+            # verifies the DSSE sidecar against `TrustRoster.spec.signingKeys`,
+            # and `status.evidence.verification` says `Valid` or `Invalid`.
+            #
+            # IT IS A DIFFERENT PRINCIPAL FROM THE RUNNER'S `logweir-s3`, and
+            # it must be read-only. Retention only REPORTS (Task 19, guard
+            # G-RET) and the handle is built with the read-only constructor, so
+            # no Logweir component in tag 1 holds any delete capability against
+            # object storage.
+            #
+            # THE CONTROLLER READS IT FROM ITS OWN ENVIRONMENT AND NEVER
+            # THROUGH THE API. The `weirkeeper` ClusterRole grants no verb on
+            # `secrets` (Task 21), and
+            # `tests/linkage.rs::the_controller_never_reads_a_secret` keeps it
+            # that way — which is why this is an env projection and not a
+            # `secretRef` the controller resolves.
+            #
+            # `optional: true` IS THE DOCUMENTED SWITCH, AND IT IS LOAD-BEARING
+            # (spec §9). Without it, a cluster that has not created this Secret
+            # gets a pod stuck in `CreateContainerConfigError` — all six
+            # reconcilers down for want of a DISPLAY feature. With it, the
+            # controller starts, holds no evidence handle, and every
+            # verification reads `NotAttempted` with the reason and the
+            # `logweir drill verify` command an operator can run instead. That
+            # is why `NotAttempted` exists as a verdict distinct from `Invalid`:
+            # declining to give the control plane bucket access is a choice,
+            # not a bad document.
+            # `crates/weirkeeper/tests/verification.rs::the_deployment_marks_the_evidence_secret_optional`
+            # asserts both entries carry it.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: logweir-evidence-ro
+                  key: access-key-id
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: logweir-evidence-ro
+                  key: secret-access-key
+                  optional: true
+            # ---------------------------------------------------------------
+            # NO ENDPOINT HERE, AND THAT IS GLOBAL CONSTRAINT 37
+            # ---------------------------------------------------------------
+            # The Phase B demo reaches the compose stack's MinIO at
+            # `http://host.docker.internal:9000` and needs `AWS_ENDPOINT_URL`,
+            # `AWS_REGION=us-east-1` and `AWS_ALLOW_HTTP=true` to do it. Those
+            # are LAPTOP-SPECIFIC and they are not in this file: a stranger has
+            # to be able to apply `logweir.yaml` unedited, and a shipped
+            # manifest naming one machine's hostname is not that. The demo
+            # patches them in through `config/overlays/k8s-demo`, which is
+            # author-only, and `just k8s-demo` applies it.
+            #
+            # An adopter on MinIO or Ceph sets the same three here, beside the
+            # two above. The controller then FORWARDS them to every runner Job
+            # it creates (`weirkeeper::controllers::backup::ARCHIVE_ADDRESSING_ENV`),
+            # so the endpoint is configured once rather than in two places that
+            # can disagree.
           resources:
             requests:
               cpu: 50m

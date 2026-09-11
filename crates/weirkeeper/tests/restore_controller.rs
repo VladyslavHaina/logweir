@@ -35,6 +35,7 @@ use weirkeeper::conditions::{
 };
 use weirkeeper::controllers::backup::SIGNING_VOLUME;
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY};
+use weirkeeper::controllers::restore::TOPIC_PREFLIGHT_KEY_PREFIX;
 use weirkeeper::controllers::restore::{
     action_for, admission_hold_patch, admit, approval_plan_hash, approver_key_ids,
     crashed_status_patch, finished_status_patch, observe_scorecard, plan_config_map_name,
@@ -50,6 +51,7 @@ use weirkeeper::controllers::restore::{
 use weirkeeper::crds::restore::{Restore, RestoreStatus};
 use weirkeeper::job::{self, APPROVAL_MOUNT_PATH, APPROVAL_VOLUME};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
+use weirkeeper::verification::unverified_evidence;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -680,9 +682,15 @@ async fn no_job_exists_until_the_approval_is_verified() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
 
     let seen = bodies
         .lock()
@@ -745,9 +753,15 @@ async fn an_approval_that_does_not_exist_yet_requeues_at_thirty_seconds() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("a dangling approvalRef is not an error");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a dangling approvalRef is not an error");
 
     assert_eq!(
         outcome.requeue,
@@ -791,9 +805,15 @@ async fn an_approval_that_does_not_exist_yet_requeues_at_thirty_seconds() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    let outcome2 = reconcile_restore(&restore(), &client2, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    let outcome2 = reconcile_restore(
+        &restore(),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen2 = bodies2
         .lock()
         .expect("the body recorder is readable")
@@ -857,6 +877,7 @@ async fn a_missing_approval_ref_is_terminal() {
         &restore_with_no_approval_ref(),
         &client,
         &unobserved_scorecard,
+        &unverified_evidence,
         now(),
     )
     .await
@@ -925,9 +946,15 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("a terminal refusal is an outcome");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a terminal refusal is an outcome");
     let seen = bodies
         .lock()
         .expect("the body recorder is readable")
@@ -982,9 +1009,15 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    let outcome2 = reconcile_restore(&restore(), &client2, &unobserved_scorecard, now())
-        .await
-        .expect("a terminal refusal is an outcome");
+    let outcome2 = reconcile_restore(
+        &restore(),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a terminal refusal is an outcome");
     let seen2 = bodies2
         .lock()
         .expect("the body recorder is readable")
@@ -1107,9 +1140,15 @@ async fn an_unreachable_target_cluster_is_terminal_and_creates_nothing() {
             status,
             body,
         ));
-        let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-            .await
-            .unwrap_or_else(|e| panic!("[{label}] a terminal refusal is an outcome: {e}"));
+        let outcome = reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] a terminal refusal is an outcome: {e}"));
         let seen = bodies
             .lock()
             .expect("the body recorder is readable")
@@ -1189,9 +1228,15 @@ async fn a_restore_whose_name_is_too_long_is_refused_before_any_post() {
     let (client, _rec, bodies) = mock_client_recording_bodies(routes);
     let object: Restore = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, &long))
         .expect("the fixture is a Restore");
-    let outcome = reconcile_restore(&object, &client, &unobserved_scorecard, now())
-        .await
-        .expect("a terminal refusal is an outcome");
+    let outcome = reconcile_restore(
+        &object,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a terminal refusal is an outcome");
 
     let seen = bodies
         .lock()
@@ -1252,9 +1297,15 @@ async fn an_approval_that_cannot_find_its_subject_is_still_a_hold() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     assert_eq!(
         outcome.requeue,
         Requeue::After(ADMISSION_REQUEUE_SECS),
@@ -1299,9 +1350,15 @@ async fn the_plan_configmap_carries_the_spec_bytes_verbatim() {
         200,
         cluster_json(true, PLAINTEXT_AUTH),
     ));
-    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
 
     let seen = bodies
         .lock()
@@ -1427,9 +1484,15 @@ async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
             }
         }
         let (client, _rec, bodies) = mock_client_recording_bodies(routes);
-        let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-            .await
-            .unwrap_or_else(|e| panic!("[{label}] an outcome, never an error: {e}"));
+        let outcome = reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] an outcome, never an error: {e}"));
         let seen = bodies
             .lock()
             .expect("the body recorder is readable")
@@ -1481,9 +1544,15 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
             200,
             cluster_json(true, PLAINTEXT_AUTH),
         ));
-        reconcile_restore(&object, &client, &unobserved_scorecard, now())
-            .await
-            .expect("both modes are admitted");
+        reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("both modes are admitted");
         let seen = bodies
             .lock()
             .expect("the body recorder is readable")
@@ -1806,9 +1875,15 @@ async fn the_three_evidence_keys_are_read_from_the_final_three_stdout_lines() {
         log_body(&i8_tail()),
         "Complete",
     ));
-    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen = bodies
         .lock()
         .expect("the body recorder is readable")
@@ -1835,9 +1910,15 @@ async fn the_three_evidence_keys_are_read_from_the_final_three_stdout_lines() {
         log_body(&reversed),
         "Complete",
     ));
-    reconcile_restore(&restore(), &client2, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen2 = bodies2
         .lock()
         .expect("the body recorder is readable")
@@ -1898,9 +1979,15 @@ async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
         log_body("the runner said nothing machine-readable\n"),
         "Complete",
     ));
-    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen = bodies
         .lock()
         .expect("the body recorder is readable")
@@ -1936,9 +2023,15 @@ async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
         log_body(&two),
         "Complete",
     ));
-    reconcile_restore(&restore(), &client2, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen2 = bodies2
         .lock()
         .expect("the body recorder is readable")
@@ -1965,9 +2058,15 @@ async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
         log_body("refusal-reason=TargetTopicConfigRefused\n"),
         "Failed",
     ));
-    reconcile_restore(&restore(), &client3, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client3,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen3 = bodies3
         .lock()
         .expect("the body recorder is readable")
@@ -2076,9 +2175,15 @@ async fn an_exit_three_maps_to_the_terminal_state_its_refusal_line_names() {
             log_body(&tail),
             "Failed",
         ));
-        let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-            .await
-            .unwrap_or_else(|e| panic!("[{label}] {e}"));
+        let outcome = reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] {e}"));
         assert_eq!(outcome.exit_code, Some(3), "[{label}]");
         assert_eq!(outcome.terminal_state.as_deref(), Some(expect), "[{label}]");
         let seen = bodies
@@ -2159,9 +2264,15 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
     let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string();
     let (client, _rec, bodies) =
         mock_client_recording_bodies(finished_routes(empty, log_body(""), "Failed"));
-    let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     assert_eq!(outcome.exit_code, None, "no code is invented");
     assert_eq!(outcome.terminal_state.as_deref(), Some("NoExitCode"));
     assert!(
@@ -2195,9 +2306,15 @@ async fn ttl_is_patched_only_after_status() {
         log_body(&i8_tail()),
         "Complete",
     ));
-    let outcome = reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     assert!(outcome.ttl_patched);
     let seen = rec.lock().expect("the recorder is readable").clone();
     let patches: Vec<&str> = seen
@@ -2230,9 +2347,15 @@ async fn ttl_is_patched_only_after_status() {
         }
     }
     let (client2, rec2, _b2) = mock_client_recording_bodies(routes);
-    let err = reconcile_restore(&restore(), &client2, &unobserved_scorecard, now())
-        .await
-        .expect_err("a 500 on the status patch is an error, not an outcome");
+    let err = reconcile_restore(
+        &restore(),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect_err("a 500 on the status patch is an error, not an outcome");
     assert!(format!("{err}").contains("kubernetes API error"));
     let seen2 = rec2.lock().expect("the recorder is readable").clone();
     assert_eq!(
@@ -2273,7 +2396,7 @@ async fn the_restore_status_carries_objectives_and_partial_reason() {
         log_body(&i8_tail()),
         "Failed",
     ));
-    reconcile_restore(&restore(), &client, &oracle, now())
+    reconcile_restore(&restore(), &client, &oracle, &unverified_evidence, now())
         .await
         .expect("the reconcile completes");
     let seen = bodies
@@ -2331,9 +2454,15 @@ async fn the_restore_status_carries_objectives_and_partial_reason() {
         log_body(&i8_tail()),
         "Failed",
     ));
-    reconcile_restore(&restore(), &client2, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen2 = bodies2
         .lock()
         .expect("the body recorder is readable")
@@ -2364,28 +2493,79 @@ async fn the_restore_status_carries_objectives_and_partial_reason() {
     );
 }
 
-/// `status.topicPreflight` is NOT written, and the CRD says why.
+/// `status.topicPreflight` is scanned by key name, and ABSENT when the runner
+/// printed no line.
+///
+/// # What this test asserted before Task 24, and why it changed
 ///
 /// Guard **G-TS**'s observation is returned by phase 0 in
 /// `logweir::drill::RestoreOutcome::topic_preflight` and, by Global Constraint
-/// 12 as amended, is deliberately not a scorecard field. **Nothing carries it
-/// out of the pod**: interface I8 fixes three stdout key lines and none of
-/// them is a preflight. So the field stays absent rather than fabricated, and
-/// the gap is recorded in the field's own description.
+/// 12 as amended, is deliberately not a scorecard field — so for two slots
+/// **nothing carried it out of the pod**, this test asserted the field was
+/// never written, and the CRD's own description recorded the gap in place
+/// (plan erratum **E10(c)**). It also said what closing the gap would take: a
+/// fourth machine-read stdout line, which is the interface owner's change.
+///
+/// Task 24 made that change on both sides, so the property is now the pair:
+/// **present when the line is, absent when it is not.** An assertion that the
+/// field is never written would now be asserting the bug.
+///
+/// KILLS: deriving the block from anything but the line (arm 2 would fabricate
+/// one), and reading the line by POSITION rather than by name (arm 1 puts it
+/// before interface I8's three keys, which is where the runner prints it).
 #[tokio::test]
-async fn the_topic_preflight_has_no_producer_and_is_left_absent() {
+async fn the_topic_preflight_is_scanned_by_key_name_and_absent_without_it() {
     let doc = scorecard_json("pass", "pass", "");
     let observation = scorecard_observation(doc.as_bytes()).expect("the fixture is a scorecard");
     let oracle = move |_key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
         let o = observation.clone();
         Box::pin(async move { Some(o) })
     };
+
+    // ARM 1 — the runner printed it, before I8's three keys.
+    let tail = format!(
+        "{TOPIC_PREFLIGHT_KEY_PREFIX}{{\"timestampType\":\"CreateTime\",\"retentionMs\":604800000,\"timestampBound\":1760000000000}}\n{}",
+        i8_tail()
+    );
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&tail),
+        "Complete",
+    ));
+    reconcile_restore(&restore(), &client, &oracle, &unverified_evidence, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    let pre = status.get("topicPreflight").unwrap_or_else(|| {
+        panic!("the preflight line was printed, so the field is written: {status}")
+    });
+    assert_eq!(pre["timestampType"], serde_json::json!("CreateTime"));
+    assert_eq!(pre["retentionMs"], serde_json::json!(604_800_000i64));
+    assert_eq!(
+        pre["timestampBound"],
+        serde_json::json!(1_760_000_000_000i64)
+    );
+    assert_eq!(
+        pre.as_object().map(serde_json::Map::len),
+        Some(3),
+        "THE THREE FIELDS AND NO OTHERS: a fourth key on the line would be a property the \
+         structural schema prunes, so it is dropped here rather than misfiled. Got {pre}"
+    );
+
+    // ARM 2 — no line, so no field. The same rule the evidence keys follow: a
+    // run that did not complete phase 0 read nothing about the target's
+    // config, and a fabricated block would be a claim about a check nobody
+    // made.
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
         pod_list_terminated(0),
         log_body(&i8_tail()),
         "Complete",
     ));
-    reconcile_restore(&restore(), &client, &oracle, now())
+    reconcile_restore(&restore(), &client, &oracle, &unverified_evidence, now())
         .await
         .expect("the reconcile completes");
     let seen = bodies
@@ -2395,14 +2575,16 @@ async fn the_topic_preflight_has_no_producer_and_is_left_absent() {
     let status = patched_statuses(&seen).remove(0);
     assert!(
         status.get("topicPreflight").is_none(),
-        "ABSENT, never fabricated — the same rule the evidence keys follow: {status}"
+        "ABSENT, never fabricated: {status}"
     );
 
+    // …and the CRD's description says the producer exists and when the field
+    // is still absent, so a reader of the shipped schema is not left wondering.
     let doc = restore_crd_field_description(&["status", "topicPreflight"]);
     assert!(
-        doc.contains("no producer") || doc.contains("not written"),
-        "and the CRD field's own description records the gap in place, so a reader of the shipped \
-         schema is not left wondering why it is always empty. Got: {doc}"
+        doc.contains("topic-preflight=") && doc.to_lowercase().contains("absent"),
+        "the field description names the stdout key its value comes from AND the case in which \
+         it is still absent. Got: {doc}"
     );
 }
 
@@ -2554,7 +2736,7 @@ async fn every_status_write_sets_the_scalar_reason() {
             "finished_status_patch exit 0 (two conditions)",
             // `Complete` is first and `EvidenceRecorded` is appended after it;
             // the TERMINAL condition is the one the column must show.
-            finished_status_patch(&r, 0, &keys, None, None, None, now())["status"].clone(),
+            finished_status_patch(&r, 0, &keys, None, None, None, None, now())["status"].clone(),
             0,
         ),
         (
@@ -2564,6 +2746,7 @@ async fn every_status_write_sets_the_scalar_reason() {
                 3,
                 &keys,
                 Some(TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON),
+                None,
                 None,
                 None,
                 now(),
@@ -2621,9 +2804,15 @@ async fn every_status_write_sets_the_scalar_reason() {
         )),
         "Failed",
     ));
-    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen = bodies
         .lock()
         .expect("the body recorder is readable")
@@ -2801,9 +2990,15 @@ async fn the_status_carries_the_old_and_new_topic_names() {
         log_body(&i8_tail()),
         "Complete",
     ));
-    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the reconcile completes");
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
     let seen = bodies
         .lock()
         .expect("the body recorder is readable")
@@ -3129,9 +3324,15 @@ fn status_patch_count(bodies: &[SeenBody]) -> usize {
 #[tokio::test]
 async fn a_steady_restore_issues_no_second_status_patch() {
     let (client, _rec, bodies) = mock_client_recording_bodies(running_routes());
-    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
-        .await
-        .expect("the first reconcile succeeds");
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the first reconcile succeeds");
     let first = bodies
         .lock()
         .expect("the body recorder is readable")
@@ -3155,6 +3356,7 @@ async fn a_steady_restore_issues_no_second_status_patch() {
         &steady,
         &client,
         &unobserved_scorecard,
+        &unverified_evidence,
         now() + chrono::Duration::minutes(1),
     )
     .await

@@ -178,8 +178,26 @@ pub struct EvidenceVerification {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_type: Option<String>,
     /// When the controller performed the verification.
+    ///
+    /// **WHEN THIS VERDICT WAS REACHED, not when it was last re-confirmed.** A
+    /// reconciler's own status patch is what wakes it (plan erratum
+    /// **E11(d)**), so a field carrying a fresh clock read on every pass would
+    /// make every pass a write and every write a wake-up. A change in
+    /// `result`, `matchedKeyId`, `payloadType` or `detail` is a new verdict and
+    /// takes a new instant; anything else keeps the stored one, and the second
+    /// status patch is then a no-op that is never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<Time>,
+    /// Why the verdict is what it is: the verification error's own message on
+    /// `Invalid`, and the reason nothing was attempted on `NotAttempted` — no
+    /// evidence credential, an unreadable object, or a `TrustRoster` carrying
+    /// no signing key material. Absent on `Valid`: there is nothing to explain
+    /// about an answer that came out yes.
+    ///
+    /// NEVER KEY MATERIAL AND NEVER A CREDENTIAL. It is an error's `Display`
+    /// and a fixed sentence, both of which name objects and key IDs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// The CEL rule that seals a whole `.spec`.

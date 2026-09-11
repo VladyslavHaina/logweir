@@ -2130,8 +2130,157 @@ kubectl --context docker-desktop delete -f logweir.yaml; echo "rc=$?"
 kubectl --context docker-desktop delete ns logweir-system logweir-t23 --ignore-not-found; echo "rc=$?"
 ```
 
+## 15. The evidence credential, the verdict, and the signing-oracle residual
 
-## 15. Serving the UI
+**Task 24, chain W slot 17.** `weirkeeper` verifies the evidence the UI renders
+— and renders only a verdict that actually happened.
+
+### 15.1 The fifth Secret, and the documented switch
+
+`logweir-evidence-ro` is a **read-only** object-store credential and a
+**different principal** from the runner's `logweir-s3` (spec §9; Global
+Constraint 6 already contemplates "a separate bucket and a separate
+principal"). It needs `s3:GetObject` on the evidence prefix and nothing else.
+It cannot write or delete in any bucket, and — because retention only reports
+(guard **G-RET**) — **no Logweir component has any delete capability against
+object storage in tag 1.**
+
+It is projected into the controller's own pod as environment, with
+`optional: true`:
+
+```yaml
+# config/manager/deployment.yaml
+- name: AWS_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef: { name: logweir-evidence-ro, key: access-key-id, optional: true }
+- name: AWS_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef: { name: logweir-evidence-ro, key: secret-access-key, optional: true }
+```
+
+**`optional: true` is load-bearing and not tidiness.** Mandatory, a cluster
+that has not created this Secret gets a pod stuck in
+`CreateContainerConfigError` — all six reconcilers down for want of a *display*
+feature. Optional, the controller starts, holds no evidence handle, and every
+`status.evidence.verification` reads:
+
+```json
+{ "result": "NotAttempted",
+  "detail": "no evidence credential is configured; run the printed logweir drill verify command instead" }
+```
+
+**That is the documented switch.** An adopter who declines to give the control
+plane bucket access runs with verification display off and verifies with the
+CLI instead — `logweir drill verify --scorecard … --signature … --public-key …`
+— and it is why `NotAttempted` exists as a verdict **distinct from `Invalid`**:
+`Invalid` is a claim about the *document*, and declining to hand over a
+credential has not produced a bad document.
+
+**The controller reads that Secret from its own environment and never through
+the API.** The `weirkeeper` ClusterRole grants no verb on `secrets` (§9), and
+`crates/weirkeeper/tests/linkage.rs::the_controller_never_reads_a_secret` keeps
+it that way. The consequence for operators is one line: after creating or
+rotating `logweir-evidence-ro`, **restart the Deployment** — container
+environment is fixed at start.
+
+### 15.2 The badge is two rules, one per kind
+
+Spec §8's green badge is not one rule, because "passed" is a different field on
+each kind:
+
+| kind      | green when                                                       |
+|-----------|------------------------------------------------------------------|
+| `Backup`  | `status.evidence.verification.result == Valid` **and** `status.exitCode == 0` |
+| `Restore` | `status.evidence.verification.result == Valid` **and** `status.outcome == pass` |
+
+There is **no `outcome` on the `Backup` path at all** — `Backup.status` carries
+`exitCode` and no `outcome` — so a single shared rule would render every
+`Backup` ungreen. Either badge is labelled
+
+> verified by weirkeeper at `<verifiedAt>` against key `<matchedKeyId>`
+
+and **never** "verified in your browser": the in-browser WASM verifier is cut
+from tag 1, and rendering no browser-computed verdict is strictly more honest
+than a green badge over a verification that did not happen there. Anything that
+is not green renders the literal word **`unverified`**, never `pass`.
+
+Both rules also appear on the object itself, as a `Verified` condition whose
+`reason` is `Verified`, `VerificationInvalid`, `VerificationNotAttempted`,
+`ExitCodeNotZero` or `OutcomeNotPass`, and whose `message` is the badge label.
+
+### 15.3 What the controller actually checks, in order
+
+1. **No credential** → `NotAttempted`. A fact about the install.
+2. **`get` the payload and its detached sidecar** through the read-only
+   handle. `NotFound` and *every other* storage error → `NotAttempted` with the
+   error's own message. A storage failure is never `Invalid`.
+3. **Recompute the digest** and compare it against the one the status recorded
+   when the run finished (`Backup.status.evidence.receiptSha256`,
+   `Restore.status.evidence.scorecardSha256`). A mismatch **is** `Invalid`, and
+   the detail names both digests. Skipping this and checking the signature
+   alone would accept a genuinely-signed *older* document put in this one's
+   place.
+4. **For each `TrustRoster.spec.signingKeys[]` entry**, build a verifying key
+   from its `spkiPem` and check the DSSE sidecar. The first success is `Valid`
+   carrying that entry's own `keyId`; otherwise `Invalid` with the last error.
+   An **empty** list is `NotAttempted` with
+
+   > the TrustRoster lists no signing key material; add the runner's public key to spec.signingKeys
+
+   — it names itself rather than failing silently, and an `Invalid` there would
+   blame every document in the cluster for one missing line in one
+   cluster-scoped object.
+
+This is written in a **second, separate `PATCH …/status`** after the terminal
+one, so a verification failure — or a 500 on that patch — can never prevent the
+exit code from being recorded.
+
+### 15.4 The residual, stated plainly
+
+`weirkeeper` is a **signing oracle**: Job CRUD in a namespace that holds
+`logweir-signing-key` is equivalent to holding that key, because a Job the
+controller creates can mount it. That is residual **O1**, and O0's default
+**(a)** — accepted, and stated here rather than implied.
+
+Global Constraint 27 is the narrowed position and the only one this repository
+makes: **no control-plane crate links the signer** (`weirkeeper` depends on
+`logweir-verify` and never on `logweir-evidence`;
+`scripts/check-one-signer.sh` computes the reachable set from the dependency
+graph), and the *capability* to sign is unbroken while the controller holds Job
+CRUD over the signing key's namespace. Both halves are true at once and the
+second is not softened by the first.
+
+**The hardened layout is documented, not mandated.** Putting
+`logweir-signing-key` in a namespace where `weirkeeper` has no Job CRUD removes
+the oracle — and it also splits the single-namespace install that the "a
+stranger applies one file" decision rests on, so it is an adopter's choice and
+not a requirement. An adopter who takes it runs a second, namespace-scoped
+RoleBinding for the runner and keeps `logweir.yaml`'s ClusterRole away from
+that namespace's Jobs.
+
+None of this stops a cluster-admin — `docs/stability.md`, **O0**.
+
+### 15.5 Where the object store is, for a local demo
+
+`just k8s-demo` (Phase B's exit criterion; the transcript is
+[../e2e/k8s/phase-b-demo.md](../e2e/k8s/phase-b-demo.md)) reaches the compose
+stack's MinIO from inside docker-desktop as **`http://host.docker.internal:9000`**,
+with `AWS_REGION=us-east-1` and `AWS_ALLOW_HTTP=true`. Those three are
+**author-only** and live in
+`config/overlays/k8s-demo/deployment-env-patch.yaml`, not in
+`config/manager/deployment.yaml`: a shipped manifest naming one laptop's
+hostname is not a file a stranger can apply, and an S3 endpoint that does not
+resolve looks exactly like an empty bucket.
+
+The controller **forwards** `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP`
+and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` from its own environment to every runner
+Job it creates (`weirkeeper::controllers::backup::ARCHIVE_ADDRESSING_ENV`), so
+an adopter on MinIO or Ceph configures the endpoint **once**, on the
+Deployment, rather than in two places that can disagree. A variable that is not
+set is not forwarded, so the default install's runner Job env is exactly what
+it was before.
+
+## 16. Serving the UI
 
 The UI is a directory of static files -- `ui/` in this repository -- and a
 Kubernetes API client. It is not installed onto the cluster: tag 1 ships **no

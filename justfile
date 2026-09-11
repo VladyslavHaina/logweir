@@ -656,6 +656,53 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
     fi
     echo "check-org-root: both images carry third_party/org-root.fingerprint at /etc/logweir/org-root.fingerprint."
 
+# Task 24, chain J slot 17. **PHASE B'S EXIT CRITERION**, scripted.
+#
+# One command from an empty docker-desktop cluster to a `Restore` object
+# carrying `phase: Succeeded`, `exitCode: 0`, `outcome: pass` and
+# `status.evidence.verification.result: Valid` with a `matchedKeyId` — plus a
+# `Backup` carrying `exitCode: 0` and the same `Valid`. Both verdicts are the
+# CONTROLLER's, computed in-cluster with the read-only `logweir-evidence-ro`
+# credential against the runner's public key on the cluster-scoped
+# `TrustRoster` named `default`.
+#
+# IT IS AUTHOR-ONLY (Global Constraint 37) and says so in its own header. Two
+# steps work only on the machine the images were built on: the `docker tag`
+# that makes the SHIPPED `ghcr.io/logweir/<name>@sha256:…` references resolve
+# on this node (the kubelet keys on the WHOLE reference — plan erratum E19b),
+# and `config/overlays/k8s-demo/deployment-env-patch.yaml`, which points the
+# controller at this laptop's compose stack. "Published" still means a PULL
+# from a registry the author does not control, and the install file's digest
+# rows still read `blocked: no remote`.
+#
+# THE ORDER OF THE FIRST THREE STEPS IS NOT A STYLE CHOICE.
+# `scripts/time-unit-suite.sh` refuses to run, exit 1, while 9092 or 9000
+# answers (Global Constraint 22), so `just lint` runs at step 2, with the stack
+# DOWN, and the stack comes up at step 3 — never the other way round.
+# `crates/weirkeeper/tests/verification.rs::the_demo_runs_lint_before_the_stack_is_up`
+# asserts it over the script text, in the default test suite.
+#
+# THE OBJECT STORE IS ADDRESSED AS `http://host.docker.internal:9000`
+# (critique B H20): the compose stack's MinIO already publishes `9000:9000`, so
+# no compose change is needed and STANDING RULE 15's one-owner rule is not
+# touched. The archive is `s3://kafka-backups/k8s-demo` and the bucket is
+# created with `mc` inside the compose network first, because `just e2e-down`
+# runs `down -v` and EMPTIES the MinIO volume (plan erratum E12g).
+#
+# `cargo build -p logweir` FIRST, and it is not optional (plan erratum E9): the
+# script shells `logweir drill approve` from `target/debug/logweir`, and
+# nothing else in this recipe builds it.
+#
+#     just image && just image-weirkeeper     # once, if the images are absent
+#     just k8s-demo; echo "rc=$?"
+#
+# It cleans up after itself from a `trap`: `kubectl delete -f logweir.yaml`,
+# `kubectl delete ns logweir-system logweir-t24`, the two author-only image
+# tags, the archive prefix, and `just e2e-down` — each with its rc printed.
+k8s-demo:
+    cargo build -p logweir
+    ./scripts/k8s-demo.sh
+
 # Task 25 (slot 18). SERVE THE UI.
 #
 # `kubectl proxy` serves the static files AND proxies the Kubernetes API on the

@@ -175,6 +175,13 @@ spec:
                     description: The object key of the signed backup receipt.
                     nullable: true
                     type: string
+                  receiptSha256:
+                    description: |-
+                      The sha256 of the receipt at `receiptKey`, as `sha256:<lowercase hex>` — the one digest spelling this corpus uses everywhere (`logweir_core::ids::sha256_prefixed`). **COMPUTED by the controller over the bytes it fetched**, not copied: a document cannot carry its own digest.
+
+                      WHY IT IS HERE AT ALL, AND IT IS NOT DECORATION (Task 24). It is the value `verification` is checked against on a LATER pass: the controller re-fetches the receipt with its read-only evidence credential and compares this recorded digest against the bytes in the bucket right now. Without it, `verify_evidence` could only check the signature — and a genuinely-signed OLDER receipt put in this one's place would verify. `Restore` has carried the same field for the scorecard since Task 20 (`restore::RestoreEvidence::scorecard_sha256`).
+                    nullable: true
+                    type: string
                   sidecarKey:
                     description: The object key of the receipt's detached DSSE sidecar.
                     nullable: true
@@ -183,6 +190,13 @@ spec:
                     description: What `weirkeeper` recorded when it verified the pair above.
                     nullable: true
                     properties:
+                      detail:
+                        description: |-
+                          Why the verdict is what it is: the verification error's own message on `Invalid`, and the reason nothing was attempted on `NotAttempted` — no evidence credential, an unreadable object, or a `TrustRoster` carrying no signing key material. Absent on `Valid`: there is nothing to explain about an answer that came out yes.
+
+                          NEVER KEY MATERIAL AND NEVER A CREDENTIAL. It is an error's `Display` and a fixed sentence, both of which name objects and key IDs only.
+                        nullable: true
+                        type: string
                       matchedKeyId:
                         description: The `keyId` of the `TrustRoster` signing key whose public key verified the signature.
                         nullable: true
@@ -196,7 +210,10 @@ spec:
                         nullable: true
                         type: string
                       verifiedAt:
-                        description: When the controller performed the verification.
+                        description: |-
+                          When the controller performed the verification.
+
+                          **WHEN THIS VERDICT WAS REACHED, not when it was last re-confirmed.** A reconciler's own status patch is what wakes it (plan erratum **E11(d)**), so a field carrying a fresh clock read on every pass would make every pass a write and every write a wake-up. A change in `result`, `matchedKeyId`, `payloadType` or `detail` is a new verdict and takes a new instant; anything else keeps the stored one, and the second status patch is then a no-op that is never sent.
                         format: date-time
                         nullable: true
                         type: string

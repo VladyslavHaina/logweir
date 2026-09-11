@@ -97,6 +97,38 @@ pub struct Context {
     pub archive: Option<std::sync::Arc<logweir_store::Store>>,
 }
 
+/// The cluster-scoped `TrustRoster`'s `spec`, or `None` when it could not be
+/// read — Task 24, interface **I16**.
+///
+/// ONE FETCH POINT FOR THE VERIFYING SIDE, beside
+/// [`approval::load_roster`]'s for the authorising side. Both resolve
+/// [`crate::ROSTER_NAME`] and nothing else; this one flattens the two
+/// "absent" cases together on purpose:
+///
+/// * a roster that is **not found** and
+/// * a roster whose `signingKeys` is **empty**
+///
+/// are the same fact to a verifier — there is no signing key material in this
+/// cluster — and `verification::verify_evidence` gives both the same
+/// `NotAttempted` detail, which names the field to add the key to.
+///
+/// An API FAILURE IS NOT EITHER OF THOSE, and it returns `None` here so the
+/// caller can say so: telling an operator to "add the runner's public key"
+/// when the real problem is a 503 sends them to edit an object that was
+/// already right.
+pub async fn roster_spec(
+    client: &kube::Client,
+) -> Result<crate::crds::trust_roster::TrustRosterSpec, kube::Error> {
+    match approval::load_roster(client).await? {
+        approval::RosterLoad::Found(roster) => Ok(roster.spec),
+        approval::RosterLoad::NotFound => Ok(crate::crds::trust_roster::TrustRosterSpec {
+            approver_keys: Vec::new(),
+            signing_keys: Vec::new(),
+            allowed_cluster_ids: Vec::new(),
+        }),
+    }
+}
+
 /// The type `main`'s registration point holds.
 ///
 /// Re-exported here so a task appending a `controllers.push(…)` line to

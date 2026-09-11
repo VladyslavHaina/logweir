@@ -90,6 +90,11 @@ use crate::conditions::{
 use crate::crds::backup::Backup;
 use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
+use crate::verification::{
+    backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
+    EvidenceRef, VerifyOracle,
+};
+use logweir_core::ids::sha256_prefixed;
 use logweir_core::spec::AuthSpec;
 use logweir_store::Store;
 
@@ -157,6 +162,60 @@ pub const ARCHIVE_SECRET_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
 pub const ARCHIVE_ACCESS_KEY: &str = "access-key-id";
 /// The key within `Backup.spec.archive.secretRef` holding the secret key.
 pub const ARCHIVE_SECRET_KEY: &str = "secret-access-key";
+
+/// The object-store ADDRESSING variables the controller forwards to every
+/// runner Job it creates — Task 24.
+///
+/// # Why the controller forwards its own environment
+///
+/// Critique B **H20**: *nothing in the design says where the object store is.*
+/// A `Backup` names its archive as a URL (`spec.archive.url`) and a credential
+/// (`spec.archive.secretRef`), and neither can carry an ENDPOINT — which is
+/// everything an adopter on MinIO, Ceph, or any S3-compatible store needs,
+/// and exactly what the Phase B demo needs to reach the compose stack's MinIO
+/// at `http://host.docker.internal:9000`.
+///
+/// These four are `object_store`'s OWN variable names, not Logweir knobs, and
+/// two of them ALREADY reach the runner by another route:
+/// [`crate::retention::storage_url_for`] reads `AWS_ALLOW_HTTP` and
+/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` out of the CONTROLLER's environment when
+/// it renders `plan_backup_spec`'s `storage` block. Forwarding all four makes
+/// one configuration point instead of two halves that can disagree — an
+/// adopter points the controller at their store and the runners follow.
+///
+/// **A VARIABLE THAT IS NOT SET IS NOT FORWARDED.** The default install sets
+/// none of them, so a default runner Job's env is exactly what it was before
+/// this task: `RUST_LOG` plus `job::build`'s own three. Nothing about the
+/// shipped `logweir.yaml` changes, which is what keeps it applyable by a
+/// stranger (Global Constraint 37); the demo's own kustomize patch is what
+/// sets them.
+pub const ARCHIVE_ADDRESSING_ENV: [&str; 4] = [
+    "AWS_ENDPOINT_URL",
+    "AWS_REGION",
+    "AWS_ALLOW_HTTP",
+    "AWS_VIRTUAL_HOSTED_STYLE_REQUEST",
+];
+
+/// [`ARCHIVE_ADDRESSING_ENV`]'s variables that are actually set on this
+/// process, in declaration order, as `env_literal` pairs.
+///
+/// NEVER A CREDENTIAL. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are
+/// deliberately not in the list: the runner's archive credential comes from
+/// the `Backup`'s own `spec.archive.secretRef` through `env_from_secret`, and
+/// the controller's is a DIFFERENT PRINCIPAL (`logweir-evidence-ro`, read-only,
+/// spec §9) which must never be handed to a pod that writes.
+#[must_use]
+pub fn archive_addressing_env() -> Vec<(String, String)> {
+    ARCHIVE_ADDRESSING_ENV
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| ((*name).to_string(), v))
+        })
+        .collect()
+}
 
 /// `receipt-key=` — interface **I7**'s first line.
 pub const RECEIPT_KEY_PREFIX: &str = "receipt-key=";
@@ -519,13 +578,24 @@ pub struct EvidencePresence {
 /// presence of the two keys (step 5's orphan check) and the receipt's own
 /// `covered` block (interface **I22**'s window) — so they are one observation
 /// rather than two round trips against the same bucket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// **NOT `Copy` SINCE TASK 24**, and the reason is a `String`. `receipt_sha256`
+/// is the digest of the bytes this observation fetched, which the status has
+/// to record so that a LATER pass can re-fetch and compare — a verification
+/// that only checked the signature would accept a genuinely-signed OLDER
+/// receipt put in this one's place. Every call site that took the value by
+/// copy now takes it by reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveObservation {
     /// Whether each of the two evidence objects exists.
     pub presence: EvidencePresence,
     /// The receipt's `covered{from_ms, to_ms}`, in **epoch milliseconds**,
     /// when the receipt was read and named its window.
     pub covered: Option<(i64, i64)>,
+    /// `sha256_prefixed` of the receipt bytes that were fetched, when they
+    /// were. **Computed here and never copied out of the document**: a
+    /// document cannot carry its own digest. `None` when the receipt could not
+    /// be read at all, which is NOT OBSERVED and not "the receipt is empty".
+    pub receipt_sha256: Option<String>,
 }
 
 /// What the archive-facing half of this reconciler is handed, and the reason
@@ -637,12 +707,18 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         .as_deref()
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
         .and_then(|doc| covered_from_receipt(&doc));
+    // THE DIGEST OF WHAT WAS ACTUALLY FETCHED, in the one spelling this corpus
+    // uses (`sha256:<lowercase hex>`), so a value read off the status and a
+    // value read out of a signed document compare as strings. Task 24's
+    // `verify_evidence` re-fetches this object on a later pass and compares.
+    let receipt_sha256 = receipt.as_deref().map(sha256_prefixed);
     Some(ArchiveObservation {
         presence: EvidencePresence {
             payload: receipt.is_some(),
             sidecar,
         },
         covered,
+        receipt_sha256,
     })
 }
 
@@ -908,7 +984,11 @@ pub fn runner_job_spec(backup: &Backup) -> Result<RunnerJobSpec, BackupError> {
         // and the exit-code meaning line are lost, and those two are how a
         // pod is correlated with the archive it read
         // (`docs/kubernetes.md` §1b).
-        env_literal: vec![("RUST_LOG".to_string(), "info".to_string())],
+        env_literal: {
+            let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
+            env.extend(archive_addressing_env());
+            env
+        },
         plan_config_map: Some(plan_config_map_name(&backup.name_any())),
     })
 }
@@ -1050,6 +1130,18 @@ pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>)
 /// which means "leave it alone": a run whose receipt could not be fetched must
 /// not overwrite a window a previous pass recorded, and must certainly not
 /// write a zero one.
+/// `#[allow(clippy::too_many_arguments)]`, AND THE REASON IS THE FUNCTION'S
+/// WHOLE POINT. This is a PURE patch builder: every parameter is one
+/// independent OBSERVATION the reconcile made, and the value of the function
+/// is that a test can construct any combination of them and assert the exact
+/// bytes that reach `/status`. Bundling them into a struct to satisfy the
+/// seven-argument lint would move the combinations into a constructor and
+/// change nothing about how many facts the status carries — while making every
+/// existing assertion in `tests/{backup,restore}_controller.rs` read one level
+/// further from the patch it is about. Task 24 took the eighth argument (the
+/// receipt digest on the `Backup` path, the topic-preflight observation on the
+/// `Restore` path) and this allow with it.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn finished_status_patch(
     backup: &Backup,
@@ -1058,6 +1150,7 @@ pub fn finished_status_patch(
     refusal: Option<&str>,
     orphan: Option<&str>,
     covered: Option<(i64, i64)>,
+    receipt_sha256: Option<&str>,
     now: DateTime<Utc>,
 ) -> Value {
     // TWO VOCABULARIES, TWO FIELDS (errata E5b, review LOW-2). The CONDITION's
@@ -1132,6 +1225,12 @@ pub fn finished_status_patch(
     }
     if let Some(k) = keys.sidecar.as_ref() {
         evidence.insert("sidecarKey".to_string(), json!(k));
+    }
+    // OMITTED, NEVER NULLED, when the receipt was not read: a merge patch with
+    // no key means "leave it alone", and a run whose receipt could not be
+    // fetched must not erase a digest a previous pass recorded.
+    if let Some(d) = receipt_sha256 {
+        evidence.insert("receiptSha256".to_string(), json!(d));
     }
 
     let mut status = serde_json::Map::new();
@@ -1523,9 +1622,10 @@ pub async fn reconcile_backup(
     backup: &Backup,
     client: &kube::Client,
     archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<BackupOutcome, BackupError> {
-    match reconcile_backup_inner(backup, client, archive, now).await {
+    match reconcile_backup_inner(backup, client, archive, verify, now).await {
         Err(BackupError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `BackupError::Refused`, so the
@@ -1574,6 +1674,7 @@ async fn reconcile_backup_inner(
     backup: &Backup,
     client: &kube::Client,
     archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<BackupOutcome, BackupError> {
     let name = backup.name_any();
@@ -1763,8 +1864,9 @@ async fn reconcile_backup_inner(
     // (interface I13, see `ArchiveOracle`), so this is the one point in the
     // reconcile that yields to the runtime for the archive.
     let observed = archive(keys.clone()).await;
-    let orphan = orphan_state(exit_code, observed.map(|o| o.presence));
-    let covered = observed.and_then(|o| o.covered);
+    let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
+    let covered = observed.as_ref().and_then(|o| o.covered);
+    let receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.clone());
 
     // WARNED ONLY WHERE IT IS NEWS. A refusal (exit 3), an operational failure
     // (1) or a signing failure (4) wrote no artifact BY CONTRACT (GC11), so
@@ -1792,21 +1894,21 @@ async fn reconcile_backup_inner(
         }
     }
 
-    patch_status_if_changed(
-        &backups,
+    // BUILT ONCE AND HELD, because the SECOND patch needs the condition array
+    // this one carries: a JSON merge patch REPLACES arrays, and after this
+    // PATCH returns, the in-memory `backup` is stale and no longer says what
+    // the object says. See `verification::second_patch`.
+    let terminal = finished_status_patch(
         backup,
-        &name,
-        finished_status_patch(
-            backup,
-            exit_code,
-            &keys,
-            refusal.as_deref(),
-            orphan,
-            covered,
-            now,
-        ),
-    )
-    .await?;
+        exit_code,
+        &keys,
+        refusal.as_deref(),
+        orphan,
+        covered,
+        receipt_sha256.as_deref(),
+        now,
+    );
+    patch_status_if_changed(&backups, backup, &name, terminal.clone()).await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this
@@ -1821,6 +1923,75 @@ async fn reconcile_backup_inner(
     )
     .await
     .map_err(BackupError::Api)?;
+
+    // ===================================================================
+    // THE SECOND PATCH — Task 24, interface I21's `Backup` half.
+    // ===================================================================
+    //
+    // AFTER the terminal status write and after the TTL, in a patch of its
+    // own, so a verification that fails — or a 500 on this very PATCH — can
+    // never prevent the exit code from being recorded. The `?` on the terminal
+    // patch above is what makes that an ordering guarantee rather than a
+    // comment.
+    //
+    // ATTEMPTED ONLY WHEN THERE IS SOMETHING TO VERIFY. Both keys and the
+    // digest have to be present: at exits 1, 3 and 4 the contract says no
+    // artifact was written (GC11), so there is no document to have an opinion
+    // about and no verification block is written at all.
+    if let (Some(payload_key), Some(sidecar_key), Some(digest)) = (
+        keys.receipt.as_deref(),
+        keys.sidecar.as_deref(),
+        receipt_sha256.as_deref(),
+    ) {
+        let result = verify(EvidenceRef {
+            payload_key: payload_key.to_string(),
+            payload_sha256: digest.to_string(),
+            sidecar_key: sidecar_key.to_string(),
+            payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        })
+        .await;
+        let current = backup
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok());
+        let block = result.to_status_value(stored_verification(current.as_ref()));
+        // THE BADGE IS COMPUTED OVER THE STATUS THAT WILL EXIST, not the one
+        // that did: the terminal patch has landed, so `exitCode` is the value
+        // it wrote. Interface I21's `Backup` rule reads `exitCode` and there
+        // is no `outcome` on this path to read instead.
+        let mut projected = terminal
+            .pointer("/status")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        projected["evidence"] = json!({ "verification": block.clone() });
+        let badge = backup_badge(&projected);
+        let verified = verified_condition(
+            &badge,
+            current_condition(
+                backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                crate::conditions::CONDITION_VERIFIED,
+            ),
+            backup.meta().generation,
+            now,
+        );
+        info!(
+            backup = %name,
+            namespace = %namespace,
+            verification = %result.result,
+            matched_key_id = result.matched_key_id.as_deref().unwrap_or("<none>"),
+            green = badge.green,
+            badge = %badge.label,
+            "weirkeeper verified this Backup's signed receipt with its read-only evidence \
+             credential"
+        );
+        patch_status_if_changed(
+            &backups,
+            backup,
+            &name,
+            second_patch(&conditions_in(&terminal), verified, block),
+        )
+        .await?;
+    }
 
     info!(
         backup = %name,
@@ -1876,7 +2047,8 @@ async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, Bac
                 .flatten()
         })
     };
-    reconcile_backup(&backup, &ctx.client, &oracle, Utc::now()).await?;
+    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
+    reconcile_backup(&backup, &ctx.client, &oracle, &verify, Utc::now()).await?;
     Ok(Action::requeue(std::time::Duration::from_secs(
         REQUEUE_SECS,
     )))

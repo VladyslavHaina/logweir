@@ -1,0 +1,78 @@
+# THE PHASE B DEMO'S OWN PATCH — AUTHOR-ONLY (Global Constraint 37).
+#
+# ---------------------------------------------------------------------------
+# WHY THE DEMO'S S3 LITERALS ARE HERE AND NOT IN `config/manager/deployment.yaml`
+# ---------------------------------------------------------------------------
+# The shipped install file has to stay applyable by a stranger. `logweir.yaml`
+# is one file somebody runs `kubectl apply -f` on, and a manifest naming
+# `host.docker.internal` names ONE LAPTOP's compose stack — a value that is
+# wrong everywhere else and SILENTLY wrong, because an S3 endpoint that does
+# not resolve looks like an empty bucket.
+#
+# So the four addressing variables live here, in a patch `just k8s-demo`
+# applies ON TOP of `logweir.yaml`, and `config/manager/deployment.yaml` keeps
+# only the `logweir-evidence-ro` env block with `optional: true`.
+# `crates/weirkeeper/tests/verification.rs::the_deployment_marks_the_evidence_secret_optional`
+# asserts that the shipped file names no `host.docker.internal`.
+#
+# ---------------------------------------------------------------------------
+# A STRATEGIC-MERGE PATCH, NOT A KUSTOMIZE OVERLAY, AND THE REASON IS MEASURED
+# ---------------------------------------------------------------------------
+# An overlay with `resources: [../../../logweir.yaml]` is refused by kustomize:
+#
+#     error: accumulating resources: … security; file '…/logweir.yaml' is not
+#     in or below '…/config/overlays/k8s-demo'
+#
+# — kustomize will not read a file above the kustomization's own directory.
+# Rebuilding the whole install from `config/manager` + `config/crd` +
+# `config/rbac` (what `config/overlays/local-images` does) would make the demo
+# apply a DIFFERENT set of documents from the one `logweir.yaml` ships, which
+# is precisely the thing Phase B is supposed to prove. So the demo applies the
+# shipped file verbatim and then patches the one Deployment:
+#
+#     kubectl --context docker-desktop apply --server-side -f logweir.yaml
+#     kubectl --context docker-desktop -n logweir-system patch deployment weirkeeper \
+#       --patch-file config/overlays/k8s-demo/deployment-env-patch.yaml
+#
+# `env` has a strategic-merge patch strategy of `merge` on key `name`, so the
+# five entries below are merged by name: `LOGWEIR_ARCHIVE_URL` REPLACES the
+# shipped empty default and the other four are added, while the two
+# `logweir-evidence-ro` entries the base carries are untouched.
+#
+# ---------------------------------------------------------------------------
+# WHAT THESE VALUES DO, AND WHY THE RUNNER GETS THEM TOO
+# ---------------------------------------------------------------------------
+# `object_store`'s `AmazonS3Builder::from_env()` reads `AWS_ENDPOINT_URL`,
+# `AWS_REGION` and `AWS_ALLOW_HTTP`, so they are what makes
+# `s3://kafka-backups/k8s-demo` resolve to the compose stack's MinIO rather
+# than to Amazon. The controller FORWARDS all four to every runner Job it
+# creates (`weirkeeper::controllers::backup::ARCHIVE_ADDRESSING_ENV`) — one
+# configuration point instead of two halves that can disagree — which is why
+# there is no second patch here for the Jobs. There could not be one: a runner
+# Job is created at RUN TIME by the controller, and no manifest tool can reach
+# it.
+#
+# `LOGWEIR_ARCHIVE_URL` names the BUCKET the controller's read-only evidence
+# handle is built over. `Store::get` takes a BUCKET-RELATIVE key, and both
+# evidence documents — the backup receipt and the restore scorecard — live
+# under `logweir/` in `kafka-backups`, so this one handle reaches both.
+#
+# NO IMAGE REFERENCE APPEARS IN THIS FILE, so the "every image reference in a
+# shipped manifest is a digest" rule (`crates/logweir/tests/manifest_lint.rs`,
+# Task 23) has nothing here to object to and the base's digest is unchanged.
+spec:
+  template:
+    spec:
+      containers:
+        - name: weirkeeper
+          env:
+            - name: LOGWEIR_ARCHIVE_URL
+              value: s3://kafka-backups/k8s-demo
+            - name: AWS_ENDPOINT_URL
+              value: http://host.docker.internal:9000
+            - name: AWS_REGION
+              value: us-east-1
+            - name: AWS_ALLOW_HTTP
+              value: "true"
+            - name: AWS_VIRTUAL_HOSTED_STYLE_REQUEST
+              value: "false"

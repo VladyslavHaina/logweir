@@ -415,6 +415,13 @@ spec:
                     description: The object key of the signed backup receipt.
                     nullable: true
                     type: string
+                  receiptSha256:
+                    description: |-
+                      The sha256 of the receipt at `receiptKey`, as `sha256:<lowercase hex>` — the one digest spelling this corpus uses everywhere (`logweir_core::ids::sha256_prefixed`). **COMPUTED by the controller over the bytes it fetched**, not copied: a document cannot carry its own digest.
+
+                      WHY IT IS HERE AT ALL, AND IT IS NOT DECORATION (Task 24). It is the value `verification` is checked against on a LATER pass: the controller re-fetches the receipt with its read-only evidence credential and compares this recorded digest against the bytes in the bucket right now. Without it, `verify_evidence` could only check the signature — and a genuinely-signed OLDER receipt put in this one's place would verify. `Restore` has carried the same field for the scorecard since Task 20 (`restore::RestoreEvidence::scorecard_sha256`).
+                    nullable: true
+                    type: string
                   sidecarKey:
                     description: The object key of the receipt's detached DSSE sidecar.
                     nullable: true
@@ -424,6 +431,13 @@ spec:
                       above.
                     nullable: true
                     properties:
+                      detail:
+                        description: |-
+                          Why the verdict is what it is: the verification error's own message on `Invalid`, and the reason nothing was attempted on `NotAttempted` — no evidence credential, an unreadable object, or a `TrustRoster` carrying no signing key material. Absent on `Valid`: there is nothing to explain about an answer that came out yes.
+
+                          NEVER KEY MATERIAL AND NEVER A CREDENTIAL. It is an error's `Display` and a fixed sentence, both of which name objects and key IDs only.
+                        nullable: true
+                        type: string
                       matchedKeyId:
                         description: The `keyId` of the `TrustRoster` signing key
                           whose public key verified the signature.
@@ -440,7 +454,10 @@ spec:
                         nullable: true
                         type: string
                       verifiedAt:
-                        description: When the controller performed the verification.
+                        description: |-
+                          When the controller performed the verification.
+
+                          **WHEN THIS VERDICT WAS REACHED, not when it was last re-confirmed.** A reconciler's own status patch is what wakes it (plan erratum **E11(d)**), so a field carrying a fresh clock read on every pass would make every pass a write and every write a wake-up. A change in `result`, `matchedKeyId`, `payloadType` or `detail` is a new verdict and takes a new instant; anything else keeps the stored one, and the second status patch is then a no-op that is never sent.
                         format: date-time
                         nullable: true
                         type: string
@@ -742,9 +759,10 @@ spec:
                 nullable: true
                 properties:
                   awsCli:
-                    description: The exact `aws s3 rm` commands an operator can run
-                      to remove the sets above, one per set, in the same order. **Reported,
-                      never executed.**
+                    description: |-
+                      The exact removal command for each set above, one per set, in the same order, **in the CLI of that archive's own scheme** — `aws s3 rm` for `s3://`, `gsutil -m rm -r` for `gs://`, `az storage blob delete-batch` for `az://` and `rm -rf` for `file://`. **Reported, never executed.**
+
+                      THE FIELD NAME SAYS `aws` AND THREE OF THE FOUR SCHEMES DO NOT, and the name is deliberately unchanged (Task 24a, plan erratum **E18(b)**): renaming a status field an adopter may already read, to fix a description, would cost more than the description was worth. What was actually broken is what the field CONTAINED — it printed `aws s3 rm 'file:///…'` for a filesystem archive, a string an operator runs and which does nothing — and that is fixed. This sentence is the description catching up with the value.
                     items:
                       type: string
                     nullable: true
@@ -1292,6 +1310,13 @@ spec:
                     description: What `weirkeeper` recorded when it verified the scorecard.
                     nullable: true
                     properties:
+                      detail:
+                        description: |-
+                          Why the verdict is what it is: the verification error's own message on `Invalid`, and the reason nothing was attempted on `NotAttempted` — no evidence credential, an unreadable object, or a `TrustRoster` carrying no signing key material. Absent on `Valid`: there is nothing to explain about an answer that came out yes.
+
+                          NEVER KEY MATERIAL AND NEVER A CREDENTIAL. It is an error's `Display` and a fixed sentence, both of which name objects and key IDs only.
+                        nullable: true
+                        type: string
                       matchedKeyId:
                         description: The `keyId` of the `TrustRoster` signing key
                           whose public key verified the signature.
@@ -1308,7 +1333,10 @@ spec:
                         nullable: true
                         type: string
                       verifiedAt:
-                        description: When the controller performed the verification.
+                        description: |-
+                          When the controller performed the verification.
+
+                          **WHEN THIS VERDICT WAS REACHED, not when it was last re-confirmed.** A reconciler's own status patch is what wakes it (plan erratum **E11(d)**), so a field carrying a fresh clock read on every pass would make every pass a write and every write a wake-up. A change in `result`, `matchedKeyId`, `payloadType` or `detail` is a new verdict and takes a new instant; anything else keeps the stored one, and the second status patch is then a no-op that is never sent.
                         format: date-time
                         nullable: true
                         type: string
@@ -1465,18 +1493,14 @@ spec:
                 nullable: true
                 type: string
               topicPreflight:
-                description: 'What phase 0 found out about the target topics (guard
-                  **G-TS**). **Always absent in tag 1: it has no producer, and this
-                  field says so rather than being fabricated.** The observation is
-                  returned by phase 0 inside the runner (`RestoreOutcome::topic_preflight`)
-                  and, by Global Constraint 12 as amended, is deliberately NOT a scorecard
-                  field — so nothing carries it out of the pod. Interface I8 fixes
-                  three stdout key lines and none of them is a preflight, and the
-                  controller reads the pod''s log and the signed scorecard and nothing
-                  else. Closing the gap means a fourth machine-read stdout line on
-                  the runner''s side, which is the interface owner''s change and not
-                  the operator''s; an absent field is truthful and a guessed one is
-                  not.'
+                description: |-
+                  What phase 0 found out about the target topics (guard **G-TS**).
+
+                  **IT HAS A PRODUCER SINCE TASK 24, AND THE GAP THAT MADE IT ABSENT IS CLOSED** (plan erratum **E10(c)**). The observation is returned by phase 0 inside the runner (`RestoreOutcome::topic_preflight`) and, by Global Constraint 12 as amended, is deliberately NOT a scorecard field — so for two slots nothing carried it out of the pod and this field declared its own absence rather than being fabricated. Closing it took exactly what that note said it would: a fourth machine-read stdout line. `logweir restore run` now prints `topic-preflight=<one-line JSON object>` (`logweir::drill::phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX`) on a successful run, and `weirkeeper::controllers::restore::topic_preflight` scans it out of the same bounded tail as the evidence keys, BY KEY NAME (erratum E4).
+
+                  **STILL ABSENT ON EVERY RUN THAT DID NOT COMPLETE PHASE 0**, and that absence is still the truthful answer rather than a zero: the line is printed only at exit 0, because `RestoreOutcome` is what carries the observation and every other path returns an error instead. A run refused at phase 0 never read the target's config, so there is nothing to report about it.
+
+                  THE THREE FIELDS ARE THE CONTRACT. The runner emits exactly `timestampType`, `retentionMs` and `timestampBound` — this struct's own camelCase spellings — and the controller filters the line to those three, so a fourth key on either side is dropped rather than misfiled into a property the structural schema then prunes. `retentionMs` is a STRING on the runner's side (that is what DescribeConfigs returns) and an `i64` here, and a value that will not parse is OMITTED from the line rather than flattened to `0`.
                 nullable: true
                 properties:
                   retentionMs:
@@ -1875,6 +1899,18 @@ spec:
         env:
         - name: LOGWEIR_ARCHIVE_URL
           value: ""
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              key: access-key-id
+              name: logweir-evidence-ro
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret-access-key
+              name: logweir-evidence-ro
+              optional: true
         image: ghcr.io/logweir/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
         imagePullPolicy: IfNotPresent
         name: weirkeeper
