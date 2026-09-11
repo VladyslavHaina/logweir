@@ -1487,15 +1487,27 @@ fn justfile() -> String {
 /// [`the_demo_runs_lint_before_the_stack_is_up`], and it is preserved: the
 /// recipe comes first because that is the order they execute in.
 ///
-/// The recipe body runs from its recipe line to the end of the file — it is
-/// the LAST recipe there by STANDING RULE 17 (chain J, slot 17, appended at
-/// the end), so that is exact rather than convenient.
+/// The recipe body runs from its recipe line to the first unindented,
+/// non-blank line after it — the comment block above Task 25's `ui` recipe,
+/// which follows `k8s-demo` since Task 25 landed. Reading to the end of the
+/// file, as this helper did while `k8s-demo` was the last recipe, would hand
+/// every row below `ui`'s 2,500-byte block too, and a token planted in that
+/// block would satisfy an assertion about the demo (Task 24's re-review).
 fn k8s_demo_recipe() -> String {
     let text = justfile();
     let start = text
         .find("\nk8s-demo:")
         .expect("`just k8s-demo` is a recipe in the justfile");
-    format!("{}\n{}", &text[start + 1..], read("scripts/k8s-demo.sh"))
+    let mut body = String::new();
+    for (i, line) in text[start + 1..].lines().enumerate() {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if i > 0 && !indented && !line.is_empty() {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    format!("{body}\n{}", read("scripts/k8s-demo.sh"))
 }
 
 fn phase_b_demo() -> String {
