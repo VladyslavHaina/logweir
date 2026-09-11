@@ -1147,3 +1147,184 @@ fn a_blocked_preflight_creates_no_target_topic() {
         .collect();
     assert_eq!(created, vec!["drill-orders".to_string()]);
 }
+
+// ---------------------------------------------------------------------------
+// The PRODUCER half of erratum E10(c) — Task 24 fix round 1
+// ---------------------------------------------------------------------------
+
+/// A source file from the workspace, read from this crate's manifest
+/// directory.
+fn workspace_source(relative: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The body of the first `fn <name>` in `src`, from its opening brace to the
+/// matching close, braces counted.
+///
+/// Text, and deliberately so: the assertion below is about a `println!` whose
+/// only observable effect is on the process's real stdout, reached only on
+/// exit 0 of a full drill against a real broker and a real archive. See
+/// `the_topic_preflight_line_is_printed_by_name_on_a_passing_run` for why that
+/// makes this the strongest instrument available in process.
+fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let at = src
+        .find(signature)
+        .unwrap_or_else(|| panic!("`{signature}` is in the source"));
+    let rest = &src[at..];
+    let open = rest.find('{').expect("the function has a body");
+    let mut depth = 0usize;
+    for (i, c) in rest[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open..=open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{signature}`'s body is unbalanced");
+}
+
+/// **THE RUNNER PRINTS `topic-preflight=` BY NAME ON A PASSING RUN** — the
+/// PRODUCER half of plan erratum **E10(c)**, which the Task 24 review found
+/// pinned by nothing at all: deleting the line survived the entire workspace
+/// suite.
+///
+/// # Why this row is in process and what it can and cannot reach
+///
+/// `drill::exiting` is a private function that writes with `println!` to the
+/// process's real stdout, and the branch that prints this line is reached only
+/// at `ExitCode::Ok` — a full drill that dialled a broker, restored into it and
+/// signed a scorecard. **There is no writer seam** (`exit::print_refusal_reason_to`
+/// is the precedent for one, and it covers interface I9's line, not this one),
+/// and libtest gives a test no way to read back its own captured stdout. So
+/// the print itself is not observable in process without a broker, and this row
+/// says so rather than pretending otherwise. What it does instead is pin the
+/// two halves the print is made of, and pin that the print is still there:
+///
+/// 1. **The VALUE, off a real passing run.** The `TopicPreflight` comes from
+///    `execute_with_outcome` over the orchestrator fixture — the same object
+///    `exiting` is handed — never from a literal, so the line's shape is the
+///    one a passing drill actually produces.
+/// 2. **The SHAPE the controller scans (erratum E4).** ONE line, the key by
+///    NAME at its head, a single-line JSON object after it, and the three keys
+///    spelled as `Restore.status.topicPreflight`'s own camelCase fields. A pod
+///    log is stdout and stderr merged in nondeterministic order, so the
+///    controller reads a BOUNDED TAIL and matches by key name; a value carrying
+///    a newline would cost two of those eight lines and could be split across
+///    them.
+/// 3. **The PRINT, in `exiting`'s body.** Text, over the source — the mutant
+///    this row exists for is "delete the `println!`", and the body is where
+///    that is decidable without a cluster.
+/// 4. **The two crates agree on the key.** `weirkeeper`'s scanner constant is
+///    read out of its own source and compared, because the producer and the
+///    consumer cannot share a type: `weirkeeper` must not depend on `logweir`
+///    at all (`scripts/check-one-signer.sh`'s check 1), so the two halves meet
+///    only in a pod log and only on this string.
+///
+/// KILLS: **M18** — dropping the `topic-preflight=` producer line, which
+/// survived the whole workspace suite before this row; renaming the key on
+/// either side; and emitting a multi-line or non-JSON value.
+#[test]
+fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
+    // ---- 1. The value, off a real passing run ---------------------------
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let outcome = logweir::drill::execute_with_outcome(&f.args, &f.run_id, &f.ctx)
+        .expect("the fixture drill passes, which is the only exit code that prints this line");
+    let line = format!(
+        "{}{}",
+        phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX,
+        outcome.topic_preflight.status_line_value()
+    );
+
+    // ---- 2. The shape the controller's bounded tail scan needs ----------
+    assert!(
+        line.starts_with("topic-preflight="),
+        "the key is at the HEAD of the line, because the controller matches by key name over a \
+         bounded tail and never by position: {line}"
+    );
+    assert_eq!(
+        line.lines().count(),
+        1,
+        "ONE LINE. Three separate `topic-preflight-*=` lines would spend three of the \
+         controller's eight tail lines on one fact and crowd out interface I8's own keys: {line}"
+    );
+    let value = line
+        .strip_prefix(phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX)
+        .expect("the prefix is the prefix");
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).unwrap_or_else(|e| panic!("the value is JSON: {e}\n{line}"));
+    let object = parsed
+        .as_object()
+        .unwrap_or_else(|| panic!("…and it is an OBJECT: {line}"));
+    assert_eq!(
+        object
+            .get("timestampType")
+            .and_then(serde_json::Value::as_str),
+        Some("CreateTime"),
+        "the three keys are `Restore.status.topicPreflight`'s own camelCase fields, byte for \
+         byte — the controller copies them across without renaming anything, so a fourth or a \
+         differently-spelled field is DROPPED rather than misfiled: {line}"
+    );
+    for k in object.keys() {
+        assert!(
+            ["timestampType", "retentionMs", "timestampBound"].contains(&k.as_str()),
+            "`{k}` is not one of the CRD's three fields: {line}"
+        );
+    }
+
+    // ---- 3. THE PRINT ITSELF, in `exiting`'s body ----------------------
+    let src = workspace_source("crates/logweir/src/drill/mod.rs");
+    let body = fn_body(&src, "fn exiting(");
+    assert!(
+        body.contains("TOPIC_PREFLIGHT_KEY_PREFIX"),
+        "`drill::exiting` must still PRINT the line. Deleting it is mutant M18, and before this \
+         row it survived the entire workspace suite: the value above would still be computed, \
+         the controller would still scan for the key, and nothing would ever emit it. Body:\n\
+         {body}"
+    );
+    assert!(
+        body.contains("status_line_value()"),
+        "…and it prints the value this function built, not a second rendering of the same fact"
+    );
+    let printed = body
+        .find("TOPIC_PREFLIGHT_KEY_PREFIX")
+        .expect("just asserted");
+    let println_at = body[..printed]
+        .rfind("println!")
+        .expect("the key reaches stdout through `println!`, which is the pod's log");
+    assert!(
+        body[println_at..printed].len() < 80,
+        "the `println!` is the one that carries the key, not an unrelated one above it"
+    );
+    assert!(
+        body[..println_at].contains("ExitCode::Ok"),
+        "it is printed only on a PASSING run: a refused or crashed drill has no completed phase \
+         0 to report, and a line naming a preflight nobody performed is worse than the absence \
+         an operator already renders. Body:\n{body}"
+    );
+
+    // ---- 4. Producer and consumer spell the key the same ---------------
+    //
+    // Read out of `weirkeeper`'s source, not imported: `weirkeeper` must not
+    // be a dependency of this crate in any direction —
+    // `scripts/check-one-signer.sh`'s check 1 counts normal, build and dev
+    // edges and pins the set of crates from which `logweir-evidence` is
+    // reachable at exactly `{logweir, e2e}`.
+    let scanner = workspace_source("crates/weirkeeper/src/controllers/restore.rs");
+    assert!(
+        scanner.contains(&format!(
+            "TOPIC_PREFLIGHT_KEY_PREFIX: &str = \"{}\"",
+            phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX
+        )),
+        "the controller scans for `{}` and this crate prints it; the two halves meet nowhere but \
+         in a pod log, so the only thing keeping them in step is this comparison",
+        phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX
+    );
+}

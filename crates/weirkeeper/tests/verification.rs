@@ -1375,6 +1375,100 @@ fn the_deployment_marks_the_evidence_secret_optional() {
     );
 }
 
+/// **THE SHIPPED CONTROLLER CONTAINER PINS A LOG LEVEL** — Task 24 defect 3,
+/// and the row review finding 2 says was missing.
+///
+/// # The measurement
+///
+/// During Task 24's Phase B run, `kubectl -n logweir-system logs
+/// deploy/weirkeeper` returned **exit 0 and ZERO BYTES** from a controller
+/// that had just reconciled six kinds, created two Jobs and verified two
+/// signed documents. `main.rs` builds its subscriber with
+/// `EnvFilter::from_default_env()`, and with `RUST_LOG` unset that filter
+/// enables NOTHING — including every `error!` on the startup path. A control
+/// plane whose diagnostics are invisible by default is one nobody can debug,
+/// and it is how E19(e)'s wrong ERROR line survived undetected: nothing was
+/// printing it.
+///
+/// PARSED, NEVER GREPPED. The file's comment block explains why the value is
+/// what it is and names `RUST_LOG` four times in prose; a text search would
+/// pass on the explanation alone, which is the defect
+/// `the_demo_addresses_minio_over_host_docker_internal` was faulted for.
+///
+/// KILLS: deleting the `RUST_LOG` env entry from the controller container;
+/// setting it to a level below `info`, at which the per-object lines — the
+/// exit code, the two evidence keys, the verification verdict and its matched
+/// key id — are lost; and editing `deployment.yaml` without re-running
+/// `scripts/render-install.sh`, which is what a stranger actually applies.
+#[test]
+fn the_deployment_sets_a_log_level() {
+    let text = read("config/manager/deployment.yaml");
+    let doc: Value = {
+        // The file leads with a comment block and one `---`.
+        let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
+        serde_yaml::from_str(body).expect("the Deployment is YAML")
+    };
+    let containers = doc
+        .pointer("/spec/template/spec/containers")
+        .and_then(Value::as_array)
+        .expect("the PodSpec carries containers");
+    assert_eq!(
+        containers.len(),
+        1,
+        "one container, so `containers/0` below is THE controller and not whichever one sorts \
+         first"
+    );
+    let env = containers[0]
+        .pointer("/env")
+        .and_then(Value::as_array)
+        .expect("the controller container carries an env block");
+    let level = env
+        .iter()
+        .find(|e| e.pointer("/name") == Some(&json!("RUST_LOG")))
+        .and_then(|e| e.pointer("/value"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "the controller container must pin `RUST_LOG`. Without it the shipped install \
+                 logs NOTHING — measured, exit 0 and zero bytes from `kubectl logs \
+                 deploy/weirkeeper`. Got: {env:?}"
+            )
+        });
+    assert_eq!(
+        level, "info",
+        "`info` is the FLOOR and not a preference: below it the exit code, the two evidence \
+         keys, the verification verdict and its matched key id are all dropped, and those are \
+         what correlate an object with the archive it read. Raise it at run time with `kubectl \
+         set env deploy/weirkeeper RUST_LOG=debug`."
+    );
+
+    // …AND IN `logweir.yaml`, WHICH IS THE FILE A STRANGER APPLIES.
+    // `scripts/render-install.sh` is its only producer, so a Deployment edit
+    // that did not reach it would ship the silent controller anyway.
+    let install = read("logweir.yaml");
+    let rendered: Vec<&str> = install
+        .split("\n---")
+        .filter(|d| d.contains("kind: Deployment"))
+        .collect();
+    assert_eq!(rendered.len(), 1, "one Deployment in the rendered install");
+    let deployment: Value =
+        serde_yaml::from_str(rendered[0].trim_start_matches("\n-")).expect("it is YAML");
+    let rendered_level = deployment
+        .pointer("/spec/template/spec/containers/0/env")
+        .and_then(Value::as_array)
+        .and_then(|env| {
+            env.iter()
+                .find(|e| e.pointer("/name") == Some(&json!("RUST_LOG")))
+        })
+        .and_then(|e| e.pointer("/value"))
+        .cloned();
+    assert_eq!(
+        rendered_level,
+        Some(json!("info")),
+        "the rendered install carries the same level; re-run `./scripts/render-install.sh`"
+    );
+}
+
 // ===========================================================================
 // The Phase B demo — its addressing, its ordering, and its transcript
 // ===========================================================================
@@ -1577,4 +1671,126 @@ fn the_demo_says_it_is_author_only() {
          the WHOLE reference, so the shipped `ghcr.io/logweir/…@sha256:…` references start on \
          this node only after the local images are tagged with them (plan erratum E19(b))"
     );
+}
+
+/// **THE DEMO READS THE `Restore`'s VERDICT BY ITS REAL FIELD PATHS, AND
+/// CAPTURES ONLY THE VALUE** — Task 24 defect 5, and the row review finding 2
+/// says was a comment rather than a test.
+///
+/// # Two measurements, one helper
+///
+/// 1. **The capture.** `read_field` printed its human-readable transcript line
+///    on STDOUT and then printed the value, so `v=$(read_field …)` captured
+///    BOTH: the exit-criterion assertion compared
+///    `"    rc=0  status.exitCode: 0\n0"` against `"0"` and refused a run that
+///    had in fact passed. The fix is not a quieter helper — the log still
+///    carries both streams — it is that the transcript line goes to STDERR and
+///    the value is the only thing on stdout.
+/// 2. **The fields.** A demo that reads the right object with the wrong
+///    jsonpath prints `<absent>` and passes: `kubectl get -o jsonpath` exits 0
+///    for a path that matches nothing. Every field the exit criterion depends
+///    on is therefore named here, as the exact expression the script must use.
+///
+/// The recipe itself is NOT changed by this row — the transcript in
+/// `e2e/k8s/phase-b-demo.md` records what the shipped text did, and a demo
+/// edited after the fact is a demo nobody ran.
+///
+/// KILLS: reverting any of the five expressions to a field that does not exist
+/// or to the wrong one (`.status.result` for `.status.outcome`, a
+/// `verification.result` read off `.status` rather than `.status.evidence`);
+/// and moving `read_field`'s transcript line back onto stdout, which puts the
+/// line inside the value again.
+#[test]
+fn the_demo_reads_the_restore_verdict_by_field_and_captures_only_the_value() {
+    let recipe = k8s_demo_recipe();
+
+    // ---- 1. THE FIVE EXPRESSIONS THE EXIT CRITERION RESTS ON ------------
+    //
+    // `.status.phase` and `.status.exitCode` are the run; `.status.outcome` is
+    // interface I21's `Restore` rule — the `Backup` rule reads `exitCode` and
+    // the two are NOT one rule; the two `verification` fields are this task's
+    // whole increment.
+    for jsonpath in [
+        "{.status.phase}",
+        "{.status.exitCode}",
+        "{.status.outcome}",
+        "{.status.evidence.verification.result}",
+        "{.status.evidence.verification.matchedKeyId}",
+    ] {
+        let at = recipe.find(jsonpath).unwrap_or_else(|| {
+            panic!(
+                "`just k8s-demo` must read the Restore's `{jsonpath}` — a jsonpath that matches \
+                 nothing exits 0 and prints the empty string, so a demo reading the wrong field \
+                 PASSES while proving nothing"
+            )
+        });
+        // …and it is read ABOUT THE RESTORE. A `Backup`-only reading of
+        // `verification.result` would satisfy a bare substring search while
+        // leaving the `Restore` half — the approved, signed, scored one —
+        // unchecked.
+        let restore_reads: Vec<&str> = recipe
+            .lines()
+            .filter(|l| l.contains(jsonpath) && l.contains("restore demo-restore"))
+            .collect();
+        assert!(
+            !restore_reads.is_empty(),
+            "`{jsonpath}` appears at {at} but never on a line that reads `restore demo-restore`"
+        );
+    }
+
+    // ---- 2. THE CAPTURE SHAPE -------------------------------------------
+    let helper = recipe
+        .split_once("read_field() {")
+        .map(|(_, rest)| rest.split_once("\n}").map_or(rest, |(body, _)| body))
+        .expect("the demo reads its fields through one `read_field` helper");
+    assert!(
+        helper.contains(">&2"),
+        "THE MEASURED DEFECT: `read_field`'s transcript line must go to STDERR. On stdout, \
+         `v=$(read_field …)` captures the line INSIDE the value — measured, the exit-criterion \
+         check compared `\"    rc=0  status.exitCode: 0\\n0\"` against `\"0\"` and refused a run \
+         that had passed. Body:\n{helper}"
+    );
+    let value_writes: Vec<&str> = helper
+        .lines()
+        .map(str::trim)
+        .filter(|l| (l.starts_with("echo") || l.starts_with("printf")) && !l.contains(">&2"))
+        .collect();
+    assert_eq!(
+        value_writes.len(),
+        1,
+        "EXACTLY ONE thing reaches stdout from this helper, and it is the value. Everything a \
+         human reads is on stderr. Got: {value_writes:?}"
+    );
+    assert!(
+        value_writes[0].starts_with("printf"),
+        "…and it is written with `printf`, not `echo`: `echo` appends a newline, which a `$(…)` \
+         strips but a `[ \"$v\" = \"0\" ]` against a multi-line value would not. Got: {}",
+        value_writes[0]
+    );
+
+    // ---- 3. EVERY OTHER CAPTURE IS A BARE `kubectl`, AND THAT IS THE RULE
+    //
+    // The polling loops capture `$(kubectl … -o jsonpath=…)` directly, which is
+    // SAFE — a bare `kubectl` writes the value and nothing else. What is not
+    // safe is capturing anything that also says something to a human, which is
+    // precisely what `read_field` was before the fix. So: a captured command
+    // is either `kubectl` itself or `read_field`, and nothing in between.
+    let captures: Vec<&str> = recipe
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains("=$(") && l.contains("demo-restore"))
+        .collect();
+    assert!(
+        !captures.is_empty(),
+        "the demo captures Restore fields at all"
+    );
+    for line in &captures {
+        let inner = line.split_once("=$(").map(|(_, r)| r).unwrap_or_default();
+        assert!(
+            inner.starts_with("kubectl") || inner.starts_with("read_field"),
+            "a captured command is either `kubectl` — which writes the value and nothing else — \
+             or `read_field`, whose stream split is the fix. Anything in between is a human-\
+             readable line ending up INSIDE the value, which is the measured defect. Got: {line}"
+        );
+    }
 }

@@ -1,9 +1,22 @@
 //! The `BackupSchedule` cron reconciler, and guard **G-SLOT**.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST. Nothing
-//! dials a socket, nothing waits on a Job, nothing shells out, and nothing
-//! approaches Global Constraint 22's 15 s per-test bound — the transport is a
-//! `tower` closure and the clock is an argument.
+//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST, WITH ONE
+//! DELIBERATE EXCEPTION. Nothing dials a socket, nothing waits on a Job, and
+//! nothing approaches Global Constraint 22's 15 s per-test bound — the
+//! transport is a `tower` closure and the clock is an argument.
+//!
+//! The exception is `the_backup_runner_argv_is_one_the_cli_accepts`, which
+//! SHELLS OUT to `target/debug/logweir` on purpose. Erratum **E20** is why:
+//! this crate emitted a `Backup` argv the CLI refused, every scheduled
+//! `Backup` in the tree exited 1 for six tasks, and three green reviews missed
+//! it because **every assertion about the argv compared the reconciler's
+//! output against a literal written in the same repository**. An argv a
+//! controller emits is an interface with another binary, and it is tested only
+//! when it is handed to that binary's real parser. Task 22's
+//! `restore_controller.rs::the_restore_job_projects_every_unexpired_roster_key_id`
+//! is the same shape, and it exists because erratum E10 caught the identical
+//! class on the `Restore` side. It dials nothing: the run stops at the
+//! credential projection, before any librdkafka handle exists.
 //!
 //! THE GUARD IS `a_crash_between_create_and_status_write_yields_exactly_one_backup`.
 //! Read it first: everything else in this file exists to make its assertions
@@ -15,9 +28,10 @@ use chrono::{DateTime, TimeZone, Utc};
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
     decide, reconcile_schedule, refine_against_last_fire, runner_argv, scheduled_backup,
-    status_patch, ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, OUT_PATH, REASON_SCHEDULED,
-    REASON_SLOT_MISSED, REASON_SUSPENDED, RECEIPT_OUT_PATH, REQUEUE_SECS, RUNNER_ARGV_ANNOTATION,
-    SCHEDULE_LABEL, SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
+    status_patch, ScheduleOutcome, SlotDecision, ALLOWED_CLUSTERS_PATH, MISSED_SLOT_HORIZON,
+    OUT_PATH, REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED, RECEIPT_OUT_PATH,
+    REQUEUE_SECS, RUNNER_ARGV_ANNOTATION, SCHEDULE_LABEL, SIGNING_KEY_PATH, SLOT_LABEL, SPEC_PATH,
+    TRIGGERED_BY_SCHEDULE,
 };
 use weirkeeper::crds::backup_schedule::{BackupSchedule, BackupScheduleStatus};
 use weirkeeper::slot::{
@@ -1681,6 +1695,244 @@ fn the_runner_argv_names_at_most_one_output_path() {
         "if these ever became equal the CLI would accept both flags, and this test would stop \
          meaning anything"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The argv, handed to the parser that has to accept it — erratum E20
+// ---------------------------------------------------------------------------
+
+/// `target/debug/logweir`, the runner's own binary (interface **E9**), located
+/// from this crate's manifest directory.
+///
+/// A weirkeeper test cannot use `env!("CARGO_BIN_EXE_logweir")`: that variable
+/// exists only for targets of the package that declares the binary, and
+/// `weirkeeper` must NOT declare `logweir` as a dependency of any kind —
+/// `scripts/check-one-signer.sh`'s check 1 counts normal, build **and** dev
+/// edges, and the set of crates from which `logweir-evidence` is reachable is
+/// pinned at exactly `{logweir, e2e}`. Taking even a dev-dependency here would
+/// put `weirkeeper` in that set and turn the link-time single-signer gate red.
+/// So the two sides meet through the filesystem and a process, which is also
+/// what they do in a cluster. Task 22's `restore_controller.rs` carries the
+/// identical helper for the identical reason.
+///
+/// AN ABSENT BINARY IS A LOUD, NAMED FAILURE AND NEVER A SILENT SKIP. A row
+/// that quietly passes when its subject is missing is the defect this whole
+/// file exists to avoid.
+fn runner_binary() -> std::path::PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target")
+                .to_path_buf()
+        },
+        std::path::PathBuf::from,
+    );
+    let bin = target.join("debug").join("logweir");
+    assert!(
+        bin.exists(),
+        "the runner binary is not at {}. This row is END-TO-END on purpose: it feeds the argv \
+         THIS crate emits to the parser that has to accept it. `cargo test --workspace` builds \
+         it; `cargo test -p weirkeeper` alone does not — run `cargo build -p logweir` first.",
+        bin.display()
+    );
+    bin
+}
+
+/// A scratch directory under the system temp dir, made by hand.
+///
+/// `tempfile` is not a dependency of this crate and is not being added for one
+/// test: `tests/linkage.rs` measures this crate's declared entries, and a new
+/// one would have to justify itself there. The same decision
+/// `tests/restore_controller.rs` and `tests/verification.rs` record.
+fn scratch_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("logweir-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+    dir
+}
+
+/// The argv with its four IN-POD paths rewritten to files that exist on this
+/// machine, and NOTHING ELSE TOUCHED.
+///
+/// Flag tokens, their order, and every non-path value are the reconciler's
+/// own. The substitution is by EXACT CONSTANT — `SPEC_PATH`,
+/// `ALLOWED_CLUSTERS_PATH`, `SIGNING_KEY_PATH`, `RECEIPT_OUT_PATH` — and the
+/// caller asserts afterwards that no absolute path survived it, so a fifth
+/// path flag added to `runner_argv` cannot slip through this row untested: it
+/// would still be `/…` and the assertion would name it.
+fn argv_against(dir: &std::path::Path, argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .map(|a| match a.as_str() {
+            SPEC_PATH => dir.join("backup.yaml").display().to_string(),
+            ALLOWED_CLUSTERS_PATH => dir.join("allowed-clusters.json").display().to_string(),
+            SIGNING_KEY_PATH => dir.join("key.pem").display().to_string(),
+            RECEIPT_OUT_PATH => dir.join("receipt.json").display().to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// **THE `Backup` ARGV IS ONE `logweir backup run` ACCEPTS** — erratum
+/// **E20**, and this row is end-to-end for exactly that reason.
+///
+/// # What a shape assertion could not see
+///
+/// `backup_schedule::runner_argv` emitted `--out /work/backup.json` beside
+/// `--receipt-out /work/receipt.json`. `logweir backup run` writes ONE
+/// document and refuses two flags naming different paths with exit **1**,
+/// before the engine is spawned — so **every scheduled `Backup` in the shipped
+/// tree exited 1 from Task 18 to Task 24 and nothing was ever archived**.
+/// Tasks 17, 18 and 19 and all three reviews were green, because every
+/// assertion about this argv compared the reconciler's output against a
+/// literal written in the same repository. The rule the plan carries forward:
+/// **an argv a controller emits is an interface with another binary, and it is
+/// tested only when it is handed to that binary's real parser.**
+///
+/// # What is asserted, and why the run fails where it does
+///
+/// The argv is `runner_argv`'s own, with only its four in-pod paths pointed at
+/// stub files in a scratch directory. The stub spec is a real `BackupSpec`
+/// with `auth.mode: scramSha512`, so the run passes clap, passes every local
+/// guard — including the `--out`/`--receipt-out` refusal, which is phase −1's
+/// step 4 — and stops at the credential projection with `$LOGWEIR_SOURCE_PASSWORD`
+/// unset: exit 1, named, **before any librdkafka handle exists**, so this row
+/// dials nothing and takes milliseconds. That is the first point at which a
+/// real broker or archive would be needed.
+///
+/// The negative twin appends `--out` at a different path and requires the E20
+/// refusal, so the positive half is not vacuous: a build that accepted
+/// anything would fail it.
+///
+/// KILLS: putting `--out` back beside `--receipt-out` in `runner_argv`; any
+/// flag this crate spells differently from the CLI (`unexpected argument`);
+/// any value the CLI's parser rejects (`unexpected value`).
+#[test]
+fn the_backup_runner_argv_is_one_the_cli_accepts() {
+    let dir = scratch_dir("t24-backup-argv");
+    // A REAL `BackupSpec`, built through the type the CLI parses rather than
+    // written as text, for `plan_backup_spec`'s own reason: `storage` is an
+    // internally tagged enum whose variants have incompatible required fields.
+    let spec = logweir_core::spec::BackupSpec {
+        source: logweir_core::spec::BackupSourceSpec {
+            bootstrap_servers: vec!["broker-0.prod:9093".to_string()],
+            auth: logweir_core::spec::AuthSpec::ScramSha512 {
+                username: "logweir".to_string(),
+                tls: true,
+            },
+            topics: vec!["orders".to_string()],
+        },
+        storage: logweir_core::engine::StorageUrl::S3 {
+            bucket: "kafka-backups".to_string(),
+            prefix: "logweir".to_string(),
+            region: None,
+            endpoint: None,
+            path_style: true,
+            allow_http: false,
+        },
+        backup_id: "b1".to_string(),
+        backup: logweir_core::spec::BackupSettings::default(),
+    };
+    std::fs::write(
+        dir.join("backup.yaml"),
+        serde_yaml::to_string(&spec).expect("the stub spec serialises"),
+    )
+    .expect("the scratch spec is writable");
+    std::fs::write(
+        dir.join("allowed-clusters.json"),
+        serde_json::to_string(&logweir_core::spec::AllowedClusters {
+            allowed_cluster_ids: Vec::new(),
+            source_cluster_id: None,
+        })
+        .expect("the stub allowlist serialises"),
+    )
+    .expect("the scratch allowlist is writable");
+    // NOT A KEY, AND IT NEVER NEEDS TO BE. `--signing-key` is opened AFTER the
+    // archive has been read back; this run stops long before that, and no
+    // private key material belongs in a test tree.
+    std::fs::write(
+        dir.join("key.pem"),
+        b"this file is never opened by this run\n",
+    )
+    .expect("the scratch signing-key path is writable");
+
+    let emitted = runner_argv("b1");
+    let argv = argv_against(&dir, &emitted);
+    let root = dir.display().to_string();
+    let unmapped: Vec<&String> = argv
+        .iter()
+        .filter(|a| a.starts_with('/') && !a.starts_with(&root))
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "every IN-POD path in the emitted argv is accounted for by `argv_against`; a flag naming \
+         a fifth mount path would reach the CLI as a path that does not exist on this machine \
+         and this row would stop meaning anything. Left unmapped: {unmapped:?}"
+    );
+    assert_eq!(
+        argv.len(),
+        emitted.len(),
+        "the substitution rewrites values and adds and removes nothing"
+    );
+
+    let out = std::process::Command::new(runner_binary())
+        .args(&argv)
+        // `LOGWEIR_SOURCE_PASSWORD` is deliberately REMOVED rather than left
+        // to the ambient environment: the assertion below is that the run
+        // reached the credential projection, and an inherited value would send
+        // it on to a broker that is not there.
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .output()
+        .expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let first = stderr.lines().next().unwrap_or_default().to_string();
+
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "THE ERRATUM E20 FAILURE CLASS: the runner refused a flag this crate emits. argv \
+         {argv:?}\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unexpected value") && !stderr.contains("invalid value"),
+        "…and every VALUE this crate emits is one the parser takes. argv {argv:?}\n\
+         stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("name DIFFERENT paths"),
+        "THE E20 DEFECT ITSELF: `logweir backup run` writes exactly one document, and this argv \
+         named two output paths. Every scheduled Backup in the tree exited 1 on this message. \
+         argv {argv:?}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the run gets as far as the credential projection and stops there. stderr: {stderr}"
+    );
+    assert!(
+        first.contains("$LOGWEIR_SOURCE_PASSWORD is unset"),
+        "…and THAT is where it stops — the first point at which a real broker or archive would \
+         be needed, reached before any librdkafka handle exists. First stderr line: {first}"
+    );
+
+    // THE NEGATIVE TWIN. Re-add the flag that caused E20 and the same argv is
+    // refused, so the assertions above are about this build and not about a
+    // parser that accepts everything.
+    let mut mutated = argv.clone();
+    mutated.push("--out".to_string());
+    mutated.push(dir.join("backup.json").display().to_string());
+    let out = std::process::Command::new(runner_binary())
+        .args(&mutated)
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .output()
+        .expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("name DIFFERENT paths"),
+        "`--out` beside `--receipt-out` at a different path IS refused by this build, so the \
+         positive half above is a real acceptance and not a vacuous one: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------

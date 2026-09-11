@@ -1734,6 +1734,77 @@ fn the_archive_url_environment_variable_is_the_one_main_reads() {
     );
 }
 
+/// **`LOGWEIR_ARCHIVE_URL=""` IS UNSET, NOT A MISCONFIGURATION** — plan
+/// erratum **E19(e)**, Task 24, and the row review finding 2 says was missing.
+///
+/// # The measurement
+///
+/// The shipped `config/manager/deployment.yaml` carries
+/// `LOGWEIR_ARCHIVE_URL: ""` — the default install, retention and verification
+/// display switched off. `std::env::var` returns **`Ok("")`** for a Kubernetes
+/// `env:` entry with an empty `value:`, never `Err(NotPresent)`, so the empty
+/// string used to reach `storage_url_for`, which correctly refused a URL with
+/// no `://`, and the controller logged an **ERROR** naming an unreadable
+/// archive URL on every clean start of the default install. Nothing was wrong
+/// with the install.
+///
+/// It was invisible for as long as it was there because the same Deployment
+/// pinned no `RUST_LOG` — see
+/// `tests/verification.rs::the_deployment_sets_a_log_level`, its twin. Both
+/// halves of defect 3 are one Deployment.
+///
+/// KILLS: reading the variable with a bare `std::env::var(...).ok()`, or with
+/// any predicate that treats `Ok("")` as a configured archive. The `Err` arm
+/// and the whitespace arm are here for the same reason: `value: " "` in a
+/// manifest is the same operator saying the same thing.
+#[test]
+fn an_empty_archive_url_is_unset_and_not_an_error() {
+    use weirkeeper::retention::configured_archive_url;
+
+    assert_eq!(
+        configured_archive_url(Ok(String::new())),
+        None,
+        "`env: [{{name: LOGWEIR_ARCHIVE_URL, value: \"\"}}]` reads back as `Ok(\"\")`, and it \
+         means NO ARCHIVE. Sending it on is the ERROR line the default install used to print on \
+         every clean start."
+    );
+    assert_eq!(
+        configured_archive_url(Ok("   ".to_string())),
+        None,
+        "and so does a value that is only whitespace"
+    );
+    assert_eq!(
+        configured_archive_url(Err(std::env::VarError::NotPresent)),
+        None,
+        "an absent variable is the same answer by the same name"
+    );
+    assert_eq!(
+        configured_archive_url(Ok("  s3://kafka-backups/k8s-demo  ".to_string())),
+        Some("s3://kafka-backups/k8s-demo".to_string()),
+        "a REAL value is returned trimmed, so a manifest's trailing newline is not a URL"
+    );
+
+    // AND THE TWO ARMS DIVERGE WHERE IT MATTERS: the value that means "no
+    // archive" is not one `storage_url_for` is ever asked about, and the one
+    // that does reach it parses.
+    assert!(
+        weirkeeper::retention::storage_url_for("").is_err(),
+        "the empty string IS refused by `storage_url_for` — which is correct, and is exactly why \
+         it must never be handed to it"
+    );
+    assert!(weirkeeper::retention::storage_url_for("s3://kafka-backups/k8s-demo").is_ok());
+
+    // …AND `main.rs` DECIDES THROUGH THIS FUNCTION, not through a second copy
+    // of the predicate. The extraction is the whole point: a decision behind
+    // `fn main` is reachable from no test.
+    let main = sanitize(&required_source("crates/weirkeeper/src/main.rs"));
+    assert!(
+        main.contains("configured_archive_url("),
+        "`main.rs` must reach this decision through `retention::configured_archive_url`; a \
+         re-inlined predicate there would be untested again"
+    );
+}
+
 /// The retention report never claims anything was deleted, and the shipped
 /// document says who does the deleting.
 #[test]

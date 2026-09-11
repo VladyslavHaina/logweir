@@ -135,16 +135,17 @@ fn run() -> ExitCode {
     // reads as the absent variable it means. (Invisible until Task 24 pinned
     // `RUST_LOG: info` on the same Deployment, which is how a wrong ERROR line
     // survives: nothing was printing it.)
-    let archive = match std::env::var(weirkeeper::retention::ARCHIVE_URL_ENV)
-        .map(|v| v.trim().to_string())
-        .and_then(|v| {
-            if v.is_empty() {
-                Err(std::env::VarError::NotPresent)
-            } else {
-                Ok(v)
-            }
-        }) {
-        Err(_) => {
+    //
+    // THE PREDICATE ITSELF LIVES IN `retention::configured_archive_url` and
+    // this function only supplies the read — a two-line extraction made in
+    // Task 24's fix round, because a decision behind `fn main` is reachable
+    // from no test at all, and `crates/weirkeeper/tests/retention.rs::
+    // an_empty_archive_url_is_unset_and_not_an_error` is the row that now
+    // holds it.
+    let archive = match weirkeeper::retention::configured_archive_url(std::env::var(
+        weirkeeper::retention::ARCHIVE_URL_ENV,
+    )) {
+        None => {
             info!(
                 env = weirkeeper::retention::ARCHIVE_URL_ENV,
                 "no archive configured: this controller holds no archive handle and writes no \
@@ -152,7 +153,7 @@ fn run() -> ExitCode {
             );
             None
         }
-        Ok(url) => match weirkeeper::retention::storage_url_for(&url) {
+        Some(url) => match weirkeeper::retention::storage_url_for(&url) {
             Err(e) => {
                 // NOT FATAL, AND NAMED. A malformed archive URL must not stop
                 // the approval and schedule reconcilers, which need no

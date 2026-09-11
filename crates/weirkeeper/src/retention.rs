@@ -90,6 +90,37 @@ use crate::crds::backup_schedule::Retention;
 /// no `retentionReport`; that is the shape every gate in this task runs in.
 pub const ARCHIVE_URL_ENV: &str = "LOGWEIR_ARCHIVE_URL";
 
+/// The archive URL this process is configured with, from the RAW environment
+/// read — or `None` for "no archive configured".
+///
+/// **AN EMPTY VALUE IS UNSET, AND THAT IS PLAN ERRATUM E19(e).** The shipped
+/// `config/manager/deployment.yaml` carries `LOGWEIR_ARCHIVE_URL: ""` — the
+/// default install, with retention and verification display switched off — and
+/// `env::var` returns `Ok("")` for a Kubernetes `env:` entry with an empty
+/// `value:`, not `Err(NotPresent)`. Sending that string on to
+/// [`storage_url_for`] made the controller log an **ERROR** naming an
+/// unreadable archive URL on every clean start of the default install. An
+/// empty archive URL is a DOCUMENTED SWITCH, not a misconfiguration.
+///
+/// # Why it takes the `Result` instead of reading the variable itself
+///
+/// So a test can hand it `Ok(String::new())` — the exact value the defect is
+/// about — without mutating process-global state that every other row in the
+/// binary shares. The predicate is the whole of the decision; `main` supplies
+/// the read. It lives here rather than in `main.rs` because a `fn` behind
+/// `fn main` is reachable from no test at all, which is how the wrong ERROR
+/// line survived: nothing printed it until `RUST_LOG: info` was pinned on the
+/// same Deployment by the same task.
+#[must_use]
+pub fn configured_archive_url(raw: Result<String, std::env::VarError>) -> Option<String> {
+    let value = raw.ok()?.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 /// The `note` when no retention rule is configured.
 ///
 /// The exact sentence, asserted by
