@@ -1,0 +1,36 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaClusterList",
+  "metadata": {
+    "resourceVersion": "50110"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "KafkaCluster",
+      "metadata": {
+        "name": "demo",
+        "namespace": "logweir-t28",
+        "uid": "5f607182-93a4-4b5c-9d7e-8f9012345678",
+        "resourceVersion": "50108",
+        "generation": 1,
+        "creationTimestamp": "2026-09-11T18:31:00Z"
+      },
+      "spec": {
+        "bootstrapServers": [
+          "host.docker.internal:9095"
+        ],
+        "auth": {
+          "mode": "plaintext"
+        },
+        "role": "source"
+      },
+      "status": {
+        "reachable": true,
+        "clusterId": "TTBLVU0wTTFVME0yVTBNMw",
+        "observedAt": "2026-09-11T18:31:42Z",
+        "reason": "Reachable"
+      }
+    }
+  ]
+}

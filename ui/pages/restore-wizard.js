@@ -176,27 +176,63 @@ export function renderStoreFields(state) {
   );
 }
 
+/** The sentence step 2 prints under the chosen row. A running schedule is the
+ *  normal state of a backed-up cluster, and this page is a snapshot of one
+ *  `list` -- Task 28 measured three `Backup` objects in six minutes against a
+ *  two-minute schedule, with the plan bytes, the plan hash and both minted
+ *  names moving under the operator on every reload. Saying which object was
+ *  chosen is what makes the move visible; suspending the schedule is what
+ *  stops it. */
+export const RELOAD_SENTENCE =
+  "a running schedule may complete a newer backup while you read this; reload to pick it " +
+  "up, or suspend the schedule first.";
+
+/** Printed instead of the chosen-row sentence when NO run in this archive has
+ *  reached `Succeeded` -- the page still renders, off the last row, and says
+ *  what it did. */
+export const NO_SUCCEEDED_SENTENCE =
+  "no run in this archive has reached phase Succeeded; the last listed Backup is shown, and " +
+  "a set no completed run wrote is a set the runner will not find.";
+
 /** Step 2 -- the backup set. Every `Backup` whose archive is the selected one,
  *  with its covered range CONVERTED TO RFC 3339 (interface I22: the field is
- *  two integers, and a viewer reading `1757253900000` learns nothing). */
+ *  two integers, and a viewer reading `1757253900000` learns nothing) -- and
+ *  the one this wizard CHOSE, named. */
 export function renderBackupSetStep(state) {
   const s = state || {};
+  const chosen = chosenBackup(s);
+  const chosenName = ((chosen || {}).metadata || {}).name;
   const rows = backupsOf(s).map((backup) => {
     const status = backup.status || {};
     const covered = status.windowCovered || {};
+    const name = (backup.metadata || {}).name;
     return [
       cell(status.backupId),
       cell(rfc3339(covered.fromMs)),
       cell(rfc3339(covered.toMs)),
       cell(status.records),
-      cell((backup.metadata || {}).name),
+      cell(status.phase),
+      cell(name === chosenName ? name + " (chosen)" : name),
     ];
   });
+  const succeeded = newestSucceeded(s) !== null;
+  const chose =
+    chosen === null
+      ? "<p class=\"note\">this namespace holds no Backup for this archive.</p>"
+      : "<p class=\"note\">chosen: " + esc(String(chosenName)) + ", backup set " +
+        esc(String(((chosen.status || {}).backupId) || "(none -- this run wrote no set)")) +
+        ". " + (succeeded ? RELOAD_SENTENCE : NO_SUCCEEDED_SENTENCE) + "</p>";
   return (
     "<section class=\"step\" id=\"step-backup-set\"><h3>2. Backup set</h3>" +
-    "<p class=\"blurb\">The sets this archive holds, newest last. The covered range is " +
+    "<p class=\"blurb\">The sets this archive holds. The wizard restores from the run that " +
+    "COMPLETED most recently -- the newest Succeeded row, not the newest row: the newest row " +
+    "is usually still running and has no set to restore from. The covered range is " +
     "Backup.status.windowCovered, two epoch-millisecond integers, shown as RFC 3339.</p>" +
-    table(["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "BACKUP"], rows) +
+    table(
+      ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
+      rows,
+    ) +
+    chose +
     "</section>"
   );
 }
@@ -232,14 +268,55 @@ export function renderPointInTimeStep(state) {
   );
 }
 
-/** Step 4 -- target and naming. A `KafkaCluster` with `role: target`, the two
- *  modes `TargetMode` accepts and nothing else, and the prefix PREFILLED with
- *  `default_topic_prefix`'s own output for the chosen instant. */
+/** The sentence step 4 prints when no `KafkaCluster` in the namespace carries
+ *  `role: target`, and the source cluster is preselected instead.
+ *
+ *  IT IS A LABEL AND NOT AN AUTHORISATION, AND THE CRD SAYS SO.
+ *  `crates/weirkeeper/src/crds/kafka_cluster.rs` documents `role` as "a
+ *  free-form string ... a label the adopter picks and the controller reports,
+ *  and `allowedClusterIds` on the cluster-scoped `TrustRoster` is what
+ *  actually authorises a target, never a role written next to the address it
+ *  authorises". The runner agrees: `drill/phase0_admit.rs` branches on
+ *  `spec.target.mode`, and all three cluster checks -- the allowlist, the
+ *  target != source rule and the marker topic -- live in the `Scratch` arm
+ *  alone. The `NewTopic` arm is EMPTY, with a comment saying the source
+ *  cluster is exactly where a point-in-time recovery belongs. */
+export const TARGET_ROLE_SENTENCE =
+  "no cluster is labelled role: target; the source cluster is preselected. The role is a " +
+  "label, not an authorisation: for mode newTopic the runner accepts any reachable target, " +
+  "the source cluster included; mode scratch is refused by the runner unless the target " +
+  "differs from the source and proves it is scratch with its marker topic.";
+
+/** The warning step 4 prints for `mode: scratch` against a cluster whose spec
+ *  declares no `markerTopic`. A WARNING and not a refusal: the runner refuses,
+ *  at phase 0, against the cluster it actually reaches -- and this page reads
+ *  a spec field, which is a statement of intent rather than an observation. */
+export const SCRATCH_MARKER_WARNING =
+  "this cluster's spec declares no markerTopic, and mode scratch is refused at phase 0 " +
+  "unless the target proves it is scratch by carrying one. The runner checks the broker; " +
+  "this line only checks the object.";
+
+/** Step 4 -- target and naming. EVERY `KafkaCluster` in the namespace with its
+ *  role beside it, the two modes `TargetMode` accepts and nothing else, and
+ *  the prefix PREFILLED with `default_topic_prefix`'s own output for the
+ *  chosen instant.
+ *
+ *  EVERY CLUSTER, BECAUSE THE RUNNER'S GUARD IS THE GATE AND THIS IS NOT.
+ *  Until Task 28a this select was built from `role === "target"` alone, so a
+ *  namespace with one `role: source` cluster -- which is what Demo 1 is, and
+ *  what `scripts/k8s-demo.sh` runs a `newTopic` restore against, green --
+ *  rendered an EMPTY select, left `target.bootstrapServers` empty, and made
+ *  the plan grammar throw. The page was refusing what the product supports.
+ *  So: list them all, say what each is labelled, preselect the sensible one,
+ *  and let phase 0 decide. */
 export function renderTargetStep(state) {
   const s = state || {};
   const fields = s.fields || {};
   const target = fields.target || {};
-  const targets = itemsOf(s.clusters).filter((c) => ((c.spec || {}).role) === "target");
+  const clusters = itemsOf(s.clusters);
+  const chosen = targetCluster(s);
+  const chosenName = ((chosen || {}).metadata || {}).name;
+  const labelled = clusters.some((c) => ((c.spec || {}).role) === "target");
   const options = TARGET_MODES.map(
     (mode) =>
       "<option value=\"" + esc(mode) + "\"" +
@@ -250,12 +327,22 @@ export function renderTargetStep(state) {
     typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? target.topicPrefix
       : prefixFor(fields.pointInTime);
-  const clusterOptions = targets
+  const clusterOptions = clusters
     .map((c) => {
       const name = (c.metadata || {}).name;
-      return "<option value=\"" + esc(name) + "\">" + esc(name) + "</option>";
+      const role = (c.spec || {}).role;
+      return (
+        "<option value=\"" + esc(name) + "\"" +
+        (name === chosenName ? " selected" : "") + ">" +
+        esc(name) + " (role: " + esc(typeof role === "string" && role.length > 0 ? role : "unset") +
+        ")</option>"
+      );
     })
     .join("");
+  const markerWarning =
+    target.mode === "scratch" && typeof ((chosen || {}).spec || {}).markerTopic !== "string"
+      ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
+      : "";
   return (
     "<section class=\"step\" id=\"step-target\"><h3>4. Target and naming</h3>" +
     "<p class=\"blurb\">Where the restored records are written. Nothing that already " +
@@ -263,8 +350,10 @@ export function renderTargetStep(state) {
     "refuses outright if a mapped target topic is already there.</p>" +
     "<label for=\"target-cluster\">target cluster</label>" +
     "<select id=\"target-cluster\" name=\"targetCluster\">" + clusterOptions + "</select>" +
+    (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
     "<label for=\"target-mode\">mode</label>" +
     "<select id=\"target-mode\" name=\"mode\">" + options + "</select>" +
+    markerWarning +
     "<label for=\"topic-prefix\">topicNaming.prefix</label>" +
     "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\">" +
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
@@ -547,29 +636,92 @@ function coveredOf(state) {
   return { fromMs: covered.fromMs, toMs: covered.toMs };
 }
 
+/** The `Backup` whose run COMPLETED most recently, or `null`.
+ *
+ *  THE LAST ROW OF A LIST IS NOT THE NEWEST COMPLETED RUN, and Task 28
+ *  measured the difference on a live cluster: a two-minute schedule produced
+ *  three `Backup` objects in six minutes and the page read a different one on every
+ *  reload -- the chosen set, its covered window, the plan bytes, the plan hash
+ *  and BOTH minted names all changing under the operator between one render
+ *  and the next. Worse, the newest object is usually the one still RUNNING,
+ *  which has no `backupId` and no `windowCovered` at all.
+ *
+ *  So: only a `Succeeded` run is offered, and among those the one whose
+ *  `Complete` condition transitioned latest (falling back to the creation
+ *  timestamp, then to list order). A tie or a missing timestamp keeps the
+ *  later-listed object, which is `kubectl`'s own order.
+ *
+ *  `completedAt` is read off the `Complete` condition rather than off
+ *  `windowCovered.toMs`: the covered window is about the RECORDS, and two runs
+ *  can cover windows that end in the other order from the order they ran. */
+function succeededBackups(state) {
+  return backupsOf(state).filter((b) => ((b.status || {}).phase) === "Succeeded");
+}
+
+function completedAt(backup) {
+  const conditions = ((backup || {}).status || {}).conditions;
+  if (Array.isArray(conditions)) {
+    for (const condition of conditions) {
+      if ((condition || {}).type === "Complete") {
+        const at = epochMs(condition.lastTransitionTime);
+        if (at !== null) {
+          return at;
+        }
+      }
+    }
+  }
+  return epochMs(((backup || {}).metadata || {}).creationTimestamp);
+}
+
+function newestSucceeded(state) {
+  const candidates = succeededBackups(state);
+  let best = null;
+  for (const backup of candidates) {
+    if (best === null) {
+      best = backup;
+      continue;
+    }
+    const left = completedAt(backup);
+    const right = completedAt(best);
+    if (left === null || right === null ? true : left >= right) {
+      best = backup;
+    }
+  }
+  return best;
+}
+
 function chosenBackup(state) {
   const wanted = (state.fields || {}).backupSetRef;
   const candidates = backupsOf(state);
-  for (const backup of candidates) {
-    if (((backup.status || {}).backupId) === wanted) {
-      return backup;
+  // THE STRING MUST BE A STRING. `wanted` is `undefined` before a set has been
+  // chosen, and a `Backup` that is still RUNNING has no `backupId` either -- so
+  // an equality test that did not check the type matched the running object
+  // and handed the page a `Backup` with no covered window at all.
+  if (typeof wanted === "string" && wanted.length > 0) {
+    for (const backup of candidates) {
+      if (((backup.status || {}).backupId) === wanted) {
+        return backup;
+      }
     }
+  }
+  const succeeded = newestSucceeded(state);
+  if (succeeded !== null) {
+    return succeeded;
   }
   return candidates.length > 0 ? candidates[candidates.length - 1] : null;
 }
 
+/** The chosen target: the one named in the state if it is still in the list,
+ *  else [`firstTarget`]'s default. The two must agree, because step 4's
+ *  `<select>` marks the same cluster `selected` and `bootstrapOf` reads this
+ *  one into the plan. */
 function targetCluster(state) {
   for (const cluster of itemsOf(state.clusters)) {
     if ((cluster.metadata || {}).name === state.targetClusterName) {
       return cluster;
     }
   }
-  for (const cluster of itemsOf(state.clusters)) {
-    if (((cluster.spec || {}).role) === "target") {
-      return cluster;
-    }
-  }
-  return null;
+  return firstTarget(state.clusters);
 }
 
 /** The default prefix for an instant, or the empty string when there is no
@@ -624,8 +776,12 @@ export async function mountRestoreWizard(node, ns, parse, deps) {
  *  `path_style` flag -- are editable in step 1 rather than left out, because
  *  the runner reads them from these bytes and from nowhere else. */
 export function initialState(ns, clusters, backups) {
-  const objects = itemsOf(backups);
-  const newest = objects.length > 0 ? objects[objects.length - 1] : null;
+  // THE NEWEST *COMPLETED* RUN, NOT THE LAST ROW. `chosenBackup` is asked with
+  // no `backupSetRef` yet, so it answers with the newest `Succeeded` object --
+  // the same one every later render will pick, and the only kind that carries
+  // a `backupId` and a `windowCovered` to build a plan from. See
+  // `newestSucceeded` for what Task 28 measured when this took the last row.
+  const newest = chosenBackup({ backups: backups, fields: {} });
   const spec = (newest || {}).spec || {};
   const status = (newest || {}).status || {};
   const covered = status.windowCovered || {};
@@ -695,13 +851,28 @@ function bootstrapOf(state) {
   return ((cluster || {}).spec || {}).bootstrapServers || [];
 }
 
+/** The cluster step 4 preselects: one labelled `role: target` if the namespace
+ *  has one, else the SOURCE cluster, else the first cluster there is.
+ *
+ *  NEVER `null` WHEN THE NAMESPACE HAS A CLUSTER. The old version returned
+ *  `null` for a namespace whose only cluster is `role: source`, which left
+ *  `target.bootstrapServers` empty and made `renderPlanBytes` throw -- on the
+ *  one-cluster `newTopic` walk that IS Demo 1. The runner has no such rule
+ *  (`drill/phase0_admit.rs`'s `TargetMode::NewTopic` arm is empty), so the
+ *  page had invented a requirement the product does not have. */
 function firstTarget(clusters) {
-  for (const cluster of itemsOf(clusters)) {
+  const all = itemsOf(clusters);
+  for (const cluster of all) {
     if (((cluster.spec || {}).role) === "target") {
       return cluster;
     }
   }
-  return null;
+  for (const cluster of all) {
+    if (((cluster.spec || {}).role) === "source") {
+      return cluster;
+    }
+  }
+  return all.length > 0 ? all[0] : null;
 }
 
 function wire(node, state, parse, api) {

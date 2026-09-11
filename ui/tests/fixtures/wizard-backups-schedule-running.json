@@ -1,0 +1,160 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupList",
+  "metadata": {
+    "resourceVersion": "50260"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "logweir-backup-laptop-20260911-183400",
+        "namespace": "logweir-t28",
+        "uid": "60718293-a4b5-4c6d-8e8f-901234567890",
+        "resourceVersion": "50201",
+        "generation": 1,
+        "creationTimestamp": "2026-09-11T18:34:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "demo"
+        },
+        "topics": [
+          "orders"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/laptop-demo",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "laptop"
+        },
+        "slot": "20260911-183400",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "ok",
+        "backupId": "01M28ZAAAAAAAAAAAAAAAAAAAA",
+        "records": 900,
+        "windowCovered": {
+          "fromMs": 1789151400000,
+          "toMs": 1789151640000
+        },
+        "conditions": [
+          {
+            "type": "Complete",
+            "status": "True",
+            "observedGeneration": 1,
+            "lastTransitionTime": "2026-09-11T18:34:41Z",
+            "reason": "Ok",
+            "message": "the runner exited 0 (ok)"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "logweir-backup-laptop-20260911-183600",
+        "namespace": "logweir-t28",
+        "uid": "71829304-b5c6-4d7e-9f90-123456789012",
+        "resourceVersion": "50230",
+        "generation": 1,
+        "creationTimestamp": "2026-09-11T18:36:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "demo"
+        },
+        "topics": [
+          "orders"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/laptop-demo",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "laptop"
+        },
+        "slot": "20260911-183600",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "ok",
+        "backupId": "01M28ZBBBBBBBBBBBBBBBBBBBB",
+        "records": 1400,
+        "windowCovered": {
+          "fromMs": 1789151400000,
+          "toMs": 1789151760000
+        },
+        "conditions": [
+          {
+            "type": "Complete",
+            "status": "True",
+            "observedGeneration": 1,
+            "lastTransitionTime": "2026-09-11T18:36:39Z",
+            "reason": "Ok",
+            "message": "the runner exited 0 (ok)"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "logweir-backup-laptop-20260911-183800",
+        "namespace": "logweir-t28",
+        "uid": "8293a4b5-c6d7-4e8f-9012-345678901234",
+        "resourceVersion": "50259",
+        "generation": 1,
+        "creationTimestamp": "2026-09-11T18:38:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "demo"
+        },
+        "topics": [
+          "orders"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/laptop-demo",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "laptop"
+        },
+        "slot": "20260911-183800",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "type": "Running",
+            "status": "True",
+            "observedGeneration": 1,
+            "lastTransitionTime": "2026-09-11T18:38:04Z",
+            "reason": "JobRunning",
+            "message": "the runner Job is running"
+          }
+        ]
+      }
+    }
+  ]
+}

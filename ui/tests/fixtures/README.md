@@ -58,5 +58,21 @@ Regenerating it is not the same as making it correct: arm 1 reads the regenerate
 so a golden regenerated from an emitter that invented a shape fails there even once the two
 JavaScript halves agree with each other.
 
+## The two Task 28a fixtures
+
+`wizard-clusters-source-only.json` and `wizard-backups-schedule-running.json` are the shapes the
+restore wizard met on a real cluster and refused, and the two rows at the end of `pages.spec.js` are
+about them.
+
+- **`wizard-clusters-source-only.json`** is ONE `KafkaCluster`, `role: source`, at the published `K8S`
+  listener -- the namespace `scripts/laptop-demo.sh` builds and the namespace `scripts/k8s-demo.sh`
+  runs a green `mode: newTopic` restore in. Until Task 28a step 4 filtered the target select down to
+  `role: target` and rendered nothing here.
+- **`wizard-backups-schedule-running.json`** is a two-minute schedule caught mid-flight: two
+  `Succeeded` `Backup` objects and, LAST in the list, one still `Running` with no `backupId` and no
+  `windowCovered`. The `Complete` condition times decide which of the two is restored from, and the
+  second row flips them without touching list order.
+
+
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software Foundation. Logweir
 is not affiliated with or endorsed by the ASF.

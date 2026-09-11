@@ -60,10 +60,15 @@ import { join } from "node:path";
 import { mintNames, planHash, renderPlanBytes } from "../plan.js";
 import {
   APPROVE_COMMAND,
+  NO_SUCCEEDED_SENTENCE,
+  RELOAD_SENTENCE,
+  SCRATCH_MARKER_WARNING,
+  TARGET_ROLE_SENTENCE,
   approvalRoute,
   draftFrom,
   initialState,
   preparePlan,
+  renderBackupSetStep,
   renderPointInTimeStep,
   renderRestoreWizard,
   renderTargetStep,
@@ -1085,9 +1090,11 @@ test("the_wizard_prefills_the_default_prefix", async () => {
   assert.ok(out.includes("<option value=\"newTopic\""), "mode option newTopic");
   assert.equal(
     (out.match(/<option value="/g) || []).length,
-    3,
-    "two modes and one target cluster; the mode select has exactly the two values " +
-      "TargetMode accepts",
+    4,
+    "two modes and BOTH clusters. Task 28a: the target select lists every KafkaCluster in " +
+      "the namespace and lets the runner's phase-0 guard decide, so this fixture's " +
+      "`role: source` and `role: target` objects are both offered; the mode select still has " +
+      "exactly the two values TargetMode accepts",
   );
 });
 
@@ -1375,4 +1382,233 @@ test("the_archive_step_shows_the_credential_name_and_says_what_it_is_for", async
     "prefilled empty when the archive names no Secret",
   );
   assert.equal(blank.indexOf("undefined"), -1);
+});
+
+// -- Task 28a: the two defects the laptop walkthrough found ------------------
+
+test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () => {
+  // DEFECT 2, measured by Task 28 on a live cluster. `renderTargetStep` and
+  // `firstTarget` listed only `KafkaCluster`s with `spec.role == "target"`, so
+  // a namespace whose only cluster is `role: source` rendered an EMPTY select,
+  // left `target.bootstrapServers` empty, and made `plan.js`'s grammar throw:
+  //   `target.bootstrapServers is required by the runner's grammar and must
+  //    not be empty`
+  // — the whole page an error box. And the RUNNER has no such rule:
+  // `drill/phase0_admit.rs` branches on `spec.target.mode` and puts all three
+  // cluster checks (the allowlist, target != source, the marker topic) inside
+  // the `Scratch` arm; `TargetMode::NewTopic` is empty, with a comment saying
+  // the source cluster is exactly where a point-in-time recovery belongs.
+  // `scripts/k8s-demo.sh` proves it by running: one cluster, `role: source`,
+  // `mode: newTopic`, green.
+  //
+  // ARM 1: one cluster, `role: source`. It renders, it is preselected, and the
+  // page says what the role is and is not.
+  const only = initialState(
+    "logweir-t28",
+    fixture("wizard-clusters-source-only.json"),
+    fixture("wizard-backups-schedule-running.json"),
+  );
+  assert.equal(
+    only.targetClusterName,
+    "demo",
+    "the source cluster is the preselected target when nothing is labelled `role: target`",
+  );
+  assert.deepEqual(
+    only.fields.target.bootstrapServers,
+    ["host.docker.internal:9095"],
+    "…so the plan document carries an address and the grammar has something to accept. This " +
+      "is the value that was EMPTY before Task 28a, and an empty list is what threw",
+  );
+  const step4 = renderTargetStep(only);
+  assert.ok(
+    step4.includes("<option value=\"demo\" selected>demo (role: source)</option>"),
+    "step 4 offers it, marks it selected, and prints its role beside the name: " + step4,
+  );
+  assert.ok(
+    step4.includes(TARGET_ROLE_SENTENCE),
+    "and says, in the page, that the role is a label and the runner is the gate: " + step4,
+  );
+  assert.equal(
+    step4.indexOf("target-cluster\" name=\"targetCluster\"></select>"),
+    -1,
+    "the select is NOT empty, which is the shape the defect produced",
+  );
+
+  // AND THE WHOLE WIZARD RENDERS — the assertion the defect actually broke.
+  const whole = await renderRestoreWizard(only);
+  assert.ok(whole.includes("id=\"plan-bytes\""), "all six steps render, plan bytes included");
+  assert.ok(
+    planPreOf(whole).includes("bootstrap_servers"),
+    "and the plan document names the target's address",
+  );
+
+  // ARM 2: two clusters, one labelled `role: target`. THAT one is preselected,
+  // both are offered, and the sentence is absent because it does not apply.
+  const both = initialState(
+    "logweir-t27",
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups.json"),
+  );
+  assert.equal(both.targetClusterName, "orders-recovery", "a `role: target` cluster still wins");
+  const step4both = renderTargetStep(both);
+  assert.ok(
+    step4both.includes("<option value=\"orders-prod\">orders-prod (role: source)</option>"),
+    "the source cluster is offered too — the runner accepts it for `newTopic`: " + step4both,
+  );
+  assert.ok(
+    step4both.includes(
+      "<option value=\"orders-recovery\" selected>orders-recovery (role: target)</option>",
+    ),
+    "and the labelled one is the selected option: " + step4both,
+  );
+  assert.equal(
+    step4both.indexOf(TARGET_ROLE_SENTENCE),
+    -1,
+    "the sentence is printed only when nothing is labelled",
+  );
+
+  // ARM 3: THE CREATE BODY FOLLOWS THE SELECTION, which is the only thing that
+  // reaches the cluster. A page that rendered the right option and submitted a
+  // different cluster would pass every assertion above.
+  const chosen = initialState(
+    "logweir-t27",
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups.json"),
+  );
+  chosen.targetClusterName = "orders-prod";
+  chosen.fields.target.bootstrapServers = ["kafka-0.orders.svc:9093"];
+  const api = recordingApi();
+  await submitRestore(chosen, api);
+  assert.equal(
+    api.calls[0].body.spec.target.clusterRef.name,
+    "orders-prod",
+    "`target.clusterRef.name` is the cluster the operator picked, `role: source` included",
+  );
+
+  // ARM 4: `mode: scratch` against a cluster with no `markerTopic` WARNS and
+  // does not refuse. The runner refuses — at phase 0, against the broker it
+  // actually reaches — and a page that refused here would be inventing a
+  // second gate over a spec field that is a statement of intent.
+  const scratch = initialState(
+    "logweir-t28",
+    fixture("wizard-clusters-source-only.json"),
+    fixture("wizard-backups-schedule-running.json"),
+  );
+  scratch.fields.target.mode = "scratch";
+  const warned = renderTargetStep(scratch);
+  assert.ok(warned.includes(SCRATCH_MARKER_WARNING), "the warning is printed: " + warned);
+  assert.ok(
+    warned.includes("<option value=\"demo\" selected>"),
+    "…and the cluster is still offered: a warning is not a refusal",
+  );
+  const stillRenders = await renderRestoreWizard(scratch);
+  assert.ok(stillRenders.includes("id=\"plan-bytes\""), "the plan still renders in scratch mode");
+});
+
+test("the_wizard_restores_from_the_newest_succeeded_backup_and_names_it", async () => {
+  // DEFECT 3. `initialState` and `chosenBackup` both took
+  // `objects[objects.length - 1]`, so a live schedule swapped the chosen set —
+  // and with it `windowCovered`, the plan bytes, the plan hash and BOTH minted
+  // names — on every reload. Task 28 measured three `Backup` objects in six
+  // minutes. Worse, the last row is usually the one still RUNNING, which has
+  // no `backupId` and no `windowCovered` at all.
+  //
+  // ARM 1: a running backup listed AFTER two succeeded ones. The newest
+  // SUCCEEDED one is chosen, and the page names it.
+  //
+  // Step 2 is asserted FIRST and off a bare state, because it is the assertion
+  // that still speaks when the choice is wrong: `initialState` on the running
+  // object THROWS out of `defaultTopicPrefix` (there is no covered window to
+  // derive an instant from), and a row whose first clause is a TypeError says
+  // less about which object was picked than one that names it.
+  const backups = fixture("wizard-backups-schedule-running.json");
+  const step2 = renderBackupSetStep({ backups: backups, fields: {} });
+  assert.ok(
+    step2.includes("chosen: logweir-backup-laptop-20260911-183600"),
+    "step 2 names the object it chose, and it is the 18:36 run - Succeeded, and the later of " +
+      "the two completions. The 18:38 object is LAST in the list and still Running, so it has " +
+      "no backup set at all: " + step2,
+  );
+
+  const state = initialState(
+    "logweir-t28",
+    fixture("wizard-clusters-source-only.json"),
+    backups,
+  );
+  assert.equal(
+    state.fields.backupSetRef,
+    "01M28ZBBBBBBBBBBBBBBBBBBBB",
+    "and the wizard's own state carries that run's set; taking the last row leaves " +
+      "`backupSetRef` undefined and the runner's grammar refuses the document",
+  );
+  assert.equal(
+    state.fields.pointInTime,
+    "2026-09-11T18:36:00Z",
+    "…and the point in time is THAT run's covered `toMs`, not the running one's absent window",
+  );
+  assert.ok(
+    renderBackupSetStep(state).includes("chosen: logweir-backup-laptop-20260911-183600"),
+    "…and the two agree: the state's chosen set and step 2's named object are one decision",
+  );
+  assert.ok(
+    step2.includes("backup set 01M28ZBBBBBBBBBBBBBBBBBBBB"),
+    "…and its backup set: " + step2,
+  );
+  assert.ok(
+    step2.includes("logweir-backup-laptop-20260911-183600 (chosen)"),
+    "…and marks the row, so the table and the sentence cannot disagree: " + step2,
+  );
+  assert.ok(
+    step2.includes(RELOAD_SENTENCE),
+    "…and says the choice can move under a running schedule: " + step2,
+  );
+  assert.ok(
+    step2.includes("PHASE</th>"),
+    "the table carries the phase, so a reader can see which rows were candidates",
+  );
+
+  // ARM 2: THE LATER COMPLETION WINS BETWEEN TWO SUCCEEDED RUNS, and it is the
+  // `Complete` condition's transition time that decides — not list order and
+  // not the covered window. Reversing the two completion times reverses the
+  // choice while the list order stays exactly as it was.
+  const reversed = fixture("wizard-backups-schedule-running.json");
+  reversed.items[0].status.conditions[0].lastTransitionTime = "2026-09-11T18:37:10Z";
+  const later = initialState(
+    "logweir-t28",
+    fixture("wizard-clusters-source-only.json"),
+    reversed,
+  );
+  assert.equal(
+    later.fields.backupSetRef,
+    "01M28ZAAAAAAAAAAAAAAAAAAAA",
+    "the FIRST-listed run now completed last, so it is the one chosen. A page reading list " +
+      "order would still answer `…BBBB` here",
+  );
+
+  // ARM 3: NO SUCCEEDED RUN AT ALL. Step 2 falls back to the last listed row —
+  // the object the page used to take unconditionally — and SAYS it did.
+  //
+  // Step 2 is reached directly here rather than through `initialState`,
+  // because a namespace in which nothing has completed has no covered window
+  // to default a point in time from and therefore no plan to render at all;
+  // that is a true statement about the cluster and not a defect of this page,
+  // and the row is about what step 2 says.
+  const none = fixture("wizard-backups-schedule-running.json");
+  for (const item of none.items) {
+    item.status = { phase: "Running" };
+  }
+  const step2none = renderBackupSetStep({ backups: none, fields: {} });
+  assert.ok(
+    step2none.includes(NO_SUCCEEDED_SENTENCE),
+    "the fallback is stated in the page: " + step2none,
+  );
+  assert.ok(
+    step2none.includes("chosen: logweir-backup-laptop-20260911-183800"),
+    "…and it is the last listed object, which is what the page used to take unconditionally",
+  );
+  assert.equal(
+    step2none.indexOf(RELOAD_SENTENCE),
+    -1,
+    "the reload sentence belongs to a chosen SUCCEEDED run and is not printed here",
+  );
 });
