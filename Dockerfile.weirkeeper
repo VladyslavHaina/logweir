@@ -1,0 +1,236 @@
+# The `weirkeeper` control-plane image — Task 23.
+#
+# IT IS NOT THE RUNNER IMAGE AND IT IS NOT A VARIANT OF IT. `Dockerfile` builds
+# `ghcr.io/logweir/logweir`: two binaries, the extracted OSO engine, the MIT
+# notice that redistribution owes, three runtime libraries and an amd64-only
+# ELF. This file builds `ghcr.io/logweir/weirkeeper`: ONE binary, no OSO code,
+# no MIT notice, `ca-certificates` and nothing else, on whatever architecture
+# it is asked for. The two images share a fingerprint file and two licence
+# lines, and nothing else — which is why `scripts/check-image-weirkeeper.sh` is
+# a separate script from `scripts/check-image.sh` rather than a sixth flag on
+# it. Every one of `check-image.sh`'s six checks fails against this image, and
+# five of them fail for the RIGHT reason: the thing they look for is not here
+# and must not be (critique B H15).
+#
+# BUILD IT WITH THE RECIPE, NOT BY HAND:
+#
+#     just image-weirkeeper                       # linux/arm64, loaded
+#     LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-weirkeeper
+#
+# and then assert it:
+#
+#     bash scripts/check-image-weirkeeper.sh weirkeeper:check; echo "rc=$?"
+#     just check-org-root; echo "rc=$?"
+#
+# SINGLE-PLATFORM, AND LOADED. `docker build --platform a,b` cannot `--load`:
+# the local image store holds single-platform images only, so a multi-platform
+# build must `--push` to a registry — and there is no remote (Global Constraint
+# 37). Either way `weirkeeper:check` would not exist as a local tag,
+# `check-image-weirkeeper.sh` would have nothing to inspect, `just
+# check-org-root` could not run and `imagePullPolicy: Never` would find no
+# image on the node. Multi-arch is produced in exactly one place —
+# `release.yml`'s image job (Task 30b) — and there is deliberately no
+# `image-weirkeeper-release` recipe in the justfile (critique B H16).
+#
+# ---------------------------------------------------------------------------
+# THE RUST COMPILE IS NEVER EMULATED — STANDING RULE 10
+# ---------------------------------------------------------------------------
+# The builder stage is pinned to `$BUILDPLATFORM`, BuildKit's predeclared
+# platform of the machine doing the building, so it is native everywhere:
+# arm64 on the development host, amd64 on a GitHub runner. An emulated
+# `cargo build --release` of this workspace was measured at 33x
+# (`docs/stability.md`) and looks like a stall rather than a failure.
+#
+# `LOGWEIR_IMAGE_PLATFORM` EXISTS FOR THAT RULE AND FOR NOTHING ELSE. The
+# developer default is `linux/arm64` — this host's own architecture, so
+# builder and target agree and the cross path below is never taken. Task 31's
+# GitHub-hosted amd64 runner sets `linux/amd64` and gets the same native build.
+# Hard-coding either value is the mutant
+# `the_weirkeeper_image_recipe_takes_its_platform_from_the_environment` kills.
+#
+# TARGET != BUILD IS REFUSED, BY NAME, AND THAT IS A MEASUREMENT NOT A
+# PREFERENCE. A cross build of THIS workspace was run on 2026-09-11
+# (arm64 host, `--platform linux/amd64`) with `gcc-x86-64-linux-gnu` installed
+# and the per-target `CARGO_TARGET_*_LINKER`/`CC_*` set, and it died after 106 s
+# in `aws-lc-sys v0.45.0`'s build script:
+#
+#   fatal error: sys/types.h: No such file or directory
+#   fatal error: bits/libc-header-start.h: No such file or directory
+#   error: failed to run custom build command for `aws-lc-sys v0.45.0`
+#
+# `aws-lc-sys` is in this crate's graph whether or not `weirkeeper` wants it —
+# `logweir-store` -> `object_store` -> `reqwest` pulls rustls's aws-lc backend,
+# and feature unification puts it in a `-p weirkeeper` build too — and its cmake
+# and bindgen steps reach for the HOST `/usr/include` rather than a cross
+# sysroot. Making that work is a real piece of work with a long tail, and
+# nothing in this plan needs it: the developer default is this host's own
+# architecture and Task 31's runner sets its own. So the mismatch is a NAMED
+# REFUSAL at second one instead of a confusing failure at second 106. **A code
+# path that has never worked does not ship pretending to.**
+#
+# WHAT THIS COSTS, STATED FOR THE TASK THAT WILL MEET IT. A single
+# `docker buildx build --platform linux/amd64,linux/arm64` cannot build this
+# image on one machine: the non-native leg hits the refusal below. Multi-arch
+# (Task 30b's `release.yml`) needs one native runner per architecture plus a
+# `docker manifest`/`buildx imagetools create` merge — or a working cross
+# sysroot for `aws-lc-sys`. STANDING RULE 10 forbids the third option, QEMU.
+#
+# THE ASSERTION BENEATH THE `apt` LAYER is what makes "native" a machine check
+# rather than a claim: under QEMU, `dpkg --print-architecture` reports the
+# EMULATED architecture and therefore disagrees with `$BUILDARCH`.
+FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder
+WORKDIR /src
+
+# BuildKit predeclares both of these; they are re-declared here because a
+# predeclared ARG is not in scope inside a stage until the stage asks for it.
+ARG BUILDARCH
+ARG TARGETARCH
+
+# 1.89, NOT 1.82 OR "latest". The workspace MSRV is `rust-version = "1.89"`
+# (Cargo.toml) and `rust-toolchain.toml`'s channel is `1.89.0`; the base image
+# tag above and those two move together, always. `Dockerfile`'s header records
+# what happened the one time they did not: every `docker build` failed with
+# "package requires rustc 1.89" and nothing noticed until Task 22.
+
+# NO apt LAYER AT ALL. The `rust:1.89-bookworm` base already carries a working C
+# toolchain for its own architecture, and every supported build here is native,
+# so there is nothing to install — which is also why this image's builder stage
+# is so much smaller than the runner image's.
+#
+# THE TRIPLE IS WRITTEN TO /triple, not recomputed. `COPY --from=` cannot
+# expand a shell variable, and the architecture-qualified target directory is
+# the thing that makes it impossible to ship a host-architecture binary by
+# accident (the same reason `Dockerfile` gives for its own `--target`). One
+# place decides the triple; the build step below reads it back.
+#
+# THE `test "$BUILDARCH" = "$(dpkg --print-architecture)"` LINE IS STANDING
+# RULE 10 AS A MACHINE CHECK. Delete `--platform=$BUILDPLATFORM` from the
+# stage header and this line fails on an arm64 host asked for linux/amd64,
+# which is the emulated compile the rule forbids.
+RUN set -eux; \
+    test -n "$TARGETARCH"; \
+    test -n "$BUILDARCH"; \
+    test "$BUILDARCH" = "$(dpkg --print-architecture)"; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      echo "Dockerfile.weirkeeper: REFUSING to cross-compile ($BUILDARCH -> $TARGETARCH)." >&2; \
+      echo "  This workspace's graph contains aws-lc-sys, whose cmake/bindgen steps read the" >&2; \
+      echo "  HOST /usr/include and fail on a cross target (measured 2026-09-11: 'fatal error:" >&2; \
+      echo "  sys/types.h: No such file or directory' after 106s). Build this image on a" >&2; \
+      echo "  machine of the target architecture and set LOGWEIR_IMAGE_PLATFORM to it," >&2; \
+      echo "  e.g. LOGWEIR_IMAGE_PLATFORM=linux/$BUILDARCH just image-weirkeeper." >&2; \
+      echo "  Emulating the compile under QEMU is forbidden (STANDING RULE 10, 33x)." >&2; \
+      exit 1; \
+    fi; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu  ;; \
+      arm64) triple=aarch64-unknown-linux-gnu ;; \
+      *) echo "Dockerfile.weirkeeper: unsupported TARGETARCH=$TARGETARCH (amd64 and arm64 only)" >&2; exit 1 ;; \
+    esac; \
+    echo "$triple" > /triple
+
+# A SEPARATE LAYER FROM THE ONE ABOVE, deliberately: a different tool with a
+# different failure mode, and merging them would make one cache miss pay for
+# both. `cargo build --target` installs no standard library for you; on the
+# native path this is a no-op ("component is up to date"), and it is kept so
+# that the `--target` discipline below is complete rather than accidental.
+RUN rustup target add "$(cat /triple)"
+
+# CACHE DISCIPLINE, the same shape `Dockerfile` uses: `COPY . .` is the last
+# thing before the compile, so every layer above survives an edit to any
+# tracked file. `.dockerignore` keeps `target/`, `.engine/` and both
+# Dockerfiles out of the context.
+COPY . .
+
+# `-p weirkeeper` AND NOT THE WORKSPACE. This image carries one binary; a
+# workspace build would compile `logweir`, its rdkafka/librdkafka C
+# dependencies and the whole engine-facing half for nothing, and would need the
+# SASL and OpenSSL development libraries the runtime stage below deliberately
+# does not have.
+#
+# `/out` IS A FIXED PATH SO THE `COPY --from=builder` BELOW CAN NAME IT. The
+# compile still goes through `--target`, so the binary is produced under the
+# architecture-qualified directory and is copied out of it by name.
+RUN set -eux; \
+    triple="$(cat /triple)"; \
+    cargo build --release --target "$triple" -p weirkeeper; \
+    mkdir -p /out; \
+    cp "target/$triple/release/weirkeeper" /out/weirkeeper
+
+# ---------------------------------------------------------------------------
+# THE RUNTIME STAGE
+# ---------------------------------------------------------------------------
+# `debian:bookworm-slim`, Global Constraint 10, the same base the runner image
+# uses — one glibc floor (>= 2.36) to document, one base to patch, one answer
+# to "which libc" across both images.
+#
+# NO `--platform` HERE, ON PURPOSE. This stage follows the platform of the
+# build, which `just image-weirkeeper` states once as
+# `--platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}"`. Pinning it here would
+# let the recipe and the file disagree, silently.
+FROM debian:bookworm-slim AS runtime
+
+# `ca-certificates` AND NOTHING ELSE, AND THE OMISSIONS ARE THE POINT.
+#
+#   NOT `libsasl2-2`  — the runner image needs it because rdkafka links
+#                       librdkafka with SASL support. `weirkeeper` links no
+#                       Kafka client and dials no broker: it creates Jobs and
+#                       the RUNNER talks to Kafka.
+#   NOT `libssl3`     — `weirkeeper` speaks TLS to exactly one peer, the
+#                       Kubernetes API server, through rustls with the `ring`
+#                       provider (`crates/weirkeeper/Cargo.toml`). There is no
+#                       OpenSSL in its link graph.
+#
+# `ca-certificates` IS REQUIRED even though the in-cluster API server is
+# verified with the projected service-account CA: `kube::Client::try_default()`
+# also resolves an out-of-cluster kubeconfig, and Global Constraint 29's
+# private-CA adopter configures a trust store that has to exist. An image with
+# no CA bundle fails at the first HTTPS handshake with an error that names
+# nothing useful.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/weirkeeper /usr/local/bin/weirkeeper
+
+# LOGWEIR'S OWN LICENCE AND NOTICE — Global Constraint 15, spec §16 clause 5.
+# Apache-2.0 requires the notice to travel with the redistributed binary, and
+# "this image only carries our own code" is a reason to ship OUR licence, not a
+# reason to ship none.
+COPY LICENSE NOTICE /usr/share/licenses/logweir/
+
+# AND NO `third_party/LICENSE-MIT`, WHICH IS ALSO A DECISION.
+# `/usr/share/licenses/kafka-backup/` is ABSENT from this image and
+# `scripts/check-image-weirkeeper.sh` check 3 asserts it stays absent. This
+# image redistributes no MIT-licensed binary — no `kafka-backup`, no OSO code
+# of any kind — and an image that shipped the notice anyway would be claiming
+# to redistribute something it does not. A licence notice is a statement about
+# what is inside, not decoration.
+
+# THE ORG-ROOT ANCHOR — Task 23, stage-2 Task 16's T1, the same path and the
+# same bytes as the runner image's.
+#
+# One line, `sha256:` + 64 hex: the SHA-256 of the SubjectPublicKeyInfo DER
+# encoding of the org root's PUBLIC key (`third_party/org-root.pub.pem`). A
+# public key's hash; no private key material is in this image or in that file.
+#
+# BOTH IMAGES CARRY IT because both are things a cluster owner might be handed,
+# and `just check-org-root` `cat`s it out of each and `diff`s both against the
+# checked-in file — one gate, two images, byte identity. Nothing in `crates/`
+# reads the path yet (`the_fingerprint_is_not_read_at_runtime`): the anchor
+# ships before the control that verifies against it, which is stated here
+# rather than implied.
+COPY third_party/org-root.fingerprint /etc/logweir/
+
+# THE SAME NON-ROOT UID AS THE RUNNER IMAGE AND AS
+# `config/manager/deployment.yaml`'s `runAsUser`/`runAsGroup`. The Deployment
+# sets `runAsNonRoot: true`, which the kubelet enforces by REFUSING to start a
+# container whose image declares `USER root` — so this line and that PodSpec
+# have to agree or the control plane never starts.
+USER 65532:65532
+
+# NO ARGUMENTS, AND NO `CMD`. `weirkeeper` takes `--version`, `--help`, or
+# nothing at all, and anything else exits 1 naming what it got
+# (`crates/weirkeeper/src/main.rs`); `config/manager/deployment.yaml` sets
+# `args: []` for the same reason. A `CMD` here would be a default argument
+# vector for a binary that accepts none.
+ENTRYPOINT ["/usr/local/bin/weirkeeper"]

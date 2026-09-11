@@ -35,14 +35,36 @@
 # that transforms nothing today; it is here so that the pairing is visible and
 # so that it starts working the moment a manifest carries that reference.
 # Until then, a runner Job on this path runs whatever
-# `RUNNER_IMAGE`/`IMAGE_PULL_POLICY` say — `ghcr.io/logweir/logweir:v0.1.0`
-# with `imagePullPolicy: Never`, which is a tag nothing can pull and is
-# therefore satisfied only by an image already loaded under that exact name:
+# `RUNNER_IMAGE`/`IMAGE_PULL_POLICY` say. Task 23 pinned that constant to a
+# DIGEST under the same repository, with `imagePullPolicy: Never` unchanged, so
+# it is satisfied only by an image already present on the node under that exact
+# repository name AND at that exact digest:
 #
+#     just image
 #     docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
 #
-# That is a real gap between this overlay's name and its effect, and it is
-# recorded here rather than discovered at the first scheduled backup.
+# MEASURED (X-DIGEST, `docs/kubernetes.md` §14): the `docker tag` is what makes
+# the shipped digest reference resolve — the kubelet keys on the WHOLE
+# reference, so a matching digest under a different repository name is
+# `ErrImageNeverPull`. And the digest a locally built image reports changes on
+# EVERY build, so a rebuilt runner image needs `job::RUNNER_IMAGE` re-pinned
+# before it will run here. That is a real gap between this overlay's name and
+# its effect, and it is recorded here rather than discovered at the first
+# scheduled backup.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS OVERLAY REWRITES TO A TAG WHEN THE BASE IS NOW A DIGEST
+# ---------------------------------------------------------------------------
+# The base reference is `ghcr.io/logweir/weirkeeper@sha256:…` after Task 23, and
+# `images:` below replaces it with `weirkeeper:check` — a TAG. That is not a
+# relaxation of Global Constraint 7: GC7 governs what is SHIPPED, and this
+# overlay is the author-only path (Global Constraint 37) whose whole premise is
+# an image that exists on one laptop. Pinning it to a digest as well was
+# considered and rejected by measurement: a locally built image's digest changes
+# on every build, so a digest here would be stale after the next
+# `just image-weirkeeper` and the author-only path would break for its only
+# user. `imagePullPolicy: Never` is what keeps the tag honest — nothing is
+# pulled, so nothing mutable is fetched from anywhere.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS LISTS THE THREE BASES INSTEAD OF `../..`

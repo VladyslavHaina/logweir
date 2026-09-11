@@ -49,6 +49,94 @@ fi
 grep -q '^sha256:' third_party/kafka-backup-binary.digest \
   && ok "the pin is a digest, never a tag" || bad "the pin is not a sha256: digest"
 
+# --------------------------------------------------------------------------
+# Task 23, arm 1 of 2. THE ORG-ROOT ANCHOR, PINNED BESIDE THE ENGINE DIGEST.
+# --------------------------------------------------------------------------
+# Global Constraint 7's byte-identity parity gate gains a SECOND pinned
+# artefact (stage-2 Task 16's T1). The engine digest above names the bytes the
+# engine binary was extracted from; this names the bytes of the org root's
+# PUBLIC key, and both are `COPY`ed into the images that must not be able to
+# change them without becoming different images.
+#
+# WHAT THE VALUE IS: `sha256:` + 64 hex, the SHA-256 of the
+# SubjectPublicKeyInfo DER encoding of `third_party/org-root.pub.pem` — the
+# same definition of "fingerprint" docs/keys.md gives. A PUBLIC key's hash. No
+# private key material is in this repository's third_party/, and the private
+# half of that keypair was generated outside the tree and destroyed.
+#
+# THE IMAGE HALF IS `just check-org-root`, which needs a docker daemon and both
+# images and is therefore a recipe, not a line here: this script runs on a
+# laptop with no network and no images.
+echo "== Global Constraint 7 (Task 23): the org-root anchor, pinned beside the engine digest =="
+[ -s third_party/org-root.fingerprint ] && ok "org-root anchor" || bad "org-root anchor"
+[ -s third_party/org-root.pub.pem ] \
+  && ok "the public key the anchor is the hash of" \
+  || bad "third_party/org-root.pub.pem is missing; the anchor would be 64 hex characters nobody can recompute"
+if [ "$(wc -l < third_party/org-root.fingerprint | tr -d ' ')" = "1" ] \
+   && grep -q '^sha256:[0-9a-f]\{64\}$' third_party/org-root.fingerprint; then
+  ok "the anchor is ONE sha256: line of 64 lowercase hex"
+else
+  bad "third_party/org-root.fingerprint is not exactly one sha256:<64 hex> line"
+fi
+# THE PARITY CHECK ITSELF: recompute the fingerprint from the checked-in public
+# key and compare. `openssl` is a prerequisite of this repository's image gate
+# already (scripts/check-image.sh refuses without it), so a missing openssl is
+# a NAMED FAILURE here too and never a silent skip — a check that cannot fail
+# is the defect class these gates exist to remove.
+if command -v openssl >/dev/null 2>&1; then
+  recomputed="sha256:$(openssl pkey -pubin -in third_party/org-root.pub.pem -outform DER 2>/dev/null \
+                       | openssl dgst -sha256 -r 2>/dev/null | cut -d' ' -f1)"
+  pinned="$(cat third_party/org-root.fingerprint)"
+  if [ "$recomputed" = "$pinned" ]; then
+    ok "the anchor is sha256(SPKI DER) of third_party/org-root.pub.pem"
+  else
+    bad "the anchor does NOT match the checked-in public key: pinned=$pinned recomputed=$recomputed"
+  fi
+else
+  bad "openssl is not on PATH, so the org-root anchor could not be recomputed"
+fi
+
+# --------------------------------------------------------------------------
+# Task 23, arm 2 of 2. BOTH IMAGES ARE REFERENCED BY DIGEST, NEVER BY TAG.
+# --------------------------------------------------------------------------
+# Global Constraint 7 as extended by Task 23 to the `logweir` runner image and
+# the `weirkeeper` controller image. The engine arm above is a DIFFERENT
+# artefact: it pins the image the engine BINARY was extracted from.
+#
+# `examples/cronjob-drill.yaml` was `image: logweir:v0.1.0`, a MUTABLE TAG,
+# under the mandatory `imagePullPolicy: Never` on a single node — so the
+# org-root anchor baked into that image could be replaced by a
+# `docker build -t logweir:v0.1.0` on that node WITHOUT TOUCHING A SINGLE
+# KUBERNETES OBJECT. The controller Deployment had the same shape, which made
+# the whole control plane replaceable the same way.
+#
+# THE RUNNER IMAGE IS NOT IN ANY MANIFEST (plan erratum E14f): it is the Rust
+# constant `weirkeeper::job::RUNNER_IMAGE`, compiled into the controller, so it
+# is checked in its own file. The exhaustive, parsed form of this check is
+# `crates/logweir/tests/manifest_lint.rs`'s
+# `manifest_lint_every_image_reference_is_a_digest`; this is the coarse
+# backstop that runs with no cargo.
+echo "== Global Constraint 7 (Task 23): both images are referenced by digest, never by tag =="
+img=0
+# The runner image, in the one place under crates/ that names it.
+grep -q 'ghcr\.io/logweir/logweir@sha256:[0-9a-f]\{64\}' crates/weirkeeper/src/job.rs || img=1
+grep -q 'ghcr\.io/logweir/logweir:' crates/weirkeeper/src/job.rs && img=1
+[ "$img" -eq 0 ] \
+  && ok "the runner image (job.rs RUNNER_IMAGE) is a digest" \
+  || bad "crates/weirkeeper/src/job.rs does not pin the runner image by digest"
+img=0
+# The controller image, in the source manifest and in the rendered install file.
+for f in config/manager/deployment.yaml logweir.yaml; do
+  grep -q 'image: ghcr\.io/logweir/weirkeeper@sha256:[0-9a-f]\{64\}' "$f" || { echo "      $f"; img=1; }
+  grep -q 'image: ghcr\.io/logweir/weirkeeper:' "$f" && { echo "      $f (tag)"; img=1; }
+done
+# The shipped CronJob example.
+grep -q 'image: .*@sha256:[0-9a-f]\{64\}' examples/cronjob-drill.yaml || { echo "      examples/cronjob-drill.yaml"; img=1; }
+grep -q 'image: logweir:v' examples/cronjob-drill.yaml && { echo "      examples/cronjob-drill.yaml (tag)"; img=1; }
+[ "$img" -eq 0 ] \
+  && ok "the controller image and the shipped CronJob are digests" \
+  || bad "the files above still reference an image by tag"
+
 echo "== ASF attribution (Global Constraint 14) on every shipped Markdown file =="
 missing=0
 while IFS= read -r f; do

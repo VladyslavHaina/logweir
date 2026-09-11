@@ -20,3 +20,10 @@
 # `COPY . .` copies and nothing else.
 /Dockerfile
 /.dockerignore
+
+# Task 23, for exactly the reason above. `Dockerfile.weirkeeper` is the second
+# Dockerfile in this tree and is taken through BuildKit's frontend, not through
+# the context tar, so excluding it here changes what `COPY . .` copies and
+# nothing else — and stops an edit to ITS comments invalidating the cargo layer
+# of the OTHER image's build.
+/Dockerfile.weirkeeper

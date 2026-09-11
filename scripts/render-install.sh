@@ -32,6 +32,11 @@ KUBECTL="${KUBECTL:-kubectl}"
 # The header, verbatim. `blocked: no remote` is Global Constraint 37's literal
 # and `crates/logweir/tests/manifest_lint.rs`'s
 # `the_install_file_records_blocked_no_remote` asserts it is in this file.
+# Task 23 added `the_install_file_still_records_blocked_no_remote` beside it,
+# which asserts the literal SURVIVED the digest pin and that the qualifying
+# sentence ("author-only ... never satisfies spec §16 clause 1") is still there:
+# deleting that clause while leaving the four words behind is how a local
+# registry run comes to be recorded as a publication.
 header() {
   cat <<'HEADER'
 # GENERATED FILE — do not edit by hand.
@@ -59,13 +64,20 @@ header() {
 # objects and evidence objects all survive it, by design. `docs/kubernetes.md`
 # §13 carries the exact command to remove each.
 #
-# digest rows: blocked: no remote — the images below are referenced by tag until release.yml has run against a git remote; a locally built image is author-only and never satisfies spec §16 clause 1
+# digest rows: blocked: no remote — the images below are referenced by digest (Global Constraint 7, Task 23) and the digest is a LOCALLY BUILT one until release.yml has run against a git remote; a locally built or locally loaded image is author-only and never satisfies spec §16 clause 1
 #
 # Consequence, stated plainly: applying this file on a cluster with no access to
 # `ghcr.io/logweir/weirkeeper` leaves the Deployment's pod in `ImagePullBackOff`.
 # X-APPLY proves `kubectl apply` exits 0; it does not start a pod. For an
 # author-only local run, `kubectl --context docker-desktop apply --server-side
 # -k config/overlays/local-images` rewrites the image to a locally loaded tag.
+#
+# The digest above was MEASURED, not fabricated, and what it does and does not
+# buy is measured too (X-DIGEST, docs/kubernetes.md §14): a pod referencing it
+# with `imagePullPolicy: Never` starts only once the image has been tagged into
+# that repository name on the node, and the digest a locally built image reports
+# changes on every build. That is why this row reads `blocked: no remote` and
+# not `pinned`.
 #
 # [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a
 # deny is never observed here; only the kind+Calico probe would make this claim

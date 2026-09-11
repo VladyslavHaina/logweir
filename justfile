@@ -537,3 +537,120 @@ check-secrets ns scram="kafka-scram":
       exit 1
     fi
     echo "check-secrets: all five Secrets are present ({{ns}}, and logweir-evidence-ro in logweir-system)."
+
+# Task 23, chain J slot 16. The two image recipes for the CONTROLLER image and
+# the org-root anchor — appended at the END of this file, as STANDING RULE 17
+# requires of every editor of it.
+
+# THE NAMED PRODUCER of the local `weirkeeper:check` tag — the sibling of
+# `image` above, and deliberately not a flag on it. Two images, two Dockerfiles,
+# two producers, two gates: `scripts/check-image.sh` asserts the runner image
+# and `scripts/check-image-weirkeeper.sh` asserts this one, because all six of
+# the former's checks are written around the runner's two binaries, its MIT
+# notice and its x86-64 ELF (critique B H15).
+#
+# SINGLE-PLATFORM, AND LOADED INTO THE LOCAL DAEMON. `docker build
+# --platform linux/amd64,linux/arm64` CANNOT `--load`: the local image store
+# holds single-platform images only, so a multi-platform build must `--push` to
+# a registry — and there is no remote (Global Constraint 37). Either way
+# `weirkeeper:check` would not exist as a local tag,
+# `scripts/check-image-weirkeeper.sh weirkeeper:check` would have nothing to
+# inspect, `just check-org-root` could not run, and `imagePullPolicy: Never`
+# would find no image on the node. **Multi-arch is Task 30b's `release.yml` and
+# nothing else**, and there is deliberately NO `image-weirkeeper-release`
+# recipe here: Task 30b is not a member of chain J and may not edit this file,
+# and a recipe whose body is `docker buildx build --push` cannot be executed on
+# a laptop with no registry — which is a recipe that has never run (critique B
+# H16).
+#
+# `${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}` IS THE WHOLE POINT OF THE VARIABLE.
+# The developer default is this host's own architecture, so the builder stage
+# (`FROM --platform=$BUILDPLATFORM`) and the target agree and nothing is
+# emulated. Task 31's GitHub-hosted amd64 runner sets
+# `LOGWEIR_IMAGE_PLATFORM=linux/amd64` and gets the same native build, instead
+# of compiling this workspace under QEMU — STANDING RULE 10's forbidden case,
+# measured at 33x in docs/stability.md. Hard-coding either value breaks the
+# other host, which is the mutant
+# `the_weirkeeper_image_recipe_takes_its_platform_from_the_environment` kills.
+#
+# DELIBERATELY NOT PART OF `lint`, `test`, `default` OR `e2e`, exactly as
+# `image` is not: an image build must never become a precondition of the
+# Docker-free test run. The two `#[test]`s that assert the anchor read only
+# checked-in files for the same reason; the image-inspecting half is
+# `check-org-root` below, a recipe and not a test (critique B M14).
+image-weirkeeper:
+    docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.weirkeeper -t weirkeeper:check .
+
+# THE IMAGE-INSPECTING HALF OF THE ORG-ROOT ASSERTION — stage-2 Task 16's T1,
+# Global Constraint 7's byte-identity parity shape.
+#
+# A RECIPE AND NOT A `#[test]`, ON PURPOSE (critique B M14). A `#[test]` that
+# shells `docker run` twice violates Global Constraint 22's 15 s per-test bound
+# and STANDING RULE 7 ("a lint or unit gate never reaches the network... no
+# image pull"), and would make `just lint` require both images to exist. The
+# unit half is two tests over checked-in files —
+# `crates/logweir/tests/manifest_lint.rs`'s
+# `org_root_fingerprint_is_a_single_sha256_line` and
+# `both_dockerfiles_copy_the_fingerprint` — and this is the half that needs a
+# daemon.
+#
+# BOTH IMAGES, BECAUSE BOTH CARRY THE ANCHOR. The runner image is what a drill
+# pod runs and the controller image is what the cluster owner is handed; the
+# whole point of baking the fingerprint is that neither can be changed without
+# producing a DIFFERENT image, so both are checked against the one checked-in
+# file and against each other by construction.
+#
+#     just image && just image-weirkeeper
+#     just check-org-root; echo "rc=$?"
+#
+# It takes both references as parameters so a pushed digest can be checked the
+# same way the local tags are:
+#
+#     just check-org-root ghcr.io/logweir/logweir@sha256:... ghcr.io/logweir/weirkeeper@sha256:...
+#
+# EVERY EXIT CODE IS READ ON ITS OWN LINE (STANDING RULE 20). `docker run`'s
+# status is read from `$?` on the next line and `diff`'s from `$?` on the line
+# after that; nothing whose status is load-bearing is piped. `set -e` is NOT
+# used, for the same reason `check-secrets` above does not use it: a mismatch
+# is the ANSWER, and the loop has to reach the end so that a failure on the
+# first image does not hide the state of the second.
+check-org-root runner="logweir:check" controller="weirkeeper:check":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cd "{{justfile_directory()}}"
+    if [ ! -s third_party/org-root.fingerprint ]; then
+      echo "check-org-root: third_party/org-root.fingerprint is missing or empty."
+      echo "That file is the checked-in half of the anchor and this gate's expected value;"
+      echo "without it the comparison below would compare the images against nothing."
+      exit 1
+    fi
+    bad=0
+    for ref in "{{runner}}" "{{controller}}"; do
+      tmp="$(mktemp -t logweir-org-root.XXXXXX)"
+      docker run --rm --entrypoint cat "$ref" /etc/logweir/org-root.fingerprint > "$tmp" 2>/dev/null
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "check-org-root: could not read /etc/logweir/org-root.fingerprint from $ref (docker rc=$rc)"
+        echo "  Build it first: \`just image\` for the runner, \`just image-weirkeeper\` for the"
+        echo "  controller. Both Dockerfiles must carry"
+        echo "  \`COPY third_party/org-root.fingerprint /etc/logweir/\`."
+        bad=1
+        rm -f "$tmp"
+        continue
+      fi
+      diff -u third_party/org-root.fingerprint "$tmp"
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "check-org-root: $ref's baked anchor is NOT the checked-in one (diff above:"
+        echo "  - is third_party/org-root.fingerprint, + is the image). Rebuild the image;"
+        echo "  never edit the file to match a stale image."
+        bad=1
+      else
+        echo "check-org-root: $ref carries the checked-in org-root fingerprint, byte for byte."
+      fi
+      rm -f "$tmp"
+    done
+    if [ "$bad" -ne 0 ]; then
+      exit 1
+    fi
+    echo "check-org-root: both images carry third_party/org-root.fingerprint at /etc/logweir/org-root.fingerprint."

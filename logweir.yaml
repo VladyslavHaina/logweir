@@ -23,13 +23,20 @@
 # objects and evidence objects all survive it, by design. `docs/kubernetes.md`
 # §13 carries the exact command to remove each.
 #
-# digest rows: blocked: no remote — the images below are referenced by tag until release.yml has run against a git remote; a locally built image is author-only and never satisfies spec §16 clause 1
+# digest rows: blocked: no remote — the images below are referenced by digest (Global Constraint 7, Task 23) and the digest is a LOCALLY BUILT one until release.yml has run against a git remote; a locally built or locally loaded image is author-only and never satisfies spec §16 clause 1
 #
 # Consequence, stated plainly: applying this file on a cluster with no access to
 # `ghcr.io/logweir/weirkeeper` leaves the Deployment's pod in `ImagePullBackOff`.
 # X-APPLY proves `kubectl apply` exits 0; it does not start a pod. For an
 # author-only local run, `kubectl --context docker-desktop apply --server-side
 # -k config/overlays/local-images` rewrites the image to a locally loaded tag.
+#
+# The digest above was MEASURED, not fabricated, and what it does and does not
+# buy is measured too (X-DIGEST, docs/kubernetes.md §14): a pod referencing it
+# with `imagePullPolicy: Never` starts only once the image has been tagged into
+# that repository name on the node, and the digest a locally built image reports
+# changes on every build. That is why this row reads `blocked: no remote` and
+# not `pinned`.
 #
 # [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a
 # deny is never observed here; only the kind+Calico probe would make this claim
@@ -1868,7 +1875,7 @@ spec:
         env:
         - name: LOGWEIR_ARCHIVE_URL
           value: ""
-        image: ghcr.io/logweir/weirkeeper:v0.1.0
+        image: ghcr.io/logweir/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
         imagePullPolicy: IfNotPresent
         name: weirkeeper
         resources:

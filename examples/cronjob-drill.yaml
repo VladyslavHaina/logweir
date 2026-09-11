@@ -71,11 +71,26 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: logweir
-              # Your own registry, or a locally built image. Logweir publishes
+              # A DIGEST, NEVER A TAG (Global Constraint 7, pinned by Task 23).
+              # This line was `logweir:v0.1.0` — a MUTABLE TAG under the
+              # mandatory `imagePullPolicy: Never` below, on a single node. So
+              # the org-root anchor baked into the image
+              # (`/etc/logweir/org-root.fingerprint`) could be replaced by a
+              # `docker build -t logweir:v0.1.0` on that node WITHOUT TOUCHING
+              # A SINGLE KUBERNETES OBJECT. A digest names bytes; a tag names
+              # whatever was built last.
+              #
+              # Replace it with your own registry's digest. Logweir publishes
               # nothing under the `osodevops/` namespace — that namespace is
               # upstream's, and this image only CONTAINS the engine binary
               # extracted from it under the MIT licence carried in third_party/.
-              image: logweir:v0.1.0
+              #
+              # The value below is a LOCALLY BUILT digest and is author-only
+              # (Global Constraint 37): no such image has been pushed, and on a
+              # node that has not built it this pod fails as `ErrImageNeverPull`
+              # naming the whole reference. `docs/kubernetes.md` §14 carries the
+              # measurement and the one `docker tag` an author needs.
+              image: ghcr.io/logweir/logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692
               # docs/kubernetes.md §2: on an arm64 node the engine layer is
               # linux/amd64 and MUST be pre-pulled host-side with
               # `docker pull --platform linux/amd64 <digest>`. `Never` makes a

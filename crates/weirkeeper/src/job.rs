@@ -21,17 +21,37 @@
 /// is not applyable, which would make spec §16's first clause unsatisfiable. A
 /// trademark answer changes one string, here.
 ///
-/// WHY A TAG TODAY, AND WHAT IS OWED. Global Constraint 7 pins by digest and
-/// never by tag, and this value is a tag. That is not a relaxation of GC7; it
-/// is GC37's `blocked: no remote` state written into the one place that has to
-/// hold a value: no remote exists, `release.yml` has never run against one, so
-/// no digest for this image exists to pin, and a fabricated `@sha256:…` would
-/// be strictly worse than a tag — it would look pinned and resolve to nothing.
-/// **Task 23 replaces this with the digest reference** and tightens
-/// `the_runner_image_is_named_once` to the digest form, at which point the tag
-/// is gone from the tree. Until then the obligation is a recorded one, not an
-/// invisible one.
-pub const RUNNER_IMAGE: &str = "ghcr.io/logweir/logweir:v0.1.0";
+/// A DIGEST, NOT A TAG — Global Constraint 7, pinned by Task 23. The value below
+/// is the manifest-list digest `docker inspect --format
+/// '{{index .RepoDigests 0}}' logweir:check` reported for the image `just image`
+/// built on 2026-09-11. A tag under `imagePullPolicy: Never` on a single node
+/// can be replaced by a local `docker build -t <tag>` **without touching a
+/// single Kubernetes object**, which defeats the org-root anchor baked into
+/// that image (`/etc/logweir/org-root.fingerprint`, stage-2 Task 16's T1); a
+/// digest names bytes.
+///
+/// AND IT IS STILL `blocked: no remote` (Global Constraint 37). "Published"
+/// means a PULL from a registry the author does not control, and this digest
+/// names bytes that exist on exactly one laptop. Two things were MEASURED on
+/// docker-desktop v1.34.1 and are written into `docs/kubernetes.md` §14 rather
+/// than assumed:
+///
+///   * a pod referencing this exact string with `imagePullPolicy: Never`
+///     **does start**, once `docker tag logweir:check <this repository>:v0.1.0`
+///     has put the image under that repository name locally — the kubelet keys
+///     on the WHOLE reference, and a matching digest alone does not make the
+///     repository name resolve. The exact command is in `docs/kubernetes.md`
+///     §14, which is not under `crates/` and may therefore spell the name out;
+///     this file may not, because the registry path appears here EXACTLY ONCE
+///     by construction (`crd_shape.rs::the_runner_image_is_named_once`);
+///   * the digest a locally built image reports **changes on every build**,
+///     including a fully cached no-op rebuild, because BuildKit re-generates
+///     the provenance attestation each time. So this value is not reproducible
+///     even on the machine that produced it, and the install file's digest rows
+///     keep reading `blocked: no remote` until `release.yml` has pushed to a
+///     real registry and the digest comes back from there (Task 30b).
+pub const RUNNER_IMAGE: &str =
+    "ghcr.io/logweir/logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692";
 
 use k8s_openapi::api::batch::v1::{
     Job, JobSpec, PodFailurePolicy, PodFailurePolicyOnExitCodesRequirement,
@@ -144,11 +164,14 @@ pub const APPROVAL_MOUNT_PATH: &str = "/approval";
 ///
 /// GLOBAL CONSTRAINT 17 AND GC37, TOGETHER. Zero cloud spend means every
 /// demo, test and CI job runs against a locally built image, and GC37 records
-/// that no remote exists yet, so [`RUNNER_IMAGE`] is a tag nothing can pull.
-/// `Never` makes a missing local image fail legibly as `ErrImageNeverPull`
-/// instead of as an opaque pull error against a registry path that resolves to
-/// nothing. Task 23 pins the digest; the policy is a separate decision and
-/// stays until a published image exists.
+/// that no remote exists yet, so [`RUNNER_IMAGE`] names a repository nothing
+/// can pull from. `Never` makes a missing local image fail legibly as
+/// `ErrImageNeverPull` instead of as an opaque pull error against a registry
+/// path that resolves to nothing. **Task 23 pinned the digest and the policy
+/// did not change**, which is the point: the two are separate decisions.
+/// Measured with the digest in place — `ErrImageNeverPull`, with the message
+/// naming the whole reference, until the image is tagged into that repository
+/// name locally; then the pod starts (`docs/kubernetes.md` §14).
 pub const IMAGE_PULL_POLICY: &str = "Never";
 
 /// The engine version the runner container declares, and the digest beside it.
@@ -376,8 +399,8 @@ pub fn failure_policy() -> PodFailurePolicy {
 ///    `controllers::backup::reconcile_backup` and
 ///    `controllers::backup::TTL_SECONDS_AFTER_FINISHED`.
 ///
-/// Task 23 replaces [`RUNNER_IMAGE`] with a digest reference; nothing else
-/// here changes when it does.
+/// Task 23 replaced [`RUNNER_IMAGE`] with a digest reference and nothing else
+/// here changed, exactly as this note predicted.
 #[must_use]
 pub fn build(spec: &RunnerJobSpec) -> Job {
     let mut env: Vec<EnvVar> = Vec::new();

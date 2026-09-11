@@ -6,6 +6,14 @@
 # test fixtures that Tasks 7, 13 and 14 read by path. Without this un-ignore,
 # `git add -A` never stages them and a fresh CI checkout fails on a missing file.
 !/e2e/fixtures/signed/*.pem
+# Task 23: the org root's PUBLIC half, and only the public half. It is the
+# bytes `third_party/org-root.fingerprint` is the SHA-256 of, so without this
+# un-ignore the checked-in fingerprint would be 64 hex characters nobody could
+# recompute. NO PRIVATE KEY IS EVER CHECKED IN HERE: the `*.key` line above
+# stands, this un-ignore names exactly one public file, and the private half of
+# that keypair was generated outside the tree and destroyed (docs/kubernetes.md
+# §14).
+!/third_party/org-root.pub.pem
 /e2e/compose/.data
 # The engine binary is extracted by scripts/extract-engine.sh, never committed;
 # the vendored hedge is the tarball in third_party/ (Global Constraint 15).

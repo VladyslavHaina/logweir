@@ -185,6 +185,33 @@ COPY --from=engine   /usr/local/bin/kafka-backup /usr/local/bin/kafka-backup
 COPY --from=builder  /src/target/x86_64-unknown-linux-gnu/release/logweir  /usr/local/bin/logweir
 COPY third_party/LICENSE-MIT /usr/share/licenses/kafka-backup/LICENSE
 COPY LICENSE NOTICE /usr/share/licenses/logweir/
+# THE ORG-ROOT ANCHOR, BAKED AT BUILD TIME — Task 23, stage-2 Task 16's T1.
+#
+# WHAT THIS FILE IS. One line, `sha256:` + 64 hex: the SHA-256 of the
+# SubjectPublicKeyInfo DER encoding of the org root's PUBLIC key
+# (`third_party/org-root.pub.pem`), the same definition of "fingerprint"
+# `docs/keys.md` gives for a signing key. It is a PUBLIC key's hash. No private
+# key material is in this image, in this repository, or in this line.
+#
+# WHY IT IS COPIED AND NOT MOUNTED. The point of the anchor is that whoever
+# controls the cluster cannot change it without producing a DIFFERENT IMAGE: a
+# ConfigMap or a Secret is exactly the projection a compromised control plane
+# owns. `COPY` puts it on the read-only rootfs of an image referenced by
+# digest, which is the only arrangement in which "the controller may project
+# any bytes; it cannot make them match" is true.
+#
+# NOTHING READS IT YET, AND THAT IS STATED RATHER THAN IMPLIED. Phase 0 does
+# not open this path — `crates/logweir/tests/manifest_lint.rs`'s
+# `the_fingerprint_is_not_read_at_runtime` asserts no `.rs` under `crates/`
+# does — because the anchor must EXIST before the check that verifies against
+# it (G5's pod-side `--org-key` refusal, Phase 3). Shipping the file now is
+# what makes that later check a one-line comparison instead of a migration.
+#
+# THE BYTE-IDENTITY GATE is `just check-org-root`, which `cat`s this path out
+# of BOTH images and `diff`s each against the checked-in file, plus
+# `scripts/check-image-weirkeeper.sh` check 4 for the controller image and
+# `scripts/check-dod.sh`'s org-root arm for the file itself.
+COPY third_party/org-root.fingerprint /etc/logweir/
 ENV LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/logweir"]

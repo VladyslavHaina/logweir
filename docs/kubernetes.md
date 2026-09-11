@@ -1864,6 +1864,272 @@ kubectl --context docker-desktop delete -f logweir.yaml; echo "rc=$?"
 kubectl --context docker-desktop delete ns logweir-system logweir-t21 --ignore-not-found; echo "rc=$?"
 ```
 
+## 14. X-DIGEST, run: does a digest reference start a pod?
+
+**This section is a transcript, not an argument.** Spec §15's `[UNVERIFIED]`
+mark 2 said, of stage-2 Task 16's digest work: *build, reference by digest,
+apply on docker-desktop, see whether a pod starts.* It was run on **2026-09-11**
+against docker-desktop (client v1.35.0 / Kustomize v5.7.1, server v1.34.1), and
+this is what came back. Everything measured here is **author-only** (Global
+Constraint 37) and **none of it satisfies spec §16 clause 1**: "published"
+means a pull from a registry the author does not control, and every byte below
+lives on one laptop.
+
+### 14.1 The org-root anchor, and what it is the fingerprint OF
+
+`third_party/org-root.fingerprint` is one line — `sha256:` plus 64 lowercase
+hex — and both images `COPY` it to `/etc/logweir/org-root.fingerprint`
+(stage-2 Task 16's T1). The value is the **SHA-256 of the SubjectPublicKeyInfo
+DER encoding of the org root's PUBLIC key**, the same definition of
+"fingerprint" [keys.md](keys.md) gives for a signing key. The bytes it is the
+hash of are checked in beside it, so the number is reproducible rather than
+unfalsifiable:
+
+```bash
+openssl pkey -pubin -in third_party/org-root.pub.pem -outform DER | openssl dgst -sha256
+# SHA2-256(stdin)= 09238e462664c556f5baa653eef23255b6d62e8ef39d928d02cb7f336637b030
+cat third_party/org-root.fingerprint
+# sha256:09238e462664c556f5baa653eef23255b6d62e8ef39d928d02cb7f336637b030
+```
+
+**No private key material is in this repository's `third_party/`.** The keypair
+was generated outside the tree with [keys.md](keys.md)'s own `openssl` recipe,
+the public half was checked in, and the private half was overwritten and
+removed in the same shell. That is deliberate and it is the honest shape for a
+shipped default: this anchor **authorises nothing**. An adopter replaces
+`third_party/org-root.pub.pem` and `third_party/org-root.fingerprint` with
+their own org root's and rebuilds both images — the fingerprint is baked at
+build time precisely so that whoever controls the cluster cannot change it
+without producing a different image.
+
+**Nothing reads it yet, and that is the point.** Phase 0 does not open
+`/etc/logweir/org-root.fingerprint` in tag 1 —
+`crates/logweir/tests/manifest_lint.rs`'s
+`the_fingerprint_is_not_read_at_runtime` asserts no code line under `crates/`
+names that path. The anchor ships so that it EXISTS before the control that
+verifies against it (G5's pod-side `--org-key` refusal, Phase 3).
+
+The gate over both images:
+
+```bash
+just image && just image-weirkeeper
+just check-org-root; echo "rc=$?"
+# check-org-root: logweir:check carries the checked-in org-root fingerprint, byte for byte.
+# check-org-root: weirkeeper:check carries the checked-in org-root fingerprint, byte for byte.
+# check-org-root: both images carry third_party/org-root.fingerprint at /etc/logweir/org-root.fingerprint.
+# rc=0
+```
+
+### 14.2 Does a locally built image carry a repository digest? **Yes.**
+
+```bash
+docker inspect --format '{{index .RepoDigests 0}}' logweir:check
+# logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692
+docker inspect --format '{{index .RepoDigests 0}}' weirkeeper:check
+# weirkeeper@sha256:eab22ebf3a001c9fce7f4ef21da74f894e630925eaee25d9ffb9c47c7c8dcae2
+```
+
+It is **not empty**. On this Docker Desktop (29.2.1, containerd image store) a
+locally built image is given a manifest-list digest, and `RepoDigests` reports
+it under the local repository name. The `registry:2` fallback the plan wrote
+down was therefore **not needed and was not taken** — no registry container
+was started and no `registry:2` install step is documented here.
+
+**But the digest is not stable, and that is the most important thing this gate
+found.** Three consecutive `just image` runs produced three different digests,
+and the third was a **fully cached, two-second, no-op rebuild**:
+
+| run | context | wall clock | reported digest |
+| --- | --- | --- | --- |
+| 1 | changed | 241 s | `sha256:0cda273d6b6f6e5a…` |
+| 2 | changed (a test file edited) | 281 s | `sha256:f06437048895f5c9…` |
+| 3 | **unchanged, 11 layers CACHED** | **2 s** | `sha256:3e9828d45aea3c5d…` |
+
+BuildKit attaches a provenance attestation to the manifest list and regenerates
+it on every build, so the list digest moves even when nothing about the image
+does. A locally built digest therefore names bytes that (a) exist on exactly one
+laptop and (b) **cannot be reproduced on that laptop**. This is the strongest
+argument in the tree for Global Constraint 37's `blocked: no remote`, and it is
+why the shipped digests are recorded as measured values rather than as pins
+anyone can re-derive. A published digest comes back from `release.yml`'s push
+(Task 30b) and is stable because the registry stores the bytes.
+
+### 14.3 Does a pod start from the digest? **Yes — and the repository name is load-bearing.**
+
+Namespace `logweir-t23`, two Pods differing only in the repository half of the
+reference, the same digest in both, `imagePullPolicy: Never` in both:
+
+```bash
+kubectl --context docker-desktop -n logweir-t23 get pods
+# NAME                   READY   STATUS              RESTARTS   AGE
+# xdigest-local-name     0/1     Completed           0          20s
+# xdigest-shipped-name   0/1     ErrImageNeverPull   0          20s
+```
+
+```bash
+kubectl --context docker-desktop -n logweir-t23 get pod xdigest-local-name \
+  -o jsonpath='{.status.containerStatuses[*].state}'
+# {"terminated":{"exitCode":0,"reason":"Completed",...}}
+kubectl --context docker-desktop -n logweir-t23 get pod xdigest-local-name \
+  -o jsonpath='{.status.containerStatuses[*].imageID}'
+# docker-pullable://logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692
+
+kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
+  -o jsonpath='{.status.containerStatuses[*].state}'
+# {"waiting":{"message":"Container image \"ghcr.io/logweir/logweir@sha256:3e9828d4…\" is not
+#   present with pull policy of Never","reason":"ErrImageNeverPull"}}
+```
+
+**The kubelet keys on the WHOLE reference, not on the digest.** A matching
+digest under a different repository name is `ErrImageNeverPull`. One local
+`docker tag` fixes it, and the same pod then starts:
+
+```bash
+docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
+docker inspect --format '{{json .RepoDigests}}' ghcr.io/logweir/logweir:v0.1.0
+# ["logweir@sha256:3e9828d4…","ghcr.io/logweir/logweir@sha256:3e9828d4…"]
+
+kubectl --context docker-desktop apply -f xdigest-shipped-name.yaml   # recreated
+kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
+  -o jsonpath='{.status.containerStatuses[*].state}'
+# {"terminated":{"exitCode":0,"reason":"Completed",...}}
+```
+
+So the **shipped** reference `ghcr.io/logweir/logweir@sha256:…` —
+`weirkeeper::job::RUNNER_IMAGE` — does start a pod on this cluster, under
+`imagePullPolicy: Never`, after that one `docker tag`. That command is the
+author-only step, and it is the reason
+[../config/overlays/local-images](../config/overlays/local-images) names it in
+its header.
+
+### 14.4 The control plane starts for the first time
+
+`logweir.yaml` now references `ghcr.io/logweir/weirkeeper@sha256:…` with
+`imagePullPolicy: IfNotPresent`. Applied with **no** local image under that
+repository name, the pod does exactly what Task 21 recorded and spec §16 clause
+1 predicts:
+
+```bash
+kubectl --context docker-desktop apply --server-side -f logweir.yaml; echo "rc=$?"
+# ... serverside-applied  (15 documents)
+# rc=0
+kubectl --context docker-desktop -n logweir-system get pods
+# weirkeeper-5996dbffc-kc6jk   0/1   ImagePullBackOff   0   25s
+#   message: Back-off pulling image "ghcr.io/logweir/weirkeeper@sha256:eab22ebf…":
+#            ErrImagePull: error from registry: denied
+```
+
+`denied`, because nothing has been pushed. Then the author-only step, and the
+**first `weirkeeper` pod ever to run in a cluster**:
+
+```bash
+docker tag weirkeeper:check ghcr.io/logweir/weirkeeper:v0.1.0
+kubectl --context docker-desktop -n logweir-system delete pod --all
+kubectl --context docker-desktop -n logweir-system get pods
+# weirkeeper-5996dbffc-nzb5j   1/1   Running   0   31s
+kubectl --context docker-desktop -n logweir-system get pod weirkeeper-5996dbffc-nzb5j \
+  -o jsonpath='{.status.containerStatuses[*].imageID}'
+# docker-pullable://weirkeeper@sha256:eab22ebf3a001c9fce7f4ef21da74f894e630925eaee25d9ffb9c47c7c8dcae2
+```
+
+**Its first 84 seconds of log are one line, and zero restarts** — which is
+what Task 16b's hot-loop fix predicts for a cluster holding no custom resource.
+A reconcile storm here would have been a finding; there was none:
+
+```json
+{"timestamp":"2026-09-11T08:35:57.301198Z","level":"ERROR","fields":{"message":"the configured
+ archive URL is not readable as an object-store location; this controller holds no archive handle
+ and writes no retention report","env":"LOGWEIR_ARCHIVE_URL","error":"`` is not an object-store
+ URL: it has no `://`"},"target":"weirkeeper"}
+```
+
+**One finding, recorded rather than fixed here:** that line is logged at
+`ERROR` for the SHIPPED default. `config/manager/deployment.yaml` sets
+`LOGWEIR_ARCHIVE_URL: ""` on purpose — retention reporting is opt-in — so the
+default install's only startup line tells an operator something is wrong when
+nothing is. The message itself says the behaviour is intended. Making the empty
+case a `warn!` (or silent) belongs to the next editor of
+`crates/weirkeeper/src/retention.rs` and `main.rs`; it is not an image or
+manifest change and was out of Task 23's Files block.
+
+The author-only overlay was applied over the same install and the pod restarted
+onto the local tag, with the same `imageID`:
+
+```bash
+kubectl --context docker-desktop apply --server-side -k config/overlays/local-images; echo "rc=$?"
+# ... serverside-applied  (15 documents)
+# rc=0
+kubectl --context docker-desktop -n logweir-system get pod weirkeeper-566c96d8bf-qmx8w \
+  -o jsonpath='{.spec.containers[*].image}'
+# weirkeeper:check
+# ... state: {"running":{...}}
+# ... imageID: docker-pullable://weirkeeper@sha256:eab22ebf…
+```
+
+### 14.5 The answer, in one paragraph
+
+**A locally built image DOES carry a repository digest on docker-desktop, and a
+pod DOES start from a digest reference — provided the image is present on the
+node under the same repository name.** No local registry was needed. What the
+gate does **not** show, and what no local run can show, is publication: the
+digests baked into `logweir.yaml` and into `weirkeeper::job::RUNNER_IMAGE` name
+bytes on one laptop, they change on every rebuild, and the install file's digest
+rows therefore still read **`blocked: no remote`** until `release.yml` has
+pushed to a registry the author does not control and the digests have been
+pulled back from it (spec §16 clause 1, Task 30b).
+
+### 14.6 The instability, demonstrated a second time — by this task
+
+The controller image was rebuilt once after the transcript above, because
+`Dockerfile.weirkeeper`'s cross-compilation branch was replaced by a **named
+refusal**. That branch had never worked: on this arm64 host,
+`LOGWEIR_IMAGE_PLATFORM=linux/amd64` with `gcc-x86-64-linux-gnu` installed and
+the per-target `CARGO_TARGET_*_LINKER` set died after 106 s in `aws-lc-sys
+v0.45.0`'s build script (`fatal error: sys/types.h: No such file or
+directory`) — `aws-lc-sys` is in the graph through
+`logweir-store` → `object_store` → `reqwest`, and its cmake/bindgen steps reach
+for the HOST `/usr/include` rather than a cross sysroot. A code path that has
+never worked does not ship pretending to, so the image now refuses a
+`TARGETARCH != BUILDARCH` build at second one with a message naming the reason.
+
+**Consequence for Task 30b, stated here because that is where it will be
+met:** one `docker buildx build --platform linux/amd64,linux/arm64` cannot
+build this image on a single machine. Multi-arch needs one native runner per
+architecture plus a `docker manifest` / `buildx imagetools create` merge — or a
+working cross sysroot for `aws-lc-sys`. QEMU is the forbidden third option
+(STANDING RULE 10).
+
+The rebuild took **296 s** and moved the controller digest from
+`sha256:eab22ebf…` to `sha256:767e3af2…`, so `config/manager/deployment.yaml`
+and `logweir.yaml` were re-pinned and the pod-start measurement re-run against
+the new value:
+
+```bash
+kubectl --context docker-desktop apply --server-side -f logweir.yaml; echo "rc=$?"   # rc=0, 15 documents
+kubectl --context docker-desktop -n logweir-system get pods
+# weirkeeper-7c6d5dccbd-9hnpw   1/1   Running   0   35s
+kubectl --context docker-desktop -n logweir-system get pod weirkeeper-7c6d5dccbd-9hnpw \
+  -o jsonpath='{.spec.containers[*].image}'
+# ghcr.io/logweir/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
+# ... imageID: docker-pullable://weirkeeper@sha256:767e3af2…   restartCount: 0 at 65 s
+```
+
+**This is the same finding as §14.2, happening to the task that recorded it.**
+Editing the image's own build definition changed the image's digest, and
+writing the new digest into the manifests changed the build context again — so
+the next `just image` or `just image-weirkeeper` will report yet another digest
+for bytes nobody asked to change. **A locally pinned digest is a measurement,
+not a reproducible pin.** The pin that closes spec §16 clause 1 is the one
+`release.yml` reads back from a registry (Task 30b), and until then these rows
+read `blocked: no remote`.
+
+The cleanup, which is how this transcript ends:
+
+```bash
+kubectl --context docker-desktop delete -f logweir.yaml; echo "rc=$?"
+kubectl --context docker-desktop delete ns logweir-system logweir-t23 --ignore-not-found; echo "rc=$?"
+```
+
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

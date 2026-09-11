@@ -1605,3 +1605,625 @@ fn the_stability_note_records_the_resolved_kube_pair() {
         "the same section carries the O0 sentence, accepted and stated"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 23 — digest-only image references, and the org-root anchor
+// ---------------------------------------------------------------------------
+
+/// Every container image reference in every shipped manifest, as
+/// `(where, reference)`.
+///
+/// THE WALK IS OVER THE PARSED DOCUMENTS, not over the text. A `grep` for
+/// `image:` would also match `imagePullPolicy`, the `images:` list in a
+/// kustomization, and any comment that mentions one — and would miss an
+/// `initContainers` entry in a manifest whose indentation it did not expect.
+/// Every PodSpec-carrying kind this tree ships is enumerated here; a seventh
+/// kind arrives as a diff in this list.
+fn image_references() -> Vec<(String, String)> {
+    all_manifests().iter().flat_map(images_in).collect()
+}
+
+/// Every container image reference in ONE parsed manifest.
+///
+/// Split out of [`image_references`] so that
+/// [`the_image_walk_covers_a_manifest_that_is_not_in_any_list`] can hand it a
+/// document that is not in the tree at all. A hard-coded list of files — the
+/// mutant — passes every other test here and fails that one.
+fn images_in(m: &Manifest) -> Vec<(String, String)> {
+    let pod_specs: Vec<&Value> = match m.kind.as_str() {
+        "Deployment" | "Job" | "ReplicaSet" | "StatefulSet" | "DaemonSet" => {
+            vec![&m.value["spec"]["template"]["spec"]]
+        }
+        "CronJob" => vec![&m.value["spec"]["jobTemplate"]["spec"]["template"]["spec"]],
+        "Pod" => vec![&m.value["spec"]],
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for spec in pod_specs {
+        if spec.is_null() {
+            continue;
+        }
+        for list in ["initContainers", "containers", "ephemeralContainers"] {
+            let Some(seq) = spec.get(list).and_then(Value::as_sequence) else {
+                continue;
+            };
+            for (i, c) in seq.iter().enumerate() {
+                let Some(image) = c.get("image").and_then(Value::as_str) else {
+                    continue;
+                };
+                out.push((
+                    format!("{}::{} {}[{}]", m.origin, m.id(), list, i),
+                    image.to_string(),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// `@sha256:` followed by exactly 64 lowercase hex characters, and nothing
+/// after it.
+fn is_digest_reference(reference: &str) -> bool {
+    let Some((name, digest)) = reference.split_once("@sha256:") else {
+        return false;
+    };
+    !name.is_empty()
+        && digest.len() == 64
+        && digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// **Global Constraint 7: pinning is by digest, never by tag** — in every
+/// shipped Kubernetes manifest.
+///
+/// WHY THIS IS A SECURITY GATE AND NOT TIDINESS. `examples/cronjob-drill.yaml`
+/// referenced `logweir:v0.1.0`, a MUTABLE TAG, under the mandatory
+/// `imagePullPolicy: Never` on a single node — so the org-root anchor baked
+/// into that image could be replaced by a `docker build -t logweir:v0.1.0` on
+/// that node **without touching a single Kubernetes object**. The controller
+/// Deployment had the same shape, which made the whole control plane
+/// replaceable the same way. A digest names bytes; a tag names whatever was
+/// built last.
+///
+/// THE SELECTION IS THE PARSE (Task 21's rule, inherited). `examples/drill.yaml`,
+/// `backup.yaml`, `restore.yaml` and the two `.json` files carry no
+/// `apiVersion`/`kind` pair, so they are skipped by
+/// [`manifests_in`] and never by a filename special case — see
+/// [`manifest_lint_selects_by_parsed_api_version_and_kind`].
+#[test]
+fn manifest_lint_every_image_reference_is_a_digest() {
+    let refs = image_references();
+    assert!(
+        refs.len() >= 3,
+        "only {} container image references were found across config/**, examples/** and \
+         logweir.yaml; this gate would then be asserting almost nothing. Found: {refs:?}",
+        refs.len()
+    );
+    for (where_, reference) in &refs {
+        assert!(
+            is_digest_reference(reference),
+            "{where_} references the image by TAG: `{reference}`. Global Constraint 7 pins by \
+             digest and never by tag — a tag under `imagePullPolicy: Never` on a single node can \
+             be replaced by a local `docker build` without touching any Kubernetes object, which \
+             defeats the org-root anchor baked into the image. Use \
+             `<name>@sha256:<64 hex>`."
+        );
+        assert!(
+            !reference.contains(":latest"),
+            "{where_} references `:latest` (`{reference}`)"
+        );
+    }
+}
+
+/// The image walk is derived from the PARSE and covers a manifest that is in
+/// no list anywhere.
+///
+/// THE MUTANT THIS EXISTS FOR: replacing the parsed selection with a hard-coded
+/// list of files — `["config/manager/deployment.yaml", "examples/cronjob-drill.yaml",
+/// "logweir.yaml"]`. That mutant passes every other assertion in this file,
+/// because those are in fact the files that carry images today. It fails here,
+/// because this document is written to a temporary directory the repository
+/// has never heard of and is still selected and still has its image read.
+///
+/// The document is a `Job`, a kind no shipped manifest uses yet and one the
+/// `Backup`/`Restore` reconcilers create at runtime — so this is also the
+/// assertion that the day a `Job` manifest ships, its image is covered without
+/// anyone remembering to add it.
+#[test]
+fn the_image_walk_covers_a_manifest_that_is_not_in_any_list() {
+    let dir = std::env::temp_dir().join(format!(
+        "logweir-manifest-lint-{}-{}",
+        std::process::id(),
+        "sixth"
+    ));
+    std::fs::create_dir_all(&dir).expect("a writable temp directory");
+    let path = dir.join("a-sixth-manifest.yaml");
+    std::fs::write(
+        &path,
+        "apiVersion: batch/v1\n\
+         kind: Job\n\
+         metadata:\n  name: a-sixth-manifest\n\
+         spec:\n  template:\n    spec:\n      containers:\n        - name: runner\n\
+         \x20         image: example.invalid/nothing:a-mutable-tag\n",
+    )
+    .expect("the temp manifest is written");
+
+    let docs = manifests_in(&path);
+    assert_eq!(
+        docs.len(),
+        1,
+        "a document carrying apiVersion and kind was not selected; the selection is not the parse"
+    );
+    let images = images_in(&docs[0]);
+    assert_eq!(
+        images.len(),
+        1,
+        "the image walk did not reach a manifest it had never seen before: {images:?}"
+    );
+    assert!(
+        !is_digest_reference(&images[0].1),
+        "the digest rule must reject `{}` — otherwise \
+         `manifest_lint_every_image_reference_is_a_digest` would pass on a tag",
+        images[0].1
+    );
+
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir(&dir).ok();
+}
+
+/// `third_party/org-root.fingerprint` is exactly one `sha256:`-prefixed line of
+/// 64 hex characters.
+///
+/// WHAT THE VALUE IS, SAID ONCE AND HERE: the SHA-256 of the
+/// SubjectPublicKeyInfo DER encoding of the org root's **public** key,
+/// `third_party/org-root.pub.pem` — the same definition of "fingerprint"
+/// `docs/keys.md` gives for a signing key, and the same one stage-2 Task 16's
+/// T1 and `docs/platform/02-k8s-transition-plan.md:449-451` give for this
+/// anchor. It is a PUBLIC key's hash; no private key material is in the file,
+/// in either image, or anywhere in this repository's `third_party/`.
+///
+/// ONE LINE IS LOAD-BEARING, not tidiness: `just check-org-root` and
+/// `scripts/check-image-weirkeeper.sh` check 4 compare this file BYTE FOR BYTE
+/// against what `docker run --entrypoint cat` prints out of the image. A second
+/// line — a comment, a blank line, a second fingerprint during a rotation —
+/// makes the comparison depend on how a shell captured the output. The
+/// explanation lives in `docs/kubernetes.md` §14 and in both Dockerfiles, where
+/// it costs nothing.
+#[test]
+fn org_root_fingerprint_is_a_single_sha256_line() {
+    let text = read("third_party/org-root.fingerprint");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "third_party/org-root.fingerprint must be EXACTLY ONE line; it has {}: {lines:?}",
+        lines.len()
+    );
+    assert!(
+        text.ends_with('\n'),
+        "third_party/org-root.fingerprint must end with a newline — `docker run --entrypoint cat` \
+         prints one, and a byte-identity comparison against a file without one always differs"
+    );
+    let line = lines[0];
+    let digest = line.strip_prefix("sha256:").unwrap_or_else(|| {
+        panic!("third_party/org-root.fingerprint must be `sha256:`-prefixed; it is `{line}`")
+    });
+    assert_eq!(
+        digest.len(),
+        64,
+        "a SHA-256 is 64 hex characters; `{digest}` is {}",
+        digest.len()
+    );
+    assert!(
+        digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the fingerprint must be lowercase hex; it is `{digest}`"
+    );
+    // The bytes it is the hash OF are checked in beside it, so the value is
+    // reproducible rather than a number nobody can falsify:
+    //     openssl pkey -pubin -in third_party/org-root.pub.pem -outform DER \
+    //       | openssl dgst -sha256
+    let pubkey = read("third_party/org-root.pub.pem");
+    assert!(
+        pubkey.starts_with("-----BEGIN PUBLIC KEY-----"),
+        "third_party/org-root.pub.pem must be a PEM PUBLIC key — the bytes the fingerprint above \
+         is the SHA-256 of. Without it the fingerprint is 64 hex characters nobody can recompute."
+    );
+    assert!(
+        !pubkey.contains("PRIVATE KEY"),
+        "third_party/org-root.pub.pem carries PRIVATE key material. The anchor is the hash of a \
+         PUBLIC key and nothing else; the private half of this keypair was generated outside the \
+         tree and destroyed (docs/kubernetes.md §14)."
+    );
+}
+
+/// BOTH images bake the anchor, at the same path.
+///
+/// The runner image is what a drill pod runs; the controller image is what a
+/// cluster owner is handed. The whole point of baking the fingerprint is that
+/// neither can be changed without producing a DIFFERENT image, so a `COPY` in
+/// only one of them leaves half the claim standing.
+///
+/// THE IMAGE-INSPECTING HALF IS `just check-org-root`, deliberately not a
+/// `#[test]` (critique B M14): a test that shells `docker run` twice breaks
+/// Global Constraint 22's 15 s bound and STANDING RULE 7, and would make
+/// `just lint` require both images to exist. This half reads two checked-in
+/// files and finishes in microseconds.
+#[test]
+fn both_dockerfiles_copy_the_fingerprint() {
+    // Split so this file's own text is not a match for the grep in
+    // `the_fingerprint_is_not_read_at_runtime` below.
+    let needle = format!("COPY third_party/org-root.fingerprint {}", "/etc/logweir/");
+    for dockerfile in ["Dockerfile", "Dockerfile.weirkeeper"] {
+        let text = read(dockerfile);
+        let hits = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with(&needle))
+            .count();
+        assert_eq!(
+            hits, 1,
+            "{dockerfile} must carry EXACTLY ONE `{needle}` instruction; it has {hits}. The \
+             org-root anchor is baked into both images (stage-2 Task 16's T1) at the path that \
+             `COPY` names, and `just check-org-root` `cat`s it out of each."
+        );
+    }
+}
+
+/// Nothing under `crates/` opens the baked anchor. **Phase 0 does not read it.**
+///
+/// This is the assertion that the task ships an anchor and not a control it
+/// does not have. The file and its build-time pinning exist so that the anchor
+/// is in place BEFORE anything verifies against it — G5's pod-side `--org-key`
+/// refusal is Phase 3 — and saying so with a test is the difference between
+/// "not yet wired" and "quietly believed to be wired".
+///
+/// THE MUTANT: read the fingerprint at phase 0. That is a real, attractive
+/// change — it looks like a hardening — and it is out of scope here because the
+/// refusal it would implement has no `--org-key` flag to refuse, no roster to
+/// check and no test for either. This fails the moment the path appears in a
+/// `.rs` file.
+#[test]
+fn the_fingerprint_is_not_read_at_runtime() {
+    // Built from pieces: this file lives under `crates/` and a literal here
+    // would be its own first hit.
+    let runtime_path = format!("/etc/{}/org-root.fingerprint", "logweir");
+    let mut offenders = Vec::new();
+    let mut scanned = 0usize;
+    let mut code_lines = 0usize;
+    for f in files_under("crates") {
+        if f.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        scanned += 1;
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        // CODE LINES ONLY. A `//` or `///` line that NAMES the path is
+        // documentation — `job.rs` says what the anchor is and where it lives,
+        // and it must keep saying so. What must not exist is a line that could
+        // OPEN it. The mutant ("read the fingerprint at phase 0") is a code
+        // line and is caught; a comment is not the control being asserted.
+        for line in text.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            code_lines += 1;
+            if line.contains(&runtime_path) {
+                offenders.push(format!(
+                    "{}: {}",
+                    f.strip_prefix(repo()).unwrap_or(&f).display(),
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        scanned > 50,
+        "only {scanned} `.rs` files were scanned; the walk is not reaching `crates/`"
+    );
+    assert!(
+        code_lines > 10_000,
+        "only {code_lines} code lines were scanned; the comment filter is eating the tree"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these files name the baked anchor's RUNTIME path: {offenders:?}. Phase 0 does not read \
+         `{runtime_path}` in tag 1 — the anchor ships so that it EXISTS before the check that \
+         verifies against it (G5's pod-side `--org-key` refusal, Phase 3). A reader arriving here \
+         needs the refusal, the flag and its own mutant round, which is a different task."
+    );
+}
+
+/// Interface **I15**, at the digest: the runner image is named in exactly one
+/// place under `crates/`, and the tag form is gone.
+///
+/// `crates/weirkeeper/tests/crd_shape.rs`'s `the_runner_image_is_named_once`
+/// asserts the same one-place property over the REGISTRY PATH. This one is
+/// about the FORM: after this task the constant is the runner repository
+/// followed by `@sha256:` and 64 hex, so a second call site introduced during a
+/// digest bump — the mutant, "duplicate the runner image string into
+/// `restore.rs`" — fails here as well, and a silent reversion to a mutable tag
+/// fails here and nowhere else. (The registry path is not spelled out anywhere
+/// in this file, for the reason below: this file lives under `crates/`, and
+/// `crd_shape.rs::the_runner_image_is_named_once` counts occurrences there.)
+///
+/// THE NEEDLES ARE BUILT FROM PIECES, for the reason `crd_shape.rs` gives: this
+/// file is under `crates/`, so a literal would be its own second occurrence.
+#[test]
+fn the_runner_image_lives_in_exactly_one_place() {
+    let digest_form = format!("{}{}@sha256:", "ghcr.io/logweir/", "logweir");
+    let tag_form = format!("{}{}:v", "ghcr.io/logweir/", "logweir");
+
+    let mut total = 0usize;
+    let mut where_: Vec<String> = Vec::new();
+    let mut tagged: Vec<String> = Vec::new();
+    for f in files_under("crates") {
+        if f.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let n = text.matches(digest_form.as_str()).count();
+        if n > 0 {
+            total += n;
+            where_.push(format!(
+                "{} ({n}x)",
+                f.strip_prefix(repo()).unwrap_or(&f).display()
+            ));
+        }
+        if text.contains(tag_form.as_str()) {
+            tagged.push(f.strip_prefix(repo()).unwrap_or(&f).display().to_string());
+        }
+    }
+    assert_eq!(
+        total, 1,
+        "`{digest_form}` must appear EXACTLY ONCE under `crates/` — a second occurrence is how a \
+         digest bump updates one call site and misses another. Found: {where_:?}"
+    );
+    assert_eq!(
+        where_,
+        vec!["crates/weirkeeper/src/job.rs (1x)".to_string()],
+        "the one occurrence is `crates/weirkeeper/src/job.rs`'s RUNNER_IMAGE"
+    );
+    assert!(
+        tagged.is_empty(),
+        "the BARE-TAG form `{tag_form}…` still survives under `crates/` in {tagged:?}. Global \
+         Constraint 7 pins by digest and never by tag; Task 23 replaced the tag, and a file that \
+         still carries it would resolve to whatever was built last."
+    );
+}
+
+/// `just image-weirkeeper` takes its platform from the environment, builds ONE
+/// platform, and loads the result.
+///
+/// THREE PROPERTIES, THREE MUTANTS.
+///
+/// (a) Hard-coding `linux/arm64` makes Task 31's GitHub-hosted amd64 runner
+/// compile this workspace under QEMU — STANDING RULE 10's forbidden case,
+/// measured at 33x in `docs/stability.md`.
+///
+/// (b) `--platform linux/amd64,linux/arm64` cannot `--load`: the local image
+/// store holds single-platform images only, so a multi-platform build must
+/// `--push` to a registry and there is no remote (Global Constraint 37).
+/// `weirkeeper:check` would then not exist as a local tag,
+/// `scripts/check-image-weirkeeper.sh` would have nothing to inspect and
+/// `imagePullPolicy: Never` would find no image on the node (critique B H16).
+///
+/// (c) An `image-weirkeeper-release` recipe is NOT created: multi-arch is
+/// produced in exactly one place, `release.yml`'s image job (Task 30b), and
+/// Task 30b is not a member of chain J and may not edit the justfile
+/// (STANDING RULE 17). A recipe whose body is `docker buildx build --push` on a
+/// laptop with no registry is a recipe that has never run.
+#[test]
+fn the_weirkeeper_image_recipe_takes_its_platform_from_the_environment() {
+    let justfile = read("justfile");
+    let recipe = |name: &str| -> String {
+        let start = justfile
+            .find(&format!("\n{name}"))
+            .unwrap_or_else(|| panic!("the justfile has no `{name}` recipe"));
+        let rest = &justfile[start + 1..];
+        let mut out = String::new();
+        for line in rest.lines() {
+            if !out.is_empty() && !line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    };
+
+    let body = recipe("image-weirkeeper:");
+    assert!(
+        body.contains("${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}"),
+        "`just image-weirkeeper` must build \
+         `--platform \"${{LOGWEIR_IMAGE_PLATFORM:-linux/arm64}}\"`, so the developer default is \
+         this host's own architecture and a CI runner sets its own rather than emulating the \
+         builder stage (STANDING RULE 10). The recipe is:\n{body}"
+    );
+    assert!(
+        !body.contains("linux/amd64,") && !body.contains(",linux/"),
+        "`just image-weirkeeper` must build ONE platform. A multi-platform `docker build` cannot \
+         `--load`, so `weirkeeper:check` would not exist as a local tag (critique B H16). The \
+         recipe is:\n{body}"
+    );
+    assert!(
+        body.contains("--load"),
+        "`just image-weirkeeper` must `--load` the result into the local daemon: every gate in \
+         this plan inspects a local tag under `imagePullPolicy: Never`. The recipe is:\n{body}"
+    );
+    assert!(
+        body.contains("-f Dockerfile.weirkeeper") && body.contains("-t weirkeeper:check"),
+        "`just image-weirkeeper` is the NAMED PRODUCER of `weirkeeper:check` from \
+         `Dockerfile.weirkeeper`. The recipe is:\n{body}"
+    );
+    assert!(
+        !body.contains("--push"),
+        "`just image-weirkeeper` must not push: there is no remote (Global Constraint 37)"
+    );
+    // A RECIPE HEADER STARTS AT COLUMN 0; a comment that NAMES the absent
+    // recipe does not. The justfile's own prose says at length why there is no
+    // release recipe, and a whole-file `contains` would report that explanation
+    // as the violation — the same mistake `scripts/check-dod.sh`'s Global
+    // Constraint 14 arm avoids.
+    assert!(
+        !justfile
+            .lines()
+            .any(|l| l.starts_with("image-weirkeeper-release")),
+        "there is no `image-weirkeeper-release` recipe. Multi-arch is produced in exactly one \
+         place — `release.yml`'s image job (Task 30b) — and a recipe whose body is \
+         `docker buildx build --push` cannot be executed on a laptop with no registry."
+    );
+}
+
+/// The controller image owes no MIT notice, and its checker says so.
+///
+/// `Dockerfile` copies `third_party/LICENSE-MIT` into
+/// `/usr/share/licenses/kafka-backup/LICENSE` because the runner image
+/// REDISTRIBUTES upstream's binary. `Dockerfile.weirkeeper` carries no OSO code
+/// at all, so shipping that notice would be claiming a redistribution that does
+/// not happen — and `scripts/check-image-weirkeeper.sh` check 3 asserts the
+/// directory is ABSENT, which is the exact opposite of `check-image.sh`'s
+/// check 5 (critique B **H15**).
+///
+/// THE ASSERTION IS OVER INSTRUCTION LINES, NOT THE WHOLE FILE, and that is
+/// deliberate: `Dockerfile.weirkeeper`'s comments say at length why there is no
+/// MIT notice and why `/usr/share/licenses/kafka-backup/` is absent, and a
+/// whole-file grep would report that explanation as the violation — the same
+/// mistake `scripts/check-dod.sh`'s Global Constraint 14 arm avoids by looking
+/// only at the three places a name would actually make something Logweir's own
+/// artefact. The mutant this kills — "fix" a red `check-image.sh` run by
+/// copying the MIT licence in — adds an INSTRUCTION, and is caught.
+#[test]
+fn the_controller_image_owes_no_mit_notice() {
+    let text = read("Dockerfile.weirkeeper");
+    let instructions: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .collect();
+    assert!(
+        instructions.len() > 10,
+        "only {} instruction lines were found in Dockerfile.weirkeeper; the comment filter is \
+         eating the file",
+        instructions.len()
+    );
+    for forbidden in ["LICENSE-MIT", "kafka-backup", "osodevops"] {
+        let hits: Vec<&&str> = instructions
+            .iter()
+            .filter(|l| l.contains(forbidden))
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "Dockerfile.weirkeeper has an INSTRUCTION naming `{forbidden}`: {hits:?}. The \
+             controller image carries no OSO code and owes no MIT notice; an image that shipped \
+             the notice anyway would claim a redistribution it does not make. If \
+             `scripts/check-image.sh weirkeeper:check` was run and failed, the fix is to run \
+             `scripts/check-image-weirkeeper.sh` instead — not to copy the licence in."
+        );
+    }
+    // Logweir's OWN licence and notice do ship — Global Constraint 15 governs
+    // Logweir's redistribution exactly as it governs upstream's.
+    assert!(
+        instructions
+            .iter()
+            .any(|l| l.starts_with("COPY LICENSE NOTICE /usr/share/licenses/logweir/")),
+        "Dockerfile.weirkeeper must `COPY LICENSE NOTICE /usr/share/licenses/logweir/`"
+    );
+
+    // And the checker asserts the ABSENCE, rather than merely not asserting the
+    // presence. A gate that only stopped checking would be no gate at all.
+    let checker = read("scripts/check-image-weirkeeper.sh");
+    assert!(
+        checker.contains("test ! -e /usr/share/licenses/kafka-backup"),
+        "scripts/check-image-weirkeeper.sh must assert `/usr/share/licenses/kafka-backup/` is \
+         ABSENT from the controller image (interface I25, check 3)"
+    );
+    assert!(
+        checker.contains("/usr/share/licenses/logweir/LICENSE")
+            && checker.contains("/usr/share/licenses/logweir/NOTICE"),
+        "scripts/check-image-weirkeeper.sh must assert BOTH of Logweir's own licence files are \
+         non-empty (interface I25, check 3)"
+    );
+    // Built from pieces, so this file carries no CODE line naming the runtime
+    // path — see `the_fingerprint_is_not_read_at_runtime`, which scans exactly
+    // that.
+    let anchor_path = format!("/etc/{}/org-root.fingerprint", "logweir");
+    assert!(
+        checker.contains(&anchor_path),
+        "scripts/check-image-weirkeeper.sh must assert the baked org-root anchor (interface I25, \
+         check 4)"
+    );
+    assert!(
+        checker.contains("--version"),
+        "scripts/check-image-weirkeeper.sh must run `weirkeeper --version` (interface I25, check 2)"
+    );
+    assert!(
+        checker.contains("ldd /usr/local/bin/weirkeeper"),
+        "scripts/check-image-weirkeeper.sh must run `ldd /usr/local/bin/weirkeeper` (interface \
+         I25, check 1)"
+    );
+}
+
+/// Pinning a LOCALLY BUILT digest does not make the install file publishable.
+///
+/// Global Constraint 37 and spec §11's amendment 5: "published" means a PULL
+/// from a registry the author does not control. `docker inspect --format
+/// '{{index .RepoDigests 0}}'` on a locally built image returns the digest of
+/// bytes that exist on exactly one laptop — and if that image was pushed to a
+/// local `registry:2` to obtain one, the bytes exist on exactly one laptop
+/// still. So the install file now carries `@sha256:` references AND still reads
+/// `blocked: no remote`, and those two facts are not in tension: the first is
+/// Global Constraint 7, the second is Global Constraint 37.
+///
+/// THIS IS NOT A DUPLICATE OF [`the_install_file_records_blocked_no_remote`].
+/// That one asserts the literal is present. This one asserts the literal
+/// survived the digest pin AND that the header still says, in the same breath,
+/// that a locally built image is author-only and never satisfies spec §16
+/// clause 1 — the mutant being "record the `registry:2` run as satisfying it",
+/// which deletes the qualifying sentence and leaves the four words behind.
+#[test]
+fn the_install_file_still_records_blocked_no_remote() {
+    let text = read("logweir.yaml");
+    let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
+
+    // The pin really did land — otherwise this test would pass on a tree where
+    // nothing changed.
+    let deployment = install_file()
+        .into_iter()
+        .find(|m| m.kind == "Deployment" && m.name() == "weirkeeper")
+        .expect("logweir.yaml carries the weirkeeper Deployment");
+    let images = images_in(&deployment);
+    assert_eq!(images.len(), 1, "the Deployment has one container");
+    assert!(
+        is_digest_reference(&images[0].1),
+        "logweir.yaml's controller image must be pinned by digest; it is `{}`",
+        images[0].1
+    );
+
+    assert!(
+        head.contains("blocked: no remote"),
+        "logweir.yaml's header must STILL carry Global Constraint 37's literal \
+         `blocked: no remote` after the digest pin. A digest that names bytes on one laptop is \
+         not a publication."
+    );
+    assert!(
+        head.contains("author-only"),
+        "logweir.yaml's header must say that a locally built or locally loaded image is \
+         `author-only`"
+    );
+    assert!(
+        head.contains("never satisfies spec §16 clause 1"),
+        "logweir.yaml's header must say that an author-only image `never satisfies spec §16 \
+         clause 1`. Deleting that clause while leaving `blocked: no remote` behind is how a local \
+         `registry:2` run comes to be recorded as a publication."
+    );
+    assert!(
+        !head.contains("referenced by tag"),
+        "logweir.yaml's header still says the images are `referenced by tag`. They are referenced \
+         by DIGEST after Task 23, and a header that describes the previous state is worse than no \
+         header: it is the one comment a stranger reads."
+    );
+}
