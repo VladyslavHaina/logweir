@@ -2130,6 +2130,29 @@ kubectl --context docker-desktop delete -f logweir.yaml; echo "rc=$?"
 kubectl --context docker-desktop delete ns logweir-system logweir-t23 --ignore-not-found; echo "rc=$?"
 ```
 
+### 14.7 The digests above are Task 23's measurement, and Task 24 superseded them
+
+**Every digest in this section — `logweir@sha256:3e9828d4…` and
+`weirkeeper@sha256:767e3af2…` — is the value Task 23 measured, and it is no
+longer what the tree pins.** Task 24 rebuilt both images (the controller image
+at the previous commit contained no `verification.rs` at all, so Phase B could
+not run against it), and the current pins are
+**`logweir@sha256:6440a4a0…`** in `crates/weirkeeper/src/job.rs`,
+`examples/cronjob-drill.yaml` and `e2e/k8s/phase-b-demo.md`, and
+**`weirkeeper@sha256:a5aa6dc1…`** in `config/manager/deployment.yaml` and
+`logweir.yaml`. `scripts/check-dod.sh` compares the tree against those.
+
+This section is **not** edited to match, and that is deliberate: it is a
+transcript of commands that were run and the values they printed on the day
+they were run, and rewriting a measurement to agree with a later one destroys
+the only thing it was worth keeping (plan erratum **E19(a)**). Read it as
+history. The §14.6 paragraph immediately above says why any of these numbers
+move at all: **a locally pinned digest is a measurement, not a reproducible
+pin**, and editing anything in an image's build context — including writing a
+digest into a manifest — changes it again. Task 24's rebuild is the fourth
+instance of exactly that, and `blocked: no remote` still stands until
+`release.yml` reads a digest back from a registry (Task 30b).
+
 ## 15. The evidence credential, the verdict, and the signing-oracle residual
 
 **Task 24, chain W slot 17.** `weirkeeper` verifies the evidence the UI renders
