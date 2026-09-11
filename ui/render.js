@@ -196,6 +196,24 @@ export function table(columns, rows) {
   );
 }
 
+/** A link to one object's detail view: `#/<route>?ns=<ns>&name=<name>`.
+ *
+ *  A HASH, AND NOTHING BUT A HASH. The whole router lives after the `#`, so
+ *  the browser never asks the file server for a route it cannot serve -- the
+ *  static half of `kubectl proxy` is a plain file server with no rewrite rule
+ *  and no 404 hook. Both values are percent-encoded, and the caption is
+ *  escaped like any other value from the cluster. */
+export function detailLink(route, ns, name) {
+  const target =
+    "#/" +
+    route +
+    "?ns=" +
+    encodeURIComponent(ns) +
+    "&name=" +
+    encodeURIComponent(name);
+  return "<a href=\"" + esc(target) + "\">" + esc(name) + "</a>";
+}
+
 /** A badge. STRUCTURAL ONLY: `kind` becomes a class suffix and `text` becomes
  *  the caption. Which kind a run gets is the calling page's decision, made
  *  from the object's own recorded fields. */

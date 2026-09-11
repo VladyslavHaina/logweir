@@ -38,6 +38,7 @@ import {
   badge,
   bucketOf,
   cell,
+  detailLink,
   coveredWindow,
   errorBox,
   esc,
@@ -101,13 +102,22 @@ function nameOf(object) {
   return cell(meta.name);
 }
 
+/** The name as a link to this run's detail view, when it has a name. */
+function nameCell(object, ns) {
+  const meta = (object && object.metadata) || {};
+  if (typeof meta.name !== "string" || meta.name.length === 0) {
+    return cell(null);
+  }
+  return detailLink("backups", ns || (meta.namespace || "default"), meta.name);
+}
+
 /** The backups table. NAME, PHASE, EXIT, RECORDS, SIGNED, AGE. */
-export function renderBackupList(input) {
+export function renderBackupList(input, ns) {
   const rows = itemsOf(input).map((object) => {
     const status = object.status || {};
     const meta = object.metadata || {};
     return [
-      nameOf(object),
+      nameCell(object, ns),
       cell(status.phase),
       cell(status.exitCode),
       cell(status.records),
@@ -170,7 +180,7 @@ export function renderBackupDetail(object) {
 export async function mountBackups(node, ns, parse) {
   try {
     const collection = await list(ns, PLURAL);
-    replace(node, parse(renderBackupList(collection)));
+    replace(node, parse(renderBackupList(collection, ns)));
   } catch (error) {
     replace(node, errorBox(error));
   }

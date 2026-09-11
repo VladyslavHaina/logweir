@@ -31,6 +31,7 @@ import {
   badge,
   bucketOf,
   cell,
+  detailLink,
   errorBox,
   esc,
   evidenceBlock,
@@ -64,6 +65,17 @@ function nameOf(object) {
   return cell(meta.name);
 }
 
+/** The name as a link to the detail view FOR THAT KIND: a Backup's own view,
+ *  or this page's Restore view. Two kinds, two destinations. */
+function nameCell(object, ns) {
+  const meta = (object && object.metadata) || {};
+  if (typeof meta.name !== "string" || meta.name.length === 0) {
+    return cell(null);
+  }
+  const route = kindOf(object) === "Backup" ? "backups" : "history";
+  return detailLink(route, ns || (meta.namespace || "default"), meta.name);
+}
+
 function kindOf(object) {
   const kind = (object && object.kind) || "";
   return kind === "" ? "-" : kind;
@@ -93,7 +105,7 @@ function rowBadge(object) {
  *  (`renderHistoryList(restores, backups)`). Objects with no creation instant
  *  sort last, in the order they arrived: a missing timestamp is not a reason
  *  to invent one. */
-export function renderHistoryList(input, second) {
+export function renderHistoryList(input, second, ns) {
   const objects = itemsOf(input).concat(second === undefined ? [] : itemsOf(second));
   const ordered = objects
     .map((object, index) => ({ object: object, index: index }))
@@ -114,7 +126,7 @@ export function renderHistoryList(input, second) {
     .map((entry) => entry.object);
 
   const rows = ordered.map((object) => [
-    nameOf(object),
+    nameCell(object, ns),
     esc(kindOf(object)),
     cell(createdAt(object)),
     cell((object.status || {}).phase),
@@ -208,7 +220,7 @@ export async function mountHistory(node, ns, parse) {
   try {
     const restores = await list(ns, PLURAL);
     const backups = await list(ns, BACKUPS);
-    replace(node, parse(renderHistoryList(restores, backups)));
+    replace(node, parse(renderHistoryList(restores, backups, ns)));
   } catch (error) {
     replace(node, errorBox(error));
   }

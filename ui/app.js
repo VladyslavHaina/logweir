@@ -15,17 +15,17 @@
 
 import { GROUP, VERSION, path } from "./api.js";
 import { el, replace } from "./render.js";
-import { mountClusters } from "./pages/clusters.js";
+import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountSchedules } from "./pages/schedules.js";
-import { mountBackups } from "./pages/backups.js";
-import { mountHistory } from "./pages/history.js";
+import { mountBackupDetail, mountBackups } from "./pages/backups.js";
+import { mountHistory, mountRestoreDetail } from "./pages/history.js";
 
 // The seven routes, in navigation order. The hash is the whole route.
 const ROUTES = [
-  { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters },
+  { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail },
   { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules },
-  { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups },
-  { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory },
+  { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
+  { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },
   { hash: "#/restore", title: "Restore", blurb: "Restore runs and the preflight the runner reported." },
   { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one." },
   { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only." },
@@ -48,18 +48,24 @@ export function parseHash(hash) {
   const question = text.indexOf("?");
   const route = question === -1 ? text : text.slice(0, question);
   let ns = DEFAULT_NAMESPACE;
+  let name = "";
   if (question !== -1) {
     for (const pair of text.slice(question + 1).split("&")) {
       const equals = pair.indexOf("=");
-      if (equals !== -1 && pair.slice(0, equals) === "ns") {
-        const value = decodeURIComponent(pair.slice(equals + 1)).trim();
-        if (value.length > 0) {
-          ns = value;
-        }
+      if (equals === -1) {
+        continue;
+      }
+      const key = pair.slice(0, equals);
+      const value = decodeURIComponent(pair.slice(equals + 1)).trim();
+      if (key === "ns" && value.length > 0) {
+        ns = value;
+      }
+      if (key === "name" && value.length > 0) {
+        name = value;
       }
     }
   }
-  return { route: route, ns: ns };
+  return { route: route, ns: ns, name: name };
 }
 
 function routeFor(hash) {
@@ -155,7 +161,10 @@ function render() {
     replace(header, nav(current, here.ns));
   }
   if (main !== null) {
-    if (typeof current.mount === "function") {
+    if (here.name !== "" && typeof current.detail === "function") {
+      replace(main, el("p", { class: "pending" }, "Reading " + here.name + "..."));
+      current.detail(main, here.ns, here.name, parseFragment);
+    } else if (typeof current.mount === "function") {
       replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
       current.mount(main, here.ns, parseFragment);
     } else {

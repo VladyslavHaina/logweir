@@ -21,6 +21,7 @@ import { list, get, create } from "../api.js";
 import {
   badge,
   cell,
+  detailLink,
   clear,
   errorBox,
   esc,
@@ -54,6 +55,15 @@ function nameOf(object) {
   return cell(meta.name);
 }
 
+/** The name as a link to this object's detail view, when it has a name. */
+function nameCell(object, ns) {
+  const meta = (object && object.metadata) || {};
+  if (typeof meta.name !== "string" || meta.name.length === 0) {
+    return cell(null);
+  }
+  return detailLink("clusters", ns || (meta.namespace || "default"), meta.name);
+}
+
 /** `spec.auth` as one cell: the mode, the username, and the Secret's NAME.
  *  Never a credential value -- there is none on this object to render, in any
  *  mode, by construction (`crates/weirkeeper/src/crds/kafka_cluster.rs`). */
@@ -72,12 +82,12 @@ export function authCell(spec) {
 }
 
 /** The clusters table. NAME, ROLE, REACHABLE, CLUSTER-ID, OBSERVED, AUTH. */
-export function renderClusterList(input) {
+export function renderClusterList(input, ns) {
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
     return [
-      nameOf(object),
+      nameCell(object, ns),
       cell(spec.role),
       cell(status.reachable),
       cell(status.clusterId),
@@ -179,7 +189,7 @@ export function clusterBody(values) {
 export async function mountClusters(node, ns, parse) {
   try {
     const collection = await list(ns, PLURAL);
-    replace(node, parse(renderClusterList(collection) + renderClusterForm()));
+    replace(node, parse(renderClusterList(collection, ns) + renderClusterForm()));
     wireForm(node, ns, parse);
   } catch (error) {
     replace(node, errorBox(error));
