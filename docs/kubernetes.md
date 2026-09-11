@@ -2550,11 +2550,15 @@ object's `metadata.managedFields` — a string `curl` cannot produce.
 ### 18.5 The authorised local proving run, 2026-09-11
 
 **Proven locally on author-only images (STANDING RULE 16 exception, authorised
-2026-09-11); the CI run is blocked: no remote.** STANDING RULE 16 makes `kind` a
-CI-only cluster with one exception — a single local proving run explicitly
-authorised by the controller at dispatch, deleting its cluster in the same
-session. This is that run. **It is not evidence for spec §16 clause 1 or clause
-2**, and the checklist row is unchanged by it.
+2026-09-11): the cluster from the pinned config, the install, the gateway, the
+CoreDNS patch and, from a pod, that the advertised name resolves and the
+published listener answers. Not proven here: the probe and the twelve steps,
+because an arm64 `kind` node cannot start the amd64-only runner image (below).
+The CI run is blocked: no remote.** STANDING RULE 16 makes `kind` a CI-only
+cluster with one exception — a single local proving run explicitly authorised by
+the controller at dispatch, deleting its cluster in the same session. This is
+that run. **It is not evidence for spec §16 clause 1 or clause 2**, and the
+checklist row is unchanged by it.
 
 The cluster, from the digest-pinned config, and the install:
 

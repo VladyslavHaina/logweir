@@ -106,8 +106,11 @@ and the probe, and the gateway-resolution failure path exiting 1), and one local
 exception, deleting its cluster in the same session. Its transcript is
 `docs/kubernetes.md` §18.5 and it is labelled there for what it is — author-only
 images on an arm64 host, which is neither evidence for this clause nor for
-clause 1. Both install branches are written now, so the day a remote exists this
-row needs a run and not a rewrite.
+clause 1. That run proved the name resolution and the listener from a pod and
+stopped before the twelve steps: an arm64 `kind` node cannot start the
+amd64-only runner image, so the steps have not yet run on `kind` anywhere. Both
+install branches are written now, so the day a remote exists this row needs a
+run and not a rewrite.
 
 Demo 2 is documented and labelled: its marks are the MSK rows, each carrying the
 sentence that would verify it, and `bash scripts/check-unverified-labels.sh`
