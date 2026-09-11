@@ -102,7 +102,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: weirkeeper
-          image: ghcr.io/logweir/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
+          image: ghcr.io/logweir/weirkeeper@sha256:f3bd4a78ee38d018cefc28f3e9a1e3e60bbbf2deb787df7e8c7d01cbc12bd797
           imagePullPolicy: IfNotPresent
           # NO ARGUMENTS. `weirkeeper` takes `--version`, `--help`, or nothing
           # at all, and anything else exits 1 naming what it got
@@ -110,6 +110,27 @@ spec:
           # pass a flag to.
           args: []
           env:
+            # ---------------------------------------------------------------
+            # `RUST_LOG`, PINNED — AND THE DEFAULT INSTALL WAS SILENT WITHOUT IT
+            # ---------------------------------------------------------------
+            # MEASURED during Task 24's Phase B run: `kubectl -n logweir-system
+            # logs deploy/weirkeeper` returned **exit 0 and ZERO BYTES** on a
+            # controller that had just reconciled six kinds, created two Jobs
+            # and verified two signed documents. `main.rs` builds its subscriber
+            # with `EnvFilter::from_default_env()`, and with `RUST_LOG` unset
+            # that filter enables nothing — including every `error!` the startup
+            # path uses to say why it could not build a client or an archive
+            # handle. A control plane whose diagnostics are invisible by default
+            # is a control plane nobody can debug.
+            #
+            # `info` IS THE FLOOR AND NOT A PREFERENCE, for the same reason the
+            # runner Job pins it (`controllers::backup::runner_job_spec`): below
+            # `info` the per-object lines — the exit code, the two evidence
+            # keys, the verification verdict and its matched key id — are lost,
+            # and those are what correlate an object with the archive it read.
+            # Raise it with `kubectl set env deploy/weirkeeper RUST_LOG=debug`.
+            - name: RUST_LOG
+              value: info
             # THE READ-ONLY ARCHIVE HANDLE, AND THE ONLY OPTIONAL PIECE OF THIS
             # PodSpec. Unset, the controller holds no archive handle at all and
             # writes no `retentionReport` — it logs that it is doing so and the

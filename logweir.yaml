@@ -1897,6 +1897,8 @@ spec:
       containers:
       - args: []
         env:
+        - name: RUST_LOG
+          value: info
         - name: LOGWEIR_ARCHIVE_URL
           value: ""
         - name: AWS_ACCESS_KEY_ID
@@ -1911,7 +1913,7 @@ spec:
               key: secret-access-key
               name: logweir-evidence-ro
               optional: true
-        image: ghcr.io/logweir/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
+        image: ghcr.io/logweir/weirkeeper@sha256:f3bd4a78ee38d018cefc28f3e9a1e3e60bbbf2deb787df7e8c7d01cbc12bd797
         imagePullPolicy: IfNotPresent
         name: weirkeeper
         resources:

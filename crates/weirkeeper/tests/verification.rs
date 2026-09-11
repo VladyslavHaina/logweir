@@ -907,6 +907,97 @@ async fn verification_is_a_second_patch_after_the_status_patch() {
     );
 }
 
+/// **A VERIFIED OBJECT RECONCILES AGAIN AND SENDS NOTHING.**
+///
+/// Plan erratum **E11(d)**, and this one was MEASURED ON A LIVE CLUSTER during
+/// the Phase B run that otherwise passed: **20 `Backup` reconciles and 20
+/// `Restore` reconciles per second**, each a real write. A JSON merge patch
+/// REPLACES arrays, so the terminal patch's `conditions: [Complete,
+/// EvidenceRecorded]` DELETED the `Verified` condition the second patch had
+/// just added; the second patch re-added it; the write woke the reconciler;
+/// forever. Every verdict on every pass was correct, and the object never
+/// stopped being rewritten.
+///
+/// KILLS: removing `verification::carry_verified` from the terminal patch
+/// builder. The count goes from 0 to 2 and the `Verified` condition is absent
+/// from the terminal patch, which is the loop.
+#[tokio::test]
+async fn a_verified_object_reconciles_without_a_patch() {
+    // PASS ONE, against an object with no status at all: two patches.
+    let (client, seen) = sequenced_client(vec![200, 200]);
+    reconcile_backup(
+        &backup(),
+        &client,
+        &observed_archive,
+        &valid_oracle,
+        Utc.with_ymd_and_hms(2026, 11, 9, 3, 20, 0).unwrap(),
+    )
+    .await
+    .expect("the first reconcile succeeds");
+    let first = seen.lock().expect("readable").clone();
+    let patches: Vec<&Seen> = first
+        .iter()
+        .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
+        .collect();
+    assert_eq!(patches.len(), 2, "the first pass writes both patches");
+
+    // THE OBJECT AS THE API SERVER NOW HOLDS IT: the two patches applied, in
+    // order, exactly as `conditions::apply_merge_patch` says the server does.
+    let mut status = json!({});
+    for p in &patches {
+        let body: Value = serde_json::from_str(&p.body).expect("the patch is JSON");
+        weirkeeper::conditions::apply_merge_patch(
+            &mut status,
+            body.get("status").expect("the patch carries a status"),
+        );
+    }
+    let types: Vec<&str> = status["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .filter_map(|c| c["type"].as_str())
+        .collect();
+    assert!(
+        types.contains(&CONDITION_VERIFIED),
+        "after both patches the object carries a Verified condition; got {types:?}"
+    );
+
+    // PASS TWO, over that object. NOTHING IS SENT.
+    let mut settled: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+    settled["status"] = status;
+    let settled: Backup = serde_json::from_value(settled).expect("the settled object is a Backup");
+
+    let (client, seen) = sequenced_client(vec![200, 200]);
+    reconcile_backup(
+        &settled,
+        &client,
+        &observed_archive,
+        &valid_oracle,
+        Utc.with_ymd_and_hms(2026, 11, 9, 4, 0, 0).unwrap(),
+    )
+    .await
+    .expect("the second reconcile succeeds");
+    let second = seen.lock().expect("readable").clone();
+    let patches: Vec<String> = second
+        .iter()
+        .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
+        .map(|s| s.body.clone())
+        .collect();
+    assert_eq!(
+        patches.len(),
+        0,
+        "A STEADY OBJECT ISSUES ZERO `/status` PATCHES. A reconciler's own status write is what \
+         wakes it, so one patch per pass is a loop and not an inefficiency — measured at 20 \
+         reconciles per second before `carry_verified` existed. Sent:\n  {}",
+        patches.join("\n  ")
+    );
+
+    // …AND THE CLOCK MOVED BETWEEN THE TWO PASSES (03:20 -> 04:00), so this is
+    // not passing because nothing changed: it is passing because `verifiedAt`
+    // and every `lastTransitionTime` are WHEN THE FACT CHANGED, not when it
+    // was last re-confirmed.
+}
+
 /// With no evidence credential the controller constructs `None` and every
 /// verification is `NotAttempted` — the controller STARTS, and says so.
 ///

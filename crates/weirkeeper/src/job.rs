@@ -51,7 +51,7 @@
 ///     keep reading `blocked: no remote` until `release.yml` has pushed to a
 ///     real registry and the digest comes back from there (Task 30b).
 pub const RUNNER_IMAGE: &str =
-    "ghcr.io/logweir/logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692";
+    "ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229";
 
 use k8s_openapi::api::batch::v1::{
     Job, JobSpec, PodFailurePolicy, PodFailurePolicyOnExitCodesRequirement,

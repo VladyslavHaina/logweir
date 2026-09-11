@@ -15,9 +15,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
     decide, reconcile_schedule, refine_against_last_fire, runner_argv, scheduled_backup,
-    status_patch, ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, REASON_SCHEDULED,
-    REASON_SLOT_MISSED, REASON_SUSPENDED, REQUEUE_SECS, RUNNER_ARGV_ANNOTATION, SCHEDULE_LABEL,
-    SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
+    status_patch, ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, OUT_PATH, REASON_SCHEDULED,
+    REASON_SLOT_MISSED, REASON_SUSPENDED, RECEIPT_OUT_PATH, REQUEUE_SECS, RUNNER_ARGV_ANNOTATION,
+    SCHEDULE_LABEL, SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
 };
 use weirkeeper::crds::backup_schedule::{BackupSchedule, BackupScheduleStatus};
 use weirkeeper::slot::{
@@ -1635,6 +1635,51 @@ fn the_backup_id_override_is_passed_not_defined() {
     assert!(
         !src.contains("logweir::backup") && !src.contains("crate::backup"),
         "the reconciler reaches the CLI through an argv string and never through a Rust path"
+    );
+}
+
+/// **The runner argv is one `logweir backup run` ACCEPTS** — Task 24, found by
+/// execution on a live cluster.
+///
+/// `logweir backup run` writes exactly ONE document and `--receipt-out` takes
+/// precedence over `--out`, so the CLI refuses two flags naming DIFFERENT
+/// paths with exit **1**, before the engine is spawned and before any broker
+/// client exists (`refuse_two_receipt_paths`, in the CLI's own
+/// `backup/phase_minus1_admit.rs`). This argv passed both —
+/// `--out /work/backup.json --receipt-out /work/receipt.json` — so **every
+/// scheduled `Backup` in the shipped tree exited 1 and archived nothing**,
+/// with the message
+///
+/// > operational: --receipt-out /work/receipt.json and --out /work/backup.json
+/// > name DIFFERENT paths … NO backup was taken
+///
+/// measured in `logweir-t24` during the Phase B demo. The stub could not see
+/// it and no unit test asserted it, because the argv was only ever compared
+/// against itself.
+///
+/// KILLS: re-adding `--out` beside `--receipt-out`, in either order.
+#[test]
+fn the_runner_argv_names_at_most_one_output_path() {
+    let argv = runner_argv("b1");
+    let out = argv.iter().filter(|a| *a == "--out").count();
+    let receipt = argv.iter().filter(|a| *a == "--receipt-out").count();
+    assert_eq!(
+        receipt, 1,
+        "the signed receipt is the one document this command writes, and the flag that names it \
+         is the one that wins; got {argv:?}"
+    );
+    assert_eq!(
+        out, 0,
+        "`--out` beside `--receipt-out` at a different path is exit 1 before anything runs — the \
+         defect that made every scheduled Backup in this tree fail. Got {argv:?}"
+    );
+    // AND THE TWO PATHS ARE STILL DIFFERENT CONSTANTS, so a future editor who
+    // re-adds the flag cannot do it "safely" by pointing both at one file and
+    // then have the two drift apart again.
+    assert_ne!(
+        OUT_PATH, RECEIPT_OUT_PATH,
+        "if these ever became equal the CLI would accept both flags, and this test would stop \
+         meaning anything"
     );
 }
 

@@ -124,7 +124,26 @@ fn run() -> ExitCode {
     // physically cannot put (Global Constraint 6, guard G-RET).
     // `scripts/check-no-archive-write.sh` fails if the other constructor is
     // named anywhere under `crates/weirkeeper/src/`.
-    let archive = match std::env::var(weirkeeper::retention::ARCHIVE_URL_ENV) {
+    //
+    // AN EMPTY VALUE IS UNSET, AND THAT IS PLAN ERRATUM **E19(e)**. The
+    // shipped `config/manager/deployment.yaml` carries
+    // `LOGWEIR_ARCHIVE_URL: ""` — the default install, with retention and
+    // verification display switched off — and this match used to send that
+    // empty string to `storage_url_for`, which correctly refused a URL with no
+    // `://` and made the controller log an **ERROR** on every clean start. An
+    // empty archive URL is a DOCUMENTED SWITCH, not a misconfiguration, and it
+    // reads as the absent variable it means. (Invisible until Task 24 pinned
+    // `RUST_LOG: info` on the same Deployment, which is how a wrong ERROR line
+    // survives: nothing was printing it.)
+    let archive = match std::env::var(weirkeeper::retention::ARCHIVE_URL_ENV)
+        .map(|v| v.trim().to_string())
+        .and_then(|v| {
+            if v.is_empty() {
+                Err(std::env::VarError::NotPresent)
+            } else {
+                Ok(v)
+            }
+        }) {
         Err(_) => {
             info!(
                 env = weirkeeper::retention::ARCHIVE_URL_ENV,

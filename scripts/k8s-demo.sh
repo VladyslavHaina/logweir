@@ -326,6 +326,45 @@ set -e
 echo "    rc=$rc  (docker inspect RepoDigests $RUNNER_IMAGE_TAG)"
 cat "$OUT/runner-digests.json"
 
+# ---------------------------------------------------------------------------
+# WHAT A FAILED RUN PRINTS, BECAUSE THE CLEANUP IS ABOUT TO DELETE IT
+# ---------------------------------------------------------------------------
+# The `trap … EXIT` below removes the namespace, so by the time anyone reads a
+# failure the objects it was about are gone. A demo that says "the Backup did
+# not exit 0" and then deletes the Backup has told you nothing you can act on.
+# So every terminal failure in steps 10-12 dumps, FIRST: the object, its Jobs
+# and pods, and the runner pod's own log — which is where the engine's own
+# error text lives.
+dump_run() {  # kind name
+  echo
+  echo "--- $1/$2, as the cluster last saw it -------------------------------"
+  set +e
+  kubectl --context "$CTX" -n "$NS" get "$1" "$2" -o yaml > "$OUT/failed-$1.yaml" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (kubectl get $1 $2 -o yaml -> $OUT/failed-$1.yaml)"
+  cat "$OUT/failed-$1.yaml"
+  set +e
+  kubectl --context "$CTX" -n "$NS" get jobs,pods -o wide > "$OUT/failed-workload.txt" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (kubectl get jobs,pods -o wide)"
+  cat "$OUT/failed-workload.txt"
+  set +e
+  kubectl --context "$CTX" -n "$NS" logs "job/$2" --tail=200 --all-containers=true > "$OUT/failed-pod.log" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (kubectl logs job/$2 --tail=200)"
+  cat "$OUT/failed-pod.log"
+  set +e
+  kubectl --context "$CTX" -n "$SYS" logs deploy/weirkeeper --tail=120 > "$OUT/failed-controller.log" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (kubectl logs deploy/weirkeeper --tail=120)"
+  cat "$OUT/failed-controller.log"
+  echo "---------------------------------------------------------------------"
+}
+
 cleanup() {
   echo
   echo "==> 12/12 cleanup"
@@ -519,7 +558,10 @@ for _ in $(seq 1 60); do
 done
 echo "    rc=$rc  (kubectl get kafkacluster demo -o jsonpath={.status.reachable})"
 echo "    reachable: $reachable"
-[ "$reachable" = "true" ] || die "the KafkaCluster never became reachable. The probe Job runs \`logweir cluster-probe\` against $BOOTSTRAP_K8S; check \`kubectl -n $NS get jobs\` and the probe pod's log."
+if [ "$reachable" != "true" ]; then
+  dump_run kafkacluster demo
+  die "the KafkaCluster never became reachable. The probe Job runs \`logweir cluster-probe\` against $BOOTSTRAP_K8S."
+fi
 
 # ---------------------------------------------------------------------------
 # 11/12 THE Backup, THEN THE APPROVED Restore.
@@ -531,6 +573,14 @@ step "11/12 a Backup, then an approved Restore"
 # is sealed by CEL, so a hand-written Backup supplies it. No
 # `--backup-id-override`: without it the run uses the `backup_id` the
 # controller renders into the plan ConfigMap.
+#
+# IT IS `backup_schedule::runner_argv`'s ARGV, MINUS THE OVERRIDE, ON PURPOSE.
+# A demo whose argv differed from the one a scheduled Backup actually gets
+# would be demonstrating a path nothing in production takes — which is how the
+# `--out`/`--receipt-out` pair survived two slots: the shipped argv passed
+# both at DIFFERENT paths, `logweir backup run` refuses that with exit 1 before
+# the engine is spawned, and every scheduled Backup in the tree failed that
+# way. This run found it, and `backup_schedule::runner_argv` is fixed.
 cat > "$OUT/backup.yaml" <<'YAML'
 apiVersion: logweir.dev/v1alpha1
 kind: Backup
@@ -538,7 +588,7 @@ metadata:
   name: demo-backup
   namespace: NAMESPACE
   annotations:
-    logweir.dev/runner-argv: '["backup","run","--spec","/plan/backup.yaml","--allowed-clusters","/plan/allowed-clusters.json","--signing-key","/signing/key.pem","--out","/work/backup.json","--receipt-out","/work/receipt.json","--triggered-by","manual"]'
+    logweir.dev/runner-argv: '["backup","run","--spec","/plan/backup.yaml","--allowed-clusters","/plan/allowed-clusters.json","--signing-key","/signing/key.pem","--receipt-out","/work/receipt.json","--triggered-by","manual"]'
 spec:
   sourceRef:
     name: demo
@@ -571,7 +621,10 @@ for _ in $(seq 1 90); do
 done
 echo "    rc=$rc  (kubectl get backup demo-backup -o jsonpath={.status.exitCode})"
 echo "    exitCode: $backup_exit"
-[ "$backup_exit" = "0" ] || die "the Backup did not exit 0 (got '${backup_exit:-<absent>}'). Read it with: kubectl --context $CTX -n $NS get backup demo-backup -o yaml"
+if [ "$backup_exit" != "0" ]; then
+  dump_run backup demo-backup
+  die "the Backup did not exit 0 (got '${backup_exit:-<absent>}'); the object, the pod log and the controller log are above and under $OUT/failed-*."
+fi
 
 backup_verdict=""
 for _ in $(seq 1 24); do
@@ -585,7 +638,10 @@ for _ in $(seq 1 24); do
 done
 echo "    rc=$rc  (kubectl get backup demo-backup -o jsonpath={.status.evidence.verification.result})"
 echo "    verification.result: $backup_verdict"
-[ "$backup_verdict" = "Valid" ] || die "the Backup's receipt did not verify (got '${backup_verdict:-<absent>}'). Read the detail with: kubectl --context $CTX -n $NS get backup demo-backup -o jsonpath='{.status.evidence.verification.detail}'"
+if [ "$backup_verdict" != "Valid" ]; then
+  dump_run backup demo-backup
+  die "the Backup's receipt did not verify (got '${backup_verdict:-<absent>}'); the verification detail is on the object above."
+fi
 
 # ---- the restore plan, and an approval over its EXACT bytes ----------------
 cat > "$OUT/restore-plan.yaml" <<YAML
@@ -749,7 +805,10 @@ for _ in $(seq 1 90); do
 done
 echo "    rc=$rc  (kubectl get restore demo-restore -o jsonpath={.status.phase})"
 echo "    phase: $restore_phase"
-[ "$restore_phase" = "Succeeded" ] || die "the Restore reached phase '${restore_phase:-<absent>}'. Read it with: kubectl --context $CTX -n $NS get restore demo-restore -o yaml"
+if [ "$restore_phase" != "Succeeded" ]; then
+  dump_run restore demo-restore
+  die "the Restore reached phase '${restore_phase:-<absent>}'; the object, the pod log and the controller log are above and under $OUT/failed-*."
+fi
 
 restore_verdict=""
 for _ in $(seq 1 24); do
@@ -769,12 +828,19 @@ echo "    verification.result: $restore_verdict"
 # ---------------------------------------------------------------------------
 step "12/12 reading every field with -o jsonpath (STANDING RULE 20)"
 
+# THE TRANSCRIPT LINE GOES TO stderr AND THE VALUE TO stdout, which is the
+# whole reason this helper is written this way. `v=$(read_field …)` captures
+# STDOUT, so an `echo` of the human-readable line on stdout would end up INSIDE
+# the value — measured: the exit-criterion assertion below compared
+# `"    rc=0  status.exitCode: 0\n0"` against `"0"` and refused a run that had
+# in fact passed. The log still carries both streams; only the capture is
+# narrowed.
 read_field() {  # kind name jsonpath label
   set +e
   value=$(kubectl --context "$CTX" -n "$NS" get "$1" "$2" -o jsonpath="$3")
   rc=$?
   set -e
-  echo "    rc=$rc  $4: ${value:-<absent>}"
+  echo "    rc=$rc  $4: ${value:-<absent>}" >&2
   printf '%s' "$value"
 }
 

@@ -757,13 +757,29 @@ fn az_parts(archive_url: &str) -> (&str, &str, &str) {
 /// wherever the process happens to be.
 ///
 /// REGION, ENDPOINT AND CREDENTIALS COME FROM THE ENVIRONMENT, not from this
-/// URL: `AmazonS3Builder::from_env()` applies `object_store`'s own credential
-/// and endpoint chain, which is what the rest of this workspace already does
-/// (`crates/logweir-store/src/lib.rs`'s header states the chain and its
-/// limits). `path_style` and `allow_http` are read from the two `AWS_*`
-/// variables `object_store` itself names, so an adopter pointing the
-/// controller at MinIO configures it the same way they configure the runner,
-/// and this task invents no Logweir-specific knob.
+/// URL — and **all four addressing values are read HERE rather than left to
+/// `AmazonS3Builder::from_env()`** (Task 24). The builder's own chain would
+/// serve the controller's `Store`; it would not serve the OTHER consumer of
+/// this value, which is the one that broke.
+///
+/// # The second consumer, and why `endpoint: None` was a real defect
+///
+/// `controllers::backup::plan_backup_spec` calls this function to fill the
+/// `storage` block of the `backup.yaml` document the RUNNER mounts and the
+/// pinned engine parses. The engine reads that document's own `endpoint` and
+/// `region` keys; it has never read `AWS_ENDPOINT_URL`. So a controller
+/// configured for MinIO rendered `endpoint: null` into the plan and the
+/// engine dialled Amazon — **measured** on the first Phase B run, where the
+/// `Backup` came back `exitCode: 1` with the archive never written.
+/// `path_style` and `allow_http` were already read from the environment here
+/// for exactly this reason; `AWS_ENDPOINT_URL` and `AWS_REGION` were the two
+/// that were missing.
+///
+/// The variable names are `object_store`'s own, so an adopter pointing the
+/// controller at MinIO or Ceph configures it the way they already configure
+/// every other S3 client, and this invents no Logweir-specific knob. An unset
+/// variable stays `None`, which is the shape every gate in this plan runs in
+/// and the shape a real AWS deployment wants.
 ///
 /// # Errors
 ///
@@ -781,8 +797,8 @@ pub fn storage_url_for(archive_url: &str) -> Result<StorageUrl, String> {
         "s3" => Ok(StorageUrl::S3 {
             bucket: first.to_string(),
             prefix: tail.to_string(),
-            region: None,
-            endpoint: None,
+            region: env_value("AWS_REGION"),
+            endpoint: env_value("AWS_ENDPOINT_URL"),
             path_style: !env_flag("AWS_VIRTUAL_HOSTED_STYLE_REQUEST"),
             allow_http: env_flag("AWS_ALLOW_HTTP"),
         }),
@@ -833,6 +849,18 @@ pub fn storage_url_for(archive_url: &str) -> Result<StorageUrl, String> {
              `gs://`, `az://` and `file://`"
         )),
     }
+}
+
+/// `name`'s value when it is set to something non-empty.
+///
+/// AN EMPTY VARIABLE IS UNSET. `AWS_ENDPOINT_URL=""` is what a Deployment
+/// writes when somebody deletes a value but leaves the key, and an empty
+/// endpoint string reaches `object_store` as a URL that parses to nothing.
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// `true` when `name` is set to something that means yes.

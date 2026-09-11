@@ -1237,6 +1237,15 @@ pub fn finished_status_patch(
     status.insert("phase".to_string(), json!(phase));
     status.insert("exitCode".to_string(), json!(exit_code));
     status.insert("exitReason".to_string(), json!(exit_reason));
+    // THE EXISTING `Verified` CONDITION IS CARRIED FORWARD, and without this
+    // line the controller hot-loops: a merge patch REPLACES arrays, so this
+    // one would delete the condition the SECOND patch adds, which would re-add
+    // it, which would wake this reconciler again. Measured at 20 reconciles
+    // per second on the Phase B run. See `verification::carry_verified`.
+    let conditions = crate::verification::carry_verified(
+        backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        conditions,
+    );
     status.insert("conditions".to_string(), json!(conditions));
     if !evidence.is_empty() {
         status.insert("evidence".to_string(), Value::Object(evidence));

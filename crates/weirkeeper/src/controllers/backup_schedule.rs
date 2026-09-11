@@ -160,6 +160,16 @@ pub const ALLOWED_CLUSTERS_PATH: &str = "/plan/allowed-clusters.json";
 /// Where the receipt signing key is projected in the runner pod.
 pub const SIGNING_KEY_PATH: &str = "/signing/key.pem";
 /// Where the runner writes its backup document.
+/// **NOT IN THE RUNNER ARGV, AND THE REASON IS A MEASUREMENT.** `logweir
+/// backup run` writes exactly one document and `--receipt-out` takes
+/// precedence over `--out`, so passing both at DIFFERENT paths is refused with
+/// exit 1 before the engine is spawned, by `refuse_two_receipt_paths` in
+/// the CLI's own `backup/phase_minus1_admit.rs`. This
+/// argv passed both until Task 24 measured it on a live cluster, which means
+/// every scheduled `Backup` in the shipped tree failed that way and archived
+/// nothing. The constant is kept because `job::WORK_VOLUME`'s doc comment and
+/// `docs/kubernetes.md` name the path a runner's scratch volume has to make
+/// writable, and that is still true; nothing passes it as a flag.
 pub const OUT_PATH: &str = "/work/backup.json";
 /// Where the runner writes the signed receipt.
 pub const RECEIPT_OUT_PATH: &str = "/work/receipt.json";
@@ -511,8 +521,26 @@ pub fn runner_argv(backup_id: &str) -> Vec<String> {
         ALLOWED_CLUSTERS_PATH,
         "--signing-key",
         SIGNING_KEY_PATH,
-        "--out",
-        OUT_PATH,
+        // `--receipt-out` AND NOT `--out`, AND THE PAIR WAS FATAL.
+        //
+        // MEASURED on the first Phase B run (Task 24): `logweir backup run`
+        // writes exactly ONE document — the signed receipt — and
+        // `refuse_two_receipt_paths` (in the CLI's own
+        // `backup/phase_minus1_admit.rs`) refuses two flags
+        // naming DIFFERENT paths with exit **1**, before the engine is spawned
+        // and before any broker client exists. This argv emitted
+        // `--out /work/backup.json --receipt-out /work/receipt.json`, so
+        // **every scheduled `Backup` in the shipped tree exited 1** with
+        // `operational: --receipt-out … and --out … name DIFFERENT paths`, and
+        // nothing was ever archived. The runner's refusal is correct and its
+        // message is exact; the caller was wrong.
+        //
+        // `--receipt-out` is the one kept because it is the one that WINS
+        // (the CLI's own `receipt_out_path`): the receipt is the signed
+        // artefact, and `--out` would have named a file nothing writes. The
+        // local file is discarded with the pod's `emptyDir` either way — the
+        // controller reads `receipt-key=` and `sidecar-key=` off the pod log
+        // (interface I7) and fetches the objects from the archive.
         "--receipt-out",
         RECEIPT_OUT_PATH,
         "--triggered-by",

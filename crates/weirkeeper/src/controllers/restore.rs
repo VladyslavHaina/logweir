@@ -1539,6 +1539,15 @@ pub fn finished_status_patch(
     // `refusal-reason=` state), so the two fields agree in spirit and differ
     // in vocabulary exactly as errata E5b requires.
     status.insert("reason".to_string(), json!(cond_reason));
+    // THE EXISTING `Verified` CONDITION IS CARRIED FORWARD, and without this
+    // line the controller hot-loops: a merge patch REPLACES arrays, so this
+    // one would delete the condition the SECOND patch adds, which would re-add
+    // it, which would wake this reconciler again. Measured at 20 reconciles
+    // per second on the Phase B run. See `verification::carry_verified`.
+    let conditions = crate::verification::carry_verified(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        conditions,
+    );
     status.insert("conditions".to_string(), json!(conditions));
 
     let mut evidence = serde_json::Map::new();

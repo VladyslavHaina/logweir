@@ -752,3 +752,45 @@ pub fn verify_oracle(
         })
     }
 }
+
+/// `conditions` with the object's existing `Verified` condition carried
+/// forward — **the fix for a hot loop, measured on a live cluster.**
+///
+/// # What went wrong, in one sentence
+///
+/// A JSON merge patch REPLACES arrays (RFC 7386), so a terminal `/status`
+/// patch writing `conditions: [Complete, EvidenceRecorded]` DELETES the
+/// `Verified` condition [`second_patch`] added on the previous pass — the
+/// second patch then re-adds it, the write wakes the reconciler, and the two
+/// patches fight forever.
+///
+/// **MEASURED** on the Phase B run that otherwise passed: 20 `Backup`
+/// reconciles and 20 `Restore` reconciles **per second**, each one a real
+/// write, in a controller whose whole condition contract (Task 16b, plan
+/// erratum **E11(d)**) exists to make a steady object issue zero patches. The
+/// verdict was correct on every pass; the object never stopped being rewritten.
+///
+/// So every terminal patch builder calls this. `Verified` is not the run's
+/// fact — it is the CONTROLLER's fact about the run, computed after the
+/// terminal write — and a builder that owns the array has to carry the parts
+/// of it that are not its own. `a_verified_object_reconciles_without_a_patch`
+/// is the regression, and it asserts the count is ZERO rather than small.
+#[must_use]
+pub fn carry_verified(existing: Option<&Vec<Condition>>, mut conditions: Vec<Value>) -> Vec<Value> {
+    // `Vec<Value>` AND NOT `Vec<Condition>`, because the patch builders build
+    // their arrays as `json!(merge_condition(…))` and a round trip through the
+    // struct here would re-serialise every element — turning a comparison that
+    // is currently byte-for-byte into one that depends on two serialisations
+    // agreeing. See `conditions::status_unchanged`'s note on why every element
+    // this crate writes comes from `Condition` and `serde` in one step.
+    if conditions
+        .iter()
+        .any(|c| c.get("type") == Some(&json!(CONDITION_VERIFIED)))
+    {
+        return conditions;
+    }
+    if let Some(v) = crate::conditions::current_condition(existing, CONDITION_VERIFIED) {
+        conditions.push(json!(v));
+    }
+    conditions
+}
