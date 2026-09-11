@@ -161,6 +161,45 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()))
 }
 
+/// `api.js`'s export list AS THE FILE DECLARES IT, in source order.
+///
+/// READ FROM THE MODULE, NEVER FROM [`API_EXPORTS`]. The constant is what the
+/// surface is SUPPOSED to be, and `the_api_module_offers_no_delete_and_no_put`
+/// compares the two. Every other test that needs "the identifiers a page could
+/// reach for" has to ask the file, because the interesting mutant is precisely
+/// the one that ADDS an export -- a generic `patch`, a raw request helper --
+/// and an alphabet taken from the constant cannot contain a name the constant
+/// does not have. That is a guard whose mutant passes, which STANDING RULE 21
+/// calls worse than no guard.
+fn api_exports() -> Vec<String> {
+    let contents = read(&ui_root().join("api.js"));
+    let mut exports: Vec<String> = Vec::new();
+    for line in contents.lines() {
+        let rest = match line.strip_prefix("export ") {
+            Some(rest) => rest,
+            None => continue,
+        };
+        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+        let rest = rest
+            .strip_prefix("const ")
+            .or_else(|| rest.strip_prefix("function "))
+            .or_else(|| rest.strip_prefix("let "))
+            .unwrap_or_else(|| panic!("an export this test cannot name: {line}"));
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        assert!(!name.is_empty(), "an export with no name: {line}");
+        exports.push(name);
+    }
+    assert!(
+        !exports.is_empty(),
+        "ui/api.js declares no export at all, so any test using this list as its alphabet \
+         would pass having checked nothing"
+    );
+    exports
+}
+
 /// A path as it reads in a failure message: relative to the repository root.
 fn shown(path: &Path) -> String {
     path.strip_prefix(repo_root())
@@ -610,28 +649,8 @@ fn the_api_module_offers_no_delete_and_no_put() {
         }
     }
 
-    let mut exports: Vec<String> = Vec::new();
-    for line in contents.lines() {
-        let rest = match line.strip_prefix("export ") {
-            Some(rest) => rest,
-            None => continue,
-        };
-        let rest = rest.strip_prefix("async ").unwrap_or(rest);
-        let rest = rest
-            .strip_prefix("const ")
-            .or_else(|| rest.strip_prefix("function "))
-            .or_else(|| rest.strip_prefix("let "))
-            .unwrap_or_else(|| panic!("an export this test cannot name: {line}"));
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        assert!(!name.is_empty(), "an export with no name: {line}");
-        exports.push(name);
-    }
-
     assert_eq!(
-        exports,
+        api_exports(),
         API_EXPORTS
             .iter()
             .map(|s| s.to_string())
@@ -966,11 +985,18 @@ fn the_suspend_toggle_is_the_only_update() {
     // generic patch, a widened writable set -- that the page contract does not
     // have. A grep for `patch` cannot express this: it matches
     // `api.patchSuspend(` itself.
+    // THE ALPHABET IS `api.js`'s LIVE EXPORT LIST, not the checked-in constant.
+    // The mutant this test exists for adds a generic `patch(ns, plural, name,
+    // body)` to `api.js` and calls it from `schedules.js`; an alphabet taken
+    // from `API_EXPORTS` cannot contain a name `API_EXPORTS` does not have, so
+    // that mutant would survive here and be caught only by the neighbouring
+    // test -- which is not the same thing as this rule holding.
+    let exports = api_exports();
     let mut findings: Vec<String> = Vec::new();
     for file in page_modules() {
         let contents = read(&file);
-        for export in API_EXPORTS {
-            if PAGE_API_IDENTIFIERS.contains(&export) {
+        for export in &exports {
+            if PAGE_API_IDENTIFIERS.contains(&export.as_str()) {
                 continue;
             }
             if let Some(offset) = contains_bare_token(&contents, export) {
