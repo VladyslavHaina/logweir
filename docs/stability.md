@@ -758,7 +758,10 @@ offset. The boundary record — the one whose timestamp equals `point_in_time` e
 all three partitions, still stamped `T`.
 
 **What this measurement also found: the canary size cannot exceed what the window really holds.**
-`sample.records_per_partition: 25` over this fixture scored `fail-integrity`, and correctly so:
+`sample.records_per_partition: 25` over this fixture scored `fail-integrity` on **all three**
+partitions — not one — with exit code **2** and a **signed** scorecard written for the failing run
+(`integrity.records_sampled: 6`, `records_sampled_matching: 6`, `mismatches: 0`). The text is the
+same for each selection; partition 1's:
 
 ```
 selection pitr-src/1  claimed 3  records Unverified { why: "the archive returned 2 fingerprints
@@ -771,8 +774,17 @@ selection pitr-src/1  claimed 3  records Unverified { why: "the archive returned
 the manifest's finest granularity is the SEGMENT — so a recovery point that falls INSIDE a segment
 makes the manifest claim the whole segment (3) while the archive side correctly yields only the
 records inside the window (2). This is the same segment-granularity fact that makes
-`expected_restored_count` a bound rather than an equality, and it is not a defect in either place:
-a short sample IS coverage the restore did not obtain. **The consequence for an operator is
+`expected_restored_count` a bound rather than an equality.
+
+**It is a known limitation of the sampled reconciliation's `claimed`, not a property of the
+restore.** `phase7_verify::verdict_for_selection` sums the WHOLE record count of every segment that
+OVERLAPS the sample window, so a straddling segment claims records the window deliberately
+excludes. Nothing here was short: the archive side returned every record the window contains, and
+the shortfall exists only against a figure derived from records the window excludes — so a signed
+document reporting `fail-integrity` with `mismatches: 0` over a restore that was verified
+record-by-record off the broker is a false negative, not a correct refusal. **Filed as Task 10b**
+(in flight); this row is updated when it lands. Until then the workaround is the operator
+consequence. **The consequence for an operator is
 concrete: on a point-in-time restore, set `sample.records_per_partition` at or below the number of
 records each partition holds inside the window, or the run reports `fail-integrity` about its own
 sample rather than about the restore.** The G-PITR fixture asks for 2, which is what its window

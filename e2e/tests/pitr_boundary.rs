@@ -102,8 +102,10 @@ const SAMPLE_END_RFC3339: &str = PIT_RFC3339;
 /// It is the CANARY SIZE: how many records per partition this restore sets out
 /// to reconcile. Two is how many records each partition holds inside the
 /// window (`T − 1 ms` and `T`), and asking for more is refused by the product
-/// for a reason that is a real property of a manifest and not a defect. With
-/// `records_per_partition: 25` this row measured, on the first full run:
+/// over a real property of a MANIFEST — segment granularity — though the
+/// refusal itself is a known limitation of the sampled reconciliation's
+/// `claimed`, filed as Task 10b. With `records_per_partition: 25` this row
+/// measured, on the first full run:
 ///
 /// ```text
 /// selection pitr-src/1  claimed 3  records Unverified { why: "the archive returned 2
@@ -119,9 +121,13 @@ const SAMPLE_END_RFC3339: &str = PIT_RFC3339;
 /// window. That gap is inherent to a recovery point that falls INSIDE a
 /// segment, which is the normal case for point-in-time recovery and the same
 /// fact that makes `expected_restored_count` a BOUND rather than an equality.
-/// A canary of 2 asks for what the window really holds, so the record lane
-/// reconciles 2 of 2 per partition and the run scores `pass`. Recorded in
-/// `docs/stability.md` beside the result.
+/// What is NOT inherent is counting that gap as a shortfall: nothing was
+/// truncated, the archive returned every record the window holds, and
+/// `claimed` sums records the window excludes — so a correct restore scores
+/// `fail-integrity`, exit 2, with `mismatches: 0`, on all three partitions.
+/// Task 10b owns that fix. Until it lands a canary of 2 asks for what the
+/// window really holds, so the record lane reconciles 2 of 2 per partition and
+/// the run scores `pass`. Recorded in `docs/stability.md` beside the result.
 const RECORDS_PER_PARTITION: usize = 2;
 
 const SRC_TOPIC: &str = "pitr-src";
