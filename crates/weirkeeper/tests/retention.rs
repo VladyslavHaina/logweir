@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, TimeZone as _, Utc};
 use logweir_core::engine::StorageUrl;
 use logweir_store::{Store, StoreError};
-use weirkeeper::crds::backup_schedule::{BackupSchedule, Retention};
+use weirkeeper::conditions::apply_merge_patch;
+use weirkeeper::crds::backup_schedule::{BackupSchedule, BackupScheduleStatus, Retention};
 use weirkeeper::retention::{
     evaluate, RemovalReason, RetentionReport, ARCHIVE_URL_ENV, NO_RULE_NOTE,
 };
@@ -2384,4 +2385,113 @@ fn the_gate_catches_every_delete_spelling_the_review_planted() {
              implementation gets edited until it fires on nothing.\n{out}"
         );
     }
+}
+
+/// **Task 16b, plan erratum E11(d), review finding M-1.** A steady schedule
+/// **with an archive configured** does not rewrite `evaluatedAt`, and its
+/// second pass sends no patch at all.
+///
+/// # The finding this pins
+///
+/// `retentionReport.evaluatedAt = now` was written on every pass whenever the
+/// controller held an archive handle — the shipped configuration. That single
+/// field made the whole status differ on every reconcile, so the patch bumped
+/// `resourceVersion`, the schedule's own watch fired, and the reconciler spun:
+/// the same defect as the two unconditional `lastTransitionTime` writes,
+/// reached through a different field. Measured live at `376a09e` on
+/// docker-desktop with `LOGWEIR_ARCHIVE_URL` set: ~3,850 own-object
+/// `resourceVersion` bumps in 90 s, per schedule.
+///
+/// The rule is the `metav1.Condition` rule generalised: a "when computed"
+/// timestamp moves when the thing it timestamps moves. The comparison is
+/// `crds::backup_schedule::RetentionReport::same_findings_as`, which compares
+/// every field of the report EXCEPT the instant.
+///
+/// A `#[test]` and not a `#[tokio::test]`, for the reason
+/// `the_retention_report_lands_on_the_schedule_status` gives: `Store` drives
+/// its own current-thread runtime (interface I13).
+#[test]
+fn a_steady_schedule_with_an_archive_does_not_rewrite_evaluated_at() {
+    let scratch = Scratch::of("steady", "mvp-demo");
+    let store = std::sync::Arc::new(scratch.read_only_handle());
+    let body = schedule_json(r#"{ "keepDays": 7 }"#);
+    let schedule: BackupSchedule =
+        serde_json::from_str(&body).expect("the fixture is a BackupSchedule");
+
+    let route = || {
+        vec![Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: schedule_json(r#"{ "keepDays": 7 }"#),
+        }]
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime builds");
+
+    // PASS 1 — the report is written, `evaluatedAt` is this pass's clock.
+    let first = rt.block_on(async {
+        let (client, _rec, bodies) = mock_client_recording_bodies(route());
+        weirkeeper::controllers::backup_schedule::reconcile_schedule_with_archive(
+            &schedule,
+            &client,
+            Some(&store),
+            now(),
+        )
+        .await
+        .expect("the first reconcile succeeds");
+        let seen = bodies.lock().expect("readable").clone();
+        (patched_status(&seen), seen.len())
+    });
+    assert_eq!(first.1, 1, "the first pass writes once");
+    assert_eq!(
+        first.0["retentionReport"]["evaluatedAt"],
+        serde_json::json!(now()),
+        "the first evaluation stamps its own clock: {}",
+        first.0
+    );
+
+    // The object as the API server now holds it.
+    let mut stored = serde_json::Value::Null;
+    apply_merge_patch(&mut stored, &first.0);
+    let mut steady: BackupSchedule =
+        serde_json::from_str(&body).expect("the fixture is a BackupSchedule");
+    steady.status = Some(
+        serde_json::from_value::<BackupScheduleStatus>(stored)
+            .expect("the patched status is a BackupScheduleStatus"),
+    );
+
+    // PASS 2 — A DIFFERENT CLOCK, six hours later, over the SAME archive.
+    // SIX HOURS LATER, in the same 24 h slot: the schedule is `suspend: true`
+    // so no slot decision moves, and the archive is unchanged.
+    let later = now() + chrono::Duration::hours(6);
+    let second = rt.block_on(async {
+        let (client, _rec, bodies) = mock_client_recording_bodies(route());
+        weirkeeper::controllers::backup_schedule::reconcile_schedule_with_archive(
+            &steady,
+            &client,
+            Some(&store),
+            later,
+        )
+        .await
+        .expect("the second reconcile succeeds");
+        let seen = bodies.lock().expect("readable").clone();
+        seen.len()
+    });
+    assert_eq!(
+        second, 0,
+        "the archive found exactly what it found before, so NOTHING is written — not the \
+         report, not the condition, not a `PATCH` at all. Before this, one schedule with an \
+         archive configured bumped its own resourceVersion ~3,850 times in 90 s"
+    );
+
+    // And the archive is still read-only.
+    assert_eq!(
+        scratch.walk().len(),
+        5,
+        "neither reconcile wrote into the archive"
+    );
 }

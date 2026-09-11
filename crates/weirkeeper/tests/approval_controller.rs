@@ -44,14 +44,19 @@ use std::path::Path;
 use chrono::{DateTime, Duration, Utc};
 use kube::api::ObjectMeta;
 use logweir_core::ids::sha256_prefixed;
+use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::approval::{
     self, evaluate, ApprovalOutcome, ApprovalRefusal, ReferentProblem, PAYLOAD_TYPE_APPROVAL,
     ROSTER_NAME, ROSTER_NOT_FOUND_MESSAGE,
 };
 use weirkeeper::controllers::trust_roster;
+use weirkeeper::crds::approval::ApprovalStatus;
 use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
+use weirkeeper::crds::trust_roster::TrustRosterStatus;
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec};
-use weirkeeper::testing::{mock_client_recording, Recorder, Route, SeenRequest};
+use weirkeeper::testing::{
+    mock_client_recording, mock_client_recording_bodies, Recorder, Route, SeenBody, SeenRequest,
+};
 
 // ---------------------------------------------------------------------------
 // The out-of-tree signed material. See the module header.
@@ -1461,5 +1466,315 @@ fn a_key_expiring_exactly_at_now_authorises_nothing() {
         )
         .is_ok(),
         "an absent notAfter is `no expiry`, never `expired`"
+    );
+}
+
+// ===========================================================================
+// TASK 16b — THE STEADY-OBJECT ROWS, plan erratum E11(d)
+// ===========================================================================
+//
+// Task 15c's review measured these two reconcilers live on a cluster nobody
+// was touching: `trust_roster` 12,107 reconciles and 12,270 own
+// `resourceVersion` bumps in 91.2 s, `approval` 7,114 in 90.4 s. Neither owns
+// a child object. The engine of both was `last_transition_time: Some(now)`
+// written unconditionally in `status_for`: the patch changed, the object's own
+// watch fired, and the next pass wrote another changing patch.
+//
+// The rows below are route-table counts and not byte comparisons, because the
+// property is "NO REQUEST WAS MADE". Each second object is the first pass's own
+// patch applied to the first object exactly as the API server would apply it
+// (`conditions::apply_merge_patch`, RFC 7386), so no arm can pass by asserting
+// over a status the reconciler would never have produced.
+
+/// Every `/status` `PATCH` the double was asked for, as its `status` object.
+fn status_patches(bodies: &[SeenBody]) -> Vec<serde_json::Value> {
+    bodies
+        .iter()
+        .filter(|b| {
+            b.method == "PATCH"
+                && b.uri
+                    .split('?')
+                    .next()
+                    .unwrap_or(&b.uri)
+                    .ends_with("/status")
+        })
+        .map(|b| {
+            serde_json::from_str::<serde_json::Value>(&b.body).expect("a status patch is JSON")
+                ["status"]
+                .clone()
+        })
+        .collect()
+}
+
+/// `lastTransitionTime` off the single condition of a patched status.
+fn transition_time(status: &serde_json::Value) -> String {
+    status["conditions"][0]["lastTransitionTime"]
+        .as_str()
+        .expect("the condition carries a lastTransitionTime")
+        .to_string()
+}
+
+/// The roster's `Loaded` condition, as the API server would hold it after
+/// `patch`.
+fn roster_carrying(patch: &serde_json::Value, spec_json: &str) -> TrustRoster {
+    let mut roster: TrustRoster =
+        serde_json::from_str(spec_json).expect("the fixture is a TrustRoster");
+    let mut stored = serde_json::Value::Null;
+    apply_merge_patch(&mut stored, patch);
+    roster.status = Some(
+        serde_json::from_value::<TrustRosterStatus>(stored)
+            .expect("the patched status is a TrustRosterStatus"),
+    );
+    roster
+}
+
+/// The one route a `TrustRoster` reconcile can take.
+fn roster_patch_route() -> Vec<Route> {
+    vec![Route {
+        method: "PATCH",
+        path_suffix: "/trustrosters/default/status",
+        status: 200,
+        body: roster_body(&approver_entry_json(), ""),
+    }]
+}
+
+/// The good approver key with a `notAfter`, as a JSON `KeyEntry`.
+fn approver_entry_json_expiring(not_after: &str) -> String {
+    let pem = APPROVER_PEM.replace('\n', "\\n");
+    format!(r#"{{"keyId":"{APPROVER_KEY_ID}","spkiPem":"{pem}","notAfter":"{not_after}"}}"#)
+}
+
+/// **Task 16b.** A steady `TrustRoster` is patched ONCE and then never again —
+/// finding **H-1**, the worst measured rate in the family.
+#[tokio::test]
+async fn a_steady_trust_roster_issues_no_second_status_patch() {
+    let body = roster_body(&approver_entry_json(), "");
+    let roster: TrustRoster = serde_json::from_str(&body).expect("the fixture is a TrustRoster");
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(roster_patch_route());
+    trust_roster::reconcile_roster(&roster, &client)
+        .await
+        .expect("the first reconcile completes");
+    let first = bodies.lock().expect("the recorder is readable").clone();
+    let patches = status_patches(&first);
+    assert_eq!(
+        patches.len(),
+        1,
+        "the first pass writes the verdict: {first:?}"
+    );
+
+    let steady = roster_carrying(&patches[0], &body);
+    let (client, calls) = mock_client_recording(roster_patch_route());
+    let verdict = trust_roster::reconcile_roster(&steady, &client)
+        .await
+        .expect("the second reconcile completes");
+    assert!(verdict.loaded, "the verdict is still computed and returned");
+    assert_eq!(
+        seen(&calls),
+        Vec::<(String, String)>::new(),
+        "the second pass over an unchanged roster makes NO CALL AT ALL — this reconciler's only \
+         call is the patch it no longer sends. Measured live before the fix: 12,107 reconciles \
+         and 12,270 resourceVersion bumps in 91.2 s on one steady object"
+    );
+}
+
+/// **Task 16b.** A roster that really changes is patched exactly once, and the
+/// transition time obeys the `metav1.Condition` contract in both directions.
+///
+/// # Two arms, because "a real state change" is two different things here
+///
+/// ARM 1 — **a key expires.** `status.expiredKeyIds` and the message change, so
+/// exactly one patch is sent; but the condition's `status` is still `True` and
+/// its `reason` is still `Loaded`, so `lastTransitionTime` is KEPT. That is the
+/// contract, not an omission: the field names when the CONDITION last changed,
+/// and this condition did not. Moving it here is the same lie the hot loop was
+/// telling, once a day instead of 133 times a second.
+///
+/// ARM 2 — **a key stops parsing.** `Loaded=True/Loaded` becomes
+/// `Loaded=False/UnparseableKey`: a transition, and the timestamp moves.
+#[tokio::test]
+async fn a_roster_that_changes_is_patched_once_with_the_right_transition_time() {
+    let body = roster_body(&approver_entry_json(), "");
+    let roster: TrustRoster = serde_json::from_str(&body).expect("the fixture is a TrustRoster");
+    let (client, _calls, bodies) = mock_client_recording_bodies(roster_patch_route());
+    trust_roster::reconcile_roster(&roster, &client)
+        .await
+        .expect("the first reconcile completes");
+    let first = status_patches(&bodies.lock().expect("readable")).remove(0);
+    let stamped = transition_time(&first);
+
+    // ---- ARM 1: the key expires ------------------------------------------
+    let expired_body = roster_body(&approver_entry_json_expiring("2020-01-01T00:00:00Z"), "");
+    let expired = roster_carrying(&first, &expired_body);
+    let (client, _calls, bodies) = mock_client_recording_bodies(roster_patch_route());
+    let verdict = trust_roster::reconcile_roster(&expired, &client)
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(
+        verdict.expired_key_ids,
+        vec![APPROVER_KEY_ID.to_string()],
+        "the key is past its notAfter"
+    );
+    let after = status_patches(&bodies.lock().expect("readable"));
+    assert_eq!(
+        after.len(),
+        1,
+        "a real change is written exactly once: {after:?}"
+    );
+    assert_eq!(
+        after[0]["expiredKeyIds"],
+        serde_json::json!([APPROVER_KEY_ID]),
+        "and the change is the expiry: {}",
+        after[0]
+    );
+    assert_eq!(
+        transition_time(&after[0]),
+        stamped,
+        "the CONDITION did not transition — still Loaded=True/Loaded — so its timestamp is the \
+         one it already carried. `metav1.Condition`'s contract, and ruling 1's own rule"
+    );
+
+    // ---- ARM 2: the key stops parsing -------------------------------------
+    let broken_pem = UNPARSEABLE_PEM.replace('\n', "\\n");
+    let broken_body = roster_body(
+        &format!(r#"{{"keyId":"{BAD_KEY_ID}","spkiPem":"{broken_pem}"}}"#),
+        "",
+    );
+    let broken = roster_carrying(&first, &broken_body);
+    let (client, _calls, bodies) = mock_client_recording_bodies(roster_patch_route());
+    let verdict = trust_roster::reconcile_roster(&broken, &client)
+        .await
+        .expect("the reconcile completes");
+    assert!(!verdict.loaded, "an unparseable entry is Loaded=False");
+    let after = status_patches(&bodies.lock().expect("readable"));
+    assert_eq!(after.len(), 1, "written exactly once: {after:?}");
+    assert_ne!(
+        transition_time(&after[0]),
+        stamped,
+        "Loaded=True/Loaded became Loaded=False/UnparseableKey, which IS a transition, so the \
+         timestamp moves. A comparison that never moved the field would be as wrong as one that \
+         always did"
+    );
+}
+
+/// The three routes an `Approval` reconcile takes when its referent exists.
+fn approval_routes(referent: (u16, String)) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_body(&approver_entry_json(), ""),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/restores/r1",
+            status: referent.0,
+            body: referent.1,
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/approvals/a1/status",
+            status: 200,
+            body: patched_approval_body(),
+        },
+    ]
+}
+
+/// **Task 16b.** A steady `Approval` is patched ONCE and then never again —
+/// finding **H-2**.
+#[tokio::test]
+async fn a_steady_approval_issues_no_second_status_patch() {
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let (client, _calls, bodies) =
+        mock_client_recording_bodies(approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH))));
+    approval::reconcile_approval(&approval, &client)
+        .await
+        .expect("the first reconcile completes");
+    let first = status_patches(&bodies.lock().expect("readable"));
+    assert_eq!(first.len(), 1, "the first pass writes the verdict");
+
+    let mut stored = serde_json::Value::Null;
+    apply_merge_patch(&mut stored, &first[0]);
+    let mut steady = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    steady.status = Some(
+        serde_json::from_value::<ApprovalStatus>(stored)
+            .expect("the patched status is an ApprovalStatus"),
+    );
+
+    let (client, calls) =
+        mock_client_recording(approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH))));
+    let outcome = approval::reconcile_approval(&steady, &client)
+        .await
+        .expect("the second reconcile completes");
+    assert!(outcome.is_verified(), "the verdict is still computed");
+    assert_eq!(
+        seen(&calls),
+        vec![
+            (
+                "GET".to_string(),
+                format!("/apis/logweir.dev/v1alpha1/trustrosters/{ROSTER_NAME}")
+            ),
+            (
+                "GET".to_string(),
+                format!("/apis/logweir.dev/v1alpha1/namespaces/{NS}/restores/r1")
+            ),
+        ],
+        "the second pass STILL READS the roster and the referent — the verdict is recomputed \
+         from scratch every time, which is the whole point of a controller — and writes NOTHING. \
+         Measured live before the fix: 7,114 reconciles in 90.4 s on one steady Approval"
+    );
+}
+
+/// **Task 16b.** An `Approval` whose REFERENT changes is patched exactly once,
+/// with a new transition time.
+///
+/// The referent is the only thing that can change here: `Approval.spec` is
+/// sealed by an object-level CEL rule (`spec is immutable; create a new object
+/// instead`), so a `Verified=False` approval becomes `Verified=True` when the
+/// `Restore` it names appears — and never by an edit to itself.
+#[tokio::test]
+async fn an_approval_whose_referent_appears_is_patched_once_with_a_new_transition_time() {
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let (client, _calls, bodies) = mock_client_recording_bodies(approval_routes((
+        404,
+        not_found_body("restores.logweir.dev \"r1\" not found"),
+    )));
+    let outcome = approval::reconcile_approval(&approval, &client)
+        .await
+        .expect("the first reconcile completes");
+    assert!(
+        !outcome.is_verified(),
+        "no referent, no verdict: {outcome:?}"
+    );
+    let refused = status_patches(&bodies.lock().expect("readable")).remove(0);
+    let stamped = transition_time(&refused);
+    assert_eq!(refused["verified"], serde_json::json!(false));
+
+    let mut stored = serde_json::Value::Null;
+    apply_merge_patch(&mut stored, &refused);
+    let mut carrying = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    carrying.status = Some(
+        serde_json::from_value::<ApprovalStatus>(stored)
+            .expect("the patched status is an ApprovalStatus"),
+    );
+
+    // The referent is created. NOTHING about the Approval changed.
+    let (client, _calls, bodies) =
+        mock_client_recording_bodies(approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH))));
+    let outcome = approval::reconcile_approval(&carrying, &client)
+        .await
+        .expect("the second reconcile completes");
+    assert!(
+        outcome.is_verified(),
+        "the referent is there now: {outcome:?}"
+    );
+    let after = status_patches(&bodies.lock().expect("readable"));
+    assert_eq!(after.len(), 1, "written exactly once: {after:?}");
+    assert_eq!(after[0]["verified"], serde_json::json!(true));
+    assert_ne!(
+        transition_time(&after[0]),
+        stamped,
+        "Verified=False/ReferentNotFound became Verified=True/Verified, which IS a transition"
     );
 }

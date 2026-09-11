@@ -12,6 +12,7 @@
 //! and `suspend` arms checkable.
 
 use chrono::{DateTime, TimeZone, Utc};
+use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
     decide, reconcile_schedule, refine_against_last_fire, runner_argv, scheduled_backup,
     status_patch, ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, REASON_SCHEDULED,
@@ -1321,7 +1322,10 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
             outcome.decision
         );
 
-        let recorded = bodies.lock().expect("the body recorder is readable").clone();
+        let recorded = bodies
+            .lock()
+            .expect("the body recorder is readable")
+            .clone();
         assert_eq!(
             patch_count(&recorded),
             expected_patches,
@@ -1864,4 +1868,135 @@ fn the_crd_states_the_missed_slot_horizon() {
              too — re-render with `just crds` after editing crds/backup_schedule.rs"
         );
     }
+}
+
+// ===========================================================================
+// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
+// ===========================================================================
+
+/// The status the API server would hold after applying `patch` to `previous`.
+///
+/// ONTO THE PREVIOUS STATUS, NOT ONTO NOTHING, and that is the whole point of
+/// using a real merge. `SlotDecision::AlreadyFired` deliberately writes NEITHER
+/// `lastFireTime` NOR `activeBackupRef` — omitting a key in a merge patch means
+/// "leave it alone" — so a test that rebuilt the object from the patch alone
+/// would silently drop the record of the fire and turn a healthy schedule into
+/// `SlotMissed` on the next pass. The API server does not do that, and neither
+/// does this.
+fn stored_after(
+    previous: Option<&BackupScheduleStatus>,
+    patch: &serde_json::Value,
+) -> BackupScheduleStatus {
+    let mut stored = previous.map_or(serde_json::Value::Null, |p| {
+        serde_json::to_value(p).expect("a BackupScheduleStatus serialises")
+    });
+    apply_merge_patch(&mut stored, patch);
+    serde_json::from_value(stored).expect("the patched status is a BackupScheduleStatus")
+}
+
+/// **Task 16b.** A steady `BackupSchedule` is patched once per real change and
+/// never otherwise; a `suspend` flip is a real change.
+///
+/// # Why a route-table count and not another byte comparison
+///
+/// `two_reconciles_with_no_change_do_not_move_last_transition_time` already
+/// pins the timestamp. What it could not see is that the reconciler used to
+/// send the identical patch anyway, 2,880 times a day per schedule — invisible
+/// on the wire only because the API server answers "this changed nothing".
+/// With an archive configured it was not even invisible: `evaluatedAt = now`
+/// made every one of those a real write, and the schedule spun. This row counts
+/// REQUESTS.
+///
+/// Each pass's object is the previous pass's own patch applied as the API
+/// server would apply it (`conditions::apply_merge_patch`, RFC 7386).
+#[tokio::test]
+async fn a_steady_backup_schedule_is_patched_once_and_a_suspend_flip_once_more() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name = scheduled_backup_name("nightly", &slot).expect("the fixture name fits");
+
+    // PASS 1 — midnight. The slot is due, the Backup is created, the status
+    // records the fire.
+    let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 201));
+    reconcile_schedule(&schedule("nightly", UID, DAILY, false), &client, fire)
+        .await
+        .expect("the midnight slot fires");
+    let stored = stored_after(None, &patched_status(&bodies.lock().expect("readable")));
+
+    // PASS 2 — midday. `AlreadyFired`: the message changes, so one patch.
+    let mut later = schedule("nightly", UID, DAILY, false);
+    later.status = Some(stored);
+    let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
+    reconcile_schedule(&later, &client, utc(2026, 9, 10, 12, 0))
+        .await
+        .expect("the midday reconcile completes");
+    let midday = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        patch_count(&midday),
+        1,
+        "the decision became AlreadyFired, whose message differs: {midday:?}"
+    );
+    let settled = stored_after(
+        Some(&later.status.clone().expect("pass 2 carried a status")),
+        &patched_status(&midday),
+    );
+    let settled_transition = settled
+        .conditions
+        .as_ref()
+        .and_then(|c| c.first())
+        .and_then(|c| c.last_transition_time)
+        .expect("the settled condition carries a transition time");
+
+    // PASS 3 — an hour later, nothing about the schedule or the slot has moved.
+    // ZERO requests to `/status`.
+    let mut steady = schedule("nightly", UID, DAILY, false);
+    steady.status = Some(settled.clone());
+    let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
+    let outcome = reconcile_schedule(&steady, &client, utc(2026, 9, 10, 13, 0))
+        .await
+        .expect("the steady reconcile completes");
+    let third = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        outcome.decision.reason(),
+        REASON_SCHEDULED,
+        "the decision is still computed and returned: {:?}",
+        outcome.decision
+    );
+    assert_eq!(
+        patch_count(&third),
+        0,
+        "a pass that computes the status the object already carries writes NOTHING. On a 30 s \
+         requeue that is 2,880 API writes a day per schedule that this reconciler no longer \
+         makes: {third:?}"
+    );
+
+    // PASS 4 — `suspend` flips. The ONE mutable field on this spec, and a real
+    // state change: Ready=True/Scheduled becomes Ready=False/Suspended.
+    let mut suspended = schedule("nightly", UID, DAILY, true);
+    suspended.status = Some(settled);
+    let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
+    reconcile_schedule(&suspended, &client, utc(2026, 9, 10, 14, 0))
+        .await
+        .expect("the suspend reconcile completes");
+    let fourth = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        patch_count(&fourth),
+        1,
+        "a real state change is written exactly once: {fourth:?}"
+    );
+    let status = patched_status(&fourth);
+    assert_eq!(
+        status["conditions"][0]["status"],
+        serde_json::json!("False")
+    );
+    assert_eq!(
+        status["conditions"][0]["lastTransitionTime"],
+        serde_json::json!(utc(2026, 9, 10, 14, 0)),
+        "and the transition time MOVES, because the condition transitioned: {status}"
+    );
+    assert_ne!(
+        status["conditions"][0]["lastTransitionTime"],
+        serde_json::json!(settled_transition),
+        "a comparison that never moved the field would be as wrong as one that always did"
+    );
 }

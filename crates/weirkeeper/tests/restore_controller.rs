@@ -21,6 +21,7 @@ use futures::future::BoxFuture;
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
 use serde_json::Value;
+use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     CONDITION_REASONS, CONDITION_REASON_GUARD_REFUSED, CONDITION_REASON_OK, REASON_ADMITTED,
     REASON_APPROVAL_NOT_VERIFIED, REASON_DRILL_NOT_PASS, REASON_GUARD_REFUSED, REASON_OK,
@@ -45,7 +46,7 @@ use weirkeeper::controllers::restore::{
     REFERENT_NOT_FOUND_REASON, SCORECARD_KEY_PREFIX, SCORECARD_OUT_PATH, SIDECAR_KEY_PREFIX,
     TARGET_PASSWORD_ENV, TARGET_PASSWORD_SECRET_KEY,
 };
-use weirkeeper::crds::restore::Restore;
+use weirkeeper::crds::restore::{Restore, RestoreStatus};
 use weirkeeper::job::{self, APPROVAL_MOUNT_PATH, APPROVAL_VOLUME};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 
@@ -3079,5 +3080,91 @@ fn the_real_oracle_reads_one_object_and_an_unreadable_one_is_not_observed() {
         observe_scorecard(&store, "   "),
         None,
         "and an empty key is not looked up at all"
+    );
+}
+
+// ===========================================================================
+// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
+// ===========================================================================
+
+/// The routes a RUNNING pass needs: the Job exists and has not finished, and
+/// the status is patchable. No admission routes: the Job already exists, so
+/// the reconcile never reaches the approval.
+fn running_routes() -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-restore-incident-4471",
+            status: 200,
+            body: running_job_body(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/restores/logweir-restore-incident-4471/status",
+            status: 200,
+            body: restore_json(PLAN_BYTES, APPROVAL, NAME),
+        },
+    ]
+}
+
+/// How many `/status` `PATCH`es the double was asked for.
+fn status_patch_count(bodies: &[SeenBody]) -> usize {
+    bodies
+        .iter()
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+        .count()
+}
+
+/// **Task 16b.** A steady `Restore` — one whose Job is still running — is
+/// patched once and then never again.
+///
+/// The terminal state was never at risk (`status_is_terminal` returns before
+/// any patch). The RUNNING state is where this reconciler spends its time, and
+/// on a 15 s requeue it used to send an identical `running_status_patch` on
+/// every pass: quiet at the API server, which is why Task 15c measured this
+/// reconciler QUIET, but a request all the same. Erratum E11(d)'s third rule
+/// is that a pass computing the status the object already carries sends
+/// nothing, and a route-table count is what can see it.
+#[tokio::test]
+async fn a_steady_restore_issues_no_second_status_patch() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(&restore(), &client, &unobserved_scorecard, now())
+        .await
+        .expect("the first reconcile succeeds");
+    let first = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        status_patch_count(&first),
+        1,
+        "the first pass records the running Job: {first:?}"
+    );
+
+    let mut stored = Value::Null;
+    apply_merge_patch(&mut stored, &patched_statuses(&first)[0]);
+    let mut steady = restore();
+    steady.status = Some(
+        serde_json::from_value::<RestoreStatus>(stored)
+            .expect("the patched status is a RestoreStatus — the API server stores it"),
+    );
+
+    let (client, _rec, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(
+        &steady,
+        &client,
+        &unobserved_scorecard,
+        now() + chrono::Duration::minutes(1),
+    )
+    .await
+    .expect("the second reconcile succeeds");
+    let second = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        status_patch_count(&second),
+        0,
+        "the second pass over an unchanged object writes NOTHING: {second:?}"
     );
 }

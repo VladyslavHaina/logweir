@@ -23,6 +23,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
+use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{TERMINAL_STATES, TERMINAL_STATE_NAME_TOO_LONG};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
 use weirkeeper::controllers::kafka_cluster::{
@@ -34,7 +35,7 @@ use weirkeeper::controllers::kafka_cluster::{
     REASON_PROBE_REPORTED_UNREACHABLE, REASON_PROBE_RUNNING, REASON_REACHABLE, REQUEUE_SECS,
     RE_PROBE_SECS, SOURCE_PASSWORD_ENV, SOURCE_PASSWORD_SECRET_KEY,
 };
-use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster};
+use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster, KafkaClusterStatus};
 use weirkeeper::job;
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 
@@ -1358,5 +1359,67 @@ async fn the_observed_status_patch_is_stable_across_passes() {
         now(),
         "source 4, the fallback: nothing on the Job and no pod, so the controller's clock is all \
          there is"
+    );
+}
+
+// ===========================================================================
+// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
+// ===========================================================================
+
+/// A steady `KafkaCluster` is patched ONCE and then never again.
+///
+/// # Why this row exists on a reconciler that was already measured QUIET
+///
+/// Task 15c fixed this kind's instance of the family by taking the instant
+/// from the PROBE rather than the clock — see
+/// [`the_observed_status_patch_is_stable_across_passes`], which asserts the two
+/// patches are the same BYTES. Quiet at the API server is not the same claim as
+/// *silent*: identical bytes still travel as a `PATCH` on every pass, and the
+/// API server's "this changed nothing" is what made it invisible. Task 16b's
+/// third rule is that a reconcile whose computed status equals the stored one
+/// sends nothing at all, and THIS is the row that can see the difference — a
+/// route-table count, not a byte comparison.
+///
+/// The second object is not hand-written: it is the first pass's own patch,
+/// applied to the first object exactly as the API server would apply it
+/// (`conditions::apply_merge_patch`, RFC 7386), so the test cannot pass by
+/// asserting over a status the reconciler would never have produced.
+#[tokio::test]
+async fn a_steady_kafka_cluster_issues_no_second_status_patch() {
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the first reconcile completes");
+    let first = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(
+        count(&first, "PATCH", "/status"),
+        1,
+        "the first pass writes the verdict: {first:?}"
+    );
+
+    let mut stored = Value::Null;
+    apply_merge_patch(&mut stored, &patched_statuses(&first)[0]);
+    let mut steady = cluster();
+    steady.status = Some(
+        serde_json::from_value::<KafkaClusterStatus>(stored)
+            .expect("the patched status is a KafkaClusterStatus — the API server stores it"),
+    );
+
+    // A DIFFERENT CLOCK, six and a half hours later, over the same finished
+    // Job and the same log.
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    reconcile_cluster(&steady, &client, utc(2026, 9, 10, 18, 30))
+        .await
+        .expect("the second reconcile completes");
+    let second = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(
+        count(&second, "PATCH", "/status"),
+        0,
+        "the second pass over an unchanged object writes NOTHING. A status patch is what wakes \
+         this reconciler, so a patch per pass is what a hot loop is made of — measured live at \
+         376a09e on the two reconcilers that had no comparison at all: 4,654 and 2,557 \
+         reconciles, and exactly as many resourceVersion bumps, in 90 s. Calls: {second:?}"
     );
 }

@@ -18,6 +18,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use futures::future::BoxFuture;
 use logweir_store::Store;
 use serde_json::Value;
+use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     reason_for_exit, wire_reason_for_exit, CONDITION_REASONS, CONDITION_TYPES,
     REASON_DRILL_NOT_PASS, REASON_GUARD_REFUSED, REASON_OK, REASON_OPERATIONAL,
@@ -31,7 +32,7 @@ use weirkeeper::controllers::backup::{
     JOB_NAME_LABEL_LEGACY, RUNNER_SERVICE_ACCOUNT, SIGNING_KEY_SECRET, TTL_SECONDS_AFTER_FINISHED,
 };
 use weirkeeper::controllers::backup_schedule::RUNNER_ARGV_ANNOTATION;
-use weirkeeper::crds::backup::Backup;
+use weirkeeper::crds::backup::{Backup, BackupStatus};
 use weirkeeper::job::{self, ENGINE_DIGEST, ENGINE_VERSION, RUNNER_IMAGE};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 
@@ -3727,5 +3728,104 @@ fn the_pod_selectors_are_the_prefixed_label_then_the_legacy_one() {
         "the prefixed label is the 1.27+ spelling and the current one; the legacy label is still \
          set on 1.29 and is the fallback. Order matters: a controller preferring the legacy label \
          breaks on the release that drops it."
+    );
+}
+
+// ===========================================================================
+// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
+// ===========================================================================
+
+/// The routes a RUNNING pass needs: the Job exists and has not finished, and
+/// the status is patchable.
+fn running_routes() -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
+            status: 200,
+            body: running_job_body(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backups/logweir-backup-nightly-20261109-031700/status",
+            status: 200,
+            body: backup_json(),
+        },
+    ]
+}
+
+/// How many `/status` `PATCH`es the double was asked for.
+fn status_patch_count(bodies: &[SeenBody]) -> usize {
+    bodies
+        .iter()
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+        .count()
+}
+
+/// **Task 16b.** A steady `Backup` — one whose Job is still running — is
+/// patched once and then never again.
+///
+/// # Why the RUNNING state and not the terminal one
+///
+/// The terminal state was never at risk: `reconcile_backup`'s `status_is_terminal`
+/// guard returns before any patch, so a finished `Backup` has always been
+/// silent. The running state is the one this reconciler spends its time in,
+/// and on a 15 s requeue it used to send `running_status_patch` on every
+/// single pass — an identical body, so the API server bumped nothing and Task
+/// 15c measured this reconciler QUIET, but a request all the same. Quiet is
+/// not silent; plan erratum E11(d)'s third rule is that a reconcile which
+/// computes the status the object already carries sends NOTHING, and a
+/// route-table count is what can see the difference.
+///
+/// The second object is the first pass's own patch, applied as the API server
+/// would apply it (`conditions::apply_merge_patch`, RFC 7386).
+#[tokio::test]
+async fn a_steady_backup_issues_no_second_status_patch() {
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the first reconcile succeeds");
+    let first = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        status_patch_count(&first),
+        1,
+        "the first pass records the running Job: {first:?}"
+    );
+
+    let mut stored = Value::Null;
+    apply_merge_patch(&mut stored, &patched_statuses(&first)[0]);
+    let mut steady = backup();
+    steady.status = Some(
+        serde_json::from_value::<BackupStatus>(stored)
+            .expect("the patched status is a BackupStatus — the API server stores it"),
+    );
+
+    // FOUR REQUEUES LATER, a different clock, the same still-running Job.
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &steady,
+        &client,
+        &unobserved_archive,
+        utc(2026, 11, 9, 3, 21),
+    )
+    .await
+    .expect("the second reconcile succeeds");
+    let second = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        status_patch_count(&second),
+        0,
+        "the second pass over an unchanged object writes NOTHING. At REQUEUE_SECS = 15 that is \
+         5,760 API writes a day per running Backup this reconciler no longer makes: {second:?}"
     );
 }

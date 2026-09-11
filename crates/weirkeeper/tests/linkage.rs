@@ -5,6 +5,10 @@
 //! here. They fall into four groups — the G-SIGN linkage half, the three
 //! manifest reads, the source-level Secret refusal, and the `mock_client`
 //! double — and each group's header says what it proves and what it does not.
+//! **Task 16b adds a fifth**: `conditions.rs`'s status-write contract, whose
+//! three functions are this crate's other piece of shared machinery and which
+//! belongs beside the double for the same reason — six reconcilers depend on
+//! it, so its own contract is not any one of their tests' business.
 //!
 //! WHY SO MANY OF THESE READ A FILE INSTEAD OF CALLING CODE. The properties
 //! are properties of a MANIFEST and of a dependency GRAPH, and a build failure
@@ -1007,5 +1011,207 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     assert!(
         stderr.is_empty(),
         "the error branch logs; it does not panic. Got: {stderr:?}"
+    );
+}
+
+// ===========================================================================
+// GROUP 5 — THE STATUS-WRITE CONTRACT (Task 16b, plan erratum E11(d))
+// ===========================================================================
+//
+// `conditions::merge_condition`, `::apply_merge_patch` and `::status_unchanged`
+// are the ONE implementation of a rule six reconcilers obey. The reconciler
+// suites assert what each reconciler DOES with them; these assert what they
+// are, so a change to the rule fails here by name instead of somewhere in a
+// route table.
+
+use serde_json::json;
+use weirkeeper::conditions::{
+    apply_merge_patch, current_condition, merge_condition, status_unchanged,
+};
+use weirkeeper::crds::Condition;
+
+fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .expect("a literal RFC 3339 instant")
+        .with_timezone(&chrono::Utc)
+}
+
+fn cond(status: &str, reason: &str, message: &str, when: &str) -> Condition {
+    Condition {
+        r#type: "Ready".to_string(),
+        status: status.to_string(),
+        observed_generation: Some(1),
+        last_transition_time: Some(at(when)),
+        reason: Some(reason.to_string()),
+        message: Some(message.to_string()),
+    }
+}
+
+/// `lastTransitionTime` moves on a transition and ONLY on a transition.
+///
+/// The `metav1.Condition` contract, and the rule whose absence from two
+/// reconcilers Task 15c measured at 12,107 and 7,114 reconciles per 90 s.
+#[test]
+fn a_transition_time_moves_only_when_the_status_or_the_reason_moves() {
+    let old = cond(
+        "True",
+        "Scheduled",
+        "fired at midnight",
+        "2026-09-10T00:00:00Z",
+    );
+    let now = "2026-09-10T12:00:00Z";
+
+    // The MESSAGE differs and nothing else: NOT a transition.
+    let same = merge_condition(
+        Some(&old),
+        cond("True", "Scheduled", "next firing 2026-09-11", now),
+    );
+    assert_eq!(
+        same.last_transition_time,
+        Some(at("2026-09-10T00:00:00Z")),
+        "the message carries instants that move by design; comparing it would make every \
+         message change a transition and put the hot loop straight back"
+    );
+    assert_eq!(
+        same.message.as_deref(),
+        Some("next firing 2026-09-11"),
+        "and the new message IS written — only the timestamp is inherited"
+    );
+
+    // The STATUS differs: a transition.
+    assert_eq!(
+        merge_condition(Some(&old), cond("False", "Scheduled", "m", now)).last_transition_time,
+        Some(at(now)),
+        "True -> False is a transition"
+    );
+    // The REASON differs: a transition.
+    assert_eq!(
+        merge_condition(Some(&old), cond("True", "Suspended", "m", now)).last_transition_time,
+        Some(at(now)),
+        "Scheduled -> Suspended is a transition even at the same status"
+    );
+    // No previous condition at all: the first appearance IS a transition.
+    assert_eq!(
+        merge_condition(None, cond("True", "Scheduled", "m", now)).last_transition_time,
+        Some(at(now)),
+        "a condition that did not exist has just transitioned into existence"
+    );
+}
+
+/// The lookup half finds a condition by `type` and nothing else.
+#[test]
+fn current_condition_is_keyed_by_type() {
+    let mut ready = cond("True", "Scheduled", "m", "2026-09-10T00:00:00Z");
+    ready.r#type = "Ready".to_string();
+    let mut failed = cond("False", "Operational", "m", "2026-09-10T01:00:00Z");
+    failed.r#type = "Failed".to_string();
+    let conditions = vec![ready, failed];
+
+    assert_eq!(
+        current_condition(Some(&conditions), "Failed").map(|c| c.status.clone()),
+        Some("False".to_string())
+    );
+    assert!(current_condition(Some(&conditions), "Admitted").is_none());
+    assert!(current_condition(None, "Ready").is_none());
+}
+
+/// `apply_merge_patch` is RFC 7386, including the two rules that decide
+/// whether a status write is a no-op.
+#[test]
+fn the_merge_patch_is_rfc_7386() {
+    // An omitted key leaves its value alone; a present key replaces it.
+    let mut target = json!({"phase": "Running", "jobRef": {"name": "j1"}});
+    apply_merge_patch(&mut target, &json!({"phase": "Succeeded"}));
+    assert_eq!(
+        target,
+        json!({"phase": "Succeeded", "jobRef": {"name": "j1"}}),
+        "an omitted key means LEAVE IT ALONE, which is why `status_unchanged` asks whether the \
+         patch would change anything rather than comparing two objects"
+    );
+
+    // Objects merge RECURSIVELY.
+    apply_merge_patch(&mut target, &json!({"jobRef": {"uid": "u1"}}));
+    assert_eq!(target["jobRef"], json!({"name": "j1", "uid": "u1"}));
+
+    // `null` DELETES, and deleting an absent key changes nothing.
+    apply_merge_patch(&mut target, &json!({"jobRef": null}));
+    assert!(target.get("jobRef").is_none(), "null deletes: {target}");
+    let before = target.clone();
+    apply_merge_patch(&mut target, &json!({"jobRef": null}));
+    assert_eq!(before, target, "deleting what is not there changes nothing");
+
+    // Arrays are REPLACED, never merged. This is why every condition in this
+    // crate is built by serialising `Condition`: the element is compared whole.
+    let mut arrays = json!({"conditions": [{"type": "Ready", "status": "True"}]});
+    apply_merge_patch(&mut arrays, &json!({"conditions": [{"type": "Failed"}]}));
+    assert_eq!(
+        arrays,
+        json!({"conditions": [{"type": "Failed"}]}),
+        "an array patch replaces the whole array: {arrays}"
+    );
+
+    // A non-object target under an object patch becomes an object first.
+    let mut absent = serde_json::Value::Null;
+    apply_merge_patch(&mut absent, &json!({"phase": "Pending"}));
+    assert_eq!(
+        absent,
+        json!({"phase": "Pending"}),
+        "a first write onto nothing"
+    );
+}
+
+/// `status_unchanged` answers "would this patch change the object", which is
+/// not "are these two objects equal".
+#[test]
+fn status_unchanged_is_a_question_about_the_patch_and_not_about_equality() {
+    let current = json!({
+        "phase": "Running",
+        "jobRef": {"name": "j1"},
+        "conditions": [{"type": "Ready", "status": "True", "reason": "Scheduled"}]
+    });
+
+    assert!(
+        status_unchanged(Some(&current), &json!({"status": {"phase": "Running"}})),
+        "a patch repeating what is there changes nothing — and it does NOT matter that it \
+         mentions one key out of three"
+    );
+    assert!(
+        status_unchanged(
+            Some(&current),
+            &json!({"status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True", "reason": "Scheduled"}]
+            }})
+        ),
+        "including when it repeats the whole condition array"
+    );
+    assert!(
+        status_unchanged(Some(&current), &json!({"status": {"exitCode": null}})),
+        "a null on a key the object never had deletes nothing"
+    );
+    assert!(
+        !status_unchanged(Some(&current), &json!({"status": {"phase": "Succeeded"}})),
+        "a different value IS a change"
+    );
+    assert!(
+        !status_unchanged(
+            Some(&current),
+            &json!({"status": {
+                "conditions": [{
+                    "type": "Ready", "status": "True", "reason": "Scheduled",
+                    "lastTransitionTime": "2026-09-10T12:00:00Z"
+                }]
+            }})
+        ),
+        "and so is ONE extra field inside one condition — which is exactly what a fresh \
+         `lastTransitionTime` is, and why writing it unconditionally spun three reconcilers"
+    );
+    assert!(
+        !status_unchanged(None, &json!({"status": {"phase": "Running"}})),
+        "an object with no status at all is changed by any status write"
+    );
+    assert!(
+        status_unchanged(Some(&current), &json!({"metadata": {"x": 1}})),
+        "a body with no `status` key changes no status"
     );
 }
