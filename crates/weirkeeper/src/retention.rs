@@ -477,10 +477,22 @@ pub fn aws_rm(archive_url: &str, backup_id: &str) -> String {
 /// the bucket and prefix are split out of `archive_url` by
 /// [`bucket_and_prefix`], and the whole target is ONE shell word — see
 /// [`shell_quote`].
+///
+/// A FILESYSTEM ARCHIVE HAS NO ALIAS TO NAME. `local` is an `mc` ALIAS — a
+/// configured endpoint — and a `file://` archive has no endpoint: its root is
+/// an absolute path, which `mc` operates on directly. Since
+/// [`bucket_and_prefix`] returns that absolute path as the root (and only for
+/// `file://`, which is the one scheme whose root is a path), prefixing it
+/// would render `local//srv/archive/…` — a double slash under an alias that
+/// names nothing.
 #[must_use]
 pub fn mc_rm(archive_url: &str, backup_id: &str) -> String {
-    let (bucket, prefix) = bucket_and_prefix(archive_url);
-    let mut target = format!("local/{bucket}");
+    let (root, prefix) = bucket_and_prefix(archive_url);
+    let mut target = if root.starts_with('/') {
+        root
+    } else {
+        format!("local/{root}")
+    };
     if !prefix.is_empty() {
         target.push('/');
         target.push_str(&prefix);
@@ -491,14 +503,62 @@ pub fn mc_rm(archive_url: &str, backup_id: &str) -> String {
     format!("mc rm --recursive --force {}", shell_quote(&target))
 }
 
-/// The `(bucket, prefix)` an object-store URL names.
+/// The `(root, prefix)` an object-store URL names: the location the archive
+/// handle is ROOTED at, and the key prefix left over for the listing.
 ///
 /// `s3://kafka-backups/mvp-demo` → `("kafka-backups", "mvp-demo")`. A URL with
 /// no scheme separator is taken whole as the first path segment, so a
 /// malformed value produces a legible command an operator will notice rather
 /// than a panic in a reconcile.
+///
+/// # `file://` IS NOT A BUCKET URL — plan erratum E13(d)
+///
+/// THE DEFECT. This function used to be scheme-BLIND: strip `…://`, trim the
+/// slashes, split at the first `/`. For `file:///a/b/c` that returns
+/// `("a", "b/c")` — a "bucket" named after the first segment of an absolute
+/// path. But [`storage_url_for`] builds that same URL into
+/// `StorageUrl::Filesystem { path: "/a/b/c" }`, and
+/// `Store::read_only_from_url` hands it to
+/// `LocalFileSystem::new_with_prefix("/a/b/c")`: the handle is rooted at the
+/// WHOLE path, and `StorageUrl::prefix()` returns `""` for `Filesystem`
+/// because upstream's variant carries no prefix field at all. The reconciler
+/// (`controllers::backup_schedule`) then lists under this function's `.1`, so
+/// a `file://` archive listed `<root>/b/c` under a store already rooted at
+/// `/a/b/c` and found nothing. The report was EMPTY — and silently so: the
+/// reconcile succeeds, the `retentionReport` block is written, and every list
+/// in it is `[]`, which in a status cannot be told apart from an archive with
+/// no backups in it. Task 16b's reviewer hit exactly this on a live cluster
+/// and had to plant the manifests at the doubled path to get a report.
+///
+/// THE INVARIANT, STATED ONCE. `archive_url` is parsed twice on this path —
+/// here, and by [`storage_url_for`] to build the controller's one handle — so
+/// the two parsers MUST agree: this function's `.1` is the prefix left over
+/// once the handle's own root is taken out, i.e. `storage_url_for(u)?.prefix()`.
+/// `tests/retention.rs`'s `the_listing_prefix_agrees_with_the_root_the_handle_is_built_from`
+/// asserts precisely that, per scheme, rather than pinning literals.
+///
+/// WHAT IS DELIBERATELY UNCHANGED. `s3://` and `gs://` already satisfied the
+/// invariant — their backends are rooted at the bucket, which is the first
+/// segment. `az://` does NOT (its backend is rooted at the CONTAINER, two
+/// segments in, so `("acct", "container/pfx")` doubles the container exactly
+/// as `file://` doubled the path); Task 24a's brief pins `az://`
+/// byte-identical, so that divergence is reported to the controller as an
+/// erratum candidate and pinned by a test rather than fixed here.
+///
+/// The two-slash form `file://relative/x` falls through to the generic split,
+/// unchanged: [`storage_url_for`] REFUSES it (Task 19 review, F-7), so no
+/// handle is ever built over it and no report is ever rendered from it.
 #[must_use]
 pub fn bucket_and_prefix(archive_url: &str) -> (String, String) {
+    // The one scheme whose root is a PATH and not a named bucket. Checked
+    // before the generic split, and only for the three-slash form the
+    // `storage_url_for` `"file"` arm accepts.
+    if let Some(path) = archive_url.strip_prefix("file://") {
+        let path = path.trim_end_matches('/');
+        if path.starts_with('/') {
+            return (path.to_string(), String::new());
+        }
+    }
     let rest = archive_url
         .split_once("://")
         .map_or(archive_url, |(_, r)| r)

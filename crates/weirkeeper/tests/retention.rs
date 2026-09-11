@@ -2495,3 +2495,252 @@ fn a_steady_schedule_with_an_archive_does_not_rewrite_evaluated_at() {
         "neither reconcile wrote into the archive"
     );
 }
+
+// ===========================================================================
+// A `file://` archive reports its own sets — plan erratum E13(d)
+// ===========================================================================
+
+/// The controller's OWN composition, for one archive URL, end to end.
+///
+/// WHY THE HANDLE IS BUILT THIS WAY AND NOT FROM A `StorageUrl` LITERAL. The
+/// defect E13(d) names is a DISAGREEMENT BETWEEN TWO PARSERS of the same
+/// string: `main.rs:136` builds the controller's one handle from
+/// [`weirkeeper::retention::storage_url_for`], and
+/// `controllers::backup_schedule.rs` lists under
+/// `bucket_and_prefix(url).1`. Every other test in this file hands
+/// `Scratch::read_only_handle` a `StorageUrl::Filesystem` it wrote itself and
+/// a prefix string it chose itself, so none of them can see the disagreement —
+/// which is exactly how a `file://` archive reached a live cluster reporting
+/// nothing. This helper spells the composition the controller performs, from
+/// the URL and nothing else.
+fn report_as_the_controller_composes_it(
+    archive_url: &str,
+    retention: &Retention,
+) -> RetentionReport {
+    let storage = weirkeeper::retention::storage_url_for(archive_url)
+        .unwrap_or_else(|e| panic!("`{archive_url}` is a storage URL: {e}"));
+    let store = Store::read_only_from_url(&storage)
+        .expect("a read-only filesystem handle over an existing directory builds");
+    let prefix = weirkeeper::retention::bucket_and_prefix(archive_url).1;
+    evaluate(&store, archive_url, &prefix, retention, now()).expect("the archive lists")
+}
+
+/// `file://<root>/kafka-backups/mvp-demo` — the shape Task 16b's reviewer had
+/// to work around on a live cluster — reports all five sets.
+///
+/// BEFORE THE FIX THIS REPORT WAS EMPTY, and the emptiness was silent: the
+/// reconcile succeeds, the `retentionReport` block is written, and every list
+/// in it is `[]`, which in a status is indistinguishable from an archive with
+/// no backups in it. The split returned the scratch root's FIRST path segment
+/// as a "bucket" (`private`, or `var`, depending on the temp dir) and handed
+/// the whole remainder back as a listing prefix, so `evaluate` listed
+/// `<root>/<root-minus-one-segment>/…` under a handle already rooted at
+/// `<root>` and found nothing. Measured at `c585b77`: `sets_kept` 0,
+/// `sets_that_would_be_removed` 0, `skipped` 0 — **0 of 5 sets accounted
+/// for**.
+#[test]
+fn a_file_archive_under_a_sub_prefix_reports_its_five_sets() {
+    let scratch = Scratch::of("e13d-prefix", "kafka-backups/mvp-demo");
+    let archive_url = format!(
+        "file://{}",
+        scratch
+            .path()
+            .join("kafka-backups/mvp-demo")
+            .to_str()
+            .expect("the scratch path is UTF-8")
+    );
+    let report = report_as_the_controller_composes_it(&archive_url, &rule(Some(2), None));
+
+    let accounted = report.sets_kept.len() + report.sets_that_would_be_removed.len();
+    assert_eq!(
+        accounted, 5,
+        "all five fixture sets are accounted for over a `file://` archive. Got kept={:?} \
+         removable={:?} skipped={:?} for {archive_url}",
+        report.sets_kept, report.sets_that_would_be_removed, report.skipped
+    );
+    assert_eq!(
+        report.sets_kept,
+        vec!["backup-005".to_string(), "backup-002".to_string()],
+        "and the two kept are the two newest BY WINDOW, exactly as over `s3://`"
+    );
+    assert_eq!(
+        report.sets_that_would_be_removed.len(),
+        3,
+        "the other three are removable under `keepLast: 2`"
+    );
+    assert!(
+        report.skipped.is_empty(),
+        "nothing is unreadable in the fixture archive: {:?}",
+        report.skipped
+    );
+}
+
+/// `file://<root>` — an archive at the filesystem root of the handle, with no
+/// sub-prefix at all — reports its five sets too.
+///
+/// THE SECOND ARM MATTERS BECAUSE THE OLD SPLIT WAS WRONG HERE AS WELL, and
+/// for a reason a one-segment URL would hide: there is no sub-prefix to
+/// double, but the old split still carved the ROOT PATH's own first segment
+/// off as a bucket and returned the rest of the absolute path as a listing
+/// prefix. Measured at `c585b77`: **0 of 5**.
+#[test]
+fn a_file_archive_at_the_handles_root_reports_its_five_sets() {
+    let scratch = Scratch::of("e13d-root", "");
+    let archive_url = format!(
+        "file://{}",
+        scratch.path().to_str().expect("the scratch path is UTF-8")
+    );
+    let report = report_as_the_controller_composes_it(&archive_url, &rule(Some(2), None));
+
+    let accounted = report.sets_kept.len() + report.sets_that_would_be_removed.len();
+    assert_eq!(
+        accounted, 5,
+        "all five fixture sets are accounted for with no sub-prefix. Got kept={:?} \
+         removable={:?} skipped={:?} for {archive_url}",
+        report.sets_kept, report.sets_that_would_be_removed, report.skipped
+    );
+}
+
+/// The invariant the defect broke, stated directly: **the listing prefix and
+/// the handle's own root come from the same URL and must agree.**
+///
+/// `Store::read_only_from_url` roots the backend per
+/// `StorageUrl`, and `StorageUrl::prefix()` is what is left over for the
+/// listing — the bucket for `s3`/`gs`, and for `Filesystem` the WHOLE path
+/// with `prefix()` returning `""`. `bucket_and_prefix(url).1` is what the
+/// reconciler actually lists under. If those two ever disagree the report is
+/// silently wrong, so this row compares them per scheme rather than pinning a
+/// literal.
+#[test]
+fn the_listing_prefix_agrees_with_the_root_the_handle_is_built_from() {
+    for url in [
+        "s3://kafka-backups/mvp-demo",
+        "s3://kafka-backups",
+        "gs://kafka-backups/mvp-demo",
+        "file:///srv/archive/kafka-backups/mvp-demo",
+        "file:///srv",
+    ] {
+        let storage = weirkeeper::retention::storage_url_for(url)
+            .unwrap_or_else(|e| panic!("`{url}` is a storage URL: {e}"));
+        assert_eq!(
+            weirkeeper::retention::bucket_and_prefix(url).1,
+            storage.prefix(),
+            "`{url}`: the prefix the reconciler lists under must be the prefix left over by \
+             the URL the handle is built from, or the report is over a path that holds nothing"
+        );
+    }
+}
+
+/// **`file://` — the root is the whole path and there is no prefix.**
+#[test]
+fn the_file_split_is_the_whole_path_as_the_root_and_no_prefix() {
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("file:///a/b/c"),
+        ("/a/b/c".to_string(), String::new()),
+        "a `file://` URL names no bucket: `LocalFileSystem::new_with_prefix` is rooted at the \
+         whole path, so nothing is left over to list under"
+    );
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("file:///a/b/c/"),
+        ("/a/b/c".to_string(), String::new()),
+        "a trailing slash is not a path segment"
+    );
+}
+
+/// **`s3://` — unchanged: the bucket, then the remainder.**
+#[test]
+fn the_s3_split_is_the_bucket_and_the_remainder() {
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("s3://kafka-backups/mvp-demo"),
+        ("kafka-backups".to_string(), "mvp-demo".to_string())
+    );
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("s3://kafka-backups/a/b"),
+        ("kafka-backups".to_string(), "a/b".to_string())
+    );
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("s3://kafka-backups"),
+        ("kafka-backups".to_string(), String::new())
+    );
+}
+
+/// **`gs://` — unchanged: the bucket, then the remainder.**
+#[test]
+fn the_gs_split_is_the_bucket_and_the_remainder() {
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("gs://kafka-backups/mvp-demo"),
+        ("kafka-backups".to_string(), "mvp-demo".to_string())
+    );
+    // THE THREE-SEGMENT CASE IS WHAT GIVES THIS ROW TEETH. A two-segment URL
+    // splits the same way whether the split is taken at the FIRST `/` or the
+    // LAST, so a row spelling only `gs://bucket/prefix` survives a
+    // `rsplit_once` mutant. Measured: with `split_once` -> `rsplit_once` this
+    // row is GREEN without the line below and RED with it.
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("gs://kafka-backups/a/b"),
+        ("kafka-backups".to_string(), "a/b".to_string())
+    );
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("gs://kafka-backups"),
+        ("kafka-backups".to_string(), String::new())
+    );
+}
+
+/// **`az://` — byte-identical to `c585b77`, BY THE CONTROLLER'S RULING, and
+/// still disagreeing with the handle. Reported, not fixed here.**
+///
+/// `storage_url_for("az://acct/container/pfx")` builds
+/// `Azure { account_name: "acct", container_name: "container", prefix: "pfx" }`
+/// and `MicrosoftAzureBuilder::with_container_name` roots the backend at the
+/// CONTAINER, so the prefix left over is `pfx`. `bucket_and_prefix` returns
+/// `("acct", "container/pfx")` — the same one-segment split that broke
+/// `file://` — so an `az://` archive lists `container/pfx` inside a store
+/// already rooted at `container` and reports nothing, exactly as a `file://`
+/// one did. Task 24a's brief pins `az://` byte-identical, so this row records
+/// the disagreement rather than removing it; the report carries it to the
+/// controller as an erratum candidate. **A test that asserts a defect is not
+/// an endorsement of it** — it is what stops the next editor changing it by
+/// accident and believing they fixed nothing.
+#[test]
+fn the_az_split_is_unchanged_and_still_disagrees_with_the_handle() {
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("az://acct/container/pfx"),
+        ("acct".to_string(), "container/pfx".to_string()),
+        "byte-identical to `c585b77`"
+    );
+    let storage = weirkeeper::retention::storage_url_for("az://acct/container/pfx")
+        .expect("`az://acct/container/pfx` is a storage URL");
+    assert_eq!(
+        storage.prefix(),
+        "pfx",
+        "the handle is rooted at the CONTAINER"
+    );
+    assert_ne!(
+        weirkeeper::retention::bucket_and_prefix("az://acct/container/pfx").1,
+        storage.prefix(),
+        "KNOWN, REPORTED, AND DELIBERATELY LEFT: an `az://` archive lists a doubled path and \
+         reports nothing, the same defect E13(d) named for `file://`. Task 24a's brief pins \
+         `az://` byte-identical; when the controller rules on it, fix `bucket_and_prefix` and \
+         DELETE THIS ASSERTION rather than inverting it"
+    );
+}
+
+/// A filesystem archive's `mc` target is the PATH, with no `local/` alias.
+///
+/// `local` is an `mc` ALIAS — a configured endpoint — and a `file://` archive
+/// has no endpoint to alias: `mc` operates on a local path directly. Once the
+/// split returns the absolute root, `format!("local/{bucket}")` would render
+/// `local//srv/archive/…`, a double slash under an alias naming nothing.
+#[test]
+fn a_filesystem_archives_mc_target_is_the_path_and_not_an_alias() {
+    assert_eq!(
+        weirkeeper::retention::mc_rm("file:///srv/archive", "backup-003"),
+        "mc rm --recursive --force '/srv/archive/backup-003/'",
+        "a local path is already a complete `mc` target"
+    );
+    // And the `s3://` spelling is untouched.
+    assert_eq!(
+        weirkeeper::retention::mc_rm(ARCHIVE_URL, "backup-003"),
+        "mc rm --recursive --force 'local/kafka-backups/mvp-demo/backup-003/'"
+    );
+}
