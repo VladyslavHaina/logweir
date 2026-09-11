@@ -17,8 +17,11 @@
 #
 # RETENTION **REPORTS AND NEVER DELETES** (GC6, guard **G-RET**). `keepLast`
 # and `keepDays` produce a `status.retentionReport` naming what WOULD be
-# removed, and the exact `aws s3 rm` command to remove it. No Logweir component
-# holds any object-store delete capability in tag 1.
+# removed, and the exact removal command for each set — in the CLI of the
+# archive's OWN scheme: `aws s3 rm` for `s3://`, `gsutil -m rm -r` for `gs://`,
+# `az storage blob delete-batch` for `az://`, `rm -rf` for `file://` (Task 24a,
+# plan erratum E18b), plus the `mc` spelling for every scheme `mc` addresses.
+# No Logweir component holds any object-store delete capability in tag 1.
 ---
 apiVersion: logweir.dev/v1alpha1
 kind: BackupSchedule

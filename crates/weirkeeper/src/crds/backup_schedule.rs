@@ -120,8 +120,19 @@ pub struct RetentionReport {
     /// archive; Logweir deleted nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sets_that_would_be_removed: Option<Vec<RemovableSetReport>>,
-    /// The exact `aws s3 rm` commands an operator can run to remove the sets
-    /// above, one per set, in the same order. **Reported, never executed.**
+    /// The exact removal command for each set above, one per set, in the same
+    /// order, **in the CLI of that archive's own scheme** — `aws s3 rm` for
+    /// `s3://`, `gsutil -m rm -r` for `gs://`, `az storage blob delete-batch`
+    /// for `az://` and `rm -rf` for `file://`. **Reported, never executed.**
+    ///
+    /// THE FIELD NAME SAYS `aws` AND THREE OF THE FOUR SCHEMES DO NOT, and the
+    /// name is deliberately unchanged (Task 24a, plan erratum **E18(b)**):
+    /// renaming a status field an adopter may already read, to fix a
+    /// description, would cost more than the description was worth. What was
+    /// actually broken is what the field CONTAINED — it printed
+    /// `aws s3 rm 'file:///…'` for a filesystem archive, a string an operator
+    /// runs and which does nothing — and that is fixed. This sentence is the
+    /// description catching up with the value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aws_cli: Option<Vec<String>>,
     /// The same commands in `mc`'s spelling. Reported, never executed.

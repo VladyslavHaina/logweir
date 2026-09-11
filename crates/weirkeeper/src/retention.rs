@@ -790,19 +790,24 @@ pub fn storage_url_for(archive_url: &str) -> Result<StorageUrl, String> {
             bucket: first.to_string(),
             prefix: tail.to_string(),
         }),
+        // ONE PARSER, THREE CALLERS — and this arm was the third textual copy
+        // (Task 24a review carry). `az_parts` is the split; this arm used to
+        // re-derive `(container, prefix)` from `tail` with the same two lines,
+        // which is exactly the "two parsers of one string that must agree"
+        // defect class erratum **E13(d)** and **E18(a)** are about. The
+        // invariant row `bucket_and_prefix(u).1 == storage_url_for(u)?.prefix()`
+        // now holds by CONSTRUCTION rather than by both copies being edited
+        // together.
         "az" => {
-            if tail.is_empty() {
+            let (account, container, prefix) = az_parts(archive_url);
+            if container.is_empty() {
                 return Err(format!(
                     "`{archive_url}` names an Azure account but no container: the form is \
                      `az://<account>/<container>[/<prefix>]`"
                 ));
             }
-            let (container, prefix) = match tail.split_once('/') {
-                Some((c, p)) => (c, p.trim_matches('/')),
-                None => (tail, ""),
-            };
             Ok(StorageUrl::Azure {
-                account_name: first.to_string(),
+                account_name: account.to_string(),
                 container_name: container.to_string(),
                 prefix: prefix.to_string(),
             })
