@@ -1,0 +1,89 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupSchedule",
+  "metadata": {
+    "name": "orders-hourly",
+    "namespace": "logweir-t26",
+    "uid": "3b2a1c0d-9e8f-4a7b-8c6d-5e4f3a2b1c0d",
+    "resourceVersion": "40877",
+    "generation": 2,
+    "creationTimestamp": "2026-09-04T09:00:00Z"
+  },
+  "spec": {
+    "schedule": "0 * * * *",
+    "sourceRef": {
+      "name": "orders-prod"
+    },
+    "topics": [
+      "orders",
+      "orders-dlq"
+    ],
+    "archive": {
+      "url": "s3://logweir-evidence/orders",
+      "secretRef": {
+        "name": "archive-credentials"
+      }
+    },
+    "retention": {
+      "keepLast": 3,
+      "keepDays": 7
+    },
+    "suspend": false
+  },
+  "status": {
+    "lastFireTime": "2026-09-11T12:40:00Z",
+    "nextFireTime": "2026-09-11T13:00:00Z",
+    "activeBackupRef": {
+      "name": "orders-hourly-20260911-124000"
+    },
+    "lastMissedSlot": "20260910-030000",
+    "retentionReport": {
+      "evaluatedAt": "2026-09-11T12:45:02Z",
+      "keepLast": 3,
+      "keepDays": 7,
+      "setsKept": [
+        "01JB7Z0000000000000000000B",
+        "01JB7Y0000000000000000000A",
+        "01JB7X00000000000000000009"
+      ],
+      "setsThatWouldBeRemoved": [
+        {
+          "backupId": "01JB7A00000000000000000001",
+          "newestRecordAt": "2026-09-01T10:15:00Z",
+          "reason": "OlderThanKeepDays",
+          "days": 7
+        },
+        {
+          "backupId": "01JB7B00000000000000000002",
+          "newestRecordAt": "2026-09-08T10:15:00Z",
+          "reason": "BeyondKeepLast",
+          "rank": 4
+        }
+      ],
+      "awsCli": [
+        "aws s3 rm 's3://logweir-evidence/orders/01JB7A00000000000000000001/' --recursive",
+        "aws s3 rm 's3://logweir-evidence/orders/01JB7B00000000000000000002/' --recursive"
+      ],
+      "mcCli": [
+        "mc rm --recursive --force 'local/logweir-evidence/orders/01JB7A00000000000000000001/'",
+        "mc rm --recursive --force 'local/logweir-evidence/orders/01JB7B00000000000000000002/'"
+      ],
+      "skipped": [
+        {
+          "key": "orders/stray/manifest.json",
+          "reason": "is not a backup manifest"
+        }
+      ]
+    },
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "True",
+        "reason": "Scheduled",
+        "message": "next slot 2026-09-11T13:00:00Z",
+        "lastTransitionTime": "2026-09-11T12:40:05Z",
+        "observedGeneration": 2
+      }
+    ]
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Restore",
+  "metadata": {
+    "name": "orders-drill-c",
+    "namespace": "logweir-t26",
+    "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c1d",
+    "resourceVersion": "40311",
+    "generation": 1,
+    "creationTimestamp": "2026-09-11T12:41:00Z"
+  },
+  "spec": {
+    "planBytes": "eyJraW5kIjoibG9nd2Vpci5wbGFuIn0=",
+    "approvalRef": {
+      "name": "orders-drill-approval"
+    },
+    "sourceArchive": {
+      "url": "s3://logweir-evidence/orders",
+      "secretRef": {
+        "name": "archive-credentials"
+      }
+    },
+    "backupSetRef": "01JB7Z0000000000000000000B",
+    "pointInTime": "2026-09-11T12:00:00Z",
+    "target": {
+      "clusterRef": {
+        "name": "orders-scratch"
+      },
+      "mode": "scratch",
+      "topicNaming": {
+        "prefix": "drill-20260911-"
+      }
+    },
+    "deadlineSeconds": 3600
+  },
+  "status": {
+    "phase": "Succeeded",
+    "exitCode": 0,
+    "exitReason": "ok",
+    "reason": "Ok",
+    "lastPhaseCompleted": 9,
+    "outcome": "pass",
+    "integrity": {
+      "level": "byte-fingerprint",
+      "result": "pass"
+    },
+    "measured": {
+      "rtoSeconds": 412,
+      "rpoSeconds": 95
+    },
+    "objectives": {
+      "rtoSeconds": 900,
+      "rpoSeconds": 300,
+      "passRate": 0.999,
+      "met": true
+    },
+    "topicPreflight": {
+      "timestampType": "CreateTime",
+      "retentionMs": 604800000,
+      "timestampBound": 1756649100000
+    },
+    "evidence": {
+      "scorecardKey": "logweir/drills/01JB7Z0000000000000000000A.json",
+      "scorecardSha256": "sha256:1122334455667788990011223344556677889900aabbccddeeff001122334455",
+      "sidecarKey": "logweir/drills/01JB7Z0000000000000000000A.json.sig",
+      "offsetReportKey": "logweir/drills/01JB7Z0000000000000000000A.offsets.json",
+      "verification": {
+        "result": "Invalid",
+        "payloadType": "application/vnd.logweir.scorecard+json",
+        "matchedKeyId": "6ea0c47f9a1b4d2e8c5f0a3b7d6e9012",
+        "verifiedAt": "2026-09-11T12:42:32Z",
+        "detail": "recorded sha256 does not match the bytes in the bucket"
+      }
+    },
+    "newTopics": [
+      "drill-20260911-orders",
+      "drill-20260911-orders-dlq"
+    ],
+    "oldTopics": [
+      "orders",
+      "orders-dlq"
+    ],
+    "jobRef": {
+      "name": "orders-drill-c-job"
+    },
+    "conditions": [
+      {
+        "type": "Complete",
+        "status": "True",
+        "reason": "Ok",
+        "lastTransitionTime": "2026-09-11T12:42:20Z",
+        "observedGeneration": 1
+      },
+      {
+        "type": "EvidenceRecorded",
+        "status": "True",
+        "reason": "EvidenceRecorded",
+        "lastTransitionTime": "2026-09-11T12:42:25Z",
+        "observedGeneration": 1
+      },
+      {
+        "type": "Verified",
+        "status": "False",
+        "reason": "VerificationInvalid",
+        "message": "unverified",
+        "lastTransitionTime": "2026-09-11T12:42:32Z",
+        "observedGeneration": 1
+      }
+    ]
+  }
+}

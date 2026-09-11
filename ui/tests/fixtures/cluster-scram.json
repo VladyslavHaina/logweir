@@ -1,0 +1,44 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaCluster",
+  "metadata": {
+    "name": "orders-prod",
+    "namespace": "logweir-t26",
+    "uid": "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a",
+    "resourceVersion": "38104",
+    "generation": 1,
+    "creationTimestamp": "2026-09-04T08:55:00Z"
+  },
+  "spec": {
+    "bootstrapServers": [
+      "kafka-0.orders.svc:9093",
+      "kafka-1.orders.svc:9093"
+    ],
+    "auth": {
+      "mode": "scramSha512",
+      "username": "logweir-reader",
+      "secretRef": {
+        "name": "my-scram"
+      },
+      "tls": true
+    },
+    "role": "source",
+    "markerTopic": "logweir-scratch-marker"
+  },
+  "status": {
+    "reachable": true,
+    "clusterId": "MkU3NEVCTTlSM0FCQVRMQQ",
+    "observedAt": "2026-09-11T12:44:31Z",
+    "reason": "Reachable",
+    "conditions": [
+      {
+        "type": "Reachable",
+        "status": "True",
+        "reason": "Reachable",
+        "message": "the probe reached a broker and read the cluster id",
+        "lastTransitionTime": "2026-09-11T12:44:31Z",
+        "observedGeneration": 1
+      }
+    ]
+  }
+}

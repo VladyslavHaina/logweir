@@ -800,11 +800,42 @@ fn the_serving_command_is_documented_identically_in_three_places() {
          that hands a browser a cluster credential. The `ui` body was:\n{body}"
     );
 
+    // A FOURTH PLACE, ONCE IT EXISTS. Task 29's `docs/install.md` reproduces
+    // the serving command and the viewer-authority paragraph a fourth time,
+    // and four copies of one string drift exactly the way three do. The arm is
+    // guarded by the file's existence rather than by a task number: this
+    // test's own name counts the three places that are always on disk, and
+    // `install.md` is checked whenever it is there. (Renaming the test to say
+    // "four" is the next editor's call; it costs a line in a name diff, which
+    // is why it is not done here.)
+    let install_path = repo_root().join("docs").join("install.md");
+    let install = if install_path.is_file() {
+        let contents = read(&install_path);
+        assert!(
+            contents.contains(SERVING_COMMAND),
+            "docs/install.md exists and must carry the serving command verbatim -- it is the \
+             document an adopter reads FIRST, so a drifted copy there is the copy most people \
+             run:\n{SERVING_COMMAND}"
+        );
+        Some(contents)
+    } else {
+        // Recorded, not skipped silently: a guard that went quiet when its
+        // subject was absent is a guard nobody can tell from a passing one.
+        println!(
+            "note: docs/install.md is not on disk, so the fourth copy of the serving command \
+             was not compared. The three that are always present still must agree."
+        );
+        None
+    };
+
     // Three copies of one string is a thing that drifts, so the last assertion
     // is that every serving line in all three files is the SAME line, not that
     // each of them looks plausible on its own.
     let mut spellings: BTreeSet<String> = BTreeSet::new();
-    for source in [&readme, &kubernetes, &justfile] {
+    for source in [&readme, &kubernetes, &justfile]
+        .into_iter()
+        .chain(install.iter())
+    {
         for line in source.lines() {
             if line.contains("proxy --www=./ui") {
                 spellings.insert(line.trim().to_string());
@@ -815,8 +846,8 @@ fn the_serving_command_is_documented_identically_in_three_places() {
         spellings,
         BTreeSet::from([SERVING_COMMAND.to_string()]),
         "the serving command is spelled more than one way across ui/README.md, \
-         docs/kubernetes.md and the `ui` recipe. One of those is the one an adopter will \
-         copy, and there is no way to tell which."
+         docs/kubernetes.md, the `ui` recipe and docs/install.md when it exists. One of \
+         those is the one an adopter will copy, and there is no way to tell which."
     );
 }
 
@@ -850,4 +881,291 @@ fn the_viewer_authority_cost_is_stated() {
             prose(ESCALATION_SENTENCE)
         );
     }
+}
+
+// ===========================================================================
+// TASK 26 -- the four read-and-create pages, and the behaviour gate.
+// ===========================================================================
+
+/// The six `api.js` identifiers a page module may reach for. `create` plus one
+/// update is the whole write surface of this product's UI, and these are the
+/// only names under `ui/pages/` that come from that module.
+///
+/// The first element carries the `engine-token-ok` escape `check-no-oso.sh`'s
+/// check B requires, for the same reason [`API_EXPORTS`]'s fifth element does:
+/// the token names a JavaScript function in `ui/api.js` that lists a Kubernetes
+/// kind, and has nothing to do with the `kafka-backup` subcommand GC3 denies.
+/// That gate matches per physical line, which is why the escape sits on the
+/// element's own line and this paragraph spells the name without its quotes.
+const PAGE_API_IDENTIFIERS: [&str; 6] = [
+    "list", // engine-token-ok: the JS export name in ui/api.js, never an engine subcommand
+    "get",
+    "create",
+    "patchSuspend",
+    "listCluster",
+    "apiError",
+];
+
+/// The four of [`PAGE_API_IDENTIFIERS`] a page tree must still be using. A page
+/// tree that names none of them is reading and writing some other way, which is
+/// what this test exists to notice.
+///
+/// The first element carries the same `engine-token-ok` escape the arrays above
+/// do, and for the same reason.
+const REQUIRED_PAGE_IDENTIFIERS: [&str; 4] = [
+    "list", // engine-token-ok: the JS export name in ui/api.js, never an engine subcommand
+    "get",
+    "create",
+    "patchSuspend",
+];
+
+/// The tokens a test file may not carry. The UI analogue of STANDING RULE 18's
+/// dial-token audit: `just lint` runs with the compose stack down (Global
+/// Constraint 22), and a behaviour suite that opened a socket would be a unit
+/// gate that needs the network.
+const DIAL_TOKENS: [&str; 6] = [
+    "fetch(",
+    "node:net",
+    "node:http",
+    "node:https",
+    "node:tls",
+    "node:dgram",
+];
+
+/// Every file under `ui/pages/`.
+fn page_modules() -> Vec<PathBuf> {
+    let root = ui_root().join("pages");
+    assert!(
+        root.is_dir(),
+        "ui/pages/ holds the four read-and-create page modules; a lint that enumerated \
+         nothing is not a pass"
+    );
+    let mut out = Vec::new();
+    walk(&root, &mut out);
+    assert!(!out.is_empty(), "ui/pages/ is empty");
+    out
+}
+
+/// Every file under `ui/tests/`.
+fn behaviour_suite_files() -> Vec<PathBuf> {
+    let root = ui_root().join("tests");
+    assert!(root.is_dir(), "ui/tests/ holds the behaviour suite");
+    let mut out = Vec::new();
+    walk(&root, &mut out);
+    assert!(!out.is_empty(), "ui/tests/ is empty");
+    out
+}
+
+// ------------------------------- 13. create only, plus one update, per PAGE
+
+#[test]
+fn the_suspend_toggle_is_the_only_update() {
+    // The whole `api.js` export list is the alphabet; the six above are what a
+    // page may use. Anything else from that list appearing under `ui/pages/`
+    // means a page reached for a capability -- a raw identifier builder, a
+    // generic patch, a widened writable set -- that the page contract does not
+    // have. A grep for `patch` cannot express this: it matches
+    // `api.patchSuspend(` itself.
+    let mut findings: Vec<String> = Vec::new();
+    for file in page_modules() {
+        let contents = read(&file);
+        for export in API_EXPORTS {
+            if PAGE_API_IDENTIFIERS.contains(&export) {
+                continue;
+            }
+            if let Some(offset) = contains_bare_token(&contents, export) {
+                findings.push(format!(
+                    "{}:{}: names the api.js export {export:?}",
+                    shown(&file),
+                    line_of(&contents, offset)
+                ));
+            }
+        }
+    }
+    assert!(
+        findings.is_empty(),
+        "a page module reached for an api.js export outside the six a page may use \
+         ({}). The suspend toggle is the ONE update this UI makes -- a JSON-merge patch \
+         touching `spec.suspend` and nothing else -- and a generic writer here would widen \
+         what every page can attempt without any page changing:\n{}",
+        PAGE_API_IDENTIFIERS.join(", "),
+        findings.join("\n")
+    );
+
+    // And the converse, so this test sees a page module that stopped using the
+    // API at all (which is what a page rewritten to hold its own client looks
+    // like from here).
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for file in page_modules() {
+        let contents = read(&file);
+        for identifier in PAGE_API_IDENTIFIERS {
+            if contains_bare_token(&contents, identifier).is_some() {
+                seen.insert(identifier);
+            }
+        }
+    }
+    // engine-token-ok: the four are ui/api.js JS export names, never engine subcommands
+    for required in REQUIRED_PAGE_IDENTIFIERS {
+        assert!(
+            seen.contains(required),
+            "no page module names {required:?} any more. The four pages read with `list` and \
+             `get`, create with `create`, and suspend with `patchSuspend`; a page tree that \
+             names none of them is reading and writing some other way. Seen: {seen:?}"
+        );
+    }
+}
+
+// ------------------------------------ 14. the behaviour suite never dials
+
+#[test]
+fn the_ui_behaviour_suite_never_dials() {
+    let mut findings: Vec<String> = Vec::new();
+    for file in behaviour_suite_files() {
+        let contents = read(&file);
+        for (index, line) in contents.lines().enumerate() {
+            for token in DIAL_TOKENS {
+                if line.contains(token) {
+                    findings.push(format!("{}:{}: carries {token:?}", shown(&file), index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        findings.is_empty(),
+        "a file under ui/tests/ names a dial token. The page modules are pure functions from \
+         a JSON object to an HTML string, and the suite asserts on those strings against \
+         checked-in fixtures; nothing in it opens a socket. `just lint` runs with the compose \
+         stack down (Global Constraint 22), and the per-test budget is 15 s -- a suite that \
+         dialled would fail one of those two long after it had stopped being reviewable:\n{}",
+        findings.join("\n")
+    );
+}
+
+// ------------------------------------------ 15. the behaviour gate is armed
+
+#[test]
+fn the_ui_behaviour_gate_is_in_just_lint() {
+    let justfile = std::fs::read_to_string(repo_root().join("justfile")).expect("justfile is read");
+    let body = recipe_body(&justfile, "lint");
+    assert!(
+        body.contains("check-ui-behaviour.sh"),
+        "`just lint` is where the UI's behaviour suite runs. Dropping the line makes every \
+         page rule in this product -- the two badge rules, the immutable line, the engine \
+         sub-report row, the bucket footer, the retention sentence -- unverified on every \
+         machine that is not the implementer's, without changing a single file under ui/. \
+         The `lint` body was:\n{body}"
+    );
+
+    // ORDER MATTERS, because the two UI gates prove different things and the
+    // cheap one goes first: `check-ui-offline.sh` reads bytes and needs no
+    // toolchain, while this one needs node and a release binary.
+    let offline = body
+        .find("check-ui-offline.sh")
+        .expect("the offline gate is in the lint body");
+    let behaviour = body
+        .find("check-ui-behaviour.sh")
+        .expect("the behaviour gate is in the lint body");
+    assert!(
+        offline < behaviour,
+        "the behaviour gate runs after the offline gate in `lint`. The `lint` body was:\n{body}"
+    );
+}
+
+// ------------------------------------- 16. the gate refuses an old node
+
+#[test]
+fn the_behaviour_gate_refuses_an_old_node() {
+    // A temp directory holding a `node` stub that answers `--version` with a
+    // version below the floor, prefixed onto PATH. There is no text-check
+    // fallback path to test, because there is none: the gate fails.
+    let overlay = Overlay::new("oldnode");
+    let stub = overlay.path.join("node");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo v18.20.0; exit 0; fi\nexit 0\n",
+    )
+    .expect("the node stub is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("the node stub is executable");
+    }
+
+    let previous = std::env::var("PATH").unwrap_or_default();
+    let out = Command::new("bash")
+        .arg("scripts/check-ui-behaviour.sh")
+        .current_dir(repo_root())
+        .env("PATH", format!("{}:{previous}", overlay.path.display()))
+        .output()
+        .expect("the behaviour gate can be spawned");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a node below v20.0.0 is a REFUSAL, exit 1, and never a warning with a green exit. A \
+         gate that degraded here would report green while every page mutant survived, which \
+         is the state STANDING RULE 21 calls worse than no guard. stdout:\n{}\nstderr:\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("is below v20.0.0"),
+        "the refusal must say what it found; stderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("never degrades to a text check"),
+        "and must say why there is no fallback; stderr was:\n{stderr}"
+    );
+}
+
+// --------------------------- 17. the offline gate's specifier rule goes RED
+
+#[test]
+fn the_offline_gate_refuses_a_bare_module_specifier() {
+    // Nothing else exercises the RED side of `check-ui-offline.sh`'s SPECIFIER
+    // rule: weakening that rule alone left every other test in this file green,
+    // which makes it a guard whose mutant passes (STANDING RULE 21). This is
+    // the arm that fails when it is weakened.
+    let overlay = Overlay::new("specifier");
+    overlay.write("a.js", "import x from \"preact\";\nexport const y = x;\n");
+    let out = run_gate(Some(&overlay.path));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a BARE module specifier needs a resolver this page does not have and must not \
+         acquire: there is no bundler, no import map and no node_modules in this tree, so \
+         the import would fail at load time in the browser -- and, far worse, a specifier \
+         that DID resolve would be code arriving from outside the served directory. \
+         stdout:\n{}\nstderr:\n{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("preact"),
+        "the refusal must name the offending specifier; stderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not relative"),
+        "and must say which rule it broke; stderr was:\n{stderr}"
+    );
+
+    // The relative form is accepted, so this test is about the specifier's
+    // SHAPE and not about the word `import`.
+    let ok = Overlay::new("specifier-ok");
+    ok.write(
+        "a.js",
+        "import { el } from \"./render.js\";\nexport const y = el;\n",
+    );
+    ok.write("index.html", "<!doctype html>\n");
+    let green = run_gate(Some(&ok.path));
+    assert_eq!(
+        green.status.code(),
+        Some(0),
+        "a relative specifier is what every module in this tree uses; stdout:\n{}\nstderr:\n{}",
+        text(&green.stdout),
+        text(&green.stderr)
+    );
 }
