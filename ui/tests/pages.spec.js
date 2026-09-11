@@ -60,13 +60,16 @@ import { join } from "node:path";
 import { mintNames, planHash, renderPlanBytes } from "../plan.js";
 import {
   APPROVE_COMMAND,
+  NO_COMPLETED_BACKUP_SENTENCE,
   NO_SUCCEEDED_SENTENCE,
   RELOAD_SENTENCE,
   SCRATCH_MARKER_WARNING,
   TARGET_ROLE_SENTENCE,
   approvalRoute,
+  completedBackups,
   draftFrom,
   initialState,
+  renderNoCompletedBackup,
   preparePlan,
   renderBackupSetStep,
   renderPointInTimeStep,
@@ -1610,5 +1613,33 @@ test("the_wizard_restores_from_the_newest_succeeded_backup_and_names_it", async 
     step2none.indexOf(RELOAD_SENTENCE),
     -1,
     "the reload sentence belongs to a chosen SUCCEEDED run and is not printed here",
+  );
+});
+
+test("the_wizard_renders_a_sentence_and_step_2_when_no_backup_has_completed", () => {
+  // Task 28a's review: with no Succeeded Backup the mount threw inside the
+  // plan renderer and the page was an error box, pre-existing at 352a4b8.
+  const list = fixture("wizard-backups.json");
+  assert.ok(completedBackups(list).length >= 1, "the fixture has a completed run (control)");
+  const running = JSON.parse(JSON.stringify(list));
+  for (const item of running.items) {
+    item.status.phase = "Running";
+    delete item.status.backupId;
+  }
+  assert.equal(completedBackups(running).length, 0, "a Running-only list has no completed run");
+  const page = renderNoCompletedBackup("ns", running);
+  assert.ok(page.includes(NO_COMPLETED_BACKUP_SENTENCE), "the sentence is printed: " + page);
+  assert.ok(page.includes("<h3>2. Backup set</h3>"), "and step 2's table follows it");
+  assert.equal(page.includes("<h3>6."), false, "and no later step is rendered");
+  const empty = renderNoCompletedBackup("ns", { items: [] });
+  assert.ok(empty.includes(NO_COMPLETED_BACKUP_SENTENCE), "an empty list renders too: " + empty);
+  const stale = JSON.parse(JSON.stringify(list));
+  for (const item of stale.items) {
+    delete item.status.backupId;
+  }
+  assert.equal(
+    completedBackups(stale).length,
+    0,
+    "a Succeeded run without a backupId (written before Task 28a) is not a completed set",
   );
 });

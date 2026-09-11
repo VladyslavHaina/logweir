@@ -194,6 +194,43 @@ export const NO_SUCCEEDED_SENTENCE =
   "no run in this archive has reached phase Succeeded; the last listed Backup is shown, and " +
   "a set no completed run wrote is a set the runner will not find.";
 
+/** Printed as the WHOLE page when no run in this namespace has completed with
+ *  a backup set: the wizard builds a plan document from a completed run's
+ *  set and covered window, and without one there is nothing to hash. Before
+ *  Task 28a this case threw inside the plan renderer and the page was an
+ *  error box (Task 28a's review, measured pre-existing at 352a4b8). */
+export const NO_COMPLETED_BACKUP_SENTENCE =
+  "no Backup in this namespace has completed with a backup set yet; the restore wizard " +
+  "needs one to build a plan document. Wait for a scheduled run to reach phase Succeeded, " +
+  "or create a Backup, then reload this page. The runs the namespace does hold are listed " +
+  "below.";
+
+/** The `Backup`s a plan can be built from: `phase: Succeeded` AND a non-empty
+ *  `status.backupId`. A run still running, or one that completed before the
+ *  controller wrote the id (Task 28a), is not one. Pure. */
+export function completedBackups(backups) {
+  return itemsOf(backups).filter((backup) => {
+    const status = (backup || {}).status || {};
+    return (
+      status.phase === "Succeeded" &&
+      typeof status.backupId === "string" &&
+      status.backupId.length > 0
+    );
+  });
+}
+
+/** The page rendered instead of the six steps when [`completedBackups`] is
+ *  empty: the heading, the sentence, and step 2's table so the reader sees
+ *  what the namespace does hold. Pure; never throws on an empty or
+ *  running-only list. */
+export function renderNoCompletedBackup(ns, backups) {
+  return (
+    "<h2>Restore wizard</h2>" +
+    "<p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p>" +
+    renderBackupSetStep({ ns: ns, backups: backups, fields: {} })
+  );
+}
+
 /** Step 2 -- the backup set. Every `Backup` whose archive is the selected one,
  *  with its covered range CONVERTED TO RFC 3339 (interface I22: the field is
  *  two integers, and a viewer reading `1757253900000` learns nothing) -- and
@@ -284,8 +321,9 @@ export function renderPointInTimeStep(state) {
 export const TARGET_ROLE_SENTENCE =
   "no cluster is labelled role: target; the source cluster is preselected. The role is a " +
   "label, not an authorisation: for mode newTopic the runner accepts any reachable target, " +
-  "the source cluster included; mode scratch is refused by the runner unless the target " +
-  "differs from the source and proves it is scratch with its marker topic.";
+  "the source cluster included; mode scratch is refused by the runner unless the target is " +
+  "among the approval's allowed cluster ids, differs from the source, and proves it is " +
+  "scratch with its marker topic.";
 
 /** The warning step 4 prints for `mode: scratch` against a cluster whose spec
  *  declares no `markerTopic`. A WARNING and not a refusal: the runner refuses,
@@ -756,6 +794,10 @@ export async function mountRestoreWizard(node, ns, parse, deps) {
   try {
     const clusters = await api.list(ns, CLUSTERS);
     const backups = await api.list(ns, BACKUPS);
+    if (completedBackups(backups).length === 0) {
+      replace(node, parse(renderNoCompletedBackup(ns, backups)));
+      return;
+    }
     const state = initialState(ns, clusters, backups);
     replace(node, parse(await renderRestoreWizard(state)));
     wire(node, state, parse, api);
