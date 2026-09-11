@@ -1077,9 +1077,9 @@ fn install_docs_name_all_five_secrets() {
     );
     // The silent-mint warning, which is the reason the list matters at all.
     assert!(
-        docs.contains("load_or_generate") && docs.contains("keys.rs:77-88"),
+        docs.contains("load_or_generate") && docs.contains("keys.rs:81-92"),
         "docs/kubernetes.md must carry the silent-mint warning citing \
-         `crates/logweir-evidence/src/keys.rs:77-88`: an absent key file is MINTED, so a first run \
+         `crates/logweir-evidence/src/keys.rs:81-92`: an absent key file is MINTED, so a first run \
          against an empty Secret produces evidence signed by a key nothing attests"
     );
     // The two keypair commands, runnable verbatim.

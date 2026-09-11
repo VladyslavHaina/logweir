@@ -434,7 +434,7 @@ apply-install:
 # task nothing in the repository told a stranger to create any of them. The one
 # that matters most is `logweir-signing-key`, which is why it is checked first:
 # `SigningKey::load_or_generate` MINTS A NEW KEY when the path is absent
-# (`crates/logweir-evidence/src/keys.rs:77-88`), so a first run against an empty
+# (`crates/logweir-evidence/src/keys.rs:81-92`), so a first run against an empty
 # Secret produces evidence signed by a key nothing attests — silently, and with
 # a green scorecard.
 #
@@ -478,7 +478,7 @@ check-secrets ns scram="kafka-scram":
       echo "Create it before any custom resource — docs/kubernetes.md §13 step 1 carries the"
       echo "exact command, and the two openssl commands that mint the keypairs. An absent"
       echo "logweir-signing-key is the worst of the five: SigningKey::load_or_generate mints a"
-      echo "new key when the path is absent (crates/logweir-evidence/src/keys.rs:77-88), so the"
+      echo "new key when the path is absent (crates/logweir-evidence/src/keys.rs:81-92), so the"
       echo "run would succeed and sign its evidence with a key nothing attests."
       exit 1
     fi

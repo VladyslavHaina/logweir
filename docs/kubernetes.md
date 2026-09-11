@@ -1504,8 +1504,8 @@ approver's private key never goes on the cluster at all.
 
 > **WARNING — an absent signing key is MINTED, silently.**
 > `SigningKey::load_or_generate` returns a **new** key when the path is absent
-> (`crates/logweir-evidence/src/keys.rs:77-88` — `if path.exists()` at `:78`,
-> then `let key = Self::generate_p256();` at `:81`). So a first run against an
+> (`crates/logweir-evidence/src/keys.rs:81-92` — `if path.exists()` at `:82`,
+> then `let key = Self::generate_p256();` at `:85`). So a first run against an
 > empty or mis-keyed `logweir-signing-key` Secret does not fail. It **succeeds**,
 > and it signs its scorecard and its receipt with a key that is in no
 > `TrustRoster`, that nothing attests, and that disappears with the pod. The
