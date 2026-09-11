@@ -478,6 +478,10 @@ pub fn aws_rm(archive_url: &str, backup_id: &str) -> String {
 /// [`bucket_and_prefix`], and the whole target is ONE shell word — see
 /// [`shell_quote`].
 ///
+/// AN AZURE ALIAS IS THE ACCOUNT ENDPOINT, so for `az://` the first element
+/// after the alias is the CONTAINER, not the account — which is why
+/// [`bucket_and_prefix`]'s `.0` is the container. See its own note.
+///
 /// A FILESYSTEM ARCHIVE HAS NO ALIAS TO NAME. `local` is an `mc` ALIAS — a
 /// configured endpoint — and a `file://` archive has no endpoint: its root is
 /// an absolute path, which `mc` operates on directly. Since
@@ -537,13 +541,36 @@ pub fn mc_rm(archive_url: &str, backup_id: &str) -> String {
 /// `tests/retention.rs`'s `the_listing_prefix_agrees_with_the_root_the_handle_is_built_from`
 /// asserts precisely that, per scheme, rather than pinning literals.
 ///
+/// # `az://` IS ROOTED AT THE CONTAINER, NOT THE ACCOUNT — the same defect
+///
+/// THE SECOND HALF OF E13(d), closed in the fix round the first half's review
+/// ruled. `Store::build_backend`'s Azure arm is
+/// `MicrosoftAzureBuilder::from_env().with_account(a).with_container_name(c)`,
+/// so the handle is rooted at the CONTAINER — two segments in — exactly as
+/// the filesystem handle was rooted at the whole path. The scheme-blind split
+/// returned `("acct", "container/pfx")`, and the reconciler then listed
+/// `container/pfx` INSIDE the container: `Ok([])`, a silently empty
+/// `retentionReport` on one of Global Constraint 9's four supported backends.
+/// The two-segment form `az://acct/container` was broken the same way, so
+/// there was no "simple az URL" that worked.
+///
+/// `.0` IS THE CONTAINER AND NOT `acct/container`, because `.0` has exactly
+/// one consumer — [`mc_rm`] — and an `mc` alias for Azure IS the account
+/// endpoint, so the first path element after the alias is the container:
+/// `local/<container>/<prefix>/<id>/`. `("acct/container", "pfx")` would
+/// satisfy the listing invariant too and would still render a target `mc`
+/// reads as container `acct`. This is the `s3`/`gs` precedent exactly: `.0`
+/// is the bucket, and the account/endpoint/region identity comes from
+/// `object_store`'s environment chain, never from the rendered target.
+///
+/// `az://acct` — an account with no container — is NOT special-cased:
+/// [`storage_url_for`] REFUSES it, so no handle is ever built over it and no
+/// report is ever rendered from it. It falls through to the generic split as
+/// `("acct", "")`, exactly as the refused two-slash `file://` form does.
+///
 /// WHAT IS DELIBERATELY UNCHANGED. `s3://` and `gs://` already satisfied the
 /// invariant — their backends are rooted at the bucket, which is the first
-/// segment. `az://` does NOT (its backend is rooted at the CONTAINER, two
-/// segments in, so `("acct", "container/pfx")` doubles the container exactly
-/// as `file://` doubled the path); Task 24a's brief pins `az://`
-/// byte-identical, so that divergence is reported to the controller as an
-/// erratum candidate and pinned by a test rather than fixed here.
+/// segment — and are byte-identical across this change.
 ///
 /// The two-slash form `file://relative/x` falls through to the generic split,
 /// unchanged: [`storage_url_for`] REFUSES it (Task 19 review, F-7), so no
@@ -559,6 +586,16 @@ pub fn bucket_and_prefix(archive_url: &str) -> (String, String) {
             return (path.to_string(), String::new());
         }
     }
+    // The one scheme whose root is TWO segments in: the handle is rooted at
+    // the CONTAINER, so the account is not part of the listing prefix and is
+    // not the `mc` target's first element either. A URL that names no
+    // container is the form `storage_url_for` refuses, and falls through.
+    if archive_url.starts_with("az://") {
+        let (_account, container, prefix) = az_parts(archive_url);
+        if !container.is_empty() {
+            return (container.to_string(), prefix.to_string());
+        }
+    }
     let rest = archive_url
         .split_once("://")
         .map_or(archive_url, |(_, r)| r)
@@ -567,6 +604,40 @@ pub fn bucket_and_prefix(archive_url: &str) -> (String, String) {
         Some((bucket, prefix)) => (bucket.to_string(), prefix.trim_matches('/').to_string()),
         None => (rest.to_string(), String::new()),
     }
+}
+
+/// `az://<account>/<container>[/<prefix…>]`, split into its three parts.
+///
+/// ONE PARSER, TWO CALLERS — [`bucket_and_prefix`] and [`cli_rm`]. E13(d) is a
+/// defect class rather than two bugs: two parsers of one string that must
+/// agree, and did not. This split is written to be byte-identical to
+/// [`storage_url_for`]'s own `"az"` arm — trim the trailing slashes, take the
+/// account at the FIRST `/`, then the container at the first `/` of what is
+/// left — so the invariant `bucket_and_prefix(u).1 == storage_url_for(u)?
+/// .prefix()` holds for every `az://` URL by construction and not by
+/// enumeration.
+///
+/// THE SPLIT IS TOTAL, AND AN ABSENT CONTAINER IS EMPTY rather than an error:
+/// `storage_url_for` refuses that form, so no report is ever rendered from it,
+/// but a `-> String` renderer has no error to return and a panic in a
+/// reconcile is not an answer. Callers decide what an empty container means —
+/// [`bucket_and_prefix`] falls through to the generic split, and [`cli_rm`]
+/// renders a visibly incomplete `az` command rather than a command for some
+/// other cloud.
+fn az_parts(archive_url: &str) -> (&str, &str, &str) {
+    let rest = archive_url
+        .split_once("://")
+        .map_or(archive_url, |(_, r)| r)
+        .trim_end_matches('/');
+    let (account, tail) = match rest.split_once('/') {
+        Some((a, t)) => (a, t.trim_matches('/')),
+        None => (rest, ""),
+    };
+    let (container, prefix) = match tail.split_once('/') {
+        Some((c, p)) => (c, p.trim_matches('/')),
+        None => (tail, ""),
+    };
+    (account, container, prefix)
 }
 
 /// The [`StorageUrl`] for the controller's ONE read-only archive handle.

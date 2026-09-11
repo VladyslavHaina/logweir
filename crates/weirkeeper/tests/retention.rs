@@ -2617,6 +2617,13 @@ fn the_listing_prefix_agrees_with_the_root_the_handle_is_built_from() {
         "s3://kafka-backups/mvp-demo",
         "s3://kafka-backups",
         "gs://kafka-backups/mvp-demo",
+        // ALL FOUR SUPPORTED SCHEMES, since Global Constraint 9 fixes the set
+        // at `s3`, `gs`, `az` and `file` and the defect was on whichever one
+        // this row did not enumerate. The `az` rows were excluded while the
+        // split disagreed with the handle; they are the fix round's own gate.
+        "az://acct/container/pfx",
+        "az://acct/container",
+        "az://acct/container/a/b",
         "file:///srv/archive/kafka-backups/mvp-demo",
         "file:///srv",
     ] {
@@ -2686,42 +2693,67 @@ fn the_gs_split_is_the_bucket_and_the_remainder() {
     );
 }
 
-/// **`az://` — byte-identical to `c585b77`, BY THE CONTROLLER'S RULING, and
-/// still disagreeing with the handle. Reported, not fixed here.**
+/// **`az://` — the CONTAINER is the root, and the remainder is the prefix.**
 ///
-/// `storage_url_for("az://acct/container/pfx")` builds
-/// `Azure { account_name: "acct", container_name: "container", prefix: "pfx" }`
-/// and `MicrosoftAzureBuilder::with_container_name` roots the backend at the
-/// CONTAINER, so the prefix left over is `pfx`. `bucket_and_prefix` returns
-/// `("acct", "container/pfx")` — the same one-segment split that broke
-/// `file://` — so an `az://` archive lists `container/pfx` inside a store
-/// already rooted at `container` and reports nothing, exactly as a `file://`
-/// one did. Task 24a's brief pins `az://` byte-identical, so this row records
-/// the disagreement rather than removing it; the report carries it to the
-/// controller as an erratum candidate. **A test that asserts a defect is not
-/// an endorsement of it** — it is what stops the next editor changing it by
-/// accident and believing they fixed nothing.
+/// THIS ROW REPLACES `the_az_split_is_unchanged_and_still_disagrees_with_the_handle`,
+/// whose own doc comment instructed exactly that once the controller ruled:
+/// "fix `bucket_and_prefix` and DELETE THIS ASSERTION rather than inverting
+/// it". The assertion it carried — that the split and the handle DISAGREE —
+/// is now false by construction, and the agreement is asserted for all three
+/// `az://` shapes by
+/// `the_listing_prefix_agrees_with_the_root_the_handle_is_built_from` above.
+///
+/// `MicrosoftAzureBuilder::with_container_name` roots the backend at the
+/// CONTAINER, two segments in, so the scheme-blind `("acct", "container/pfx")`
+/// listed `container/pfx` INSIDE the container and reported nothing — the
+/// same silent empty report E13(d) named for `file://`, on a supported
+/// backend.
 #[test]
-fn the_az_split_is_unchanged_and_still_disagrees_with_the_handle() {
+fn the_az_split_is_the_container_and_the_remainder() {
     assert_eq!(
         weirkeeper::retention::bucket_and_prefix("az://acct/container/pfx"),
-        ("acct".to_string(), "container/pfx".to_string()),
-        "byte-identical to `c585b77`"
+        ("container".to_string(), "pfx".to_string()),
+        "the ACCOUNT is not part of either half: the handle is rooted at the container, and \
+         an `mc` alias for Azure IS the account endpoint"
     );
-    let storage = weirkeeper::retention::storage_url_for("az://acct/container/pfx")
-        .expect("`az://acct/container/pfx` is a storage URL");
+    // THE THREE-SEGMENT CASE IS WHAT GIVES THIS ROW TEETH, for the same
+    // reason the `gs://` row spells one: a two-segment tail splits the same
+    // way at the FIRST `/` and at the LAST, so `az://acct/container/pfx`
+    // alone survives a `split_once` -> `rsplit_once` mutant.
     assert_eq!(
-        storage.prefix(),
-        "pfx",
-        "the handle is rooted at the CONTAINER"
+        weirkeeper::retention::bucket_and_prefix("az://acct/container/a/b"),
+        ("container".to_string(), "a/b".to_string()),
+        "interior slashes are preserved in the prefix"
     );
-    assert_ne!(
-        weirkeeper::retention::bucket_and_prefix("az://acct/container/pfx").1,
-        storage.prefix(),
-        "KNOWN, REPORTED, AND DELIBERATELY LEFT: an `az://` archive lists a doubled path and \
-         reports nothing, the same defect E13(d) named for `file://`. Task 24a's brief pins \
-         `az://` byte-identical; when the controller rules on it, fix `bucket_and_prefix` and \
-         DELETE THIS ASSERTION rather than inverting it"
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("az://acct/container"),
+        ("container".to_string(), String::new()),
+        "the two-segment form was broken too — there was no `az://` URL that worked"
+    );
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("az://acct/container/pfx/"),
+        ("container".to_string(), "pfx".to_string()),
+        "a trailing slash is not a path segment"
+    );
+    // AN ACCOUNT WITH NO CONTAINER IS LEFT ON THE GENERIC SPLIT, exactly as
+    // the refused two-slash `file://` form is: `storage_url_for` refuses it,
+    // so no handle is ever built over it and no report is ever rendered from
+    // it. There is nothing for this function to be right about.
+    assert!(
+        weirkeeper::retention::storage_url_for("az://acct").is_err(),
+        "`az://acct` names no container, and the handle builder says so"
+    );
+    assert_eq!(
+        weirkeeper::retention::bucket_and_prefix("az://acct"),
+        ("acct".to_string(), String::new()),
+        "and the split leaves that form on the generic path rather than inventing a container"
+    );
+    // The `mc` target follows `.0`: `local` is the ACCOUNT endpoint, so the
+    // first element after the alias is the container.
+    assert_eq!(
+        weirkeeper::retention::mc_rm("az://acct/container/pfx", "backup-003"),
+        "mc rm --recursive --force 'local/container/pfx/backup-003/'",
+        "`local/acct/container/…` would name container `acct` to `mc`"
     );
 }
 
