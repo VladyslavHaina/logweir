@@ -151,7 +151,7 @@ numbers.
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
 them ARM FOR ARM, IN ORDER. The messages below are the **exact** refusal text of
 BOTH readers — compared byte-for-byte by
-`crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_invariants_have_exactly_four_arms`
+`crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` over arm 5, and
 `validate_invariants_has_exactly_five_return_err_statements` over the total),
 by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`

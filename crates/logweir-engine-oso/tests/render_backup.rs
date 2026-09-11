@@ -155,15 +155,18 @@ fn backup_document_names_no_write_key() {
 /// The EXACT line, indentation included, so a key emitted at the wrong nesting
 /// level fails too.
 ///
-/// **NAME RETAINED ON PURPOSE.** Task 4's fix round 1 (review finding F-1)
-/// removed `backup.strip_offset_headers` from this document — it is a RESTORE
-/// key the pinned engine drops as unknown, see
-/// `the_backup_document_names_no_restore_side_offset_key` below — and the
-/// plan's test-name gate is additions-only against the base commit, so this
-/// row keeps the name it was landed under and now asserts the surviving half
-/// of the invariant plus the value bound on it.
+/// **RENAMED, Task 12 closeout carry (c).** Task 4's fix round 1 (review
+/// finding F-1) removed `backup.strip_offset_headers` from this document — it
+/// is a RESTORE key the pinned engine drops as unknown, see
+/// `the_backup_document_names_no_restore_side_offset_key` below — and the row
+/// kept the name it had been landed under, `backup_document_renders_strip_offset_headers_false`,
+/// because the test-name gate is additions-only against the base commit. That
+/// name described a key this document no longer emits, at a value it no longer
+/// has: a reader looking for the `strip_offset_headers` behaviour would have
+/// found a test asserting `include_offset_headers`. The closeout ruled the
+/// rename in; the assertions are unchanged.
 #[test]
-fn backup_document_renders_strip_offset_headers_false() {
+fn backup_document_renders_include_offset_headers_true() {
     let doc = render_backup::render(&plan()).expect("the fixture renders");
     assert!(
         doc.lines().any(|l| l == "  include_offset_headers: true"),

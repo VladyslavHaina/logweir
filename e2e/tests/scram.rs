@@ -56,13 +56,17 @@ use std::process::Command;
 /// tree does — so the sweeps below can be exact rather than heuristic.
 ///
 /// **Both rows that add an archive sweep at BOTH ends.**
-/// `harness::corrupt_a_non_oldest_segment` picks its victim by listing the
-/// bucket ROOT and taking the LAST key in sort order, and `mvp-scram…` sorts
-/// after `drill-demo…` — so an archive left behind here would make
-/// `full_drill.rs`'s corrupted-segment row quarantine one of THIS file's
-/// segments and then watch an intact drill archive exit 0. That is a measured
-/// failure mode, not a hypothetical: `backup_argv.rs`'s
-/// `sweep_real_engine_archives` exists for the same reason.
+/// `harness::corrupt_a_non_oldest_segment` picks its victim by taking the LAST
+/// key in sort order. Since Task 12 the helper it reads is SCOPED to the
+/// archive prefix it is given (`drill-demo`); before that it listed the bucket
+/// ROOT, and `mvp-scram…` sorts after `drill-demo…`, so an archive left behind
+/// here made `full_drill.rs`'s corrupted-segment row quarantine one of THIS
+/// file's segments and then watch an intact drill archive exit 0. That is a
+/// measured failure mode, not a hypothetical: `backup_argv.rs`'s
+/// `sweep_real_engine_archives` exists for the same reason. The sweeps stay —
+/// the scoping is the half that does not depend on every future row
+/// remembering, and a shared bucket full of one run's leftovers is its own
+/// problem.
 const SCRAM_ID_PREFIX: &str = "mvp-scram";
 
 /// The `backup_id` for the rendered (host-side, `SASLEXT`) engine arm — the

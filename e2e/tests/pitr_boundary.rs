@@ -96,16 +96,21 @@ const SAMPLE_START_RFC3339: &str = "2025-10-09T08:53:19Z";
 /// records the restore correctly did not write, and report them as missing.
 const SAMPLE_END_RFC3339: &str = PIT_RFC3339;
 
-/// `sample.records_per_partition`, and **2 is load-bearing** — measured, not
-/// guessed.
+/// `sample.records_per_partition`, and **25 is the value every other fixture
+/// in this tree uses** — `examples/restore.yaml`, `examples/drill.yaml` and
+/// `harness::spec_default` all ask for 25. Nothing about this row wants a
+/// different number, and that is the point of it being this one.
 ///
 /// It is the CANARY SIZE: how many records per partition this restore sets out
-/// to reconcile. Two is how many records each partition holds inside the
-/// window (`T − 1 ms` and `T`), and asking for more is refused by the product
-/// over a real property of a MANIFEST — segment granularity — though the
-/// refusal itself is a known limitation of the sampled reconciliation's
-/// `claimed`, filed as Task 10b. With `records_per_partition: 25` this row
-/// measured, on the first full run:
+/// to reconcile. The window here holds **two** per partition (`T − 1 ms` and
+/// `T`), so 25 asks for more coverage than the window can supply — which is
+/// the ordinary case for a point-in-time restore and must score `pass`.
+///
+/// # It was 2, and 2 was a workaround
+///
+/// Task 11 landed this constant at 2 because at `records_per_partition: 25`
+/// this row scored **`fail-integrity`, exit 2, on all three partitions, with a
+/// SIGNED scorecard and `mismatches: 0`**:
 ///
 /// ```text
 /// selection pitr-src/1  claimed 3  records Unverified { why: "the archive returned 2
@@ -113,22 +118,32 @@ const SAMPLE_END_RFC3339: &str = PIT_RFC3339;
 ///   coverage the drill did not obtain, not a smaller successful sample" }
 /// ```
 ///
-/// `verdict_for_selection` computes its claim as
-/// `min(records_per_partition, Σ manifest record_count over the segments overlapping the
-/// sample window)`. The manifest's finest granularity is the SEGMENT, and the
-/// one segment per partition here holds all three records — so it claims 3 —
-/// while `OsoCliEngine::fingerprints` correctly returns only the 2 inside the
-/// window. That gap is inherent to a recovery point that falls INSIDE a
-/// segment, which is the normal case for point-in-time recovery and the same
-/// fact that makes `expected_restored_count` a BOUND rather than an equality.
-/// What is NOT inherent is counting that gap as a shortfall: nothing was
-/// truncated, the archive returned every record the window holds, and
-/// `claimed` sums records the window excludes — so a correct restore scores
-/// `fail-integrity`, exit 2, with `mismatches: 0`, on all three partitions.
-/// Task 10b owns that fix. Until it lands a canary of 2 asks for what the
-/// window really holds, so the record lane reconciles 2 of 2 per partition and
-/// the run scores `pass`. Recorded in `docs/stability.md` beside the result.
-const RECORDS_PER_PARTITION: usize = 2;
+/// `phase7_verify::verdict_for_selection` derived `claimed` from the WHOLE
+/// record count of every manifest segment OVERLAPPING the sample window. The
+/// manifest's finest granularity is the SEGMENT, and the one segment per
+/// partition here holds all three records — so it claimed 3 — while
+/// `OsoCliEngine::fingerprints` correctly returned only the 2 inside the
+/// window. The gap is inherent to a recovery point that falls INSIDE a
+/// segment, which is the same fact that makes `expected_restored_count` a
+/// BOUND rather than an equality. What was NOT inherent was counting that gap
+/// as a shortfall: nothing had been truncated, and `claimed` was summing
+/// records the window deliberately excludes.
+///
+/// **Task 10b fixed it** — `claimed` is now
+/// `min(sample.records_per_partition, Σ record_count over the segments WHOLLY
+/// inside the sample window)`, a straddler being an upper bound only — so a
+/// correct point-in-time restore scores `pass` at any sample size, and the
+/// short-sample `Unverified` text names the supportable claim and the
+/// straddler count instead. Every segment here straddles `T`, so `claimed` is
+/// 0 and each selection comes back `Verified`.
+///
+/// **Raising this constant back to 25 is therefore the standing e2e proof of
+/// Task 10b** (Task 12, closeout carry (d)): `just pitr` at 25 is the row that
+/// goes red again the day `verdict_for_selection` counts a straddling segment
+/// whole. A constant of 2 would keep passing through that regression, which is
+/// what made it a workaround rather than a fixture choice. Recorded in
+/// `docs/stability.md` beside the result.
+const RECORDS_PER_PARTITION: usize = 25;
 
 const SRC_TOPIC: &str = "pitr-src";
 const PARTITIONS: i32 = 3;
@@ -872,6 +887,39 @@ fn pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time() {
         "the signed document names the mode it ran in: {}",
         sc["target"]
     );
+    // **THE TASK 10b PROOF, MADE VISIBLE AND ASSERTED** (Task 12, closeout
+    // carry (d)). `RECORDS_PER_PARTITION` is 25 and each partition's window
+    // holds 2, and every segment here STRADDLES `T` — so the manifest supports
+    // a claim of exactly **nothing**, and `claimed` must be 0 on every
+    // selection with the record lane `Verified`. Before Task 10b the same
+    // fixture at 25 produced `claimed 3` and `Unverified` on all three
+    // partitions, and a correct restore scored `fail-integrity`, exit 2,
+    // signed, with `mismatches: 0`.
+    //
+    // The verdicts are structured log lines on the runner's stdout, which the
+    // harness captures, so they are echoed here as well as asserted: `just
+    // pitr` is the standing e2e proof of that fix, and a proof nobody can read
+    // is a proof nobody checks.
+    let restore_stdout = r.out.stdout_utf8();
+    let verdicts: Vec<&str> = restore_stdout
+        .lines()
+        .filter(|l| l.contains("\"message\":\"selection verdict\""))
+        .collect();
+    assert_eq!(
+        verdicts.len(),
+        PARTITIONS as usize,
+        "phase 7 must report one selection verdict per partition; got {verdicts:?}"
+    );
+    for v in &verdicts {
+        eprintln!("[pitr] {v}");
+        assert!(
+            v.contains("\"claimed\":0"),
+            "every segment in this fixture straddles the recovery point, so the manifest \
+             supports a claim of 0 and `claimed` must be 0 — a non-zero claim here is Task \
+             10b's defect back (a straddling segment counted whole): {v}"
+        );
+    }
+
     assert!(
         logweir_verify(&r).success(),
         "logweir's own verifier must accept the document it signed"

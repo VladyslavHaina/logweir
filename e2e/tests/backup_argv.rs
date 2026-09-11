@@ -705,12 +705,13 @@ fn sweep_seeded_receipts() {
 /// the seed's `drill-demo` would corrupt the fixture archive every other e2e
 /// row reads.
 ///
-/// **AND IT IS SWEPT AWAY AGAIN, BEFORE AND AFTER.** This row is the only one
-/// in the suite that ADDS an archive to the shared bucket, and
-/// `harness::corrupt_a_non_oldest_segment` picks its victim by listing the
-/// bucket ROOT and taking the last key in sort order
-/// (`harness/mod.rs::archive_segment_keys`). A `t4real-…` prefix sorts after
-/// `drill-demo/…`, so leaving one behind makes
+/// **AND IT IS SWEPT AWAY AGAIN, BEFORE AND AFTER.** This row ADDS an archive
+/// to the shared bucket, and `harness::corrupt_a_non_oldest_segment` picks its
+/// victim by taking the last key in sort order. Since Task 12 the helper it
+/// reads (`harness/mod.rs::archive_segment_keys`) is SCOPED to the archive
+/// prefix it is given — `drill-demo` — so a stray `t4real-…` can no longer be
+/// the victim; before that scoping it listed the bucket ROOT, a `t4real-…`
+/// prefix sorts after `drill-demo/…`, and leaving one behind made
 /// `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`
 /// quarantine THIS row's segment and then watch an intact drill archive exit 0
 /// — measured, on the first full-recipe run of this fix round. Hence

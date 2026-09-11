@@ -1,19 +1,80 @@
 # Quickstart
 
-Two paths. The first proves the tool works on your laptop in four minutes with
-no cloud resources. The second runs a drill against a scratch cluster you
-already have.
+Three paths. The first two prove the tool works on your laptop with no cloud
+resources — one for the **backup-and-recover** path, one for the **drill**
+path. The third runs a drill against a scratch cluster you already have.
 
 If you only want to know what a scorecard means once someone hands you one, read
 [verify-a-scorecard.md](verify-a-scorecard.md) instead.
 
 ---
 
-## Path 1: the demo
+## Path 1: `just mvp-demo` — backup, point-in-time restore, signed receipt
+
+```bash
+just e2e-up      # Kafka (KRaft) + MinIO, in docker compose
+just mvp-demo
+just e2e-down
+```
+
+This is the one command that exercises the whole CLI path, in order:
+
+| step | what runs | what it proves |
+|---|---|---|
+| 1 | preflight | the stack is up and healthy, and `orders` and `payments` hold **zero** records |
+| 2 | produce | 1000 records into each topic, end offsets read back off the broker |
+| 3 | `logweir backup run` | **the product** takes the backup, behind phase −1's admission guard, and signs a backup receipt |
+| 4 | two readers | `logweir drill verify --payload-type backup-receipt` **and** `python3 docs/verify_scorecard.py --payload-type backup-receipt` |
+| 5 | `logweir drill approve` | the plan is approved by hash, with a **different key** from the one that signs the result |
+| 6 | `logweir restore run` | `target.mode: newTopic` at a `restore.point_in_time`: the records land in topics that did not exist, and nothing is torn down |
+| 7 | two readers again | over the scorecard, plus the evidence object keys an auditor would fetch |
+| 8 | summary | the new topics, their record count off the broker, the measured RTO and RPO, the receipt key and the scorecard key |
+
+**It wants a FRESH stack and says so.** Run it on a stack whose `orders` or
+`payments` already hold records and it exits **1** at step 1, before producing
+anything and before any archive exists, and tells you to run
+`just e2e-down && just e2e-up`. That is not fussiness: a second backup into a
+colliding `backup_id` does not accumulate — measured on this stack, a re-run
+left the manifest describing 2048 records while the broker held 6000 — and a
+partial archive that a restore reads from happily is exactly the false pass
+this project keeps designing against.
+
+It needs `docker`, `cargo`, `openssl`, `awk`, and `python3` with the
+`cryptography` package. All of them are checked before anything starts.
+Override the interpreter with `LOGWEIR_PYTHON=/path/to/python3`.
+
+Everything it writes goes to `.demo/mvp/`, which is gitignored, and it sweeps
+its own archive out of the shared bucket at both ends — including from a
+`trap … EXIT`, so a run that dies mid-flight sweeps too.
+
+**The two keys it mints prove integrity, not provenance.** `logweir`'s signer
+mints silently against an empty key path, so a signature can be perfectly valid
+over a key that nothing attests, that no roster names and that no auditor has
+ever seen. The demo prints that warning rather than letting a green "verified"
+imply more than it means. See [keys.md](keys.md).
+
+**Every exit code is read directly.** No line in `scripts/mvp-demo.sh` whose
+first word is `logweir`, `docker`, `just`, `kubectl` or `curl` contains an
+unquoted `|`, and every one of them is followed by a line reading `$?` —
+because `cmd | grep` reports *grep's* status, and the exit code is the
+contract. That is checked on every commit by
+`crates/logweir/tests/mvp_demo_lint.rs`, not by eye.
+
+---
+
+## Path 2: the drill demo
 
 ```bash
 ./scripts/demo.sh
 ```
+
+**How it differs from Path 1.** This one takes its archive **from the
+harness** — `scripts/e2e-seed.sh`, whose backup step is the pinned
+`kafka-backup` engine invoked directly — and restores it into a **scratch**
+cluster behind a marker topic, at no point in time. Everything it proves is
+true, and none of it is the product taking a backup. Path 1 is the product's
+own `backup run` and its `newTopic` point-in-time restore; this is the drill
+path, which is what v0.1 shipped.
 
 Needs `docker`, `cargo`, `openssl`, `shasum`, and `python3` with the
 `cryptography` package. All five are checked before anything starts, so a missing one costs you
@@ -44,7 +105,7 @@ which shares no code with Logweir.
 
 ---
 
-## Path 2: a scratch cluster you already have
+## Path 3: a scratch cluster you already have
 
 ### 0. What you need before you start
 

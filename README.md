@@ -57,41 +57,56 @@ person who has to decide how much weight to give it.
 
 ## Quickstart
 
-One command, on a laptop, with no cloud resources:
+One command, on a laptop, with no cloud resources — a source topic to a
+verified point-in-time restore into a **new** topic and a signed receipt:
 
 ```bash
-./scripts/demo.sh
+just e2e-up      # Kafka (KRaft) + MinIO, in docker compose
+just mvp-demo
+just e2e-down
 ```
 
-It needs `docker`, `cargo`, `openssl`, `shasum` and `python3` with the
+`just mvp-demo` drives the product end to end and prints every exit code it
+reads:
+
+1. **Preflight.** Refuses unless the stack is up and healthy and `orders` and
+   `payments` hold zero records — a second backup into a colliding `backup_id`
+   does not accumulate, and a partial archive that a restore reads from
+   happily is worse than a refusal.
+2. **Produces** 1000 records into each topic and reads the end offsets back
+   off the broker.
+3. **`logweir backup run`** — the product taking the backup, behind the phase
+   −1 admission guard, writing a DSSE-signed **backup receipt**.
+4. **Verifies that receipt twice**: `logweir drill verify`, and
+   `docs/verify_scorecard.py`, which shares no code with Logweir.
+5. **`logweir drill approve`** over the exact plan bytes.
+6. **`logweir restore run`** with `target.mode: newTopic` and a
+   `restore.point_in_time` — the records land in topics that did not exist,
+   on the same cluster, and nothing is torn down.
+7. **Shows and verifies the scorecard**, twice again, and prints the evidence
+   object keys an auditor would fetch.
+8. **Prints one summary line**: the new topics, their record count read off
+   the broker, the measured RTO and RPO, and the two evidence keys.
+
+It needs `docker`, `cargo`, `openssl`, `awk` and `python3` with the
 `cryptography` package (`pip install cryptography`; or point `LOGWEIR_PYTHON`
-at an interpreter that has it). All five are checked at second zero, before
-anything is started. It takes about four minutes and does six things:
+at an interpreter that has it). All of them are checked at second zero, before
+anything is started. Everything it writes goes to `.demo/mvp/`, which is
+gitignored, and it sweeps its own archive out of the shared bucket at both
+ends.
 
-1. Extracts the digest-pinned `kafka-backup` engine.
-2. Brings up Kafka (KRaft) and MinIO with `docker compose`.
-3. Produces records and takes a real backup with that engine.
-4. Mints a signing key **and a separate approver key**, derives the cluster
-   allowlist from the running broker, and runs `logweir doctor`.
-5. Approves the exact plan by hash, then runs the drill.
-6. Shows the scorecard and verifies it **twice** — once with `logweir drill
-   verify`, once with `docs/verify_scorecard.py`, which shares no code with
-   Logweir.
+**The keys it mints prove integrity, not provenance.** They are generated on
+your machine, seconds before they sign, and nothing attests them — the demo
+says so out loud rather than letting a green "verified" imply more than it
+means. [docs/keys.md](docs/keys.md) is the rotation story.
 
-Tear it down with `just e2e-down`.
+There is also `./scripts/demo.sh`, the v0.1 **drill** demo: it seeds an archive
+with the pinned engine and restores it into a segregated scratch cluster
+behind a marker topic. It proves the drill path; `just mvp-demo` proves the
+backup-and-recover path. Both leave your working tree clean.
 
-**It does not modify your working tree.** Everything it writes goes to `.demo/`
-and `.engine/`, both gitignored, and it checks `git status` for you at the end
-and says so. (It seeds the stack with `LOGWEIR_SEED_REFRESH_FIXTURES=0`, so it
-does not refresh the two checked-in archive fixtures that `just e2e-seed`
-deliberately refreshes — that is a maintainer action, not part of the demo.)
-
-The demo rebinds one field of `examples/drill.yaml`: `sample.window_start` /
-`sample.window_end`, which name the point-in-time range you are recovering to
-and are therefore specific to your archive, not to Logweir. A window that
-overlaps no segment is refused rather than reported as a pass. See
-[docs/quickstart.md](docs/quickstart.md) to run it against a cluster you
-already have.
+See [docs/quickstart.md](docs/quickstart.md) for the same two paths in full,
+and for running a drill against a cluster you already have.
 
 ## Logging
 

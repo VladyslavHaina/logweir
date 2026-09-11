@@ -234,7 +234,7 @@ impl BackupReceipt {
     /// reworded**: `docs/verify_scorecard.py`'s mirrored block compares
     /// byte-for-byte against them, and `crates/logweir-core/tests/
     /// backup_receipt.rs` asserts each one in full —
-    /// `backup_receipt_invariants_have_exactly_four_arms` over the four
+    /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` over the four
     /// self-contradiction arms, `arm_5_refuses_an_auth_mode_outside_the_closed_two`
     /// over arm 5, and
     /// `validate_invariants_has_exactly_five_return_err_statements` over the

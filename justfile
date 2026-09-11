@@ -390,6 +390,47 @@ pitr:
     cargo build -p logweir
     AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --test pitr_boundary -- --exact pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time --test-threads=1 --nocapture
 
+# Task 12, chain J slot 13. **PHASE A'S EXIT CRITERION**, on the local stack:
+# one recipe from a source topic to a verified point-in-time restore into a NEW
+# topic and a signed receipt.
+#
+#     produce -> logweir backup run -> receipt verified by BOTH readers
+#             -> logweir drill approve -> logweir restore run
+#                (target.mode: newTopic, restore.point_in_time)
+#             -> scorecard verified by BOTH readers -> one summary line
+#
+# IT IS NOT `just demo`. `scripts/demo.sh` takes its archive from the HARNESS
+# (`scripts/e2e-seed.sh`, whose backup step is the pinned engine invoked
+# directly) and restores into a SCRATCH cluster at no point in time. This
+# recipe drives the PRODUCT's own `backup run` and its `newTopic` restore, and
+# it is the single command Phases B, C and D all cite as "the CLI path works".
+#
+# THIS RECIPE ASSUMES THE STACK IS ALREADY UP, exactly as `pitr` above does and
+# for the same reason: the compose stack is a shared resource with one owner at
+# a time (STANDING RULE 3), and a recipe that brought it down would pull it out
+# from under whoever was using it. Run it as:
+#
+#     just e2e-down && just e2e-up
+#     just mvp-demo; echo "rc=$?"
+#     just e2e-down
+#
+# `just e2e-up` ALONE is enough and that is measured: the demo needs nothing
+# from `scripts/e2e-seed.sh`. It produces its own records into `orders` and
+# `payments`, takes its own backup under its own `backup_id`, restores in
+# `newTopic` mode (which requires no marker topic), and sweeps that archive out
+# of the shared bucket at both ends — from a `trap … EXIT`, so a run that dies
+# mid-flight sweeps too. It REFUSES a stack whose source topics already hold
+# records, which is what makes a second run exit 1 at step 1 rather than write
+# a partial archive.
+#
+# `cargo build -p logweir` FIRST, and it is not optional (plan erratum E9): the
+# script runs `target/debug/logweir` through a one-entry shim directory on
+# `$PATH`, so the demo and the e2e suite test the same bytes. Without this line
+# the demo runs whatever binary was left over from an earlier build, which is
+# how a mutant survives a run that looks green.
+mvp-demo:
+    cargo build -p logweir
+    ./scripts/mvp-demo.sh
 # Task 21, chain J slot 14. The three install recipes — interface **I26**.
 #
 # `just apply-check` WAS TWO DIFFERENT JOBS UNDER ONE NAME, and it is split

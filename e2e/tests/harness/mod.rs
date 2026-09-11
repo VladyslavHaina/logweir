@@ -1213,12 +1213,28 @@ pub fn oso_evidence_verify(sub: &serde_json::Value) -> std::process::ExitStatus 
 // The archive and the evidence bucket.
 // ---------------------------------------------------------------------------
 
-fn archive_segment_keys() -> Vec<String> {
-    // Listed from the BUCKET ROOT, because `mc --json ls` reports `key`
-    // relative to the path it was given: listing `.../drill-demo` yields
-    // `drill-demo/topics/...` (the backup_id under the storage prefix), which
-    // is NOT a usable `mc` argument. From the root the keys come back
-    // bucket-relative and compose correctly.
+/// The segment keys of **one archive**, bucket-relative and sorted.
+///
+/// **SCOPED TO `archive_prefix`, never to the bucket root** (stage-2 closeout
+/// carry (a), routed to Task 12). The `kafka-backups` bucket is SHARED: every
+/// row that takes a backup under its own `backup_id` puts an archive in it,
+/// and several of those prefixes sort AFTER `drill-demo` — `mvp-demo` and
+/// `pitr-…` and `t4real-…` all do. `corrupt_a_non_oldest_segment` below takes
+/// the LAST key this returns, so an unscoped listing made the victim depend on
+/// which other rows had run and whether they had swept: measured once already
+/// in Task 4's fix round, where a leftover `t4real-…` archive was quarantined
+/// in place of the drill's and `full_drill`'s corruption row then watched an
+/// INTACT archive exit 0. The sweeps those rows carry are the belt; this is
+/// the braces, and it is the half that does not depend on every future row
+/// remembering.
+///
+/// Still LISTED from the bucket root, which is a different thing from being
+/// scoped to it: `mc --json ls` reports `key` relative to the path it was
+/// given, so listing `…/drill-demo` yields keys like `topics/…` that do not
+/// compose back into an `mc` argument. From the root the keys come back
+/// bucket-relative and `local/<bucket>/<key>` is usable; the FILTER is what
+/// confines them to one archive.
+fn archive_segment_keys(archive_prefix: &str) -> Vec<String> {
     let o = ok(
         mc(&[
             "--json",
@@ -1228,11 +1244,13 @@ fn archive_segment_keys() -> Vec<String> {
         ]),
         "mc ls archive",
     );
+    let scope = format!("{archive_prefix}/");
     let mut keys: Vec<String> = o
         .stdout_utf8()
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|v| v["key"].as_str().map(str::to_string))
+        .filter(|k| k.starts_with(&scope))
         .filter(|k| k.contains("/topics/") && k.rsplit('/').next().unwrap().starts_with("segment-"))
         .collect();
     keys.sort();
@@ -1246,10 +1264,14 @@ fn archive_segment_keys() -> Vec<String> {
 /// runs a binary's tests in name order, and `a_corrupted_segment…` sorts before
 /// `a_full_drill…`.
 pub fn corrupt_a_non_oldest_segment() -> String {
-    let keys = archive_segment_keys();
+    // `ARCHIVE_PREFIX` — the SEEDED archive, which is the one every caller of
+    // this function is drilling against. See `archive_segment_keys` for what
+    // an unscoped listing cost.
+    let keys = archive_segment_keys(ARCHIVE_PREFIX);
     assert!(
         keys.len() > 1,
-        "expected several segments in the archive, found {keys:?} — run ./scripts/e2e-seed.sh"
+        "expected several segments in the {ARCHIVE_PREFIX} archive, found {keys:?} — \
+         run ./scripts/e2e-seed.sh"
     );
     let key = keys.last().unwrap().clone();
     ok(

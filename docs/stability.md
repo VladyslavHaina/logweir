@@ -776,20 +776,37 @@ makes the manifest claim the whole segment (3) while the archive side correctly 
 records inside the window (2). This is the same segment-granularity fact that makes
 `expected_restored_count` a bound rather than an equality.
 
-**It is a known limitation of the sampled reconciliation's `claimed`, not a property of the
-restore.** `phase7_verify::verdict_for_selection` sums the WHOLE record count of every segment that
-OVERLAPS the sample window, so a straddling segment claims records the window deliberately
-excludes. Nothing here was short: the archive side returned every record the window contains, and
-the shortfall exists only against a figure derived from records the window excludes — so a signed
+**It was a known limitation of the sampled reconciliation's `claimed`, not a property of the
+restore.** `phase7_verify::verdict_for_selection` summed the WHOLE record count of every segment
+that OVERLAPS the sample window, so a straddling segment claimed records the window deliberately
+excludes. Nothing was short: the archive side returned every record the window contains, and the
+shortfall existed only against a figure derived from records the window excludes — so a signed
 document reporting `fail-integrity` with `mismatches: 0` over a restore that was verified
-record-by-record off the broker is a false negative, not a correct refusal. **Fixed by Task 10b:** `claimed` now sums only the segments wholly inside the sample window and treats
-a straddler as an upper bound, so this restore scores `pass` at `records_per_partition: 25` (re-review,
-2026-09-10: `claimed=0` on all three partitions, `Verified { checked: 2 }`, exit 0). The fixture still asks
-for 2 until Task 12 raises it; the sentence below is the pre-fix operator consequence, kept as history. **The consequence for an operator is
-concrete: on a point-in-time restore, set `sample.records_per_partition` at or below the number of
-records each partition holds inside the window, or the run reports `fail-integrity` about its own
-sample rather than about the restore.** The G-PITR fixture asks for 2, which is what its window
-holds per partition.
+record-by-record off the broker was a false negative, not a correct refusal.
+
+**Fixed by Task 10b, and the fixture now proves it.** `claimed` is
+`min(sample.records_per_partition, Σ record_count over the segments WHOLLY inside the sample
+window)`, a straddler counting towards an upper bound only, and the short-sample `Unverified` text
+names the supportable claim and the straddler count. Task 11 had worked the defect around by
+setting this row's `sample.records_per_partition` to **2**; **Task 12 raised it to 25** — the value
+`examples/restore.yaml`, `examples/drill.yaml` and `harness::spec_default` all use — so that `just
+pitr` is the standing end-to-end proof of the fix rather than a row that would stay green through
+its regression. Every segment in this fixture straddles `T`, so the manifest supports a claim of
+nothing at all. Measured at `records_per_partition: 25` (2026-09-11, `just pitr` rc **0**, 38 s),
+one line per partition, asserted by the row and not merely printed:
+
+```
+selection verdict  selection="pitr-src/0"  claimed=0  segments=Verified { checked: 1 }  records=Verified { checked: 2 }  records_restored=2
+selection verdict  selection="pitr-src/1"  claimed=0  segments=Verified { checked: 1 }  records=Verified { checked: 2 }  records_restored=2
+selection verdict  selection="pitr-src/2"  claimed=0  segments=Verified { checked: 1 }  records=Verified { checked: 2 }  records_restored=2
+```
+
+Outcome `pass`, exit 0, both readers VALID. The operator consequence recorded here before the fix —
+*set `sample.records_per_partition` at or below the number of records each partition holds inside
+the window, or the run reports `fail-integrity` about its own sample* — **no longer holds and is
+kept only as history of what was measured.** A canary larger than the window is now ordinary: the
+run reports what the manifest can support, which over a straddled recovery point is zero, and the
+per-record lane still verifies every record the window does hold.
 
 **The count is bounded, never equated.** The nine records land in one segment per partition
 (`segment_max_records: 1000`), and each of those segments straddles `T`: it starts at `T − 1 ms` and

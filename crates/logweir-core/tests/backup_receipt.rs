@@ -5,7 +5,7 @@
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
-//! `backup_receipt_invariants_have_exactly_four_arms` closes over them, while
+//! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
 //! `validate_invariants_has_exactly_five_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
@@ -90,7 +90,7 @@ fn pristine() -> BackupReceipt {
 /// document makes against itself — it refuses a value the format has no
 /// spelling for — and it has its own case and its own named test
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
-/// `backup_receipt_invariants_have_exactly_four_arms` keeps saying exactly
+/// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
 /// `validate_invariants_has_exactly_five_return_err_statements` pins the
 /// total.
@@ -312,8 +312,15 @@ fn validate_invariants_has_exactly_five_return_err_statements() {
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
 /// `validate_invariants_has_exactly_five_return_err_statements`.
+///
+/// **RENAMED, Task 12 closeout carry (c).** It was
+/// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
+/// round made false: the invariant gained a fifth arm and the name went on
+/// claiming there were four. The body was always exact and was always scoped
+/// to the four self-contradiction arms in writing; only the name said
+/// otherwise, and a name is what a reviewer reads first.
 #[test]
-fn backup_receipt_invariants_have_exactly_four_arms() {
+fn backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message() {
     let cases = arm_cases();
     assert_eq!(
         cases.len(),
@@ -402,11 +409,13 @@ fn arm_2_treats_a_blank_manifest_key_as_absent() {
 /// document from a future major is refused before any other arm is evaluated
 /// against fields that build may have redefined.
 ///
-/// The name says "the other three" because it predates arm 5; the property
-/// asserted is the general one — before EVERY other arm — and the body below
-/// violates all four of them, arm 5 included.
+/// **RENAMED, Task 12 closeout carry (c).** It was
+/// `arm_1_is_evaluated_before_the_other_three`, a name that predated arm 5 and
+/// counted one arm too few. The property asserted was always the general one —
+/// before EVERY other arm — and the body below violates all four of them, arm
+/// 5 included; the name now says so.
 #[test]
-fn arm_1_is_evaluated_before_the_other_three() {
+fn arm_1_is_evaluated_before_every_other_arm() {
     let mut doc = pristine();
     doc.format_version = "2.0.0".to_string();
     // Every other arm is ALSO violated.
