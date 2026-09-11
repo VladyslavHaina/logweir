@@ -4,7 +4,7 @@
 # AND IT STAYS THERE. Task 17 wrote down what the `Backup` reconciler needs, in
 # the shape a grant takes, so that this file could be a DIFF rather than an
 # interpretation; `crates/weirkeeper/tests/backup_controller.rs`'s
-# `the_rbac_fragments_request_pod_logs_and_nothing_more` asserts the request and
+# `the_rbac_fragments_request_pod_logs_the_plan_config_map_and_nothing_more` asserts the request and
 # `crates/logweir/tests/manifest_lint.rs`'s
 # `weirkeeper_can_read_pod_logs_and_nothing_more` asserts this grant. Two files,
 # two tests, one closed interface. The request is NOT installed by anything and
@@ -140,11 +140,24 @@ rules:
   # THE POD A JOB PRODUCED. `list` with a label selector is how it is found —
   # `batch.kubernetes.io/job-name`, falling back to the legacy `job-name` —
   # because a Job's pod name is generated and the controller never knows it in
-  # advance. `get` and `watch` are spec §9's shape for a controller that reads
-  # pod status, carried verbatim.
+  # advance.
+  #
+  # `list` AND NOTHING ELSE, narrowed in Task 22 (Task 21 review, LOW-1). Spec
+  # §9's shape for "a controller that reads pod status" is `get/list/watch` and
+  # Task 21 carried it verbatim; at (resource, verb) granularity two of those
+  # three had no caller. `Api<Pod>` appears at exactly six sites under
+  # `crates/weirkeeper/src/` — `backup.rs`, `kafka_cluster.rs` and `restore.rs`,
+  # twice each — and every one is `.list(&ListParams…)` or `.logs(…)`: there is
+  # no `Api::<Pod>::get`/`get_opt` anywhere, and no `Controller`/`watcher` over
+  # Pods (the three `.owns(jobs, …)` watch JOBS). The security delta of dropping
+  # them is nil — `list` already returns whole Pod objects — and that is the
+  # point: this file's governing rule, set out in capitals in its header, is
+  # that EVERY GRANTED VERB HAS A CALLER, and it was not true of these two.
+  # `every_granted_verb_has_a_caller` is now (resource, verb)-granular so the
+  # test can see what the prose promised.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
   # THE SUBRESOURCE, NAMED SEPARATELY, `get` AND NOTHING ELSE. This is the only
   # rule in this file that names `pods/log`, and it is the only way the exit
   # code's evidence keys (interface I7) and `refusal-reason=` reach the

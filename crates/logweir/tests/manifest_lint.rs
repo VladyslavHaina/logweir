@@ -381,50 +381,210 @@ fn weirkeeper_has_no_verb_on_secrets() {
 /// table below maps each RBAC verb to the call that needs it; a verb with no
 /// table row fails loudly rather than silently passing, so a future `*` or
 /// `deletecollection` cannot slip in.
-#[test]
-fn every_granted_verb_has_a_caller() {
-    // The source of truth for "is it called": every `.rs` under the controller
-    // crate, concatenated.
-    let mut source = String::new();
+/// The `Api<T>` methods actually called under `crates/weirkeeper/src/`, per
+/// Rust type — DERIVED from the source, never listed.
+///
+/// # Why a derived map and not a table of needles
+///
+/// The verb-granular predecessor asked "does the string `.get(&` appear
+/// ANYWHERE under `crates/weirkeeper/src/`", which is true as soon as any one
+/// resource is `get`-ed. Task 21's review (LOW-1) found what that cannot see:
+/// `get` and `watch` were granted on `pods` while every `Api<Pod>` call in the
+/// tree is `.list(&ListParams…)` or `.logs(…)`. A caller table has to bind the
+/// verb to the RESOURCE, and the only honest way to bind them is to read which
+/// method is called on which typed handle.
+///
+/// # How the binding is read
+///
+/// `Api<T>` appears in this crate in exactly two declaration shapes —
+/// `let x: Api<T> = Api::namespaced(…)` and a parameter `x: &Api<T>` — and
+/// rustfmt puts the closing brace of a top-level item in column 0. So each
+/// declaration is scoped to the text from itself to whichever comes first: the
+/// end of the enclosing item (`"\n}"`), or the next declaration binding the
+/// same identifier. Inside that region, `ident.method(` records
+/// `(T, method)`, and `Controller::new(ident`, `.owns(ident` or
+/// `.watches(ident` records `(T, <controller-watch>)` — a watcher LISTs and
+/// then WATCHes, which is the only caller `list`/`watch` on a reconciled kind
+/// ever has.
+fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
+    const WATCH: &str = "<controller-watch>";
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
     for f in files_under("crates/weirkeeper/src") {
-        if f.extension().and_then(|e| e.to_str()) == Some("rs") {
-            source.push_str(&std::fs::read_to_string(&f).expect("a readable .rs"));
+        if f.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&f).expect("a readable .rs");
+        let bytes: Vec<char> = src.chars().collect();
+
+        // (declaration end, identifier, type)
+        let mut decls: Vec<(usize, String, String)> = Vec::new();
+        let mut at = 0usize;
+        while let Some(rel) = src[at..].find("Api<") {
+            let open = at + rel;
+            at = open + 4;
+            let Some(close_rel) = src[at..].find('>') else {
+                break;
+            };
+            let ty = src[at..at + close_rel].to_string();
+            if ty.is_empty() || !ty.chars().all(is_word) {
+                continue;
+            }
+            // Walk back over `&`, whitespace, `:`, whitespace, the identifier.
+            let mut i = src[..open].chars().count();
+            let back = |i: &mut usize, pred: &dyn Fn(char) -> bool| {
+                while *i > 0 && pred(bytes[*i - 1]) {
+                    *i -= 1;
+                }
+            };
+            back(&mut i, &|c| c.is_whitespace() || c == '&');
+            if i == 0 || bytes[i - 1] != ':' {
+                continue;
+            }
+            i -= 1;
+            back(&mut i, &|c| c.is_whitespace());
+            let ident_end = i;
+            back(&mut i, &is_word);
+            if i == ident_end {
+                continue;
+            }
+            let ident: String = bytes[i..ident_end].iter().collect();
+            if ident.is_empty() || ident.chars().next().is_some_and(|c| c.is_numeric()) {
+                continue;
+            }
+            decls.push((at + close_rel + 1, ident, ty));
+        }
+
+        for (n, (decl_end, ident, ty)) in decls.iter().enumerate() {
+            let mut stop = src[*decl_end..]
+                .find("\n}")
+                .map_or(src.len(), |r| decl_end + r);
+            for (p2, id2, _) in &decls[n + 1..] {
+                if id2 == ident && *p2 < stop {
+                    stop = *p2;
+                    break;
+                }
+            }
+            let region = &src[*decl_end..stop];
+            let mut k = 0usize;
+            while let Some(rel) = region[k..].find(ident.as_str()) {
+                let hit = k + rel;
+                k = hit + ident.len();
+                let before_ok = hit == 0 || !region[..hit].ends_with(is_word);
+                let after_ok = !region[k..].starts_with(is_word);
+                if !before_ok || !after_ok {
+                    continue;
+                }
+                let tail = region[k..].trim_start();
+                if let Some(rest) = tail.strip_prefix('.') {
+                    let m: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| is_word(*c))
+                        .collect();
+                    if !m.is_empty() && rest.trim_start()[m.len()..].trim_start().starts_with('(') {
+                        out.entry(ty.clone()).or_default().insert(m);
+                    }
+                }
+                let head = region[..hit].trim_end();
+                if ["Controller::new(", ".owns(", ".watches("]
+                    .iter()
+                    .any(|k| head.ends_with(k))
+                {
+                    out.entry(ty.clone()).or_default().insert(WATCH.to_string());
+                }
+            }
         }
     }
+    out
+}
+
+/// Every granted **(resource, verb)** pair has a caller on that resource's own
+/// typed handle.
+///
+/// Sharpened in Task 22 from a verb-granular test (Task 21 review, LOW-1): the
+/// old form asked only whether a verb's call shape appeared anywhere in the
+/// crate, so `get` and `watch` on `pods` — which nothing calls — passed. The
+/// mutant that proves the difference is re-adding either verb to the `pods`
+/// rule: the verb-granular test stayed green, this one fails naming the pair.
+#[test]
+fn every_granted_verb_has_a_caller() {
+    const WATCH: &str = "<controller-watch>";
+    let callers = api_callers();
     assert!(
-        source.len() > 10_000,
-        "the weirkeeper source walk found only {} bytes; the caller table below would then pass \
-         vacuously",
-        source.len()
+        callers.len() >= 8,
+        "the Api<T> scan found only {} types; every assertion below would then be vacuous: {:?}",
+        callers.len(),
+        callers
     );
 
-    // verb -> the `Api::` call shapes that require it. `Controller::new` and
-    // `.owns(` open a watcher, which LISTs and then WATCHes.
-    let table: BTreeMap<&str, Vec<&str>> = BTreeMap::from([
-        ("create", vec![".create(&PostParams::default()"]),
-        ("get", vec![".get_opt(", ".get(&", ".get(ROSTER_NAME)"]),
-        (
-            "list", // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-            vec![".list(&ListParams", "Controller::new(", ".owns("],
-        ),
-        ("watch", vec!["Controller::new(", ".owns(", ".watches("]),
-        ("patch", vec![".patch_status(", ".patch("]),
-        ("update", vec![".replace(&PostParams", ".replace_status("]),
-        ("delete", vec![".delete(&DeleteParams", ".delete_opt("]),
-    ]);
+    // resource -> the Rust type its handle has.
+    let ty_of = |resource: &str| -> &'static str {
+        match resource.split('/').next().expect("a resource name") {
+            "pods" => "Pod",
+            "jobs" => "Job",
+            "configmaps" => "ConfigMap",
+            "approvals" => "Approval",
+            "backups" => "Backup",
+            "backupschedules" => "BackupSchedule",
+            "kafkaclusters" => "KafkaCluster",
+            "restores" => "Restore",
+            "trustrosters" => "TrustRoster",
+            other => panic!(
+                "role.yaml grants a verb on `{other}`, which this test cannot map to an \
+                 `Api<T>`. Add the mapping — a resource with no type is a grant nobody can \
+                 check."
+            ),
+        }
+    };
+
+    // (resource, verb) -> the methods that satisfy it. Subresources take their
+    // OWN row: `patch` on `<kind>/status` is `patch_status`, and a `patch` on
+    // the main resource would not satisfy it.
+    let methods_for = |resource: &str, verb: &str| -> Vec<&'static str> {
+        let sub = resource.split_once('/').map(|(_, s)| s);
+        match (sub, verb) {
+            (Some("log"), "get") => vec!["logs"],
+            (Some("status"), "patch") => vec!["patch_status"],
+            (Some("status"), "update") => vec!["replace_status"],
+            (Some(other), v) => panic!("no caller model for subresource `{other}` verb `{v}`"),
+            (None, "create") => vec!["create"],
+            (None, "get") => vec!["get", "get_opt"],
+            (None, "list") => vec!["list", WATCH], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            (None, "watch") => vec![WATCH],
+            (None, "patch") => vec!["patch"],
+            (None, "update") => vec!["replace"],
+            (None, "delete") => vec!["delete", "delete_opt"],
+            (None, v) => panic!(
+                "role.yaml grants the verb `{v}`, which this caller model does not know. Add \
+                 a row naming the `Api::` method that needs it, or remove the grant."
+            ),
+        }
+    };
+
+    /// The ONE (resource, verb) pair granted without a caller, with the reason.
+    ///
+    /// Found BY this sharpening, and recorded rather than narrowed. Spec §9's
+    /// shape grants `get`/`list`/`watch` uniformly over the six kinds; five of
+    /// the six have a `get`-shaped caller and `backupschedules` does not,
+    /// because its reconciler only ever receives the object from the
+    /// `Controller`'s own watcher and then patches its status. Splitting the
+    /// rule would leave one of six kinds silently un-`get`-able to anyone
+    /// reading the install file, which is a worse surprise than a grant that
+    /// is written down; the security delta is nil, since `list` already
+    /// returns every one of these objects in full.
+    ///
+    /// EXACTLY ONE ENTRY, asserted below: a second one must show up in a diff.
+    const GRANTED_FOR_UNIFORMITY: [(&str, &str); 1] = [("backupschedules", "get")];
 
     let rules = rules_of("config/rbac/role.yaml", "weirkeeper");
-    let granted: BTreeSet<String> = rules
-        .iter()
-        .flat_map(|(_, _, verbs)| verbs.iter().cloned())
-        .collect();
-    assert!(!granted.is_empty(), "role.yaml granted no verb at all");
+    assert!(!rules.is_empty(), "role.yaml granted no verb at all");
 
-    // THE NAMED ONE. `delete` must appear in no rule, on any resource: the
-    // API server's TTL controller removes a finished Job (this controller
-    // patches `ttlSecondsAfterFinished` after the status write) and
-    // ownerReference garbage collection removes the plan ConfigMap and the
-    // probe Job. No `Api::delete` exists under `crates/weirkeeper/src/`.
+    // THE NAMED ONE. `delete` must appear in no rule, on any resource: the API
+    // server's TTL controller removes a finished Job (this controller patches
+    // `ttlSecondsAfterFinished` after the status write) and ownerReference
+    // garbage collection removes the plan ConfigMap and the probe Job.
     for (groups, resources, verbs) in &rules {
         assert!(
             !verbs.iter().any(|x| x == "delete"),
@@ -432,28 +592,64 @@ fn every_granted_verb_has_a_caller() {
              no reconciler calls `Api::delete` anywhere"
         );
     }
-    for needle in table.get("delete").expect("the table has a `delete` row") {
-        assert!(
-            !source.contains(needle),
-            "`{needle}` appeared under crates/weirkeeper/src/ — a reconciler now deletes \
-             something, and this test's premise (and Global Constraint 6) has changed"
-        );
+    for called in callers.values() {
+        for forbidden in ["delete", "delete_opt"] {
+            assert!(
+                !called.contains(forbidden),
+                "`Api::{forbidden}` is now called under crates/weirkeeper/src/ — a reconciler \
+                 deletes something, and this test's premise (and Global Constraint 6) has \
+                 changed"
+            );
+        }
     }
 
-    for verb in &granted {
-        let needles = table.get(verb.as_str()).unwrap_or_else(|| {
-            panic!(
-                "role.yaml grants the verb `{verb}`, which this caller table does not model. Add \
-                 a row naming the `Api::` call that needs it, or remove the grant — a verb with \
-                 no caller is critique B M18."
-            )
-        });
-        assert!(
-            needles.iter().any(|n| source.contains(n)),
-            "role.yaml grants `{verb}` and nothing under crates/weirkeeper/src/ calls it \
-             (looked for {needles:?})"
-        );
+    let mut checked = 0usize;
+    for (_, resources, verbs) in &rules {
+        for resource in resources {
+            for verb in verbs {
+                if GRANTED_FOR_UNIFORMITY
+                    .iter()
+                    .any(|(r, v)| r == resource && v == verb)
+                {
+                    continue;
+                }
+                let ty = ty_of(resource);
+                let want = methods_for(resource, verb);
+                let called = callers.get(ty).cloned().unwrap_or_default();
+                assert!(
+                    want.iter().any(|m| called.contains(*m)),
+                    "role.yaml grants `{verb}` on `{resource}` and nothing under \
+                     crates/weirkeeper/src/ calls it: `Api<{ty}>` is used for {called:?}, and \
+                     this verb needs one of {want:?}. A verb with no caller on its own resource \
+                     is critique B M18 — narrow the rule, or record the pair in \
+                     GRANTED_FOR_UNIFORMITY with the reason."
+                );
+                checked += 1;
+            }
+        }
     }
+    assert!(
+        checked >= 20,
+        "only {checked} (resource, verb) pairs were checked; the walk has gone quiet"
+    );
+    assert_eq!(
+        GRANTED_FOR_UNIFORMITY.len(),
+        1,
+        "exactly one pair is granted without a caller, and it is written down"
+    );
+    // And the pods rule, by name, because it is the one this sharpening was
+    // carried for.
+    let pods: Vec<&Vec<String>> = rules
+        .iter()
+        .filter(|(_, r, _)| r == &vec!["pods".to_string()])
+        .map(|(_, _, v)| v)
+        .collect();
+    assert_eq!(
+        pods,
+        vec![&vec!["list".to_string()]], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        "the pods rule is `list` and nothing else (Task 21 review, LOW-1): `Api<Pod>` is only \
+         ever `.list(&ListParams…)` and `.logs(…)`, and `pods/log` carries its own `get`"
+    );
 }
 
 /// The four ClusterRoles, verb for verb.
@@ -506,7 +702,10 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["jobs"]),
             v(&["create", "get", "list", "watch", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        (v(&[""]), v(&["pods"]), v(&["get", "list", "watch"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        // `list` ALONE since Task 22 (Task 21 review, LOW-1): `Api<Pod>` is
+        // only ever `.list(&ListParams…)` or `.logs(…)`, so `get` and `watch`
+        // — spec §9's shape, carried verbatim by Task 21 — had no caller.
+        (v(&[""]), v(&["pods"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["pods/log"]), v(&["get"])),
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
     ];

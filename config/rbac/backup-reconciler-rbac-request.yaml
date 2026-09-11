@@ -14,7 +14,7 @@
 # The rules below are the request, written in the shape the grant will take, so
 # that Task 21's implementer has something to DIFF rather than a sentence to
 # interpret. `crates/weirkeeper/tests/backup_controller.rs`'s
-# `the_rbac_fragments_request_pod_logs_and_nothing_more` parses this file and
+# `the_rbac_fragments_request_pod_logs_the_plan_config_map_and_nothing_more` parses this file and
 # asserts what it asks for; Task 21's `weirkeeper_can_read_pod_logs_and_nothing_more`
 # asserts what the installed role grants. The pair is what closes I28.
 #

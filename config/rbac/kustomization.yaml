@@ -8,7 +8,7 @@
 #   installing it would put a second, unbound role in every cluster for no
 #   benefit. It stays beside `role.yaml` as the record of why each rule there
 #   exists, and the pair of tests
-#   (`backup_controller.rs::the_rbac_fragments_request_pod_logs_and_nothing_more`
+#   (`backup_controller.rs::the_rbac_fragments_request_pod_logs_the_plan_config_map_and_nothing_more`
 #   over the request, `manifest_lint.rs::weirkeeper_can_read_pod_logs_and_nothing_more`
 #   over the grant) is what closes interface **I28**.
 # * `backup-runner-serviceaccount.yaml` — the `logweir-runner` ServiceAccount.
