@@ -359,9 +359,9 @@ must **never** be passed — the default keeps the cross-site request filter on.
 `logweir-viewer` (and `logweir-operator` if the page should write) and nothing
 else, build a throwaway kubeconfig carrying that subject, and serve from it —
 the context in it is named `docker-desktop` on purpose, so the command above is
-unchanged. [kubernetes.md](kubernetes.md) §15 carries that section in full,
-with the exact `kubectl config` lines, and is the authority for it; this
-document does not restate it.
+unchanged. [kubernetes.md](kubernetes.md) §16, *Serving the UI*, carries that
+section in full, with the exact `kubectl config` lines, and is the authority
+for it; this document does not restate it.
 
 ---
 

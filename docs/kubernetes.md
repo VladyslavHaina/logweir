@@ -1501,7 +1501,7 @@ pointer that replaced the second copy.
 **What did NOT move, and why.** The rest of this section is measurement, not
 instruction: the RBAC reasoning below, the NetworkPolicy's `[UNVERIFIED]` mark
 in place, the `ValidatingAdmissionPolicy` note, and the recorded X-APPLY
-transcript at the end. §14's X-DIGEST transcript and §15's UI section are the
+transcript at the end. §14's X-DIGEST transcript and §16's UI section are the
 same kind of thing. A transcript is evidence of what happened on a named day on
 a named cluster; moving it would be rewriting it.
 
