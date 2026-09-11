@@ -458,3 +458,145 @@ pub const PHASE_SUCCEEDED: &str = "Succeeded";
 
 /// `phase` for every other terminal outcome, the crashed-Job case included.
 pub const PHASE_FAILED: &str = "Failed";
+
+// ===========================================================================
+// THE STATUS-WRITE CONTRACT — ONE IMPLEMENTATION, SIX RECONCILERS
+// ===========================================================================
+//
+// Plan erratum **E11(d)**, from Task 15c's review (findings H-1, H-2, M-1).
+//
+// # The bug these four functions close
+//
+// A reconciler's OWN status patch is what wakes it: a patch that changes any
+// byte bumps `resourceVersion`, the primary-resource watch fires, and the next
+// reconcile writes another changing byte. `owns` is not required and no child
+// object is needed — two of the three reconcilers caught by this were watching
+// nothing at all. Measured live on docker-desktop at `376a09e`, on objects
+// nobody touched: `trust_roster` **12,107 reconciles in 91.2 s**, `approval`
+// **7,114 in 90.4 s**, and `backup_schedule` writing a fresh
+// `retentionReport.evaluatedAt` on every pass.
+//
+// The invariant, stated once: **a status patch is a pure function of the
+// object and its children, never of the clock.** Three rules implement it, and
+// all three live here rather than in any reconciler:
+//
+// 1. A condition's `lastTransitionTime` moves only when that condition's
+//    `status` or `reason` moves — [`merge_condition`], the `metav1.Condition`
+//    contract. `message` is deliberately NOT compared: it carries instants
+//    (the next firing, the slot) that move by design, and comparing it would
+//    put the bug straight back.
+// 2. A "when computed" field — `retentionReport.evaluatedAt` — is written only
+//    when the thing it timestamps changed, and kept otherwise. That
+//    comparison is the report's own
+//    (`crate::retention::RetentionReport::same_findings_as`), and it feeds
+//    this module's rule 3.
+// 3. **If the patch would not change the object, no patch is sent at all** —
+//    [`status_unchanged`]. This is the backstop that makes rules 1 and 2
+//    OBSERVABLE in a test (a route table with zero PATCHes) instead of merely
+//    invisible on the wire, and it is what turns a redundant API write into no
+//    API write.
+//
+// # Why the comparison is RFC 7386 and not `==`
+//
+// Every reconciler here patches with `Patch::Merge`, which is RFC 7386. A
+// merge patch that omits a key means "leave it alone", and one that carries
+// `null` means "delete it" — so "the computed status equals the current
+// status" is not a comparison of two objects, it is the question *would
+// applying this patch change anything*. [`apply_merge_patch`] is the API
+// server's half of that question, written out so the answer is exact: a patch
+// that omits five keys and repeats a sixth is correctly read as a no-op, and a
+// patch that sets a key to `null` on an object that never had it is too.
+// Arrays are REPLACED and never merged, which is why every condition array
+// this crate writes is built from `Condition` and serialised by `serde` —
+// a hand-built element that spells one optional field differently from the
+// stored one would compare unequal forever and re-open the loop.
+
+/// The object's current condition of this `type`, if it carries one.
+///
+/// The lookup half of [`merge_condition`], separate only because each kind has
+/// its own status struct and therefore its own path to the vector; the
+/// COMPARISON is in one place and this is not it.
+#[must_use]
+pub fn current_condition<'a>(
+    conditions: Option<&'a Vec<crate::crds::Condition>>,
+    r#type: &str,
+) -> Option<&'a crate::crds::Condition> {
+    conditions?.iter().find(|c| c.r#type == r#type)
+}
+
+/// `next`, carrying the `lastTransitionTime` the `metav1.Condition` contract
+/// says it should: the one it ALREADY has when neither `status` nor `reason`
+/// changed, and `next`'s own otherwise.
+///
+/// THE ONE COMPARISON. Before this function there were four byte-identical
+/// private copies of it (`backup.rs`, `restore.rs`, `kafka_cluster.rs`,
+/// `backup_schedule.rs`) and two reconcilers with none at all
+/// (`trust_roster.rs`, `approval.rs`) — which is exactly how a rule comes to
+/// hold on four kinds and not on the other two. Every reconciler in this crate
+/// calls this; none of them compares timestamps itself.
+///
+/// `existing` is `None` for a first write, and then `next` is returned
+/// unchanged: the first time a condition appears IS a transition.
+#[must_use]
+pub fn merge_condition(
+    existing: Option<&crate::crds::Condition>,
+    next: crate::crds::Condition,
+) -> crate::crds::Condition {
+    match existing {
+        Some(c) if c.status == next.status && c.reason == next.reason => crate::crds::Condition {
+            last_transition_time: c.last_transition_time,
+            ..next
+        },
+        _ => next,
+    }
+}
+
+/// Apply an RFC 7386 JSON merge patch to `target`, exactly as the API server
+/// would.
+///
+/// `null` deletes the key; an object merges recursively; anything else —
+/// arrays included — replaces. A non-object `target` under an object patch
+/// becomes an empty object first, which is the RFC's own rule and is what
+/// makes a first write onto an absent status come out right.
+pub fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let Some(fields) = patch.as_object() else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let map = target
+        .as_object_mut()
+        .expect("target was just made an object");
+    for (k, v) in fields {
+        if v.is_null() {
+            map.remove(k);
+        } else {
+            apply_merge_patch(map.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+        }
+    }
+}
+
+/// Whether sending `next` would leave `current` byte-for-byte as it is — in
+/// which case the reconciler sends nothing.
+///
+/// `current` is the object's status as it stands (`None` for an object with no
+/// status yet); `next` is the WHOLE patch body the reconciler is about to
+/// send, `{"status": {…}}`, so a call site passes the value it already built
+/// and does no indexing of its own.
+///
+/// A body with no `status` key changes no status and is therefore unchanged;
+/// that shape is not written anywhere in this crate and is answered rather
+/// than asserted, because a `debug_assert` here would be a panic on a path
+/// whose whole purpose is to avoid a write.
+#[must_use]
+pub fn status_unchanged(current: Option<&serde_json::Value>, next: &serde_json::Value) -> bool {
+    let Some(status) = next.get("status") else {
+        return true;
+    };
+    let current = current.cloned().unwrap_or(serde_json::Value::Null);
+    let mut merged = current.clone();
+    apply_merge_patch(&mut merged, status);
+    merged == current
+}

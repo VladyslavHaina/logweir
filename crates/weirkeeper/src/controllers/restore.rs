@@ -118,14 +118,14 @@ use super::backup::{
 };
 use super::Context;
 use crate::conditions::{
-    reason_for_exit, wire_reason_for_exit, CONDITION_ADMITTED, CONDITION_COMPLETE,
-    CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED, CONDITION_JOB_CREATED, PHASE_FAILED,
-    PHASE_PENDING, PHASE_RUNNING, PHASE_SUCCEEDED, REASON_ADMITTED, REASON_APPROVAL_NOT_VERIFIED,
-    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL,
-    TERMINAL_STATE_APPROVAL_NOT_RECEIVED, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
-    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_NAME_TOO_LONG,
-    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_PLAN_HASH_MISMATCH,
-    TERMINAL_STATE_WINDOW_NOT_COVERED,
+    current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
+    CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
+    CONDITION_JOB_CREATED, PHASE_FAILED, PHASE_PENDING, PHASE_RUNNING, PHASE_SUCCEEDED,
+    REASON_ADMITTED, REASON_APPROVAL_NOT_VERIFIED, REASON_EVIDENCE_KEYS_RECORDED,
+    REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL, TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
+    TERMINAL_STATE_CLUSTER_NOT_REACHABLE, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+    TERMINAL_STATE_PLAN_HASH_MISMATCH, TERMINAL_STATE_WINDOW_NOT_COVERED,
 };
 use crate::crds::approval::Approval;
 use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
@@ -1160,30 +1160,15 @@ pub fn window_not_covered(exit_code: i32, outcome: Option<&str>) -> Option<&'sta
 // Status patches
 // ---------------------------------------------------------------------------
 
-/// `lastTransitionTime` moves only when the condition actually transitions.
-///
-/// This controller requeues, so a bump on every write would put a fresh
-/// transition timestamp on a `Restore` that never changed state — both a lie
-/// about the condition and a `resourceVersion` bump every watcher in the
-/// cluster receives.
-fn last_transition_time(
-    restore: &Restore,
-    r#type: &str,
-    status: &str,
-    reason: &str,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    restore
-        .status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .and_then(|cs| cs.iter().find(|c| c.r#type == r#type))
-        .filter(|c| c.status == status && c.reason.as_deref() == Some(reason))
-        .and_then(|c| c.last_transition_time)
-        .unwrap_or(now)
-}
-
 /// One condition, as a merge-patch fragment.
+///
+/// `lastTransitionTime` moves only when the condition actually transitions,
+/// and the comparison that decides it is
+/// [`crate::conditions::merge_condition`] — ONE implementation for all six
+/// reconcilers (plan erratum E11(d)); this file used to carry a private copy.
+/// Built by serialising [`crate::crds::Condition`] so the element compares
+/// byte for byte against the stored one — see `backup::condition` for why a
+/// hand-built element re-opens the loop.
 fn condition(
     restore: &Restore,
     r#type: &str,
@@ -1192,14 +1177,51 @@ fn condition(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    json!({
-        "type": r#type,
-        "status": status,
-        "reason": reason,
-        "message": message,
-        "observedGeneration": restore.meta().generation,
-        "lastTransitionTime": last_transition_time(restore, r#type, status, reason, now),
-    })
+    json!(merge_condition(
+        current_condition(
+            restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+            r#type,
+        ),
+        crate::crds::Condition {
+            r#type: r#type.to_string(),
+            status: status.to_string(),
+            observed_generation: restore.meta().generation,
+            last_transition_time: Some(now),
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+        },
+    ))
+}
+
+/// Patch `/status` — unless the patch would change nothing.
+///
+/// The decision is [`crate::conditions::status_unchanged`]'s; this exists so
+/// this reconciler's six patch sites read as one line each and the skip cannot
+/// be applied at five of them and forgotten at the sixth.
+async fn patch_status_if_changed(
+    api: &Api<Restore>,
+    restore: &Restore,
+    name: &str,
+    patch: Value,
+) -> Result<(), RestoreError> {
+    if status_unchanged(
+        restore
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .as_ref(),
+        &patch,
+    ) {
+        debug!(
+            restore = %name,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+        return Ok(());
+    }
+    api.patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .map_err(RestoreError::Api)?;
+    Ok(())
 }
 
 /// The `/status` merge patch for an admission that is a HOLD rather than a
@@ -1944,14 +1966,13 @@ pub async fn reconcile_restore(
             );
             if !status_is_terminal(restore) {
                 let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
-                restores
-                    .patch_status(
-                        &name,
-                        &PatchParams::default(),
-                        &Patch::Merge(refused_status_patch(restore, state, &message, now)),
-                    )
-                    .await
-                    .map_err(RestoreError::Api)?;
+                patch_status_if_changed(
+                    &restores,
+                    restore,
+                    &name,
+                    refused_status_patch(restore, state, &message, now),
+                )
+                .await?;
             }
             Ok(RestoreOutcome {
                 job_name: name,
@@ -2081,14 +2102,13 @@ async fn reconcile_restore_inner(
                          for {ADMISSION_REQUEUE_SECS}s (interface I19)"
                     );
                 }
-                restores
-                    .patch_status(
-                        &name,
-                        &PatchParams::default(),
-                        &Patch::Merge(admission_hold_patch(restore, a, now)),
-                    )
-                    .await
-                    .map_err(RestoreError::Api)?;
+                patch_status_if_changed(
+                    &restores,
+                    restore,
+                    &name,
+                    admission_hold_patch(restore, a, now),
+                )
+                .await?;
                 return Ok(RestoreOutcome {
                     job_name,
                     created: false,
@@ -2136,14 +2156,13 @@ async fn reconcile_restore_inner(
             "created the runner Job; the plan hash was recomputed from spec.planBytes and \
              matched the hash inside the approval's own signed bytes"
         );
-        restores
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(running_status_patch(restore, &job_name, true, now)),
-            )
-            .await
-            .map_err(RestoreError::Api)?;
+        patch_status_if_changed(
+            &restores,
+            restore,
+            &name,
+            running_status_patch(restore, &job_name, true, now),
+        )
+        .await?;
         return Ok(RestoreOutcome {
             job_name,
             created: true,
@@ -2158,14 +2177,13 @@ async fn reconcile_restore_inner(
 
     // STEP 2. Running.
     if !backup::job_finished(&job) {
-        restores
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(running_status_patch(restore, &job_name, false, now)),
-            )
-            .await
-            .map_err(RestoreError::Api)?;
+        patch_status_if_changed(
+            &restores,
+            restore,
+            &name,
+            running_status_patch(restore, &job_name, false, now),
+        )
+        .await?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -2193,19 +2211,13 @@ async fn reconcile_restore_inner(
             "the Job finished with no terminated state for the runner container; writing a \
              terminal status rather than watching forever, and inventing no exit code"
         );
-        restores
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(crashed_status_patch(
-                    restore,
-                    terminal_state,
-                    &job_name,
-                    now,
-                )),
-            )
-            .await
-            .map_err(RestoreError::Api)?;
+        patch_status_if_changed(
+            &restores,
+            restore,
+            &name,
+            crashed_status_patch(restore, terminal_state, &job_name, now),
+        )
+        .await?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -2270,22 +2282,21 @@ async fn reconcile_restore_inner(
         }
     }
 
-    restores
-        .patch_status(
-            &name,
-            &PatchParams::default(),
-            &Patch::Merge(finished_status_patch(
-                restore,
-                exit_code,
-                &keys,
-                refusal.as_deref(),
-                observed.as_ref(),
-                topics.as_ref(),
-                now,
-            )),
-        )
-        .await
-        .map_err(RestoreError::Api)?;
+    patch_status_if_changed(
+        &restores,
+        restore,
+        &name,
+        finished_status_patch(
+            restore,
+            exit_code,
+            &keys,
+            refusal.as_deref(),
+            observed.as_ref(),
+            topics.as_ref(),
+            now,
+        ),
+    )
+    .await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this

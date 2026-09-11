@@ -88,6 +88,7 @@ use tracing::{debug, info, warn};
 use logweir_store::Store;
 
 use super::Context;
+use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::backup::{Backup, BackupSpec};
 use crate::crds::backup_schedule::{BackupSchedule, BackupScheduleSpec, Retention};
 use crate::crds::{Condition, LocalRef};
@@ -611,11 +612,15 @@ pub fn scheduled_backup(
 /// timestamp an operator uses to tell when the backup actually ran.
 ///
 /// `lastTransitionTime` MOVES ONLY WHEN THE CONDITION TRANSITIONS — see
-/// [`last_transition_time`]. This reconciler requeues every
-/// [`REQUEUE_SECS`] seconds, so a bump-on-every-write would put 2,880 fresh
-/// transition timestamps a day on a schedule that never changed state (fix
-/// round 1, review finding MED-1), which is both a lie about the condition and
-/// 2,880 `resourceVersion` bumps every watcher in the cluster has to receive.
+/// [`crate::conditions::merge_condition`], which is now the ONE
+/// implementation of that comparison for all six reconcilers (plan erratum
+/// E11(d); this file's private copy was one of four). This reconciler requeues
+/// every [`REQUEUE_SECS`] seconds, so a bump-on-every-write would put 2,880
+/// fresh transition timestamps a day on a schedule that never changed state
+/// (fix round 1, review finding MED-1), which is both a lie about the
+/// condition and 2,880 `resourceVersion` bumps every watcher in the cluster
+/// has to receive. `retentionReport.evaluatedAt` obeys the same rule through
+/// [`crate::crds::backup_schedule::RetentionReport::same_findings_as`].
 #[must_use]
 pub fn status_patch(
     schedule: &BackupSchedule,
@@ -645,7 +650,26 @@ pub fn status_patch_with_retention(
 ) -> serde_json::Value {
     let mut status = serde_json::Map::new();
     if let Some(report) = retention {
-        status.insert("retentionReport".to_string(), json!(report.to_status()));
+        // `evaluatedAt` IS KEPT WHEN THE FINDINGS ARE THE SAME — plan erratum
+        // E11(d), review finding M-1. `evaluatedAt` is a "when computed" field,
+        // so writing `now` into it on every pass made the whole status differ
+        // on every pass, bumped `resourceVersion`, woke this reconciler's own
+        // watch and spun it — the identical defect the two unconditional
+        // `lastTransitionTime` writes had, reached through a different field.
+        // The comparison is the report's own
+        // (`crds::backup_schedule::RetentionReport::same_findings_as`), which
+        // compares every field EXCEPT the instant.
+        let mut next = report.to_status();
+        if let Some(previous) = schedule
+            .status
+            .as_ref()
+            .and_then(|s| s.retention_report.as_ref())
+        {
+            if next.same_findings_as(previous) {
+                next.evaluated_at = previous.evaluated_at;
+            }
+        }
+        status.insert("retentionReport".to_string(), json!(next));
     }
     status.insert(
         "nextFireTime".to_string(),
@@ -668,48 +692,22 @@ pub fn status_patch_with_retention(
     let reason = decision.reason();
     status.insert(
         "conditions".to_string(),
-        json!([Condition {
-            r#type: CONDITION_READY.to_string(),
-            status: ready.to_string(),
-            observed_generation: schedule.metadata.generation,
-            last_transition_time: Some(last_transition_time(schedule, ready, reason, now)),
-            reason: Some(reason.to_string()),
-            message: Some(decision.message()),
-        }]),
+        json!([merge_condition(
+            current_condition(
+                schedule.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                CONDITION_READY,
+            ),
+            Condition {
+                r#type: CONDITION_READY.to_string(),
+                status: ready.to_string(),
+                observed_generation: schedule.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(reason.to_string()),
+                message: Some(decision.message()),
+            },
+        )]),
     );
     json!({ "status": serde_json::Value::Object(status) })
-}
-
-/// The `lastTransitionTime` the `Ready` condition should carry: the one it
-/// ALREADY carries when neither `status` nor `reason` has changed, and `now`
-/// otherwise.
-///
-/// THE KUBERNETES CONDITION CONTRACT IS THAT THIS FIELD MOVES WHEN THE
-/// CONDITION TRANSITIONS, and "the controller woke up again" is not a
-/// transition. Without this, a reconciler on a [`REQUEUE_SECS`] requeue writes
-/// 2,880 fresh timestamps a day per schedule (fix round 1, review finding
-/// MED-1) and an operator asking "how long has this been Ready?" is told
-/// "thirty seconds" about a schedule that has been Ready for a month.
-///
-/// THE MESSAGE IS DELIBERATELY NOT PART OF THE COMPARISON. It carries the next
-/// firing instant, which moves at every slot boundary by design; comparing it
-/// would make every message change a transition and put the bug straight back.
-/// `status` and `reason` are the machine-readable pair, and they are what the
-/// contract is written about.
-fn last_transition_time(
-    schedule: &BackupSchedule,
-    ready: &str,
-    reason: &str,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    schedule
-        .status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .and_then(|conditions| conditions.iter().find(|c| c.r#type == CONDITION_READY))
-        .filter(|c| c.status == ready && c.reason.as_deref() == Some(reason))
-        .and_then(|c| c.last_transition_time)
-        .unwrap_or(now)
 }
 
 /// What one reconcile did.
@@ -943,18 +941,36 @@ pub async fn reconcile_schedule_with_archive(
     // AFTER THE CREATE, ALWAYS. See the function note: the crash window is
     // harmless only in this order.
     let api: Api<BackupSchedule> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
-        &name,
-        &PatchParams::default(),
-        &Patch::Merge(status_patch_with_retention(
-            schedule,
-            &decision,
-            created.as_deref(),
-            retention_report.as_ref(),
-            now,
-        )),
-    )
-    .await?;
+    let patch = status_patch_with_retention(
+        schedule,
+        &decision,
+        created.as_deref(),
+        retention_report.as_ref(),
+        now,
+    );
+    // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding M-1.
+    // The two rules above (the merged condition, the kept `evaluatedAt`) make
+    // a steady schedule's computed status equal to the stored one; this is
+    // what turns that equality into NO API CALL, which is the property the
+    // route-table test can see. The decision is still returned and still
+    // logged.
+    if status_unchanged(
+        schedule
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .as_ref(),
+        &patch,
+    ) {
+        debug!(
+            schedule = %name,
+            namespace = %namespace,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+    } else {
+        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
+    }
 
     if !decision.ready() {
         // WARN AND NOT ERROR. A suspended schedule is an operator's own

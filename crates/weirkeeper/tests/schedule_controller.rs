@@ -161,13 +161,29 @@ fn body_name(seen: &SeenBody) -> String {
 
 /// The one `status` object out of the recorded `PATCH` bodies.
 fn patched_status(bodies: &[SeenBody]) -> serde_json::Value {
-    let patch = bodies
-        .iter()
-        .find(|b| b.method == "PATCH")
-        .expect("the reconciler patches /status");
+    patched_status_opt(bodies).expect("the reconciler patches /status")
+}
+
+/// The `status` object out of the recorded `PATCH` bodies, or `None` when the
+/// reconciler sent NO patch.
+///
+/// TASK 16b. A reconcile whose computed status equals the one already on the
+/// object now sends nothing at all (plan erratum E11(d), review findings
+/// H-1/H-2/M-1) — a steady `BackupSchedule` on a 30 s requeue used to issue
+/// 2,880 identical `PATCH`es a day, and one with an archive configured spun,
+/// because `retentionReport.evaluatedAt = now` made each of them a change.
+/// "No patch" is now an expected outcome, so it is a `None` a test can assert
+/// on rather than a panic inside a helper.
+fn patched_status_opt(bodies: &[SeenBody]) -> Option<serde_json::Value> {
+    let patch = bodies.iter().find(|b| b.method == "PATCH")?;
     let v: serde_json::Value =
         serde_json::from_str(&patch.body).expect("a recorded PATCH body is JSON");
-    v["status"].clone()
+    Some(v["status"].clone())
+}
+
+/// How many `/status` `PATCH`es the double was asked for.
+fn patch_count(bodies: &[SeenBody]) -> usize {
+    bodies.iter().filter(|b| b.method == "PATCH").count()
 }
 
 /// This file's own source, for the source-reading assertions.
@@ -1150,9 +1166,18 @@ async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
         + chrono::Duration::seconds(
             i64::try_from(REQUEUE_SECS).expect("the requeue interval is 30 seconds"),
         );
-    for (label, now) in [
-        ("the 30 s requeue", requeue),
-        ("+12 h, a different message", utc(2026, 9, 10, 12, 0)),
+    //
+    // `expected_patches` IS TASK 16b's ADDITION, and it is the sharper form of
+    // this test's own property. At the 30 s requeue the decision is still
+    // `Due` over the same slot, so every key the pass computes — the message
+    // included — equals what the object already carries, and the reconcile now
+    // sends NO patch at all (plan erratum E11(d)). At +12 h the decision has
+    // become `AlreadyFired`, whose MESSAGE differs while `status` and `reason`
+    // do not, so one patch is sent and `lastTransitionTime` must still be the
+    // original instant — which is the MED-1 assertion, unchanged.
+    for (label, now, expected_patches) in [
+        ("the 30 s requeue", requeue, 0),
+        ("+12 h, a different message", utc(2026, 9, 10, 12, 0), 1),
     ] {
         let mut again = schedule("nightly", UID, DAILY, false);
         again.status = Some(stored.clone());
@@ -1160,7 +1185,17 @@ async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
         reconcile_schedule(&again, &client, now)
             .await
             .unwrap_or_else(|e| panic!("{label}: {e}"));
-        let condition = patched_status(&bodies.lock().expect("readable"))["conditions"][0].clone();
+        let recorded = bodies.lock().expect("readable").clone();
+        assert_eq!(
+            patch_count(&recorded),
+            expected_patches,
+            "{label}: a reconcile that changes nothing writes nothing (plan erratum E11(d)); a \
+             reconcile that changes the message writes once"
+        );
+        let status = patched_status_opt(&recorded).unwrap_or_else(|| {
+            serde_json::to_value(&stored).expect("the stored status serialises")
+        });
+        let condition = status["conditions"][0].clone();
         assert_eq!(
             condition["reason"],
             serde_json::json!(REASON_SCHEDULED),
@@ -1249,10 +1284,18 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
     // Every instant of the rest of the day, at the three points that matter:
     // just after the fire (still inside the horizon), the middle of the day,
     // and one minute before the next slot.
-    for (label, now, expected_posts) in [
-        ("+5 min", utc(2026, 9, 10, 0, 5), 1),
-        ("+12 h", utc(2026, 9, 10, 12, 0), 0),
-        ("+23 h 59 min", utc(2026, 9, 10, 23, 59), 0),
+    //
+    // `expected_patches` IS TASK 16b's ADDITION. At +5 min the slot is still
+    // inside the horizon, so the decision, the name, `nextFireTime` and the
+    // whole condition are byte-identical to what the midnight pass already
+    // wrote — and a reconcile that computes the status the object already
+    // carries now sends NO patch (plan erratum E11(d)). At +12 h and
+    // +23 h 59 min the decision has become `AlreadyFired`, whose message
+    // differs, so one patch IS sent.
+    for (label, now, expected_posts, expected_patches) in [
+        ("+5 min", utc(2026, 9, 10, 0, 5), 1, 0),
+        ("+12 h", utc(2026, 9, 10, 12, 0), 0, 1),
+        ("+23 h 59 min", utc(2026, 9, 10, 23, 59), 0, 1),
     ] {
         let mut later = schedule("nightly", UID, DAILY, false);
         later.status = Some(stored.clone());
@@ -1278,7 +1321,18 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
             outcome.decision
         );
 
-        let status = patched_status(&bodies.lock().expect("the body recorder is readable"));
+        let recorded = bodies.lock().expect("the body recorder is readable").clone();
+        assert_eq!(
+            patch_count(&recorded),
+            expected_patches,
+            "{label}: a reconcile that changes nothing writes nothing (plan erratum E11(d))"
+        );
+        // The status the object CARRIES after this pass: the patch when one was
+        // sent, and otherwise the one it already had — which is the same
+        // object either way, and is what the assertions below are about.
+        let status = patched_status_opt(&recorded).unwrap_or_else(|| {
+            serde_json::to_value(&stored).expect("the stored status serialises")
+        });
         assert!(
             status.get("lastMissedSlot").is_none(),
             "{label}: NOTHING was missed, so `lastMissedSlot` is not written. This assertion \

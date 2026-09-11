@@ -68,7 +68,9 @@ use tracing::{debug, info, warn};
 
 use super::backup::{self, RUNNER_SERVICE_ACCOUNT};
 use super::Context;
-use crate::conditions::TERMINAL_STATE_NAME_TOO_LONG;
+use crate::conditions::{
+    current_condition, merge_condition, status_unchanged, TERMINAL_STATE_NAME_TOO_LONG,
+};
 use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner};
 
@@ -521,26 +523,14 @@ pub fn observed_at(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> DateTime
 // Status patches
 // ---------------------------------------------------------------------------
 
-fn last_transition_time(
-    cluster: &KafkaCluster,
-    r#type: &str,
-    status: &str,
-    reason: &str,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    cluster
-        .status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .and_then(|cs| cs.iter().find(|c| c.r#type == r#type))
-        .filter(|c| c.status == status && c.reason.as_deref() == Some(reason))
-        .and_then(|c| c.last_transition_time)
-        .unwrap_or(now)
-}
-
 /// One condition, as a merge-patch fragment. **Exactly one is ever written**
 /// (errata **E5c**): a condition array is a map keyed by `type`, so two
 /// `Reachable` entries would be a malformed status whatever their statuses said.
+///
+/// `lastTransitionTime` moves only when the condition actually transitions,
+/// and the comparison that decides it is
+/// [`crate::conditions::merge_condition`] — ONE implementation for all six
+/// reconcilers (plan erratum E11(d)); this file used to carry a private copy.
 fn condition(
     cluster: &KafkaCluster,
     status: &str,
@@ -548,14 +538,50 @@ fn condition(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    json!({
-        "type": CONDITION_REACHABLE,
-        "status": status,
-        "reason": reason,
-        "message": message,
-        "observedGeneration": cluster.meta().generation,
-        "lastTransitionTime": last_transition_time(cluster, CONDITION_REACHABLE, status, reason, now),
-    })
+    json!(merge_condition(
+        current_condition(
+            cluster.status.as_ref().and_then(|s| s.conditions.as_ref()),
+            CONDITION_REACHABLE,
+        ),
+        crate::crds::Condition {
+            r#type: CONDITION_REACHABLE.to_string(),
+            status: status.to_string(),
+            observed_generation: cluster.meta().generation,
+            last_transition_time: Some(now),
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+        },
+    ))
+}
+
+/// Patch `/status` — unless the patch would change nothing.
+///
+/// The decision is [`crate::conditions::status_unchanged`]'s; this exists so
+/// this reconciler's five patch sites read as one line each.
+async fn patch_status_if_changed(
+    api: &Api<KafkaCluster>,
+    cluster: &KafkaCluster,
+    name: &str,
+    patch: Value,
+) -> Result<(), KafkaClusterError> {
+    if status_unchanged(
+        cluster
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .as_ref(),
+        &patch,
+    ) {
+        debug!(
+            cluster = %name,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+        return Ok(());
+    }
+    api.patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .map_err(KafkaClusterError::Api)?;
+    Ok(())
 }
 
 /// The `/status` merge patch for the pass that CREATED a probe Job.
@@ -866,14 +892,13 @@ pub async fn reconcile_cluster(
             );
             if !status_is_terminal(cluster) {
                 let clusters: Api<KafkaCluster> = Api::namespaced(client.clone(), &namespace);
-                clusters
-                    .patch_status(
-                        &name,
-                        &PatchParams::default(),
-                        &Patch::Merge(refused_status_patch(cluster, state, &message, now)),
-                    )
-                    .await
-                    .map_err(KafkaClusterError::Api)?;
+                patch_status_if_changed(
+                    &clusters,
+                    cluster,
+                    &name,
+                    refused_status_patch(cluster, state, &message, now),
+                )
+                .await?;
             }
             Ok(ProbeOutcome {
                 job_name: probe_job_name(&name),
@@ -953,14 +978,13 @@ async fn reconcile_cluster_inner(
             "created the probe Job; this controller never dials a broker itself and never reads \
              a Secret, which is why a probe is a Job"
         );
-        clusters
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(probe_started_patch(cluster, &job_name, now)),
-            )
-            .await
-            .map_err(KafkaClusterError::Api)?;
+        patch_status_if_changed(
+            &clusters,
+            cluster,
+            &name,
+            probe_started_patch(cluster, &job_name, now),
+        )
+        .await?;
         return Ok(ProbeOutcome {
             job_name,
             created: true,
@@ -974,14 +998,13 @@ async fn reconcile_cluster_inner(
 
     // STEP 2. Running.
     if !backup::job_finished(&job) {
-        clusters
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(probe_started_patch(cluster, &job_name, now)),
-            )
-            .await
-            .map_err(KafkaClusterError::Api)?;
+        patch_status_if_changed(
+            &clusters,
+            cluster,
+            &name,
+            probe_started_patch(cluster, &job_name, now),
+        )
+        .await?;
         return Ok(ProbeOutcome {
             job_name,
             created: false,
@@ -1010,19 +1033,13 @@ async fn reconcile_cluster_inner(
             "the probe Job finished with no terminated state for the runner container; nothing \
              about this cluster is known either way, and `reachable` is left unset"
         );
-        clusters
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(crashed_status_patch(
-                    cluster,
-                    terminal_state,
-                    &job_name,
-                    observed,
-                )),
-            )
-            .await
-            .map_err(KafkaClusterError::Api)?;
+        patch_status_if_changed(
+            &clusters,
+            cluster,
+            &name,
+            crashed_status_patch(cluster, terminal_state, &job_name, observed),
+        )
+        .await?;
         return Ok(ProbeOutcome {
             job_name,
             created: false,
@@ -1062,14 +1079,13 @@ async fn reconcile_cluster_inner(
         );
     }
 
-    clusters
-        .patch_status(
-            &name,
-            &PatchParams::default(),
-            &Patch::Merge(observed_status_patch(cluster, &v, exit_code, observed)),
-        )
-        .await
-        .map_err(KafkaClusterError::Api)?;
+    patch_status_if_changed(
+        &clusters,
+        cluster,
+        &name,
+        observed_status_patch(cluster, &v, exit_code, observed),
+    )
+    .await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this

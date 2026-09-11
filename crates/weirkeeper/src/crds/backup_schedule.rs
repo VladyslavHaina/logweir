@@ -140,6 +140,33 @@ pub struct RetentionReport {
     pub note: Option<String>,
 }
 
+impl RetentionReport {
+    /// Whether this report FOUND what `other` found — every field compared
+    /// except [`RetentionReport::evaluated_at`].
+    ///
+    /// # Why `evaluatedAt` is the one field left out
+    ///
+    /// It is a "when computed" field, not a finding: it timestamps the
+    /// evaluation, so comparing it would make every evaluation differ from
+    /// every other by construction. Plan erratum **E11(d)**, review finding
+    /// M-1 — `retentionReport.evaluatedAt = now` on every pass is what made a
+    /// `BackupSchedule` with an archive configured bump its own
+    /// `resourceVersion` on every reconcile and spin, exactly as the two
+    /// unconditional `lastTransitionTime` writes did. The rule is the same one
+    /// the `metav1.Condition` contract states for a transition time: the
+    /// timestamp moves when the thing it timestamps moves. The caller
+    /// (`controllers::backup_schedule::status_patch_with_retention`) keeps the
+    /// stored instant when this returns `true`.
+    #[must_use]
+    pub fn same_findings_as(&self, other: &Self) -> bool {
+        let ignoring_when = |r: &Self| Self {
+            evaluated_at: None,
+            ..r.clone()
+        };
+        ignoring_when(self) == ignoring_when(other)
+    }
+}
+
 /// One manifest key the evaluation could not read. **Task 19 review, F-5.**
 // WHY A SKIP IS A REPORTED FACT AND NOT AN ERROR.
 // `retention::evaluate` used to return `Err` on the first manifest that did

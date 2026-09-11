@@ -61,9 +61,10 @@ use logweir_core::ids::sha256_prefixed;
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::Context;
+use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::approval::{Approval, ApprovalStatus, SubjectKind};
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
@@ -814,14 +815,20 @@ pub fn status_for(
         approver,
         ticket,
         self_attested_risk,
-        conditions: Some(vec![Condition {
-            r#type: CONDITION_VERIFIED.to_string(),
-            status: if verified { "True" } else { "False" }.to_string(),
-            observed_generation: approval.metadata.generation,
-            last_transition_time: Some(now),
-            reason: Some(outcome.reason().to_string()),
-            message: Some(outcome.message()),
-        }]),
+        conditions: Some(vec![merge_condition(
+            current_condition(
+                approval.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                CONDITION_VERIFIED,
+            ),
+            Condition {
+                r#type: CONDITION_VERIFIED.to_string(),
+                status: if verified { "True" } else { "False" }.to_string(),
+                observed_generation: approval.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(outcome.reason().to_string()),
+                message: Some(outcome.message()),
+            },
+        )]),
     }
 }
 
@@ -847,12 +854,31 @@ pub async fn reconcile_approval(
     let status = status_for(approval, &outcome, Utc::now());
 
     let api: Api<Approval> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
-        &name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({ "status": status })),
-    )
-    .await?;
+    let patch = json!({ "status": status });
+    // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-2.
+    // An `Approval` is the most steady object this controller holds: its spec
+    // is sealed by CEL and its verdict is a function of that spec, the roster
+    // and the referent. Before this guard the unconditional
+    // `lastTransitionTime: Some(now)` in [`status_for`] made every pass a
+    // change, its own status patch woke the watch, and one steady `Approval`
+    // ran 7,114 reconciles in 90.4 s. The outcome is still logged below.
+    if status_unchanged(
+        approval
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .as_ref(),
+        &patch,
+    ) {
+        debug!(
+            approval = %name,
+            namespace = %namespace,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+    } else {
+        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
+    }
 
     if outcome.is_verified() {
         info!(

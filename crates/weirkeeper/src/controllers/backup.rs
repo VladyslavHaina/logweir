@@ -77,13 +77,13 @@ use tracing::{debug, info, warn};
 
 use super::Context;
 use crate::conditions::{
-    reason_for_exit, wire_reason_for_exit, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED,
-    CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED, PHASE_FAILED,
-    PHASE_RUNNING, PHASE_SUCCEEDED, REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE,
-    REASON_OPERATIONAL, TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
-    TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE, TERMINAL_STATE_DISRUPTED_MID_DRILL,
-    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_NAME_TOO_LONG,
-    TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
+    current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
+    CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED, CONDITION_JOB_CREATED,
+    CONDITION_REASON_GUARD_REFUSED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
+    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL,
+    TERMINAL_STATE_ARCHIVE_URL_UNREADABLE, TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
     TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_UNSCHEDULABLE,
     TERMINAL_STATE_REFERENT_NOT_FOUND,
 };
@@ -943,30 +943,23 @@ pub fn status_is_terminal(backup: &Backup) -> bool {
     )
 }
 
-/// `lastTransitionTime` moves only when the condition actually transitions.
-///
-/// This controller requeues, so a bump on every write would put a fresh
-/// transition timestamp on a `Backup` that never changed state — both a lie
-/// about the condition and a `resourceVersion` bump every watcher in the
-/// cluster receives.
-fn last_transition_time(
-    backup: &Backup,
-    r#type: &str,
-    status: &str,
-    reason: &str,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    backup
-        .status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .and_then(|cs| cs.iter().find(|c| c.r#type == r#type))
-        .filter(|c| c.status == status && c.reason.as_deref() == Some(reason))
-        .and_then(|c| c.last_transition_time)
-        .unwrap_or(now)
-}
-
 /// One condition, as a merge-patch fragment.
+///
+/// `lastTransitionTime` moves only when the condition actually transitions,
+/// and the comparison that decides it is
+/// [`crate::conditions::merge_condition`] — ONE implementation for all six
+/// reconcilers (plan erratum E11(d)). This file used to carry a private copy
+/// of it, as did `restore.rs`, `kafka_cluster.rs` and `backup_schedule.rs`;
+/// four copies of a rule is how two other reconcilers came to ship without it
+/// at all.
+///
+/// BUILT BY SERIALISING [`crate::crds::Condition`] AND NOT BY HAND. A merge
+/// patch REPLACES an array rather than merging it, so the element this writes
+/// is compared whole against the stored one by
+/// [`crate::conditions::status_unchanged`]; a hand-built element that spelled
+/// one optional field differently from the stored one — `observedGeneration:
+/// null` where the stored object simply has no such key — would compare
+/// unequal on every pass and re-open the very loop this closes.
 fn condition(
     backup: &Backup,
     r#type: &str,
@@ -975,14 +968,53 @@ fn condition(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    json!({
-        "type": r#type,
-        "status": status,
-        "reason": reason,
-        "message": message,
-        "observedGeneration": backup.meta().generation,
-        "lastTransitionTime": last_transition_time(backup, r#type, status, reason, now),
-    })
+    json!(merge_condition(
+        current_condition(
+            backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+            r#type,
+        ),
+        crate::crds::Condition {
+            r#type: r#type.to_string(),
+            status: status.to_string(),
+            observed_generation: backup.meta().generation,
+            last_transition_time: Some(now),
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+        },
+    ))
+}
+
+/// Patch `/status` — unless the patch would change nothing.
+///
+/// THE THIRD RULE OF THE STATUS-WRITE CONTRACT, at this kind's five patch
+/// sites. The decision is [`crate::conditions::status_unchanged`]'s and is not
+/// re-implemented here; this exists so the five call sites read as one line
+/// each and so the skip is impossible to apply at four of them and forget at
+/// the fifth.
+async fn patch_status_if_changed(
+    api: &Api<Backup>,
+    backup: &Backup,
+    name: &str,
+    patch: Value,
+) -> Result<(), BackupError> {
+    if status_unchanged(
+        backup
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .as_ref(),
+        &patch,
+    ) {
+        debug!(
+            backup = %name,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+        return Ok(());
+    }
+    api.patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .map_err(BackupError::Api)?;
+    Ok(())
 }
 
 /// The `/status` merge patch for a Job that exists and has not finished.
@@ -1514,14 +1546,13 @@ pub async fn reconcile_backup(
             );
             if !status_is_terminal(backup) {
                 let backups: Api<Backup> = Api::namespaced(client.clone(), &namespace);
-                backups
-                    .patch_status(
-                        &name,
-                        &PatchParams::default(),
-                        &Patch::Merge(refused_status_patch(backup, state, &message, now)),
-                    )
-                    .await
-                    .map_err(BackupError::Api)?;
+                patch_status_if_changed(
+                    &backups,
+                    backup,
+                    &name,
+                    refused_status_patch(backup, state, &message, now),
+                )
+                .await?;
             }
             Ok(BackupOutcome {
                 job_name: name,
@@ -1638,14 +1669,13 @@ async fn reconcile_backup_inner(
             job = %job_name,
             "created the runner Job"
         );
-        backups
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(running_status_patch(backup, &job_name, now)),
-            )
-            .await
-            .map_err(BackupError::Api)?;
+        patch_status_if_changed(
+            &backups,
+            backup,
+            &name,
+            running_status_patch(backup, &job_name, now),
+        )
+        .await?;
         return Ok(BackupOutcome {
             job_name,
             created: true,
@@ -1658,14 +1688,13 @@ async fn reconcile_backup_inner(
 
     // STEP 2. Running.
     if !job_finished(&job) {
-        backups
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(running_status_patch(backup, &job_name, now)),
-            )
-            .await
-            .map_err(BackupError::Api)?;
+        patch_status_if_changed(
+            &backups,
+            backup,
+            &name,
+            running_status_patch(backup, &job_name, now),
+        )
+        .await?;
         return Ok(BackupOutcome {
             job_name,
             created: false,
@@ -1691,14 +1720,13 @@ async fn reconcile_backup_inner(
             "the Job finished with no terminated state for the runner container; writing a \
              terminal status rather than watching forever, and inventing no exit code"
         );
-        backups
-            .patch_status(
-                &name,
-                &PatchParams::default(),
-                &Patch::Merge(crashed_status_patch(backup, terminal_state, &job_name, now)),
-            )
-            .await
-            .map_err(BackupError::Api)?;
+        patch_status_if_changed(
+            &backups,
+            backup,
+            &name,
+            crashed_status_patch(backup, terminal_state, &job_name, now),
+        )
+        .await?;
         return Ok(BackupOutcome {
             job_name,
             created: false,
@@ -1764,22 +1792,21 @@ async fn reconcile_backup_inner(
         }
     }
 
-    backups
-        .patch_status(
-            &name,
-            &PatchParams::default(),
-            &Patch::Merge(finished_status_patch(
-                backup,
-                exit_code,
-                &keys,
-                refusal.as_deref(),
-                orphan,
-                covered,
-                now,
-            )),
-        )
-        .await
-        .map_err(BackupError::Api)?;
+    patch_status_if_changed(
+        &backups,
+        backup,
+        &name,
+        finished_status_patch(
+            backup,
+            exit_code,
+            &keys,
+            refusal.as_deref(),
+            orphan,
+            covered,
+            now,
+        ),
+    )
+    .await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this

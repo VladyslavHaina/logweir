@@ -1159,12 +1159,24 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
     let conditions_keys = src.matches("\"conditions\"").count();
     let reason_keys = src.matches("\"reason\"").count();
     assert_eq!(
-        reason_keys,
-        conditions_keys + 1,
-        "every place this file writes a `conditions` key also writes a scalar `reason` key, plus \
-         exactly ONE more — the `reason` field inside the `condition` builder itself, which is \
-         the value the scalar is a copy of. A patch builder added with `conditions` and no \
-         `reason` lands here as {conditions_keys} conditions against {reason_keys} reasons."
+        reason_keys, conditions_keys,
+        "every place this file writes a `conditions` key also writes a scalar `reason` key. A \
+         patch builder added with `conditions` and no `reason` lands here as {conditions_keys} \
+         conditions against {reason_keys} reasons."
+    );
+    // THE COUNT USED TO BE `conditions_keys + 1`, and the `+ 1` was the
+    // `"reason"` STRING KEY inside this file's own `condition` builder. Task
+    // 16b replaced that hand-built `json!({…})` with the serialised
+    // `crds::Condition` the shared `conditions::merge_condition` returns — one
+    // transition-time comparison for all six reconcilers, plan erratum
+    // E11(d) — so the builder no longer spells the key and the counts are now
+    // equal. Asserted rather than left implicit: if the builder ever stops
+    // going through the shared merge, the equality above would silently start
+    // meaning something else.
+    assert!(
+        src.contains("json!(merge_condition("),
+        "the condition builder goes through `conditions::merge_condition`, which is why the \
+         count above is an equality and not `+ 1`"
     );
 }
 

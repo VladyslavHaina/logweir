@@ -48,10 +48,11 @@ use kube::runtime::{watcher, Controller};
 use kube::{Api, ResourceExt};
 use logweir_verify::VerifyingKey;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::approval::{ReconcileError, ROSTER_NAME};
 use super::Context;
+use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec, TrustRosterStatus};
 use crate::crds::Condition;
 
@@ -156,14 +157,20 @@ pub fn status_for(
     TrustRosterStatus {
         loaded: Some(verdict.loaded),
         expired_key_ids: Some(verdict.expired_key_ids.clone()),
-        conditions: Some(vec![Condition {
-            r#type: CONDITION_LOADED.to_string(),
-            status: if verdict.loaded { "True" } else { "False" }.to_string(),
-            observed_generation: roster.metadata.generation,
-            last_transition_time: Some(now),
-            reason: Some(verdict.reason.to_string()),
-            message: Some(verdict.message.clone()),
-        }]),
+        conditions: Some(vec![merge_condition(
+            current_condition(
+                roster.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                CONDITION_LOADED,
+            ),
+            Condition {
+                r#type: CONDITION_LOADED.to_string(),
+                status: if verdict.loaded { "True" } else { "False" }.to_string(),
+                observed_generation: roster.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(verdict.reason.to_string()),
+                message: Some(verdict.message.clone()),
+            },
+        )]),
     }
 }
 
@@ -177,20 +184,44 @@ pub async fn reconcile_roster(
     client: &kube::Client,
 ) -> Result<RosterVerdict, ReconcileError> {
     let name = roster.name_any();
-    let verdict = evaluate(&roster.spec, Utc::now());
-    let status = status_for(roster, &verdict, Utc::now());
+    // ONE CLOCK READ. Two reads — one for the verdict, one for the status —
+    // could put a key's expiry and the condition that reports it on either
+    // side of the same instant.
+    let now = Utc::now();
+    let verdict = evaluate(&roster.spec, now);
+    let status = status_for(roster, &verdict, now);
 
     // CLUSTER-SCOPED: `Api::all`, no namespace. `TrustRoster` is the one kind
     // in this group that is not namespaced, and cluster scope is the point —
     // in Kubernetes the strong form of "a separate file argument the drill
     // spec cannot widen" is "a different RBAC subject".
     let api: Api<TrustRoster> = Api::all(client.clone());
-    api.patch_status(
-        &name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({ "status": status })),
-    )
-    .await?;
+    let patch = json!({ "status": status });
+    // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-1.
+    // This reconciler's own status patch is what wakes it, so a patch that
+    // changed nothing but the clock spun it at 133 reconciles a second on an
+    // object nobody had touched (12,107 in 91.2 s, measured live).
+    //
+    // THE VERDICT IS STILL LOGGED. The skip is about the WRITE, not about
+    // observability: an operator reading the log still sees one line per
+    // reconcile, and the reconcile rate is now the requeue's (one per 300 s)
+    // rather than the loop's.
+    if status_unchanged(
+        roster
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .as_ref(),
+        &patch,
+    ) {
+        debug!(
+            roster = %name,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+    } else {
+        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
+    }
 
     if verdict.loaded {
         info!(
