@@ -241,11 +241,27 @@ fn the_kind_list_is_exactly_six() {
     // would be compared against itself and the forbidden-name loop below would
     // have nothing to look at. Reading the directory is what makes a `Drill`
     // CRD someone added and emitted fail on its own name.
+    //
+    // ONE EXACT FILENAME IS SKIPPED, AND IT IS NOT A PATTERN (Task 21).
+    // `config/crd/kustomization.yaml` is the kustomize base that lists the six
+    // CRDs by name, and it is a `kustomize.config.k8s.io/v1beta1 Kustomization`
+    // rather than a `CustomResourceDefinition`. It has to live in this
+    // directory: kustomize only recognises a base by a file of that exact name
+    // inside it, and `config/overlays/local-images` can name a sibling
+    // DIRECTORY but not a bare file from outside its own root. Skipping it by
+    // its literal name leaves the property this test asserts untouched — a
+    // seventh CRD file still fails here, on its own name — and adding a second
+    // skip would be a visible diff on this line.
+    const NOT_A_CRD: [&str; 1] = ["kustomization.yaml"];
+    let is_crd_file = |p: &PathBuf| -> bool {
+        p.extension().is_some_and(|x| x == "yaml")
+            && !NOT_A_CRD.contains(&p.file_name().and_then(|n| n.to_str()).unwrap_or_default())
+    };
     let dir = crd_dir();
     let mut yaml_files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("config/crd is readable")
         .map(|e| e.expect("an entry").path())
-        .filter(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .filter(is_crd_file)
         .collect();
     yaml_files.sort();
     let mut kinds: Vec<String> = yaml_files
@@ -305,14 +321,15 @@ fn the_kind_list_is_exactly_six() {
                 .to_string_lossy()
                 .to_string()
         })
+        .filter(|n| !NOT_A_CRD.contains(&n.as_str()))
         .collect();
     on_disk.sort();
     let mut want: Vec<String> = FILES.iter().map(|f| f.to_string()).collect();
     want.sort();
     assert_eq!(
         on_disk, want,
-        "config/crd holds exactly the six files and no seventh — a stray file here is a \
-         seventh kind someone applied"
+        "config/crd holds exactly the six CRD files and no seventh (the one kustomize base named \
+         in NOT_A_CRD aside) — a stray file here is a seventh kind someone applied"
     );
 }
 
