@@ -192,8 +192,11 @@ pub struct RunArgs {
     ///
     /// **EMPTY MEANS NOT PINNED**, which is today's behaviour exactly: the
     /// flag is additive and no existing adopter breaks. A non-empty set is
-    /// checked by `phase1_approval::admit_pinned_approver_key_id` BEFORE
-    /// phase 0 dials anything, and an approver key outside it is exit 3.
+    /// checked by `phase1_approval::admit_pinned_approver_key_id` from
+    /// `drill::execute`, ahead of `context` and therefore before any Kafka
+    /// client exists — which is what makes "BEFORE phase 0 dials anything"
+    /// true at the socket layer and not merely at the phase layer. An approver
+    /// key outside the set is exit 3.
     ///
     /// The operator fills this from the `TrustRoster`
     /// (`weirkeeper::controllers::restore::approver_key_ids`: every
@@ -1078,6 +1081,23 @@ pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillErro
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
     check_projected_credentials()?;
+    // The pinned approver set, at the SAME seam and for the same reason (Task
+    // 22 fix round 1, review finding MED-1). It began one frame lower, at the
+    // top of `execute_with_outcome` — which is already past `context(args)`,
+    // and `context` constructs the rdkafka client, whose CONSTRUCTION alone
+    // begins bootstrap connections. So a refused run dialled the spec's
+    // bootstrap before printing a refusal whose own words say it had not:
+    // measured against a closed port, the process emitted
+    // `FAIL … Connect to ipv4#127.0.0.1:19092 … Connection refused` on stderr
+    // and a `BrokerTransportFailure` line on stdout, and only then the
+    // refusal. The guard reads nothing from `Ctx` — only `args.approver_key`
+    // (a file on disk) and `args.approver_key_ids` (an argv value) — so there
+    // was never a reason for it to sit behind the client. Here the shipped
+    // message's "before phase 0 dials anything" is true at the socket layer,
+    // which is what `tests/approval.rs::
+    // an_unpinned_approver_is_refused_without_dialling_the_bootstrap` asserts
+    // over the whole transcript of a run against a closed port.
+    phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)?;
     let c = context(args)?;
     execute_with_outcome(args, run_id, &c)
 }
@@ -1128,16 +1148,18 @@ pub fn execute_with_outcome(
     run_id: &str,
     c: &Ctx,
 ) -> Result<RestoreOutcome, DrillError> {
-    // BEFORE PHASE 0, AND THAT IS THE POINT. `--approver-key-ids` is a phase-1
-    // property — it is about the approval — but phase 0 DIALS, and Global
-    // Constraint 11 reserves exit 3 for a refusal made "before anything ran".
-    // Left at phase 1 this refusal would arrive after the target cluster had
-    // been contacted, and on a host with no broker it would never arrive at
-    // all. It is hoisted here, ahead of `new_scorecard`, so the run is refused
-    // having touched nothing. Omitting the flag is a no-op (see
-    // `admit_pinned_approver_key_id`).
-    phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)?;
-
+    // `--approver-key-ids` is deliberately NOT checked here, though phase 1 is
+    // where the approval is otherwise handled. This function takes a `&Ctx`,
+    // so by the time it runs the rdkafka client already exists and the
+    // bootstrap has already been contacted — Global Constraint 11 reserves
+    // exit 3 for a refusal made "before anything ran", and that promise cannot
+    // be kept from behind a constructed client. The check therefore lives in
+    // `execute`, beside I11's `check_projected_credentials()` and ahead of
+    // `context`, which is the only place it CAN be kept (Task 22 fix round 1,
+    // MED-1). Nothing is lost on this path: every in-repo caller of this
+    // function, of `execute_with` and of `run_with` drives it over doubles
+    // with an EMPTY `approver_key_ids` (`tests/fixtures/mod.rs`), for which
+    // the guard returns `Ok` unconditionally.
     let mut sc = new_scorecard(run_id, args, c);
     // Phase 9 deletes through the SAME client, and since Task 8 phase 0's
     // preflight and the target-topic creation step write through it too. Named

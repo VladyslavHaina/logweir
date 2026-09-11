@@ -307,6 +307,139 @@ fn phase1_without_the_flag_is_unchanged() {
     );
 }
 
+/// The refusal arrives before any Kafka client EXISTS — not merely before
+/// phase 0 — asserted over the whole transcript of a real process whose
+/// bootstrap is a CLOSED port.
+///
+/// Task 22 fix round 1, review finding **MED-1**. The three rows above all
+/// point at `examples/drill.yaml`'s `:9092`, where a live broker accepts the
+/// connection and logs nothing at rdkafka's level 3, and they assert with
+/// `contains` — so none of them could see that `admit_pinned_approver_key_id`
+/// used to be called from `drill::execute_with_outcome`, which is already past
+/// `drill::context`, and `context` CONSTRUCTS the rdkafka client. Construction
+/// alone begins bootstrap connections. Against a closed port the same run
+/// emitted, from its own process,
+/// `%3|…|FAIL|logweir-drill#producer-2| … Connect to ipv4#127.0.0.1:<port>
+/// failed: Connection refused` on stderr and a `BrokerTransportFailure` line
+/// on stdout, and only THEN the refusal whose own text says it had dialled
+/// nothing. The guard now runs in `drill::execute`, beside I11's
+/// `check_projected_credentials()` and ahead of `context`.
+///
+/// **A closed port is the instrument, and a live broker cannot be one**: it
+/// accepts and stays silent. The port is taken from a listener bound on `:0`
+/// and then released, and this row PROVES it is closed before it spawns
+/// anything — a hard-coded port that something happened to be serving would
+/// make the assertion below silently vacuous, which is the exact failure mode
+/// that let MED-1 ship.
+///
+/// The tokens asserted absent are `localhost:<port>` and `127.0.0.1:<port>`
+/// rather than the bare port number on purpose: a five-digit number can appear
+/// by coincidence inside a log timestamp's microseconds field, and a row that
+/// flakes once a year is a row nobody trusts.
+///
+/// No broker and no compose stack (Global Constraint 22): a closed loopback
+/// port refuses instantly, so the 15 s bound asserted at the end is met with
+/// three orders of magnitude to spare by the hoist — and blown by its absence,
+/// if rdkafka's client construction ever spins on a dead broker rather than
+/// logging and moving on.
+#[test]
+fn an_unpinned_approver_is_refused_without_dialling_the_bootstrap() {
+    // A port nothing is serving: bound on `:0` so the OS picks one that was
+    // free, then dropped. Closedness is ASSERTED, never assumed.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a loopback port is bindable")
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    assert!(
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_err(),
+        "127.0.0.1:{port} must be CLOSED for this row to mean anything, and something bound \
+         it between the listener being released and this connect"
+    );
+
+    // The `bootstrap_servers:` LINE is rewritten wholesale rather than by
+    // substituting the example's current host:port pair. That pair is one of
+    // `no_network_in_unit_tests.rs`'s `DIAL_TOKENS`, so spelling it out here —
+    // even inside a comment, as the first draft of this row did and that gate
+    // caught — would put this file on an allow-list it has no business being
+    // on. Rewriting the line is also robust to the example changing.
+    let mut rewritten = 0usize;
+    let text = std::fs::read_to_string("../../examples/drill.yaml")
+        .unwrap()
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("bootstrap_servers:") {
+                rewritten += 1;
+                format!("  bootstrap_servers: [localhost:{port}]")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        rewritten, 1,
+        "exactly one `bootstrap_servers:` line must have been repointed at the closed port; a \
+         silent no-op would leave this row aimed at a LIVE broker and therefore vacuous"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let spec = dir.path().join("closed-bootstrap.yaml");
+    std::fs::write(&spec, text + "\n").unwrap();
+
+    let mut args = base_args_over(&spec);
+    pin(&mut args, &["sha256:deadbeef", "sha256:cafebabe"]);
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_restore(&args);
+    let elapsed = started.elapsed();
+
+    // The refusal itself is unchanged by the hoist: same code, same bytes,
+    // same final stdout line.
+    assert_eq!(
+        code,
+        Some(3),
+        "a pinned-set miss is exit 3 wherever the bootstrap points: {stderr}"
+    );
+    let want = phase1_approval::pinned_set_refusal(
+        &fixture_key_id(),
+        &["sha256:deadbeef".to_string(), "sha256:cafebabe".to_string()],
+    );
+    assert!(
+        stderr.contains(&want),
+        "the refusal must be this message verbatim.\nwant: {want}\ngot: {stderr}"
+    );
+    assert!(
+        stdout.trim_end().ends_with("refusal-reason=GuardRefused"),
+        "a guard refusal prints its reason as the final stdout line (interface I9): {stdout}"
+    );
+
+    // THE FINDING. Nothing this process said may mention a connection.
+    let transcript = format!("{stdout}{stderr}");
+    for token in [
+        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        "Connect to".to_string(),
+        "FAIL".to_string(),
+        "rdkafka".to_string(),
+        "BrokerTransportFailure".to_string(),
+        "brokers are down".to_string(),
+    ] {
+        assert!(
+            !transcript.contains(&token),
+            "the plan is refused BEFORE a Kafka client is constructed, so nothing in this \
+             process's transcript may mention a connection — found {token:?}.\n\
+             --- stdout ---\n{stdout}--- stderr ---\n{stderr}"
+        );
+    }
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "Global Constraint 22 bounds a process-level row at 15 s; this took {elapsed:?}. A \
+         closed loopback port refuses instantly, so a slow run here is one whose client \
+         construction is spinning on a dead broker — which is what the hoist prevents"
+    );
+}
+
 /// `--subject-kind` is written INSIDE the signed bytes.
 ///
 /// Proved by mutation rather than by reading the file: the minted

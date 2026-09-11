@@ -41,8 +41,16 @@ pub fn pinned_set_refusal(key_id: &str, pinned: &[String]) -> String {
 /// would exit 1 at phase 0 and never reach the refusal at all (the exact
 /// ambiguity Task 20's Why records). Global Constraint 11 reserves exit 3 for
 /// "refused by a guard, **before anything ran**", so the check is hoisted
-/// ahead of phase 0 by `drill::execute_with_outcome` and given its own entry
-/// point here, beside the approval logic it belongs to.
+/// ahead of phase 0 by `drill::execute` and given its own entry point here,
+/// beside the approval logic it belongs to.
+///
+/// **`drill::execute`, not `drill::execute_with_outcome`** (Task 22 fix round
+/// 1, MED-1): the latter takes an already-built `Ctx`, and `drill::context`
+/// constructs the rdkafka client, whose construction alone begins bootstrap
+/// connections. Called from there, this refusal arrived AFTER the target had
+/// been contacted at TCP level — measured against a closed port. Called from
+/// `execute`, beside I11's `check_projected_credentials()`, it arrives before
+/// any client exists, which is what the message claims.
 ///
 /// Keeping it out of [`verify`]'s signature also keeps that signature at four
 /// arguments, which is why `crates/logweir/tests/approval.rs`'s existing suite
