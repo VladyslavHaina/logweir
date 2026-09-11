@@ -1958,6 +1958,8 @@ And once more, before this task landed: the re-review of fix round 1 rebuilt the
 
 And once more again, for Task 28a: the controller now writes `Backup.status.backupId` on the terminal status patch — the field the restore wizard reads and the laptop walkthrough had to `kubectl patch` in by hand — so the controller image was rebuilt from that source (240 s, native `arm64`, the runner image untouched) and `weirkeeper@sha256:d198c8e2…` was superseded by **`weirkeeper@sha256:e6e3384e…`** in `config/manager/deployment.yaml` and `logweir.yaml`.
 
+And a fourth time, for Task 30b: the release task's local dry run rebuilt the controller image to assert `scripts/check-image-weirkeeper.sh`'s new `--no-exec` arm against freshly produced bytes (182 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:e6e3384e…` was superseded by **`weirkeeper@sha256:6ab14111…`** in `config/manager/deployment.yaml` and `logweir.yaml` — the same rule, the fourth instance, and the reason clause 1 of the tag-1 checklist still reads blocked.
+
 This section is **not** edited to match, and that is deliberate: it is a
 transcript of commands that were run and the values they printed on the day
 they were run, and rewriting a measurement to agree with a later one destroys

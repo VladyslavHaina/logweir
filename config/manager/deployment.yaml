@@ -102,7 +102,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: weirkeeper
-          image: ghcr.io/logweir/weirkeeper@sha256:e6e3384eaf37321366fe36ee3a5d23dc7eb21868859cf32737300194587488ae
+          image: ghcr.io/logweir/weirkeeper@sha256:6ab1411110731d3092fca3d1d08deded1487b227c25057107f206377da1ea60a
           imagePullPolicy: IfNotPresent
           # NO ARGUMENTS. `weirkeeper` takes `--version`, `--help`, or nothing
           # at all, and anything else exits 1 naming what it got

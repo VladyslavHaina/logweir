@@ -1913,7 +1913,7 @@ spec:
               key: secret-access-key
               name: logweir-evidence-ro
               optional: true
-        image: ghcr.io/logweir/weirkeeper@sha256:e6e3384eaf37321366fe36ee3a5d23dc7eb21868859cf32737300194587488ae
+        image: ghcr.io/logweir/weirkeeper@sha256:6ab1411110731d3092fca3d1d08deded1487b227c25057107f206377da1ea60a
         imagePullPolicy: IfNotPresent
         name: weirkeeper
         resources:
