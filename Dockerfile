@@ -185,6 +185,14 @@ COPY --from=engine   /usr/local/bin/kafka-backup /usr/local/bin/kafka-backup
 COPY --from=builder  /src/target/x86_64-unknown-linux-gnu/release/logweir  /usr/local/bin/logweir
 COPY third_party/LICENSE-MIT /usr/share/licenses/kafka-backup/LICENSE
 COPY LICENSE NOTICE /usr/share/licenses/logweir/
+# THE GENERATED THIRD-PARTY INVENTORY — Task 29, interface I30, Global
+# Constraint 15. MIT, BSD-2-Clause, BSD-3-Clause and Apache-2.0 each require the
+# copyright notice to travel with the redistributed binary, and the binary above
+# is statically linked against 392 packages' worth of them. LICENSE says what
+# Logweir may be used under; NOTICE says what Logweir owes and cannot be
+# generated; this says who the 392 are. `scripts/gen-third-party-notices.sh`
+# writes it and `crates/logweir/tests/doc_lint.rs` keeps it honest.
+COPY THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
 # THE ORG-ROOT ANCHOR, BAKED AT BUILD TIME — Task 23, stage-2 Task 16's T1.
 #
 # WHAT THIS FILE IS. One line, `sha256:` + 64 hex: the SHA-256 of the

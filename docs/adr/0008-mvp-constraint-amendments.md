@@ -273,5 +273,7 @@ surface, and this gate is what keeps that true.
   `crates/logweir/tests/engine_allowlist.rs` asserts that count — so a later
   edit that reintroduces it by name has to argue with a test.
 
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

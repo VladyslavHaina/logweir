@@ -110,3 +110,5 @@ is empty, `logweir_core::scorecard` enforces `-1..=9`, and
 `crates/logweir/src/drill/mod.rs` opens by naming the orchestrator
 "eleven-phase (-1..=9)" while stating that the ten modules beside it are phases
 0 through 9.
+
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).

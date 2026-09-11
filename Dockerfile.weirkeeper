@@ -192,11 +192,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/weirkeeper /usr/local/bin/weirkeeper
 
-# LOGWEIR'S OWN LICENCE AND NOTICE — Global Constraint 15, spec §16 clause 5.
+# LOGWEIR'S OWN LICENCE, NOTICE AND THIRD-PARTY INVENTORY — Global Constraint
+# 15, spec §16 clause 5, Task 29's interface I30.
 # Apache-2.0 requires the notice to travel with the redistributed binary, and
 # "this image only carries our own code" is a reason to ship OUR licence, not a
 # reason to ship none.
-COPY LICENSE NOTICE /usr/share/licenses/logweir/
+#
+# THREE FILES, NOT TWO, AND THE THIRD IS THE ONE "our own code" GLOSSES OVER.
+# `weirkeeper` carries no OSO code, but it is statically linked against the
+# same Rust dependency graph the runner is, and MIT, BSD-2-Clause,
+# BSD-3-Clause and Apache-2.0 each require those copyright notices to travel
+# with the binary. `THIRD_PARTY_NOTICES.md` is that inventory, generated from
+# the resolved graph by `scripts/gen-third-party-notices.sh`. Both images carry
+# the same three files at the same path, asserted by
+# `crates/logweir/tests/doc_lint.rs::both_images_copy_the_licence_and_the_notice`.
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
 
 # AND NO `third_party/LICENSE-MIT`, WHICH IS ALSO A DECISION.
 # `/usr/share/licenses/kafka-backup/` is ABSENT from this image and

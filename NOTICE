@@ -4,10 +4,106 @@ Copyright 2026 The Logweir Authors
 This product includes software developed at
 The Logweir Project (https://github.com/logweir/logweir).
 
-This product shells out to, and redistributes in its container image, the
-`kafka-backup` binary from osodevops/kafka-backup, which is licensed under the
-MIT License. A copy of that licence and the source tarball for the pinned
+Each section below states WHY the attribution is owed, so that a reader can
+check every claim from the files named rather than taking this file's word for
+it. The per-crate inventory of the Rust dependency graph is a separate,
+GENERATED file: THIRD_PARTY_NOTICES.md.
+
+
+1. LOGWEIR ITSELF — Apache-2.0
+--------------------------------------------------------------------------
+Licensed under the Apache License, Version 2.0. The full text is in LICENSE.
+Contributions are taken under the Developer Certificate of Origin 1.1
+(`git commit -s`); no copyright-assignment CLA is required or accepted
+(CONTRIBUTING.md). Documentation under docs/ is CC-BY-4.0 (docs/LICENSE-docs).
+
+
+2. THE VENDORED `kafka-backup` ENGINE — MIT
+--------------------------------------------------------------------------
+This product shells out to, and redistributes in its RUNNER container image,
+the `kafka-backup` binary from osodevops/kafka-backup, which is licensed under
+the MIT License. A copy of that licence and the source tarball for the pinned
 version are in third_party/.
 
+WHY IT IS OWED: MIT requires the copyright notice and the permission notice to
+travel with a redistributed binary. The binary is in the runner image, so the
+licence is too — Dockerfile copies third_party/LICENSE-MIT to
+/usr/share/licenses/kafka-backup/LICENSE.
+
+WHERE IT IS NOT OWED, AND THEREFORE IS NOT PRESENT: the `weirkeeper`
+controller image carries no OSO code of any kind and has no
+/usr/share/licenses/kafka-backup/ directory at all. An MIT notice there would
+be a claim to redistribute something the image does not contain.
+scripts/check-image-weirkeeper.sh check 3 asserts that absence.
+
+
+3. librdkafka — BSD-2-Clause, STATICALLY LINKED, AND ITS FOURTEEN COMPONENTS
+--------------------------------------------------------------------------
+The `logweir` binary links librdkafka statically, through the `rdkafka-sys`
+crate's `cmake-build` feature with `ssl,sasl,zstd,libz`. librdkafka is
+Copyright (c) 2012-2022, Magnus Edenhill and 2023, Confluent Inc., under the
+BSD-2-Clause licence, and it VENDORS fourteen further components under
+licences of their own. BSD-2-Clause requires the copyright notice to travel
+with the redistributed binary; the binary is in both container images and in
+the release tarballs, so the notice is here.
+
+THIS IS THE ATTRIBUTION `cargo metadata` CANNOT SEE. THIRD_PARTY_NOTICES.md is
+generated from the resolved Rust graph and every crate in it is a Rust crate.
+The C code compiled into the same binary appears in that graph as one entry —
+`rdkafka-sys` — and the fourteen components below appear in it not at all.
+
+THE COMPONENT LIST BELOW IS DERIVED, NOT MAINTAINED BY HAND. It is read from
+`librdkafka/LICENSES.txt` in the resolved `rdkafka-sys` source directory
+(under $CARGO_HOME/registry/src/*/rdkafka-sys-<version>/), whose every
+`^LICENSE` header names one component.
+`crates/logweir/tests/doc_lint.rs::the_notice_names_every_librdkafka_component_in_licenses_txt`
+reads that file and asserts this file names each component it finds. An
+upstream bump that adds a fifteenth component FAILS that test rather than
+passing it, and a component deleted from this list fails it by name. The
+spec's own prose and this plan's first draft both said twelve and both omitted
+`tinycthread` and `wingetopt`; a hand-maintained list is how that happens.
+
+  cjson            MIT
+  crc32c           Zlib
+  fnv1a            public domain
+  hdrhistogram     MIT
+  lz4              BSD-2-Clause
+  murmur2          public domain
+  nanopb           Zlib
+  opentelemetry    Apache-2.0
+  pycrc            MIT
+  queue            BSD-3-Clause
+  regexp           public domain
+  snappy           BSD-3-Clause
+  tinycthread      Zlib
+  wingetopt        ISC
+
+The full text of each is in that same LICENSES.txt, which is the file this
+list is derived from; nothing here paraphrases it.
+
+
+4. OpenSSL — linked through the same feature set
+--------------------------------------------------------------------------
+librdkafka is built with `ssl` and `sasl`, so the `logweir` binary reaches
+OpenSSL for TLS and for SASL mechanisms. The runner image installs `libssl3`
+and `libsasl2-2` from Debian; their licence texts are under
+/usr/share/doc/libssl3/ and /usr/share/doc/libsasl2-2/ in the image, where
+Debian places them. OpenSSL 3.x is Apache-2.0.
+
+The `weirkeeper` controller image has NO OpenSSL: it speaks TLS to exactly one
+peer, the Kubernetes API server, through rustls with the `ring` provider, and
+installs neither library (Dockerfile.weirkeeper).
+
+
+5. THE RUST DEPENDENCY GRAPH — THIRD_PARTY_NOTICES.md
+--------------------------------------------------------------------------
+One entry per package in the resolved graph, each with its SPDX expression and
+its copyright line, generated by scripts/gen-third-party-notices.sh from
+`cargo metadata --format-version 1 --offline`. It is regenerated, never
+edited. Both container images carry it beside this file and LICENSE, under
+/usr/share/licenses/logweir/, and it ships in the release artefact.
+
+
+--------------------------------------------------------------------------
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

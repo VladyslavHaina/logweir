@@ -75,5 +75,7 @@ elsewhere.
   disagree, the format is broken — which is a far more useful signal than one
   implementation agreeing with itself.
 
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

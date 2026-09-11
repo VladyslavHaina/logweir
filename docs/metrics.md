@@ -132,5 +132,7 @@ above, and there is no PVC or sidecar fallback in v0.1. No metrics is an honest
 state; a dashboard fed by a deleted file is not. See
 [kubernetes.md §5](kubernetes.md).
 
+Documentation is licensed [CC-BY-4.0](LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

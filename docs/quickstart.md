@@ -1,5 +1,8 @@
 # Quickstart
 
+**Installing Logweir onto a Kubernetes cluster is a different document: [install.md](install.md).**
+This one is the CLI and the local stack.
+
 Three paths. The first two prove the tool works on your laptop with no cloud
 resources — one for the **backup-and-recover** path, one for the **drill**
 path. The third runs a drill against a scratch cluster you already have.
@@ -330,6 +333,8 @@ A **missing** receipt means "no storage evidence was published for this run" —
 never "the upload was not create-only".
 
 ---
+
+Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

@@ -2,32 +2,105 @@
 
 Thanks for your interest in contributing to Logweir.
 
-## Developer Certificate of Origin
+## Developer Certificate of Origin — required on every commit
 
-All commits must be signed off under the [Developer Certificate of
-Origin](https://developercertificate.org/) (DCO). Sign off every commit with:
+Every commit must carry a `Signed-off-by:` trailer under the Developer
+Certificate of Origin 1.1. Sign off with:
 
-```
+```bash
 git commit -s
 ```
 
-This adds a `Signed-off-by` trailer to your commit message, certifying that
-you wrote the patch or otherwise have the right to submit it under the
-project's licence.
+which appends
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+using your `user.name` and `user.email`. Use your real name and a real address:
+the DCO is a certification, and an anonymous one certifies nothing. A commit
+without the trailer is not merged; `git commit --amend -s` fixes the last one
+and `git rebase --signoff <base>` fixes a branch.
+
+### The certificate, in full
+
+```
+Developer Certificate of Origin
+Version 1.1
+
+Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+
+Everyone is permitted to copy and distribute verbatim copies of this
+license document, but changing it is not allowed.
+
+
+Developer's Certificate of Origin 1.1
+
+By making a contribution to this project, I certify that:
+
+(a) The contribution was created in whole or in part by me and I
+    have the right to submit it under the open source license
+    indicated in the file; or
+
+(b) The contribution is based upon previous work that, to the best
+    of my knowledge, is covered under an appropriate open source
+    license and I have the right under that license to submit that
+    work with modifications, whether created in whole or in part
+    by me, under the same open source license (unless I am
+    permitted to submit under a different license), as indicated
+    in the file; or
+
+(c) The contribution was provided directly to me by some other
+    person who certified (a), (b) or (c) and I have not modified
+    it.
+
+(d) I understand and agree that this project and the contribution
+    are public and that a record of the contribution (including all
+    personal information I submit with it, including my sign-off) is
+    maintained indefinitely and may be redistributed consistent with
+    this project or the open source license(s) involved.
+```
 
 ## No CLA
 
-Logweir does not require a Contributor Licence Agreement (CLA). The DCO
-sign-off above is the only requirement.
+**No copyright-assignment CLA is required or accepted.** You keep your
+copyright; the DCO sign-off above is the only thing this project asks of a
+contributor, and it is a certification rather than a transfer.
+
+That is a deliberate choice with a consequence, and the consequence is the
+point. Relicensing a project requires the agreement of every copyright holder
+unless a CLA has assigned those rights to one party. Without a CLA, once a
+handful of outside contributors have landed code, **no single party — the
+project's own author included — can quietly relicense the whole.** Terraform
+and Redis were both relicensed by their owners; what preserved openness in each
+case was the fork right under the old licence, not the licence family. Refusing
+a CLA is how this project makes that reversal expensive for itself in advance.
 
 ## Licence
 
-Logweir is licensed under Apache-2.0. By contributing, you agree that your
-contributions are licensed under the same terms: inbound = outbound,
-Apache-2.0.
+Logweir is licensed under **Apache-2.0**. By contributing, you agree that your
+contributions are licensed under the same terms: **inbound = outbound**,
+Apache-2.0. The full text is in [LICENSE](LICENSE) and what the project owes
+its dependencies is in [NOTICE](NOTICE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+**Documentation is CC-BY-4.0**, not Apache-2.0 — the text is in
+[docs/LICENSE-docs](docs/LICENSE-docs). A change under `docs/` is contributed
+under that licence, with the same DCO sign-off.
+
+## Before you open a pull request
+
+- `just lint` and `cargo test --workspace` both exit 0.
+- A new dependency is a decision, not a detail: the workspace graph is closed
+  and `THIRD_PARTY_NOTICES.md` is generated from it
+  (`bash scripts/gen-third-party-notices.sh --write`), so adding a crate means
+  regenerating that file in the same commit.
+- A guard without a mutant is not a guard. A test that cannot fail is worse
+  than no test, because the ledger records it as passing.
 
 ---
+
+Documentation is licensed [CC-BY-4.0](docs/LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

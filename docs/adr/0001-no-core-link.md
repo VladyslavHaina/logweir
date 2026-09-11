@@ -76,5 +76,7 @@ separate things:
 - Logweir decodes `.kbak` segments itself. That is more code, and it is the
   code that makes an integrity claim independent.
 
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

@@ -146,5 +146,7 @@ redacted more strongly still — presence is reported, values never are.
 
 ---
 
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

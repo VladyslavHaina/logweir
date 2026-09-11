@@ -65,5 +65,7 @@ to a future estimator; they are not the ratio, and must not be quoted as one.
   has not run, so the schedule is as unvalidated now as it was before the
   build.
 
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

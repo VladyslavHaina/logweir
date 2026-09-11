@@ -559,5 +559,7 @@ first. In **0.1.1**, `--redact` **replaces** this arm with a path whitelist
 
 ---
 
+Documentation is licensed [CC-BY-4.0](../LICENSE-docs).
+
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

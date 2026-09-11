@@ -1,13 +1,41 @@
 # Logweir
 
-Logweir produces a **signed drill scorecard** in which `measured.rto_seconds`
-and `measured.rpo_seconds` are real numbers, produced by actually restoring a
-sampled point-in-time window from a Kafka backup archive into a segregated
-scratch cluster and reconciling it **per record**.
+**Logweir backs up Apache Kafka topics, restores a sampled point-in-time window
+into a new topic, reconciles it per record, and signs the result — so that
+"our backups work" is a document an auditor can verify rather than a claim.**
 
 Not a policy document. Not a dry run. A restore that happened, timed, checked
 byte-for-byte against the archive, and signed so an auditor can verify it
 without trusting the machine that produced it.
+
+**Licence: [Apache-2.0](LICENSE)**, with what the project owes its dependencies
+in [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Documentation is CC-BY-4.0 ([docs/LICENSE-docs](docs/LICENSE-docs)).
+
+**Contributions: DCO sign-off (`git commit -s`) on every commit; no
+copyright-assignment CLA is required or accepted.** See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Minimum Kubernetes: 1.29.** (CEL validation rules are GA there and the six
+CRDs use them.) The CLI needs no cluster at all.
+
+## Install
+
+```bash
+kubectl --context docker-desktop apply --server-side -f logweir.yaml
+```
+
+...but read **[docs/install.md](docs/install.md)** first, because that one line
+is only half of it: there are **two supported paths** — the published image
+digests, and an **author-only** local build — and until the release workflow
+has run against a remote the digest rows read **`blocked: no remote`** and the
+first path is documented rather than exercised. `docs/install.md` also carries
+the five Secrets you must create **before** the first custom resource, the two
+keypairs, the cluster-scoped `TrustRoster`, the per-namespace runner
+ServiceAccount, and the uninstall with what it leaves behind.
+
+`docs/install.md` is the **single** install document. Nothing else in this tree
+carries install steps.
 
 ## What it looks like
 
@@ -147,12 +175,12 @@ jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
 
 | Non-goal | Why, and what does it instead |
 |---|---|
-| **It does not back up.** | `osodevops/kafka-backup` does. Logweir consumes an archive that already exists and never creates one. |
-| **It does not write to the source cluster, on any path.** | Not a topic, not an offset commit, not a config. The drill restores into a *scratch* cluster, proved segregated by a marker topic before anything runs. |
+| **It writes no Kafka protocol code.** | The archive is produced and read by the pinned `kafka-backup` engine, which Logweir drives as a subprocess. Logweir's own client work goes through `rdkafka`. |
+| **It does not write to the source cluster, on any path.** | Not a topic, not an offset commit, not a config. A drill restores into a *scratch* cluster, proved segregated by a marker topic before anything runs; a restore writes only into topics that did not exist. |
 | **It does not consume OSO CRDs.** | No `KafkaRestore`, no `KafkaBackup`, no operator objects read or written. Logweir shells out to the engine binary and nothing else. |
-| **It does not require Kubernetes.** | v0.1 is a CLI that spawns a local subprocess. A `CronJob` example is provided ([examples/cronjob-drill.yaml](examples/cronjob-drill.yaml)) because that is how most people will schedule it — but nothing needs a cluster. |
-| **It ships no web UI.** | No HTTP surface at all in v0.1: no `/metrics`, no `/healthz`, no `/readyz`. Metrics are a Prometheus textfile at `--metrics-file`. |
-| **It reads no metadata in v0.1.** | No ACLs, no client quotas, no broker configs. Metadata snapshot and diff are SP2. |
+| **It deletes nothing but the scratch topics it created.** | Retention **reports** and prints the commands; no Logweir component holds any object-store delete capability. Restore-in-place into a live topic is a **never**, not a later. |
+| **It ships no HTTP surface and no UI image.** | The UI is a directory of static files served by `kubectl proxy --www=`; there is no server-side UI component, no sidecar, no `/metrics`, no `/healthz`. Metrics are a Prometheus textfile at `--metrics-file`. |
+| **It reads no cluster metadata.** | No ACLs, no client quotas, no broker configs. Metadata snapshot and diff are a later tag. |
 
 ## Relationship to `osodevops/kafka-backup`
 
@@ -210,7 +238,7 @@ also lists what v0.1 does **not** do — including `--from-cluster`, compacted
 targets, `sample.anchor: tail|random`, and the fact that `engine_subreport` is
 always `null`.
 
-## Install
+## Running the CLI on its own
 
 **Logweir is not on crates.io at v0.1.0.** `cargo install logweir` does not work
 and this README will not pretend otherwise: the workspace's internal
@@ -256,12 +284,48 @@ Running it under Kubernetes has a small number of facts that will otherwise
 cost you an afternoon — in particular, **the exit code that says "a drill ran
 and did not pass" is nearly invisible to a Kubernetes operator** unless the Job
 is shaped correctly. They are all in
-[docs/kubernetes.md](docs/kubernetes.md).
+[docs/kubernetes.md](docs/kubernetes.md); the install itself is
+[docs/install.md](docs/install.md).
+
+## Threat model: what this does **not** protect against
+
+Four residuals, accepted and stated here rather than left to be discovered.
+They are not undiscovered bugs, and a report that one of them is true is not a
+vulnerability report.
+
+- **`weirkeeper` is a signing oracle wherever it holds Job CRUD over the
+  namespace that holds the signing key.** The controller has no `get` on
+  Secrets anywhere and never reads `logweir-signing-key` — but it creates Jobs,
+  and a Job it creates can mount that Secret and sign whatever it likes with no
+  Logweir crate involved. **Job CRUD over the signing-key namespace is
+  equivalent to holding the key.** The hardened layout is to put the Secret in
+  a namespace where `weirkeeper` has no Job CRUD, which removes the oracle;
+  [docs/install.md](docs/install.md) gives that layout.
+- **A cluster-admin defeats every control described here.** They can mount the
+  signing Secret and sign, edit the `TrustRoster`, or delete an admission
+  policy. Nothing here constrains that subject and nothing claims to.
+- **RBAC bounds the viewer, not the page.** The UI is static files served by
+  `kubectl proxy` under the viewer's own kubeconfig, so the shipped
+  `logweir-viewer` / `logweir-operator` / `logweir-approver` ClusterRoles bind
+  the **user** and bind nothing at all about the page. Running the UI from a
+  cluster-admin kubeconfig gives the shipped bundle cluster-admin.
+- **`self_attested: false` means only "two different keys".** One person
+  holding both keypairs satisfies it. It is not evidence of an independent
+  auditor, and a scorecard carrying it must not be read as one.
+
+[SECURITY.md](SECURITY.md) carries the same four beside what **is** in scope.
+
+**Release notes list the `ui/` bundle by digest.** The page runs with the
+viewer's authority, so what is in the bundle matters: there is no telemetry in
+it, nothing in it is fetched from anywhere else, and its contents are listed by
+digest in the release notes so that the bytes a browser executed can be
+compared against the bytes that were released.
 
 ## Documentation
 
 | Document | For |
 |---|---|
+| [docs/install.md](docs/install.md) | **Installing Logweir.** The two paths, the five Secrets, the uninstall. |
 | [docs/quickstart.md](docs/quickstart.md) | Running a drill against a cluster you already have. |
 | [docs/verify-a-scorecard.md](docs/verify-a-scorecard.md) | The auditor who received a scorecard and has to decide what it proves. |
 | [docs/formats/drill-scorecard.md](docs/formats/drill-scorecard.md) | Every field, its type, and its formula. |
@@ -272,11 +336,15 @@ is shaped correctly. They are all in
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, and what is in scope. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | DCO sign-off, no CLA, inbound = outbound Apache-2.0. |
 | [MAINTAINERS.md](MAINTAINERS.md) | Who reviews, and what a format change needs. |
+| [TRADEMARKS.md](TRADEMARKS.md) | LOGWEIR is a working name; what clearing it would take. |
+| [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Every package in the resolved graph, its SPDX expression and its copyright line. |
 
 ---
 
 Licensed under [Apache-2.0](LICENSE); see [NOTICE](NOTICE). Contributions
 require a DCO sign-off (`git commit -s`) and no CLA.
+
+Documentation is licensed [CC-BY-4.0](docs/LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

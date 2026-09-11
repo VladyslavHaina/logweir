@@ -922,7 +922,52 @@ The versions are declared in `crates/weirkeeper/Cargo.toml` and in the
 workspace root's pin-list comment; this page is where the *reason* lives, so a
 future bump has something to disagree with.
 
+## Deliberately not in tag 1
+
+Two lists, taken verbatim from the specification's own out-of-scope section, so
+that "absent" is never read as "forgotten". **Later, named** is sixteen items
+that are wanted and are not here; **Never** is four that are not coming, and the
+difference between the two lists is a decision rather than a schedule.
+
+### Later, named — sixteen items
+
+| # | Item | Reason | Citation |
+|---|---|---|---|
+| 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
+| 2 | **Strimzi as a source** | That population's default engine is `v0.19.1`, **below the `0.21.0` floor**. Supporting it would mean supporting an engine that lacks levers Logweir needs, which is why it is reported `unsupported (lever-absent)` and never as a fault. | spec §13; `docs/support-matrix.md` |
+| 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
+| 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
+| 5 | **Retention deletion** | Retention **reports** and never deletes. Deleting would need a two-handle store model — the archive handle is `read_only_from_url` — and an amendment to the constraint that says Logweir writes only under its own prefix with create-only semantics. Neither is in tag 1, so no Logweir component holds any object-store delete capability. | spec §5, §13 |
+| 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
+| 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
+| 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
+| 9 | **A Helm chart** | The install is kustomize sources and one rendered file. A chart is a second install path to keep correct, and the manifest-lint gate parses shipped YAML by `apiVersion`/`kind` — it would otherwise be parsing templates. | spec §11, §13 |
+| 10 | **KMS / PKCS#11 signing** | `sign_detached` takes a concrete `&SigningKey` with **no trait seam**, so an external signer is a refactor and not a configuration option. | spec §13 |
+| 11 | **Key generation and rotation** | Tag 1 mints nothing and rotates nothing: the operator creates both keypairs with `openssl` and puts the public halves in the `TrustRoster`. `docs/keys.md` is the rotation story, not a rotation feature. | spec §13 |
+| 12 | **A PVC for the runner pod** | The runner streams and writes to an emptyDir; a large restore is bounded by that, and a persistent volume would be a new lifecycle to own. | spec §13 |
+| 13 | **Subprocess timeout, cancellation and SIGTERM handling** | The engine subprocess runs to completion. A Job deleted mid-run leaves the child to the kubelet, and nothing in tag 1 propagates a cancel. | spec §13 |
+| 14 | **A configurable Kafka client timeout** | It is a **20 s constant**, not a setting. | `crates/logweir-kafka/src/rdkafka_reader.rs:16` |
+| 15 | **The kind + Calico NetworkPolicy probe** | The shipped NetworkPolicy is labelled `[UNVERIFIED]` in the manifest itself: docker-desktop runs no CNI that enforces NetworkPolicy, so a deny is never observed there and the probe that would make the claim real stays backlogged. | spec §9, §13 |
+| 16 | **Stage-2 Tasks 10 and 17-24** | Carried forward as a block, in the backlog they were written in. | `docs/platform/04-stage2-backlog.md` |
+
+### Never — four entries
+
+These are not scheduled. They are refused.
+
+| # | Entry | Why it is a never, not a later |
+|---|---|---|
+| 1 | **Restore-in-place into a live topic** | The product's whole safety argument is that a restore writes into topics that did not exist. Writing into a live topic removes the property that makes an unattended restore defensible at all. |
+| 2 | **Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE** | Each is a separate product surface with its own trust model. Logweir moves records and reconciles bytes; it does not resolve schemas, evaluate a registry's RBAC, or hold field-level encryption keys. |
+| 3 | **MSK ZK-to-KRaft migration, and the word "migration"** | Logweir is not a migration tool and the word is avoided on every surface, because a document that says "migration" is a document somebody will act on as though it were one. |
+| 4 | **Multi-cluster or fleet views, and the words** | One controller per cluster. There is no fleet object, no cross-cluster list and no aggregated view, and the vocabulary is kept out of the UI and the docs for the same reason as the previous row. |
+
+**Cited from** the specification's out-of-scope section; the two lists are
+reproduced whole rather than summarised, because a summarised list of what a
+product does not do is how an item quietly rejoins the roadmap.
+
 ---
+
+Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

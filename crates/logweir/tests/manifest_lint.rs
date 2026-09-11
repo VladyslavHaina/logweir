@@ -1237,14 +1237,21 @@ impl std::ops::Index<&str> for Manifest {
 // Install docs and the two recipes
 // ---------------------------------------------------------------------------
 
-/// `docs/kubernetes.md` carries a `kubectl create secret` line for each of the
+/// The install document carries a `kubectl create secret` line for each of the
 /// five Secrets — `logweir-approval-bundle` included.
 ///
 /// There are FIVE, not three (spec §9, critique B H14), and nothing in this
-/// repository told a stranger to create any of them before this task.
+/// repository told a stranger to create any of them before Task 21.
+///
+/// **The document moved, and this test followed it** (Task 29, chain W). Step 1
+/// was in `docs/kubernetes.md` §13; the tree now carries ONE install document,
+/// `docs/install.md`, and `docs/kubernetes.md` §13 is the pointer at it. The
+/// property asserted here is unchanged — "the install document carries a line
+/// an adopter can run, for each of the five" — and every assertion below is
+/// byte for byte the one Task 21 landed. Only the file it reads changed.
 #[test]
 fn install_docs_name_all_five_secrets() {
-    let docs = read("docs/kubernetes.md");
+    let docs = read("docs/install.md");
     for secret in [
         "logweir-signing-key",
         "logweir-approval-bundle",
@@ -1262,7 +1269,7 @@ fn install_docs_name_all_five_secrets() {
         });
         assert!(
             found,
-            "docs/kubernetes.md has no `kubectl create secret` command for `{secret}` (a mention \
+            "docs/install.md has no `kubectl create secret` command for `{secret}` (a mention \
              is not a command: the install docs have to carry a line an adopter can run)"
         );
     }
@@ -1271,13 +1278,13 @@ fn install_docs_name_all_five_secrets() {
     // key, which the runner reads and nothing else spells.
     assert!(
         docs.contains("--from-literal=password="),
-        "docs/kubernetes.md must show how to create the per-cluster SCRAM credential, whose data \
+        "docs/install.md must show how to create the per-cluster SCRAM credential, whose data \
          key is `password` (`TARGET_PASSWORD_SECRET_KEY`)"
     );
     // The silent-mint warning, which is the reason the list matters at all.
     assert!(
         docs.contains("load_or_generate") && docs.contains("keys.rs:81-92"),
-        "docs/kubernetes.md must carry the silent-mint warning citing \
+        "docs/install.md must carry the silent-mint warning citing \
          `crates/logweir-evidence/src/keys.rs:81-92`: an absent key file is MINTED, so a first run \
          against an empty Secret produces evidence signed by a key nothing attests"
     );
@@ -1287,7 +1294,7 @@ fn install_docs_name_all_five_secrets() {
             docs.contains(&format!(
                 "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out {pair}"
             )),
-            "docs/kubernetes.md must carry the verbatim `openssl genpkey` command for {pair}"
+            "docs/install.md must carry the verbatim `openssl genpkey` command for {pair}"
         );
     }
 }
@@ -2124,13 +2131,22 @@ fn the_controller_image_owes_no_mit_notice() {
              `scripts/check-image-weirkeeper.sh` instead — not to copy the licence in."
         );
     }
-    // Logweir's OWN licence and notice do ship — Global Constraint 15 governs
-    // Logweir's redistribution exactly as it governs upstream's.
+    // Logweir's OWN licence, notice and third-party inventory do ship — Global
+    // Constraint 15 governs Logweir's redistribution exactly as it governs
+    // upstream's, and the inventory is the arm of it that covers the 392
+    // packages this binary is statically linked against.
+    //
+    // THREE FILES, NOT TWO (Task 29). Task 23 landed this line naming LICENSE
+    // and NOTICE, because `THIRD_PARTY_NOTICES.md` did not exist yet. The
+    // exhaustive, COPY-parsing form of this assertion is
+    // `crates/logweir/tests/doc_lint.rs::both_images_copy_the_licence_and_the_notice`,
+    // which checks both images; this stays as the literal-prefix backstop.
     assert!(
-        instructions
-            .iter()
-            .any(|l| l.starts_with("COPY LICENSE NOTICE /usr/share/licenses/logweir/")),
-        "Dockerfile.weirkeeper must `COPY LICENSE NOTICE /usr/share/licenses/logweir/`"
+        instructions.iter().any(|l| l.starts_with(
+            "COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/"
+        )),
+        "Dockerfile.weirkeeper must `COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md \
+         /usr/share/licenses/logweir/`"
     );
 
     // And the checker asserts the ABSENCE, rather than merely not asserting the

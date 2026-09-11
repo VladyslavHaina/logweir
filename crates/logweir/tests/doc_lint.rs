@@ -1,0 +1,1011 @@
+//! THE DOCUMENTS A STRANGER ACTS ON — Task 29.
+//!
+//! WHAT THESE TESTS PROVE. That the five documents nobody runs a test against
+//! before acting on them — `NOTICE`, `THIRD_PARTY_NOTICES.md`,
+//! `CONTRIBUTING.md`'s DCO section, `README.md`'s threat model and
+//! `docs/install.md` — say what they are required to say, and that the two
+//! lists which are easiest to let rot (the librdkafka component list and the
+//! package inventory) are **derived from the artefacts they describe** rather
+//! than typed here.
+//!
+//! THE DERIVATION RULE, AND WHY IT IS THE WHOLE POINT. A licence test whose
+//! expected set is a literal in the test file can be satisfied by deleting the
+//! same name from both places. Both of the list tests below read their
+//! expectation out of a file that is not a document:
+//! `the_notice_names_every_librdkafka_component_in_licenses_txt` reads
+//! `librdkafka/LICENSES.txt` out of the resolved `rdkafka-sys` source
+//! directory, and `third_party_notices_covers_every_resolved_package` reads
+//! `Cargo.lock`. Deleting a line from `NOTICE` cannot be matched by an equally
+//! shrunken expectation, because the expectation is upstream's file.
+//!
+//! AND A LICENCE TEST NEVER SKIPS. If `LICENSES.txt` is not where it is looked
+//! for, the test **fails naming the path**. A skipping licence test is a check
+//! that cannot fail, which is the defect class this task exists to remove: the
+//! plan's own first draft froze twelve components where the file names
+//! fourteen, and a test that had skipped on a cold cache would have certified
+//! that as complete.
+//!
+//! COSTS NOTHING AND REACHES NOTHING. Every test here reads checked-in files
+//! (plus, in one case, the resolved crate source already on disk). Nothing
+//! spawns cargo, opens a socket or starts a container, so the whole file is
+//! milliseconds against the 15-second per-test budget.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+// --------------------------------------------------------------- the helpers
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
+}
+
+fn read(relative: &str) -> String {
+    let path = repo_root().join(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()))
+}
+
+/// The six Markdown files at the repository root. Named rather than globbed:
+/// "the six root markdown files" is a claim about which documents ship, and a
+/// glob would quietly stop checking one that was deleted.
+const ROOT_MARKDOWN: [&str; 6] = [
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "MAINTAINERS.md",
+    "TRADEMARKS.md",
+    "THIRD_PARTY_NOTICES.md",
+];
+
+/// Every `*.md` under `docs/`, at any depth, in sorted order.
+fn docs_markdown() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![repo_root().join("docs")];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a directory entry is readable").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    assert!(
+        !found.is_empty(),
+        "no Markdown file was found under docs/ — a footer check that enumerated \
+         nothing is not a pass"
+    );
+    found
+}
+
+// ------------------------------------------------- the librdkafka components
+
+/// `Cargo.lock`'s recorded version of a package, by name. There is exactly one
+/// `rdkafka-sys` in this graph; two would be a finding of its own.
+fn locked_version(lock: &str, package: &str) -> String {
+    let needle = format!("name = \"{package}\"");
+    let mut versions = Vec::new();
+    for block in lock.split("[[package]]") {
+        if block.lines().any(|l| l.trim() == needle) {
+            for line in block.lines() {
+                if let Some(rest) = line.trim().strip_prefix("version = \"") {
+                    versions.push(rest.trim_end_matches('"').to_string());
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        versions.len(),
+        1,
+        "Cargo.lock records {} `{package}` packages; expected exactly one: {versions:?}",
+        versions.len()
+    );
+    versions.remove(0)
+}
+
+/// `$CARGO_HOME/registry/src/<index>/rdkafka-sys-<version>/librdkafka/LICENSES.txt`.
+///
+/// The index directory name is registry-specific and must not be hard-coded,
+/// so every `registry/src/*` child is tried. Returns the path whether or not
+/// it exists, so the caller can FAIL naming it.
+fn licenses_txt_candidates(version: &str) -> Vec<PathBuf> {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .expect("either $CARGO_HOME or $HOME is set");
+    let src = cargo_home.join("registry").join("src");
+    let tail = PathBuf::from(format!("rdkafka-sys-{version}"))
+        .join("librdkafka")
+        .join("LICENSES.txt");
+
+    let mut candidates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&src) {
+        for entry in entries.flatten() {
+            candidates.push(entry.path().join(&tail));
+        }
+    }
+    if candidates.is_empty() {
+        candidates.push(src.join("<index>").join(&tail));
+    }
+    candidates.sort();
+    candidates
+}
+
+/// **`NOTICE` names every component `LICENSES.txt` names — derived, never typed.**
+///
+/// The expected set is every `^LICENSE.<component>` header in librdkafka's own
+/// `LICENSES.txt`, read out of the `rdkafka-sys` source directory resolved
+/// from `Cargo.lock`'s recorded version. Fourteen today —
+/// `tinycthread` and `wingetopt` among them, which the specification's prose
+/// and this plan's first draft both omitted while naming twelve. A fifteenth
+/// after an upstream bump FAILS this test rather than passing it.
+#[test]
+fn the_notice_names_every_librdkafka_component_in_licenses_txt() {
+    let lock = read("Cargo.lock");
+    let version = locked_version(&lock, "rdkafka-sys");
+
+    let candidates = licenses_txt_candidates(&version);
+    let licenses = candidates.iter().find(|p| p.is_file()).unwrap_or_else(|| {
+        // NEVER A SKIP. A licence test that skips is a check that cannot fail,
+        // and this is the one test standing between an incomplete attribution
+        // and a release that certifies it as complete.
+        let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+        panic!(
+            "librdkafka's LICENSES.txt was not found for rdkafka-sys {version}. This test \
+             does NOT skip: the component list in NOTICE is derived from that file, and a \
+             licence check that cannot run is a licence check that cannot fail. Run a \
+             build (or `cargo fetch --offline`) so the crate source is unpacked, then \
+             re-run. Paths tried:\n  {}",
+            tried.join("\n  ")
+        )
+    });
+    let text = std::fs::read_to_string(licenses)
+        .unwrap_or_else(|e| panic!("{} is readable: {e}", licenses.display()));
+
+    // Every `^LICENSE` header. The bare `LICENSE` at line 1 is librdkafka's
+    // own; `LICENSE.<name>` is one vendored component each.
+    let mut components: BTreeSet<String> = BTreeSet::new();
+    let mut saw_top_level = false;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("LICENSE") else {
+            continue;
+        };
+        if rest.is_empty() || rest.trim().is_empty() {
+            saw_top_level = true;
+        } else if let Some(name) = rest.strip_prefix('.') {
+            let name = name.trim();
+            if !name.is_empty() {
+                components.insert(name.to_string());
+            }
+        }
+    }
+
+    assert!(
+        saw_top_level,
+        "{} has no bare `LICENSE` header — librdkafka's own licence block is the \
+         first thing in that file, and its absence means the file's shape changed",
+        licenses.display()
+    );
+    assert!(
+        components.len() >= 12,
+        "{} yielded only {} component headers ({components:?}). The file has carried \
+         fourteen since 2.12.1; a sudden collapse means the header shape changed and \
+         this test is now deriving an expectation that is too small to be worth \
+         asserting",
+        licenses.display(),
+        components.len()
+    );
+
+    let notice = read("NOTICE");
+    for component in &components {
+        assert!(
+            notice.contains(component.as_str()),
+            "NOTICE does not name the librdkafka component `{component}`. The expected \
+             set is read from {} — not from a literal in this test — so deleting the \
+             line from NOTICE cannot be matched by shrinking the expectation. \
+             {} components were found: {components:?}",
+            licenses.display(),
+            components.len()
+        );
+    }
+
+    // The umbrella attribution the components hang from.
+    for required in ["librdkafka", "BSD-2-Clause", "OpenSSL"] {
+        assert!(
+            notice.contains(required),
+            "NOTICE must name `{required}`: librdkafka is statically linked through \
+             `rdkafka-sys`'s `cmake-build` feature and its licence requires the \
+             copyright notice to travel with the redistributed binary"
+        );
+    }
+
+    // And the fact that the list is derived, said in the document itself, so a
+    // reader can check it the same way this test does.
+    assert!(
+        notice.contains("LICENSES.txt"),
+        "NOTICE must name `LICENSES.txt` as the file its component list is derived \
+         from; a list a reader cannot check is a list a reader must trust"
+    );
+}
+
+// ------------------------------------------------------- the crate inventory
+
+/// Every `name@version` in `Cargo.lock`, in sorted order.
+fn locked_packages(lock: &str) -> BTreeSet<String> {
+    let mut packages = BTreeSet::new();
+    for block in lock.split("[[package]]").skip(1) {
+        let mut name = None;
+        let mut version = None;
+        for line in block.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("name = \"") {
+                if name.is_none() {
+                    name = Some(rest.trim_end_matches('"').to_string());
+                }
+            } else if let Some(rest) = line.strip_prefix("version = \"") {
+                if version.is_none() {
+                    version = Some(rest.trim_end_matches('"').to_string());
+                }
+            }
+            if line == "[[package]]" || (name.is_some() && version.is_some()) {
+                // Both fields are at the top of a block; stop before the
+                // `dependencies` list, whose entries also look like names.
+                if name.is_some() && version.is_some() {
+                    break;
+                }
+            }
+        }
+        if let (Some(n), Some(v)) = (name, version) {
+            packages.insert(format!("{n}@{v}"));
+        }
+    }
+    packages
+}
+
+/// The inventory's entries: `name@version` -> (SPDX field, copyright field).
+fn inventory_entries(text: &str) -> BTreeMap<String, (String, String)> {
+    let mut entries: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut current: Option<String> = None;
+    let mut spdx = String::new();
+    let mut copyright = String::new();
+
+    let flush = |entries: &mut BTreeMap<String, (String, String)>,
+                 current: &mut Option<String>,
+                 spdx: &mut String,
+                 copyright: &mut String| {
+        if let Some(key) = current.take() {
+            let previous = entries.insert(key.clone(), (spdx.clone(), copyright.clone()));
+            assert!(
+                previous.is_none(),
+                "THIRD_PARTY_NOTICES.md carries TWO entries for `{key}`; the generator \
+                 emits one per resolved package"
+            );
+        }
+        spdx.clear();
+        copyright.clear();
+    };
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("### ") {
+            flush(&mut entries, &mut current, &mut spdx, &mut copyright);
+            current = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("- SPDX: ") {
+            spdx = rest.trim().trim_matches('`').to_string();
+        } else if let Some(rest) = line.strip_prefix("- Copyright: ") {
+            copyright = rest.trim().to_string();
+        }
+    }
+    flush(&mut entries, &mut current, &mut spdx, &mut copyright);
+    entries
+}
+
+/// **`THIRD_PARTY_NOTICES.md` carries one entry per resolved package, with a
+/// non-empty SPDX field and a non-empty copyright field on each.**
+///
+/// The expected set comes from `Cargo.lock`, so hand-editing one entry out of
+/// the document fails here naming the missing `name@version` — and the
+/// acceptance line `diff -u THIRD_PARTY_NOTICES.md <(generator)` exits 1 at the
+/// same time. Two independent detectors for one edit, on purpose.
+///
+/// The non-empty copyright assertion is what makes the generator's third arm
+/// load-bearing: nineteen packages carry neither a copyright line in a licence
+/// file nor an `authors` field, and a generator that emitted nothing for them
+/// would produce a file that looks complete and is not.
+#[test]
+fn third_party_notices_covers_every_resolved_package() {
+    let lock = read("Cargo.lock");
+    let expected = locked_packages(&lock);
+    assert!(
+        expected.len() > 100,
+        "Cargo.lock yielded only {} packages; the parse is wrong, not the lockfile",
+        expected.len()
+    );
+
+    let inventory = read("THIRD_PARTY_NOTICES.md");
+    let entries = inventory_entries(&inventory);
+
+    for package in &expected {
+        let (spdx, copyright) = entries.get(package).unwrap_or_else(|| {
+            panic!(
+                "THIRD_PARTY_NOTICES.md has no entry for `{package}`. The expected set is \
+                 parsed from Cargo.lock ({} packages), not from a literal here, so a \
+                 hand edit cannot be matched by shrinking the expectation. Regenerate \
+                 with `bash scripts/gen-third-party-notices.sh --write`",
+                expected.len()
+            )
+        });
+        assert!(
+            !spdx.trim().is_empty(),
+            "THIRD_PARTY_NOTICES.md's entry for `{package}` has an empty SPDX field"
+        );
+        assert!(
+            !copyright.trim().is_empty(),
+            "THIRD_PARTY_NOTICES.md's entry for `{package}` has an empty copyright \
+             field. Every package gets one of the three arms, and the third arm states \
+             the fact (`no copyright statement in the published crate; SPDX <expr> \
+             applies`) rather than emitting nothing — an empty field is \
+             indistinguishable from `nothing is owed here`"
+        );
+    }
+
+    let extra: Vec<&String> = entries.keys().filter(|k| !expected.contains(*k)).collect();
+    assert!(
+        extra.is_empty(),
+        "THIRD_PARTY_NOTICES.md names packages that are not in Cargo.lock: {extra:?}"
+    );
+
+    assert!(
+        inventory.contains(&format!(
+            "Packages in the resolved graph: {}",
+            expected.len()
+        )),
+        "THIRD_PARTY_NOTICES.md's header must record the package count it was \
+         generated at ({}), so a stale file is visible without a diff",
+        expected.len()
+    );
+    assert!(
+        inventory.contains("Regenerated, never edited"),
+        "THIRD_PARTY_NOTICES.md must say that it is regenerated and never edited; \
+         a generated file that does not say so gets edited"
+    );
+    assert!(
+        inventory.contains("scripts/gen-third-party-notices.sh"),
+        "THIRD_PARTY_NOTICES.md must name the command that regenerates it"
+    );
+}
+
+// ------------------------------------------------------------- the footers
+
+/// **Every doc footer carries the ASF sentence and a CC-BY-4.0 line whose link
+/// resolves to `docs/LICENSE-docs`.**
+///
+/// The link is resolved on disk rather than pattern-matched. A footer line
+/// asserting a licence with no artefact behind it is an assertion, not a
+/// licence, which is why `docs/LICENSE-docs` exists at all.
+#[test]
+fn every_doc_footer_carries_the_asf_sentence_and_the_docs_licence() {
+    let root = repo_root();
+    let licence = root
+        .join("docs")
+        .join("LICENSE-docs")
+        .canonicalize()
+        .expect("docs/LICENSE-docs exists: the CC-BY-4.0 text every footer cites");
+
+    let mut paths = docs_markdown();
+    paths.extend(ROOT_MARKDOWN.iter().map(|f| root.join(f)));
+
+    for path in paths {
+        let relative = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+
+        // The ASF sentence, either spelling: `®` at the repository root and
+        // under `docs/`, `(R)` where an ASCII-only gate applies.
+        assert!(
+            text.contains("registered trademarks of the Apache Software")
+                && text.contains("not affiliated with or endorsed by the ASF"),
+            "{} does not carry the ASF attribution sentence (Global Constraint 14)",
+            relative.display()
+        );
+
+        // The CC-BY-4.0 line, and the link on it has to RESOLVE.
+        let mut resolved = false;
+        let mut seen: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if !line.contains("CC-BY-4.0](") {
+                continue;
+            }
+            let Some(open) = line.find("CC-BY-4.0](") else {
+                continue;
+            };
+            let after = &line[open + "CC-BY-4.0](".len()..];
+            let Some(close) = after.find(')') else {
+                continue;
+            };
+            let target = &after[..close];
+            seen.push(target.to_string());
+            let candidate = path
+                .parent()
+                .expect("a file has a parent directory")
+                .join(target);
+            if candidate.canonicalize().is_ok_and(|c| c == licence) {
+                resolved = true;
+            }
+        }
+        assert!(
+            resolved,
+            "{}'s footer needs a CC-BY-4.0 line whose relative link resolves to \
+             docs/LICENSE-docs (R10: docs are CC-BY-4.0). Link targets found on \
+             CC-BY-4.0 lines: {seen:?}",
+            relative.display()
+        );
+    }
+}
+
+// ----------------------------------------------------------------- the DCO
+
+/// **`CONTRIBUTING.md` requires a DCO sign-off and accepts no CLA.**
+#[test]
+fn contributing_requires_a_dco_signoff_and_no_cla() {
+    let contributing = read("CONTRIBUTING.md");
+
+    assert!(
+        contributing.contains("Signed-off-by"),
+        "CONTRIBUTING.md must name the `Signed-off-by` trailer"
+    );
+    assert!(
+        contributing.contains("git commit -s"),
+        "CONTRIBUTING.md must give the `git commit -s` recipe"
+    );
+    assert!(
+        contributing.contains("Developer Certificate of Origin"),
+        "CONTRIBUTING.md must name the Developer Certificate of Origin"
+    );
+    // The certificate itself, not only a link to it: a contributor certifies
+    // what is in front of them.
+    for clause in [
+        "The contribution was created in whole or in part by me",
+        "The contribution is based upon previous work",
+        "The contribution was provided directly to me by some other",
+        "maintained indefinitely and may be redistributed",
+    ] {
+        assert!(
+            contributing.contains(clause),
+            "CONTRIBUTING.md must carry DCO 1.1's own text, including the clause \
+             starting `{clause}`"
+        );
+    }
+    assert!(
+        contributing.contains("No copyright-assignment CLA is required or accepted"),
+        "CONTRIBUTING.md must state that no copyright-assignment CLA is required or \
+         accepted — the DCO is a certification and not a transfer, and that difference \
+         is the reason this project cannot be quietly relicensed"
+    );
+}
+
+// --------------------------------------------------------- the threat model
+
+/// **`README.md` states the four threat-model residuals, on that surface.**
+///
+/// They are residuals, not bugs: the surface a stranger reads first has to
+/// carry them, because none of the four is discoverable from the code.
+#[test]
+fn the_readme_states_the_four_threat_model_residuals() {
+    let readme = read("README.md");
+
+    assert!(
+        readme.contains(
+            "Job CRUD over the signing-key namespace is\n  equivalent to holding the key"
+        ) || readme
+            .contains("Job CRUD over the signing-key namespace is equivalent to holding the key"),
+        "README.md must state that Job CRUD over the signing-key namespace is \
+         equivalent to holding the key — the signing-oracle residual (O1/O0 default \
+         (a), Global Constraint 27)"
+    );
+    assert!(
+        readme.contains("A cluster-admin defeats every control described here"),
+        "README.md must state that a cluster-admin defeats every control described \
+         here (O0, default (a))"
+    );
+    assert!(
+        readme.contains("RBAC bounds the viewer, not the page"),
+        "README.md must carry the sentence `RBAC bounds the viewer, not the page` \
+         (Global Constraint 28): the four shipped ClusterRoles bind the user, and \
+         under the `kubectl proxy` serving path they bind nothing about the page"
+    );
+    assert!(
+        readme.contains("`self_attested: false` means only \"two different keys\""),
+        "README.md must state that `self_attested: false` means only \"two different \
+         keys\" — one operator holding two keypairs satisfies it, and it is not \
+         evidence of an independent auditor"
+    );
+
+    // The withdrawn claim is forbidden on every shipped surface
+    // (`scripts/check-one-signer.sh` and `scripts/check-withdrawn-claim.sh`).
+    // Stating the residuals is what replaces it; restating it here would be the
+    // exact regression the corpus grep exists to catch.
+    assert!(
+        !readme.to_lowercase().contains("cannot sign"),
+        "README.md restates a withdrawn claim about signing; state the narrowed \
+         position instead"
+    );
+
+    // The release-notes note about the UI bundle.
+    assert!(
+        readme.contains("listed by\ndigest in the release notes")
+            || readme.contains("listed by digest in the release notes"),
+        "README.md must record that the `ui/` bundle's contents are listed by digest \
+         in the release notes — the page runs with the viewer's authority, so which \
+         bytes it is has to be checkable"
+    );
+}
+
+// ----------------------------------------------------------- the two images
+
+/// A `COPY` instruction's operands, for every `COPY` in a Dockerfile.
+/// Line continuations are joined first; `--from=` flags are dropped.
+fn copy_instructions(dockerfile: &str) -> Vec<Vec<String>> {
+    let mut joined = String::new();
+    for line in dockerfile.lines() {
+        let trimmed = line.trim_end();
+        if let Some(stripped) = trimmed.strip_suffix('\\') {
+            joined.push_str(stripped);
+            joined.push(' ');
+        } else {
+            joined.push_str(trimmed);
+            joined.push('\n');
+        }
+    }
+
+    joined
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix("COPY ")?;
+            Some(
+                rest.split_whitespace()
+                    .filter(|token| !token.starts_with("--"))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// **Both images `COPY` LICENSE, NOTICE and THIRD_PARTY_NOTICES.md into
+/// `/usr/share/licenses/logweir/`; only the runner carries the MIT notice.**
+///
+/// The controller links no OSO code and redistributes no MIT-licensed binary,
+/// so an MIT notice in its image would be a **false attribution** — a licence
+/// notice is a statement about what is inside, not decoration. That absence is
+/// asserted here and by `scripts/check-image-weirkeeper.sh` check 3.
+///
+/// This parses `COPY` instructions rather than grepping the file, because
+/// `Dockerfile.weirkeeper`'s comments explain the absence at length and a grep
+/// for `kafka-backup` would report the explanation as the violation.
+#[test]
+fn both_images_copy_the_licence_and_the_notice() {
+    const LOGWEIR_LICENCES: &str = "/usr/share/licenses/logweir/";
+
+    for (name, path) in [
+        ("runner", "Dockerfile"),
+        ("controller", "Dockerfile.weirkeeper"),
+    ] {
+        let dockerfile = read(path);
+        let copies = copy_instructions(&dockerfile);
+        assert!(
+            !copies.is_empty(),
+            "{path} has no COPY instruction; the parse is wrong, not the file"
+        );
+
+        for required in ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"] {
+            let carried = copies.iter().any(|operands| {
+                operands.last().is_some_and(|dest| {
+                    dest == LOGWEIR_LICENCES || dest == LOGWEIR_LICENCES.trim_end_matches('/')
+                }) && operands
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .any(|source| source == required)
+            });
+            assert!(
+                carried,
+                "the {name} image ({path}) does not COPY `{required}` into \
+                 {LOGWEIR_LICENCES}. Apache-2.0, MIT, BSD-2-Clause and BSD-3-Clause each \
+                 require the copyright notice to travel with the redistributed binary, \
+                 and both images redistribute one. COPY instructions found: {copies:?}"
+            );
+        }
+    }
+
+    // The runner redistributes the engine binary, so it owes the MIT notice.
+    let runner = copy_instructions(&read("Dockerfile"));
+    assert!(
+        runner.iter().any(|operands| {
+            operands
+                .last()
+                .is_some_and(|dest| dest == "/usr/share/licenses/kafka-backup/LICENSE")
+                && operands.iter().any(|s| s.contains("LICENSE-MIT"))
+        }),
+        "Dockerfile must COPY third_party/LICENSE-MIT to \
+         /usr/share/licenses/kafka-backup/LICENSE: the runner image redistributes the \
+         MIT-licensed `kafka-backup` binary and MIT requires the notice to travel with \
+         it. COPY instructions found: {runner:?}"
+    );
+
+    // The controller redistributes none of it, and must not claim to.
+    let controller = copy_instructions(&read("Dockerfile.weirkeeper"));
+    for operands in &controller {
+        for token in operands {
+            assert!(
+                !token.contains("kafka-backup"),
+                "Dockerfile.weirkeeper COPYs a `kafka-backup` path (`{token}`). The \
+                 controller links no OSO code and redistributes no MIT-licensed \
+                 binary, so that notice would be a FALSE ATTRIBUTION — a claim to \
+                 redistribute something the image does not contain. \
+                 `scripts/check-image-weirkeeper.sh` check 3 asserts the same absence \
+                 from the built image."
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------- the install doc
+
+/// **`docs/install.md` states the unpublished-image caveat, in its own words.**
+///
+/// X-APPLY proves `kubectl apply` exits 0; it does not start a pod. An install
+/// file pointing at digests that were never pushed applies cleanly on a
+/// stranger's cluster and then fails every pull — so the caveat is the
+/// document's lead, not a footnote.
+#[test]
+fn install_md_states_the_unpublished_image_caveat() {
+    let install = read("docs/install.md");
+
+    for literal in [
+        "blocked: no remote",
+        "author-only",
+        "imagePullPolicy: Never",
+        "kubectl --context docker-desktop apply --server-side -k config/overlays/local-images",
+    ] {
+        assert!(
+            install.contains(literal),
+            "docs/install.md must carry the literal `{literal}` (Global Constraint 37)"
+        );
+    }
+
+    assert!(
+        install.contains("never satisfies spec\n§16 clause 1")
+            || install.contains("never satisfies spec §16 clause 1"),
+        "docs/install.md must state that a locally built or locally loaded image never \
+         satisfies spec §16 clause 1 — \"published\" means a pull from a registry the \
+         author does not control, the `registry:2` fallback included"
+    );
+
+    // The author-only tag step: the kubelet keys on the WHOLE reference, so a
+    // matching digest under a different repository name is ErrImageNeverPull.
+    //
+    // BUILT FROM PIECES, NEVER WRITTEN OUT. The bare-tag form of the runner
+    // image is forbidden in any `.rs` file under `crates/` (Global Constraint
+    // 7; `manifest_lint.rs::the_runner_image_lives_in_exactly_one_place` scans
+    // for it), and a literal here would be its own violation.
+    let tag_step = format!(
+        "docker tag logweir:check {}{}:{}",
+        "ghcr.io/logweir/", "logweir", "v0.1.0"
+    );
+    assert!(
+        install.contains(&tag_step),
+        "docs/install.md must carry the author-only `{tag_step}` step: the kubelet \
+         keys images on the whole reference, so the shipped digest reference does not \
+         resolve to a locally built image until it is tagged with the shipped name"
+    );
+
+    // NO DIGEST LITERAL. A locally built digest changes on every build, so a
+    // digest copied into prose is a measurement that stops being true.
+    let digests: Vec<&str> = install
+        .split("sha256:")
+        .skip(1)
+        .filter(|tail| {
+            tail.chars()
+                .take(64)
+                .filter(char::is_ascii_hexdigit)
+                .count()
+                == 64
+        })
+        .collect();
+    assert!(
+        digests.is_empty(),
+        "docs/install.md carries {} `sha256:<64 hex>` literal(s). It must not: a \
+         locally built image's digest changes on EVERY build, so a digest in prose is \
+         a measurement of one build. The document names \
+         `config/manager/deployment.yaml` and `crates/weirkeeper/src/job.rs` as the \
+         places the pinned references live, and the reader reads them from the \
+         checkout",
+        digests.len()
+    );
+    for source_of_truth in [
+        "config/manager/deployment.yaml",
+        "crates/weirkeeper/src/job.rs",
+    ] {
+        assert!(
+            install.contains(source_of_truth),
+            "docs/install.md must name `{source_of_truth}` as a place the pinned image \
+             reference actually lives"
+        );
+    }
+}
+
+/// **The Secret preflight runs before any custom resource.**
+///
+/// `just check-secrets` exits 1 naming the first absent Secret, and an absent
+/// `logweir-signing-key` is the worst of the five: the key is MINTED when the
+/// path is absent, so the run succeeds and signs its evidence with a key
+/// nothing attests. A document that runs that check after the samples have
+/// been applied has documented the trap rather than avoided it.
+#[test]
+fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
+    let install = read("docs/install.md");
+
+    // THE COMMAND, NOT A MENTION. `just check-secrets` is named several times
+    // in this document's prose — in the paragraph that explains what it exits,
+    // and in the silent-mint warning that explains why it exists. A prose
+    // mention is not a step an adopter performs, so the index compared below
+    // is the first line that IS the command: trimmed, it starts with it.
+    let preflight = install
+        .match_indices("just check-secrets")
+        .find(|(at, _)| {
+            let line_start = install[..*at].rfind('\n').map_or(0, |i| i + 1);
+            install[line_start..*at].trim().is_empty()
+        })
+        .map(|(at, _)| at)
+        .expect(
+            "docs/install.md must carry `just check-secrets` as a COMMAND on its own line \
+             (interface I26), not only as a mention in prose",
+        );
+
+    let first_sample = install
+        .match_indices("config/samples/")
+        .filter(|(at, _)| {
+            // Only an APPLY of a sample counts; a prose mention does not.
+            let line_start = install[..*at].rfind('\n').map_or(0, |i| i + 1);
+            install[line_start..*at].contains("apply")
+        })
+        .map(|(at, _)| at)
+        .min()
+        .expect("docs/install.md must show applying the samples");
+
+    assert!(
+        preflight < first_sample,
+        "docs/install.md applies a file under config/samples/ at byte {first_sample} \
+         but does not reach `just check-secrets` until byte {preflight}. The preflight \
+         runs BEFORE any custom resource: an absent `logweir-signing-key` does not \
+         fail, it succeeds and signs with a key nothing attests"
+    );
+
+    // The five Secrets, by the names the code reads.
+    for secret in [
+        "logweir-signing-key",
+        "logweir-approval-bundle",
+        "logweir-s3",
+        "logweir-evidence-ro",
+    ] {
+        let found = install
+            .match_indices("create secret generic")
+            .any(|(at, _)| {
+                let end = (at + 400).min(install.len());
+                install.get(at..end).is_some_and(|w| w.contains(secret))
+            });
+        assert!(
+            found,
+            "docs/install.md has no `kubectl create secret` command for `{secret}`; a \
+             mention is not a command"
+        );
+    }
+    assert!(
+        install.contains("--from-literal=password="),
+        "docs/install.md must show how to create the per-cluster SCRAM credential, \
+         whose data key is fixed at `password` (`TARGET_PASSWORD_SECRET_KEY`)"
+    );
+    assert!(
+        install.contains("--from-file=signing.pem=signing.pem"),
+        "docs/install.md must use the signing Secret's real data key, `signing.pem` — \
+         a Secret keyed `key.pem` mounts a directory without the file the runner was \
+         told to read"
+    );
+    assert!(
+        install.contains("load_or_generate") && install.contains("keys.rs:81-92"),
+        "docs/install.md must carry the silent-mint warning citing \
+         `crates/logweir-evidence/src/keys.rs:81-92`"
+    );
+    for pair in ["signing.pem", "approver.pem"] {
+        assert!(
+            install.contains(&format!(
+                "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out {pair}"
+            )),
+            "docs/install.md must carry the verbatim `openssl genpkey` command for {pair}"
+        );
+    }
+
+    // The runner ServiceAccount is applied PER NAMESPACE: it is not in
+    // `logweir.yaml`, which installs only into `logweir-system`, where no
+    // runner ever runs.
+    assert!(
+        install.contains("config/rbac/backup-runner-serviceaccount.yaml"),
+        "docs/install.md must tell the reader to apply the runner ServiceAccount"
+    );
+    assert!(
+        install.contains("Apply it once per namespace that will run jobs"),
+        "docs/install.md must say the runner ServiceAccount is applied per namespace: \
+         a pod whose PodSpec names no ServiceAccount silently gets `default`"
+    );
+
+    // The `TrustRoster`'s name is fixed.
+    assert!(
+        install.contains("name: default"),
+        "docs/install.md must carry the `TrustRoster` snippet with `name: default`"
+    );
+    assert!(
+        install.contains("nothing reads any other name"),
+        "docs/install.md must say the `TrustRoster` name is fixed: a roster called \
+         anything else is stored and reconciled and consulted by no approval check"
+    );
+
+    // Global Constraint 29: two clients, two trust stores.
+    assert!(
+        install.contains("webpki-roots") && install.contains("ssl_ca_location"),
+        "docs/install.md must carry the two-trust-stores paragraph: the engine falls \
+         back to bundled `webpki-roots` unless `ssl_ca_location` is set, while \
+         Logweir's rdkafka path uses the image's `ca-certificates`, so a private-CA \
+         adopter configures BOTH"
+    );
+
+    // The uninstall, and what survives it.
+    assert!(
+        install.contains("kubectl --context docker-desktop delete -f logweir.yaml"),
+        "docs/install.md must carry the uninstall command"
+    );
+    assert!(
+        install.contains("removes only\nthat first thing")
+            || install.contains("removes only that first thing"),
+        "docs/install.md must state that `kubectl delete -f logweir.yaml` removes only \
+         the control plane; the scratch topics, the archive objects and the evidence \
+         objects survive it and each has its own command"
+    );
+}
+
+// --------------------------------------------------- deliberately not tag 1
+
+/// **`docs/stability.md` lists the sixteen deferred items and the four nevers.**
+///
+/// A table test rather than a substring sweep: the failure names the item, so
+/// "one line was dropped" is a readable failure rather than a boolean.
+#[test]
+fn stability_lists_the_deferred_items() {
+    let stability = read("docs/stability.md");
+    let section = stability
+        .split_once("## Deliberately not in tag 1")
+        .map(|(_, rest)| rest)
+        .expect("docs/stability.md must carry the `Deliberately not in tag 1` section");
+
+    const LATER: [&str; 16] = [
+        "MSK IAM auth",
+        "Strimzi as a source",
+        "in-browser WASM verifier",
+        "OsoCliEngine::validation_run",
+        "Retention deletion",
+        "Byte-faithful production restores",
+        "Multi-tenancy beyond namespace RBAC",
+        "Delegated rule-based schedule approval",
+        "A Helm chart",
+        "KMS / PKCS#11 signing",
+        "Key generation and rotation",
+        "A PVC for the runner pod",
+        "Subprocess timeout, cancellation and SIGTERM handling",
+        "A configurable Kafka client timeout",
+        "kind + Calico NetworkPolicy probe",
+        "Stage-2 Tasks 10 and 17-24",
+    ];
+    for (index, item) in LATER.iter().enumerate() {
+        assert!(
+            section.contains(item),
+            "docs/stability.md's `Deliberately not in tag 1` section is missing \
+             *Later, named* item {} of 16: `{item}`",
+            index + 1
+        );
+    }
+
+    const NEVER: [&str; 4] = [
+        "Restore-in-place into a live topic",
+        "Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE",
+        "MSK ZK-to-KRaft migration",
+        "Multi-cluster or fleet views",
+    ];
+    for (index, entry) in NEVER.iter().enumerate() {
+        assert!(
+            section.contains(entry),
+            "docs/stability.md's `Deliberately not in tag 1` section is missing \
+             *Never* entry {} of 4: `{entry}`",
+            index + 1
+        );
+    }
+
+    // The two lists are stated separately, and the difference is the point.
+    assert!(
+        section.contains("### Later, named") && section.contains("### Never"),
+        "the *Later, named* and *Never* lists are stated separately: one is a \
+         schedule and the other is a refusal"
+    );
+
+    // Each deferred item carries a reason and a citation, which is what makes
+    // the list reviewable rather than decorative.
+    for (label, citation) in [
+        ("the MSK IAM seam", "crates/logweir-kafka/src/token.rs:1-9"),
+        (
+            "the Kafka client timeout constant",
+            "crates/logweir-kafka/src/rdkafka_reader.rs:16",
+        ),
+        ("the Strimzi engine floor", "v0.19.1"),
+    ] {
+        assert!(
+            section.contains(citation),
+            "the *Later, named* entry for {label} must carry its citation `{citation}`"
+        );
+    }
+}
+
+// -------------------------------------------------------------- trademarks
+
+/// **`TRADEMARKS.md` states the clearance act and the announcement gate.**
+///
+/// In the research report's own terms rather than a softened paraphrase:
+/// "counsel must assess likelihood-of-confusion" with no registries and no
+/// classes names no act anybody can perform.
+#[test]
+fn trademarks_states_the_clearance_act_and_the_announcement_gate() {
+    let trademarks = read("TRADEMARKS.md");
+
+    for literal in ["UKIPO", "EUIPO", "USPTO", "classes 9 and 42", "2,824"] {
+        assert!(
+            trademarks.contains(literal),
+            "TRADEMARKS.md must carry `{literal}`: the clearance act is a formal \
+             UKIPO + EUIPO + USPTO search for LOGWEIR and WEIRKEEPER in classes 9 and \
+             42, and the stem \"weir\" alone returns 2,824 records"
+        );
+    }
+    assert!(
+        trademarks.contains("working name"),
+        "TRADEMARKS.md must say LOGWEIR is a **working name**"
+    );
+    assert!(
+        trademarks.contains("owner action, not a task's"),
+        "TRADEMARKS.md must say the clearance search is owner action and not a task's \
+         — no engineering task in this repository can produce a clearance opinion"
+    );
+    assert!(
+        trademarks.contains("A git tag is a git object. An announcement is a use in commerce."),
+        "TRADEMARKS.md must distinguish announcing from tagging: announcing publicly \
+         is gated on the clearance opinion and tagging is not"
+    );
+    // BUILT FROM PIECES, LIKE EVERY OTHER REFERENCE TO THE RUNNER IMAGE IN A
+    // `.rs` FILE. Interface I15 says the runner image is named EXACTLY ONCE
+    // under `crates/` — `crates/weirkeeper/src/job.rs`'s `RUNNER_IMAGE` — and
+    // `crd_shape.rs::the_runner_image_is_named_once` scans every file under
+    // `crates/` for the whole string. A literal here would be the second
+    // occurrence and would fail that guard, which is the point of it.
+    let runner_repository = format!("{}{}", "ghcr.io/logweir/", "logweir");
+    let prose = trademarks.replace('\n', " ");
+    assert!(
+        prose.contains(&runner_repository) && prose.contains("not placeholders"),
+        "TRADEMARKS.md must record that the registry namespace is fixed as a literal \
+         (`{runner_repository}`), so clearing the question changes one string and not \
+         the install path"
+    );
+}

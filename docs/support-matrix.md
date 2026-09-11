@@ -8,6 +8,9 @@ every other version rather than projecting a result. A matrix that lists an
 untested version with a verdict is worse than a short matrix.
 -->
 
+**Installing Logweir is [install.md](install.md)**, which leads with the engine
+floor below. This file is the row-by-row evidence behind it.
+
 ## The floors, stated first
 
 | Floor | Version | What it gates |
@@ -33,7 +36,7 @@ raises against that engine or against an operator that defaults to it.**
 
 | Engine version | Image digest | Outcome | Evidence |
 |---|---|---|---|
-| **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
+| **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | **The engine floor: `0.21.0` is the minimum supported `kafka-backup` version, the version this row was run against, and the version the shipped digest pins. [install.md](install.md) leads with it.** Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
 
 That is **one green row at the declared floor**, which is the release
 requirement. It is also the only row that has been run.
@@ -95,6 +98,8 @@ nothing**.
 Until it has run, this file is short on purpose.
 
 ---
+
+Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
