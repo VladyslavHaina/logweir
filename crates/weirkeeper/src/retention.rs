@@ -23,9 +23,11 @@
 //! first deletion defect destroys an archive.
 //!
 //! **The adopter's own bucket lifecycle policy does the deleting.** This
-//! module renders the exact commands an operator would run — `aws s3 rm` and
-//! `mc rm` — as strings, into `BackupSchedule.status.retentionReport`, and
-//! runs none of them. Retention never touches a Kafka topic, in any tag.
+//! module renders the exact commands an operator would run — the archive
+//! scheme's own CLI (`aws s3 rm`, `gsutil rm`, `az storage blob delete-batch`
+//! or `rm -rf`) and the `mc` spelling of the same removal — as strings, into
+//! `BackupSchedule.status.retentionReport`, and runs none of them. Retention
+//! never touches a Kafka topic, in any tag.
 //!
 //! # Three mechanisms, because "the caller builds it read-only" is a convention
 //!
@@ -189,9 +191,17 @@ pub struct RetentionReport {
     pub sets_kept: Vec<String>,
     /// The sets the policy WOULD remove, **newest first**.
     pub sets_that_would_be_removed: Vec<RemovableSet>,
-    /// The exact commands an operator would run. Rendered, never executed.
-    /// One per entry of [`RetentionReport::sets_that_would_be_removed`], in
-    /// the same order.
+    /// The exact commands an operator would run, in the ARCHIVE SCHEME'S OWN
+    /// CLI — see [`cli_rm`]. Rendered, never executed. One per entry of
+    /// [`RetentionReport::sets_that_would_be_removed`], in the same order.
+    ///
+    /// THE FIELD NAME IS `awsCli` ON THE STATUS AND IS NOT RENAMED HERE. It
+    /// is CRD API — `crds::backup_schedule::RetentionReport`, and from there
+    /// `config/crd/backupschedules.yaml` — and a `file://` archive's remedy
+    /// living under a key spelled `awsCli` is a naming wart, not a wrong
+    /// command. Renaming it is an API change with its own generated-CRD
+    /// regeneration, out of this task's two-file scope, and is carried to the
+    /// controller in the task report rather than taken here.
     pub aws_cli: Vec<String>,
     /// The `mc` spelling of the same commands, same order. Rendered, never
     /// executed.
@@ -406,7 +416,7 @@ pub fn evaluate(
 
     let aws_cli = removable
         .iter()
-        .map(|s| aws_rm(archive_url, &s.backup_id))
+        .map(|s| cli_rm(archive_url, &s.backup_id))
         .collect();
     let mc_cli = removable
         .iter()
@@ -459,15 +469,112 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// The command an operator runs against `aws s3`. **Rendered, never executed.**
+/// The command an operator runs against the archive's OWN CLI. **Rendered,
+/// never executed.**
 ///
-/// `aws s3 rm '<url>/<id>/' --recursive`, with exactly one slash between the
-/// archive URL and the id whatever the spec's trailing slash looked like, and
-/// the whole path as ONE shell word — see [`shell_quote`].
+/// # It is not called `aws_rm` any more, because it was not one
+///
+/// THE DEFECT. This renderer interpolated the archive URL into
+/// `aws s3 rm '<url>/<id>/' --recursive` for EVERY scheme, so a `file://`
+/// archive's report carried `aws s3 rm 'file:///srv/archive/backup-001/'
+/// --recursive`. `aws s3 rm` takes an `S3Uri`; a `file://` URI is not one, so
+/// that entry was not a command an operator could run — in a field this
+/// module, the CRD's own field description and `docs/kubernetes.md` all
+/// document as "the exact commands an operator would run", with copy-and-paste
+/// the intended workflow (Task 19 review). A report on a `file://` archive
+/// carried one runnable remedy (the `mc` one) and one that was not a command.
+/// `gs://` and `az://` were wrong the same way and had never been looked at.
+///
+/// # One spelling per scheme, and why each is the one it is
+///
+/// * `s3://` — `aws s3 rm '<url>/<id>/' --recursive`. **Byte-identical** to
+///   what this function always rendered: the `aws` CLI takes the `s3://` URL
+///   itself as the target.
+/// * `gs://` — `gsutil -m rm -r '<url>/<id>/'`. Same shape, Google's CLI:
+///   the `gs://` URL is the target, `-r` recurses and `-m` parallelises what
+///   is usually thousands of segment objects.
+/// * `az://` — `az storage blob delete-batch --account-name '<account>'
+///   --source '<container>' --pattern '<prefix>/<id>/*'`. Azure's CLI takes no
+///   `az://` URL: the account and the container are separate arguments, which
+///   is the same fact that roots the archive handle at the container — see
+///   [`bucket_and_prefix`] — and the key prefix is a glob, never a path
+///   argument. **The pattern carries no leading slash**: a blob name does not
+///   begin with one, and `'/backup-001/*'` would match nothing.
+/// * `file://` — `rm -rf '<path>/<id>/'`. There is no cloud CLI for a
+///   filesystem archive, and a backup set is a directory. `mc` is a real
+///   answer for the `mc` slot (it operates on a local path directly — see
+///   [`mc_rm`]), but this slot is the scheme's OWN tool, and for a filesystem
+///   that is the shell.
+///
+/// THE ENTRY IS NEVER OMITTED for a scheme this function does not recognise:
+/// `aws_cli` is documented as one entry per removable set, in the same order,
+/// so the correspondence with
+/// [`RetentionReport::sets_that_would_be_removed`] is POSITIONAL and a skipped
+/// entry would misalign every later row. An unrecognised scheme — which
+/// [`storage_url_for`] refuses, so no report is ever rendered from one — falls
+/// to the `aws` arm, unchanged, and is a legible command an operator will
+/// notice rather than a panic in a reconcile.
+///
+/// AND `rm -rf` IS THE MOST DESTRUCTIVE OF THE FOUR SPELLINGS, which is
+/// exactly why the path is ONE shell word: [`shell_quote`] is unconditional,
+/// so a backup set directory named `a;rm -rf ~` is a path and not a second
+/// command. Nothing here executes anything — guard **G-RET**,
+/// `scripts/check-no-archive-write.sh`, and
+/// `tests/retention.rs::the_report_path_spawns_no_process`.
 #[must_use]
-pub fn aws_rm(archive_url: &str, backup_id: &str) -> String {
-    let target = format!("{}/{backup_id}/", archive_url.trim_end_matches('/'));
-    format!("aws s3 rm {} --recursive", shell_quote(&target))
+pub fn cli_rm(archive_url: &str, backup_id: &str) -> String {
+    let scheme = archive_url
+        .split_once("://")
+        .map_or("", |(scheme, _)| scheme);
+    match scheme {
+        // The scheme whose "CLI" is the shell, and whose target is a path
+        // rather than a URL — `bucket_and_prefix` returns that path as the
+        // root, so this is the same one parser the listing uses.
+        "file" => {
+            let (root, prefix) = bucket_and_prefix(archive_url);
+            let mut target = root;
+            if !prefix.is_empty() {
+                target.push('/');
+                target.push_str(&prefix);
+            }
+            target.push('/');
+            target.push_str(backup_id);
+            target.push('/');
+            format!("rm -rf {}", shell_quote(&target))
+        }
+        "gs" => format!(
+            "gsutil -m rm -r {}",
+            shell_quote(&backup_set_url(archive_url, backup_id))
+        ),
+        "az" => {
+            let (account, container, prefix) = az_parts(archive_url);
+            let pattern = if prefix.is_empty() {
+                format!("{backup_id}/*")
+            } else {
+                format!("{prefix}/{backup_id}/*")
+            };
+            format!(
+                "az storage blob delete-batch --account-name {} --source {} --pattern {}",
+                shell_quote(account),
+                shell_quote(container),
+                shell_quote(&pattern)
+            )
+        }
+        _ => format!(
+            "aws s3 rm {} --recursive",
+            shell_quote(&backup_set_url(archive_url, backup_id))
+        ),
+    }
+}
+
+/// `<archive_url>/<backup_id>/`, with exactly one slash between them whatever
+/// the spec's trailing slash looked like.
+///
+/// The two schemes whose CLI takes the URL ITSELF as the target — `s3` and
+/// `gs` — render this; Azure's takes the container and a glob instead, and a
+/// filesystem archive has a path and not a URL.
+fn backup_set_url(archive_url: &str, backup_id: &str) -> String {
+    format!("{}/{backup_id}/", archive_url.trim_end_matches('/'))
 }
 
 /// The command an operator runs against `mc`. **Rendered, never executed.**

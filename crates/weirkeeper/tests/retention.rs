@@ -1875,7 +1875,7 @@ fn argv_of(rendered: &str) -> Vec<String> {
 /// shell reads as TWO commands, the second of them `rm -rf ~/ --recursive`, in
 /// a status field documented as "the exact commands an operator would run".
 fn assert_one_path_argument(what: &str, backup_id: &str) {
-    let aws = weirkeeper::retention::aws_rm(ARCHIVE_URL, backup_id);
+    let aws = weirkeeper::retention::cli_rm(ARCHIVE_URL, backup_id);
     let argv = argv_of(&aws);
     assert_eq!(
         argv,
@@ -1885,7 +1885,7 @@ fn assert_one_path_argument(what: &str, backup_id: &str) {
             format!("s3://kafka-backups/mvp-demo/{backup_id}/"),
             "--recursive".to_string(),
         ],
-        "aws_rm must render {what} as ONE path argument and nothing else. Rendered:\n{aws}"
+        "cli_rm must render {what} as ONE path argument and nothing else. Rendered:\n{aws}"
     );
 
     let mc = weirkeeper::retention::mc_rm(ARCHIVE_URL, backup_id);
@@ -1947,7 +1947,7 @@ fn a_single_quote_in_a_backup_id_closes_escapes_and_reopens() {
 /// every such predicate is a list of characters someone believed were safe.
 #[test]
 fn the_ordinary_command_is_quoted_too_and_still_reads_as_one_command() {
-    let aws = weirkeeper::retention::aws_rm(ARCHIVE_URL, "backup-003");
+    let aws = weirkeeper::retention::cli_rm(ARCHIVE_URL, "backup-003");
     assert_eq!(
         aws, "aws s3 rm 's3://kafka-backups/mvp-demo/backup-003/' --recursive",
         "the quoting is unconditional"
@@ -1970,7 +1970,7 @@ fn the_ordinary_command_is_quoted_too_and_still_reads_as_one_command() {
 #[test]
 fn the_bucket_and_prefix_are_quoted_as_well_as_the_backup_id() {
     let hostile = "s3://buck et/pre;fix";
-    let aws = weirkeeper::retention::aws_rm(hostile, "id");
+    let aws = weirkeeper::retention::cli_rm(hostile, "id");
     assert_eq!(
         argv_of(&aws),
         vec![
@@ -2774,5 +2774,90 @@ fn a_filesystem_archives_mc_target_is_the_path_and_not_an_alias() {
     assert_eq!(
         weirkeeper::retention::mc_rm(ARCHIVE_URL, "backup-003"),
         "mc rm --recursive --force 'local/kafka-backups/mvp-demo/backup-003/'"
+    );
+}
+
+/// **The printed remedy names the ARCHIVE SCHEME'S OWN TOOL.**
+///
+/// One row per scheme, each pinning the exact string, because this field is
+/// documented — here, in the CRD's own field description and in
+/// `docs/kubernetes.md` — as "the exact commands an operator would run", and
+/// Task 19's review established that copy-and-paste IS the intended workflow.
+/// A rendered string an operator cannot run is the whole finding: before this,
+/// `cli_rm` interpolated the archive URL into `aws s3 rm` for EVERY scheme, so
+/// a `file://` archive's report carried
+/// `aws s3 rm 'file:///srv/archive/backup-003/' --recursive` — `aws s3 rm`
+/// takes an `S3Uri`, and a `file://` URI is not one.
+///
+/// THE ROWS ASSERT THE STRING AND NOT AN `argv`. The `argv_of` helper above
+/// runs the rendered command under `/bin/sh` against a stub function, which is
+/// the right instrument for `aws` and `mc` and emphatically the WRONG one for
+/// a line beginning `rm -rf`: a test that executes a removal command to check
+/// its shape is the reaper this whole design replaced. The one-shell-word
+/// property these rows depend on is `shell_quote`'s, asserted unconditionally
+/// and per hostile character by the F-1 rows above.
+#[test]
+fn an_s3_archives_remedy_is_the_aws_cli_and_is_byte_identical() {
+    assert_eq!(
+        weirkeeper::retention::cli_rm("s3://kafka-backups/mvp-demo", "backup-003"),
+        "aws s3 rm 's3://kafka-backups/mvp-demo/backup-003/' --recursive",
+        "the `aws` CLI takes the `s3://` URL itself as the target — unchanged, byte for byte"
+    );
+    assert_eq!(
+        weirkeeper::retention::cli_rm("s3://kafka-backups/mvp-demo/", "backup-003"),
+        "aws s3 rm 's3://kafka-backups/mvp-demo/backup-003/' --recursive",
+        "exactly one slash between the archive URL and the id, whatever the spec's trailing \
+         slash looked like"
+    );
+}
+
+#[test]
+fn a_file_archives_remedy_is_rm_rf_on_the_archive_path() {
+    let rendered = weirkeeper::retention::cli_rm("file:///srv/archive", "backup-003");
+    assert_eq!(
+        rendered, "rm -rf '/srv/archive/backup-003/'",
+        "there is no cloud CLI for a filesystem archive and a backup set is a directory, so \
+         the scheme's own tool is the shell — and the path is ONE shell word"
+    );
+    assert!(
+        !rendered.starts_with("aws "),
+        "THE WHOLE FINDING: `aws s3 rm` takes an `S3Uri`, so `aws s3 rm 'file:///…'` is not a \
+         command an operator can run, in a field documented as the exact commands they would \
+         run. Rendered:\n{rendered}"
+    );
+    assert_eq!(
+        weirkeeper::retention::cli_rm("file:///srv/archive/kafka-backups/mvp-demo", "backup-003"),
+        "rm -rf '/srv/archive/kafka-backups/mvp-demo/backup-003/'",
+        "a sub-prefix is part of the path: `bucket_and_prefix` roots a `file://` archive at \
+         the WHOLE path and leaves no prefix over"
+    );
+}
+
+#[test]
+fn a_gs_archives_remedy_is_the_gsutil_command() {
+    assert_eq!(
+        weirkeeper::retention::cli_rm("gs://kafka-backups/mvp-demo", "backup-003"),
+        "gsutil -m rm -r 'gs://kafka-backups/mvp-demo/backup-003/'",
+        "Google's CLI takes the `gs://` URL as the target: `-r` recurses, and `-m` \
+         parallelises what is usually thousands of segment objects"
+    );
+}
+
+#[test]
+fn an_az_archives_remedy_is_the_az_cli_delete_batch() {
+    assert_eq!(
+        weirkeeper::retention::cli_rm("az://acct/container/pfx", "backup-003"),
+        "az storage blob delete-batch --account-name 'acct' --source 'container' \
+         --pattern 'pfx/backup-003/*'",
+        "Azure's CLI takes no `az://` URL: the account and the container are separate \
+         arguments — the same fact that roots the archive handle at the container — and the \
+         key prefix is a glob"
+    );
+    assert_eq!(
+        weirkeeper::retention::cli_rm("az://acct/container", "backup-003"),
+        "az storage blob delete-batch --account-name 'acct' --source 'container' \
+         --pattern 'backup-003/*'",
+        "NO LEADING SLASH when there is no prefix: a blob name does not begin with one, and \
+         `'/backup-003/*'` would match nothing"
     );
 }
