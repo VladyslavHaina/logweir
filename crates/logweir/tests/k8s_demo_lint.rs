@@ -46,13 +46,26 @@ fn read(rel: &str) -> String {
 ///
 /// It is the LAST recipe in the justfile by STANDING RULE 17 — chain J, slot
 /// 17, appended at the end — so "to the end of the file" is exact rather than
-/// convenient, and a later task appending after it will find this helper
-/// reading two recipes and can narrow it then.
+/// convenient until Task 25 appended `ui` after it; the helper now stops at
+/// the first unindented line after the header.
 fn k8s_demo_recipe(justfile: &str) -> String {
     let at = justfile
         .find("\nk8s-demo:")
         .expect("`just k8s-demo` is a recipe in the justfile");
-    justfile[at + 1..].to_string()
+    // Task 25 appended `ui` after this recipe, so the body ends at the first
+    // later line that is neither indented nor blank — the next recipe, or the
+    // comment block above it. Reading to the end of the file would lint that
+    // recipe's `kubectl proxy` line under this recipe's name.
+    let mut out = String::new();
+    for (i, line) in justfile[at + 1..].lines().enumerate() {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if i > 0 && !indented && !line.is_empty() {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// **STANDING RULE 20, over the demo script.**
