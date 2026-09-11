@@ -1,0 +1,31 @@
+# The control-plane base: the Deployment and the runner NetworkPolicy.
+#
+# `namespace.yaml` IS FIRST HERE, AND `config/kustomization.yaml` NAMES THIS
+# DIRECTORY FIRST — so the Namespace is still the first resource in the install
+# root's ordering (interface **I27**). It is listed HERE rather than as
+# `manager/namespace.yaml` in `config/kustomization.yaml`, which is the shape
+# the brief describes, for one measured reason:
+#
+#     error: accumulating resources from '../../manager/namespace.yaml':
+#     security; file '.../config/manager/namespace.yaml' is not in or below
+#     '.../config/overlays/local-images'
+#
+# `config/overlays/local-images` cannot name `../..` (kustomize calls that a
+# cycle, because the overlay lives inside `config/`) and cannot name a bare
+# FILE outside its own root — but it CAN name a sibling DIRECTORY that carries
+# its own kustomization, because each such directory becomes a loader root of
+# its own. Putting the Namespace inside one of those directories is what lets
+# both the install root and the author-only overlay reach it from one copy.
+# Duplicating the document instead would have put two `kind: Namespace`
+# documents in `logweir.yaml`, which
+# `manifest_lint.rs::logweir_yaml_creates_its_own_namespace` asserts against.
+#
+# The property that actually matters is asserted over the RENDERED file and not
+# over this list: exactly one Namespace, named `logweir-system`, preceding every
+# namespaced document in `logweir.yaml`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - deployment.yaml
+  - networkpolicy.yaml

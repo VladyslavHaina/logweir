@@ -1,0 +1,54 @@
+# `logweir-operator` — create the four operational kinds, and suspend a
+# schedule.
+#
+# ---------------------------------------------------------------------------
+# THE `suspend` RESTRICTION IS CEL, NOT RBAC, AND IT CANNOT BE WRITTEN HERE
+# ---------------------------------------------------------------------------
+# An RBAC `rules[]` entry is `apiGroups`, `resources`, `verbs` and
+# `resourceNames` and nothing else — there is no field in which a CEL
+# expression could be written, so "`update` restricted by CEL to `suspend`" is
+# not expressible in a ClusterRole and must not be attempted (critique B H13,
+# spec §9 amendment 4b, claim C97). An implementer who tries produces either a
+# ClusterRole the API server rejects or a key it silently ignores, and the
+# second is worse: the install succeeds and the restriction does not exist.
+#
+# THE RESTRICTION ALREADY EXISTS, IN THE CRD. `config/crd/backupschedules.yaml`
+# carries an object-level `x-kubernetes-validations` rule on `.spec` sealing
+# every field except `suspend` — `schedule`, `sourceRef`, `topics`, `archive`
+# and `retention`, each pinned both for presence and for value — with the
+# message `only spec.suspend is mutable; create a new BackupSchedule instead`.
+# **The API server applies it to every subject, cluster-admin included**, which
+# is a stronger statement than any ClusterRole could make about any one of
+# them. So the grant below is a plain `update`, and the restriction to
+# `suspend` is enforced one layer up.
+#
+# SHIPPED UNBOUND. Bind it per namespace:
+#
+#     kubectl --context docker-desktop create rolebinding logweir-operator \
+#       --clusterrole=logweir-operator --user=<user> -n <namespace>
+#
+# NO `approvals` HERE. Creating a restore and approving one are different
+# people on purpose (`logweir-approver`); an operator who could do both makes
+# `self_attested: false` unachievable in this namespace.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-operator
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: human-role
+rules:
+  # Start work: a cluster connection, a schedule, a one-off backup, a restore.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - restores
+    verbs: ["create"]
+  # Suspend and resume a schedule. PLAIN `update` — see this file's header for
+  # why it cannot carry the restriction and where the restriction actually is.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupschedules"]
+    verbs: ["update"]

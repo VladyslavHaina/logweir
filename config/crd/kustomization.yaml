@@ -1,0 +1,23 @@
+# The six CustomResourceDefinitions, listed by name.
+#
+# NOT A GLOB. `kustomize` has no directory-wildcard for `resources`, and an
+# enumeration is what makes a seventh kind a reviewable diff in this file rather
+# than a document that appears in `logweir.yaml` because somebody dropped a file
+# in this directory.
+#
+# EVERY FILE THIS LISTS IS GENERATED. `just crds` renders them from
+# `crates/weirkeeper/src/crds/` and
+# `crates/weirkeeper/tests/crd_shape.rs::the_checked_in_crds_are_what_the_emitter_renders`
+# fails if a checked-in byte diverges. This file is the only hand-written thing
+# in the directory; adding a kind means adding it to the emitter AND to this
+# list, and forgetting the second half ships an install that cannot store the
+# kind the controller watches.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - approvals.yaml
+  - backups.yaml
+  - backupschedules.yaml
+  - kafkaclusters.yaml
+  - restores.yaml
+  - trustrosters.yaml

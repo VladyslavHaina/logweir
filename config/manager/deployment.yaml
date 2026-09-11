@@ -1,0 +1,117 @@
+# The `weirkeeper` Deployment — the control plane itself.
+#
+# ---------------------------------------------------------------------------
+# THIS PodSpec IS THE ONE `automountServiceAccountToken` EXEMPTION
+# ---------------------------------------------------------------------------
+# Critique B **H14**, spec §9. Every runner PodSpec `job::build` produces
+# carries `automountServiceAccountToken: false`, and so does the runner's own
+# ServiceAccount, because `logweir backup run` makes zero Kubernetes API calls
+# and is the process that holds the signing key. This pod is the opposite: it
+# is the ONLY Kubernetes API client in the design
+# (`design-operator.md:355-359`), and removing its projected token stops it
+# opening a single watch. So it names `serviceAccountName: weirkeeper` and does
+# **not** set the field at all.
+#
+# THE EXEMPTION IS A LITERAL PATH LIST AND NEVER A PATTERN.
+# `crates/logweir/tests/manifest_lint.rs`'s
+# `runner_pods_do_not_automount_a_token` carries the list; a second exempt
+# PodSpec is a diff in that test, reviewed on its own merits, rather than a
+# glob that quietly grew.
+#
+# ---------------------------------------------------------------------------
+# ONE REPLICA, `Recreate`, AND NO LEADER ELECTION
+# ---------------------------------------------------------------------------
+# Global Constraint 30: one controller per cluster. There is no leader-election
+# lease in `crates/weirkeeper/` — `main.rs` builds one client and registers six
+# `Controller`s — so two running copies would each see the same due schedule
+# slot and each `POST` a `Backup`. `RollingUpdate` starts the new pod before the
+# old one is gone and would produce exactly that overlap during every upgrade,
+# which is why the strategy is `Recreate` and the replica count is 1. Neither is
+# a tuning knob.
+#
+# ---------------------------------------------------------------------------
+# NO PROBES, NO PORTS, NO Service — AND THAT IS THE DESIGN
+# ---------------------------------------------------------------------------
+# Global Constraint 32: tag 1 ships no HTTP surface. This binary serves nothing
+# — no `/healthz`, no `/metrics`, no byte-echo route — so an `httpGet` probe
+# would fail and a `tcpSocket` probe would have nothing to connect to. The
+# liveness signal is the process: `main.rs` returns a non-zero `ExitCode` on
+# every fatal path and the kubelet restarts the container. Adding a probe here
+# means first adding a listener, which is a tag-2 decision.
+#
+# ---------------------------------------------------------------------------
+# THE IMAGE IS A BARE TAG, AND THAT IS RECORDED RATHER THAN HIDDEN
+# ---------------------------------------------------------------------------
+# Global Constraint 7 pins by digest and Global Constraint 37 says a locally
+# built image is author-only. `ghcr.io/logweir/weirkeeper:v0.1.0` is the literal
+# registry namespace of Global Constraint 24 at the workspace version, and **no
+# such image has been pushed**: until a git remote exists and `release.yml` has
+# run against it, `logweir.yaml`'s digest rows read `blocked: no remote`. Task 23
+# replaces this string with an `@sha256:` reference. Applying this file on a
+# cluster with no access to that repository is expected to leave the pod in
+# `ImagePullBackOff`, and X-APPLY does not claim otherwise: it proves `kubectl
+# apply` exits 0, not that a pod starts (spec §16 clause 1).
+#
+# For an author-only local run, `config/overlays/local-images` rewrites this
+# reference to `weirkeeper:check` with `imagePullPolicy: Never`.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weirkeeper
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/component: control-plane
+    spec:
+      serviceAccountName: weirkeeper
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: weirkeeper
+          image: ghcr.io/logweir/weirkeeper:v0.1.0
+          imagePullPolicy: IfNotPresent
+          # NO ARGUMENTS. `weirkeeper` takes `--version`, `--help`, or nothing
+          # at all, and anything else exits 1 naming what it got
+          # (`crates/weirkeeper/src/main.rs`). There is no argument parser to
+          # pass a flag to.
+          args: []
+          env:
+            # THE READ-ONLY ARCHIVE HANDLE, AND THE ONLY OPTIONAL PIECE OF THIS
+            # PodSpec. Unset, the controller holds no archive handle at all and
+            # writes no `retentionReport` — it logs that it is doing so and the
+            # other five reconcilers are unaffected
+            # (`weirkeeper::retention::ARCHIVE_URL_ENV`). Set it, and add the
+            # `logweir-evidence-ro` credential beside it, to turn retention
+            # reporting and the UI's verification display on. Shipped empty so
+            # the default install is the one every gate in this plan runs.
+            - name: LOGWEIR_ARCHIVE_URL
+              value: ""
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

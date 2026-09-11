@@ -1,0 +1,41 @@
+# A `KafkaCluster` — the connection every backup and restore names.
+#
+#     kubectl --context docker-desktop -n <namespace> \
+#       apply -f config/samples/kafkacluster.yaml
+#
+# NO NAMESPACE IS SET IN THIS FILE, ON PURPOSE. Apply it with `-n`; a sample
+# that hard-coded `logweir-system` would put an adopter's custom resources in
+# the control plane's own namespace, where the NetworkPolicy and the RBAC are
+# written for a controller and not for runners.
+#
+# `role` IS `source` OR `target` AND IT IS NOT ADVISORY: a restore refuses a
+# target whose observed `cluster_id` equals the source's (GC18(c) rail 4).
+#
+# THE CONTROLLER PROBES THIS OBJECT BY RUNNING A JOB. The `KafkaCluster`
+# reconciler runs `logweir cluster-probe` as a runner Job — same ServiceAccount
+# (`logweir-runner`), same image, same `automountServiceAccountToken: false` —
+# and reads two lines from its pod log to set `status.reachable`. So the runner
+# ServiceAccount must exist in THIS namespace before this object is useful:
+#
+#     kubectl --context docker-desktop -n <namespace> \
+#       apply -f config/rbac/backup-runner-serviceaccount.yaml
+---
+apiVersion: logweir.dev/v1alpha1
+kind: KafkaCluster
+metadata:
+  name: source
+  labels:
+    app.kubernetes.io/name: logweir
+spec:
+  role: source
+  bootstrapServers:
+    # The compose stack's published in-cluster listener (STANDING RULE 15). A
+    # pod cannot reach `localhost:9092`; `host.docker.internal:9095` is the one
+    # address that works from inside docker-desktop.
+    - host.docker.internal:9095
+  auth:
+    # `plaintext` or `scramSha512`. For `scramSha512`, set `username` and a
+    # `secretRef` naming a Secret with a `password` key — the controller
+    # projects it as a `secretKeyRef` and never reads it.
+    mode: plaintext
+    tls: false

@@ -1,0 +1,37 @@
+# `logweir-viewer` — read the six kinds, and nothing else.
+#
+# NO `/status` RESOURCE IS NAMED IN THIS FILE, AND THAT IS NOT AN OMISSION.
+# `get` on `backups` returns the WHOLE object, `status` included: the status
+# subresource exists so a WRITER can be authorised separately, not so a reader
+# can be denied. Naming `backups/status` here would grant nothing a viewer does
+# not already have and would read, to an auditor, as though this role could
+# write one. Spec §9: "`logweir-viewer`: `get/list/watch` on all kinds, no
+# `/status`."
+#
+# SHIPPED UNBOUND. Bind it per namespace:
+#
+#     kubectl --context docker-desktop create rolebinding logweir-viewer \
+#       --clusterrole=logweir-viewer --user=<user> -n <namespace>
+#
+# **RBAC BOUNDS THE VIEWER, NOT THE PAGE** (spec §9, §8). The UI is a static
+# bundle served by `kubectl proxy --www=`; it renders whatever the viewer's own
+# credential can read and hides nothing on its own. A page that shows less than
+# this role allows is a convenience, never a control.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-viewer
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - restores
+      - trustrosters
+    verbs: ["get", "list", "watch"]

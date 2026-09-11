@@ -1,0 +1,169 @@
+# The `weirkeeper` ClusterRole — interface **I28**, the grant half.
+#
+# THE REQUEST HALF IS `backup-reconciler-rbac-request.yaml`, BESIDE THIS FILE,
+# AND IT STAYS THERE. Task 17 wrote down what the `Backup` reconciler needs, in
+# the shape a grant takes, so that this file could be a DIFF rather than an
+# interpretation; `crates/weirkeeper/tests/backup_controller.rs`'s
+# `the_rbac_fragments_request_pod_logs_and_nothing_more` asserts the request and
+# `crates/logweir/tests/manifest_lint.rs`'s
+# `weirkeeper_can_read_pod_logs_and_nothing_more` asserts this grant. Two files,
+# two tests, one closed interface. The request is NOT installed by anything and
+# `config/rbac/kustomization.yaml` deliberately does not list it.
+#
+# ---------------------------------------------------------------------------
+# THE RULE THIS FILE IS WRITTEN BY: EVERY GRANTED VERB HAS A CALLER
+# ---------------------------------------------------------------------------
+# Critique B **M18**. A verb nobody calls is a capability nobody audits, and it
+# is discovered by an attacker before it is discovered by a reviewer. Every
+# `verbs:` entry below is named by at least one `Api::` call under
+# `crates/weirkeeper/src/`, `crates/logweir/tests/manifest_lint.rs`'s
+# `every_granted_verb_has_a_caller` keeps that true, and the call site is named
+# in the comment above each rule.
+#
+# WHERE SPEC §9's ENGLISH AND THE RBAC VERB SET DISAGREE, THE CALLERS DECIDE.
+# §9 says "`update` on their `/status` only" and "Job CRUD"; the load-bearing
+# words are **only** (the status subresource and not the whole object) and
+# **Job** (and not pods). The RBAC verbs that implement them are what the code
+# calls: every status write in this crate is `Api::patch_status` — a merge
+# patch, so an absent key means "leave it alone" — and no reconciler anywhere
+# calls `Api::replace`, so a literal `update` would be a granted verb with no
+# caller, which is the exact defect M18 names. `delete` is the same story: "Job
+# CRUD"'s D is done by the API server's TTL controller after this controller
+# patches `ttlSecondsAfterFinished`, and by ownerReference garbage collection
+# for the plan ConfigMap and the probe Job. **`delete` appears in no rule in
+# this file, on any resource.** Where §9 instead names an RBAC-shaped triple —
+# `get/list/watch` on Pods, `get` on `pods/log`, no verb on Secrets — it is
+# taken literally and verbatim.
+#
+# ---------------------------------------------------------------------------
+# NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE
+# ---------------------------------------------------------------------------
+# Spec §9 and `design-operator.md:278-281`. The runner Job mounts
+# `logweir-signing-key`, `logweir-approval-bundle` and the per-cluster SCRAM
+# credential, and it reads the object-store credential from `secretKeyRef` env
+# — every one of those is projected by the **kubelet** from a reference this
+# controller writes into a PodSpec. Writing a reference is not reading a value,
+# so the controller never needs, and never gets, a verb on `secrets`.
+#
+# THIS BOUNDS READS AND NOT CAPABILITY, AND SAYING SO IS PART OF THE GRANT.
+# Global Constraint 27, O1/O0 default (a): Job create in a namespace holding
+# the signing key is equivalent to holding the key, because this controller can
+# create a pod that mounts it. The narrow claim — the controller cannot READ the
+# Secret — is true and is the one made here; the broader one is withdrawn and is
+# not restated on any surface.
+#
+# ---------------------------------------------------------------------------
+# TWO GAPS THE PLAN'S OWN SOURCES HAD, CLOSED HERE, EACH WITH ITS CALLER
+# ---------------------------------------------------------------------------
+# 1. **`create` on `backups`.** The `BackupSchedule` reconciler is what turns a
+#    schedule into a run: `controllers/backup_schedule.rs` builds a `Backup` and
+#    `POST`s it (`api.create(&PostParams::default(), &backup)`). No source for
+#    this task listed that verb. Without it every slot a schedule fires 403s and
+#    the schedule silently never produces a backup.
+# 2. **`patch` on `jobs`.** Every runner Job is patched with
+#    `ttlSecondsAfterFinished` AFTER the status write carrying its exit code —
+#    the ordering that keeps the pod (and therefore the exit code and the
+#    evidence keys) alive until they have been read. Three reconcilers do it.
+#    Without it the TTL is never set and finished Jobs accumulate forever.
+#
+# ---------------------------------------------------------------------------
+# `pods/log` IS A SUBRESOURCE (critique B H8, spec §9 amendment 4a, C96)
+# ---------------------------------------------------------------------------
+# `{apiGroups: [""], resources: ["pods"], verbs: ["get"]}` authorises the pod
+# OBJECT. A `GET /api/v1/namespaces/<ns>/pods/<p>/log` is authorised against the
+# resource string `pods/log`, which has to be named in a rule of its own. There
+# is exactly ONE such rule below, its verb list is exactly `["get"]`, and no
+# rule anywhere in this file names `pods/exec` or `pods/attach` — both would let
+# this controller start a process inside the pod holding the signing key, which
+# is strictly more than reading that pod's stdout.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: weirkeeper
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: control-plane
+rules:
+  # THE SIX KINDS. `list` and `watch` are what `Controller::new(api, …)` opens
+  # in all six of `controllers/{approval,backup,backup_schedule,kafka_cluster,
+  # restore,trust_roster}.rs`; `get` is the referent read —
+  # `controllers/backup.rs` and `controllers/restore.rs` `get_opt` the
+  # `KafkaCluster` a spec names, `controllers/restore.rs` `get_opt`s the
+  # `Approval`, `controllers/approval.rs` `get`s the `Backup` or `Restore` an
+  # approval points at, and `controllers::approval::load_roster` `get`s the
+  # cluster-scoped `TrustRoster` named `default` (interface I16).
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - restores
+      - trustrosters
+    verbs: ["get", "list", "watch"]
+  # THE ONE WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
+  # `controllers/backup_schedule.rs` creates one `Backup` per due slot. A
+  # schedule that could not create a backup is a schedule that does nothing.
+  # `create` ONLY: nothing in this crate updates, replaces or deletes a `Backup`
+  # object — the schedule writes its own `status`, not the backup's spec.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backups"]
+    verbs: ["create"]
+  # THE STATUS SUBRESOURCES, AND NOTHING ELSE OF THE OBJECT. `patch` because
+  # every writer in this crate goes through `conditions::apply_merge_patch` and
+  # `Api::patch_status` with `Patch::Merge`; NOT `update`, which no reconciler
+  # calls. Six entries and not a wildcard, so adding a seventh kind is a visible
+  # diff in this file.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals/status
+      - backups/status
+      - backupschedules/status
+      - kafkaclusters/status
+      - restores/status
+      - trustrosters/status
+    verbs: ["patch"]
+  # THE RUNNER JOBS. `create` in `controllers/{backup,kafka_cluster,restore}.rs`
+  # (`jobs.create(&PostParams::default(), &job::build(&spec))`); `get` is each
+  # later pass deciding whether its Job already exists (`jobs.get_opt`); `list`
+  # and `watch` are `.owns(jobs, watcher::Config::default())` on all three
+  # controllers; `patch` is `ttlSecondsAfterFinished`, written after the status
+  # patch carrying the exit code.
+  #
+  # NO `delete`. The TTL controller removes a finished Job, and the probe Job
+  # and plan ConfigMap are removed by ownerReference garbage collection. No
+  # `Api::delete` exists anywhere under `crates/weirkeeper/src/`.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch"]
+  # THE POD A JOB PRODUCED. `list` with a label selector is how it is found —
+  # `batch.kubernetes.io/job-name`, falling back to the legacy `job-name` —
+  # because a Job's pod name is generated and the controller never knows it in
+  # advance. `get` and `watch` are spec §9's shape for a controller that reads
+  # pod status, carried verbatim.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # THE SUBRESOURCE, NAMED SEPARATELY, `get` AND NOTHING ELSE. This is the only
+  # rule in this file that names `pods/log`, and it is the only way the exit
+  # code's evidence keys (interface I7) and `refusal-reason=` reach the
+  # controller: `Api::<Pod>::logs` in `controllers/{backup,kafka_cluster,
+  # restore}.rs`. Nothing is written and no process is started, so there is no
+  # `create`, and there is no rule anywhere naming `pods/exec` or `pods/attach`.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # THE PLAN ConfigMap THE RUNNER MOUNTS AT `/plan` — plan erratum **E5a**.
+  # `create` writes it, before the Job and in the same reconcile pass
+  # (`controllers/backup.rs`, `controllers/restore.rs`: `maps.create(…)`);
+  # `get` is how a 409 is decided, by reading the existing object's owner
+  # reference (`maps.get_opt(…)`). NOT `patch`, NOT `update`, NOT `delete`: the
+  # plan is rendered once from a CEL-immutable spec, and a second pass that
+  # could rewrite it is a pass that could change a document a running pod
+  # already mounted. `list` and `watch` are not here either — nothing watches
+  # ConfigMaps, and a controller that could list every ConfigMap in the cluster
+  # for no caller is critique B M18 in miniature.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get"]

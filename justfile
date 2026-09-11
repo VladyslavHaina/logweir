@@ -376,3 +376,110 @@ crds:
 pitr:
     cargo build -p logweir
     AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --test pitr_boundary -- --exact pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time --test-threads=1 --nocapture
+
+# Task 21, chain J slot 14. The three install recipes — interface **I26**.
+#
+# `just apply-check` WAS TWO DIFFERENT JOBS UNDER ONE NAME, and it is split
+# into three (critique B M15). X-APPLY is "apply the file twice and read both
+# exit codes"; the missing-Secret check is "inspect a namespace and refuse";
+# and the second would make the first FAIL on a clean cluster — no Secrets yet
+# — which is precisely the state X-APPLY is defined against. They must never be
+# chained. `crates/logweir/tests/manifest_lint.rs`'s
+# `check_secrets_refuses_a_missing_secret` asserts they are not.
+
+# Regenerate `logweir.yaml` from `config/`.
+#
+# `scripts/render-install.sh` is the ONLY producer of that file. The checking
+# half is `./scripts/render-install.sh --check` (which re-renders into a temp
+# file and `diff -u`s) and, without a subprocess,
+# `crates/logweir/tests/manifest_lint.rs::install_yaml_has_no_drift`, which
+# compares the rendered documents against the source manifests value by value.
+# This recipe WRITES the tracked file and is therefore deliberately not part of
+# `lint` — the same arrangement `crds` has, and for the same reason: a gate that
+# rewrites the thing it is checking cannot fail.
+install-yaml:
+    ./scripts/render-install.sh
+
+# X-APPLY (spec §16 clause 1): apply the install file twice, reading both exit
+# codes DIRECTLY.
+#
+# TWICE IS THE TEST, NOT A RETRY. The first apply creates the CRDs; the second
+# is the one that would fail if the file contained a custom resource of a kind
+# the same file is still establishing, or if server-side apply disagreed with
+# itself about field ownership. A single green apply proves much less.
+#
+# `--server-side` IS NOT OPTIONAL: the six CRDs are large enough that a
+# client-side apply stores a `last-applied-configuration` annotation over the
+# 262144-byte metadata limit on some of them.
+#
+# WHAT THIS DOES AND DOES NOT PROVE. It proves `kubectl apply` exits 0. It does
+# NOT start a pod: the images are referenced by tag, no such image has been
+# pushed, and the Deployment's pod is expected to sit in `ImagePullBackOff`
+# until `release.yml` has run against a git remote (Global Constraint 37 —
+# `blocked: no remote`). For an author-only local run use the overlay:
+#
+#     kubectl --context docker-desktop apply --server-side -k config/overlays/local-images
+#
+# NO PIPE ANYWHERE (STANDING RULE 20): `cmd | grep` reports grep's status, and
+# both of these exit codes are load-bearing.
+apply-install:
+    kubectl --context docker-desktop apply --server-side -f logweir.yaml
+    kubectl --context docker-desktop apply --server-side -f logweir.yaml
+
+# The pre-flight: refuse a namespace that is missing any of the five Secrets,
+# naming the FIRST absent one.
+#
+# RUN IT BEFORE THE FIRST CUSTOM RESOURCE, AND NEVER AS PART OF THE INSTALL.
+# There are FIVE Secrets, not three (spec §9, critique B H14), and until this
+# task nothing in the repository told a stranger to create any of them. The one
+# that matters most is `logweir-signing-key`, which is why it is checked first:
+# `SigningKey::load_or_generate` MINTS A NEW KEY when the path is absent
+# (`crates/logweir-evidence/src/keys.rs:77-88`), so a first run against an empty
+# Secret produces evidence signed by a key nothing attests — silently, and with
+# a green scorecard.
+#
+# FOUR OF THE FIVE LIVE IN THE RUNNER'S NAMESPACE; the fifth,
+# `logweir-evidence-ro`, is the CONTROLLER's read-only evidence credential and
+# lives in `logweir-system` (spec §9's table: the kubelet reads it, so "no `get`
+# on Secrets" holds in the letter). The per-cluster SCRAM credential's NAME is
+# the adopter's — it is whatever `KafkaCluster.spec.auth.secretRef` says — so it
+# is the second argument, defaulting to `kafka-scram`; what is fixed is its data
+# key, `password`.
+#
+#     just check-secrets logweir-t21
+#     just check-secrets my-namespace my-scram-secret
+#
+# EVERY EXIT CODE IS READ DIRECTLY (STANDING RULE 20). `kubectl get` writes to
+# a discarded stream and its status is read from `$?` on the next line; nothing
+# is piped.
+check-secrets ns scram="kafka-scram":
+    #!/usr/bin/env bash
+    # NOT `set -e`: a missing Secret is the ANSWER, not an accident, and the
+    # loop has to reach the end to name the first one that is absent.
+    set -uo pipefail
+    missing=""
+    for pair in "logweir-signing-key:{{ns}}" \
+                "logweir-approval-bundle:{{ns}}" \
+                "{{scram}}:{{ns}}" \
+                "logweir-s3:{{ns}}" \
+                "logweir-evidence-ro:logweir-system"; do
+      name="${pair%%:*}"
+      space="${pair##*:}"
+      kubectl --context docker-desktop -n "$space" get secret "$name" -o name >/dev/null 2>&1
+      rc=$?
+      if [ "$rc" -ne 0 ] && [ -z "$missing" ]; then
+        missing="$name"
+        missing_ns="$space"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      echo "check-secrets: $missing is absent from namespace $missing_ns"
+      echo ""
+      echo "Create it before any custom resource — docs/kubernetes.md §13 step 1 carries the"
+      echo "exact command, and the two openssl commands that mint the keypairs. An absent"
+      echo "logweir-signing-key is the worst of the five: SigningKey::load_or_generate mints a"
+      echo "new key when the path is absent (crates/logweir-evidence/src/keys.rs:77-88), so the"
+      echo "run would succeed and sign its evidence with a key nothing attests."
+      exit 1
+    fi
+    echo "check-secrets: all five Secrets are present ({{ns}}, and logweir-evidence-ro in logweir-system)."

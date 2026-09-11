@@ -1,0 +1,1936 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `./scripts/render-install.sh` (`just install-yaml`) from
+# `config/`, which is the composable source. `./scripts/render-install.sh
+# --check` re-renders into a temporary file and `diff -u`s this one against it,
+# so a hand edit is a red build rather than a silent divergence.
+#
+# INSTALL:
+#
+#     kubectl --context docker-desktop apply --server-side -f logweir.yaml
+#
+# It is safe to run twice; that is X-APPLY, spec §16 clause 1. It contains the
+# Namespace, the six CustomResourceDefinitions, the RBAC and the controller
+# Deployment, and NO custom resource — so the CRD-not-yet-established ordering
+# failure cannot occur. Samples are separate files, applied second:
+# `config/samples/`. Minimum Kubernetes: 1.29.
+#
+# UNINSTALL, and what it leaves behind:
+#
+#     kubectl --context docker-desktop delete -f logweir.yaml
+#
+# removes the control plane and DELETES NOTHING ELSE — scratch topics, archive
+# objects and evidence objects all survive it, by design. `docs/kubernetes.md`
+# §13 carries the exact command to remove each.
+#
+# digest rows: blocked: no remote — the images below are referenced by tag until release.yml has run against a git remote; a locally built image is author-only and never satisfies spec §16 clause 1
+#
+# Consequence, stated plainly: applying this file on a cluster with no access to
+# `ghcr.io/logweir/weirkeeper` leaves the Deployment's pod in `ImagePullBackOff`.
+# X-APPLY proves `kubectl apply` exits 0; it does not start a pod. For an
+# author-only local run, `kubectl --context docker-desktop apply --server-side
+# -k config/overlays/local-images` rewrites the image to a locally loaded tag.
+#
+# [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a
+# deny is never observed here; only the kind+Calico probe would make this claim
+# real, and it is backlogged] — applies to the NetworkPolicy below. The same
+# mark is carried in `config/manager/networkpolicy.yaml` with the sentence that
+# would verify it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: logweir
+  name: logweir-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: approvals.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Approval
+    plural: approvals
+    shortNames: []
+    singular: approval
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.subjectRef.name
+      name: SUBJECT
+      type: string
+    - jsonPath: .status.verified
+      name: VERIFIED
+      type: string
+    - jsonPath: .status.approver
+      name: APPROVER
+      type: string
+    - jsonPath: .status.matchedKeyId
+      name: KEY-ID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A DSSE-signed authorisation for one Restore or Backup. All four
+          spec fields are required: a create form that posts only the documents posts
+          an object the schema rejects. `spec` is immutable.'
+        properties:
+          spec:
+            description: '`Approval.spec` — **four fields, all required**.'
+            properties:
+              approvalBytes:
+                description: |-
+                  The approval document, as **the UTF-8 document text, verbatim, never base64**.
+
+                  The UI pastes exactly what `logweir drill approve` wrote and the controller hashes exactly those bytes. Base64 would insert an encoding step between the approver's file and the hashed bytes, which is the class of transformation `planBytes` exists to forbid. This field therefore declares no `format: byte`.
+                type: string
+              planHash:
+                description: The sha256 of the subject's `planBytes`, lowercase hex.
+                  Supplied by the create form for the operator to compare, and RECOMPUTED
+                  by the controller from the referent's own bytes regardless — a mismatch
+                  is a refusal.
+                type: string
+              sidecarBytes:
+                description: |-
+                  The detached DSSE sidecar for `approvalBytes`, as **the UTF-8 document text, verbatim, never base64**.
+
+                  Same reason as `approvalBytes`: the bytes the approver's tool wrote are the bytes the controller verifies, with no encoding step in between. This field declares no `format: byte`.
+                type: string
+              subjectRef:
+                description: The object this approval is about. Comes from the route
+                  the wizard navigated to; it is part of the bytes the approval binds,
+                  so an `Approval` whose `planHash` matches a `Restore` is never accepted
+                  for anything else.
+                properties:
+                  kind:
+                    description: '`Restore` or `Backup`. Comes from the route the
+                      wizard navigated to.'
+                    enum:
+                    - Restore
+                    - Backup
+                    type: string
+                  name:
+                    description: The subject's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+            required:
+            - approvalBytes
+            - planHash
+            - sidecarBytes
+            - subjectRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Approval.status`.'
+            nullable: true
+            properties:
+              approver:
+                description: The approver's subject, read from the matched roster
+                  entry.
+                nullable: true
+                type: string
+              conditions:
+                description: '`Verified`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              matchedKeyId:
+                description: The `TrustRoster.spec.approverKeys[].keyId` that verified
+                  it.
+                nullable: true
+                type: string
+              selfAttestedRisk:
+                description: Whether the approver and the requester are the same principal
+                  — `false` means only that the two matched key ids differ.
+                nullable: true
+                type: boolean
+              ticket:
+                description: The change ticket the approval document names, when it
+                  names one.
+                nullable: true
+                type: string
+              verified:
+                description: Whether the DSSE signature over `approvalBytes` verified
+                  against a `TrustRoster` approver key, and the recomputed plan hash
+                  matched.
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: Approval
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backups.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Backup
+    plural: backups
+    shortNames: []
+    singular: backup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: 0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed
+      jsonPath: .status.exitCode
+      name: EXIT
+      type: integer
+    - jsonPath: .status.records
+      name: RECORDS
+      type: integer
+    - description: green needs this Valid AND exitCode 0
+      jsonPath: .status.evidence.verification.result
+      name: SIGNED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: One archive run, executed as a Job. Its name and `status.backupId`
+          are a pure function of the trigger, so a duplicate reconcile gets AlreadyExists
+          rather than a second partial archive. `spec` is immutable.
+        properties:
+          spec:
+            description: '`Backup.spec`.'
+            properties:
+              archive:
+                description: Where the archive is written.
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store
+                      credential. Its keys are read by the Job, never by the controller's
+                      own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              deadlineSeconds:
+                description: The Job's `activeDeadlineSeconds`.
+                format: int64
+                type: integer
+              scheduleRef:
+                description: The `BackupSchedule` that created this object, when one
+                  did.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              slot:
+                description: The schedule slot this run is for, `yyyymmdd-hhmmss`
+                  in UTC. Part of this object's name and of `status.backupId`; guard
+                  **G-SLOT**.
+                nullable: true
+                type: string
+              sourceRef:
+                description: The `KafkaCluster` to read from, in this namespace.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              topics:
+                description: NAMED topics, never patterns — guard **G-GLOB**, as on
+                  `BackupSchedule`.
+                items:
+                  type: string
+                type: array
+              triggeredBy:
+                description: What caused this run — `schedule` or `manual`. Recorded
+                  rather than inferred from the presence of `scheduleRef`, because
+                  the receipt carries it and an auditor reads the receipt.
+                type: string
+            required:
+            - archive
+            - deadlineSeconds
+            - sourceRef
+            - topics
+            - triggeredBy
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Backup.status`.'
+            nullable: true
+            properties:
+              auth:
+                description: The identity the run presented. `mode` and `username`,
+                  never a password.
+                nullable: true
+                properties:
+                  mode:
+                    description: '`plaintext` or `scramSha512`, as resolved from the
+                      source `KafkaCluster`.'
+                    nullable: true
+                    type: string
+                  username:
+                    description: The SASL principal the run authenticated as, when
+                      there was one. Logweir cannot observe the principal the broker
+                      authenticated — Kafka exposes no such call — so this is the
+                      username Logweir PRESENTED.
+                    nullable: true
+                    type: string
+                type: object
+              backupId:
+                description: The archive's backup id, derived from this object's UID
+                  and `spec.slot`.
+                nullable: true
+                type: string
+              conditions:
+                description: The condition set. Spec §8's green badge for a `Backup`
+                  needs `evidence.verification.result == Valid` **and** `exitCode
+                  == 0` — a `Backup` carries no `outcome`, so the badge rule here
+                  is not the `Restore` rule.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              evidence:
+                description: The signed receipt, and the controller's verification
+                  of it.
+                nullable: true
+                properties:
+                  receiptKey:
+                    description: The object key of the signed backup receipt.
+                    nullable: true
+                    type: string
+                  sidecarKey:
+                    description: The object key of the receipt's detached DSSE sidecar.
+                    nullable: true
+                    type: string
+                  verification:
+                    description: What `weirkeeper` recorded when it verified the pair
+                      above.
+                    nullable: true
+                    properties:
+                      matchedKeyId:
+                        description: The `keyId` of the `TrustRoster` signing key
+                          whose public key verified the signature.
+                        nullable: true
+                        type: string
+                      payloadType:
+                        description: The DSSE `payloadType` that was verified.
+                        nullable: true
+                        type: string
+                      result:
+                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty
+                          `TrustRoster.spec.signingKeys` is `NotAttempted` naming
+                          itself, never a silent `Invalid`.'
+                        nullable: true
+                        type: string
+                      verifiedAt:
+                        description: When the controller performed the verification.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
+              exitCode:
+                description: 'The runner''s exit code, lifted from `pod.status.containerStatuses[].state.terminated.exitCode`
+                  — the one path in Kubernetes that carries it. `0` pass · `1` operational,
+                  no artifact · `2` a result that is not a pass, document written
+                  and signed · `3` refused by a guard · `4` signing or lock proof
+                  failed (Global Constraint 11). Spec §8''s green badge for a `Backup`
+                  requires `evidence.verification.result == Valid` AND `exitCode ==
+                  0` — green requires verification Valid and exitCode 0, and a `Backup`
+                  carries no `outcome` for the badge to read instead. ABSENT is a
+                  real value: a Job that finished with no terminated state for the
+                  `runner` container has no recoverable code, and the controller records
+                  the absence rather than fabricating a `0` or a `1`.'
+                format: int32
+                nullable: true
+                type: integer
+              exitReason:
+                description: |-
+                  Why the run ended, as one of Global Constraint 11's wire reasons — `ok`, `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock` — or, when the run reached a **terminal state** more specific than its code, that state: the `refusal-reason=` line the runner printed for exit 3, or `OrphanedScorecard` for an exit-4 run whose payload exists without its sidecar.
+
+                  `operational` for the crashed-Job case, where `exitCode` is absent: a run whose code is unrecoverable produced no artifact either, and the SUB-CASE (`DisruptedMidDrill`, `PodUnschedulable`, `NoExitCode`) is the condition's `reason`.
+                nullable: true
+                type: string
+              jobRef:
+                description: The Job that ran, or is running, this backup.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              manifestKey:
+                description: The object key of the manifest this run wrote.
+                nullable: true
+                type: string
+              manifestSha256:
+                description: The sha256 of the manifest at `manifestKey`, lowercase
+                  hex.
+                nullable: true
+                type: string
+              phase:
+                description: 'Where the run is: `Pending`, `Running`, `Succeeded`,
+                  `Failed`, `Refused`. A free-form string rather than an enum, because
+                  Task 17 owns the phase vocabulary and no agreement test in this
+                  plan binds it.'
+                nullable: true
+                type: string
+              records:
+                description: How many records the run archived.
+                format: int64
+                nullable: true
+                type: integer
+              windowCovered:
+                description: The window the archive covers, in epoch milliseconds
+                  — interface **I22**.
+                nullable: true
+                properties:
+                  fromMs:
+                    description: Inclusive start of the covered window, epoch milliseconds.
+                    format: int64
+                    type: integer
+                  toMs:
+                    description: Exclusive end of the covered window, epoch milliseconds.
+                    format: int64
+                    type: integer
+                required:
+                - fromMs
+                - toMs
+                type: object
+            type: object
+        required:
+        - spec
+        title: Backup
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backupschedules.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: BackupSchedule
+    plural: backupschedules
+    shortNames: []
+    singular: backupschedule
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.schedule
+      name: SCHEDULE
+      type: string
+    - description: the one mutable spec field
+      jsonPath: .spec.suspend
+      name: SUSPEND
+      type: string
+    - jsonPath: .status.lastFireTime
+      name: LAST
+      type: date
+    - jsonPath: .status.nextFireTime
+      name: NEXT
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A recurring backup of a named topic set into an archive. `spec.suspend`
+          is the only mutable field; every other field is sealed by an object-level
+          CEL rule. Retention REPORTS what it would remove and deletes nothing.
+        properties:
+          spec:
+            description: '`BackupSchedule.spec`. Only `suspend` is mutable — see the
+              module header.'
+            properties:
+              archive:
+                description: Where the backup is written.
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store
+                      credential. Its keys are read by the Job, never by the controller's
+                      own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              retention:
+                description: '`{keepLast, keepDays}` — **reporting only**. Logweir
+                  deletes nothing.'
+                nullable: true
+                properties:
+                  keepDays:
+                    description: Keep backup sets newer than N days; older sets are
+                      REPORTED as removable.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  keepLast:
+                    description: Keep the most recent N backup sets; older sets are
+                      REPORTED as removable.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              schedule:
+                description: 'A five-field cron expression, in UTC: minute hour day-of-month
+                  month day-of-week. `*`, a literal, a comma list, an `a-b` range
+                  and a `*/n` step are accepted, as are `@hourly`, `@daily` and `@weekly`;
+                  anything else is refused with a `Ready` condition naming the field,
+                  never read as a silent match-all. A slot that comes due more than
+                  the ONE-HOUR missed-slot horizon before the controller looks is
+                  skipped and recorded in `status.lastMissedSlot`.'
+                type: string
+              sourceRef:
+                description: The `KafkaCluster` to back up, in this namespace.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              suspend:
+                default: false
+                description: Stop firing new `Backup`s. **The only mutable field on
+                  this spec**, and the only `.spec` write the controller performs
+                  on any kind in tag 1.
+                type: boolean
+              topics:
+                description: 'NAMED topics, never patterns. Global Constraint 18''s
+                  first rail and guard **G-GLOB**: a glob metacharacter is refused,
+                  and an omitted list is not permitted at all — the one shape that
+                  would mean "everything" to the engine. A mandatory allowlist whose
+                  absence means "all topics" is not an allowlist.'
+                items:
+                  type: string
+                type: array
+            required:
+            - archive
+            - schedule
+            - sourceRef
+            - topics
+            type: object
+            x-kubernetes-validations:
+            - message: only spec.suspend is mutable; create a new BackupSchedule instead
+              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule)
+                || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef)
+                && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) &&
+                has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics
+                == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) &&
+                (!has(self.archive) || self.archive == oldSelf.archive) && has(self.retention)
+                == has(oldSelf.retention) && (!has(self.retention) || self.retention
+                == oldSelf.retention)
+          status:
+            description: '`BackupSchedule.status`.'
+            nullable: true
+            properties:
+              activeBackupRef:
+                description: The `Backup` currently running for this schedule, if
+                  any.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              conditions:
+                description: '`Ready`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              lastFireTime:
+                description: When this schedule last created a `Backup`.
+                format: date-time
+                nullable: true
+                type: string
+              lastMissedSlot:
+                description: |-
+                  The most recent slot that came due and was NOT fired — the controller was down, or the previous run was still active. Recorded because object identity is a pure function of the trigger (guard **G-SLOT**): a missed slot is never silently re-fired under a different name.
+
+                  THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one hour before the controller looked is skipped and recorded here, with a `Ready` condition whose reason is `SlotMissed`; a controller restarted after a week therefore fires at most the current slot and never six days of backlog. The field is written when a slot is skipped and is never cleared afterwards — it is the audit trail of the skip, so a correct implementation is distinguishable from a broken schedule.
+                nullable: true
+                type: string
+              nextFireTime:
+                description: When it will next create one, given `schedule` and `suspend`.
+                format: date-time
+                nullable: true
+                type: string
+              retentionReport:
+                description: What retention WOULD remove. Nothing was deleted — see
+                  [`RetentionReport`].
+                nullable: true
+                properties:
+                  awsCli:
+                    description: The exact `aws s3 rm` commands an operator can run
+                      to remove the sets above, one per set, in the same order. **Reported,
+                      never executed.**
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  evaluatedAt:
+                    description: When the controller last evaluated retention.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  keepDays:
+                    description: '`spec.retention.keepDays`, as it was applied.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  keepLast:
+                    description: '`spec.retention.keepLast`, **as it was applied**.
+                      Absent when no rule was configured, or when the configured value
+                      was not a non-negative count and was therefore not applied.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  mcCli:
+                    description: The same commands in `mc`'s spelling. Reported, never
+                      executed.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  note:
+                    description: Why the evaluation removed nothing, when the reason
+                      is not "there is nothing to remove" — set when no retention
+                      rule is configured.
+                    nullable: true
+                    type: string
+                  setsKept:
+                    description: The `backupId`s the policy keeps, newest first.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  setsThatWouldBeRemoved:
+                    description: The sets the policy WOULD remove, newest first. They
+                      are still in the archive; Logweir deleted nothing.
+                    items:
+                      description: One set retention WOULD remove. **It is still in
+                        the archive.**
+                      properties:
+                        backupId:
+                          description: The backup set's id — the manifest key's parent
+                            directory.
+                          type: string
+                        days:
+                          description: The configured `keepDays`, when `reason` is
+                            `OlderThanKeepDays`.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        newestRecordAt:
+                          description: The set's newest record instant, read from
+                            the manifest BODY and never from the key string, which
+                            carries no timestamp.
+                          format: date-time
+                          type: string
+                        rank:
+                          description: The set's 1-based rank in newest-first order,
+                            when `reason` is `BeyondKeepLast`.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        reason:
+                          description: '`OlderThanKeepDays` or `BeyondKeepLast`. `OlderThanKeepDays`
+                            when both rules select the set, because age is the reason
+                            an operator acts on.'
+                          type: string
+                      required:
+                      - backupId
+                      - newestRecordAt
+                      - reason
+                      type: object
+                    nullable: true
+                    type: array
+                  skipped:
+                    description: 'The manifest keys under the prefix that could not
+                      be read, and why. Each was SKIPPED: it is in neither `setsKept`
+                      nor `setsThatWouldBeRemoved`, and the rest of the archive was
+                      still evaluated. An empty list means every manifest under the
+                      prefix was read.'
+                    items:
+                      description: One manifest key the evaluation could not read.
+                        **Task 19 review, F-5.**
+                      properties:
+                        key:
+                          description: The manifest key, exactly as the archive listed
+                            it.
+                          type: string
+                        reason:
+                          description: Why it could not be read — `is not a backup
+                            manifest` for a sibling JSON object the `/manifest.json`
+                            filter picked up, or the storage error's own message.
+                          type: string
+                      required:
+                      - key
+                      - reason
+                      type: object
+                    nullable: true
+                    type: array
+                type: object
+            type: object
+        required:
+        - spec
+        title: BackupSchedule
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkaclusters.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: KafkaCluster
+    plural: kafkaclusters
+    shortNames: []
+    singular: kafkacluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: source or target
+      jsonPath: .spec.role
+      name: ROLE
+      type: string
+    - description: the controller's last probe
+      jsonPath: .status.reachable
+      name: REACHABLE
+      type: string
+    - description: read from the broker, never from the spec
+      jsonPath: .status.clusterId
+      name: CLUSTER-ID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A Kafka cluster Logweir connects to: bootstrap servers, auth
+          mode and username, role, and the marker topic that proves a scratch target.
+          The password lives in a Secret; `status.clusterId` is read from the broker
+          and never from this spec. `spec` is immutable.'
+        properties:
+          spec:
+            description: '`KafkaCluster.spec`.'
+            properties:
+              auth:
+                description: How Logweir authenticates here.
+                properties:
+                  mode:
+                    description: The SASL mechanism, or `plaintext` for none.
+                    enum:
+                    - plaintext
+                    - scramSha512
+                    type: string
+                  secretRef:
+                    description: A Secret in this namespace holding the SASL password.
+                      Logweir never reads its value into a status field, a log line
+                      or a rendered document.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tls:
+                    default: false
+                    description: Whether the transport is TLS. Independent of `mode`
+                      — see the type's own note.
+                    type: boolean
+                  username:
+                    description: The SASL principal. Required in practice when `mode`
+                      is `scramSha512`; it is what `planBytes` binds, so changing
+                      it after an approval invalidates that approval's plan hash.
+                    nullable: true
+                    type: string
+                required:
+                - mode
+                type: object
+              bootstrapServers:
+                description: The broker bootstrap addresses, `host:port`.
+                items:
+                  type: string
+                type: array
+              markerTopic:
+                description: 'The marker topic that proves a target is a scratch cluster.
+                  v0.1 proves scratch-ness with a marker topic because a guard needing
+                  a kubeconfig cannot run in the unit suite; absent here, no marker
+                  proof is offered and a `mode: scratch` restore against this cluster
+                  is refused.'
+                nullable: true
+                type: string
+              role:
+                description: 'What this cluster is to Logweir — `source` or `target`.
+                  A free-form string rather than an enum: the value is a label the
+                  adopter picks and the controller reports, and `allowedClusterIds`
+                  on the cluster-scoped `TrustRoster` is what actually authorises
+                  a target, never a role written next to the address it authorises.'
+                type: string
+            required:
+            - auth
+            - bootstrapServers
+            - role
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`KafkaCluster.status` — entirely observations.'
+            nullable: true
+            properties:
+              clusterId:
+                description: The cluster id READ FROM THE BROKER. Never copied from
+                  a spec, and re-asserted `!= target` before a backup runs (Global
+                  Constraint 18's fourth rail).
+                nullable: true
+                type: string
+              conditions:
+                description: '`Reachable`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              observedAt:
+                description: When the probe above was performed.
+                format: date-time
+                nullable: true
+                type: string
+              reachable:
+                description: Whether the controller's last probe reached a broker.
+                nullable: true
+                type: boolean
+              reason:
+                description: |-
+                  **Why `reachable` says what it says** — `Reachable`, `ProbeReportedUnreachable`, `ProbeOutputUnreadable`, `ProbeRunning`, `NoExitCode`, `PodUnschedulable`, `DisruptedMidDrill` or `NameTooLong`: the `Reachable` condition's own `reason`, promoted to a scalar. Added by Task 15c.
+
+                  WHY A SCALAR BESIDE THE CONDITION. `reachable` is a tri-state in practice — `true`, `false`, and ABSENT — and the absent case has five causes an operator has to tell apart: the probe pod printed no parseable contract line, the Job finished with no exit code at all, the pod never scheduled, the node went away mid-probe, or a probe is simply in flight. With no scalar all of those read identically through `-o jsonpath` and through any `custom-columns` view, and the specific state exists only inside `status.conditions` — which is review finding **M2** on the `Restore` path, reached here from the other direction.
+
+                  **`status` IS STRUCTURAL AND PRUNES WHAT IT DOES NOT DECLARE**, so this is not a field a controller could have written without the CRD saying so: a merge patch carrying `status.reason` against the previous schema was dropped by the API server silently.
+
+                  It is not a second vocabulary: it is always **verbatim** the `reason` of the one `Reachable` condition the same patch writes, which makes it CamelCase everywhere by errata **E5b**.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: KafkaCluster
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: restores.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Restore
+    plural: restores
+    shortNames: []
+    singular: restore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: scratch is a drill
+      jsonPath: .spec.target.mode
+      name: MODE
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: 0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed
+      jsonPath: .status.exitCode
+      name: EXIT
+      type: integer
+    - description: the terminal or current condition reason - ApprovalNotVerified,
+        PlanHashMismatch, GuardRefused, Ok, ...; NOT exitReason, which is `operational`
+        for every admission refusal
+      jsonPath: .status.reason
+      name: REASON
+      type: string
+    - jsonPath: .status.outcome
+      name: OUTCOME
+      type: string
+    - jsonPath: .status.integrity.result
+      name: INTEGRITY
+      type: string
+    - jsonPath: .status.measured.rtoSeconds
+      name: RTO
+      type: integer
+    - description: green needs this Valid AND outcome pass
+      jsonPath: .status.evidence.verification.result
+      name: SIGNED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'One restore run, executed as a Job. A drill is a Restore with
+          `spec.target.mode: scratch`; there is no separate Drill kind. A Restore
+          only ever writes a NEW topic, so it is non-destructive by construction.
+          `spec` is immutable — the approval binds these exact bytes.'
+        properties:
+          spec:
+            description: '`Restore.spec`.'
+            properties:
+              approvalRef:
+                description: The `Approval` that authorises this restore, in this
+                  namespace. The approval's `planHash` must equal the sha256 of `planBytes`
+                  above, and its `subjectRef` must name this object.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              backupSetRef:
+                description: The backup set inside `sourceArchive` — a `backupId`.
+                type: string
+              deadlineSeconds:
+                description: The Job's `activeDeadlineSeconds`.
+                format: int64
+                type: integer
+              planBytes:
+                description: |-
+                  The restore plan, as the exact bytes the approver signed.
+
+                  AN OPAQUE STRING, NEVER A MODELLED SCHEMA. `planHash` binds exact spec bytes, the API server normalises YAML, and a typed round-trip would silently invalidate every approval. The UI produces these bytes client-side and shows their sha256 before submitting; the controller hashes exactly what is here.
+                type: string
+              pointInTime:
+                description: The point in time to restore to. Records after it are
+                  not restored.
+                format: date-time
+                type: string
+              sourceArchive:
+                description: The archive to restore from.
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store
+                      credential. Its keys are read by the Job, never by the controller's
+                      own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              target:
+                description: Where the restore writes, and in which mode.
+                properties:
+                  clusterRef:
+                    description: The `KafkaCluster` to write to, in this namespace.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  mode:
+                    description: '`scratch` for a drill, `newTopic` for a real restore.'
+                    enum:
+                    - scratch
+                    - newTopic
+                    type: string
+                  topicNaming:
+                    description: How the new topics are named.
+                    properties:
+                      prefix:
+                        description: 'Prepended to each source topic name to form
+                          the new topic''s name. The result is what `status.newTopics`
+                          records, and — for `mode: scratch` — what phase 9 tears
+                          down.'
+                        type: string
+                    required:
+                    - prefix
+                    type: object
+                required:
+                - clusterRef
+                - mode
+                - topicNaming
+                type: object
+            required:
+            - approvalRef
+            - backupSetRef
+            - deadlineSeconds
+            - planBytes
+            - pointInTime
+            - sourceArchive
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Restore.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: The condition set.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              evidence:
+                description: The signed scorecard, the offset report, and the controller's
+                  verification.
+                nullable: true
+                properties:
+                  offsetReportKey:
+                    description: The object key of the offset report. Tag 1 renders
+                      the report and applies nothing (Global Constraint 35).
+                    nullable: true
+                    type: string
+                  offsetReportSha256:
+                    description: 'The sha256 of the offset report, as `sha256:<lowercase
+                      hex>`. **COPIED from the signed scorecard''s own `evidence.offset_report_sha256`**,
+                      never recomputed: the report''s digest is inside the bytes the
+                      signature covers, so recomputing it would fetch a second object
+                      to answer a question the first one already answers — and would
+                      report a mismatch as agreement.'
+                    nullable: true
+                    type: string
+                  scorecardKey:
+                    description: The object key of the signed scorecard.
+                    nullable: true
+                    type: string
+                  scorecardSha256:
+                    description: 'The sha256 of the scorecard at `scorecardKey`, as
+                      `sha256:<lowercase hex>` — the one digest spelling this corpus
+                      uses everywhere (`logweir_core::ids::sha256_prefixed`), so a
+                      value read off this field and a value read out of a signed document
+                      compare as strings. **COMPUTED by the controller over the bytes
+                      it fetched**, not copied: a document cannot carry its own digest.'
+                    nullable: true
+                    type: string
+                  sidecarKey:
+                    description: The object key of the scorecard's detached DSSE sidecar.
+                    nullable: true
+                    type: string
+                  verification:
+                    description: What `weirkeeper` recorded when it verified the scorecard.
+                    nullable: true
+                    properties:
+                      matchedKeyId:
+                        description: The `keyId` of the `TrustRoster` signing key
+                          whose public key verified the signature.
+                        nullable: true
+                        type: string
+                      payloadType:
+                        description: The DSSE `payloadType` that was verified.
+                        nullable: true
+                        type: string
+                      result:
+                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty
+                          `TrustRoster.spec.signingKeys` is `NotAttempted` naming
+                          itself, never a silent `Invalid`.'
+                        nullable: true
+                        type: string
+                      verifiedAt:
+                        description: When the controller performed the verification.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
+              exitCode:
+                description: 'The runner''s exit code (Global Constraint 11). `2`
+                  is the most valuable result the tool produces: the drill ran, it
+                  was measured, and the backup did not meet its objective — a scorecard
+                  WAS written and signed.'
+                format: int32
+                nullable: true
+                type: integer
+              exitReason:
+                description: 'The terminal state that refused the run, for exit 3
+                  — `Expired`, `WindowNotCovered`, `ApprovalNotReceived`, `OrphanedScorecard`,
+                  `DisruptedMidDrill`, `PodUnschedulable`, `TargetTopicConfigRefused`,
+                  `CredentialNotRenderable`. Read off the pod log''s final line, which
+                  carries `refusal-reason=<TerminalState>`: the pod log API has no
+                  stream selector, so nothing on stderr is distinguishable by a controller.'
+                nullable: true
+                type: string
+              integrity:
+                description: How thoroughly the restore was checked, what that found,
+                  and — when the result is `partial` — why (interface **I34**).
+                nullable: true
+                properties:
+                  level:
+                    description: '`byte-fingerprint`, `consume-only` or `not-attempted`.
+                      The scorecard''s own kebab-case spellings, carried through unchanged
+                      so the badge the UI renders and the document an auditor reads
+                      say the same word.'
+                    nullable: true
+                    type: string
+                  partialReason:
+                    description: 'INTERFACE **I34**, second half. Why the integrity
+                      result is `partial`, naming itself: an archive returning zero
+                      or short fingerprints for a selection; a (topic, partition,
+                      window) the manifest claims exists but no segment matches; a
+                      pre-0.21 segment carrying no sha256; a consume-only selection
+                      whose target partition gave back less than the manifest claims.
+                      Produced by Task 20 from the scorecard''s `integrity.partial_reason`.
+                      Spec §8 requires the UI to render it — a `partial` with no reason
+                      is a badge an auditor cannot act on.'
+                    nullable: true
+                    type: string
+                  result:
+                    description: '`pass`, `partial` or `fail`. `partial` is a selection
+                      whose evidence was inconclusive — something in the sample was
+                      not examined — and is NOT a pass.'
+                    nullable: true
+                    type: string
+                type: object
+              jobRef:
+                description: The Job that ran, or is running, this restore.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              lastPhaseCompleted:
+                description: The last phase slot that completed, `-1` through `9`.
+                format: int32
+                nullable: true
+                type: integer
+              measured:
+                description: What the run achieved.
+                nullable: true
+                properties:
+                  rpoSeconds:
+                    description: The measured archive-coverage gap, seconds. Non-negative.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  rtoSeconds:
+                    description: Wall-clock seconds from the start of the restore
+                      to a verified target.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              newTopics:
+                description: 'The topics this run CREATED. For `mode: scratch`, exactly
+                  what phase 9 tears down.'
+                items:
+                  type: string
+                nullable: true
+                type: array
+              objectives:
+                description: What was asked for, and whether it was met (interface
+                  **I34**).
+                nullable: true
+                properties:
+                  met:
+                    description: The aggregate verdict over whichever objectives above
+                      are non-null. `true` — every non-null objective was met. `false`
+                      — at least one was missed. Absent — a `passRate` objective was
+                      requested but the MEASURED rate could not be computed, so the
+                      aggregate is unmeasurable rather than satisfied.
+                    nullable: true
+                    type: boolean
+                  passRate:
+                    description: The requested record match rate, 0.0 to 1.0.
+                    format: double
+                    nullable: true
+                    type: number
+                  rpoSeconds:
+                    description: 'The requested maximum archive-coverage gap, seconds.
+                      Never negative: a negative allowed gap is not a stricter objective,
+                      it is an unsatisfiable one.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  rtoSeconds:
+                    description: The requested maximum recovery time, seconds.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              oldTopics:
+                description: 'The source topics the new ones were restored from. Nothing
+                  here was written to, in any tag: retiring an old topic is tag 2''s
+                  `Switchover` and is validated against this list.'
+                items:
+                  type: string
+                nullable: true
+                type: array
+              outcome:
+                description: '`pass`, `fail-objective`, `fail-integrity` or `preflight-failed`.
+                  Spec §8''s green badge for a `Restore` needs `evidence.verification.result
+                  == Valid` **and** `outcome == pass`.'
+                nullable: true
+                type: string
+              phase:
+                description: 'Where the run is: `Pending`, `Running`, `Succeeded`,
+                  `Failed`, `Refused`. Task 20 owns the phase vocabulary.'
+                nullable: true
+                type: string
+              reason:
+                description: |-
+                  The reason of the condition that describes this run RIGHT NOW — `ApprovalNotVerified`, `ApprovalNotReceived`, `PlanHashMismatch`, `ClusterNotReachable`, `NameTooLong`, `JobCreated`, `Ok`, `GuardRefused`, `DrillNotPass`, `SigningOrLock`, `Operational`, … — and the field the `REASON` printer column reads.
+
+                  # Why this exists beside `exitReason`, which looks like it says the same thing
+
+                  IT DOES NOT SAY THE SAME THING, AND FOR THE FOUR STATES AN OPERATOR MOST NEEDS IT SAID NOTHING AT ALL. `exitReason` is Global Constraint 11's vocabulary about a RUN: it is written from an exit code, and a refusal this controller makes ITSELF — before any `POST`, so with no run and no code — can only spell it `operational`, which is GC11's "could not be attempted". All four admission refusals (`ApprovalNotReceived`, `ApprovalNotVerified`, `PlanHashMismatch`, `ClusterNotReachable`) and `NameTooLong` therefore printed the SAME `operational` in the `REASON` column, and the specific state existed only inside `status.conditions` — measured live at the Task 20 review (finding M2) on two objects that both printed `operational`.
+
+                  So this field is the CONDITION's answer, promoted to a scalar. It is not a third vocabulary: it is always **verbatim** the `reason` of the condition this patch writes about the run's current or terminal state, which makes it CamelCase everywhere by errata **E5b**, and `every_status_write_sets_the_scalar_reason` asserts the equality for every patch builder plus, by source scan, that a patch which writes `conditions` and no `reason` cannot be added.
+
+                  `exitReason` is UNCHANGED and still the honest home of GC11's wire string and of the runner's own `refusal-reason=` terminal state, which is the more specific answer whenever a pod actually ran. Two fields, two questions: *what did the run exit with* and *what state is this object in*.
+                nullable: true
+                type: string
+              topicPreflight:
+                description: 'What phase 0 found out about the target topics (guard
+                  **G-TS**). **Always absent in tag 1: it has no producer, and this
+                  field says so rather than being fabricated.** The observation is
+                  returned by phase 0 inside the runner (`RestoreOutcome::topic_preflight`)
+                  and, by Global Constraint 12 as amended, is deliberately NOT a scorecard
+                  field — so nothing carries it out of the pod. Interface I8 fixes
+                  three stdout key lines and none of them is a preflight, and the
+                  controller reads the pod''s log and the signed scorecard and nothing
+                  else. Closing the gap means a fourth machine-read stdout line on
+                  the runner''s side, which is the interface owner''s change and not
+                  the operator''s; an absent field is truthful and a guessed one is
+                  not.'
+                nullable: true
+                properties:
+                  retentionMs:
+                    description: The target topic's `retention.ms`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  timestampBound:
+                    description: The oldest timestamp the target will accept without
+                      rejecting or rewriting the record, derived from `retentionMs`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  timestampType:
+                    description: The target topic's `message.timestamp.type` — `CreateTime`
+                      or `LogAppendTime`. `LogAppendTime` rewrites every restored
+                      record's timestamp to the moment of the restore, which makes
+                      a point-in-time claim unverifiable.
+                    nullable: true
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        title: Restore
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: trustrosters.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: TrustRoster
+    plural: trustrosters
+    shortNames: []
+    singular: trustroster
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: the approver key ids; the signing key ids are in spec.signingKeys
+      jsonPath: .spec.approverKeys[*].keyId
+      name: KEYS
+      type: string
+    - jsonPath: .status.loaded
+      name: LOADED
+      type: string
+    - jsonPath: .status.expiredKeyIds[*]
+      name: EXPIRED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Cluster-scoped. The keys that may authorise (`approverKeys`)
+          and the keys that may attest (`signingKeys`), both carrying public key material,
+          plus the cluster ids a restore may target. `spec` is immutable.
+        properties:
+          spec:
+            description: '`TrustRoster.spec`. **Cluster-scoped** — see the module
+              header.'
+            properties:
+              allowedClusterIds:
+                description: The cluster ids a restore may target. Read from here
+                  and never from a plan, so an edited spec cannot widen its own allowlist.
+                items:
+                  type: string
+                type: array
+              approverKeys:
+                description: The keys that may **authorise** a restore or a backup.
+                  An `Approval` verifies against one of these.
+                items:
+                  description: One key on the roster. The same four fields for approvers
+                    and for signers.
+                  properties:
+                    keyId:
+                      description: The key id an evidence sidecar names, and the id
+                        `status.matchedKeyId` reports. **Required.**
+                      type: string
+                    notAfter:
+                      description: When this key stops being accepted. A key past
+                        `notAfter` is reported in `status.expiredKeyIds` and does
+                        not verify.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    spkiPem:
+                      description: The **public** key, SubjectPublicKeyInfo in PEM
+                        form. **Required** — this is the field whose absence would
+                        make every verification `NotAttempted`. Never a private key.
+                      type: string
+                    subject:
+                      description: Who or what this key belongs to, for display.
+                      nullable: true
+                      type: string
+                  required:
+                  - keyId
+                  - spkiPem
+                  type: object
+                type: array
+              signingKeys:
+                description: 'The keys that may **attest** — the runners'' own signing
+                  keys, whose public halves verify a scorecard, a backup receipt or
+                  a teardown record. Interface **I17**: key material, not ids.'
+                items:
+                  description: One key on the roster. The same four fields for approvers
+                    and for signers.
+                  properties:
+                    keyId:
+                      description: The key id an evidence sidecar names, and the id
+                        `status.matchedKeyId` reports. **Required.**
+                      type: string
+                    notAfter:
+                      description: When this key stops being accepted. A key past
+                        `notAfter` is reported in `status.expiredKeyIds` and does
+                        not verify.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    spkiPem:
+                      description: The **public** key, SubjectPublicKeyInfo in PEM
+                        form. **Required** — this is the field whose absence would
+                        make every verification `NotAttempted`. Never a private key.
+                      type: string
+                    subject:
+                      description: Who or what this key belongs to, for display.
+                      nullable: true
+                      type: string
+                  required:
+                  - keyId
+                  - spkiPem
+                  type: object
+                type: array
+            required:
+            - allowedClusterIds
+            - approverKeys
+            - signingKeys
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`TrustRoster.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: '`Loaded`, per-key `Expired`, and whatever else the controller
+                  reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              expiredKeyIds:
+                description: The `keyId`s past their `notAfter`, from both lists.
+                  Declared here so no consumer has to derive expiry itself from a
+                  clock it does not share with the controller.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              loaded:
+                description: Whether the controller parsed every entry on this roster.
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: TrustRoster
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/name: logweir
+  name: weirkeeper
+  namespace: logweir-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: human-role
+    app.kubernetes.io/name: logweir
+  name: logweir-approver
+rules:
+- apiGroups:
+  - logweir.dev
+  resources:
+  - approvals
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: human-role
+    app.kubernetes.io/name: logweir
+  name: logweir-operator
+rules:
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backups
+  - backupschedules
+  - kafkaclusters
+  - restores
+  verbs:
+  - create
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backupschedules
+  verbs:
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: human-role
+    app.kubernetes.io/name: logweir
+  name: logweir-viewer
+rules:
+- apiGroups:
+  - logweir.dev
+  resources:
+  - approvals
+  - backups
+  - backupschedules
+  - kafkaclusters
+  - restores
+  - trustrosters
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/name: logweir
+  name: weirkeeper
+rules:
+- apiGroups:
+  - logweir.dev
+  resources:
+  - approvals
+  - backups
+  - backupschedules
+  - kafkaclusters
+  - restores
+  - trustrosters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backups
+  verbs:
+  - create
+- apiGroups:
+  - logweir.dev
+  resources:
+  - approvals/status
+  - backups/status
+  - backupschedules/status
+  - kafkaclusters/status
+  - restores/status
+  - trustrosters/status
+  verbs:
+  - patch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/name: logweir
+  name: weirkeeper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper
+subjects:
+- kind: ServiceAccount
+  name: weirkeeper
+  namespace: logweir-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/name: logweir
+  name: weirkeeper
+  namespace: logweir-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: control-plane
+      app.kubernetes.io/name: logweir
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: control-plane
+        app.kubernetes.io/name: logweir
+    spec:
+      containers:
+      - args: []
+        env:
+        - name: LOGWEIR_ARCHIVE_URL
+          value: ""
+        image: ghcr.io/logweir/weirkeeper:v0.1.0
+        imagePullPolicy: IfNotPresent
+        name: weirkeeper
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: weirkeeper
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: runner
+    app.kubernetes.io/name: logweir
+  name: logweir-runner-egress
+  namespace: logweir-system
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+  - ports:
+    - port: 9092
+      protocol: TCP
+    - port: 9094
+      protocol: TCP
+    - port: 9095
+      protocol: TCP
+    - port: 9096
+      protocol: TCP
+    - port: 9097
+      protocol: TCP
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 9000
+      protocol: TCP
+  podSelector:
+    matchExpressions:
+    - key: batch.kubernetes.io/job-name
+      operator: Exists
+  policyTypes:
+  - Egress

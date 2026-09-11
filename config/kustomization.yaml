@@ -1,0 +1,33 @@
+# The install root. `scripts/render-install.sh` builds THIS directory and
+# writes `logweir.yaml`; nothing else produces that file.
+#
+# ---------------------------------------------------------------------------
+# `manager` IS FIRST, AND ITS FIRST RESOURCE IS THE NAMESPACE (interface I27)
+# ---------------------------------------------------------------------------
+# `kubectl apply --server-side -f logweir.yaml` applies documents in file order.
+# A ServiceAccount ahead of its Namespace fails with `namespaces
+# "logweir-system" not found` on a cluster that has never seen Logweir, which is
+# the only cluster X-APPLY is defined against (critique B H12). Listing the
+# Namespace first is belt; `kubectl kustomize`'s default legacy sort — which
+# emits Namespace, then CustomResourceDefinition, then ServiceAccount, then the
+# RBAC kinds, then Deployment — is braces; and
+# `crates/logweir/tests/manifest_lint.rs`'s
+# `logweir_yaml_creates_its_own_namespace` asserts the rendered result rather
+# than trusting either.
+#
+# ---------------------------------------------------------------------------
+# NO CUSTOM RESOURCE IS REACHABLE FROM HERE
+# ---------------------------------------------------------------------------
+# `config/samples/` is NOT listed and has no kustomization of its own. A
+# `KafkaCluster` inside `logweir.yaml` would be a document whose `kind` the
+# same file's CRDs are still establishing: the first apply races, and the second
+# — the one X-APPLY reads — races differently. Samples are separate files,
+# applied second, after `kubectl wait --for condition=established`.
+# `manifest_lint.rs::logweir_yaml_contains_no_custom_resource` asserts no
+# document in the rendered file carries `apiVersion: logweir.dev/v1alpha1`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - manager
+  - crd
+  - rbac

@@ -1,0 +1,51 @@
+# A `Restore` — and the one kind that will not run without a signed approval.
+#
+#     kubectl --context docker-desktop -n <namespace> \
+#       apply -f config/samples/restore.yaml
+#
+# ---------------------------------------------------------------------------
+# `planBytes` AND `approvalRef` ARE NOT PLACEHOLDERS YOU CAN LEAVE ALONE
+# ---------------------------------------------------------------------------
+# `planBytes` is the exact document the run executes, opaque to the API server
+# and CEL-immutable once set. The `Approval` this object names carries a
+# `planHash` over those bytes, and the reconciler RECOMPUTES the hash from the
+# `planBytes` in front of it: a `Restore` whose bytes were edited after approval
+# refuses with `PlanHashMismatch`, naming both digests. Mint the pair with
+# `logweir drill approve`; `docs/kubernetes.md` §12 walks the whole flow.
+#
+# Until a verified `Approval` exists, this object sits at
+# `phase: Pending`, `reason: ApprovalNotVerified` — which is the design and not
+# a stall. The five checks and their refusal vocabulary are in
+# `docs/kubernetes.md` §8.
+#
+# `mode: scratch` CREATES TOPICS UNDER `topicNaming.prefix` AND DELETES THEM
+# AGAIN in phase 9. Those scratch topics are the only thing tag 1 deletes
+# anywhere (Global Constraint 19). `mode: newTopic` creates and keeps them.
+---
+apiVersion: logweir.dev/v1alpha1
+kind: Restore
+metadata:
+  name: drill-001
+  labels:
+    app.kubernetes.io/name: logweir
+spec:
+  sourceArchive:
+    url: s3://kafka-backups/logweir
+    secretRef:
+      name: logweir-s3
+  backupSetRef: backup-001
+  # RFC 3339. The window's end is INCLUSIVE (guard G-PITR); a value at or
+  # before the archive's own floor is a phase-0 refusal naming both integers.
+  pointInTime: "2026-09-07T14:05:00Z"
+  target:
+    clusterRef:
+      name: target
+    mode: scratch
+    topicNaming:
+      prefix: logweir-scratch-
+  approvalRef:
+    name: drill-001-approval
+  # REPLACE-ME — the exact restore document, base64 of the bytes the approval
+  # hashed. `logweir drill approve` prints both halves.
+  planBytes: REPLACE-ME-base64-of-the-approved-plan
+  deadlineSeconds: 1800

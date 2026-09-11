@@ -1,0 +1,90 @@
+# THE AUTHOR-ONLY INSTALL PATH OF GLOBAL CONSTRAINT 37. IT NEVER SATISFIES
+# SPEC §16 CLAUSE 1.
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE YOU TICK ANYTHING
+# ---------------------------------------------------------------------------
+# This overlay points the install at images that exist on exactly one laptop.
+# "Published" means a PULL from a registry the author does not control (spec
+# §11, amendment 5): a locally built or locally loaded tag is **author-only**,
+# and an install proven with this overlay proves that the manifests are right
+# and that the binaries run — and says nothing at all about whether a stranger
+# can install Logweir. The install file's digest rows read `blocked: no remote`
+# until a git remote exists and `release.yml` has run against it. This is path
+# **(b)** of `docs/install.md` and Task 31's CI branch names it by this path.
+#
+# ---------------------------------------------------------------------------
+# HOW TO USE IT
+# ---------------------------------------------------------------------------
+#     just image && just image-weirkeeper     # build and LOAD the two tags
+#     kubectl --context docker-desktop apply --server-side \
+#       -k config/overlays/local-images
+#
+# `imagePullPolicy: Never` is what makes the locally loaded tag win: without it
+# the kubelet tries the registry first and an unqualified `weirkeeper:check`
+# resolves to Docker Hub.
+#
+# ---------------------------------------------------------------------------
+# ONE OF THE TWO IMAGE REFERENCES IS NOT IN ANY MANIFEST, AND IS NOT REWRITTEN
+# ---------------------------------------------------------------------------
+# `ghcr.io/logweir/weirkeeper` is `config/manager/deployment.yaml`'s and this
+# overlay rewrites it. `ghcr.io/logweir/logweir` — the RUNNER image — is a Rust
+# constant, `weirkeeper::job::RUNNER_IMAGE`, compiled into the controller and
+# written into every Job the controller creates at runtime. **kustomize cannot
+# reach it**, so the second `images:` entry below is a declaration of intent
+# that transforms nothing today; it is here so that the pairing is visible and
+# so that it starts working the moment a manifest carries that reference.
+# Until then, a runner Job on this path runs whatever
+# `RUNNER_IMAGE`/`IMAGE_PULL_POLICY` say — `ghcr.io/logweir/logweir:v0.1.0`
+# with `imagePullPolicy: Never`, which is a tag nothing can pull and is
+# therefore satisfied only by an image already loaded under that exact name:
+#
+#     docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
+#
+# That is a real gap between this overlay's name and its effect, and it is
+# recorded here rather than discovered at the first scheduled backup.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS LISTS THE THREE BASES INSTEAD OF `../..`
+# ---------------------------------------------------------------------------
+# This overlay lives INSIDE `config/`, so `resources: [../..]` is a cycle and
+# `kubectl kustomize` refuses it: "candidate root .../config contains visited
+# root .../config/overlays/local-images". It also may not name a bare FILE from
+# outside its own root ("security; file ... is not in or below ..."), which is
+# why `config/manager/kustomization.yaml` carries the Namespace. Naming the same
+# three base DIRECTORIES `config/kustomization.yaml` names — each of which
+# becomes a loader root of its own — is the way out, and it duplicates that
+# list. The duplication is guarded:
+# `crates/logweir/tests/manifest_lint.rs`'s
+# `the_local_images_overlay_covers_the_same_bases` parses both kustomizations
+# and fails if a base is added to one and not the other, so a seventh CRD or a
+# second manager file cannot silently be missing from the author-only path.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../manager
+  - ../../crd
+  - ../../rbac
+images:
+  # The controller. Rewritten in `config/manager/deployment.yaml`.
+  - name: ghcr.io/logweir/weirkeeper
+    newName: weirkeeper
+    newTag: check
+  # The runner. Declared, and transforms nothing today — see the header.
+  - name: ghcr.io/logweir/logweir
+    newName: logweir
+    newTag: check
+patches:
+  # `images:` rewrites the reference and cannot touch `imagePullPolicy`, so the
+  # policy is its own patch. `replace` and not `add`, because the base sets
+  # `IfNotPresent` — a `replace` against an absent path is an error, which is
+  # the failure mode we want if somebody deletes that line from the base.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: weirkeeper
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

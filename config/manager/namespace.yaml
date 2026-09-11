@@ -1,0 +1,33 @@
+# The namespace the control plane installs into — interface **I27**, and the
+# first resource in `config/kustomization.yaml`'s ordering.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS AT ALL (critique B **H12**)
+# ---------------------------------------------------------------------------
+# `logweir.yaml` is the one file a stranger applies. Without a `Namespace`
+# document inside it, the namespaced ServiceAccount and Deployment that follow
+# fail on a cluster that has never seen Logweir with
+# `namespaces "logweir-system" not found`, `kubectl apply` returns non-zero, and
+# X-APPLY — spec §16 clause 1, the "done, laptop" claim of spec §1 — is never
+# satisfied. A README line saying "first create the namespace" is not the same
+# artifact: the claim is ONE file.
+#
+# IT MUST ALSO COME FIRST IN THE FILE, not merely be present. `kubectl apply
+# --server-side -f` applies documents in the order they appear, and a
+# ServiceAccount ahead of its namespace fails for the same reason. The ordering
+# is asserted by `crates/logweir/tests/manifest_lint.rs`'s
+# `logweir_yaml_creates_its_own_namespace`, which checks both that there is
+# exactly one `kind: Namespace` and that it precedes every namespaced document.
+#
+# THE NAME IS FIXED, AND `config/` IS NOT KUSTOMIZE-PARAMETERISED OVER IT.
+# `config/rbac/role_binding.yaml`'s subject names this namespace, and STANDING
+# RULE 13's T21-T24 exception is written against this literal. An adopter who
+# needs another name edits this file and `role_binding.yaml` together and
+# re-renders with `just install-yaml`.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir

@@ -1,0 +1,70 @@
+# A `ValidatingAdmissionPolicy` example — SHIPPED COMMENTED OUT.
+#
+# ---------------------------------------------------------------------------
+# [UNVERIFIED — needs a 1.30+ cluster]
+# ---------------------------------------------------------------------------
+# This mark stays here, in the shipped text, with the sentence that would
+# verify it (spec §15 mark 7, STANDING RULE 22). **Minimum Kubernetes for
+# Logweir is 1.29** (Global Constraint 25: CEL validation rules GA), and this
+# example is not part of that floor. What would verify it: create a 1.30+
+# cluster, uncomment both documents below, apply them, and show an `Approval`
+# whose `spec` is edited after creation being REJECTED by the API server with
+# this policy's message — and the same edit succeeding with the policy absent.
+# Neither half has been run.
+#
+# WHY IT IS 1.30+ AND NOT 1.29. `optionalOldSelf` is 1.30+ (Global Constraint
+# 25), and without it a per-field `self == oldSelf` transition rule does not
+# seal an OPTIONAL field: an absent field can still be ADDED on update, because
+# `oldSelf` has nothing to compare against. Immutability over an object with
+# optional fields is therefore an object-level rule (critique B M3) — which is
+# exactly the shape `config/crd/backupschedules.yaml` already uses for
+# `BackupSchedule.spec`, inside the CRD, where it works on 1.29.
+#
+# WHY IT IS COMMENTED OUT RATHER THAN OMITTED. A `ValidatingAdmissionPolicy`
+# document applied to a 1.29 cluster is rejected — `no matches for kind` — and
+# a `logweir.yaml` carrying one would fail X-APPLY on the stated floor. This
+# file is not listed by any kustomization and is never rendered into
+# `logweir.yaml`; it is an example an adopter on 1.30+ opts into, by hand.
+#
+# WHAT IT WOULD ADD. Nothing that a cluster-admin cannot defeat — O0, default
+# (a), accept it and say so (spec §9): a cluster-admin can delete this policy.
+# It raises the cost of an accidental edit, not of a deliberate one.
+#
+# ---------------------------------------------------------------------------
+# apiVersion: admissionregistration.k8s.io/v1
+# kind: ValidatingAdmissionPolicy
+# metadata:
+#   name: logweir-approval-is-write-once
+#   labels:
+#     app.kubernetes.io/name: logweir
+# spec:
+#   failurePolicy: Fail
+#   matchConstraints:
+#     resourceRules:
+#       - apiGroups: ["logweir.dev"]
+#         apiVersions: ["v1alpha1"]
+#         operations: ["UPDATE"]
+#         resources: ["approvals"]
+#   validations:
+#     # ONE OBJECT-LEVEL RULE, NOT FOUR PER-FIELD ONES. `spec.subjectRef` and
+#     # the three byte fields are all required by the CRD today, but a future
+#     # optional field added to `Approval.spec` would slip through a per-field
+#     # rule set on 1.29 semantics; comparing the whole `spec` cannot.
+#     - expression: "object.spec == oldObject.spec"
+#       message: >-
+#         an Approval is write-once: its signed bytes, its sidecar, its planHash
+#         and its subjectRef are what the controller verified. Create a new
+#         Approval instead of editing this one.
+#       reason: Invalid
+# ---
+# apiVersion: admissionregistration.k8s.io/v1
+# kind: ValidatingAdmissionPolicyBinding
+# metadata:
+#   name: logweir-approval-is-write-once
+#   labels:
+#     app.kubernetes.io/name: logweir
+# spec:
+#   policyName: logweir-approval-is-write-once
+#   validationActions: ["Deny"]
+#   # CLUSTER-WIDE. `matchResources` omitted means every namespace; an adopter
+#   # who wants it in one namespace adds a `namespaceSelector` here.

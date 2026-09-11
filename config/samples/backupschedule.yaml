@@ -1,0 +1,45 @@
+# A `BackupSchedule` — the kind that produces `Backup` objects on a cron.
+#
+#     kubectl --context docker-desktop -n <namespace> \
+#       apply -f config/samples/backupschedule.yaml
+#
+# EVERY `.spec` FIELD EXCEPT `suspend` IS SEALED BY THE CRD'S OWN CEL RULE.
+# `config/crd/backupschedules.yaml` carries an object-level
+# `x-kubernetes-validations` rule with the message `only spec.suspend is
+# mutable; create a new BackupSchedule instead`, and the API server applies it
+# to **every** subject — cluster-admin included. To change a schedule's topics,
+# archive, source or cron expression, create a new object. This is also why
+# `config/rbac/operator_role.yaml` grants a plain `update`: RBAC has no
+# expression language, so the restriction cannot live there (critique B H13).
+#
+# `topics` IS A NAMED ALLOWLIST WITH NO WILDCARD (GC18(c) rail 1, guard
+# **G-GLOB**). A `*` here is a refusal, not a match-all.
+#
+# RETENTION **REPORTS AND NEVER DELETES** (GC6, guard **G-RET**). `keepLast`
+# and `keepDays` produce a `status.retentionReport` naming what WOULD be
+# removed, and the exact `aws s3 rm` command to remove it. No Logweir component
+# holds any object-store delete capability in tag 1.
+---
+apiVersion: logweir.dev/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: nightly
+  labels:
+    app.kubernetes.io/name: logweir
+spec:
+  # Five fields, space-separated, and a hand-written parser — no cron crate
+  # (Global Constraint 38 closes the workspace graph).
+  schedule: "0 2 * * *"
+  sourceRef:
+    name: source
+  topics:
+    - orders
+    - payments
+  archive:
+    url: s3://kafka-backups/logweir
+    secretRef:
+      name: logweir-s3
+  retention:
+    keepLast: 7
+  # The one mutable field.
+  suspend: false

@@ -1,0 +1,34 @@
+# Binds the `weirkeeper` ClusterRole to the `weirkeeper` ServiceAccount.
+#
+# A ClusterRoleBinding AND NOT A RoleBinding, FOR ONE REASON: `TrustRoster` is
+# cluster-scoped (spec §9) and `controllers::approval::load_roster` reads it
+# with `Api::all`, as does the `TrustRoster` reconciler's own `Controller`. A
+# namespace-scoped binding cannot authorise a read of a cluster-scoped object,
+# so the controller would start, watch nothing, and report every approval
+# unverifiable. The other five kinds are namespaced and this binding also makes
+# them readable in EVERY namespace, which is the design: one controller per
+# cluster (Global Constraint 30), reconciling `Backup` and `Restore` objects
+# wherever an adopter creates them.
+#
+# THE OTHER THREE ClusterRoles ARE SHIPPED UNBOUND, ON PURPOSE. `logweir-viewer`,
+# `logweir-operator` and `logweir-approver` describe **humans**, and who may
+# approve a restore in which namespace is an adopter's decision, not this
+# file's. `docs/kubernetes.md` §13 carries the three `kubectl create
+# rolebinding` commands. A shipped binding to a real person or group would be a
+# grant nobody asked for.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: weirkeeper
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: logweir-system

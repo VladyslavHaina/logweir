@@ -1,0 +1,74 @@
+# The cluster-scoped `TrustRoster` — interface **I16**.
+#
+# ---------------------------------------------------------------------------
+# THE NAME IS FIXED. IT IS `default`, AND NOTHING READS ANY OTHER NAME.
+# ---------------------------------------------------------------------------
+# `weirkeeper::controllers::approval::ROSTER_NAME` is the literal `"default"`,
+# and `load_roster` does `Api::<TrustRoster>::all(client).get(ROSTER_NAME)`. A
+# roster called anything else is stored by the API server, reconciled by the
+# `TrustRoster` controller, shown by `kubectl get trustroster` — and consulted
+# by no approval check, so every `Approval` reports `RosterNotFound`. Do not
+# rename it.
+#
+# ---------------------------------------------------------------------------
+# IT IS CLUSTER-SCOPED, SO INSTALLING IT IS A CLUSTER-ADMIN STEP
+# ---------------------------------------------------------------------------
+# Spec §9. The UI SURFACES this snippet and does not submit it: a
+# namespace-scoped adopter cannot complete the approval flow without somebody
+# with cluster-level write applying this once. That is why the install docs
+# carry it at **step 1**, before anything else, rather than leaving it to be
+# discovered when the first `Restore` sits at `ApprovalNotVerified`.
+#
+#     kubectl --context docker-desktop apply -f config/samples/trustroster.yaml
+#
+# ---------------------------------------------------------------------------
+# WHY THE KEYS BELOW ARE PLACEHOLDERS AND NOT A WORKING PUBLIC KEY
+# ---------------------------------------------------------------------------
+# There is exactly one private key checked into this repository —
+# `e2e/fixtures/signed/signing.pem`, a stage-1 throwaway used to mint test
+# approvals — and its public half is beside it. A sample roster that trusted
+# that public half would be a shipped configuration under which **anyone with a
+# copy of this repository can mint an approval this cluster accepts**. So the
+# entries below are placeholders, and filling them in is install step 1:
+#
+#     openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem \
+#       && openssl pkey -in approver.pem -pubout -out approver.pub.pem
+#
+# Paste `approver.pub.pem` into `approverKeys[].spkiPem` and `signing.pub.pem`
+# into `signingKeys[].spkiPem`. `keyId` is the **sha256 of the SPKI PEM's own
+# bytes** and check 3 recomputes it — a declared id that does not match its own
+# key is `KeyIdNotInRoster`, naming both ids, which is a refusal you can read.
+#
+#     shasum -a 256 approver.pub.pem
+#
+# `notAfter` is RFC 3339. An expired key is reported through
+# `status.expiredKeyIds` and does NOT move the `Loaded` condition's
+# `lastTransitionTime` (plan erratum E13b); an unparseable one does.
+---
+apiVersion: logweir.dev/v1alpha1
+kind: TrustRoster
+metadata:
+  # FIXED. See this file's header — `ROSTER_NAME` is `"default"`.
+  name: default
+  labels:
+    app.kubernetes.io/name: logweir
+spec:
+  # The source cluster ids a restore may be admitted against (GC18(c) rail 1).
+  # An empty list admits nothing, which is the safe default to start from.
+  allowedClusterIds: []
+  approverKeys:
+    - keyId: REPLACE-ME-sha256-of-approver.pub.pem
+      subject: approver@example.invalid
+      notAfter: "2027-01-01T00:00:00Z"
+      spkiPem: |
+        -----BEGIN PUBLIC KEY-----
+        REPLACE-ME paste the contents of approver.pub.pem here
+        -----END PUBLIC KEY-----
+  signingKeys:
+    - keyId: REPLACE-ME-sha256-of-signing.pub.pem
+      subject: logweir-runner@example.invalid
+      notAfter: "2027-01-01T00:00:00Z"
+      spkiPem: |
+        -----BEGIN PUBLIC KEY-----
+        REPLACE-ME paste the contents of signing.pub.pem here
+        -----END PUBLIC KEY-----
