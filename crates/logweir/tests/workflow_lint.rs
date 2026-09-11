@@ -61,23 +61,47 @@ fn repo_root() -> std::path::PathBuf {
         .unwrap()
 }
 
-fn release_yml() -> std::path::PathBuf {
-    repo_root().join(".github/workflows/release.yml")
+/// **A workflow by file name.** Task 31 added a SECOND workflow to this file's
+/// remit — `kind-demo.yml`, Demo 1 in CI — so the three readers below are
+/// parameterised by file name and the three release-scoped names are kept as
+/// the thin wrappers every existing test already calls. Extending rather than
+/// forking is deliberate: two copies of `is_pushing_step` differing in one
+/// subtlety is how the wrong one gets called.
+fn workflow_path(file: &str) -> std::path::PathBuf {
+    repo_root().join(".github/workflows").join(file)
 }
 
-/// The workflow as TEXT. Some properties are text properties and must not be
+/// A workflow as TEXT. Some properties are text properties and must not be
 /// asked of the parsed tree: a `docker build` inside a `run:` block is a string
 /// the YAML model cannot distinguish from prose.
-fn raw() -> String {
-    let path = release_yml();
+fn raw_of(file: &str) -> String {
+    let path = workflow_path(file);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
-/// The workflow as a parsed document.
-fn workflow() -> Value {
-    let path = release_yml();
-    serde_yaml::from_str(&raw())
+/// A workflow as a parsed document.
+fn parsed(file: &str) -> Value {
+    let path = workflow_path(file);
+    serde_yaml::from_str(&raw_of(file))
         .unwrap_or_else(|e| panic!("{} is not valid YAML: {e}", path.display()))
+}
+
+/// `kind-demo.yml`: Demo 1 in CI, on a `kind` cluster the workflow creates
+/// (spec §16 clause 2). Task 31.
+const KIND_DEMO_YML: &str = "kind-demo.yml";
+
+// `release_yml()` — the path of the one workflow this file used to know about
+// — is gone: `workflow_path(file)` subsumes it and `cargo clippy -- -D
+// warnings` refuses the unused wrapper. Its two callers now read the file name
+// directly, which is also the only place in this file that says which workflow
+// the release-scoped tests are about.
+
+fn raw() -> String {
+    raw_of("release.yml")
+}
+
+fn workflow() -> Value {
+    parsed("release.yml")
 }
 
 /// EVERY job's steps, by job name, in file order (F1). `serde_yaml`'s `Mapping`
@@ -1560,4 +1584,389 @@ fn workflow_lint_publish_waits_for_the_pullback() {
             "pullback step {i} must carry the tag gate on the STEP (the job has none): {step:?}"
         );
     }
+}
+
+// ===========================================================================
+// TASK 31 — `kind-demo.yml`: Demo 1 in CI, on a cluster the workflow creates
+// ===========================================================================
+//
+// Spec §16 clause 2. Every test below reads `.github/workflows/kind-demo.yml`
+// through the same three readers `release.yml` uses, and every one of them
+// identifies a step by WHAT IT DOES — the command in its `run:`, the action in
+// its `uses:` — never by its `id:` and never by its position, so a rename
+// cannot make a lint blind. The two places a NAME is load-bearing
+// (`workflow_lint_kind_demo_names_the_install_branch` and
+// `x_uiwrite_in_ci_is_labelled_mechanical_only`) are exactly the two places
+// where the name is the record of what the run means, and each of those tests
+// finds its step by behaviour first and then holds the name to account.
+
+/// THE STEPS OF `kind-demo.yml`'s one job, in file order. A panic here rather
+/// than an empty slice: a workflow with no steps is a broken workflow, not a
+/// workflow with nothing to lint.
+fn kind_demo_steps(doc: &Value) -> &[Value] {
+    let all = jobs(doc);
+    assert_eq!(
+        1,
+        all.len(),
+        "kind-demo.yml has {} jobs. The whole walk is one job on one runner \
+         because the compose stack, the kind cluster and the demo all live in one machine's \
+         state; a second job would have none of it. Jobs found: {:?}",
+        all.len(),
+        all.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    let steps = all[0].1;
+    assert!(!steps.is_empty(), "kind-demo.yml's job has no steps");
+    steps
+}
+
+/// `name:` of a step, or the empty string.
+fn step_name(step: &Value) -> &str {
+    step["name"].as_str().unwrap_or("")
+}
+
+/// Does this step INSTALL the control plane? Identified by the command, never
+/// by the name — which is the point: the name is what these tests hold to
+/// account, so it cannot also be how they find the step.
+fn is_install_step(step: &Value) -> bool {
+    let block = run(step);
+    block.contains("apply --server-side -k") || block.contains("apply --server-side -f")
+}
+
+/// **The cluster is created by this workflow and deleted by it, whatever
+/// happened — and it is never the laptop's.**
+///
+/// STANDING RULE 16: `kind` is a CI-only cluster, created and destroyed by the
+/// workflow. A `kind` cluster that survives a failed run is a leaked container
+/// network and a leaked `kubeconfig` entry on a runner that is about to be
+/// recycled, and — much worse on the one authorised local proving run — a
+/// cluster nobody deleted.
+///
+/// The third clause is the one that could not be recovered from later: this
+/// workflow must never name the developer's own cluster. Spec §16 clause 2 is
+/// about a cluster the workflow CREATED; a step that reached for the laptop's
+/// would produce a green run that proved something else entirely.
+///
+/// KILLS: removing the `kind delete cluster` step; dropping its `if: always()`
+/// (a failed demo then leaks the cluster, which is the case the flag exists
+/// for); pointing any step at the laptop cluster.
+#[test]
+fn workflow_lint_kind_demo_creates_and_deletes_its_cluster() {
+    let doc = parsed(KIND_DEMO_YML);
+    let steps = kind_demo_steps(&doc);
+
+    let create: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| run(s).contains("kind create cluster"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        1,
+        create.len(),
+        "kind-demo.yml must have exactly one `kind create cluster` step; found {create:?}. \
+         Spec §16 clause 2 is about a cluster THE WORKFLOW created"
+    );
+
+    let delete: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| run(s).contains("kind delete cluster"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        1,
+        delete.len(),
+        "kind-demo.yml must have exactly one `kind delete cluster` step; found {delete:?}"
+    );
+    assert!(
+        create[0] < delete[0],
+        "the `kind delete cluster` step (index {}) must come after the `kind create cluster` \
+         step (index {})",
+        delete[0],
+        create[0]
+    );
+    assert_eq!(
+        "always()",
+        condition(&steps[delete[0]]).trim(),
+        "the `kind delete cluster` step must carry `if: always()`; it carries `{}`. Without it \
+         a failed demo leaks the cluster — which is the only case the teardown exists for",
+        condition(&steps[delete[0]])
+    );
+
+    // AND THE WORKFLOW NEVER NAMES THE DEVELOPER'S OWN CLUSTER. Read over the
+    // whole of every step — `name:`, `run:`, `uses:`, `env:` and `with:` — by
+    // serialising the step back to YAML, so a context hidden in a `with:` value
+    // or an environment variable is caught as readily as one on a command line.
+    let laptop_context = concat!("docker-", "desktop");
+    for (i, step) in steps.iter().enumerate() {
+        let text = serde_yaml::to_string(step).expect("a step re-serialises");
+        assert!(
+            !text.contains(laptop_context),
+            "step {i} of kind-demo.yml names the developer's own cluster context. This workflow \
+             owns ONE cluster, the `kind` one it created (STANDING RULE 16), and every `kubectl` \
+             in it and in `scripts/kind-demo.sh` names `kind-logweir`:\n{text}"
+        );
+    }
+}
+
+/// **Three artefacts, uploaded whatever happened.**
+///
+/// A demo that failed at step 7 and uploaded nothing has told a reader that it
+/// failed and nothing about why; the compose logs, the cluster's own state and
+/// the controller's log are the three places the answer is, and all three are
+/// deleted seconds later by the teardown.
+///
+/// KILLS: dropping any of the three uploads; leaving one without `if:
+/// always()`, which uploads diagnostics on exactly the runs that need none.
+#[test]
+fn workflow_lint_kind_demo_uploads_diagnostics_on_failure() {
+    let doc = parsed(KIND_DEMO_YML);
+    let steps = kind_demo_steps(&doc);
+
+    let uploads: Vec<(usize, &Value)> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| uses(s).contains("upload-artifact"))
+        .collect();
+    assert!(
+        uploads.len() >= 3,
+        "kind-demo.yml uploads {} artefact(s). Three are required: the compose logs, the \
+         cluster's own state and the controller's log — the three places the answer to a \
+         failed demo is, all of them deleted by the teardown moments later",
+        uploads.len()
+    );
+    for (i, step) in &uploads {
+        assert_eq!(
+            "always()",
+            condition(step).trim(),
+            "the artefact upload at step {i} (`{}`) must carry `if: always()`; it carries \
+             `{}`. Without it the diagnostics are uploaded on exactly the runs that do not \
+             need them",
+            step_name(step),
+            condition(step)
+        );
+    }
+
+    // AND THE TEARDOWN IS UNCONDITIONAL TOO — both halves of it, because a
+    // compose stack left up on a runner is a leak and a compose stack left up
+    // on the authorised local proving run breaks `just lint` (Global
+    // Constraint 22: `time-unit-suite.sh` refuses while 9092 or 9000 answers).
+    let down = steps
+        .iter()
+        .find(|s| run(s).contains("down -v"))
+        .unwrap_or_else(|| panic!("kind-demo.yml must tear the compose stack down"));
+    assert_eq!(
+        "always()",
+        condition(down).trim(),
+        "the `docker compose … down -v` step must carry `if: always()`"
+    );
+    assert!(
+        run(down).contains("--profile setup") && run(down).contains("--profile tools"),
+        "the teardown must name BOTH profiles: `down` only removes containers for services in \
+         the ACTIVE profile set, so a plain `down -v` walks past every setup container an \
+         earlier `up` left behind (`justfile`'s `e2e-down`, and its reason):\n{}",
+        run(down)
+    );
+}
+
+/// **The controller image is built for the runner's own architecture, by the
+/// one named producer.**
+///
+/// `just image-weirkeeper` builds `--platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}"`
+/// — arm64 by Global Constraint 10, because the development host is arm64 and
+/// every local gate inspects a loaded tag. A GitHub runner is amd64, where that
+/// build is EMULATED: STANDING RULE 10's forbidden case, measured at 33x in
+/// `docs/stability.md`, and it looks like a stall rather than a failure. This
+/// workflow sets the variable the recipe reads; Task 23 owns the recipe
+/// (STANDING RULE 17 — this task is in chain W and not in chain J).
+///
+/// The second half is the reason the first half can be a one-line assertion:
+/// there is ONE producer of each local tag and ONE place a platform is written.
+/// A hand-rolled `docker build` here would be a second, and the platform would
+/// then be true in one place and false in another.
+///
+/// KILLS: dropping `LOGWEIR_IMAGE_PLATFORM` from the step's `env:` (the arm64
+/// Rust compile under QEMU then runs on an amd64 runner); open-coding
+/// `docker build` or `docker buildx build` anywhere in the file.
+#[test]
+fn workflow_lint_kind_demo_builds_weirkeeper_for_the_runner_platform() {
+    let doc = parsed(KIND_DEMO_YML);
+    let steps = kind_demo_steps(&doc);
+
+    let build = steps
+        .iter()
+        .find(|s| words(run(s)).contains(&"image-weirkeeper"))
+        .unwrap_or_else(|| {
+            panic!(
+                "kind-demo.yml must run `just image-weirkeeper` — the one named producer of the \
+                 local controller tag (`justfile`)"
+            )
+        });
+    let platform = build["env"]["LOGWEIR_IMAGE_PLATFORM"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        "linux/amd64",
+        platform.trim(),
+        "the `just image-weirkeeper` step must carry `LOGWEIR_IMAGE_PLATFORM: linux/amd64` in \
+         its `env:`; it carries `{platform}`. The recipe defaults to linux/arm64 for the \
+         development host (Global Constraint 10), and on an amd64 runner that default compiles \
+         the whole Rust workspace under QEMU — STANDING RULE 10's forbidden case, 33x in \
+         `docs/stability.md`, indistinguishable from a stall"
+    );
+
+    // NO SECOND PRODUCER. Text, not tree: a `docker build` inside a `run:`
+    // block is a string the YAML model cannot tell from prose, and `${{ … }}`
+    // expressions and shell comments are stripped first for the reason Task 30
+    // stripped them — `${{ steps.build.outputs.digest }}` is a legal reference
+    // to a build step's OUTPUT and a `#` line is not a command.
+    let text = strip_shell_comments(&strip_gha_expressions(&raw_of(KIND_DEMO_YML)));
+    for (n, line) in text.lines().enumerate() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for (i, t) in toks.iter().enumerate() {
+            if *t != "docker" {
+                continue;
+            }
+            let next = toks.get(i + 1).copied().unwrap_or("");
+            assert!(
+                next != "build" && next != "buildx",
+                "kind-demo.yml line {} open-codes `docker {next}`. The producers of the two \
+                 local tags are `just image` and `just image-weirkeeper`, and they are the one \
+                 place a platform is written (`justfile`):\n    {line}",
+                n + 1
+            );
+        }
+    }
+}
+
+/// **The install step says which world it installed from.**
+///
+/// Global Constraint 37: a locally built or locally loaded image is
+/// AUTHOR-ONLY and never satisfies spec §16 clause 1 — the `registry:2`
+/// fallback included. A green `kind-demo` therefore means one of two quite
+/// different things, and the only durable record of which is the step's own
+/// name in the run log.
+///
+/// The published branch carries an assertion the author-only branch cannot: a
+/// `rollout status` on the controller Deployment, which is the one thing
+/// X-APPLY cannot prove — a pod PULLED the shipped digest from a registry the
+/// author does not control and reached Ready.
+///
+/// KILLS: renaming either branch to something that does not say what it
+/// installed; adding a published-digest install with no `rollout status` after
+/// it, which would let a run claim the pull without ever asserting a pod
+/// started.
+#[test]
+fn workflow_lint_kind_demo_names_the_install_branch() {
+    const AUTHOR_ONLY: &str = "author-only images; NOT evidence";
+    const PUBLISHED: &str = "published digests, pulled by the cluster";
+
+    let doc = parsed(KIND_DEMO_YML);
+    let steps = kind_demo_steps(&doc);
+
+    let installs: Vec<(usize, &Value)> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| is_install_step(s))
+        .collect();
+    assert!(
+        !installs.is_empty(),
+        "kind-demo.yml installs nothing: no step runs `kubectl … apply --server-side`"
+    );
+
+    let mut saw_author_only = false;
+    let mut saw_published = false;
+    for (i, step) in &installs {
+        let name = step_name(step);
+        assert!(
+            name.contains(AUTHOR_ONLY) || name.contains(PUBLISHED),
+            "the install step at index {i} is named `{name}`, which says neither \
+             `{AUTHOR_ONLY}` nor `{PUBLISHED}`. Those two installs prove different things and \
+             the run log's only record of which one ran is this name"
+        );
+        saw_author_only |= name.contains(AUTHOR_ONLY);
+        if name.contains(PUBLISHED) {
+            saw_published = true;
+            // … AND THE ROLLOUT THAT MAKES IT MEAN SOMETHING, in the next step
+            // that runs a command.
+            let next = steps[i + 1..]
+                .iter()
+                .find(|s| !run(s).is_empty())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the published-digest install at index {i} is the last step that runs \
+                         anything. It must be followed by a `rollout status`: applying a \
+                         manifest that names a published digest proves nothing until a pod has \
+                         pulled it and reached Ready"
+                    )
+                });
+            let block = run(next);
+            assert!(
+                block.contains("rollout status"),
+                "the step after the published-digest install runs `{block}` and not a `rollout \
+                 status`. That rollout is the assertion X-APPLY cannot make"
+            );
+            assert!(
+                block.contains("--timeout=180s"),
+                "the `rollout status` after the published-digest install must bound its wait at \
+                 `--timeout=180s`; a rollout that waits for ever reports a stuck pull as a \
+                 cancelled job:\n{block}"
+            );
+        }
+    }
+    assert!(
+        saw_author_only,
+        "kind-demo.yml has no `{AUTHOR_ONLY}` install branch. That is the branch that can run \
+         today — there is no remote — and the one whose name refuses the clause-1 claim"
+    );
+    assert!(
+        saw_published,
+        "kind-demo.yml has no `{PUBLISHED}` install branch. Both branches are written now, so \
+         the day a remote exists the workflow needs a variable set and not a rewrite"
+    );
+}
+
+/// **The CI half of X-UIWRITE is labelled as the half it is.**
+///
+/// Spec §10's gate is a `create` of a `Restore` FROM THE PAGE, and `curl` is
+/// not the page. A runner has no browser, so the mechanical half — the
+/// same-origin `POST` through `kubectl proxy`, asserting 201 — is all CI can
+/// do. A step named plain `X-UIWRITE` would put a browser assertion in the
+/// plan that exists nowhere in it; naming the half AND citing the document
+/// where the other half is recorded is what keeps the ledger honest.
+///
+/// KILLS: naming the CI step plain `X-UIWRITE`; dropping the citation of
+/// `e2e/k8s/laptop-demo.md`, which is where the in-browser half lives.
+#[test]
+fn x_uiwrite_in_ci_is_labelled_mechanical_only() {
+    let doc = parsed(KIND_DEMO_YML);
+    let steps = kind_demo_steps(&doc);
+
+    // FOUND BY WHAT IT DOES: the step that runs the demo script. The name is
+    // what this test holds to account, so it cannot also be the way in.
+    let demo = steps
+        .iter()
+        .find(|s| run(s).contains("scripts/kind-demo.sh"))
+        .unwrap_or_else(|| {
+            panic!(
+                "kind-demo.yml must run `scripts/kind-demo.sh` — the driver that patches \
+                 CoreDNS, probes the advertised listener from a pod and then runs the twelve \
+                 steps of `scripts/demo-steps.sh`"
+            )
+        });
+    let name = step_name(demo);
+    assert!(
+        name.contains("mechanical half only"),
+        "the step that runs the demo is named `{name}`. It performs X-UIWRITE's MECHANICAL half \
+         only — `curl` is not the page (spec §10) — and the name is the only place in a run log \
+         that says so"
+    );
+    assert!(
+        name.contains("e2e/k8s/laptop-demo.md"),
+        "the step that runs the demo is named `{name}` and cites no document. The half spec §10 \
+         actually requires is recorded at `e2e/k8s/laptop-demo.md`, proven by `\"manager\": \
+         \"logweir-ui\"` in the created object's managedFields; a name that says \"mechanical \
+         only\" without saying where the other half is invites the reader to conclude there \
+         isn't one"
+    );
 }

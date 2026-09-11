@@ -2406,6 +2406,322 @@ page:
 The old approval still covers the old restore, which is the correct outcome: an
 approval binds bytes, and these are different bytes.
 
+## 18. Demo 1 in CI
+
+Spec §16 clause 2 asks for Demo 1 — the walk `e2e/k8s/laptop-demo.md` records
+on this laptop — to run **end to end in CI, on a `kind` cluster the workflow
+creates**, with the compose broker reached over the published `K8S` listener.
+This section is what that workflow is, why its one hard problem is solved the
+way it is, and exactly what state the clause is in today.
+
+**The clause reads `blocked: no remote`, and nothing below changes that.** There
+is no git remote for this repository, so `.github/workflows/kind-demo.yml` has
+never run and cannot. What would close it is one artefact: the URL of a green
+run of that workflow. `docs/tag1-checklist.md` row 2 says so with the date.
+
+### 18.1 The twelve steps are defined once
+
+Before Task 31 the walk lived in `scripts/laptop-demo.sh`. A second copy in a CI
+script would have been two walks drifting apart while the checklist went on
+claiming that CI runs the one this document records. So the thirteen step
+functions (`step_01` … `step_09`, `step_10a`, `step_10b`, `step_11`, `step_12`
+— twelve numbered steps, step 10 having two halves), the helpers and the
+teardown moved verbatim into **`scripts/demo-steps.sh`**, which is sourced and
+never executed, and both demos became drivers:
+
+| driver | sets | runs |
+|---|---|---|
+| `scripts/laptop-demo.sh` | `LOGWEIR_KUBE_CONTEXT=docker-desktop` | `demo_run` |
+| `scripts/kind-demo.sh` | `LOGWEIR_KUBE_CONTEXT=kind-logweir` | three pre-steps, then `demo_run` |
+
+Three variables parameterise the steps and nothing else does:
+`LOGWEIR_KUBE_CONTEXT` (default `docker-desktop`), `LOGWEIR_DEMO_IMAGE_REF`
+(default `ghcr.io/logweir/logweir:v0.1.0`) and `LOGWEIR_DEMO_PULL_POLICY`
+(default `Never`). Every `kubectl` line in both files reads
+`kubectl --context "$LOGWEIR_KUBE_CONTEXT" …` — STANDING RULE 12 is satisfied by
+the context always being passed, never by the literal being spelt out — and each
+driver prints the cluster it resolved as its first line of output.
+`crates/logweir/tests/laptop_demo_lint.rs` holds all of it:
+`the_two_demo_scripts_share_their_steps` refuses a step function defined outside
+`demo-steps.sh`, and `laptop_demo_names_every_kubectl_context` refuses a
+`kubectl` that omits the variable **and** a driver that fails to set it.
+
+### 18.2 The one hard problem: resolve the name, not the address
+
+The demo's broker is the compose stack on the runner's **host**; the Logweir
+runner is a **pod**. Three things follow, and only the third is a solution.
+
+* **An address cannot be substituted.** A Kafka client that connects to a
+  bootstrap address is then redirected by the broker's metadata response to the
+  **advertised** listener, which STANDING RULE 15 fixes at
+  `K8S://host.docker.internal:9095` and which only Task 7 may change. Computing
+  the kind gateway and passing it as `--bootstrap` fixes the first packet and
+  nothing after it.
+* **`extraPortMappings` is the wrong direction.** It maps host → node, inbound.
+  This is a pod reaching out to a host service. `e2e/k8s/kind-config.yaml`
+  carries none, and says so in a comment with that reason.
+* **So the NAME is made to resolve.** After the cluster is created,
+  `scripts/kind-demo.sh` reads the kind network's IPv4 gateway and adds a
+  CoreDNS `hosts` block for `host.docker.internal` inside the cluster's own DNS.
+  The advertised listener then resolves in every pod and **the bootstrap string
+  stays the literal `host.docker.internal:9095` in both demos** — byte-identical
+  to spec §2. What was three substitutions becomes two.
+
+The three pre-steps, in order, every exit code on its own line and nothing piped
+(STANDING RULE 20):
+
+1. **the gateway**, printed and asserted non-empty. There is **no fallback to
+   `localhost`**: inside a pod `localhost` is the pod, so a silent fallback
+   would dial the runner itself and surface eleven steps later as a `Backup`
+   that never finished. The script reads **every** gateway and takes the first
+   IPv4 one — see §18.5, where the authorised run measured why.
+2. **the CoreDNS patch**: read the `coredns` ConfigMap's `Corefile`; rewrite it
+   with the `hosts` block inside the `.:53` server block, carrying
+   `fallthrough` so the `hosts` plugin does not answer NXDOMAIN for every name
+   it does not hold; render the new ConfigMap to a **file** and `apply -f` that
+   file as two commands, never
+   `… --dry-run=client -o yaml | kubectl apply -f -`, because that pipe reports
+   `kubectl apply`'s status and swallows the render's; then `rollout restart`
+   and `rollout status … --timeout=120s`.
+3. **the probe** (interface register I14, Task 15c), from inside the cluster and
+   before step 1 runs:
+   `kubectl run bootstrap-probe --rm --attach --restart=Never --image=… -- cluster-probe --bootstrap host.docker.internal:9095`.
+   `--attach --restart=Never` makes `kubectl`'s exit code the container's, which
+   is read directly; `reachable=true` and exit 0 are step 1's precondition.
+   `logweir doctor` is not used: it makes `--allowed-clusters` and
+   `--approver-key` mandatory and hard-codes `Plaintext`.
+
+`kind_demo_patches_coredns_before_the_first_step` asserts that order, and that
+the ConfigMap apply is two commands;
+`kind_demo_asserts_a_non_empty_bootstrap_address` runs the script with a stub
+`docker` whose `network inspect` prints nothing and requires exit **1**.
+
+### 18.3 Two install branches, and only one of them is evidence
+
+Global Constraint 37: a locally built or locally loaded image is **author-only**
+and never satisfies spec §16 clause 1, the `registry:2` fallback included. So a
+green `kind-demo` means one of two quite different things, and the workflow's own
+step names are the record of which:
+
+* **`install (author-only images; NOT evidence for §16 clause 1)`** — the
+  default, and the only branch that can run today. `kind load docker-image`
+  puts the locally built tags into the node under `imagePullPolicy: Never`. It
+  proves the code path and proves nothing about publication.
+* **`install (published digests, pulled by the cluster)`** — once a remote
+  exists and `release.yml` has pushed. No `kind load` at all: the cluster
+  **pulls** `ghcr.io/logweir/logweir@sha256:…`, and the
+  `rollout status deploy/weirkeeper --timeout=180s` that follows is the
+  assertion X-APPLY cannot make — a pod pulled the shipped digest from a
+  registry the author does not control and reached Ready. With `release.yml`'s
+  `pullback:` job that is what moves clause 1 off `blocked`.
+
+Which branch runs is `env.LOGWEIR_INSTALL_PATH`: the `install_path` input of a
+`workflow_dispatch` run, else the repository variable `vars.LOGWEIR_INSTALL_PATH`,
+else `author-only`. On the published branch `vars.LOGWEIR_PUBLISHED_RUNNER_REF`
+carries the runner reference — the full `@sha256:` form, never a tag (Global
+Constraint 7). `workflow_lint_kind_demo_names_the_install_branch` finds the
+install step by the command it runs and then holds its name to account, and
+requires the `rollout status` after the published form.
+
+The author-only branch carries one extra line that the laptop path also needs,
+for plan erratum E19b's reason: the kubelet keys images on the **whole**
+reference, so `weirkeeper::job::RUNNER_IMAGE` — a Rust constant kustomize cannot
+reach — is `ErrImageNeverPull` on a node holding the same digest under a
+different name. On the laptop one `docker tag` fixes it because the daemon and
+the kubelet share an image store; a kind node has an image store of its own, so
+the tag is made on the host and the **tagged name** is loaded. `docker save`
+preserves the manifest digest — measured 2026-09-11, the saved index carries
+`sha256:6440a4a0…`, the digest the constant pins — so the reference resolves
+inside the node.
+
+### 18.4 X-UIWRITE in CI is the mechanical half, and the step name says so
+
+Spec §10's gate is a `create` of a `Restore` **from the page**, and `curl` is not
+the page. A runner has no browser. So the workflow's demo step is named
+
+> `Demo 1, all twelve steps — X-UIWRITE (mechanical half only; the browser half is recorded on the laptop, see e2e/k8s/laptop-demo.md)`
+
+and `x_uiwrite_in_ci_is_labelled_mechanical_only` finds that step by the script
+it runs and then requires both the phrase and the citation. The half spec §10
+actually asks for is in `e2e/k8s/laptop-demo.md` §10, under its own
+`in-browser create` heading, proven by `"manager": "logweir-ui"` in the created
+object's `metadata.managedFields` — a string `curl` cannot produce.
+
+### 18.5 The authorised local proving run, 2026-09-11
+
+**Proven locally on author-only images (STANDING RULE 16 exception, authorised
+2026-09-11); the CI run is blocked: no remote.** STANDING RULE 16 makes `kind` a
+CI-only cluster with one exception — a single local proving run explicitly
+authorised by the controller at dispatch, deleting its cluster in the same
+session. This is that run. **It is not evidence for spec §16 clause 1 or clause
+2**, and the checklist row is unchanged by it.
+
+The cluster, from the digest-pinned config, and the install:
+
+```
+$ kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
+ ✓ Ensuring node image (kindest/node) 🖼
+ ✓ Preparing nodes 📦
+ ✓ Starting control-plane 🕹️
+ ✓ Installing CNI 🔌
+ ✓ Installing StorageClass 💾
+Set kubectl context to "kind-logweir"
+kind create cluster  14.65s total
+rc=0
+$ docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
+rc=0
+$ kind load docker-image logweir:check weirkeeper:check ghcr.io/logweir/logweir:v0.1.0 --name logweir
+Image: "logweir:check" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
+Image: "weirkeeper:check" with ID "sha256:6ab14111…" not yet present on node "logweir-control-plane", loading...
+Image: "ghcr.io/logweir/logweir:v0.1.0" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
+rc=0
+$ bash scripts/render-install.sh --check
+render-install: logweir.yaml is what config/ renders to (no drift).
+rc=0
+$ kubectl --context kind-logweir apply --server-side -k config/overlays/local-images
+rc=0   (15 documents serverside-applied)
+```
+
+The two pre-steps that are the mechanism:
+
+```
+$ bash scripts/kind-demo.sh
+kind-demo: kubectl context kind-logweir (STANDING RULE 12)
+
+==> pre 1/3 the kind network's IPv4 gateway
+    rc=0  (docker network inspect kind -f '{{range .IPAM.Config}}{{println .Gateway}}{{end}}')
+    gateways: fc00:f853:ccd:e793::1 172.22.0.1
+    the IPv4 gateway -> 172.22.0.1
+
+==> pre 2/3 CoreDNS resolves host.docker.internal to 172.22.0.1
+    rc=0  (kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')
+    rc=0  (awk: replace any block this script wrote before, then insert the hosts block into the .:53 server block)
+    the patched Corefile:
+        .:53 {
+            # logweir-kind-demo: BEGIN — the compose stack is on the host
+            hosts {
+                172.22.0.1 host.docker.internal
+                fallthrough
+            }
+            # logweir-kind-demo: END
+            errors
+            …
+        }
+    rc=0  (kubectl -n kube-system create configmap coredns --from-file=Corefile=... --dry-run=client -o yaml > .demo/kind/coredns-configmap.yaml)
+    rc=0  (kubectl -n kube-system apply -f .demo/kind/coredns-configmap.yaml)
+    rc=0  (kubectl -n kube-system rollout restart deployment/coredns)
+    rc=0  (kubectl -n kube-system rollout status deployment/coredns --timeout=120s)
+deployment "coredns" successfully rolled out
+```
+
+And the property the patch exists for, asked of a pod:
+
+```
+$ kubectl --context kind-logweir run dnsproof --rm --attach --restart=Never \
+    --image=weirkeeper:check --image-pull-policy=Never --command -- bash -c '…'
++ getent hosts host.docker.internal
+172.22.0.1      host.docker.internal
++ exec 3<>/dev/tcp/host.docker.internal/9095
+TCP host.docker.internal:9095 OPEN
++ getent hosts kubernetes.default.svc.cluster.local
+10.96.0.1       kubernetes.default.svc.cluster.local
+rc=0
+```
+
+The advertised listener's **name** resolves inside the cluster, the compose
+stack's published `K8S` listener **answers** on it from inside a pod, and
+`fallthrough` left the rest of cluster DNS working. That is mechanism (a),
+measured.
+
+**Two things this run found, both now fixed in the script.**
+
+* **`index .IPAM.Config 0` is not the IPv4 entry.** kind's network is
+  dual-stack and the order is not fixed: here entry 0 was
+  `fc00:f853:ccd:e793::1` and the IPv4 gateway `172.22.0.1` was second. A
+  `hosts` block carrying the IPv6 gateway resolves and then fails to connect,
+  because docker publishes `9095` and `9000` on IPv4 — the silent-wrong-address
+  failure the no-fallback rule exists to prevent. The script now reads every
+  gateway, takes the first IPv4 one, and refuses if there is none.
+* **The patch was not idempotent.** A second pass inserted a second `hosts`
+  block, and CoreDNS refuses a server block that declares one plugin twice: the
+  new pods never became ready and `rollout status` timed out 120 s later saying
+  only that coredns had not become ready. The patch now brackets its own block
+  with `# logweir-kind-demo: BEGIN/END` markers and removes any previous one
+  before writing. (The cluster was deleted and recreated once, in the same
+  session, to recover from the Corefile that second pass had produced.)
+
+**What this run could NOT prove on this host, and why it is not a defect in the
+workflow.** The pre-step-3 probe and every runner Job need the **runner image**,
+which is `linux/amd64` only — the engine binary is dynamically linked and has no
+arm64 manifest (Global Constraint 10). This development host is arm64, so the
+kind node is arm64, and the image is refused before it is ever executed:
+
+```
+$ kubectl --context kind-logweir run imgcheck --restart=Never --image=logweir:check --image-pull-policy=Never …
+NAME       READY   STATUS               RESTARTS   AGE
+imgcheck   0/1     ErrImageNeverPull    0          6s
+  Warning  ErrImageNeverPull  kubelet  Container image "logweir:check" is not present with pull policy of Never
+```
+
+The bytes are on the node — `ctr -n k8s.io images ls` lists all three names at
+the digests the tree pins — but containerd's CRI image service does not surface
+an image whose platform is not the node's, so the kubelet cannot see it. This is
+not emulation being slow; it is the image being invisible, and no wall clock was
+measurable for it. Setting the node's
+`[plugins.'io.containerd.runtime.v2.task'] platforms` to include `linux/amd64`
+changed the runtime's list and not the image service's, and was reverted with
+the cluster.
+
+**On a GitHub runner none of this exists**: the runner is amd64, the runner
+image is amd64 (Global Constraint 10), and `just image-weirkeeper` is given
+`LOGWEIR_IMAGE_PLATFORM: linux/amd64` so the controller image is amd64 too and
+is compiled **natively** — STANDING RULE 10 forbids emulating that compile, and
+`docs/stability.md` measures an emulated cargo layer at 33x. So the twelve steps
+themselves are evidenced here by Task 28a's recorded walkthrough
+(`e2e/k8s/laptop-demo.md`) and by the dry proof below, and by the CI run that
+cannot yet happen — not by this one.
+
+The teardown, in the same session:
+
+```
+$ kind delete cluster --name logweir
+rc=0
+$ just e2e-down
+rc=0
+$ kind get clusters
+No kind clusters found.
+rc=0
+logweir-e2e containers: 0
+```
+
+### 18.6 The dry proof
+
+With a `kubectl` shim that logs its argv and answers the four reads the
+pre-steps make, a `docker` shim that answers `network inspect`, and the twelve
+steps replaced by tracers in a **copy** of `demo-steps.sh`, `scripts/kind-demo.sh`
+runs the real pre-steps and the real `demo_run`:
+
+```
+==> pre 1/3 the kind network's IPv4 gateway      -> 172.18.0.1
+==> pre 2/3 CoreDNS resolves host.docker.internal to 172.18.0.1   (five kubectl, every rc=0)
+==> pre 3/3 cluster-probe --bootstrap host.docker.internal:9095, from a pod
+    reachable=true — the advertised listener resolves in-cluster.
+TRACE step_01 … step_09, step_10a, step_10b, step_11, step_12, on_exit (teardown)
+rc=0
+```
+
+and with the gateway empty:
+
+```
+==> pre 1/3 the kind network's IPv4 gateway      -> <none>
+kind-demo: could not resolve an IPv4 gateway of the docker network `kind` … there is
+deliberately no fallback to localhost: inside a pod, localhost is the pod.
+rc=1
+kubectl invocations after the refusal: 0
+```
+
+`bash -n` exits 0 on all three scripts.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

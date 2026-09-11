@@ -1,0 +1,56 @@
+# The `kind` cluster `.github/workflows/kind-demo.yml` creates for Demo 1 in CI
+# (spec §16 clause 2). Task 31.
+#
+# ===========================================================================
+# ONE NODE, AND THE NODE IMAGE IS PINNED BY DIGEST
+# ===========================================================================
+# Global Constraint 7: pinning is by digest, never by tag. A `kindest/node` tag
+# is republished — the same `v1.29.14` string has meant different bytes more
+# than once — and a CI job that is the evidence for a tag-1 clause cannot rest
+# on a mutable reference.
+#
+# THE DIGEST WAS RESOLVED ONCE, ON 2026-09-11, WITH THESE TWO COMMANDS, and
+# they are written here the way `third_party/kafka-backup-binary.digest`
+# records its own provenance:
+#
+#     docker pull kindest/node:v1.29.14
+#     docker image inspect kindest/node:v1.29.14 --format '{{index .RepoDigests 0}}'
+#     -> kindest/node@sha256:8703bd94ee24e51b778d5556ae310c6c0fa67d761fae6379c8e0bb480e6fea29
+#
+# That digest is the MANIFEST LIST, not one architecture's manifest:
+# `docker manifest inspect` on it returns `application/vnd.docker.distribution.
+# manifest.list.v2+json` with `linux/amd64` (`sha256:e7858e63…`) and
+# `linux/arm64` (`sha256:6eed9bfd…`) inside it. So the one reference resolves on
+# the amd64 GitHub runner this workflow runs on AND on the arm64 development
+# host — which matters, because STANDING RULE 16's single authorised local
+# proving run uses this same file.
+#
+# ===========================================================================
+# KUBERNETES 1.29 — THE FLOOR, DELIBERATELY, AND NOT A NEWER MINOR
+# ===========================================================================
+# Global Constraint 25 sets the minimum at 1.29 (CEL validation rules GA). CI
+# proving 1.34 would prove the CRDs work on a version no adopter is obliged to
+# run while saying nothing about the one this project promises. `v1.29.14` is
+# the last 1.29 patch `kindest/node` publishes.
+#
+# ===========================================================================
+# NO `extraPortMappings`, AND THAT IS THE WHOLE POINT OF THIS FILE
+# ===========================================================================
+# `extraPortMappings` maps a HOST port onto a NODE port — inbound traffic, host
+# to cluster. What Demo 1 needs is the opposite direction: a pod reaching the
+# compose broker on the host. It is not the mechanism, and adding it would look
+# like the mechanism while changing nothing.
+#
+# The broker's metadata response redirects every client to the ADVERTISED
+# listener `K8S://host.docker.internal:9095` (Task 7, STANDING RULE 15) whatever
+# address it bootstrapped at, so no address substitution can work either — the
+# NAME has to resolve inside the cluster. `scripts/kind-demo.sh` reads the kind
+# network's gateway and adds a CoreDNS `hosts` block for
+# `host.docker.internal`, and the bootstrap string stays the literal
+# `host.docker.internal:9095` in both demos.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: logweir
+nodes:
+  - role: control-plane
+    image: kindest/node@sha256:8703bd94ee24e51b778d5556ae310c6c0fa67d761fae6379c8e0bb480e6fea29

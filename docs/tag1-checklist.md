@@ -27,7 +27,7 @@ closer.
 | # | Spec §16 clause | Status | Closer or recorded evidence |
 |---|---|---|---|
 | 1 | `kubectl apply --server-side -f logweir.yaml` works twice on a clean docker-desktop, **and** the image digests that file carries have been pulled back from a registry the author does not control | `blocked: images not published` | `docs/kubernetes.md` §13 (the X-APPLY transcript) · `docs/install.md` (the two digest rows, both blocked) · `logweir.yaml` · `crates/logweir/tests/manifest_lint.rs` · **2026-09-11, still blocked. What would close it: the pullback job's summary from one tagged run — the two pulled digests and the pull transcript, written on a runner that did not build the bytes. Nothing else does.** |
-| 2 | Demo 1 runs end to end **in CI on a `kind` cluster created by the workflow**; X-APPLY is additionally recorded once on docker-desktop; Demo 2 is documented and labelled | `blocked: no remote` | `e2e/k8s/laptop-demo.md` (the recorded docker-desktop walkthrough, X-APPLY included) · `crates/logweir/tests/laptop_demo_lint.rs` · `docs/kubernetes.md` §13 |
+| 2 | Demo 1 runs end to end **in CI on a `kind` cluster created by the workflow**; X-APPLY is additionally recorded once on docker-desktop; Demo 2 is documented and labelled | `blocked: no remote` | `e2e/k8s/laptop-demo.md` (the recorded docker-desktop walkthrough, X-APPLY included) · `crates/logweir/tests/laptop_demo_lint.rs` · `.github/workflows/kind-demo.yml` · `scripts/kind-demo.sh` · `scripts/demo-steps.sh` · `e2e/k8s/kind-config.yaml` · `crates/logweir/tests/workflow_lint.rs` · `docs/kubernetes.md` §13, §18 · **2026-09-11, still blocked. What would close it: the URL of one green run of `kind-demo.yml`, on a `kind` cluster that run created. Nothing else does.** |
 | 3 | Every shipped image is referenced by `@sha256:` and asserted before push; the engine digest stays in `third_party/kafka-backup-binary.digest`; the extraction script's tag pull is fixed | `closed` | `docs/kubernetes.md` §14 (the X-DIGEST transcript) · `crates/logweir/tests/extract_engine.rs` · `crates/logweir/tests/manifest_lint.rs` · `scripts/check-image.sh` · `scripts/check-image-weirkeeper.sh` · `third_party/kafka-backup-binary.digest` · `scripts/check-dod.sh` |
 | 4 | Task 9's F1–F4 are closed before the first real push, and `release.yml` then runs for real, once | `blocked: no remote` | `crates/logweir/tests/workflow_lint.rs` · `.github/workflows/release.yml` · **2026-09-11, still blocked. What would close it: the URL of one tagged run of that workflow, green.** |
 | 5 | LICENSE, NOTICE, README, SECURITY.md and CONTRIBUTING with DCO are present; every doc footer carries the ASF sentence; both images `COPY` LICENSE and NOTICE | `closed` | `crates/logweir/tests/doc_lint.rs` · `scripts/check-dod.sh` · `scripts/check-image.sh` · `scripts/check-image-weirkeeper.sh` · `THIRD_PARTY_NOTICES.md` |
@@ -75,16 +75,39 @@ digest is the measurement of one build.
 
 ### 2 — Demo 1, in CI, on a workflow-created cluster
 
-**`blocked: no remote`.** The `kind` job is Task 31's and needs a git remote and
-GitHub Actions; it does not exist today, so nothing in this row names it as a
-closer. What **is** recorded is the whole walkthrough run on docker-desktop end
-to end and checked in at `e2e/k8s/laptop-demo.md` — preflight, the install gate,
-the keypairs, the Secrets, the roster, the cluster, a schedule and the backup it
-fires, the approval minted out of band, both readers over the scorecard and the
-teardown — with `crates/logweir/tests/laptop_demo_lint.rs` refusing a transcript
-that has been forged rather than run. The docker-desktop half of the clause is
-therefore evidenced; the CI half is not, and the row reads `blocked` for the
-whole clause because a row carries one status.
+**`blocked: no remote`.** What **is** recorded is the whole walkthrough run on
+docker-desktop end to end and checked in at `e2e/k8s/laptop-demo.md` — preflight,
+the install gate, the keypairs, the Secrets, the roster, the cluster, a schedule
+and the backup it fires, the approval minted out of band, both readers over the
+scorecard and the teardown — with
+`crates/logweir/tests/laptop_demo_lint.rs` refusing a transcript that has been
+forged rather than run. The docker-desktop half of the clause is therefore
+evidenced; the CI half is not, and the row reads `blocked` for the whole clause
+because a row carries one status.
+
+**2026-09-11 — Task 31 built the CI half and stopped here.** The workflow now
+exists: `.github/workflows/kind-demo.yml` creates a `kind` cluster from the
+digest-pinned `e2e/k8s/kind-config.yaml` (Kubernetes 1.29, Global Constraint
+25's floor), brings the five-listener compose stack up, builds both images with
+their named producers, installs, and runs `scripts/kind-demo.sh` — which reads
+the kind network's IPv4 gateway, adds a CoreDNS `hosts` block so the advertised
+listener `host.docker.internal:9095` resolves in every pod, probes the broker
+from inside the cluster, and then runs the twelve steps of
+`scripts/demo-steps.sh`, the same twelve the laptop walkthrough recorded.
+`crates/logweir/tests/workflow_lint.rs` and
+`crates/logweir/tests/laptop_demo_lint.rs` hold its shape.
+
+**That workflow has never run, because there is still no git remote**, so the
+transcript that would close this row does not exist. Two things were proven
+instead, and neither is this clause: the script was proven **dry** (a stubbed
+`kubectl` and `docker`, the twelve steps invoked in order after the CoreDNS patch
+and the probe, and the gateway-resolution failure path exiting 1), and one local
+`kind` proving run was made under STANDING RULE 16's single authorised
+exception, deleting its cluster in the same session. Its transcript is
+`docs/kubernetes.md` §18.5 and it is labelled there for what it is — author-only
+images on an arm64 host, which is neither evidence for this clause nor for
+clause 1. Both install branches are written now, so the day a remote exists this
+row needs a run and not a rewrite.
 
 Demo 2 is documented and labelled: its marks are the MSK rows, each carrying the
 sentence that would verify it, and `bash scripts/check-unverified-labels.sh`

@@ -79,6 +79,23 @@ const FULL_PROXY_COMMAND: &str =
 /// context (STANDING RULE 12).
 const BARE_PROXY_COMMAND: &str = "kubectl proxy --www=./ui";
 
+/// **The three shell files of the two demos, with each one's floor for the
+/// guarded-line self-check.** Task 31 split Task 28's single script into the
+/// twelve steps (`demo-steps.sh`, sourced by both drivers) and two drivers; a
+/// lint that kept reading only `laptop-demo.sh` would, after that split, be
+/// reading a six-line file and passing vacuously.
+///
+/// The floors are lower bounds on what the tokeniser must SEE, not counts:
+/// `demo-steps.sh` runs `kubectl` forty-odd times plus `docker`, `curl`, `just`
+/// and `logweir`; `kind-demo.sh`'s three pre-steps run six `kubectl` and one
+/// `docker`; `laptop-demo.sh` is a driver and runs none, which is the point of
+/// it being a driver.
+const DEMO_SCRIPTS: &[(&str, usize)] = &[
+    ("scripts/demo-steps.sh", 30),
+    ("scripts/kind-demo.sh", 6),
+    ("scripts/laptop-demo.sh", 0),
+];
+
 /// Every run of whitespace collapsed to one space, so a command the spec
 /// line-wrapped mid-token (`kubectl\nproxy --www=./ui`) is still one string.
 fn collapse(text: &str) -> String {
@@ -261,24 +278,30 @@ fn laptop_demo_transcript_is_present() {
 /// line into anything), and dropping the `rc=$?` that follows one.
 #[test]
 fn laptop_demo_never_pipes_a_load_bearing_exit_code() {
-    let script = read("scripts/laptop-demo.sh");
+    // ALL THREE FILES (Task 31). The twelve steps live in `demo-steps.sh`; the
+    // two drivers and `kind-demo.sh`'s three pre-steps run `docker` and
+    // `kubectl` of their own, and a pipe there would be exactly as blind.
+    for (path, floor) in DEMO_SCRIPTS {
+        let script = read(path);
 
-    // THE SELF-CHECK FIRST. A lint over a file it found no guarded lines in
-    // passes vacuously, and would keep passing if every `kubectl` were respelt
-    // `"$KUBECTL"`. The number is a floor: the walk runs `kubectl` more than
-    // thirty times, plus `docker`, `curl`, `just` and `logweir`.
-    let guarded = exit_code_lint::logical_lines(&script)
-        .into_iter()
-        .filter(exit_code_lint::LogicalLine::is_guarded)
-        .count();
-    assert!(
-        guarded >= 30,
-        "the tokeniser found only {guarded} guarded line(s) in scripts/laptop-demo.sh — a lint \
-         that sees nothing cannot fail. Are the tools still invoked as the bare words `kubectl`, \
-         `curl`, `docker`, `just` and `logweir`?"
-    );
+        // THE SELF-CHECK FIRST. A lint over a file it found no guarded lines
+        // in passes vacuously, and would keep passing if every `kubectl` were
+        // respelt `"$KUBECTL"`. The number is a floor: the walk runs `kubectl`
+        // more than thirty times, plus `docker`, `curl`, `just` and `logweir`;
+        // the pre-steps of `kind-demo.sh` run six `kubectl` and one `docker`.
+        let guarded = exit_code_lint::logical_lines(&script)
+            .into_iter()
+            .filter(exit_code_lint::LogicalLine::is_guarded)
+            .count();
+        assert!(
+            guarded >= *floor,
+            "the tokeniser found only {guarded} guarded line(s) in {path}, and {floor} is the \
+             floor — a lint that sees nothing cannot fail. Are the tools still invoked as the \
+             bare words `kubectl`, `curl`, `docker`, `just` and `logweir`?"
+        );
 
-    exit_code_lint::assert_no_masked_exit_code("scripts/laptop-demo.sh", &script);
+        exit_code_lint::assert_no_masked_exit_code(path, &script);
+    }
 }
 
 /// **STANDING RULE 12, on every line that runs `kubectl`.**
@@ -291,30 +314,77 @@ fn laptop_demo_never_pipes_a_load_bearing_exit_code() {
 /// KILLS: dropping `--context docker-desktop` from any `kubectl` line.
 #[test]
 fn laptop_demo_names_every_kubectl_context() {
-    let script = read("scripts/laptop-demo.sh");
+    // THE SPELLING IS NOW THE VARIABLE, AND THE VARIABLE IS ALWAYS PASSED
+    // (Task 31). STANDING RULE 12 is about `kubectl` never being run against
+    // an unnamed context, and a parameter that is always present on the
+    // command line satisfies it exactly as a literal did — while a literal
+    // would have forced a second copy of the twelve steps for the `kind`
+    // cluster, which is the defect `the_two_demo_scripts_share_their_steps`
+    // exists to prevent. The two arms below are what keeps the variable from
+    // being a hole: every `kubectl` passes it, and each driver SETS it to a
+    // named cluster.
     let mut offenders: Vec<String> = Vec::new();
     let mut seen = 0usize;
-    for (i, line) in script.lines().enumerate() {
-        if line.split_whitespace().next() != Some("kubectl") {
-            continue;
-        }
-        seen += 1;
-        if !line.contains("--context docker-desktop") {
-            offenders.push(format!("line {}: {}", i + 1, line.trim()));
+    for (path, _) in DEMO_SCRIPTS {
+        let script = read(path);
+        for (i, line) in script.lines().enumerate() {
+            if line.split_whitespace().next() != Some("kubectl") {
+                continue;
+            }
+            seen += 1;
+            if !line.contains(r#"--context "$LOGWEIR_KUBE_CONTEXT""#) {
+                offenders.push(format!("{path} line {}: {}", i + 1, line.trim()));
+            }
         }
     }
     assert!(
         seen >= 25,
-        "only {seen} line(s) in scripts/laptop-demo.sh begin with `kubectl` — this lint would \
-         pass vacuously over a script that spelt the tool some other way"
+        "only {seen} line(s) across {} begin with `kubectl` — this lint would pass vacuously \
+         over a script that spelt the tool some other way",
+        DEMO_SCRIPTS
+            .iter()
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     assert!(
         offenders.is_empty(),
-        "{} `kubectl` line(s) in scripts/laptop-demo.sh do not name the context (STANDING RULE \
-         12 — `kubectl proxy` included, and it is the one command in this product that hands a \
-         browser a cluster credential):\n{}",
+        "{} `kubectl` line(s) do not name the context (STANDING RULE 12 — `kubectl proxy` \
+         included, and it is the one command in this product that hands a browser a cluster \
+         credential). Every one reads `kubectl --context \"$LOGWEIR_KUBE_CONTEXT\" …`:\n{}",
         offenders.len(),
         offenders.join("\n")
+    );
+
+    // AND EACH DRIVER SETS IT, TO A CLUSTER IT NAMES. A variable that no
+    // driver assigned would default silently and STANDING RULE 12 would be
+    // satisfied on paper by a `kubectl` aimed at whatever the kubeconfig's
+    // current context happened to be.
+    for (driver, context) in [
+        ("scripts/laptop-demo.sh", "docker-desktop"),
+        ("scripts/kind-demo.sh", "kind-logweir"),
+    ] {
+        let src = read(driver);
+        let assignment = format!("LOGWEIR_KUBE_CONTEXT={context}");
+        assert!(
+            src.contains(&assignment),
+            "{driver} must set `{assignment}`. The steps are shared, so the DRIVER is the only \
+             place that says which cluster a run is about — and it is what both scripts print \
+             as their first line of output"
+        );
+    }
+
+    // NEITHER DRIVER MAY RUN THE OTHER'S CLUSTER. `kind` is a CI-only cluster
+    // (STANDING RULE 16) and the laptop walk is the docker-desktop record;
+    // a driver that named both would make a transcript unreadable.
+    assert!(
+        !read("scripts/kind-demo.sh").contains("docker-desktop"),
+        "scripts/kind-demo.sh names the docker-desktop context. It owns exactly one cluster, \
+         the `kind` one the workflow created (STANDING RULE 16)"
+    );
+    assert!(
+        !read("scripts/laptop-demo.sh").contains("kind-logweir"),
+        "scripts/laptop-demo.sh names the kind cluster. `kind` is CI-only (STANDING RULE 16)"
     );
 }
 
@@ -337,19 +407,25 @@ fn laptop_demo_names_every_kubectl_context() {
 // reason.
 #[test]
 fn laptop_demo_uses_the_published_k8s_listener() {
-    let script = read("scripts/laptop-demo.sh");
     let forbidden = concat!("local", "host:9092");
-    assert!(
-        script.contains("host.docker.internal:9095"),
-        "scripts/laptop-demo.sh must point the KafkaCluster at the published K8S listener \
-         `host.docker.internal:9095` (Task 7, STANDING RULE 15)"
-    );
-    assert!(
-        !script.contains(forbidden),
-        "scripts/laptop-demo.sh names the host-side harness listener. A runner pod that \
-         bootstraps there reaches its OWN loopback, and step 7 times out waiting for \
-         `status.reachable`"
-    );
+    // THE LITERAL, IN BOTH DEMOS (Task 31). `kind-demo.sh` resolves the NAME
+    // inside the cluster with a CoreDNS `hosts` block instead of substituting
+    // an address, precisely so this string stays what spec §2 says it is.
+    for path in ["scripts/demo-steps.sh", "scripts/kind-demo.sh"] {
+        let script = read(path);
+        assert!(
+            script.contains("host.docker.internal:9095"),
+            "{path} must point at the published K8S listener `host.docker.internal:9095` \
+             (Task 7, STANDING RULE 15). A Kafka client is redirected by the broker's metadata \
+             response to the ADVERTISED listener whatever address it bootstrapped at, so an \
+             address substituted here would fix the first packet and nothing after it"
+        );
+        assert!(
+            !script.contains(forbidden),
+            "{path} names the host-side harness listener. A runner pod that bootstraps there \
+             reaches its OWN loopback, and step 7 times out waiting for `status.reachable`"
+        );
+    }
 }
 
 /// **No private key ever reaches the page.**
@@ -361,7 +437,7 @@ fn laptop_demo_uses_the_published_k8s_listener() {
 /// KILLS: uploading `approver.pem` through the page in step 11.
 #[test]
 fn laptop_demo_never_sends_a_key_to_the_page() {
-    let script = read("scripts/laptop-demo.sh");
+    let script = read("scripts/demo-steps.sh");
     let lines = exit_code_lint::logical_lines(&script);
 
     // Step 11 runs on the host, with the CLI, against the approver's own key.
@@ -370,7 +446,7 @@ fn laptop_demo_never_sends_a_key_to_the_page() {
         .find(|l| l.first_word == "logweir" && l.code.contains("drill approve"))
         .unwrap_or_else(|| {
             panic!(
-                "scripts/laptop-demo.sh runs no `logweir drill approve` line. Step 11 mints the \
+                "scripts/demo-steps.sh runs no `logweir drill approve` line. Step 11 mints the \
                  approval OUT OF BAND, on this host, with the shipped CLI — that is what makes \
                  `self_attested: false` possible and what keeps the key off the page"
             )
@@ -398,7 +474,7 @@ fn laptop_demo_never_sends_a_key_to_the_page() {
                 .trim_matches(['"', '\''].as_ref());
             assert!(
                 !(path.ends_with(".pem") || path.ends_with(".key")),
-                "line {}: a `curl` in scripts/laptop-demo.sh posts `{path}`. Nothing in this \
+                "line {}: a `curl` in scripts/demo-steps.sh posts `{path}`. Nothing in this \
                  walk sends key material anywhere, and the create the page performs needs no \
                  key at all:\n    {}",
                 line.line,
@@ -468,18 +544,29 @@ fn laptop_demo_refuses_a_wrong_context() {
 /// with a permission error that says nothing about the demo.
 #[test]
 fn the_laptop_demo_script_is_an_executable_bash_script() {
-    let p = root().join("scripts/laptop-demo.sh");
-    let body = read("scripts/laptop-demo.sh");
-    assert!(
-        body.starts_with("#!/usr/bin/env bash"),
-        "the script declares bash; got {:?}",
-        body.lines().next()
-    );
-    assert!(
-        is_executable(&p),
-        "{} must be executable — `just laptop-demo` runs it as `./scripts/laptop-demo.sh`",
-        p.display()
-    );
+    // ALL THREE DECLARE BASH; the two DRIVERS are executable and
+    // `demo-steps.sh` is not, because it is sourced and never executed — a
+    // mode bit is the cheapest way to say so, and a `./scripts/demo-steps.sh`
+    // would run the twelve steps against whatever context happened to be set.
+    for path in [
+        "scripts/laptop-demo.sh",
+        "scripts/kind-demo.sh",
+        "scripts/demo-steps.sh",
+    ] {
+        let body = read(path);
+        assert!(
+            body.starts_with("#!/usr/bin/env bash"),
+            "{path} declares bash; got {:?}",
+            body.lines().next()
+        );
+    }
+    for path in ["scripts/laptop-demo.sh", "scripts/kind-demo.sh"] {
+        assert!(
+            is_executable(&root().join(path)),
+            "{path} must be executable — `just laptop-demo` runs it as `./scripts/laptop-demo.sh`, \
+             and `.github/workflows/kind-demo.yml` runs the other under `bash`"
+        );
+    }
     let stub = root().join("crates/logweir/tests/fixtures/stub-kubectl");
     assert!(
         is_executable(&stub),
@@ -691,4 +778,289 @@ fn is_executable(p: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(p: &Path) -> bool {
     p.exists()
+}
+
+// ---------------------------------------------------------------------------
+// TASK 31 — THE TWO DEMOS SHARE ONE SET OF STEPS, AND THE `kind` DRIVER'S
+// THREE PRE-STEPS
+// ---------------------------------------------------------------------------
+
+/// **Twelve steps, defined once.**
+///
+/// Spec §16 clause 2 asks for Demo 1 — *the* Demo 1, the one
+/// `e2e/k8s/laptop-demo.md` records — to run in CI. A second copy of the steps
+/// in `kind-demo.sh` would satisfy every other assertion in this file while the
+/// two walks drifted apart, and the checklist would go on claiming CI runs the
+/// walk the transcript proves. So both drivers SOURCE `scripts/demo-steps.sh`
+/// and neither defines a step of its own.
+///
+/// KILLS: copying the twelve steps into `kind-demo.sh` (or back into
+/// `laptop-demo.sh`) instead of sourcing them — the step-function definition
+/// is what this finds, so a copy that renamed nothing is caught, and a copy
+/// that renamed the functions no longer runs the same walk under any name.
+#[test]
+fn the_two_demo_scripts_share_their_steps() {
+    const DRIVERS: [&str; 2] = ["scripts/laptop-demo.sh", "scripts/kind-demo.sh"];
+    const STEPS: &str = "scripts/demo-steps.sh";
+
+    // THE STEPS ARE WHERE THEY SAY THEY ARE. A floor, so a `demo-steps.sh`
+    // that had been emptied could not make the rest of this test pass
+    // vacuously: the walk is twelve numbered steps, step 10 having two halves.
+    let steps_src = read(STEPS);
+    let defined = step_definitions(&steps_src);
+    assert_eq!(
+        13,
+        defined.len(),
+        "{STEPS} defines {} step function(s), and the walk has thirteen — `step_01` … \
+         `step_09`, `step_10a`, `step_10b`, `step_11`, `step_12`, which are the twelve numbered \
+         steps with step 10 split into its scripted and in-browser halves. Found: {defined:?}",
+        defined.len()
+    );
+    assert!(
+        steps_src.contains("demo_run()"),
+        "{STEPS} must define `demo_run` — the ONE place the twelve steps are invoked, so there \
+         is one ordering of the walk in the tree and not one per driver"
+    );
+
+    for driver in DRIVERS {
+        let src = read(driver);
+        assert!(
+            src.contains(". scripts/demo-steps.sh") || src.contains("source scripts/demo-steps.sh"),
+            "{driver} must source `scripts/demo-steps.sh`. The two demos run the SAME twelve \
+             steps — that is the whole content of spec §16 clause 2's claim that CI runs Demo 1"
+        );
+        assert!(
+            src.contains("demo_run"),
+            "{driver} sources the steps and never runs them: it must call `demo_run`"
+        );
+        let own = step_definitions(&src);
+        assert!(
+            own.is_empty(),
+            "{driver} defines its own step function(s) {own:?}. A driver sets the cluster and \
+             sources the steps; a step defined here is a second walk that nothing keeps in step \
+             with the recorded one"
+        );
+    }
+}
+
+/// Every `step_NN…() {` (or `step_NN…()  {`) defined at the top level of a
+/// shell file, in file order. A definition, never a call: the call sites in
+/// `demo_run` are indented and carry no parentheses.
+fn step_definitions(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.strip_prefix("step_") else {
+            continue;
+        };
+        let Some(name) = rest.split("()").next() else {
+            continue;
+        };
+        if rest.contains("()") && !name.is_empty() {
+            out.push(format!("step_{name}"));
+        }
+    }
+    out
+}
+
+/// **A gateway that did not resolve stops the run, and there is no fallback.**
+///
+/// `kind-demo.sh` reads the kind network's IPAM gateway and gives it to CoreDNS
+/// as the address of `host.docker.internal`. A `localhost` fallback would be
+/// worse than no fallback: inside a pod `localhost` is the pod, so the demo
+/// would proceed, the runner would dial itself, and the failure would surface
+/// eleven steps later as a `Backup` that never finished.
+///
+/// NO CLUSTER AND NO DAEMON. A `docker` shim whose `network inspect` prints an
+/// empty string and exits 0 is on `$PATH`; the script gets as far as the
+/// assertion and no further. `kubectl` is not stubbed at all, because a correct
+/// script never reaches one.
+///
+/// KILLS: falling back to `localhost` — or to the host-side harness listener,
+/// or to any address at all — when the gateway resolution comes back empty; the
+/// stubbed run then exits 0, or dies later with a message about something else,
+/// where 1 is required here. (The forbidden address is not spelt out in this
+/// file: `no_network_in_unit_tests.rs` greps every `.rs` under `crates/**` for
+/// it and fails naming the file, which is why
+/// `laptop_demo_uses_the_published_k8s_listener` builds it with `concat!`.)
+#[test]
+fn kind_demo_asserts_a_non_empty_bootstrap_address() {
+    // THE SHIM, AND WHY IT IS WRITTEN HERE RATHER THAN CHECKED IN. It exists
+    // for one assertion, it is four lines, and a reader of that assertion has
+    // to know what `network inspect` answered for the exit code to mean
+    // anything. `fixtures/stub-kubectl` is checked in because three tests and
+    // a plan rule refer to it by name; this one has no second reader.
+    const STUB_DOCKER: &str = "#!/bin/sh\n\
+        # A STUB `docker` THAT DIALS NOTHING (Task 31, written by\n\
+        # `kind_demo_asserts_a_non_empty_bootstrap_address`). `network inspect`\n\
+        # succeeds and prints NOTHING, which is what a kind network that does not\n\
+        # exist looks like through `-f '{{(index .IPAM.Config 0).Gateway}}'`.\n\
+        case \"$1\" in\n\
+        \x20 network) exit 0 ;;\n\
+        esac\n\
+        echo \"stub-docker: refusing \\`docker $*\\` — this stub answers only \\`network inspect\\`\" >&2\n\
+        exit 1\n";
+
+    let root = root();
+    let bin = tempdir("logweir-t31-stub-docker");
+    let installed = bin.join("docker");
+    std::fs::write(&installed, STUB_DOCKER).expect("the stub docker is written onto $PATH");
+    make_executable(&installed);
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("scripts/kind-demo.sh")
+        .current_dir(&root)
+        .env("PATH", path)
+        .env("LOGWEIR_DEMO_NONINTERACTIVE", "1")
+        .output()
+        .expect("bash runs scripts/kind-demo.sh");
+
+    let code = out.status.code();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let _ = std::fs::remove_dir_all(&bin);
+
+    assert_eq!(
+        code,
+        Some(1),
+        "scripts/kind-demo.sh must exit 1 when the kind network's gateway comes back empty; it \
+         exited {code:?}. A run that continued would dial the POD's own loopback and fail \
+         eleven steps later with a message about a `Backup`\n--- stdout ---\n{stdout}\n\
+         --- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("docker network inspect"),
+        "the refusal must name what it tried, so a reader knows which command to run by hand. \
+         Expected the `docker network inspect` line in stderr\n--- stdout ---\n{stdout}\n\
+         --- stderr ---\n{stderr}"
+    );
+    // AND IT SAYS WHY THERE IS NO FALLBACK, because the next person to read
+    // this failure is the person tempted to add one.
+    assert!(
+        stderr.contains("localhost is the pod"),
+        "the refusal must say why it does not fall back\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("1/12 preflight"),
+        "the run reached step 1 despite an unresolved gateway\n--- stdout ---\n{stdout}"
+    );
+}
+
+/// **DNS first, then the probe, then the walk — and the ConfigMap apply is two
+/// commands.**
+///
+/// The order is the whole mechanism. CoreDNS has to answer for
+/// `host.docker.internal` before anything dials it; the probe (interface
+/// register I14) is what turns "CoreDNS was patched" into "a pod reached the
+/// broker"; and only then may step 1 run, because every later step's failure
+/// mode looks like something else.
+///
+/// The second clause is STANDING RULE 20 in the one place it is easiest to
+/// break: `kubectl create configmap … --dry-run=client -o yaml | kubectl apply
+/// -f -` is the idiom everybody writes, and it reports `kubectl apply`'s status
+/// while swallowing the render's. `exit_code_lint` sees the pipe as one logical
+/// line beginning with `kubectl`, so this arm states the shape the render must
+/// have instead: a file in between.
+///
+/// KILLS: deleting the CoreDNS patch and passing the computed gateway as
+/// `--bootstrap` (H10(a) — the client would be redirected to an unresolvable
+/// advertised name, and a lint catches it before a runner minute is spent);
+/// moving the probe after the first step; piping the ConfigMap render into
+/// `apply`.
+#[test]
+fn kind_demo_patches_coredns_before_the_first_step() {
+    let src = read("scripts/kind-demo.sh");
+
+    // OFFSETS OF COMMANDS, NEVER OF COMMENTS. This file's header quotes the
+    // pipe it refuses (`… -o yaml | kubectl apply -f -`) so that the next
+    // person to write it knows why not, and a naive `str::find` would then
+    // fail the test on the sentence that prevents the defect.
+    let at = |needle: &str| -> usize {
+        let mut offset = 0usize;
+        for line in src.split_inclusive('\n') {
+            if !line.trim_start().starts_with('#') && line.contains(needle) {
+                return offset;
+            }
+            offset += line.len();
+        }
+        panic!("no COMMAND line of scripts/kind-demo.sh contains `{needle}`")
+    };
+
+    let gateway = at("docker network inspect");
+    let rollout = at("rollout status deployment/coredns --timeout=120s");
+    let probe = at("run bootstrap-probe");
+    let walk = at("demo_run");
+
+    assert!(
+        gateway < rollout,
+        "the gateway must be resolved before CoreDNS is told what to answer with"
+    );
+    assert!(
+        rollout < probe,
+        "the CoreDNS `rollout status` (offset {rollout}) must precede the `bootstrap-probe` \
+         (offset {probe}): a probe run while the old CoreDNS pods are still serving proves \
+         nothing about the patch"
+    );
+    assert!(
+        probe < walk,
+        "the `bootstrap-probe` (offset {probe}) must precede the first invocation of the \
+         sourced steps (offset {walk}). `reachable=true` is step 1's precondition, and a walk \
+         that started without it fails at step 7 with a message about a `Backup`"
+    );
+
+    // THE HOSTS BLOCK IS THE MECHANISM, AND `fallthrough` IS WHAT KEEPS THE
+    // REST OF CLUSTER DNS WORKING.
+    assert!(
+        src.contains("host.docker.internal") && src.contains("fallthrough"),
+        "the CoreDNS patch must add a `hosts` block for `host.docker.internal` carrying \
+         `fallthrough`; without it the `hosts` plugin answers NXDOMAIN for every name it does \
+         not hold and `kubernetes.default` stops resolving"
+    );
+
+    // THE BOOTSTRAP STRING IS NOT SUBSTITUTED. This is the positive form of
+    // the mutant "pass the computed gateway as --bootstrap": the probe's
+    // address is the literal spec §2 names.
+    let probe_line = src[probe..]
+        .lines()
+        .next()
+        .expect("the bootstrap-probe line is a line")
+        .trim();
+    assert!(
+        probe_line.contains("cluster-probe --bootstrap"),
+        "the probe must run `cluster-probe --bootstrap …` (interface register I14, Task 15c). \
+         `logweir doctor` is not used: it makes `--allowed-clusters` and `--approver-key` \
+         mandatory and hard-codes Plaintext:\n    {probe_line}"
+    );
+    assert!(
+        !probe_line.contains("$gw"),
+        "the probe passes the resolved gateway ADDRESS as `--bootstrap`. That fixes the first \
+         packet and nothing after it: the broker's metadata response redirects the client to \
+         the ADVERTISED listener, which STANDING RULE 15 fixes at `host.docker.internal:9095`. \
+         The name is what has to resolve, and the CoreDNS block above is what makes it:\n    \
+         {probe_line}"
+    );
+
+    // TWO COMMANDS, NOT A PIPE (STANDING RULE 20).
+    let render = at("--dry-run=client -o yaml");
+    let render_line = src[render..]
+        .lines()
+        .next()
+        .expect("the render line is a line")
+        .trim();
+    assert!(
+        render_line.contains('>') && !render_line.contains('|'),
+        "the ConfigMap render must REDIRECT to a file and must not be piped into `apply`: a \
+         pipe reports `kubectl apply`'s status and swallows the render's (STANDING RULE 20). \
+         Found:\n    {render_line}"
+    );
+    let applied = at("apply -f \"$KIND_OUT/coredns-configmap.yaml\"");
+    assert!(
+        render < applied,
+        "the rendered ConfigMap must be applied from the file the render wrote"
+    );
 }
