@@ -747,3 +747,43 @@ ui:
     @echo "kubectl config commands."
     @echo ""
     kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
+
+# Task 28 (slot 21). PHASE C's EXIT CRITERION, and install gate X-UIWRITE.
+#
+# The walk spec §1 calls "the whole acceptance surface": a stranger clones,
+# applies ONE file to docker-desktop Kubernetes and gets CRDs, RBAC and the
+# controller; the UI is static files served by `kubectl proxy --www=`; against
+# a plain broker from the compose stack they create a `BackupSchedule`, watch a
+# `Backup` produce a signed receipt, run a drill (a `Restore` with a `newTopic`
+# target) and read a signed scorecard with measured RTO and RPO -- NEVER TYPING
+# A PRIVATE KEY INTO A BROWSER. Twelve numbered steps; the transcript of the
+# run that proved it is `e2e/k8s/laptop-demo.md`.
+#
+# THE COMPOSE STACK IS A PRECONDITION, not a step: spec §2's Demo 1 opens with
+# `docker compose … up`, so bring it up first and let the demo's teardown take
+# it down (STANDING RULE 3).
+#
+#     just e2e-up
+#     LOGWEIR_DEMO_NONINTERACTIVE=1 just laptop-demo; echo "rc=$?"
+#
+# X-UIWRITE HAS TWO HALVES AND THE SECOND ONE IS THE GATE. Spec §10 asks for a
+# `create` of a `Restore` FROM THE PAGE returning 201, and `curl` is not the
+# page. Step 10(a) is the scripted half; step 10(b) is performed by hand from
+# the wizard's final step, and the created object's `metadata.managedFields`
+# names `logweir-ui` (`ui/api.js`'s `?fieldManager=logweir-ui`, interface
+# register I23) -- which is the evidence, and which neither `kubectl` nor a
+# browser User-Agent can produce. With the proxy still up from the first pass:
+#
+#     LOGWEIR_DEMO_ONLY_STEP=10b ./scripts/laptop-demo.sh
+#
+# `cargo build -p logweir` FIRST, and it is not optional (plan erratum E9): the
+# script shells `logweir drill approve` and `logweir drill verify` from
+# `target/debug/logweir`, and nothing else in this recipe builds it.
+#
+# It cleans up after itself from a `trap`: `kubectl delete -f logweir.yaml`,
+# `kubectl delete ns logweir-system logweir-t28`, the two author-only image
+# tags, the archive prefix, the proxy, the keypairs it minted, and `just
+# e2e-down` -- each with its rc printed.
+laptop-demo:
+    cargo build -p logweir
+    ./scripts/laptop-demo.sh

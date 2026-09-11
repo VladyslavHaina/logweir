@@ -136,6 +136,41 @@ backup-and-recover path. Both leave your working tree clean.
 See [docs/quickstart.md](docs/quickstart.md) for the same two paths in full,
 and for running a drill against a cluster you already have.
 
+### The whole thing, on Kubernetes, in one command
+
+`just mvp-demo` is the CLI end to end. **`just laptop-demo` is the product end
+to end** — the walk this project's definition of done is written as: apply one
+file to docker-desktop Kubernetes and get CRDs, RBAC and the controller; serve
+the UI as static files; create a `BackupSchedule`; watch a `Backup` produce a
+signed receipt; create a `Restore`, approve it out of band, and read a signed
+scorecard with measured RTO and RPO.
+
+```bash
+just e2e-up                                          # the stack is a precondition
+LOGWEIR_DEMO_NONINTERACTIVE=1 just laptop-demo; echo "rc=$?"
+```
+
+Twelve numbered steps, each exit code printed on its own line, and a teardown
+in a `trap` that deletes the install, both namespaces, the archive prefix, the
+two author-only image tags, the proxy, the keypairs it minted, and the compose
+stack. The transcript of the run that proved it is
+[e2e/k8s/laptop-demo.md](e2e/k8s/laptop-demo.md).
+
+**You never type a private key into the browser, and that is the point.** The
+UI is a Kubernetes API client with no privilege of its own; the approval is
+minted on your own machine with `logweir drill approve` and only the two public
+documents it writes are pasted into the page. The demo's step 10 is install
+gate **X-UIWRITE** and it has two halves: a scripted `create` returning `201`,
+and the same create performed **by hand from the wizard's final step** — after
+which `kubectl get restore <name> -o jsonpath='{.metadata.managedFields}'`
+carries `"manager": "logweir-ui"`, which is how you know the write came from
+the page and not from a command line.
+
+Steps 1 and 3 are **author-only** and say so: they tag the local images with
+the shipped repository names (the kubelet keys on the whole reference) and
+point the controller at this laptop's MinIO. Neither relaxes the rule that
+"published" means a pull from a registry the author does not control.
+
 ## Logging
 
 `logweir drill run` writes structured JSON to **stdout**, one object per line;

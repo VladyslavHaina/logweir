@@ -1,0 +1,51 @@
+#!/bin/sh
+# A STUB `kubectl` THAT DIALS NOTHING. Task 28 fixture.
+#
+# `crates/logweir/tests/laptop_demo_lint.rs::laptop_demo_refuses_a_wrong_context`
+# copies this file into a temporary directory as `kubectl`, mode 0755, puts
+# that directory FIRST on `$PATH`, points `KUBECONFIG` at
+# `crates/logweir/tests/fixtures/kubeconfig-kind-x.yaml`, and runs
+# `bash scripts/laptop-demo.sh`. The demo's very first command is
+#
+#     kubectl --context docker-desktop config current-context
+#
+# which this stub answers with `kind-x`; the script must then print
+#
+#     refusing: current context is kind-x, not docker-desktop
+#
+# on stderr and exit 1, before anything else runs.
+#
+# WHY A STUB AND NOT A REAL `kubectl` POINTED AT AN UNROUTABLE SERVER. Global
+# Constraint 22 keeps the default `cargo test` suite free of anything that
+# shells `kubectl` or dials a socket, and an `#[ignore]`d test is not a gate at
+# all. The stub carries the substance of the fix it replaces — no dial, no
+# timeout, the exit code read directly, the exact stderr string — without
+# either defect, and STANDING RULE 16 sanctions exactly this technique for
+# Task 31's dry proving run.
+#
+# EVERY OTHER ARGUMENT VECTOR IS A REFUSAL, AND IT NAMES WHAT IT WAS ASKED TO
+# DO. That is what makes the "remove the step-1 context check" mutant fail
+# usefully rather than mysteriously: the script proceeds to step 2, this stub
+# refuses `create namespace logweir-t28` with exit 1, `set -e` aborts, and the
+# required stderr string is absent — with a line in the output saying which
+# command got as far as being attempted.
+#
+# It contacts nothing. There is no `curl`, no `nc`, no socket of any kind in
+# this file, and `KUBECONFIG` is a fixture it never reads.
+
+seen_config=
+seen_current_context=
+for arg in "$@"; do
+  case "$arg" in
+    config) seen_config=1 ;;
+    current-context) seen_current_context=1 ;;
+  esac
+done
+
+if [ -n "$seen_config" ] && [ -n "$seen_current_context" ]; then
+  echo kind-x
+  exit 0
+fi
+
+echo "stub-kubectl: refusing \`kubectl $*\` — this stub answers only \`config current-context\` (with \`kind-x\`) and dials nothing. A script that reached this line did not refuse the wrong context first." >&2
+exit 1

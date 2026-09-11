@@ -3,9 +3,12 @@
 **Installing Logweir onto a Kubernetes cluster is a different document: [install.md](install.md).**
 This one is the CLI and the local stack.
 
-Three paths. The first two prove the tool works on your laptop with no cloud
+Four paths. The first two prove the tool works on your laptop with no cloud
 resources — one for the **backup-and-recover** path, one for the **drill**
-path. The third runs a drill against a scratch cluster you already have.
+path. The third runs a drill against a scratch cluster you already have. The
+fourth, [`just laptop-demo`](#path-4-just-laptop-demo--the-whole-product-on-docker-desktop-kubernetes),
+is the whole PRODUCT on docker-desktop Kubernetes: the operator, the custom
+resources, the UI and both install gates.
 
 If you only want to know what a scorecard means once someone hands you one, read
 [verify-a-scorecard.md](verify-a-scorecard.md) instead.
@@ -105,6 +108,87 @@ backup exists; the plan was approved by a **different key** than the one that
 signs the result; the drill ran every phase against a real broker and a real
 archive; and the scorecard verifies under **two independent verifiers**, one of
 which shares no code with Logweir.
+
+---
+
+## Path 4: `just laptop-demo` — the whole product on docker-desktop Kubernetes
+
+Paths 1 to 3 are the CLI. This one is the product: `weirkeeper` reconciling
+custom resources in a cluster, the UI served as static files, and a `Restore`
+created **from the page**.
+
+```bash
+just e2e-up                                          # the stack is a precondition
+LOGWEIR_DEMO_NONINTERACTIVE=1 just laptop-demo; echo "rc=$?"
+```
+
+Twelve numbered steps, each exit code printed on its own line:
+
+1. **Preflight.** Refuses, on stderr and with exit 1, unless the current
+   context is `docker-desktop` — `refusing: current context is <what it found>,
+   not docker-desktop`, printed **before anything else runs**, so a wrong
+   cluster is never dialled. Then the compose stack, both local images, and the
+   CRD list (zero, or exactly the six this project ships).
+2. `kubectl --context docker-desktop create namespace logweir-t28`, plus the
+   per-namespace runner ServiceAccount.
+3. **`just apply-install`** — install gate **X-APPLY**: `kubectl apply
+   --server-side -f logweir.yaml`, twice, both exit codes read directly.
+4. **Two keypairs**, minted into `.demo/laptop/`, with the warning that
+   `SigningKey::load_or_generate` mints silently: a run against an empty
+   `logweir-signing-key` Secret signs its evidence with a key nothing attests.
+5. **The five Secrets**, then `just check-secrets logweir-t28`.
+6. The cluster-scoped **`TrustRoster` named `default`**, carrying the approver
+   key id and the signing key **material** — an id alone would leave nothing to
+   verify against.
+7. A **`KafkaCluster`** at `host.docker.internal:9095`, the published listener a
+   pod can reach, waited on until `status.reachable` is `true`.
+8. A **`BackupSchedule`** on `*/2 * * * *`; the `Backup` it fires reaches
+   `phase: Succeeded` with `exitCode: 0`, and its signed receipt verifies
+   `Valid`.
+9. **`kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/
+   --address=127.0.0.1`**, then four fetches that must each answer `200`: the
+   page, the router, the wizard, and the Kubernetes API on the same origin. A
+   renamed `ui/` or a changed `--www-prefix` fails here and nowhere else.
+10. **Install gate X-UIWRITE, both halves.** (a) the scripted create — the body
+    is built by the *page's own* modules (`ui/tests/emit-restore-body.js` calls
+    `renderPlanBytes`, `planHash`, `mintNames` and the wizard's `restoreBody`)
+    and `curl` posts it, `201`. (b) the same create **by hand, from the
+    wizard's final step**, because `curl` is not the page: afterwards
+    `kubectl --context docker-desktop -n logweir-t28 get restore <name> -o
+    jsonpath='{.metadata.managedFields}'` carries `"manager": "logweir-ui"`,
+    which `ui/api.js`'s `?fieldManager=logweir-ui` puts there and which nothing
+    on a command line can produce. Half (b) is a second, interactive pass:
+
+    ```bash
+    LOGWEIR_DEMO_ONLY_STEP=10b ./scripts/laptop-demo.sh
+    ```
+
+11. **The approval, minted out of band, on your own machine**, with `logweir
+    drill approve --subject-kind Restore`. The sidecar path is derived from
+    `--out`. Only `approval.json` and `approval.sig` — two public documents —
+    ever reach the page. **No private key is ever typed into a browser**, and
+    `crates/logweir/tests/laptop_demo_lint.rs` asserts it.
+12. The `Restore` reaches a terminal phase; `exitCode`, `outcome`,
+    `integrity.level`, the measured **RTO** and **RPO**, the new topics and the
+    two evidence keys are each read with `-o jsonpath` on its own line; then
+    **both readers** run over the scorecard — `logweir drill verify` and
+    `python3 docs/verify_scorecard.py`, which shares no code with Logweir — and
+    both exit codes are printed. The teardown follows, in a `trap`.
+
+Everything it writes goes to `.demo/laptop/`, which is gitignored, and the
+teardown deletes the install, both namespaces, the archive prefix, the two
+author-only image tags, the proxy, **both keypairs**, and the compose stack —
+each with its own `rc`.
+
+**Two of its steps are author-only and say so.** Step 1 tags the local images
+with the shipped `ghcr.io/logweir/…` names, because the kubelet keys on the
+whole reference and a matching digest under a different name is
+`ErrImageNeverPull`; step 3 patches the controller's environment to point at
+this laptop's MinIO. Neither changes what "published" means: a pull from a
+registry the author does not control.
+
+The transcript of the run that proved all of this is
+[../e2e/k8s/laptop-demo.md](../e2e/k8s/laptop-demo.md).
 
 ---
 

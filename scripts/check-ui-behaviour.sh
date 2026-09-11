@@ -42,6 +42,24 @@
 # that refusal able to refuse, and a tool added beside the suite is never
 # mistaken for coverage.
 #
+# THE SECOND TOOL IS `emit-restore-body.js`, AND IT IS NOT RUN HERE (Task 28).
+# It builds the laptop walkthrough's `Restore` create body out of the page's own
+# modules -- `renderPlanBytes`, `planHash` and `mintNames` from `ui/plan.js`,
+# and `restoreBody` from `ui/pages/restore-wizard.js` -- from a wizard state the
+# demo writes with the values of the archive it has just made. Its runner is
+# `scripts/laptop-demo.sh` step 10(a), which needs a live cluster, an archive
+# and a `kubectl proxy`, so it can be neither a `*.spec.js` suite (Global
+# Constraint 22) nor an arm of this gate. What holds it instead is
+# `crates/logweir/tests/laptop_demo_lint.rs::the_body_emitter_renders_the_plan_with_the_pages_own_renderer`,
+# in the DEFAULT test suite: it asserts the import from `../plan.js`, that all
+# three functions are CALLED and not merely imported, and that no key of the
+# plan document's own grammar appears in the file -- which is what a
+# hand-written YAML string would have to spell. This paragraph is also what
+# keeps `ui_lint.rs::the_behaviour_gate_runs_only_the_spec_files` able to tell a
+# TOOL from a suite that was renamed out of the glob: that test asks whether
+# anything names each non-suite file, and this names it, with its runner and its
+# guard.
+#
 # AND A GREEN RUN THAT ASSERTED NOTHING IS A FAILURE (plan erratum E21f). A
 # bare `node --test` from the repository root reports `tests 0` and exits 0 --
 # a gate that enumerated nothing, which is the `check-links.sh:42-45` and
