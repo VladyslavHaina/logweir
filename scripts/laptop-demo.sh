@@ -729,44 +729,14 @@ YAML
   reachable=$(read_field kafkacluster demo '{.status.reachable}' 'status.reachable')
   [ "$reachable" = "true" ] || die "status.reachable is '$reachable'"
 
-  # AND A SECOND CLUSTER OBJECT WHOSE `role` IS `target`, BECAUSE STEP 10(b)
-  # NEEDS ONE. The restore wizard picks its target with
-  # `restore-wizard.js::firstTarget`, which walks the `KafkaCluster` list for
-  # `spec.role == "target"` and returns `null` when there is none -- and a null
-  # target gives `renderPlanBytes` an EMPTY `bootstrap_servers`, which the
-  # grammar refuses, so the page renders an error box instead of the six steps.
-  # In `newTopic` mode the restored topics land on the SOURCE broker, so this
-  # object names the same address; it is a second NAME for one cluster, which
-  # is what the page's role model asks for. The scripted half of step 10 keeps
-  # targeting `demo`, so the two halves differ only in the name the operator
-  # picked on screen.
-  cat > "$OUT/kafkacluster-target.yaml" <<YAML
-apiVersion: logweir.dev/v1alpha1
-kind: KafkaCluster
-metadata:
-  name: demo-target
-  namespace: $NS
-spec:
-  bootstrapServers: ["$BOOTSTRAP_K8S"]
-  auth:
-    mode: plaintext
-  role: target
-YAML
-  set +e
-  kubectl --context docker-desktop apply -f "$OUT/kafkacluster-target.yaml" > "$OUT/kc-target-apply.log" 2>&1
-  rc=$?
-  set -e
-  echo "    rc=$rc  (kubectl apply -f kafkacluster-target.yaml — role: target, for the wizard at step 10(b))"
-  [ "$rc" -eq 0 ] || die "could not apply the target KafkaCluster (rc=$rc)"
-  set +e
-  kubectl --context docker-desktop -n "$NS" wait --for=jsonpath='{.status.reachable}'=true kafkacluster/demo-target --timeout=300s > "$OUT/kc-target-wait.log" 2>&1
-  rc=$?
-  set -e
-  echo "    rc=$rc  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/demo-target)"
-  if [ "$rc" -ne 0 ]; then
-    dump_run kafkacluster demo-target
-    die "the target KafkaCluster never became reachable."
-  fi
+  # ONE CLUSTER, AND THAT IS DEMO 1. Task 28 had to apply a second object here
+  # -- `demo-target`, `role: target`, the same address -- because the restore
+  # wizard listed only `role: target` clusters and rendered an error box
+  # without one. Task 28a closed that: step 4 lists every `KafkaCluster` with
+  # its role beside it and lets the runner's phase-0 guard decide, which is
+  # what the CRD and `drill/phase0_admit.rs` said all along. In `newTopic` mode
+  # the restored topics land on the SOURCE broker, so one object is the whole
+  # walk.
 
   pause "the controller probed the broker with a Job and wrote status.reachable: true."
 }
@@ -914,12 +884,14 @@ YAML
   # `update` because RBAC has no expression language. So this one `patch` is
   # also the demonstration of that rule.
   #
-  # It is here because the walk needs a STABLE newest `Backup` from this point
-  # on. The restore wizard reads its backup set off the newest one
-  # (`restore-wizard.js::initialState`), and a schedule that keeps firing every
-  # two minutes replaces that object under the operator's feet between step 9
-  # and step 10(b) -- measured: three `Backup` objects in six minutes, and the
-  # page reading a different one on every reload.
+  # It is here because the walk needs a STABLE chosen `Backup` from this point
+  # on. The restore wizard restores from the newest SUCCEEDED run
+  # (`restore-wizard.js::newestSucceeded`, Task 28a) and says which one it
+  # chose, but a schedule that keeps firing every two minutes still completes a
+  # newer one between step 9 and step 10(b) -- measured: three `Backup` objects
+  # in six minutes -- and with it go the plan bytes, the plan hash and both
+  # minted names. Naming the choice makes the move visible; suspending the
+  # schedule is what stops it, which is what the page's own sentence says.
   set +e
   kubectl --context docker-desktop -n "$NS" patch backupschedule laptop --type=merge -p '{"spec":{"suspend":true}}' > "$OUT/suspend.log" 2>&1
   rc=$?
@@ -1093,32 +1065,14 @@ JSON
 step_10b() {
   step "10/12 (b) X-UIWRITE, IN THE BROWSER: the create from the wizard's final step"
 
-  # ==========================================================================
-  # A DISCLOSED WORKAROUND, AND THE DEFECT IT IS FOR
-  # ==========================================================================
-  # `BackupStatus::backup_id` is declared in the CRD
-  # (`config/crd/backups.yaml`, `status.backupId`) and in the Rust type
-  # (`crates/weirkeeper/src/crds/backup.rs`), and NOTHING WRITES IT: the
-  # controller's `plan_backup_id` renders the id into the runner's plan
-  # ConfigMap and the status patch never carries it. The restore wizard reads
-  # it -- `restore-wizard.js::initialState` sets `fields.backupSetRef =
-  # status.backupId` -- and `renderPlanBytes` refuses a document without one,
-  # THROWING BEFORE ANY OF THE SIX STEPS RENDERS. So on a real cluster the page
-  # is an error box, and the half of X-UIWRITE that spec §10 actually asks for
-  # cannot be performed at all.
-  #
-  # The fix belongs to the next editor of `crates/weirkeeper/src/controllers/
-  # backup.rs` (one field on the terminal status patch) and NOT to this script:
-  # changing it would rebuild the controller image and move its digest, which
-  # this walk is pinned against (plan erratum E19a).
-  #
-  # So the walk writes the field the controller owes, derived from the archive
-  # the run actually wrote: `status.evidence.receiptKey` is
-  # `logweir/backups/<backup_id>/<run_id>.receipt.json`, so the id is its third
-  # path segment -- the same string `backupSetRef` must name for the runner to
-  # resolve the set. It is a STATUS patch on this demo's own object in this
-  # demo's own namespace; no shipped code changes, and both halves of X-UIWRITE
-  # are about the create's `fieldManager`, which this cannot affect.
+  # NOTHING IS PATCHED IN HERE ANY MORE. Task 28 had to
+  # `kubectl patch --subresource=status` `status.backupId` onto the Backup
+  # before the wizard would render: the field was declared on the CRD and
+  # nothing wrote it, so `restore-wizard.js::initialState` read `undefined`
+  # into `fields.backupSetRef` and the plan grammar threw before step 1.
+  # Task 28a put the field on `finished_status_patch`, so the controller writes
+  # it -- and this step reads it back off the object the walk already made, as
+  # evidence that it did.
   set +e
   kubectl --context docker-desktop -n "$NS" get backups -o name > "$OUT/backups-10b.txt" 2>&1
   rc=$?
@@ -1129,20 +1083,26 @@ step_10b() {
   [ -n "$ui_backup" ] || die "no Backup in $NS for the wizard to read a backup set off"
 
   set +e
+  kubectl --context docker-desktop -n "$NS" get backup "$ui_backup" -o jsonpath='{.status.backupId}' > "$OUT/backupid-10b.txt" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (kubectl get backup $ui_backup -o jsonpath={.status.backupId})"
+  ui_backup_id=$(cat "$OUT/backupid-10b.txt")
+  [ -n "$ui_backup_id" ] || die "status.backupId is empty on $ui_backup — the controller image predates the field"
+  echo "    status.backupId, written by the controller: $ui_backup_id"
+
+  # AND IT IS THE ARCHIVE'S OWN PREFIX. `status.evidence.receiptKey` is
+  # `logweir/backups/<backup_id>/<run_id>.receipt.json`, so its third path
+  # segment is the id the runner actually wrote under: the status and the
+  # archive agree, read off the cluster rather than argued about.
+  set +e
   kubectl --context docker-desktop -n "$NS" get backup "$ui_backup" -o jsonpath='{.status.evidence.receiptKey}' > "$OUT/receiptkey-10b.txt" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl get backup $ui_backup -o jsonpath={.status.evidence.receiptKey})"
-  ui_backup_id=$(awk -F/ '{ print $3 }' "$OUT/receiptkey-10b.txt")
-  [ -n "$ui_backup_id" ] || die "could not derive the backup id from $ui_backup's receiptKey"
-  echo "    backup id from the archive: $ui_backup_id"
-
-  set +e
-  kubectl --context docker-desktop -n "$NS" patch backup "$ui_backup" --subresource=status --type=merge -p "{\"status\":{\"backupId\":\"$ui_backup_id\"}}" > "$OUT/patch-backupid.log" 2>&1
-  rc=$?
-  set -e
-  echo "    rc=$rc  (kubectl patch backup $ui_backup --subresource=status: status.backupId=$ui_backup_id — the field the controller owes, see the comment above)"
-  [ "$rc" -eq 0 ] || die "could not write status.backupId on $ui_backup (rc=$rc)"
+  from_archive=$(awk -F/ '{ print $3 }' "$OUT/receiptkey-10b.txt")
+  echo "    the id in the archive key: $from_archive"
+  [ "$from_archive" = "$ui_backup_id" ] || die "status.backupId ($ui_backup_id) is not the archive's prefix ($from_archive)"
 
   cat <<TXT
     Spec §10: "under kubectl proxy --www=, a create of a Restore FROM THE PAGE

@@ -9,6 +9,22 @@ RTO and RPO — **never typing a private key into a browser**.
 
 Twelve numbered steps, one section each below, each with the transcript it produced and a verdict.
 
+**Re-recorded for Task 28a, with the two workarounds gone.** The first recording of this walk had to
+work around two defects it had itself discovered, and said so in the open. Task 28a fixed both, and
+this is the walk without them:
+
+| defect | the workaround this recording no longer needs |
+|---|---|
+| `Backup.status.backupId` was declared on the CRD and **nothing wrote it**, so the restore wizard read `undefined` into `fields.backupSetRef`, the plan grammar refused the document, and the page was an error box before step 1 rendered | step 10(b) used to `kubectl patch --subresource=status` the field in by hand. **Closed by Task 28a**: `controllers/backup.rs::finished_status_patch` writes it, and step 10(b) now READS it back off the object and checks it against the archive's own prefix. |
+| the wizard listed only `KafkaCluster`s with `spec.role == "target"` — a requirement the runner does not have, since `drill/phase0_admit.rs`'s `TargetMode::NewTopic` arm is empty and the CRD says `role` is a label rather than an authorisation — so the one-cluster namespace this walk builds rendered an empty target select | step 7 used to apply a **second** `KafkaCluster`, `demo-target`, at the same address. **Closed by Task 28a**: step 4 lists every cluster with its role beside it and lets the runner's guard decide, so step 7 applies ONE object again. |
+
+A third finding was **not** a defect of the page and is not worked around: a `BackupSchedule` on
+`*/2 * * * *` completes a newer `Backup` while an operator reads the wizard. Task 28a made the page
+say which run it chose — the newest `Succeeded` one, by its `Complete` condition — and print
+`a running schedule may complete a newer backup while you read this; reload to pick it up, or suspend
+the schedule first.` Step 8 still suspends the schedule, because a walkthrough wants a fixed target;
+the page now tells an operator who does not.
+
 **Two passes, and the second one is the gate.** Spec §10's X-UIWRITE reads: under `kubectl proxy
 --www=`, a `create` of a `Restore` **from the page** returns 201. **`curl` is not the page.** So:
 
@@ -21,9 +37,11 @@ Twelve numbered steps, one section each below, each with the transcript it produ
 
 Run on 2026-09-11 on docker-desktop Kubernetes (client v1.35, context `docker-desktop`), against the
 compose stack's KRaft broker and MinIO, with the two locally built images at the digests the tree pins
-(`logweir:check` = `sha256:6440a4a0…`, `weirkeeper:check` = `sha256:d198c8e2…`). **Neither image was
-rebuilt**: a rebuild moves a repository digest (plan erratum E19a) and those two digests are what
-`crates/weirkeeper/src/job.rs` and `config/manager/deployment.yaml` name.
+(`logweir:check` = `sha256:6440a4a0…`, `weirkeeper:check` = `sha256:e6e3384e…`). **The runner image was
+not rebuilt.** The CONTROLLER image was, once, because the `backupId` fix above lives in it: 240 s,
+native `arm64`, and the new digest is pinned in `config/manager/deployment.yaml` and re-rendered into
+`logweir.yaml`. A rebuild moves a repository digest (plan erratum E19a) and `docs/kubernetes.md` §14.7
+records the move.
 
 **Two steps of this walk are author-only and say so.** Step 1 tags the local images with the shipped
 `ghcr.io/logweir/…` names, because the kubelet keys on the WHOLE reference and a matching digest under
@@ -49,7 +67,7 @@ The compose stack is a PRECONDITION here and not a step, because spec §2's Demo
     rc=0  (docker compose ps --status running)
     compose services running: kafka-broker-1 minio 
     rc=0  (docker image inspect logweir:check) -> ["logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229"]
-    rc=0  (docker image inspect weirkeeper:check) -> ["weirkeeper@sha256:d198c8e2657c340ad9cab24da3975d13986634c92f6765a00f0dd445c2040276"]
+    rc=0  (docker image inspect weirkeeper:check) -> ["weirkeeper@sha256:e6e3384eaf37321366fe36ee3a5d23dc7eb21868859cf32737300194587488ae"]
     rc=0  (kubectl get crd -o name)
     logweir.dev CRDs already installed: 0
     rc=0  (docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0 — author-only, removed by the teardown)
@@ -61,8 +79,8 @@ The compose stack is a PRECONDITION here and not a step, because spec §2's Demo
 
 ## 2. The namespace, and the runner ServiceAccount
 
-The runner ServiceAccount lives in the namespace of the `Backup`/`Restore` objects, so it is NOT in
-`logweir.yaml` (plan erratum E14c); a runner pod mounts no token, so it needs no RoleBinding.
+The runner Job's ServiceAccount is a namespaced object and is applied here rather than in
+`logweir.yaml`, which is cluster-scoped plus `logweir-system`.
 
 `==> 2/12 namespace logweir-t28`
 
@@ -76,11 +94,13 @@ The runner ServiceAccount lives in the namespace of the `Backup`/`Restore` objec
 
 ## 3. `just apply-install` — install gate **X-APPLY**
 
-`just apply-install` is the gate: `kubectl --context docker-desktop apply --server-side -f
-logweir.yaml`, **twice**, with both exit codes read directly. The demo's own S3 literals are a
-kustomize patch applied on top — the shipped file is applied unedited, and the controller forwards the
-endpoint, the region and the allow-http flag to every runner Job it creates, so they are configured
-once instead of in two places that can disagree.
+X-APPLY is `kubectl --context docker-desktop apply --server-side -f logweir.yaml`, **twice**, with
+both exit codes read directly: a second server-side apply of the same file is the one that catches a
+field-ownership conflict, and an install file that cannot be re-applied is an install file no adopter
+can upgrade with.
+
+The overlay patch after it is the author-only half: it points the controller at this laptop's compose
+MinIO. The SHIPPED `logweir.yaml` is applied unedited.
 
 `==> 3/12 just apply-install (install gate X-APPLY), then the author-only demo overlay`
 
@@ -99,17 +119,16 @@ networkpolicy.networking.k8s.io/logweir-runner-egress serverside-applied
 
 ## 4. Two keypairs, and the silent-mint warning
 
-Both keypairs are minted into `.demo/laptop/` (gitignored) with the four `openssl` commands
-`scripts/demo.sh` uses, and **the teardown deletes both private halves**. The warning is not
-decoration: `SigningKey::load_or_generate` LOADS a path that exists and MINTS one that does not, so a
-first run against an empty `logweir-signing-key` Secret produces a green scorecard signed by a key
-nothing attests.
+`SigningKey::load_or_generate` (`crates/logweir-evidence/src/keys.rs`) loads a path that exists and
+MINTS one that does not. A run against an empty `logweir-signing-key` Secret therefore produces a
+green scorecard signed by a key no `TrustRoster` attests, and nothing says so at the time. The walk
+prints the warning where an operator reads it.
 
 `==> 4/12 minting the signing and approver keypairs into .demo/laptop/`
 
 ```
-    signing key id:  2190b61d2de7a3158a8790cd2dd15f2421db6d9f7b42a2c9a79affb2dd797f79
-    approver key id: ad9836ead774e6d720894fc34d3a66bb417a7334da589d1f76957ec978d9176c
+    signing key id:  889fd1c00c029029e0dd10c2ba090faa71178b3bed245117c7d2284d32d83288
+    approver key id: 70f4f569167fe05fe31a733a4c7dbaa9cf1c5a0f19674d1e4f3c83ea09a8b0b7
 
     WARNING — SigningKey::load_or_generate MINTS SILENTLY.
     crates/logweir-evidence/src/keys.rs: a path that EXISTS is loaded; a path that
@@ -125,17 +144,13 @@ nothing attests.
 
 ## 5. The five Secrets, and `just check-secrets`
 
-Five Secrets, not three (spec §9): the signing key (data key `signing.pem` — the file name the runner's
-argv reads), the approval bundle's four keys, the per-cluster SCRAM credential (unused on this
-plaintext listener, and created anyway because an install missing one is exactly what `check-secrets`
-exists to catch), the runner's archive credential, and the CONTROLLER's read-only evidence credential
-in `logweir-system` — a different principal, which is the separation this proves. The controller is
-restarted because it reads that Secret from its own environment, fixed at container start.
+Spec §9's five: `logweir-signing-key`, `logweir-approval-bundle` (its own Secret, spec §7 amendment
+4c, never folded into the signing key's), the per-cluster SCRAM credential, `logweir-s3`, and
+`logweir-evidence-ro` — the last in `logweir-system`, because it is the CONTROLLER's read-only
+evidence credential and a different principal from the runner's.
 
-Two of the approval bundle's four keys cannot exist yet — `approval.json` and `approval.sig` are
-signatures over plan bytes that step 10 has not rendered — so the bundle is created with placeholders
-and **step 11 replaces it**, before the `Approval` object exists and therefore before any runner Job
-can mount it. Saying so is more honest than reordering the walk to hide it.
+The approval bundle is created here with a placeholder and REPLACED at step 11 with the real
+approval, before the `Approval` object exists and therefore before any runner Job can mount it.
 
 `==> 5/12 the five Secrets, then just check-secrets logweir-t28`
 
@@ -156,10 +171,9 @@ check-secrets: all five Secrets are present (logweir-t28, and logweir-evidence-r
 
 ## 6. The cluster-scoped `TrustRoster` named `default`
 
-`signingKeys[]` carries the runner's PUBLIC KEY, not just its id: with a `signingKeyIds: [string]`
-shape there would be nothing to verify against and `status.evidence.verification.result` could never
-read `Valid`. The `keyId` is the sha256 of the SPKI DER, computed here with `openssl` so this script
-and `logweir-verify` cannot disagree about it.
+`weirkeeper::ROSTER_NAME` is `default` and the object is cluster-scoped: one roster for the cluster,
+carrying the approver's key id in `spec.approverKeys[]` and the signing key's MATERIAL in
+`spec.signingKeys[]` — `keyId`, `spkiPem`, `subject`, `notAfter`.
 
 `==> 6/12 TrustRoster default — the approver key id and the signing key MATERIAL`
 
@@ -177,12 +191,16 @@ POD: the stack's host-side listener is the pod's own loopback from inside the cl
 that advertised it would send every later connection there too.
 `laptop_demo_uses_the_published_k8s_listener` forbids that address anywhere in the script.
 
-The **second** object, `demo-target`, exists for step 10(b). The restore wizard picks its target with
-`restore-wizard.js::firstTarget`, which walks the list for `spec.role == "target"` and returns `null`
-otherwise — and a null target gives `renderPlanBytes` an empty `bootstrap_servers`, which the grammar
-refuses, so the page renders an error box instead of six steps. In `newTopic` mode the restored topics
-land on the source broker, so this is a second NAME for one cluster, which is what the page's role
-model asks for.
+**ONE object, and Task 28a is why.** The first recording of this walk applied a second
+`KafkaCluster` here — `demo-target`, `role: target`, the same address — because the restore wizard
+listed only `role: target` clusters and rendered an error box without one. That requirement was the
+page's invention: `crates/weirkeeper/src/crds/kafka_cluster.rs` documents `role` as a label the
+adopter picks, with `TrustRoster.allowedClusterIds` as the thing that authorises a target, and
+`crates/logweir/src/drill/phase0_admit.rs` puts every cluster check inside the `Scratch` arm — its
+`TargetMode::NewTopic` arm is empty, with a comment saying the source cluster is exactly where a
+point-in-time recovery belongs. `scripts/k8s-demo.sh` had been proving that by running, green, against
+one `role: source` cluster all along. Task 28a made step 4 of the wizard list every cluster with its
+role beside it and let the runner's guard decide, so this walk applies one object again.
 
 `==> 7/12 KafkaCluster at host.docker.internal:9095 -> status.reachable`
 
@@ -190,12 +208,10 @@ model asks for.
     rc=0  (kubectl apply -f kafkacluster.yaml)
     rc=0  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/demo)
     rc=0  status.reachable: true
-    rc=0  (kubectl apply -f kafkacluster-target.yaml — role: target, for the wizard at step 10(b))
-    rc=0  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/demo-target)
     PAUSE (suppressed by LOGWEIR_DEMO_NONINTERACTIVE=1): the controller probed the broker with a Job and wrote status.reachable: true.
 ```
 
-**Verdict: PASS — both `KafkaCluster` objects reached `status.reachable: true` off the controller's own probe Job.**
+**Verdict: PASS — the single `KafkaCluster` reached `status.reachable: true` off the controller's own probe Job.**
 
 ## 8. A `BackupSchedule`, and the `Backup` it fires
 
@@ -210,10 +226,11 @@ one.
 The schedule is **suspended** once that `Backup` has exited 0 and verified. `suspend` is the ONE
 mutable field of `BackupSchedule.spec` — the CRD seals every other field for EVERY subject,
 cluster-admin included, with its own CEL rule — so the line is also the demonstration of that rule. It
-is here because the walk needs a stable newest `Backup` from this point on: the wizard reads its backup
-set off the newest one, and a schedule firing every two minutes replaces that object under the
-operator's feet (measured: three `Backup` objects in six minutes, the page reading a different one on
-each reload).
+is here because the walk wants a fixed chosen `Backup` from this point on. Since Task 28a the wizard
+restores from the newest SUCCEEDED run and NAMES it on screen, so an operator who does not suspend can
+at least see the choice move; measured on the first recording, a two-minute schedule produced three
+`Backup` objects in six minutes, and with the chosen object go the plan bytes, the plan hash and both
+minted names.
 
 `==> 8/12 records, the bucket, a BackupSchedule on */2, and the Backup it fires`
 
@@ -225,16 +242,16 @@ each reload).
     rc=0  (kafka-console-producer -> laptopdemo)
     rc=0  (kafka-get-offsets laptopdemo)
     laptopdemo holds 200 records
-    recovery point: 2026-09-11T18:52:17Z   sample window from: 2026-09-11T17:57:12Z
+    recovery point: 2026-09-11T20:20:12Z   sample window from: 2026-09-11T19:25:07Z
     rc=0  (kubectl apply -f backupschedule.yaml, schedule */2 * * * *)
     waiting for the schedule to fire (up to two minutes plus the run)...
     rc=0  (kubectl get backups -o name)
-    the schedule fired: Backup/logweir-backup-laptop-20260911-185200
-    rc=0  (kubectl get backup logweir-backup-laptop-20260911-185200 -o jsonpath={.status.phase})
+    the schedule fired: Backup/logweir-backup-laptop-20260911-202000
+    rc=0  (kubectl get backup logweir-backup-laptop-20260911-202000 -o jsonpath={.status.phase})
     phase: Succeeded
     rc=0  status.exitCode: 0
-    rc=0  status.evidence.receiptKey: logweir/backups/adb40303-8ddf-4af4-b4bd-93b348d8aaaf-20260911-185200/01M28X0AN2VYZW2FT7WK1NG1D5.receipt.json
-    rc=0  (kubectl get backup logweir-backup-laptop-20260911-185200 -o jsonpath={.status.evidence.verification.result})
+    rc=0  status.evidence.receiptKey: logweir/backups/6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000/01M29219NNNSH9JVTW4AC6M5QD.receipt.json
+    rc=0  (kubectl get backup logweir-backup-laptop-20260911-202000 -o jsonpath={.status.evidence.verification.result})
     status.evidence.verification.result: Valid
     rc=0  (kubectl patch backupschedule laptop spec.suspend=true — the ONE mutable field; every other is sealed by the CRD's own CEL rule)
     PAUSE (suppressed by LOGWEIR_DEMO_NONINTERACTIVE=1): a scheduled Backup exited 0 and its signed receipt verified Valid.
@@ -256,7 +273,7 @@ bounded foreground loop, and the teardown kills it.
 `==> 9/12 kubectl proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1, and four fetches`
 
 ```
-    rc=0  (kubectl proxy, backgrounded; pid 16194)
+    rc=0  (kubectl proxy, backgrounded; pid 90397)
 
     The UI is at http://127.0.0.1:8001/ui/
 
@@ -295,11 +312,11 @@ browser-derived User-Agent an absent `?fieldManager=` would have left.
 
 ```
     rc=0  (node ui/tests/emit-restore-body.js --out .demo/laptop/)
-plan-hash=sha256:61d3af301ded7e1b523aa299e67c45cefcf52f61aa69c398f960684ca051401e
-restore-name=restore-61d3af30
-approval-name=approval-61d3af30
+plan-hash=sha256:7423c51b462e9ad7fb66855bcded9bbb7ad8e934196920e70905fcead07e1b17
+restore-name=restore-7423c51b
+approval-name=approval-7423c51b
     rc=0  HTTP 201  (POST http://127.0.0.1:8001/apis/logweir.dev/v1alpha1/namespaces/logweir-t28/restores?fieldManager=logweir-cli)
-    X-UIWRITE (a): 201 Created — Restore/restore-61d3af30, approvalRef -> approval-61d3af30 (which does not exist yet)
+    X-UIWRITE (a): 201 Created — Restore/restore-7423c51b, approvalRef -> approval-7423c51b (which does not exist yet)
     rc=0  (managedFields managers on the scripted Restore): logweir-cli unknown
     PAUSE (suppressed by LOGWEIR_DEMO_NONINTERACTIVE=1): X-UIWRITE half (a): a Restore created through kubectl proxy's API, 201.
 ```
@@ -313,16 +330,18 @@ fail only at step 12, which is the failure Task 27's guard exists to catch three
 Its `fieldManager` is `logweir-cli`, which is exactly why this half does not satisfy spec §10 on its
 own.
 
-And this is what the non-interactive pass printed where half (b) goes — the command, the string it will
-produce, and the fact that it was skipped:
+And this is what the non-interactive pass printed where half (b) goes — the backup id **read off the
+object the controller wrote it on**, the command, the string it will produce, and the fact that the
+create itself was skipped:
 
 `==> 10/12 (b) X-UIWRITE, IN THE BROWSER: the create from the wizard's final step`
 
 ```
     rc=0  (kubectl get backups -o name)
-    rc=0  (kubectl get backup logweir-backup-laptop-20260911-185200 -o jsonpath={.status.evidence.receiptKey})
-    backup id from the archive: adb40303-8ddf-4af4-b4bd-93b348d8aaaf-20260911-185200
-    rc=0  (kubectl patch backup logweir-backup-laptop-20260911-185200 --subresource=status: status.backupId=adb40303-8ddf-4af4-b4bd-93b348d8aaaf-20260911-185200 — the field the controller owes, see the comment above)
+    rc=0  (kubectl get backup logweir-backup-laptop-20260911-202000 -o jsonpath={.status.backupId})
+    status.backupId, written by the controller: 6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000
+    rc=0  (kubectl get backup logweir-backup-laptop-20260911-202000 -o jsonpath={.status.evidence.receiptKey})
+    the id in the archive key: 6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000
     Spec §10: "under kubectl proxy --www=, a create of a Restore FROM THE PAGE
     returns 201". curl is not the page. Do this by hand:
 
@@ -351,22 +370,49 @@ produce, and the fact that it was skipped:
         LOGWEIR_DEMO_ONLY_STEP=10b ./scripts/laptop-demo.sh
 ```
 
+The four lines at the top of that block are the `backupId` fix, checked on the cluster rather than argued about:
+`status.backupId` is what the controller wrote on the terminal status patch, and the id in
+`status.evidence.receiptKey` is the prefix the runner actually wrote the archive under
+(`logweir/backups/<backup_id>/<run_id>.receipt.json`). The script `die`s if they differ, and it `die`s
+if `status.backupId` is empty — which is what a controller image predating the fix would give it. The
+first recording had a `kubectl patch --subresource=status` here instead.
+
 ### (b) the in-browser create
 
 Performed by hand, in a real browser (Chromium, driven over the Playwright MCP server), against the
 proxy pass 1 left up.
 
-1. `http://127.0.0.1:8001/ui/#/restore?ns=logweir-t28` — the six steps render.
-2. Step 1: the endpoint `http://host.docker.internal:9000`, the region `us-east-1`, `path_style`
-   addressing on, and the evidence bucket set to `kafka-backups`, each typed and committed.
-3. Step 4: the target cluster `demo-target`, mode `newTopic`, and `topicNaming.prefix` changed to
-   `from-the-page-` — the one value that makes this a **second, different plan** from the scripted
-   half's.
-4. Step 6 then showed the whole rendered document, its sha256
-   `sha256:bcaa48fa8f54e2b4d34371adcca304ab543ef3cbdcab045208a4bb581d5ab522`, and the two names minted
-   from exactly those bytes: `restore-bcaa48fa` and `approval-bcaa48fa`. The scripted half's pair was
-   `restore-61d3af30`/`approval-61d3af30`, so the two creates are demonstrably different documents.
-5. **Create the Restore** — one click, no key, no token, no credential of any kind in the page.
+1. `http://127.0.0.1:8001/ui/#/restore?ns=logweir-t28` — **all six steps rendered, with no status
+   patch of any kind having been applied to the `Backup`.** That is the first defect closed, observed
+   rather than reasoned about: the page read `status.backupId` off the object because the controller
+   had written it.
+2. Step 2 showed one row, `Succeeded`, marked `(chosen)`, under the sentence
+   `chosen: logweir-backup-laptop-20260911-202000, backup set
+   6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000. a running schedule may complete a newer
+   backup while you read this; reload to pick it up, or suspend the schedule first.`
+3. Step 4 offered exactly one option — `demo (role: source)`, **selected** — above the sentence
+   `no cluster is labelled role: target; the source cluster is preselected. The role is a label, not
+   an authorisation: for mode newTopic the runner accepts any reachable target, the source cluster
+   included; mode scratch is refused by the runner unless the target differs from the source and
+   proves it is scratch with its marker topic.` That is the second defect closed: there is no
+   `demo-target` object in this namespace and the wizard does not want one.
+4. `topicNaming.prefix` was typed to a distinct value and blurred — the one change that makes this a
+   **second, different plan** from the scripted half's. The plan re-rendered to
+   `sha256:db9b280adaa8f5da529b749f4c9d0839b3f71f5d84d799450910b78b62a33baa`, minting
+   `restore-db9b280a` and `approval-db9b280a`; the scripted half's pair was
+   `restore-7423c51b`/`approval-7423c51b`, so the two creates are demonstrably different documents.
+5. **Create the Restore** — one click, no key, no token, no credential of any kind in the page. The
+   page's console carried **0 errors and 0 warnings**.
+
+The object the page created names the source cluster as its target, which is the whole of defect 2 in
+one line:
+
+```
+$ kubectl --context docker-desktop -n logweir-t28 get restore restore-db9b280a \
+    -o jsonpath='{.spec.target.clusterRef.name}{" mode="}{.spec.target.mode}{" backupSetRef="}{.spec.backupSetRef}'
+demo mode=newTopic backupSetRef=6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000
+rc=0
+```
 
 *(No screenshot is checked in. The picture is not the evidence; the `managedFields` output below is,
 and it is quoted whole.)*
@@ -375,9 +421,10 @@ and it is quoted whole.)*
 
 ```
     rc=0  (kubectl get backups -o name)
-    rc=0  (kubectl get backup logweir-backup-laptop-20260911-185200 -o jsonpath={.status.evidence.receiptKey})
-    backup id from the archive: adb40303-8ddf-4af4-b4bd-93b348d8aaaf-20260911-185200
-    rc=0  (kubectl patch backup logweir-backup-laptop-20260911-185200 --subresource=status: status.backupId=adb40303-8ddf-4af4-b4bd-93b348d8aaaf-20260911-185200 — the field the controller owes, see the comment above)
+    rc=0  (kubectl get backup logweir-backup-laptop-20260911-202000 -o jsonpath={.status.backupId})
+    status.backupId, written by the controller: 6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000
+    rc=0  (kubectl get backup logweir-backup-laptop-20260911-202000 -o jsonpath={.status.evidence.receiptKey})
+    the id in the archive key: 6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000
     Spec §10: "under kubectl proxy --www=, a create of a Restore FROM THE PAGE
     returns 201". curl is not the page. Do this by hand:
 
@@ -403,11 +450,8 @@ and it is quoted whole.)*
 
     PAUSE: create the Restore in the browser now, then continue.
     press RETURN to continue: 
-    rc=0  (kubectl get restores -o name)
-restore.logweir.dev/restore-61d3af30
-restore.logweir.dev/restore-bcaa48fa
-    the name the page created:     rc=0  (kubectl get restore restore-bcaa48fa -o jsonpath={.metadata.managedFields})
-[{"apiVersion":"logweir.dev/v1alpha1","fieldsType":"FieldsV1","fieldsV1":{"f:spec":{".":{},"f:approvalRef":{".":{},"f:name":{}},"f:backupSetRef":{},"f:deadlineSeconds":{},"f:planBytes":{},"f:pointInTime":{},"f:sourceArchive":{".":{},"f:secretRef":{".":{},"f:name":{}},"f:url":{}},"f:target":{".":{},"f:clusterRef":{".":{},"f:name":{}},"f:mode":{},"f:topicNaming":{".":{},"f:prefix":{}}}}},"manager":"logweir-ui","operation":"Update","time":"2026-09-11T18:54:56Z"},{"apiVersion":"logweir.dev/v1alpha1","fieldsType":"FieldsV1","fieldsV1":{"f:status":{".":{},"f:conditions":{},"f:phase":{},"f:reason":{}}},"manager":"unknown","operation":"Update","subresource":"status","time":"2026-09-11T18:54:56Z"}]
+    rc=0  (kubectl get restore restore-db9b280a -o jsonpath={.metadata.managedFields})
+[{"apiVersion":"logweir.dev/v1alpha1","fieldsType":"FieldsV1","fieldsV1":{"f:spec":{".":{},"f:approvalRef":{".":{},"f:name":{}},"f:backupSetRef":{},"f:deadlineSeconds":{},"f:planBytes":{},"f:pointInTime":{},"f:sourceArchive":{".":{},"f:secretRef":{".":{},"f:name":{}},"f:url":{}},"f:target":{".":{},"f:clusterRef":{".":{},"f:name":{}},"f:mode":{},"f:topicNaming":{".":{},"f:prefix":{}}}}},"manager":"logweir-ui","operation":"Update","time":"2026-09-11T20:21:38Z"},{"apiVersion":"logweir.dev/v1alpha1","fieldsType":"FieldsV1","fieldsV1":{"f:status":{".":{},"f:conditions":{},"f:phase":{},"f:reason":{}}},"manager":"unknown","operation":"Update","subresource":"status","time":"2026-09-11T20:21:38Z"}]
     rc=0  (python3 -m json.tool, the same bytes as the reader sees them)
 [
     {
@@ -448,7 +492,7 @@ restore.logweir.dev/restore-bcaa48fa
         },
         "manager": "logweir-ui",
         "operation": "Update",
-        "time": "2026-09-11T18:54:56Z"
+        "time": "2026-09-11T20:21:38Z"
     },
     {
         "apiVersion": "logweir.dev/v1alpha1",
@@ -464,22 +508,22 @@ restore.logweir.dev/restore-bcaa48fa
         "manager": "unknown",
         "operation": "Update",
         "subresource": "status",
-        "time": "2026-09-11T18:54:56Z"
+        "time": "2026-09-11T20:21:38Z"
     }
 ]
 
     X-UIWRITE (b): the manager is logweir-ui — THE WRITE CAME FROM THE PAGE.
-rc=0
 ```
 
-`"manager": "logweir-ui"`, on the entry that owns every `f:spec` field of the object. **The write came
-from the page.** The second entry, `"manager": "unknown"`, owns `f:status` only — that is the
-controller writing the first `Pending`/`ApprovalNotVerified` status, not a second writer of the spec.
+`"manager": "logweir-ui"`, on the entry that owns every `f:spec` field of the object — `f:backupSetRef`
+and `f:target.f:clusterRef.f:name` among them. **The write came from the page.** The second entry,
+`"manager": "unknown"`, owns `f:status` only — that is the controller writing the first
+`Pending`/`ApprovalNotVerified` status, not a second writer of the spec.
 
 That `Restore` is deliberately left un-approved: the gate is the create, and an approval for it would
 be a second out-of-band ceremony proving nothing step 11 does not already prove.
 
-**Verdict: PASS — install gate **X-UIWRITE**, both halves: `201` from the scripted create, and `"manager": "logweir-ui"` from the one the page performed.**
+**Verdict: PASS — install gate **X-UIWRITE**, both halves: `201` from the scripted create, and `"manager": "logweir-ui"` from the one the page performed — this time with no status patch and one `KafkaCluster`.**
 
 ## 11. The approval, minted out of band, on the host
 
@@ -498,26 +542,26 @@ base64.
 ```
     rc=0  (logweir drill approve --subject-kind Restore --out .demo/laptop/approval.json)
 approved .demo/laptop/plan.yaml
-  plan_hash  sha256:61d3af301ded7e1b523aa299e67c45cefcf52f61aa69c398f960684ca051401e
+  plan_hash  sha256:7423c51b462e9ad7fb66855bcded9bbb7ad8e934196920e70905fcead07e1b17
   approver   laptop
   ticket     DEMO-1
   subject    Restore
-  key_id     ad9836ead774e6d720894fc34d3a66bb417a7334da589d1f76957ec978d9176c
+  key_id     70f4f569167fe05fe31a733a4c7dbaa9cf1c5a0f19674d1e4f3c83ea09a8b0b7
   wrote      .demo/laptop/approval.json
   wrote      .demo/laptop/approval.sig
 
 This approval binds the EXACT bytes of .demo/laptop/plan.yaml. Edit the spec — including its
 sample window — and `logweir drill run` refuses with exit 3 until you re-run
 this command.
-    plan_hash from the CLI : sha256:61d3af301ded7e1b523aa299e67c45cefcf52f61aa69c398f960684ca051401e
-    plan-hash from the page: sha256:61d3af301ded7e1b523aa299e67c45cefcf52f61aa69c398f960684ca051401e
+    plan_hash from the CLI : sha256:7423c51b462e9ad7fb66855bcded9bbb7ad8e934196920e70905fcead07e1b17
+    plan-hash from the page: sha256:7423c51b462e9ad7fb66855bcded9bbb7ad8e934196920e70905fcead07e1b17
     rc=0  (kubectl delete secret logweir-approval-bundle — the placeholder)
     rc=0  (secret/logweir-approval-bundle, the real four keys)
-    rc=0  (kubectl create -f approval-object.yaml — Approval/approval-61d3af30 over Restore/restore-61d3af30)
-    rc=0  (kubectl wait --for=jsonpath={.status.verified}=true approval/approval-61d3af30)
+    rc=0  (kubectl create -f approval-object.yaml — Approval/approval-7423c51b over Restore/restore-7423c51b)
+    rc=0  (kubectl wait --for=jsonpath={.status.verified}=true approval/approval-7423c51b)
     rc=0  status.verified: true
-    rc=0  status.matchedKeyId: ad9836ead774e6d720894fc34d3a66bb417a7334da589d1f76957ec978d9176c
-    PAUSE (suppressed by LOGWEIR_DEMO_NONINTERACTIVE=1): the approval was minted on this host and verified in the cluster (key ad9836ead774e6d720894fc34d3a66bb417a7334da589d1f76957ec978d9176c).
+    rc=0  status.matchedKeyId: 70f4f569167fe05fe31a733a4c7dbaa9cf1c5a0f19674d1e4f3c83ea09a8b0b7
+    PAUSE (suppressed by LOGWEIR_DEMO_NONINTERACTIVE=1): the approval was minted on this host and verified in the cluster (key 70f4f569167fe05fe31a733a4c7dbaa9cf1c5a0f19674d1e4f3c83ea09a8b0b7).
 ```
 
 **Verdict: PASS — the approval was minted on the HOST, its `plan_hash` equals the hash the page showed, and the cluster verified it against the roster.**
@@ -533,7 +577,7 @@ compose network, because that is where the object store is.
 `==> 12/12 the Restore's terminal status, then BOTH readers over the scorecard`
 
 ```
-    rc=0  (kubectl get restore restore-61d3af30 -o jsonpath={.status.phase})
+    rc=0  (kubectl get restore restore-7423c51b -o jsonpath={.status.phase})
     phase: Succeeded
     rc=0  status.exitCode: 0
     rc=0  status.outcome: pass
@@ -541,26 +585,26 @@ compose network, because that is where the object store is.
     rc=0  status.measured.rtoSeconds: 1
     rc=0  status.measured.rpoSeconds: 9
     rc=0  status.newTopics: ["drill-laptopdemo"]
-    rc=0  status.evidence.scorecardKey: logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.json
-    rc=0  status.evidence.sidecarKey: logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.sig
-    rc=0  (kubectl get restore restore-61d3af30 -o jsonpath={.status.evidence.verification.result})
-    rc=0  (status.evidence.verification): {"matchedKeyId":"2190b61d2de7a3158a8790cd2dd15f2421db6d9f7b42a2c9a79affb2dd797f79","payloadType":"application/vnd.logweir.drill-scorecard+json;version=1.0.0","result":"Valid","verifiedAt":"2026-09-11T18:52:59Z"}
-    rc=0  (mc cat kafka-backups/logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.json)
-    rc=0  (mc cat kafka-backups/logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.sig)
+    rc=0  status.evidence.scorecardKey: logweir/drills/01M2922J53Z6CZ8M7406W9G218.json
+    rc=0  status.evidence.sidecarKey: logweir/drills/01M2922J53Z6CZ8M7406W9G218.sig
+    rc=0  (kubectl get restore restore-7423c51b -o jsonpath={.status.evidence.verification.result})
+    rc=0  (status.evidence.verification): {"matchedKeyId":"889fd1c00c029029e0dd10c2ba090faa71178b3bed245117c7d2284d32d83288","payloadType":"application/vnd.logweir.drill-scorecard+json;version=1.0.0","result":"Valid","verifiedAt":"2026-09-11T20:20:54Z"}
+    rc=0  (mc cat kafka-backups/logweir/drills/01M2922J53Z6CZ8M7406W9G218.json)
+    rc=0  (mc cat kafka-backups/logweir/drills/01M2922J53Z6CZ8M7406W9G218.sig)
     rc=0  (logweir drill verify --payload-type scorecard)
-signature: VALID  key 2190b61d2de7a3158a8790cd2dd15f2421db6d9f7b42a2c9a79affb2dd797f79
-run_id:    01M28X1JRC4ET9QRY76VGS7YPG
+signature: VALID  key 889fd1c00c029029e0dd10c2ba090faa71178b3bed245117c7d2284d32d83288
+run_id:    01M2922J53Z6CZ8M7406W9G218
 outcome:   pass
 approval:  laptop (DEMO-1)
-offsets:   logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.offsets.json
-           sha256:d42a1c817c3ef8f089478fa466343235251b13259b23514d4319d684e8980f3c — the engine's offset MAPPING, uploaded as evidence and applied to nothing
+offsets:   logweir/drills/01M2922J53Z6CZ8M7406W9G218.offsets.json
+           sha256:16649760c94a1ab94a436616f08e16dbebe73d5ebcba27acc6bb6db6dff13747 — the engine's offset MAPPING, uploaded as evidence and applied to nothing
     rc=0  (python3 docs/verify_scorecard.py --payload-type scorecard)
-VALID  run_id=01M28X1JRC4ET9QRY76VGS7YPG  outcome=pass
+VALID  run_id=01M2922J53Z6CZ8M7406W9G218  outcome=pass
        rto_seconds=1  rpo_seconds=9
        integrity=byte-fingerprint/pass
        evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       offsets:  logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.offsets.json
-                 sha256:d42a1c817c3ef8f089478fa466343235251b13259b23514d4319d684e8980f3c — the engine's offset MAPPING, uploaded as evidence and applied to nothing
+       offsets:  logweir/drills/01M2922J53Z6CZ8M7406W9G218.offsets.json
+                 sha256:16649760c94a1ab94a436616f08e16dbebe73d5ebcba27acc6bb6db6dff13747 — the engine's offset MAPPING, uploaded as evidence and applied to nothing
        verifier: verify_scorecard.py 1.13.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, the six required non-block fields present and of the type their Rust type implies, u64 domain with null refused where Rust has no Option, target.auth's mode present, not blank, and one of the two values the format defines when the block is; evidence.offset_report_key and its sha256 present or absent together; target.marker_topic present unless target.mode is newTopic; target.mode absent or one of the two values the format defines; approval.self_attested derived, not echoed)
 ```
 
@@ -568,13 +612,14 @@ The summary the walk prints for itself:
 
 ```
 ==> PHASE C EXIT CRITERION MET
-    Backup  logweir-backup-laptop-20260911-185200:  exitCode=0  verification=Valid
-                           receiptKey=logweir/backups/adb40303-8ddf-4af4-b4bd-93b348d8aaaf-20260911-185200/01M28X0AN2VYZW2FT7WK1NG1D5.receipt.json
-    Restore restore-61d3af30: phase=Succeeded  exitCode=0  outcome=pass
+
+    Backup  logweir-backup-laptop-20260911-202000:  exitCode=0  verification=Valid
+                           receiptKey=logweir/backups/6ed3dbba-4d06-4f71-9d44-1ce14a269d59-20260911-202000/01M29219NNNSH9JVTW4AC6M5QD.receipt.json
+    Restore restore-7423c51b: phase=Succeeded  exitCode=0  outcome=pass
                            integrity=byte-fingerprint  rtoSeconds=1  rpoSeconds=9
                            newTopics=["drill-laptopdemo"]
-                           scorecardKey=logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.json
-                           sidecarKey=logweir/drills/01M28X1JRC4ET9QRY76VGS7YPG.sig
+                           scorecardKey=logweir/drills/01M2922J53Z6CZ8M7406W9G218.json
+                           sidecarKey=logweir/drills/01M2922J53Z6CZ8M7406W9G218.sig
                            verification=Valid
     Both readers agreed, each exit code read directly: logweir drill verify -> 0,
     python3 docs/verify_scorecard.py -> 0.
@@ -637,13 +682,13 @@ The twelve banners it printed, in order:
 
 ```
 ==> PHASE C EXIT CRITERION MET
-    Backup  logweir-backup-laptop-20260911-185600:  exitCode=0  verification=Valid
-                           receiptKey=logweir/backups/9e175188-720d-454e-8528-8c739222f547-20260911-185600/01M28X993CDS9R1RGSARV3KTCS.receipt.json
-    Restore restore-b6043bb3: phase=Succeeded  exitCode=0  outcome=pass
+    Backup  logweir-backup-laptop-20260911-202200:  exitCode=0  verification=Valid
+                           receiptKey=logweir/backups/5eb64236-3bee-4092-bf56-59437a01a32c-20260911-202200/01M2927M3060NWCGW51C13Q07J.receipt.json
+    Restore restore-a9ea9f9c: phase=Succeeded  exitCode=0  outcome=pass
                            integrity=byte-fingerprint  rtoSeconds=1  rpoSeconds=9
                            newTopics=["drill-laptopdemo"]
-                           scorecardKey=logweir/drills/01M28XAGYN42CPX3RQJ3QD42DJ.json
-                           sidecarKey=logweir/drills/01M28XAGYN42CPX3RQJ3QD42DJ.sig
+                           scorecardKey=logweir/drills/01M2928WBA72NZ660YB1MMRGKT.json
+                           sidecarKey=logweir/drills/01M2928WBA72NZ660YB1MMRGKT.sig
                            verification=Valid
     Both readers agreed, each exit code read directly: logweir drill verify -> 0,
     python3 docs/verify_scorecard.py -> 0.
@@ -652,7 +697,7 @@ The twelve banners it printed, in order:
     NO PRIVATE KEY WAS EVER TYPED INTO THE BROWSER.
 
 ==> 12/12 teardown
-    stopped the kubectl proxy (pid 18033)
+    stopped the kubectl proxy (pid 1207)
     rc=0  (kubectl delete -f logweir.yaml)
     rc=0  (kubectl delete ns logweir-system logweir-t28)
     rc=0  (mc rm kafka-backups/laptop-demo/ — a non-zero here just means there was nothing to sweep)
@@ -663,6 +708,7 @@ The twelve banners it printed, in order:
 rc=0
 ```
 
+`grep -E 'rc=[1-9]'` over that whole log finds **nothing**. Wall clock 104 s; pass 1 was 90 s.
 
 ## What this transcript does not prove
 
@@ -675,6 +721,14 @@ rc=0
   the page runs with the viewer's entire cluster authority, not with the four ClusterRoles
   `logweir.yaml` ships. Step 9 prints that in full before the first fetch.
 - **It is not an MSK result.** Nothing here touches MSK, and no acceptance criterion depends on it.
+- **It does not prove the wizard renders for every namespace shape.** It renders here, on a namespace
+  with one `role: source` `KafkaCluster` and one `Succeeded` `Backup`, and the two defects that made
+  it fail on exactly that shape are closed and guarded by rows in `ui/tests/pages.spec.js`. A
+  namespace in which NO run has reached `Succeeded` still has no covered window to default a point in
+  time from: step 2 says which row it fell back to and why, and there is no plan to render.
+- **A locally pinned digest is a measurement, not a reproducible pin.** The controller image was
+  rebuilt for this recording and its digest moved again — the fourth time in this plan (plan erratum
+  E19a, `docs/kubernetes.md` §14.7).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software Foundation. Logweir is not
 affiliated with or endorsed by the ASF.
