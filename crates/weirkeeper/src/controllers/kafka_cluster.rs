@@ -460,6 +460,63 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
     })
 }
 
+/// When the probe this pass is reading **actually finished**.
+///
+/// # THIS IS NOT `now`, AND THE LIVE RUN IS WHY
+///
+/// Measured on docker-desktop with `observedAt: now`: **3,388 reconciles in
+/// ninety seconds**, a hot loop. The mechanism is `controller().owns(jobs)`
+/// plus a status field that changes on every read — a status patch carrying a
+/// fresh `now` bumps the object's `resourceVersion`, the `KafkaCluster` watch
+/// fires, the reconcile re-reads the same finished Job, writes another fresh
+/// `now`, and so on at ~2,000 passes a minute. (The TTL patch is not the
+/// culprit: a merge patch whose content is unchanged is a no-op and bumps
+/// nothing. The clock was.)
+///
+/// Taking the instant from the PROBE instead of from the controller fixes it at
+/// the root and is also the more truthful value — the CRD field says "when the
+/// probe above was performed", not "when a reconcile last looked". It is a
+/// property of the Job, so every re-read of the same Job produces a
+/// BYTE-IDENTICAL patch, the API server treats it as a no-op, and the loop has
+/// nothing to feed on. `the_observed_status_patch_is_stable_across_passes` is
+/// the regression test.
+///
+/// Four sources, in order of how close each is to the probe itself: the runner
+/// container's own `finishedAt`, the Job's `completionTime`, the Job's terminal
+/// condition's `lastTransitionTime`, and — only when the API server offered
+/// none of the three — `now`.
+#[must_use]
+pub fn observed_at(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> DateTime<Utc> {
+    pod.and_then(|p| p.status.as_ref())
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == crate::job::CONTAINER_NAME))
+        .and_then(|c| c.state.as_ref())
+        .and_then(|s| s.terminated.as_ref())
+        .and_then(|t| t.finished_at.as_ref())
+        .map(|t| t.0)
+        .or_else(|| {
+            job.status
+                .as_ref()
+                .and_then(|s| s.completion_time.as_ref())
+                .map(|t| t.0)
+        })
+        .or_else(|| {
+            job.status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|cs| {
+                    cs.iter()
+                        .filter(|c| {
+                            c.status == "True" && (c.type_ == "Complete" || c.type_ == "Failed")
+                        })
+                        .filter_map(|c| c.last_transition_time.as_ref())
+                        .map(|t| t.0)
+                        .next()
+                })
+        })
+        .unwrap_or(now)
+}
+
 // ---------------------------------------------------------------------------
 // Status patches
 // ---------------------------------------------------------------------------
@@ -535,7 +592,7 @@ pub fn observed_status_patch(
     cluster: &KafkaCluster,
     v: &Verdict,
     exit_code: i32,
-    now: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
 ) -> Value {
     let mut status = serde_json::Map::new();
     if let Some(r) = v.reachable {
@@ -544,7 +601,9 @@ pub fn observed_status_patch(
     if let Some(id) = v.cluster_id.as_ref() {
         status.insert("clusterId".to_string(), json!(id));
     }
-    status.insert("observedAt".to_string(), json!(now));
+    // THE PROBE'S OWN INSTANT, NOT THE CONTROLLER'S — see `observed_at` for the
+    // 3,388-reconciles-in-ninety-seconds measurement that made this the value.
+    status.insert("observedAt".to_string(), json!(observed_at));
     // The scalar the condition's reason is promoted to (review finding M2):
     // `reachable` alone cannot distinguish `ProbeOutputUnreadable` from
     // `NoExitCode` from a probe still in flight.
@@ -556,7 +615,7 @@ pub fn observed_status_patch(
             v.status,
             &v.reason,
             &verdict_message(v, exit_code),
-            now,
+            observed_at,
         )]),
     );
     json!({ "status": Value::Object(status) })
@@ -574,11 +633,11 @@ pub fn crashed_status_patch(
     cluster: &KafkaCluster,
     terminal_state: &str,
     job_name: &str,
-    now: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
 ) -> Value {
     json!({
         "status": {
-            "observedAt": now,
+            "observedAt": observed_at,
             "reason": terminal_state,
             "conditions": [condition(
                 cluster,
@@ -590,7 +649,7 @@ pub fn crashed_status_patch(
                      unset rather than invented",
                     crate::job::CONTAINER_NAME
                 ),
-                now,
+                observed_at,
             )],
         }
     })
@@ -942,6 +1001,7 @@ async fn reconcile_cluster_inner(
     // none".
     let Some(exit_code) = exit_code else {
         let terminal_state = backup::crash_terminal_state(pod.as_ref());
+        let observed = observed_at(&job, pod.as_ref(), now);
         warn!(
             cluster = %name,
             namespace = %namespace,
@@ -958,7 +1018,7 @@ async fn reconcile_cluster_inner(
                     cluster,
                     terminal_state,
                     &job_name,
-                    now,
+                    observed,
                 )),
             )
             .await
@@ -988,6 +1048,7 @@ async fn reconcile_cluster_inner(
         .map_err(KafkaClusterError::Api)?;
     let report = probe_report(&log);
     let v = verdict(&report);
+    let observed = observed_at(&job, pod.as_ref(), now);
 
     if v.reachable.is_none() {
         warn!(
@@ -1005,7 +1066,7 @@ async fn reconcile_cluster_inner(
         .patch_status(
             &name,
             &PatchParams::default(),
-            &Patch::Merge(observed_status_patch(cluster, &v, exit_code, now)),
+            &Patch::Merge(observed_status_patch(cluster, &v, exit_code, observed)),
         )
         .await
         .map_err(KafkaClusterError::Api)?;

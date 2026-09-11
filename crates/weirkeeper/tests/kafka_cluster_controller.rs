@@ -26,7 +26,7 @@ use serde_json::Value;
 use weirkeeper::conditions::{TERMINAL_STATES, TERMINAL_STATE_NAME_TOO_LONG};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
 use weirkeeper::controllers::kafka_cluster::{
-    action_for, auth_mode_flag, crashed_status_patch, name_limit_for_cluster,
+    action_for, auth_mode_flag, crashed_status_patch, name_limit_for_cluster, observed_at,
     observed_status_patch, probe_job_name, probe_report, probe_started_patch, reconcile_cluster,
     refused_status_patch, runner_argv, runner_job_spec, verdict, ProbeReport, Requeue,
     CLUSTER_ID_PREFIX, CONDITION_REACHABLE, PROBE_CONDITION_REASONS, PROBE_DEADLINE_SECONDS,
@@ -1268,4 +1268,83 @@ fn the_requeue_maps_onto_the_action_the_runtime_gets() {
              own TTL, applied by the API server. Found `{token}`."
         );
     }
+}
+
+/// **The hot loop, and its regression test.** Two reconciles over the SAME
+/// finished probe Job write BYTE-IDENTICAL status patches.
+///
+/// # What went wrong live, and what it cost
+///
+/// With `observedAt` taken from the controller's clock, the shipped reconciler
+/// did **3,388 reconciles in ninety seconds** on docker-desktop against three
+/// `KafkaCluster` objects. `controller().owns(jobs)` is half the mechanism and a
+/// status field that changes on every read is the other: a patch carrying a
+/// fresh `now` bumps `resourceVersion`, the object's own watch fires, the
+/// reconcile re-reads the same finished Job, writes another fresh `now`, and the
+/// loop feeds itself at ~2,000 passes a minute. (The TTL patch is innocent: a
+/// merge patch whose content is unchanged bumps nothing.)
+///
+/// The fix is `observed_at`, which takes the instant from the PROBE — the
+/// runner container's `finishedAt`, the Job's `completionTime`, or its terminal
+/// condition — so the whole patch is a function of the Job and a re-read is a
+/// no-op at the API server. This row is what stops the clock creeping back in:
+/// it drives the real reconcile twice over one route table and compares the two
+/// patches as bytes, with two DIFFERENT `now` values to make the point that the
+/// controller's clock must not appear in the result at all.
+#[tokio::test]
+async fn the_observed_status_patch_is_stable_across_passes() {
+    // A finished Job whose pod's `runner` reports a fixed `finishedAt`, which is
+    // what the fixtures above already carry.
+    let mut patches = Vec::new();
+    for clock in [now(), utc(2026, 9, 10, 18, 30)] {
+        let (client, _rec, bodies) =
+            mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+        reconcile_cluster(&cluster(), &client, clock)
+            .await
+            .expect("the reconcile completes");
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+        patches.push(patched_statuses(&seen)[0].clone());
+    }
+    assert_eq!(
+        patches[0], patches[1],
+        "two passes over the same finished Job must write the SAME bytes, whatever the \
+         controller's clock says — otherwise every pass bumps `resourceVersion`, the object's \
+         own watch fires, and the reconciler spins (measured live: 3,388 passes in 90 s)"
+    );
+    let observed = patches[0]["observedAt"]
+        .as_str()
+        .expect("the patch carries observedAt");
+    assert_eq!(
+        observed, "2026-09-10T11:59:00Z",
+        "and the instant is the RUNNER CONTAINER's own `finishedAt`, not either clock: {observed}"
+    );
+
+    // The helper's four sources, in order, over the shipped fixtures.
+    let job: k8s_openapi::api::batch::v1::Job =
+        serde_json::from_str(&job_body("Complete")).expect("the fixture is a Job");
+    let pods: kube::core::ObjectList<k8s_openapi::api::core::v1::Pod> =
+        serde_json::from_str(&pod_list_terminated(0)).expect("the fixture is a PodList");
+    assert_eq!(
+        observed_at(&job, pods.items.first(), now()).to_rfc3339(),
+        "2026-09-10T11:59:00+00:00",
+        "source 1: the runner container's `finishedAt`"
+    );
+    let no_pod = observed_at(&job, None, now());
+    assert_eq!(
+        no_pod.to_rfc3339(),
+        "2026-09-10T11:59:00+00:00",
+        "source 3: the Job's terminal condition's `lastTransitionTime` when no pod is left \
+         (this fixture carries no `completionTime`)"
+    );
+    // And `now` only when the API server offered nothing at all.
+    let bare: k8s_openapi::api::batch::v1::Job = serde_json::from_str(
+        r#"{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"x"},"status":{}}"#,
+    )
+    .expect("the fixture is a Job");
+    assert_eq!(
+        observed_at(&bare, None, now()),
+        now(),
+        "source 4, the fallback: nothing on the Job and no pod, so the controller's clock is all \
+         there is"
+    );
 }
