@@ -68,9 +68,10 @@ fn read(rel: &str) -> String {
 /// not a `const fn`.
 ///
 /// The one remaining evasion — keep the declaration, add a clock-reading
-/// helper, and repoint every *use* at it — leaves `T` unused, and this
-/// workspace builds its tests under `-D warnings`, so `dead_code` fails the
-/// build before this test is reached.
+/// helper, and repoint every *use* at it — leaves `T` unused. Nothing in this
+/// workspace denies warnings in a test build, so `dead_code` alone does not
+/// fail it; that evasion is caught by `cargo clippy --features e2e -- -D
+/// warnings`, the gate every task and review runs by hand, not by this test.
 ///
 /// The `Utc::now` needle stays: it is the spelling a clock read would most
 /// likely take (`pitr_boundary.rs` already has `chrono` through the harness,
