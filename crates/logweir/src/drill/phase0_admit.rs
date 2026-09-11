@@ -74,7 +74,71 @@ pub struct TopicPreflight {
     pub topics_created: Vec<String>,
 }
 
+/// The stdout key the runner prints guard **G-TS**'s observation on —
+/// **interface I8's fourth key line**, and the producer half of plan erratum
+/// **E10(c)**.
+///
+/// # Why a line at all, and why one
+///
+/// `Restore.status.topicPreflight` was declared at slot 5 and had **no
+/// producer**: the observation is returned by phase 0 inside the runner and is
+/// deliberately not a scorecard field (Global Constraint 12 as amended), so
+/// nothing carried it out of the pod and the operator rendered a declared
+/// absence. Closing the gap needs exactly one thing on this side — a machine-
+/// readable stdout line — because the controller reads the pod's log and the
+/// signed scorecard and nothing else.
+///
+/// ONE LINE, NOT THREE. A pod log is stdout and stderr merged in
+/// nondeterministic order, so every controller-side reader in this plan scans
+/// a BOUNDED TAIL (`weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`, 8
+/// lines) and matches by key name (plan erratum **E4**). Three separate
+/// `topic-preflight-*=` lines would spend three of those eight on one fact and
+/// crowd out interface I8's own three keys on a run that also wrote an offset
+/// report. One line carrying a JSON object costs one.
+pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
+
 impl TopicPreflight {
+    /// This observation as the value of [`TOPIC_PREFLIGHT_KEY_PREFIX`]'s line
+    /// — a single-line JSON object in `Restore.status.topicPreflight`'s own
+    /// camelCase spelling.
+    ///
+    /// **THE THREE KEYS ARE THE CRD's THREE FIELDS**, byte for byte:
+    /// `timestampType`, `retentionMs`, `timestampBound`
+    /// (`weirkeeper::crds::restore::TopicPreflight`). The controller copies
+    /// them across without renaming anything, so a fourth field here would be
+    /// dropped rather than misfiled.
+    ///
+    /// `retention_ms` IS A STRING ON THIS SIDE AND AN INTEGER ON THE OTHER,
+    /// and the conversion is here rather than in the controller. DescribeConfigs
+    /// returns a string and this type carries it verbatim, on purpose: a value
+    /// this build cannot parse is a fact worth keeping. But
+    /// `Restore.status.topicPreflight.retentionMs` is an `i64` in a structural
+    /// schema, so a value that will not parse is OMITTED from this line
+    /// entirely — an absent field is truthful and a `0` is not, and the raw
+    /// string is still in the pod log above.
+    ///
+    /// `configs_set` and `topics_created` are NOT here. Neither is a
+    /// `topicPreflight` field on the CRD: the configs are a compile-time
+    /// constant (`TARGET_TOPIC_CONFIGS`) an operator can read in the source,
+    /// and the created topics reach the status through
+    /// `Restore.status.newTopics`, which Task 20 derives from the APPROVED
+    /// plan bytes rather than from anything the runner says about itself.
+    #[must_use]
+    pub fn status_line_value(&self) -> String {
+        let mut o = serde_json::Map::new();
+        o.insert(
+            "timestampType".to_string(),
+            serde_json::Value::String(self.timestamp_type.clone()),
+        );
+        if let Ok(ms) = self.retention_ms.trim().parse::<i64>() {
+            o.insert("retentionMs".to_string(), serde_json::Value::from(ms));
+        }
+        if let Some(b) = self.timestamp_bound_ms {
+            o.insert("timestampBound".to_string(), serde_json::Value::from(b));
+        }
+        serde_json::Value::Object(o).to_string()
+    }
+
     /// `TARGET_TOPIC_CONFIGS`, owned and in order. The ONE place the constant
     /// becomes a `Vec`, so no caller can reorder it on the way in.
     fn pinned_configs() -> Vec<(String, String)> {

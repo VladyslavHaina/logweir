@@ -560,7 +560,23 @@ fn report_with(
         Ok(o) => Some(&o.evidence),
         Err(_) => None,
     };
-    exiting(run_id, code, refusal_message.as_deref(), evidence)
+    // GUARD **G-TS**'s observation, plan erratum **E10(c)**'s producer half.
+    // Available only on `Ok`, because `RestoreOutcome` is what carries it and
+    // every other path returns a `DrillError` instead — so a run that was
+    // refused at phase 0, or that died before phase 0 finished, prints no
+    // preflight line and `Restore.status.topicPreflight` stays absent. That is
+    // the truthful answer for a run that never read the target's config.
+    let preflight = match &outcome {
+        Ok(o) => Some(&o.topic_preflight),
+        Err(_) => None,
+    };
+    exiting(
+        run_id,
+        code,
+        refusal_message.as_deref(),
+        evidence,
+        preflight,
+    )
 }
 
 /// Everything a terminal path owes the outside world, whether or not a
@@ -604,6 +620,7 @@ fn exiting(
     code: ExitCode,
     refusal_message: Option<&str>,
     evidence: Option<&EvidenceKeys>,
+    topic_preflight: Option<&phase0_admit::TopicPreflight>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
@@ -643,6 +660,25 @@ fn exiting(
     // The third line is printed only when there IS an offset report — see
     // `phase8_score::Signed::offset_report_key`. Two lines is a truthful
     // answer; a third naming an object that was never put is not.
+    // **GUARD G-TS, AND IT GOES BEFORE INTERFACE I8's KEYS.** Plan erratum
+    // **E10(c)**: `Restore.status.topicPreflight` was declared with no
+    // producer, and this line is it — one key, one line, scanned by name out
+    // of the controller's bounded tail exactly as the evidence keys are
+    // (erratum E4). It is printed BEFORE the three key lines so I8's "the
+    // FINAL stdout lines, with nothing after them" is unchanged; a reader that
+    // took the last line would still take a key.
+    //
+    // Printed only on exit 0, for the same reason the keys are: a refused or
+    // crashed run has no completed phase 0 to report, and a line naming a
+    // preflight nobody performed would be worse than the absence the operator
+    // already renders.
+    if let (ExitCode::Ok, Some(p)) = (code, topic_preflight) {
+        println!(
+            "{}{}",
+            phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX,
+            p.status_line_value()
+        );
+    }
     if let (ExitCode::Ok, Some(e)) = (code, evidence) {
         println!("scorecard-key={}", e.scorecard_key);
         println!("sidecar-key={}", e.sidecar_key);
@@ -3065,7 +3101,7 @@ mod tests {
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
             assert_eq!(
-                exiting("01TEST", c, None, None),
+                exiting("01TEST", c, None, None, None),
                 c,
                 "exiting must not alter the code"
             );

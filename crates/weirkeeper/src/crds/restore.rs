@@ -307,16 +307,36 @@ pub struct RestoreStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objectives: Option<Objectives>,
     /// What phase 0 found out about the target topics (guard **G-TS**).
-    /// **Always absent in tag 1: it has no producer, and this field says so
-    /// rather than being fabricated.** The observation is returned by phase 0
-    /// inside the runner (`RestoreOutcome::topic_preflight`) and, by Global
-    /// Constraint 12 as amended, is deliberately NOT a scorecard field — so
-    /// nothing carries it out of the pod. Interface I8 fixes three stdout key
-    /// lines and none of them is a preflight, and the controller reads the
-    /// pod's log and the signed scorecard and nothing else. Closing the gap
-    /// means a fourth machine-read stdout line on the runner's side, which is
-    /// the interface owner's change and not the operator's; an absent field is
-    /// truthful and a guessed one is not.
+    ///
+    /// **IT HAS A PRODUCER SINCE TASK 24, AND THE GAP THAT MADE IT ABSENT IS
+    /// CLOSED** (plan erratum **E10(c)**). The observation is returned by
+    /// phase 0 inside the runner (`RestoreOutcome::topic_preflight`) and, by
+    /// Global Constraint 12 as amended, is deliberately NOT a scorecard field
+    /// — so for two slots nothing carried it out of the pod and this field
+    /// declared its own absence rather than being fabricated. Closing it took
+    /// exactly what that note said it would: a fourth machine-read stdout line.
+    /// `logweir restore run` now prints
+    /// `topic-preflight=<one-line JSON object>`
+    /// (`logweir::drill::phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX`) on a
+    /// successful run, and
+    /// `weirkeeper::controllers::restore::topic_preflight` scans it out of the
+    /// same bounded tail as the evidence keys, BY KEY NAME (erratum E4).
+    ///
+    /// **STILL ABSENT ON EVERY RUN THAT DID NOT COMPLETE PHASE 0**, and that
+    /// absence is still the truthful answer rather than a zero: the line is
+    /// printed only at exit 0, because `RestoreOutcome` is what carries the
+    /// observation and every other path returns an error instead. A run
+    /// refused at phase 0 never read the target's config, so there is nothing
+    /// to report about it.
+    ///
+    /// THE THREE FIELDS ARE THE CONTRACT. The runner emits exactly
+    /// `timestampType`, `retentionMs` and `timestampBound` — this struct's
+    /// own camelCase spellings — and the controller filters the line to those
+    /// three, so a fourth key on either side is dropped rather than misfiled
+    /// into a property the structural schema then prunes. `retentionMs` is a
+    /// STRING on the runner's side (that is what DescribeConfigs returns) and
+    /// an `i64` here, and a value that will not parse is OMITTED from the line
+    /// rather than flattened to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflight>,
     /// The signed scorecard, the offset report, and the controller's
