@@ -274,6 +274,36 @@ test("a_restore_green_badge_needs_a_valid_verification_and_a_pass_outcome", () =
   }
 });
 
+test("the_restore_badge_reads_the_outcome_and_not_the_exit_code", () => {
+  // Every checked-in Restore fixture has `outcome == "pass"` exactly when
+  // `exitCode == 0`, so a rule that read the exit code would pass the rows
+  // above unnoticed (Task 26's review, finding M-1). These two objects pull
+  // the fields apart: a Valid scorecard SAYING the restore did not reconcile,
+  // with exit 0, must not be green; a Valid `pass` with a non-zero exit is.
+  const base = fixture("restore-valid-pass.json");
+  assert.equal(base.status.evidence.verification.result, "Valid");
+
+  const failedButExitZero = JSON.parse(JSON.stringify(base));
+  failedButExitZero.status.outcome = "fail-integrity";
+  failedButExitZero.status.exitCode = 0;
+  const notGreen = badgeOf(renderRestoreDetail(failedButExitZero));
+  assert.equal(
+    notGreen.includes("badge-green"),
+    false,
+    "Valid + fail-integrity + exit 0 is NOT green: the Restore rule reads `outcome`",
+  );
+  assert.ok(notGreen.includes("unverified"), "and it says `unverified`");
+
+  const passedButExitTwo = JSON.parse(JSON.stringify(base));
+  passedButExitTwo.status.outcome = "pass";
+  passedButExitTwo.status.exitCode = 2;
+  const green = badgeOf(renderRestoreDetail(passedButExitTwo));
+  assert.ok(
+    green.includes("badge-green"),
+    "Valid + pass + exit 2 IS green: the exit code is not part of the Restore rule",
+  );
+});
+
 test("the_backup_detail_renders_the_covered_window_as_rfc3339", () => {
   const object = fixture("backup-valid-exit0.json");
   assert.deepEqual(
