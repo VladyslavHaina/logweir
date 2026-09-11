@@ -139,6 +139,76 @@ fn licenses_txt_candidates(version: &str) -> Vec<PathBuf> {
     candidates
 }
 
+/// NOTICE's librdkafka attribution table: `component` -> `licence`.
+///
+/// The table is the contiguous run of two-space-indented `<name>  <licence>`
+/// rows that ends at the sentence "The full text of each". Scoping the parse
+/// to the table rather than to the whole file is the whole point: NOTICE's
+/// PROSE also names components (the paragraph recording that the first draft
+/// omitted `tinycthread` and `wingetopt`), and a guard that counts a prose
+/// mention as an attribution cannot see an attribution deleted.
+fn notice_component_table(notice: &str) -> BTreeMap<String, String> {
+    let lines: Vec<&str> = notice.lines().collect();
+    let terminator = lines
+        .iter()
+        .position(|l| l.contains("The full text of each"))
+        .unwrap_or_else(|| {
+            panic!(
+                "NOTICE has no `The full text of each` sentence. That sentence closes \
+                 the librdkafka component table and is how this test finds the table's \
+                 end; without it the parse has no anchor and would silently read \
+                 nothing, which is the failure mode this whole file exists to remove"
+            )
+        });
+
+    let mut table = BTreeMap::new();
+    let mut index = terminator;
+    let mut saw_row = false;
+    while index > 0 {
+        index -= 1;
+        let line = lines[index];
+        if line.trim().is_empty() {
+            // Blank lines separate the table from the sentence below it; once
+            // a row has been seen, a blank line ends the table going upwards.
+            if saw_row {
+                break;
+            }
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("  ") else {
+            break;
+        };
+        if rest.starts_with(' ') {
+            break;
+        }
+        let mut parts = rest.splitn(2, "  ");
+        let (Some(name), Some(licence)) = (parts.next(), parts.next()) else {
+            break;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            break;
+        }
+        saw_row = true;
+        let previous = table.insert(name.to_string(), licence.trim().to_string());
+        assert!(
+            previous.is_none(),
+            "NOTICE's component table names `{name}` twice; one row per component"
+        );
+    }
+
+    assert!(
+        table.len() >= 12,
+        "NOTICE's component table parsed as only {} row(s) ({:?}). The file has carried \
+         fourteen since librdkafka 2.12.1; a collapse means the table's SHAPE changed \
+         and this test is now asserting set equality against something too small to be \
+         worth asserting",
+        table.len(),
+        table.keys().collect::<Vec<_>>()
+    );
+    table
+}
+
 /// **`NOTICE` names every component `LICENSES.txt` names — derived, never typed.**
 ///
 /// The expected set is every `^LICENSE.<component>` header in librdkafka's own
@@ -205,15 +275,60 @@ fn the_notice_names_every_librdkafka_component_in_licenses_txt() {
     );
 
     let notice = read("NOTICE");
-    for component in &components {
+
+    // THE GUARD READS THE TABLE, AND READS IT BOTH WAYS.
+    //
+    // An earlier shape asserted `notice.contains(component)` over the WHOLE
+    // file, and that is not the assertion it looks like. `tinycthread` and
+    // `wingetopt` are named twice in NOTICE — once in the attribution table
+    // and once in the paragraph explaining that the first draft omitted them —
+    // so deleting either component's ATTRIBUTION LINE left the test green.
+    // The two components this file exists to stop losing were the two the
+    // guard could not see lost. It was also one-directional: an invented
+    // fifteenth component added to the table passed, because nothing asserted
+    // NOTICE ⊆ LICENSES.txt.
+    //
+    // So: parse the table into a set and assert SET EQUALITY with the derived
+    // fourteen. A missing component fails naming it; an extra one fails naming
+    // it; the prose is prose again.
+    let components_in_notice = notice_component_table(&notice);
+
+    let missing: Vec<&String> = components
+        .iter()
+        .filter(|c| !components_in_notice.contains_key(*c))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "NOTICE's component table does not name the librdkafka component(s) {missing:?}. \
+         The expected set is read from {} — not from a literal in this test — so \
+         deleting a line from the table cannot be matched by shrinking the \
+         expectation, and a mention in the surrounding PROSE does not count: this \
+         assertion reads the attribution table and nothing else. Table read \
+         ({} rows): {:?}",
+        licenses.display(),
+        components_in_notice.len(),
+        components_in_notice.keys().collect::<Vec<_>>()
+    );
+
+    let extra: Vec<&String> = components_in_notice
+        .keys()
+        .filter(|c| !components.contains(*c))
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "NOTICE's component table names {extra:?}, which librdkafka's own {} does NOT \
+         vendor. A licence notice is a statement about what is inside the binary; \
+         naming a component that is not there is a false attribution, and it is as \
+         wrong as losing one. The derived set ({} components) is: {components:?}",
+        licenses.display(),
+        components.len()
+    );
+
+    for (component, licence) in &components_in_notice {
         assert!(
-            notice.contains(component.as_str()),
-            "NOTICE does not name the librdkafka component `{component}`. The expected \
-             set is read from {} — not from a literal in this test — so deleting the \
-             line from NOTICE cannot be matched by shrinking the expectation. \
-             {} components were found: {components:?}",
-            licenses.display(),
-            components.len()
+            !licence.trim().is_empty(),
+            "NOTICE's component table gives `{component}` no licence. The row exists to \
+             say WHICH licence the component travels under; a bare name states nothing"
         );
     }
 
@@ -270,19 +385,28 @@ fn locked_packages(lock: &str) -> BTreeSet<String> {
     packages
 }
 
-/// The inventory's entries: `name@version` -> (SPDX field, copyright field).
-fn inventory_entries(text: &str) -> BTreeMap<String, (String, String)> {
-    let mut entries: BTreeMap<String, (String, String)> = BTreeMap::new();
+/// The inventory's entries: `name@version` -> (SPDX field, copyright lines).
+///
+/// THE COPYRIGHT FIELD IS PLURAL. The obligation a redistributed binary carries
+/// is to reproduce the notices, and a licence file naming four holders owes
+/// four lines — `ring` names Brian Smith, the Go Authors and the Chromium
+/// Authors; `aws-lc-sys` names eleven. The generator emits one
+/// `- Copyright:` line per notice and then the single `- Copyright source:`
+/// line, so this parser collects a `Vec` rather than overwriting a `String`.
+/// An earlier shape kept the last line only, which would have hidden exactly
+/// the defect this parse now makes visible.
+fn inventory_entries(text: &str) -> BTreeMap<String, (String, Vec<String>)> {
+    let mut entries: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     let mut current: Option<String> = None;
     let mut spdx = String::new();
-    let mut copyright = String::new();
+    let mut copyrights: Vec<String> = Vec::new();
 
-    let flush = |entries: &mut BTreeMap<String, (String, String)>,
+    let flush = |entries: &mut BTreeMap<String, (String, Vec<String>)>,
                  current: &mut Option<String>,
                  spdx: &mut String,
-                 copyright: &mut String| {
+                 copyrights: &mut Vec<String>| {
         if let Some(key) = current.take() {
-            let previous = entries.insert(key.clone(), (spdx.clone(), copyright.clone()));
+            let previous = entries.insert(key.clone(), (spdx.clone(), copyrights.clone()));
             assert!(
                 previous.is_none(),
                 "THIRD_PARTY_NOTICES.md carries TWO entries for `{key}`; the generator \
@@ -290,20 +414,20 @@ fn inventory_entries(text: &str) -> BTreeMap<String, (String, String)> {
             );
         }
         spdx.clear();
-        copyright.clear();
+        copyrights.clear();
     };
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("### ") {
-            flush(&mut entries, &mut current, &mut spdx, &mut copyright);
+            flush(&mut entries, &mut current, &mut spdx, &mut copyrights);
             current = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("- SPDX: ") {
             spdx = rest.trim().trim_matches('`').to_string();
         } else if let Some(rest) = line.strip_prefix("- Copyright: ") {
-            copyright = rest.trim().to_string();
+            copyrights.push(rest.trim().to_string());
         }
     }
-    flush(&mut entries, &mut current, &mut spdx, &mut copyright);
+    flush(&mut entries, &mut current, &mut spdx, &mut copyrights);
     entries
 }
 
@@ -333,7 +457,7 @@ fn third_party_notices_covers_every_resolved_package() {
     let entries = inventory_entries(&inventory);
 
     for package in &expected {
-        let (spdx, copyright) = entries.get(package).unwrap_or_else(|| {
+        let (spdx, copyrights) = entries.get(package).unwrap_or_else(|| {
             panic!(
                 "THIRD_PARTY_NOTICES.md has no entry for `{package}`. The expected set is \
                  parsed from Cargo.lock ({} packages), not from a literal here, so a \
@@ -347,13 +471,21 @@ fn third_party_notices_covers_every_resolved_package() {
             "THIRD_PARTY_NOTICES.md's entry for `{package}` has an empty SPDX field"
         );
         assert!(
-            !copyright.trim().is_empty(),
-            "THIRD_PARTY_NOTICES.md's entry for `{package}` has an empty copyright \
-             field. Every package gets one of the three arms, and the third arm states \
+            !copyrights.is_empty(),
+            "THIRD_PARTY_NOTICES.md's entry for `{package}` carries NO copyright line. \
+             Every package gets one of the three arms, and the third arm states \
              the fact (`no copyright statement in the published crate; SPDX <expr> \
-             applies`) rather than emitting nothing — an empty field is \
+             applies`) rather than emitting nothing — an absent field is \
              indistinguishable from `nothing is owed here`"
         );
+        for copyright in copyrights {
+            assert!(
+                !copyright.trim().is_empty(),
+                "THIRD_PARTY_NOTICES.md's entry for `{package}` carries an EMPTY \
+                 `- Copyright:` line. A blank notice is worse than a stated absence: \
+                 it reads as an answer"
+            );
+        }
     }
 
     let extra: Vec<&String> = entries.keys().filter(|k| !expected.contains(*k)).collect();
@@ -380,6 +512,113 @@ fn third_party_notices_covers_every_resolved_package() {
         inventory.contains("scripts/gen-third-party-notices.sh"),
         "THIRD_PARTY_NOTICES.md must name the command that regenerates it"
     );
+}
+
+/// The inventory entry for the crate named `name`, whatever version resolved.
+/// Keyed by name rather than `name@version` so a dependency bump does not
+/// silently turn this assertion into a vacuous one.
+fn entry_for<'a>(
+    entries: &'a BTreeMap<String, (String, Vec<String>)>,
+    name: &str,
+) -> (&'a String, &'a Vec<String>) {
+    let prefix = format!("{name}@");
+    let (key, (_, copyrights)) = entries
+        .iter()
+        .find(|(k, _)| k.starts_with(&prefix))
+        .unwrap_or_else(|| {
+            panic!(
+                "THIRD_PARTY_NOTICES.md has no entry for a crate named `{name}`. If the \
+                 dependency genuinely left the graph, this assertion is the thing to \
+                 delete — deliberately, not by accident"
+            )
+        });
+    (key, copyrights)
+}
+
+/// **Arm 1 carries EVERY holder its licence files name, not the first one.**
+///
+/// The obligation MIT, BSD and Apache-2.0 impose is to reproduce the copyright
+/// notices — plural. A generator that returned the first matching line of the
+/// first matching file attributed `ring` to "The Go Authors" (its
+/// `LICENSE-BoringSSL` sorts before `LICENSE-other-bits`, where Brian Smith
+/// is) and printed nine of `aws-lc-sys`'s eleven notices nowhere at all. And a
+/// notice with no `(c)` and no year is still a notice: `aws-lc-sys`'s
+/// `LICENSE:9` is `Copyright Amazon.com, Inc. or its affiliates.` — skipping
+/// it attributed an Amazon crate to Google, and told the reader that
+/// `aws-lc-rs` and `utf8_iter` carried no licence-file notice while both ship
+/// one.
+///
+/// These four crates are the measured witnesses of those two defects, so they
+/// are the four asserted here. Reads two checked-in files and nothing else
+/// (Global Constraint 22): no cargo, no registry, no network.
+#[test]
+fn the_inventory_carries_every_holder_a_licence_file_names() {
+    let inventory = read("THIRD_PARTY_NOTICES.md");
+    let entries = inventory_entries(&inventory);
+
+    // (F2) Every holder in the file, not the first. `ring`'s own notice lives
+    // in the file that sorts LAST.
+    let (ring_key, ring) = entry_for(&entries, "ring");
+    for holder in ["Brian Smith", "The Go Authors"] {
+        assert!(
+            ring.iter().any(|line| line.contains(holder)),
+            "THIRD_PARTY_NOTICES.md's `{ring_key}` entry does not name `{holder}`. ring \
+             ships three holder notices across `LICENSE-BoringSSL` and \
+             `LICENSE-other-bits`; a generator that keeps only the first attributes the \
+             crate to whichever file sorts first and loses its author. Lines found: \
+             {ring:?}"
+        );
+    }
+    assert!(
+        ring.len() >= 2,
+        "THIRD_PARTY_NOTICES.md's `{ring_key}` entry carries {} copyright line(s). The \
+         entry is plural by construction — one line per notice — and a single line \
+         means the generator went back to first-match-wins",
+        ring.len()
+    );
+
+    // (F1) A holder line with no `(c)` and no year is still a notice, and
+    // (F2) again: the OpenSSL-family notices aws-lc-sys vendors.
+    let (aws_key, aws) = entry_for(&entries, "aws-lc-sys");
+    for holder in ["Amazon", "OpenSSL"] {
+        assert!(
+            aws.iter().any(|line| line.contains(holder)),
+            "THIRD_PARTY_NOTICES.md's `{aws_key}` entry does not name `{holder}`. Its \
+             `LICENSE` opens `Copyright Amazon.com, Inc. or its affiliates.` — no \
+             `(c)`, no year, and still the notice — and goes on to carry the OpenSSL \
+             Project's and Eric Young's. Attributing an Amazon crate to Google is a \
+             false attribution, not a gap. Lines found: {aws:?}"
+        );
+    }
+    assert!(
+        aws.len() >= 3,
+        "THIRD_PARTY_NOTICES.md's `{aws_key}` entry carries {} copyright line(s); its \
+         `LICENSE` carries eleven holder notices and the entry owes one line each",
+        aws.len()
+    );
+
+    // The arm LABEL is an assertion about the crate, not a formatting choice:
+    // `authors` here would say "no licence-file notice exists" about two crates
+    // that ship one.
+    for name in ["aws-lc-rs", "utf8_iter"] {
+        let prefix = format!("{name}@");
+        let (key, (_, _)) = entries
+            .iter()
+            .find(|(k, _)| k.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("THIRD_PARTY_NOTICES.md has no entry for `{name}`"));
+        let block = inventory
+            .split("### ")
+            .find(|b| b.starts_with(key.as_str()))
+            .unwrap_or_else(|| panic!("THIRD_PARTY_NOTICES.md has no `### {key}` block"));
+        assert!(
+            block.contains("- Copyright source: licence file"),
+            "THIRD_PARTY_NOTICES.md's `{key}` entry does not use the licence-file arm. \
+             `aws-lc-rs` ships `Copyright Amazon.com, Inc. or its affiliates.` and \
+             `utf8_iter` ships `Copyright Mozilla Foundation`; reporting the \
+             `authors` arm asserts no licence-file notice exists when one does. Block \
+             read:\n{block}"
+        );
+    }
 }
 
 // ------------------------------------------------------------- the footers
@@ -658,7 +897,217 @@ fn both_images_copy_the_licence_and_the_notice() {
     }
 }
 
+// -------------------------------------------------------- the UI section pointer
+
+/// Every `§N` / `section N` marker on one line, as `(start, end, N)` byte
+/// offsets into that line. Hand-rolled rather than pulled from `regex`,
+/// because Global Constraint 38 closes the workspace graph and a cross-reference
+/// checker is not worth a package.
+fn section_markers(line: &str) -> Vec<(usize, usize, u32)> {
+    let bytes = line.as_bytes();
+    let digits_from = |start: usize| -> Option<(usize, u32)> {
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == start {
+            return None;
+        }
+        line[start..end].parse::<u32>().ok().map(|n| (end, n))
+    };
+
+    let mut markers: Vec<(usize, usize, u32)> = Vec::new();
+    for (at, _) in line.match_indices('\u{a7}') {
+        if let Some((end, number)) = digits_from(at + '\u{a7}'.len_utf8()) {
+            markers.push((at, end, number));
+        }
+    }
+    // `to_ascii_lowercase` maps only A-Z, so every byte offset in the lowered
+    // copy is the same offset in the original.
+    let lowered = line.to_ascii_lowercase();
+    for (at, _) in lowered.match_indices("section ") {
+        if let Some((end, number)) = digits_from(at + "section ".len()) {
+            markers.push((at, end, number));
+        }
+    }
+    markers.sort_unstable();
+    markers.dedup();
+    markers
+}
+
+/// **A pointer at the UI section names the number that section actually has.**
+///
+/// `docs/kubernetes.md`'s UI section was `## 15.` when `docs/install.md` and
+/// `docs/kubernetes.md` were written to point at it, and Task 24 inserted a new
+/// `## 15.` ahead of it, renumbering it to `## 16.`. The rebase was clean —
+/// nothing in git notices that a number in prose became a pointer at the wrong
+/// section — so this arm exists to notice it: the heading is PARSED, the
+/// pointers are found, and the two must agree.
+///
+/// Finding a pointer: a `§N` or `section N` marker with `Serving the UI` or
+/// `UI section` within 60 characters on the same line, where the window stops
+/// at the NEXT marker. That bound is what keeps the `§14` in
+/// "`§14`'s X-DIGEST transcript and `§16`'s UI section" from being read as a
+/// pointer at the UI section — it belongs to the transcript beside it.
+///
+/// A `§15` that means Task 24's own `## 15. The evidence credential…` is not a
+/// UI pointer and is untouched by all of this.
+#[test]
+fn ui_section_pointers_name_the_heading_that_exists() {
+    let kubernetes = read("docs/kubernetes.md");
+
+    let headings: Vec<u32> = kubernetes
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("## ")?;
+            let (number, title) = rest.split_once(". ")?;
+            (title.trim() == "Serving the UI").then(|| number.trim().parse::<u32>().ok())?
+        })
+        .collect();
+    assert_eq!(
+        headings.len(),
+        1,
+        "docs/kubernetes.md must carry exactly one `## <N>. Serving the UI` heading; \
+         found {}. Every pointer in the tree is checked against that number, so two \
+         headings (or none) leaves the pointers checked against nothing",
+        headings.len()
+    );
+    let heading = headings[0];
+
+    let mut sources: Vec<PathBuf> = docs_markdown();
+    sources.push(repo_root().join("README.md"));
+    sources.push(repo_root().join("ui").join("README.md"));
+
+    let mut sites: Vec<String> = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+        for (number, line_number, line) in text.lines().enumerate().flat_map(|(i, line)| {
+            let markers = section_markers(line);
+            let mut found = Vec::new();
+            for (index, &(start, end, number)) in markers.iter().enumerate() {
+                let ceiling = markers
+                    .get(index + 1)
+                    .map(|next| next.0)
+                    .unwrap_or(line.len());
+                let mut forward = (end + 60).min(ceiling).min(line.len());
+                while forward > end && !line.is_char_boundary(forward) {
+                    forward -= 1;
+                }
+                let floor = if index > 0 { markers[index - 1].1 } else { 0 };
+                let mut backward = start.saturating_sub(60).max(floor);
+                while backward < start && !line.is_char_boundary(backward) {
+                    backward += 1;
+                }
+                let window = format!("{}{}", &line[backward..start], &line[end..forward]);
+                if window.contains("Serving the UI") || window.contains("UI section") {
+                    found.push((number, i + 1, line));
+                }
+            }
+            found
+        }) {
+            let relative = path
+                .strip_prefix(repo_root())
+                .unwrap_or(path.as_path())
+                .display()
+                .to_string();
+            assert_eq!(
+                number,
+                heading,
+                "{relative}:{line_number} points at section {number} for the UI section, \
+                 but `docs/kubernetes.md`'s heading is `## {heading}. Serving the UI`. \
+                 The line reads:\n  {}\nA renumbering upstream of that heading does not \
+                 conflict in git and does not break a link — it silently aims the \
+                 reader at a different section",
+                line.trim()
+            );
+            sites.push(format!("{relative}:{line_number}"));
+        }
+    }
+
+    assert!(
+        sites.len() >= 2,
+        "only {} UI-section pointer(s) were found ({sites:?}). `docs/install.md` and \
+         `docs/kubernetes.md` each carry one, and an assertion that finds nothing to \
+         check is an assertion that cannot fail — which is the defect this arm exists \
+         to catch. If a pointer was deliberately removed, this floor is the thing to \
+         change, deliberately",
+        sites.len()
+    );
+}
+
 // ---------------------------------------------------------- the install doc
+
+/// Every digest literal in `text`, in any of its shapes, described in words.
+///
+/// TWO SHAPES, because a digest in prose has two tells and only one of them is
+/// the full `sha256:<64 hex>` form:
+///
+///   1. `sha256:` followed by six or more hex characters. Six, not sixty-four,
+///      because the form people actually paste into prose is the TRUNCATED one
+///      — `sha256:a5aa6dc1…` — and it is a measurement of one build just as
+///      much as the whole thing is. Six hex digits is already an identifier;
+///      fewer could be a word (`decade`, `facade`) or a version.
+///   2. a run of sixty-four hex characters anywhere at all, prefix or no
+///      prefix. A digest pasted without its `sha256:` is still a digest.
+///
+/// The caller runs this over the file as written AND over the file with its
+/// whitespace removed, which is what catches a digest wrapped across a line
+/// break. `label` says which pass found the hit, so the failure message points
+/// at the right thing.
+///
+/// Byte scanning is safe over UTF-8: every byte of a multi-byte sequence is
+/// >= 0x80 and no ASCII hex digit ever appears inside one.
+fn digest_literals(text: &str, label: &str) -> Vec<String> {
+    const PREFIX: &str = "sha256:";
+    const TRUNCATED_MIN: usize = 6;
+    const FULL: usize = 64;
+
+    let bytes = text.as_bytes();
+    let hex_run_from = |start: usize| {
+        bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count()
+    };
+    let excerpt = |start: usize, len: usize| {
+        let end = (start + len.min(72)).min(bytes.len());
+        String::from_utf8_lossy(&bytes[start..end]).into_owned()
+    };
+
+    let mut found = Vec::new();
+
+    for (at, _) in text.match_indices(PREFIX) {
+        let start = at + PREFIX.len();
+        let run = hex_run_from(start);
+        if run >= TRUNCATED_MIN {
+            found.push(format!(
+                "`{PREFIX}` followed by {run} hex character(s) — `{PREFIX}{}` — at byte \
+                 {at} of the file {label}",
+                excerpt(start, run)
+            ));
+        }
+    }
+
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_hexdigit() {
+            index += 1;
+            continue;
+        }
+        let run = hex_run_from(index);
+        if run >= FULL {
+            found.push(format!(
+                "a bare run of {run} hex characters — `{}` — at byte {index} of the \
+                 file {label}",
+                excerpt(index, run)
+            ));
+        }
+        index += run;
+    }
+
+    found
+}
 
 /// **`docs/install.md` states the unpublished-image caveat, in its own words.**
 ///
@@ -708,28 +1157,31 @@ fn install_md_states_the_unpublished_image_caveat() {
          resolve to a locally built image until it is tagged with the shipped name"
     );
 
-    // NO DIGEST LITERAL. A locally built digest changes on every build, so a
-    // digest copied into prose is a measurement that stops being true.
-    let digests: Vec<&str> = install
-        .split("sha256:")
-        .skip(1)
-        .filter(|tail| {
-            tail.chars()
-                .take(64)
-                .filter(char::is_ascii_hexdigit)
-                .count()
-                == 64
-        })
-        .collect();
+    // NO DIGEST LITERAL, IN ANY SHAPE. A locally built digest changes on every
+    // build, so a digest copied into prose is a measurement that stops being
+    // true. An earlier shape of this guard split on `sha256:` and required the
+    // NEXT 64 characters to be hex, which caught exactly one spelling.
+    // Measured against that guard: a truncated `sha256:a5aa6dc1…`, a bare
+    // 64-hex run with no prefix, and a digest wrapped across a line break all
+    // passed. All three are a digest in prose; a reader copies them the same
+    // way. So the scan now takes every shape, over the file as written AND
+    // over the file with its whitespace removed.
+    //
+    // The legitimate `@sha256:<digest>` placeholder carries no hex at all and
+    // is untouched — which is the distinction the document actually draws.
+    let mut digests = digest_literals(&install, "as written");
+    let squeezed: String = install.chars().filter(|c| !c.is_whitespace()).collect();
+    digests.extend(digest_literals(&squeezed, "with whitespace removed"));
     assert!(
         digests.is_empty(),
-        "docs/install.md carries {} `sha256:<64 hex>` literal(s). It must not: a \
-         locally built image's digest changes on EVERY build, so a digest in prose is \
-         a measurement of one build. The document names \
+        "docs/install.md carries {} digest literal(s):\n  {}\nIt must not: a locally \
+         built image's digest changes on EVERY build, so a digest in prose is a \
+         measurement of one build. The document names \
          `config/manager/deployment.yaml` and `crates/weirkeeper/src/job.rs` as the \
          places the pinned references live, and the reader reads them from the \
-         checkout",
-        digests.len()
+         checkout. The bare `@sha256:<digest>` placeholder is fine — it carries no hex",
+        digests.len(),
+        digests.join("\n  ")
     );
     for source_of_truth in [
         "config/manager/deployment.yaml",
