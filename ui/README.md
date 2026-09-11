@@ -176,3 +176,6 @@ It does not mint an approval, hold a key, or submit the cluster-scoped
 `TrustRoster`. The roster is a cluster-admin step -- see install step 1b in
 [../docs/kubernetes.md](../docs/kubernetes.md) -- and the page surfaces that
 snippet rather than submitting it.
+
+Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.
