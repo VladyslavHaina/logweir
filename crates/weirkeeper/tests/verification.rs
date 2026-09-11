@@ -783,12 +783,30 @@ fn sequenced_client(status_codes: Vec<u16>) -> (kube::Client, Arc<Mutex<Vec<Seen
 
 /// A verify oracle that answers `Valid` without touching a bucket.
 fn valid_oracle(r: EvidenceRef) -> futures::future::BoxFuture<'static, VerificationResult> {
+    valid_oracle_at(r, Utc.with_ymd_and_hms(2026, 9, 11, 3, 20, 0).unwrap())
+}
+
+/// The same answer, reached at `at`.
+///
+/// SEPARATE BECAUSE THE INSTANT IS THE PROPERTY IN ONE TEST AND NOISE IN THE
+/// REST. `verify_evidence` reads its own clock (the brief's signature carries
+/// no `now`), so a re-verification on a later pass genuinely produces a later
+/// `verifiedAt` — and the rule that keeps the controller quiet is that a
+/// verdict whose SUBSTANCE has not changed keeps the instant it was reached
+/// at. A steady-object test whose oracle returns a CONSTANT instant cannot see
+/// that rule at all: measured, the mutant "verifiedAt is always now" left
+/// `a_verified_object_reconciles_without_a_patch` green at 13 passed / 1
+/// failed, killed only by `not_attempted_is_a_verdict_distinct_from_invalid`.
+fn valid_oracle_at(
+    r: EvidenceRef,
+    at: chrono::DateTime<Utc>,
+) -> futures::future::BoxFuture<'static, VerificationResult> {
     Box::pin(async move {
         VerificationResult {
             result: VerificationVerdict::Valid,
             matched_key_id: Some(FIXTURE_KEY_ID.to_string()),
             payload_type: r.payload_type.to_string(),
-            verified_at: Utc.with_ymd_and_hms(2026, 9, 11, 3, 20, 0).unwrap(),
+            verified_at: at,
             detail: None,
         }
     })
@@ -988,12 +1006,20 @@ async fn a_verified_object_reconciles_without_a_patch() {
     settled["status"] = status;
     let settled: Backup = serde_json::from_value(settled).expect("the settled object is a Backup");
 
+    // …AND THE ORACLE'S OWN CLOCK MOVES TOO. `verify_evidence` reads the clock
+    // itself (the signature carries no `now`), so a second verification really
+    // does reach a later instant — and the rule that keeps this quiet is that
+    // an UNCHANGED verdict keeps the instant it was reached at. An oracle
+    // returning a constant would make this test blind to that rule; measured,
+    // the mutant "verifiedAt is always now" survived here until this line moved.
+    let later =
+        |r: EvidenceRef| valid_oracle_at(r, Utc.with_ymd_and_hms(2026, 9, 11, 18, 45, 0).unwrap());
     let (client, seen) = sequenced_client(vec![200, 200]);
     reconcile_backup(
         &settled,
         &client,
         &observed_archive,
-        &valid_oracle,
+        &later,
         Utc.with_ymd_and_hms(2026, 11, 9, 4, 0, 0).unwrap(),
     )
     .await
@@ -1013,7 +1039,8 @@ async fn a_verified_object_reconciles_without_a_patch() {
         patches.join("\n  ")
     );
 
-    // …AND THE CLOCK MOVED BETWEEN THE TWO PASSES (03:20 -> 04:00), so this is
+    // …AND BOTH CLOCKS MOVED BETWEEN THE TWO PASSES — the reconcile's
+    // (03:20 -> 04:00) and the verification's own (03:20 -> 18:45). This is
     // not passing because nothing changed: it is passing because `verifiedAt`
     // and every `lastTransitionTime` are WHEN THE FACT CHANGED, not when it
     // was last re-confirmed.
