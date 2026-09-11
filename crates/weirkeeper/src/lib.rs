@@ -71,6 +71,18 @@
 //! status for the case nothing else in the corpus handled — a Job that
 //! finished with no terminated state at all.
 
+//! WHAT TASK 15C ADDED. [`controllers::kafka_cluster`] — the FIRST loop whose
+//! whole output is an observation, and the producer of the
+//! `KafkaCluster.status.reachable` field Task 15b declared and nobody wrote.
+//! It runs `logweir cluster-probe` (interface **I14**) as a short-lived Job,
+//! reads that subcommand's two stdout lines BY KEY NAME from a bounded tail
+//! (erratum **E4**), and writes `reachable`, `clusterId`, `observedAt`, one
+//! `Reachable` condition and the scalar `reason`. **It never dials a broker
+//! itself and never reads a Secret** (spec §9), which is why a probe is a Job;
+//! and it deletes nothing — the re-probe cadence is the probe Job's own
+//! `ttlSecondsAfterFinished`, so the API server collects the finished Job and
+//! the next reconcile finds none.
+
 pub mod conditions;
 pub mod controllers;
 pub mod crds;

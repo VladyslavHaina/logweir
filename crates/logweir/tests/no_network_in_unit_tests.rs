@@ -88,7 +88,7 @@ const DIAL_TOKENS: [&str; 13] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 17] = [
+const ALLOWED: [(&str, &str); 18] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -97,6 +97,15 @@ const ALLOWED: [(&str, &str); 17] = [
         "crates/logweir/src/doctor.rs",
         "production: doctor's checks 6 and 7 dial BY DESIGN; its #[cfg(test)] spec \
          literals are fed to StubReader and to the pure evaluate_* halves",
+    ),
+    (
+        "crates/logweir/src/probe.rs",
+        "production: the cluster probe dials BY DESIGN; it is the whole subcommand \
+         (interface I14, Task 15c). Its pure half (`outcome`) and its reader seam \
+         (`probe`) take a value and a `&dyn ClusterReader`, so the whole contract is \
+         testable with no socket; `run`/`dial` are the only functions here that name \
+         the constructor, and they are the SECOND sanctioned construction site after \
+         `logweir-kafka`'s own reader",
     ),
     (
         "crates/logweir/src/drill/mod.rs",

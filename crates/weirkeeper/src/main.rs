@@ -250,6 +250,16 @@ fn run() -> ExitCode {
             client.clone(),
             archive.clone(),
         )));
+        // Task 15c pushes the SIXTH — the `KafkaCluster` probe reconciler that
+        // makes `status.reachable` mean something, by running `logweir
+        // cluster-probe` as a short-lived Job and reading interface I14's two
+        // stdout lines off the pod log. It takes NO archive handle: a probe
+        // reads no archive, so it is the one controller here whose context
+        // needs nothing but a client. `tests/linkage.rs`'s `"controllers":6`
+        // moved in this same commit.
+        controllers.push(Box::pin(
+            weirkeeper::controllers::kafka_cluster::controller(client.clone()),
+        ));
 
         let registered = controllers.len();
         info!(

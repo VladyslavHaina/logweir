@@ -43,6 +43,26 @@ fn main() -> std::process::ExitCode {
             receipt_out,
             backup_id_override,
         }),
+        // Task 15c, interface I14. Dispatched here for the structural reason
+        // the comment at the end of this match records: the arm list is
+        // exhaustive with no catch-all, so a subcommand added to `cli.rs` and
+        // not wired here is a COMPILE error rather than a runtime stub. That is
+        // also why `crates/logweir/src/main.rs` is edited by this task although
+        // the brief's Files block names only `cli.rs` — the two cannot move
+        // apart.
+        cli::Command::ClusterProbe {
+            bootstrap,
+            auth_mode,
+            username,
+            tls,
+            marker_topic,
+        } => logweir::probe::run(&logweir::probe::ProbeArgs {
+            bootstrap,
+            auth_mode,
+            username,
+            tls,
+            marker_topic,
+        }),
         cli::Command::Doctor {
             spec,
             allowed_clusters,

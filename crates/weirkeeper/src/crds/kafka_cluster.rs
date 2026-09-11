@@ -125,6 +125,41 @@ pub struct KafkaClusterStatus {
     /// When the probe above was performed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<Time>,
+    /// **Why `reachable` says what it says** — `Reachable`,
+    /// `ProbeReportedUnreachable`, `ProbeOutputUnreadable`, `ProbeRunning`,
+    /// `NoExitCode`, `PodUnschedulable`, `DisruptedMidDrill` or `NameTooLong`:
+    /// the `Reachable` condition's own `reason`, promoted to a scalar. Added by
+    /// Task 15c.
+    ///
+    /// WHY A SCALAR BESIDE THE CONDITION. `reachable` is a tri-state in
+    /// practice — `true`, `false`, and ABSENT — and the absent case has five
+    /// causes an operator has to tell apart: the probe pod printed no parseable
+    /// contract line, the Job finished with no exit code at all, the pod never
+    /// scheduled, the node went away mid-probe, or a probe is simply in flight.
+    /// With no scalar all of those read identically through `-o jsonpath` and
+    /// through any `custom-columns` view, and the specific state exists only
+    /// inside `status.conditions` — which is review finding **M2** on the
+    /// `Restore` path, reached here from the other direction.
+    ///
+    /// **`status` IS STRUCTURAL AND PRUNES WHAT IT DOES NOT DECLARE**, so this
+    /// is not a field a controller could have written without the CRD saying
+    /// so: a merge patch carrying `status.reason` against the previous schema
+    /// was dropped by the API server silently.
+    ///
+    /// It is not a second vocabulary: it is always **verbatim** the `reason` of
+    /// the one `Reachable` condition the same patch writes, which makes it
+    /// CamelCase everywhere by errata **E5b**.
+    //
+    // NO NEW PRINTER COLUMN, and this half is a `//` comment because it is
+    // build rationale rather than something `kubectl explain` should print.
+    // `KafkaCluster`'s four columns (ROLE/REACHABLE/CLUSTER-ID/AGE) are Task
+    // 15b's pinned interface, asserted against a deliberately non-derived
+    // literal in `tests/crd_shape.rs` — mutant MA of that task dropped a column
+    // and 16 of 16 tests passed — so repointing or extending them is that
+    // task's decision, not this one's. The scalar is reachable through
+    // `-o jsonpath={.status.reason}` and through `custom-columns` meanwhile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// `Reachable`, and whatever else the controller reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,

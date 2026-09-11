@@ -12,6 +12,11 @@ pub mod engine_bin;
 pub mod exit;
 pub mod ids;
 pub mod metrics;
+/// Interface **I14**: `logweir cluster-probe`, the liveness probe the
+/// `KafkaCluster` reconciler runs as a Job. It is a subcommand of THIS binary
+/// and not an engine command (GC3): the engine's four reachable subcommands are
+/// unchanged by it.
+pub mod probe;
 pub mod schema;
 pub mod show;
 pub mod verify;

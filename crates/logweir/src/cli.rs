@@ -43,6 +43,58 @@ pub enum Command {
     Backup(BackupCmd),
     /// Print a JSON Schema. Tag 1 accepts `scorecard` and `backup-receipt`.
     Schema { which: String },
+    // Chain L, Task 15c, interface I14. A PURPOSE-BUILT LIVENESS PROBE, and
+    // not `doctor` with fewer flags: `doctor` takes two more MANDATORY paths,
+    // cannot be told which auth to use, refuses unless the cluster is in a
+    // restore-target allowlist AND holds a healthy marker topic — which no
+    // `role: source` cluster does — and prints the observed id only inside
+    // prose. `crates/logweir/src/probe.rs`'s module header states all four with
+    // their call sites. The `///` lines below are what clap renders.
+    /// Dial a Kafka cluster, read its cluster id, and print exactly two stdout
+    /// lines — `cluster-id=<id>` then `reachable=true|false` — exiting 0 when a
+    /// broker answered and 1 when none did.
+    ///
+    /// This is a LIVENESS PROBE and nothing more. It reads no cluster
+    /// allowlist, opens no approver public key, and asserts no marker topic:
+    /// those are drill-time guards belonging to phase 0, checked against the
+    /// plan a restore is about to run, not against a cluster's reachability.
+    /// `--marker-topic` is accepted so a controller can pass a cluster's own
+    /// field through unconditionally, and it changes neither the output nor the
+    /// exit code.
+    ///
+    /// With `--auth-mode scramSha512` the SASL password is read from the
+    /// environment variable `LOGWEIR_SOURCE_PASSWORD` and from nowhere else:
+    /// there is deliberately NO flag for it, because a secret on an argv is
+    /// visible in every process listing on the host and in the Job spec a
+    /// controller creates.
+    ClusterProbe {
+        /// The broker bootstrap addresses, `host:port`, comma-separated. ONE
+        /// value rather than a repeated flag: a controller joins the cluster
+        /// object's own `bootstrapServers` with commas, so the argv element it
+        /// writes is a string it can compare against what it read.
+        #[arg(long)]
+        bootstrap: String,
+        /// `plaintext` or `scramSha512` — byte-identical to the spec's and the
+        /// `KafkaCluster` CRD's own spellings, so a value read off the object
+        /// can be copied straight onto this argv. Anything else is reported as
+        /// an unreachable probe naming the mode, never as a usage error: the
+        /// two contract lines exist for every command line that parsed.
+        #[arg(long, default_value = crate::probe::AUTH_MODE_PLAINTEXT)]
+        auth_mode: String,
+        /// The SASL principal. Required in practice at
+        /// `--auth-mode scramSha512`; ignored at `plaintext`.
+        #[arg(long)]
+        username: Option<String>,
+        /// Whether the transport is TLS, INDEPENDENT of the mode: SASL/SCRAM
+        /// over PLAINTEXT and SASL/SCRAM over SSL are two `security.protocol`
+        /// values for one mechanism, which is why the cluster object carries
+        /// `auth.tls` beside `auth.mode` (Global Constraint 29).
+        #[arg(long)]
+        tls: bool,
+        /// Accepted and NEVER asserted — see this subcommand's description.
+        #[arg(long)]
+        marker_topic: Option<String>,
+    },
     /// Check credentials, engine VERSION and glibc floor, target reachability,
     /// marker topic and approver key — before a drill is attempted.
     //
