@@ -2758,16 +2758,24 @@ mod tests {
         assert!(err.to_string().contains("no target-side mapping"));
     }
 
-    /// `claimed` is `min(sel.count, Σ record_count)` over the matched
-    /// segments — the module doc's "short counts as unverified" rule rests
-    /// entirely on this figure, and the doc's claim about WHICH figure it is
-    /// was wrong once already (it said "byte-for-byte the same" as
-    /// `phase4_sample`'s uncapped `sample.records_expected`). Both halves are
-    /// exercised: the selection's own `count` binding when it is smaller, and
-    /// the manifest sum binding when IT is smaller. A mutant dropping either
-    /// half changes an observed number here.
+    /// `claimed` is `min(sel.count, Σ record_count)` over the matched segments
+    /// **wholly inside** the sampled window — the module doc's "short counts
+    /// as unverified" rule rests entirely on this figure, and the doc's claim
+    /// about WHICH figure it is has been wrong twice: it once said
+    /// "byte-for-byte the same" as `phase4_sample`'s uncapped
+    /// `sample.records_expected`, and until Task 10b it summed every
+    /// OVERLAPPING segment, which failed correct point-in-time restores.
+    ///
+    /// Renamed from `claimed_is_the_manifest_window_sum_capped_by_the_
+    /// selections_own_count`: "the manifest window sum" is the overlap sum,
+    /// and a test name that says it would now be a lie.
+    ///
+    /// All three halves are exercised: the selection's own `count` binding
+    /// when it is smaller, the wholly-inside manifest sum binding when IT is
+    /// smaller, and a straddler contributing nothing to either. A mutant
+    /// dropping any of them changes an observed number here.
     #[test]
-    fn claimed_is_the_manifest_window_sum_capped_by_the_selections_own_count() {
+    fn claimed_is_the_manifests_wholly_inside_sum_capped_by_the_selections_own_count() {
         struct Empty;
         impl ClusterReader for Empty {
             fn cluster_id(&self) -> Result<String, logweir_kafka::reader::KafkaError> {
@@ -2817,7 +2825,8 @@ mod tests {
                 .collect();
         let archive = SelectionArchive::Unsupported("n/a".into());
 
-        // `sel_for` builds `count: 10`; the one segment claims 10 records.
+        // `sel_for` builds `count: 10`; the one segment spans [0, 100] and
+        // holds 10 records. Over the window (0, 100) it is WHOLLY inside.
         // Cap binds: count 4 < manifest 10.
         let mut small = sel_for("orders", 0, (0, 100));
         small.count = 4;
@@ -2830,7 +2839,21 @@ mod tests {
         let v = verdict_for_selection(&Empty, &store, &facts, &large, &mapping, &archive).unwrap();
         assert_eq!(
             v.claimed, 10,
-            "the manifest's own in-window record_count must cap the claim when it is smaller"
+            "the manifest's own wholly-inside record_count must cap the claim when it is smaller"
+        );
+
+        // The SAME segment, against a window that ends one millisecond before
+        // it does: now it STRADDLES, so it supports nothing and the claim
+        // falls to 0. One field of one input moved; `claimed` moved from 10 to
+        // 0, which is the whole of Task 10b in one comparison.
+        let mut straddled = sel_for("orders", 0, (0, 99));
+        straddled.count = 40;
+        let v =
+            verdict_for_selection(&Empty, &store, &facts, &straddled, &mapping, &archive).unwrap();
+        assert_eq!(
+            v.claimed, 0,
+            "a segment the window cuts across holds records the window excludes; its \
+             record_count is an upper bound, never a claim"
         );
 
         // No segment matches the window at all: there is no manifest figure
@@ -2841,6 +2864,406 @@ mod tests {
             verdict_for_selection(&Empty, &store, &facts, &outside, &mapping, &archive).unwrap();
         assert_eq!(v.claimed, 10);
         assert!(v.segments.is_unverified());
+    }
+
+    // -----------------------------------------------------------------
+    // Task 10b — `claimed` is what the manifest can SUPPORT, not what it
+    // OVERLAPS.
+    //
+    // Task 11's review reproduced the false negative on the real stack
+    // (engine 0.21.0 `sha256:8ff5be71…`, Kafka 3.7.1): a three-partition
+    // `point_in_time` restore, verified record-by-record off the broker,
+    // scored `outcome: fail-integrity` with `mismatches: 0`, because
+    // `claimed` was `min(sel.count, Σ record_count over every OVERLAPPING
+    // segment)` — the WHOLE count of a straddling segment, including the
+    // records the window excludes — while `OsoCliEngine::fingerprints`
+    // returns only the records whose timestamp lies inside the window.
+    // `claimed 3` against 2 obtainable fingerprints on each partition.
+    //
+    // The rule is now the one `expected_restored_count` already writes down:
+    // only the segments WHOLLY inside the sample window, both ends inclusive,
+    // can support a claim; a straddler's records are an upper bound and
+    // contribute NOTHING.
+
+    /// `2025-10-09T08:53:20Z`, computed with `python3 -c 'import datetime as
+    /// d; print(d.datetime.fromtimestamp(1760000000, d.timezone.utc)
+    /// .isoformat())'` before it was written here (plan errata E6/E7). It is
+    /// the same instant `e2e/fixtures/drill-pitr.yaml` uses as its
+    /// `point_in_time`, so these unit rows and the owed e2e proof are about
+    /// the same boundary.
+    const T_MS: i64 = 1_760_000_000_000;
+
+    /// A `ClusterReader` that answers `consume_range` from a fixed vector,
+    /// honouring `max` exactly as a broker read does, and refuses everything
+    /// `verdict_for_selection` does not call.
+    struct Restored(Vec<ConsumedRecord>);
+    impl ClusterReader for Restored {
+        fn cluster_id(&self) -> Result<String, logweir_kafka::reader::KafkaError> {
+            unimplemented!("verdict_for_selection never reads the cluster id")
+        }
+        fn list_topics(
+            &self,
+        ) -> Result<Vec<logweir_kafka::reader::TopicMeta>, logweir_kafka::reader::KafkaError>
+        {
+            unimplemented!("verdict_for_selection never lists topics")
+        }
+        fn end_offsets(
+            &self,
+            _: &str,
+        ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
+            unimplemented!("the count bound is `check_restored_count`'s, not this function's")
+        }
+        fn broker_configs(
+            &self,
+        ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+            unimplemented!()
+        }
+        fn topic_configs(
+            &self,
+            _: &str,
+        ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+            unimplemented!()
+        }
+        fn consume_range(
+            &self,
+            _t: &str,
+            _p: i32,
+            _from: i64,
+            max: usize,
+        ) -> Result<Vec<ConsumedRecord>, logweir_kafka::reader::KafkaError> {
+            Ok(self.0.iter().take(max).cloned().collect())
+        }
+    }
+
+    /// One archive fingerprint and the consumed record a correct restore
+    /// produces from it: the same key, value, timestamp and 8-byte
+    /// little-endian `x-original-offset` header, at a DIFFERENT target offset,
+    /// so `compare` has to read the header to match them (guard G-HDR).
+    fn pair(offset: i64, ts_ms: i64) -> (RecordFingerprint, ConsumedRecord) {
+        let key = format!("k{offset}").into_bytes();
+        let value = format!("v{offset}").into_bytes();
+        let headers = vec![(
+            "x-original-offset".to_string(),
+            Some(offset.to_le_bytes().to_vec()),
+        )];
+        (
+            RecordFingerprint {
+                topic: "orders".into(),
+                partition: 0,
+                offset,
+                sha256: logweir_kafka::fingerprint::record_fingerprint(
+                    Some(&key),
+                    Some(&value),
+                    &headers,
+                    ts_ms,
+                ),
+            },
+            ConsumedRecord {
+                partition: 0,
+                offset: offset - 1_000,
+                timestamp_ms: ts_ms,
+                key: Some(key),
+                value: Some(value),
+                headers,
+            },
+        )
+    }
+
+    /// `n` matching pairs at original offsets `1000..1000+n`, one millisecond
+    /// apart ending on `newest_ms`.
+    fn pairs(n: usize, newest_ms: i64) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) {
+        (0..n)
+            .map(|i| pair(1_000 + i as i64, newest_ms - (n - 1 - i) as i64))
+            .unzip()
+    }
+
+    /// `BackupSetFacts` for `orders/0` over `segments`, seeding each segment's
+    /// bytes into `store` so `segment_evidence` performs a real sha256
+    /// comparison rather than one the fixture satisfies by construction.
+    ///
+    /// `(key, start_timestamp, end_timestamp, record_count)` per segment.
+    fn facts_and_store(segments: &[(&str, i64, i64, i64)]) -> (BackupSetFacts, Store) {
+        let store = Store::in_memory("logweir");
+        let mut out = Vec::new();
+        for (i, (key, t0, t1, n)) in segments.iter().enumerate() {
+            let bytes = format!("segment bytes {key}").into_bytes();
+            store.put_create_only(key, &bytes).unwrap();
+            out.push(SegmentFacts {
+                key: (*key).into(),
+                start_offset: i as i64 * 1_000,
+                end_offset: i as i64 * 1_000 + n.max(&0) - 1,
+                start_timestamp: *t0,
+                end_timestamp: *t1,
+                record_count: *n,
+                sha256: logweir_core::ids::sha256_prefixed(&bytes),
+                uploaded_at: *t1,
+            });
+        }
+        let mut facts = facts_one_segment();
+        facts.topics[0].partitions[0].segments = out;
+        (facts, store)
+    }
+
+    fn orders_mapping() -> BTreeMap<String, String> {
+        [("orders".to_string(), "drill-orders".to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    /// A selection over `window` asking for `count` records per partition.
+    fn sel_window(count: usize, window: (i64, i64)) -> SampleSelection {
+        let mut s = sel_for("orders", 0, window);
+        s.count = count;
+        s
+    }
+
+    /// **Task 10b guard (i) — the straddler.** One segment holding 3 records
+    /// across `[T−1, T+1]` (T = 1_760_000_000_000 = 2025-10-09T08:53:20Z); the
+    /// sample window is `[T−1, T]`, so the segment STRADDLES its end and the
+    /// archive can only ever return the 2 records inside. Both reconcile.
+    ///
+    /// This is the reproduced defect, in process: under the OVERLAP sum
+    /// `claimed` is `min(25, 3) = 3`, `compared >= claimed` is unreachable at
+    /// 2, and a CORRECT restore lands on `Unverified` — `fail-integrity`,
+    /// exit 2, about its own sample. Under the wholly-inside rule the
+    /// straddler supports nothing, `claimed` is 0, and the positive,
+    /// non-vacuous `compared > 0` conjunct is what still makes the verdict an
+    /// assertion rather than a vacuous pass.
+    ///
+    /// Kills mutant **M1** (restore the overlap sum): `Verified { checked: 2 }`
+    /// becomes `Unverified`, at assertion time.
+    #[test]
+    fn a_straddling_segment_supports_no_claim_and_its_in_window_records_verify() {
+        let (facts, store) = facts_and_store(&[("logweir/straddler.kbak", T_MS - 1, T_MS + 1, 3)]);
+        let (fps, consumed) = pairs(2, T_MS);
+        let s = sel_window(25, (T_MS - 1, T_MS));
+
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &s,
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.claimed, 0,
+            "a segment straddling the window edge holds records the window EXCLUDES; its \
+             record_count is an upper bound, never a claim the archive must meet"
+        );
+        assert_eq!(
+            v.records,
+            Evidence::Verified { checked: 2 },
+            "the archive returned every record the window contains and all of them \
+             reconciled; got {:?}",
+            v.records
+        );
+        assert_eq!(v.reconciled, Some((2, 2)));
+        assert!(
+            v.segments.is_verified(),
+            "the straddling segment's own sha256 is still checked — the overlap predicate \
+             stays exactly where it was for `segment_evidence`: {:?}",
+            v.segments
+        );
+        assert!(v.fully_verified());
+    }
+
+    /// **Task 10b guard (ii) — the kept property.** One segment WHOLLY inside
+    /// the window holding 5 records; the archive returns 3, all matching.
+    /// That is a genuinely truncated read of a segment the window contains,
+    /// which is the case "short counts as unverified" was built for, and it
+    /// must stay `Unverified` — with the text naming 5.
+    #[test]
+    fn a_wholly_inside_segment_still_binds_the_claim_and_a_short_read_is_unverified() {
+        let (facts, store) = facts_and_store(&[("logweir/inside.kbak", T_MS - 10, T_MS - 1, 5)]);
+        let (fps, consumed) = pairs(3, T_MS - 2);
+        let s = sel_window(25, (T_MS - 20, T_MS));
+
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &s,
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.claimed, 5,
+            "the manifest PROVES 5 records are in the window"
+        );
+        let why = v
+            .records
+            .why()
+            .expect("a short sample must say so")
+            .to_string();
+        assert!(
+            v.records.is_unverified(),
+            "3 of a proven 5 is coverage the drill did not obtain: {:?}",
+            v.records
+        );
+        assert!(
+            why.contains(
+                "the archive returned 3 fingerprints where the manifest supports at \
+                          least 5 for this selection"
+            ),
+            "the message must name the manifest's supportable claim: {why}"
+        );
+        assert!(
+            !why.contains("straddling"),
+            "no segment straddles this window, so the message must not invent one: {why}"
+        );
+    }
+
+    /// **Task 10b guard (iii) — the mix.** One wholly-inside segment holding 5
+    /// and one straddler holding 3: the claim is 5, not 8. `compared == 5`
+    /// verifies; `compared == 4` does not, and the message discloses the
+    /// straddler so an auditor can see why 5 and not 8.
+    ///
+    /// The `compared == 5` half kills mutant **M1** a second time (under the
+    /// overlap sum `claimed` is 8 and 5 is short).
+    #[test]
+    fn a_mixed_window_claims_the_wholly_inside_segment_and_discloses_the_straddler() {
+        let segments = [
+            ("logweir/inside.kbak", T_MS - 10, T_MS - 1, 5),
+            ("logweir/straddler.kbak", T_MS - 1, T_MS + 1, 3),
+        ];
+        let s = sel_window(25, (T_MS - 20, T_MS));
+
+        let (facts, store) = facts_and_store(&segments);
+        let (fps, consumed) = pairs(5, T_MS - 2);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &s,
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+        assert_eq!(
+            v.claimed, 5,
+            "5 wholly inside + 3 straddling supports 5, never 8"
+        );
+        assert_eq!(v.records, Evidence::Verified { checked: 5 });
+
+        let (facts, store) = facts_and_store(&segments);
+        let (fps, consumed) = pairs(4, T_MS - 2);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &s,
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+        assert_eq!(v.claimed, 5);
+        let why = v.records.why().expect("a short sample must say so");
+        assert!(v.records.is_unverified(), "4 of a proven 5 is short");
+        assert!(
+            why.contains(
+                "the archive returned 4 fingerprints where the manifest supports at \
+                          least 5 for this selection (1 straddling segment holds 3 records the \
+                          window may exclude)"
+            ),
+            "the message must disclose the straddler it deliberately did not count: {why}"
+        );
+    }
+
+    /// **Task 10b guard (iv) — the consume-only lane carries the SAME rule.**
+    /// The mirrors of (i) and (ii), on the lane that has no fingerprints to
+    /// compare: a straddler supports nothing and the read-back verifies; a
+    /// wholly-inside segment still binds, and a short read-back is
+    /// `Unverified` with the claim named.
+    ///
+    /// Kills mutant **M4** (apply the new rule on one lane only).
+    #[test]
+    fn the_consume_only_lane_claims_the_same_wholly_inside_sum() {
+        // (i)'s mirror: the straddler.
+        let (facts, store) = facts_and_store(&[("logweir/straddler.kbak", T_MS - 1, T_MS + 1, 3)]);
+        let (_, consumed) = pairs(2, T_MS);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &sel_window(25, (T_MS - 1, T_MS)),
+            &orders_mapping(),
+            &SelectionArchive::Unsupported("segment written before 0.21".into()),
+        )
+        .unwrap();
+        assert_eq!(v.claimed, 0);
+        assert_eq!(
+            v.records,
+            Evidence::Verified { checked: 2 },
+            "the target gave back every record the window holds: {:?}",
+            v.records
+        );
+
+        // (ii)'s mirror: the wholly-inside segment.
+        let (facts, store) = facts_and_store(&[("logweir/inside.kbak", T_MS - 10, T_MS - 1, 5)]);
+        let (_, consumed) = pairs(3, T_MS - 2);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &sel_window(25, (T_MS - 20, T_MS)),
+            &orders_mapping(),
+            &SelectionArchive::Unsupported("segment written before 0.21".into()),
+        )
+        .unwrap();
+        assert_eq!(v.claimed, 5);
+        let why = v.records.why().expect("a short read-back must say so");
+        assert!(v.records.is_unverified(), "{:?}", v.records);
+        assert!(
+            why.contains(
+                "the target partition gave back 3 records where the manifest supports \
+                          at least 5 for this selection"
+            ),
+            "the consume-only message must name the same claim: {why}"
+        );
+    }
+
+    /// **Task 10b guard (v) — both ends are INCLUSIVE.** A segment flush with
+    /// BOTH window edges (`start_timestamp == w0`, `end_timestamp == w1`) is
+    /// wholly inside it, exactly as `expected_restored_count` reads the
+    /// restore window: the engine's own filter is `r.timestamp >= s &&
+    /// r.timestamp <= e`, so a segment touching a bound is inside it, not
+    /// across it.
+    ///
+    /// Kills mutant **M2** (`>=` → `>` on either end): the segment stops
+    /// counting, `claimed` falls to 0, and a 3-fingerprint read of a proven 5
+    /// reports `Verified` — the false PASS the false negative's fix must not
+    /// buy.
+    #[test]
+    fn a_segment_flush_with_both_window_edges_is_wholly_inside() {
+        let (facts, store) = facts_and_store(&[("logweir/flush.kbak", T_MS - 10, T_MS, 5)]);
+        let (fps, consumed) = pairs(3, T_MS - 2);
+
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &sel_window(25, (T_MS - 10, T_MS)),
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.claimed, 5,
+            "start_timestamp == w0 and end_timestamp == w1 is INSIDE [w0, w1], both ends \
+             inclusive — the same reading `expected_restored_count` gives the restore window"
+        );
+        assert!(
+            v.records.is_unverified(),
+            "3 of a proven 5 is short; if the flush segment stopped counting this would be a \
+             vacuous pass: {:?}",
+            v.records
+        );
     }
 
     #[test]

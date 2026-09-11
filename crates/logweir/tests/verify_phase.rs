@@ -1691,10 +1691,19 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         .partial_reason
         .expect("partial must carry a reason");
     assert!(reason.contains("orders/0"), "{reason:?}");
+    // Task 10b: "supports at least 50", not "claims 50". The segment here is
+    // WHOLLY inside the sampled window, so the number itself is unchanged —
+    // what changed is that the figure is now stated as the lower bound it has
+    // always been, and a straddling segment would no longer contribute to it.
     assert!(
-        reason.contains("gave back 5 records") && reason.contains("claims 50"),
+        reason.contains("gave back 5 records") && reason.contains("supports at least 50"),
         "the reason must name BOTH the shortfall and the claim, so an auditor can size it: \
          {reason:?}"
+    );
+    assert!(
+        !reason.contains("straddling"),
+        "this selection's segment lies wholly inside the window; the message must not \
+         disclose a straddler that is not there: {reason:?}"
     );
 }
 
@@ -2571,9 +2580,16 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         .partial_reason
         .expect("partial must carry a reason");
     assert!(reason.contains("orders/0"), "{reason:?}");
+    // Task 10b: the byte-fingerprint lane's own wording, pinned as a phrase
+    // rather than as a bare "25" — a lone digit is satisfied by any number in
+    // any sentence, and the message this arm is about is the one an auditor
+    // reads out of the SIGNED `partial_reason`.
     assert!(
-        reason.contains("25"),
-        "the reason must name what the manifest claimed, so an auditor can see the size of \
+        reason.contains(
+            "the archive returned 1 fingerprints where the manifest supports at least 25 \
+             for this selection"
+        ),
+        "the reason must name what the manifest supports, so an auditor can see the size of \
          the shortfall: {reason:?}"
     );
 }

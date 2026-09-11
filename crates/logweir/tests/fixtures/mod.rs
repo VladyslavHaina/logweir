@@ -806,6 +806,30 @@ pub enum Drill {
     /// parameter of `execute_with`, so there is no way to run a WHOLE drill
     /// against a refusing deleter without this shape.
     LeavesATopicBehind,
+    /// Task 10b. The normal point-in-time shape, which no fixture expressed:
+    /// the archive's one segment STRADDLES the window's end, so the records it
+    /// holds are partly outside the window and the archive can only ever
+    /// fingerprint the ones inside.
+    ///
+    /// The manifest segment spans `[window_start, window_end + 1 h]` and claims
+    /// `STRADDLER_SEGMENT_RECORDS` (3); the window holds
+    /// `STRADDLER_IN_WINDOW_RECORDS` (2) of them, the engine offers exactly
+    /// those two fingerprints, the target holds exactly those two records, and
+    /// every objective is met. A CORRECT restore, end to end.
+    ///
+    /// Until Task 10b that drill scored `fail-integrity` and exited 2: phase
+    /// 7's `claimed` summed the WHOLE `record_count` of every OVERLAPPING
+    /// segment, so `min(25, 3) = 3` was demanded of a window that can supply
+    /// 2, and the selection was `Unverified` about its own sample. Measured on
+    /// the real stack (engine 0.21.0 `sha256:8ff5be71…`, Kafka 3.7.1) on all
+    /// three partitions of a three-partition `point_in_time` restore, with
+    /// `integrity.mismatches: 0`.
+    ///
+    /// It is the only whole-drill shape whose verdict turns on `claimed`
+    /// alone: the sample reconciles perfectly, the restored count is inside
+    /// the manifest's `[0, 3]` bound, and every objective is met, so a
+    /// non-pass here can have come from nothing else.
+    SamplesAcrossAStraddlingSegment,
 }
 
 pub const FIXTURE_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
@@ -822,6 +846,23 @@ pub const FIXTURE_SAMPLE_RECORDS: usize = 25;
 /// How many records the manifest says the sampled window holds — twenty times
 /// the canary size, so the two `records_expected` figures cannot be confused.
 pub const FIXTURE_WINDOW_RECORDS: i64 = 500;
+
+/// Task 10b, `Drill::SamplesAcrossAStraddlingSegment`. How far past
+/// `FIXTURE_WINDOW_END` the straddling segment reaches: one hour, so the
+/// segment unambiguously CUTS ACROSS the window's end rather than touching it
+/// (a segment ending exactly on the end is WHOLLY INSIDE — both bounds are
+/// inclusive, and that distinction is what
+/// `a_segment_flush_with_both_window_edges_is_wholly_inside` pins).
+pub const STRADDLER_OVERHANG_MS: i64 = 3_600_000;
+/// What that segment's `record_count` says: 3 records, of which the window
+/// holds 2. Deliberately BELOW `FIXTURE_SAMPLE_RECORDS` (25) — the overlap
+/// sum's false negative needs `Σ record_count` to bind before the selection's
+/// own count does, which is exactly the real archive's shape: on the measured
+/// run the figure was 3 against 25 requested, on all three partitions.
+pub const STRADDLER_SEGMENT_RECORDS: i64 = 3;
+/// How many of those 3 lie at or before `FIXTURE_WINDOW_END` — the most the
+/// archive can fingerprint and the most a correct restore can write.
+pub const STRADDLER_IN_WINDOW_RECORDS: usize = 2;
 
 /// `n` archive fingerprints at offsets 0..n and the matching consumed records,
 /// with the LAST record landing exactly on `newest_ms` and the rest one second
@@ -908,6 +949,26 @@ pub fn orchestrator_facts(segment_bytes: &[u8]) -> BackupSetFacts {
             }],
         }],
     }
+}
+
+/// Task 10b. `orchestrator_facts` with its one segment moved so it STRADDLES
+/// the window's end: `[FIXTURE_WINDOW_START, FIXTURE_WINDOW_END +
+/// STRADDLER_OVERHANG_MS]`, holding `STRADDLER_SEGMENT_RECORDS` of which the
+/// window contains `STRADDLER_IN_WINDOW_RECORDS`.
+///
+/// A separate builder rather than a parameter on `orchestrator_facts`: the
+/// segment's timestamps, its `record_count` and its offset extent all move
+/// together, and every other shape in this file depends on the 500-record
+/// segment staying exactly where it is.
+pub fn orchestrator_facts_straddling(segment_bytes: &[u8]) -> BackupSetFacts {
+    let t1 = ts(FIXTURE_WINDOW_END).timestamp_millis();
+    let mut facts = orchestrator_facts(segment_bytes);
+    let seg = &mut facts.topics[0].partitions[0].segments[0];
+    seg.end_offset = STRADDLER_SEGMENT_RECORDS - 1;
+    seg.end_timestamp = t1 + STRADDLER_OVERHANG_MS;
+    seg.record_count = STRADDLER_SEGMENT_RECORDS;
+    seg.uploaded_at = t1 + STRADDLER_OVERHANG_MS;
+    facts
 }
 
 /// A `DataEngine` that answers from memory: no subprocess, no engine binary,
@@ -1257,7 +1318,12 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         .put_create_only(FIXTURE_SEGMENT_KEY, &segment_bytes)
         .unwrap();
 
-    let facts = orchestrator_facts(&segment_bytes);
+    let straddles = shape == Drill::SamplesAcrossAStraddlingSegment;
+    let facts = if straddles {
+        orchestrator_facts_straddling(&segment_bytes)
+    } else {
+        orchestrator_facts(&segment_bytes)
+    };
     // An hour short of the requested recovery point: `measured.rpo_seconds` is
     // `sample.window_end - newest_restored_record`, so this is 3600 against a
     // 300s objective. The archive fingerprints are built from the SAME
@@ -1268,7 +1334,18 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     } else {
         window_end_ms
     };
-    let (fps, mut records) = orchestrator_pair(FIXTURE_SAMPLE_RECORDS, newest_ms);
+    // Task 10b. The straddling shape offers exactly the records the window
+    // holds — `STRADDLER_IN_WINDOW_RECORDS`, not `FIXTURE_SAMPLE_RECORDS` —
+    // because that is all `OsoCliEngine::fingerprints` can return for a window
+    // whose end falls inside a segment. The spec still asks for 25 per
+    // partition, which is the whole point: the drill must pass on the 2 the
+    // window can supply rather than fail for the 23 it cannot.
+    let canary = if straddles {
+        STRADDLER_IN_WINDOW_RECORDS
+    } else {
+        FIXTURE_SAMPLE_RECORDS
+    };
+    let (fps, mut records) = orchestrator_pair(canary, newest_ms);
     if shape == Drill::ReconcilesWithMismatches {
         // One record on the TARGET differs from the bytes its archive
         // fingerprint was computed over. `compare` must report exactly one
@@ -1302,19 +1379,27 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     // the one visible consequence that offsets 24 and 499 share `newest_ms`.
     // `newest_ts` reads `hi - 1` only, so it reads 499's, and no assertion in
     // this tree depends on the target's timestamps being monotonic in offset.
-    records.extend(
-        (FIXTURE_SAMPLE_RECORDS as i64..FIXTURE_WINDOW_RECORDS).map(|off| {
-            let tail = FIXTURE_WINDOW_RECORDS - 1 - off;
-            ConsumedRecord {
-                partition: 0,
-                offset: off,
-                timestamp_ms: newest_ms - tail * 1000,
-                key: Some(format!("k{off}").into_bytes()),
-                value: Some(format!("v{off}").into_bytes()),
-                headers: vec![("x-original-offset".to_string(), Some(le_offset(off)))],
-            }
-        }),
-    );
+    //
+    // Task 10b's shape is the exception and has no filler at all: its manifest
+    // segment claims 3 records, the window holds 2, and a target holding 500
+    // would be outside `expected_restored_count`'s `[0, 3]` bound. Its two
+    // canary records ARE the whole restored topic, so `newest_ts`'s read at
+    // `hi - 1` = offset 1 lands on the newest of them.
+    if !straddles {
+        records.extend(
+            (FIXTURE_SAMPLE_RECORDS as i64..FIXTURE_WINDOW_RECORDS).map(|off| {
+                let tail = FIXTURE_WINDOW_RECORDS - 1 - off;
+                ConsumedRecord {
+                    partition: 0,
+                    offset: off,
+                    timestamp_ms: newest_ms - tail * 1000,
+                    key: Some(format!("k{off}").into_bytes()),
+                    value: Some(format!("v{off}").into_bytes()),
+                    headers: vec![("x-original-offset".to_string(), Some(le_offset(off)))],
+                }
+            }),
+        );
+    }
 
     let mut engine = FixtureEngine::new(facts, fps);
     match shape {
@@ -1340,6 +1425,11 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // The engine is byte-for-byte the passing one: the whole variable is
         // the TARGET's high watermark below.
         | Drill::RestoresOutsideTheManifestBound
+        // Task 10b. The engine is the passing one too: the whole variable is
+        // the MANIFEST's one segment (moved to straddle the window's end by
+        // `orchestrator_facts_straddling`) and the fingerprint set it can
+        // therefore offer.
+        | Drill::SamplesAcrossAStraddlingSegment
         | Drill::LeavesATopicBehind => {}
     }
 
@@ -1364,9 +1454,17 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     // `hi - 1` = 399 — still reads a real record; the measured RPO is then
     // 100 s against the spec's 300 s objective, i.e. still MET, so the
     // `fail-integrity` this shape scores can only have come from the count.
+    //
+    // Task 10b. `SamplesAcrossAStraddlingSegment` holds exactly the
+    // `STRADDLER_IN_WINDOW_RECORDS` (2) the window contains. The manifest's
+    // one straddling segment puts `expected_restored_count` at `[0, 3]` —
+    // `lower` is 0 because no segment is WHOLLY inside and `upper` is the
+    // straddler's 3 — so 2 is inside the bound and `check_restored_count`
+    // contributes nothing to this drill's verdict either.
     let restored_hi = match shape {
         Drill::RestoresNothing => 0,
         Drill::RestoresOutsideTheManifestBound => FIXTURE_WINDOW_RECORDS - 100,
+        Drill::SamplesAcrossAStraddlingSegment => STRADDLER_IN_WINDOW_RECORDS as i64,
         _ => FIXTURE_WINDOW_RECORDS,
     };
     let client = FixtureClient {

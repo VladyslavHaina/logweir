@@ -2023,3 +2023,194 @@ fn a_whole_drill_outside_the_manifest_bound_signs_fail_integrity_and_both_reader
         "the auditor's verifier must report the outcome it read: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 10b: the normal point-in-time shape, through both readers.
+
+/// **Task 10b guard (vi).** One whole drill — every phase, over the doubles —
+/// whose archive segment STRADDLES the sample window's end, and whose
+/// fingerprint set is exactly the records the window holds. It is a CORRECT
+/// restore, and it must score `outcome: pass`, exit **0**, with signed bytes
+/// BOTH readers accept.
+///
+/// This is the false negative Task 11's review reproduced on the real stack,
+/// at whole-drill scale and in process. Before Task 10b,
+/// `phase7_verify::verdict_for_selection` derived `claimed` from every
+/// OVERLAPPING segment's whole `record_count` — `min(25, 3) = 3` here — while
+/// the archive can only offer the 2 records inside the window, so
+/// `compared >= claimed` was unreachable, the selection was `Unverified`
+/// ("a short sample is coverage the drill did not obtain"), and the run signed
+/// `fail-integrity` with `mismatches: 0` about its own sample. Measured
+/// 2026-09-10 against engine 0.21.0 (`sha256:8ff5be71…`) on Kafka 3.7.1, on
+/// all three partitions of a three-partition `point_in_time` restore.
+///
+/// Every other variable is pinned so the verdict can come from `claimed`
+/// alone: the sample reconciles 2/2, the restored count (2) is inside the
+/// manifest's `[0, 3]` bound, and every objective is met.
+///
+/// `sample.records_expected` is deliberately NOT part of the fix and is
+/// asserted here at its uncapped value: `phase4_sample` leaves it as the
+/// canary the drill set out to reconcile (25), the reconciliation compares
+/// against `claimed` and never against it, and a pass over 2 sampled records
+/// out of a 25-record ask is the correct signed document — the same 6-of-75
+/// shape the real stack produced.
+///
+/// Kills mutant **M1** (restore the overlap sum): the run goes back to
+/// `fail-integrity` and exit 2, and both readers are then handed a document
+/// that says a correct restore failed.
+#[test]
+fn a_whole_drill_sampling_across_a_straddling_segment_signs_pass_and_both_readers_accept_it() {
+    // Resolved first: a parity claim that silently skipped its second reader
+    // would be the "documented guarantee the code does not deliver" this file
+    // exists to remove.
+    let py = require_python();
+
+    let f = fixtures::orchestrator_fixture(fixtures::Drill::SamplesAcrossAStraddlingSegment);
+    let sc = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_or_else(|e| {
+        panic!(
+            "a restore that returned every record its window holds is a PASS; the drill \
+             refused it: {e:?}"
+        )
+    });
+
+    // It is a WHOLE drill: phases 6 and 7 both ran and the run was scored.
+    let phases: Vec<i8> = sc.phases.iter().map(|p| p.phase).collect();
+    assert!(
+        phases.contains(&6) && phases.contains(&7),
+        "the claim is read at the END of phase 7; a run that never restored proves \
+         nothing about it: {phases:?}"
+    );
+    assert!(
+        sc.measured.rto_seconds.is_some() && sc.measured.rpo_seconds.is_some(),
+        "the drill must have been SCORED"
+    );
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(sc.integrity.result, IntegrityResult::Pass);
+    assert_eq!(
+        (
+            sc.integrity.records_sampled,
+            sc.integrity.records_sampled_matching,
+            sc.integrity.mismatches
+        ),
+        (
+            fixtures::STRADDLER_IN_WINDOW_RECORDS as u64,
+            fixtures::STRADDLER_IN_WINDOW_RECORDS as u64,
+            0
+        ),
+        "every record the window holds was reconciled and all of them matched: {:?}",
+        sc.integrity
+    );
+    assert_eq!(
+        sc.integrity.partial_reason, None,
+        "a pass may carry no finding; the short-sample text is the one that used to be here"
+    );
+    assert_eq!(
+        sc.sample.records_expected,
+        fixtures::FIXTURE_SAMPLE_RECORDS as u64,
+        "`sample.records_expected` is the canary the drill ASKED for and is deliberately \
+         uncapped by what the window can supply (phase4_sample; phase7_verify's own doc \
+         says so). Task 10b does not touch it: a pass over {} of {} is the correct \
+         document, not a contradiction",
+        sc.integrity.records_sampled,
+        sc.sample.records_expected
+    );
+    assert_eq!(sc.objectives.met, Some(true));
+
+    // The exit code, read from the same `From` impl the binary uses — never
+    // through a pipe (STANDING RULE 20, GC11).
+    assert_eq!(
+        ExitCode::Ok as i32,
+        0,
+        "a pass is exit 0 (GC11); `execute_with` returning Ok rather than \
+         `DrillError::NotPass` IS that path, and the failing shape above takes the other one"
+    );
+
+    // The SIGNED BYTES, not the in-memory copy.
+    let signed_bytes = std::fs::read(&f.out).expect("--out was written");
+    let uploaded = f
+        .ctx
+        .store
+        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .expect("phase 8 uploaded the scorecard")
+        .0;
+    assert_eq!(
+        signed_bytes, uploaded,
+        "the local artifact and the uploaded object must be the same bytes"
+    );
+    let on_the_wire: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&signed_bytes).expect("the signed bytes are a Scorecard");
+    assert_eq!(
+        on_the_wire.outcome,
+        Outcome::Pass,
+        "the SIGNED document must say pass"
+    );
+    assert_eq!(on_the_wire.outcome.wire_name(), "pass");
+    assert_eq!(on_the_wire.integrity.partial_reason, None);
+
+    // ---- both readers, over those exact bytes ----
+    let sig_path = f.out.with_extension("sig");
+    assert!(
+        sig_path.exists(),
+        "phase 8 writes the sidecar beside --out; without it neither reader can run"
+    );
+    let pub_path = f.out.with_file_name("run-signing.pub.pem");
+    fixtures::write_pub(
+        &SigningKey::from_pem_file(&f.args.signing_key).expect("the run's signing key"),
+        &pub_path,
+    );
+
+    // Reader 1 — Rust, in process.
+    let media = logweir::verify::resolve_payload_type("scorecard").expect("the short name");
+    assert_eq!(media, PAYLOAD_TYPE_SCORECARD);
+    match logweir::verify::verify_scorecard(&f.out, &sig_path, &pub_path, media) {
+        Ok(logweir::verify::Verdict::Scorecard(report)) => {
+            assert!(
+                report.signature_valid,
+                "the Rust reader must find the signature valid"
+            );
+            assert!(
+                report.invariants_ok,
+                "a pass over 2 of a 25-record ask is a VALID document: `records_sampled` \
+                 may not EXCEED `records_expected`, and 2 does not"
+            );
+            assert_eq!(report.run_id, f.run_id);
+            assert_eq!(report.outcome, Outcome::Pass);
+        }
+        Ok(other) => panic!("a scorecard must verify as a scorecard, got {other:?}"),
+        Err(code) => panic!(
+            "the Rust reader REFUSED the drill's own signed scorecard (exit {}); a document \
+             Logweir signs and its own verifier rejects is the broken format \
+             docs/verify_scorecard.py's module comment describes",
+            code as i32
+        ),
+    }
+
+    // Reader 2 — the auditor's Python verifier, by direct call.
+    let out = Command::new(&py)
+        .current_dir(root())
+        .arg("docs/verify_scorecard.py")
+        .arg(&f.out)
+        .arg(&sig_path)
+        .arg(&pub_path)
+        .output()
+        .expect("run docs/verify_scorecard.py");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // `Output::status.code()` is the real process status, never a pipeline's.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the auditor's verifier must ACCEPT the drill's own signed scorecard\n  \
+         stderr: {}\n  stdout: {}",
+        stderr.trim(),
+        String::from_utf8_lossy(&out.stdout).trim()
+    );
+    assert!(
+        strip(&stderr, &[PYTHON_PREFIX]).is_none(),
+        "the auditor's verifier refused an invariant on a document it exited 0 for: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        stdout.contains("pass"),
+        "the auditor's verifier must report the outcome it read: {stdout}"
+    );
+}
