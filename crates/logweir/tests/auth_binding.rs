@@ -440,24 +440,70 @@ fn the_scorecard_auth_block_and_auth_spec_agree() {
 /// Comment lines are stripped before the scan: the files legitimately DISCUSS
 /// the arm they used to pin, and a test that could not tell prose from code
 /// would force the history out of the source.
+///
+/// # The file list is DERIVED — Task 16b, plan erratum E11(e), finding M-2
+///
+/// This row used to iterate a FIXED list, `["drill/mod.rs", "doctor.rs",
+/// "backup/mod.rs"]`. Task 15c then added a fourth sanctioned site,
+/// `probe.rs`, and this row did not notice — it could not: a list is not a
+/// rule, and the fifth site would have been invisible too. The list is now
+/// computed by walking `crates/logweir/src/**`, so every site that constructs
+/// is checked by existing.
+///
+/// THE FULL RULE LIVES IN ONE PLACE AND IT IS NOT HERE:
+/// `no_network_in_unit_tests.rs::the_one_construction_site_rule_is_derived_from_the_tree`
+/// owns the allowlist of sanctioned sites and their reasons, walks
+/// `crates/weirkeeper/src/**` as well, and additionally asserts that each
+/// site confines the dialling constructor to one named function. This row is
+/// Task 6's own narrower claim, kept under its own name and derived rather
+/// than listed — no second allowlist, and none needed: the claim below holds
+/// for EVERY file that constructs, sanctioned or not.
 #[test]
 fn no_construction_site_hardcodes_plaintext() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for site in ["drill/mod.rs", "doctor.rs", "backup/mod.rs"] {
-        let body = std::fs::read_to_string(src.join(site)).unwrap();
+    let mut sites: Vec<(String, String)> = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let body = std::fs::read_to_string(&p).unwrap();
+                let code: String = body
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim_start();
+                        !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if code.contains("AuthConfig::from_spec")
+                    || code.contains("RdKafkaReader::connect(")
+                {
+                    out.push((p.display().to_string(), code));
+                }
+            }
+        }
+    }
+    walk(&src, &mut sites);
+    assert_eq!(
+        sites.len(),
+        4,
+        "four sites construct a client today — drill::context, doctor::check_target, \
+         backup::run and probe::dial. A change to that COUNT is a decision about interface I1 \
+         and belongs in `no_network_in_unit_tests.rs`'s CONSTRUCTION_SITES with a reason, not \
+         in a passing test: {:?}",
+        sites.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+    for (site, code) in &sites {
         assert!(
-            body.contains("AuthConfig::from_spec"),
+            code.contains("AuthConfig::from_spec"),
             "{site} must build its client's auth through the ONE construction site \
              (interface I1)"
         );
-        let code: String = body
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start();
-                !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!"))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
         assert!(
             !code.contains("AuthConfig::Plaintext"),
             "{site} still pins the plaintext arm in CODE: a spec asking for scramSha512 would \

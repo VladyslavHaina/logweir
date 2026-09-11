@@ -370,3 +370,370 @@ fn every_allow_list_entry_is_still_earned() {
          removed rather than left standing: {stale:?}"
     );
 }
+
+// ===========================================================================
+// THE ONE-CONSTRUCTION-SITE RULE, DERIVED — Task 16b, plan erratum E11(e)
+// ===========================================================================
+//
+// Interface **I1**: a client's auth is built in ONE place,
+// `AuthConfig::from_spec`, and no call site pins an arm itself. Task 6 landed
+// that rule with a guard that iterated a **fixed three-file list**
+// (`auth_binding.rs`'s `no_construction_site_hardcodes_plaintext`, over
+// `drill/mod.rs`, `doctor.rs`, `backup/mod.rs`). Task 15c then added a FOURTH
+// sanctioned site, `probe.rs`, and the Task 6 row did not notice — it could
+// not: a list is not a rule. Task 15c disclosed this and wrote its own,
+// stronger guard inside `cluster_probe.rs`, so nothing was ever unprotected;
+// but the next site would have been unguarded again, and the tree would then
+// have carried TWO guards and no derivation. Task 15c's review raised it as
+// **M-2**.
+//
+// This is the one guard. It DERIVES its file list by walking
+// `crates/logweir/src/**` and `crates/weirkeeper/src/**`, so a fifth site is
+// caught by existing, and the allowlist below is the only place a sanctioned
+// site is named. Task 15c's row is folded in whole — its `fn_bodies`-counted
+// "exactly one function may name the constructor, and it is THAT one" is
+// asserted here for every sanctioned site rather than for `probe.rs` alone,
+// which is stronger than either of the two guards it replaces.
+//
+// WHY IT LIVES IN THIS FILE. This file already owns the walk, and it is the
+// one path on `ALLOWED` whose reason is "it is the one that has to spell the
+// tokens out" — a guard about constructor names has to name them, and any
+// other home would need a standing permission for a file that constructs
+// nothing.
+
+/// The tokens that mean "a Kafka client's auth is built here".
+///
+/// The first is the dial itself; the second is interface I1's ONE
+/// constructor; the last two are the arms a call site must never pin — the
+/// defect Task 6 found in two of three sites, under which a spec asking for
+/// `scramSha512` was recorded in the receipt and then dialled unauthenticated.
+const CONSTRUCTION_TOKENS: [&str; 4] = [
+    "RdKafkaReader::connect(",
+    "AuthConfig::from_spec",
+    "AuthConfig::Plaintext",
+    "AuthConfig::ScramSha512",
+];
+
+/// The arms no call site may pin. A subset of [`CONSTRUCTION_TOKENS`], named
+/// separately because the offence is different: naming `from_spec` is the
+/// RULE, naming an arm is the BREACH.
+const PINNED_ARMS: [&str; 2] = ["AuthConfig::Plaintext", "AuthConfig::ScramSha512"];
+
+/// The SANCTIONED construction sites: the file, the one function in it that
+/// may name the dialling constructor, and why that site exists.
+///
+/// Four entries, and `crates/weirkeeper/**` contributes NONE of them — the
+/// controller never dials a broker itself, which is why a probe is a Job. That
+/// absence is asserted rather than assumed: the walk covers weirkeeper's whole
+/// `src`, so a `RdKafkaReader::connect(` appearing there would be an
+/// unsanctioned site and would fail this guard by name.
+const CONSTRUCTION_SITES: [(&str, &str, &str); 4] = [
+    (
+        "crates/logweir/src/drill/mod.rs",
+        "fn context(",
+        "`drill::context` — the orchestrator builds the target reader once, before any \
+         phase runs, and hands it down as a `&dyn ClusterReader`",
+    ),
+    (
+        "crates/logweir/src/doctor.rs",
+        "fn check_target(",
+        "`doctor::check_target` — check 7 dials the target BY DESIGN; that is the whole \
+         check, and its pure half `evaluate_target` takes the answer as a value",
+    ),
+    (
+        "crates/logweir/src/backup/mod.rs",
+        "pub fn run(",
+        "`backup::run` — the backup path's source reader; `run_with` takes it as a \
+         parameter and names no constructor, which is what keeps the unit suite socketless",
+    ),
+    (
+        "crates/logweir/src/probe.rs",
+        "fn dial(",
+        "`probe::dial` — interface I14's subcommand IS a dial (Task 15c); its pure half \
+         `outcome` and its seam `probe` take a value and a `&dyn ClusterReader`",
+    ),
+];
+
+/// The bodies of every `fn` in a source file, keyed by its signature line.
+///
+/// Brace-counted rather than regexed: "exactly one function names the
+/// constructor" is a claim about a BODY, and a line-based scan cannot tell
+/// which function a line is inside. Lifted verbatim from the guard Task 15c
+/// wrote in `cluster_probe.rs`, which this row replaces.
+fn fn_bodies(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    // The running BYTE offset of each line. Every index below lands on a `{`
+    // or a `}`, both ASCII, so slicing by them is always on a char boundary
+    // even though these files carry multi-byte punctuation in their comments.
+    let mut line_start = 0usize;
+    for line in src.lines() {
+        let start = line_start;
+        line_start += line.len() + 1;
+        let t = line.trim_start();
+        if !(t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub(crate) fn ")) {
+            continue;
+        }
+        let Some(open) = src[start..].find('{').map(|i| start + i) else {
+            continue;
+        };
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push((t.to_string(), src[open..=end].to_string()));
+    }
+    out
+}
+
+/// `src` with comment lines removed.
+///
+/// Every one of these files legitimately DISCUSSES the arm it must not pin —
+/// `probe.rs` explains in prose why an `AuthConfig::ScramSha512` there would
+/// be the defect — and a scan that could not tell prose from code would force
+/// the reasoning out of the source.
+fn code_of(src: &str) -> String {
+    src.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// PURE, and the whole point: one file's path and body in, its offences
+/// against interface I1 out. `a_construction_site_planted_in_an_unlisted_file_is_flagged`
+/// drives this directly, so the guard's teeth are proved without anyone having
+/// to commit a fifth construction site to find out.
+fn construction_offences(rel_path: &str, contents: &str) -> Vec<String> {
+    let code = code_of(contents);
+    if !CONSTRUCTION_TOKENS.iter().any(|t| code.contains(t)) {
+        return Vec::new();
+    }
+    let Some((_, sanctioned_fn, _)) = CONSTRUCTION_SITES.iter().find(|(p, _, _)| *p == rel_path)
+    else {
+        let named: Vec<&str> = CONSTRUCTION_TOKENS
+            .iter()
+            .filter(|t| code.contains(**t))
+            .copied()
+            .collect();
+        return vec![format!(
+            "{rel_path} builds a Kafka client's auth ({}) and is not a sanctioned construction \
+             site. Interface I1 says there is ONE place a client's auth is built; a fifth site \
+             is a decision, not an edit, and belongs in CONSTRUCTION_SITES with its reason",
+            named.join(", ")
+        )];
+    };
+
+    let mut out = Vec::new();
+    if !code.contains("AuthConfig::from_spec") {
+        out.push(format!(
+            "{rel_path} is a sanctioned construction site but does not build its auth through \
+             `AuthConfig::from_spec` (interface I1)"
+        ));
+    }
+    for arm in PINNED_ARMS {
+        if code.contains(arm) {
+            out.push(format!(
+                "{rel_path} pins `{arm}` in CODE: a spec asking for the other mode would be \
+                 recorded in the document and then dialled as this one"
+            ));
+        }
+    }
+    let dialling: Vec<String> = fn_bodies(&code)
+        .into_iter()
+        .filter(|(_, body)| body.contains("RdKafkaReader::connect("))
+        .map(|(sig, _)| sig)
+        .collect();
+    if dialling.len() != 1 {
+        out.push(format!(
+            "{rel_path}: exactly one function may name the dialling constructor; found \
+             {dialling:?}"
+        ));
+    } else if !dialling[0].starts_with(sanctioned_fn) {
+        out.push(format!(
+            "{rel_path}: the constructor is named by {:?}, not by the sanctioned `{sanctioned_fn}`. \
+             A dial that moved into a function the pure rows drive would put a socket back in the \
+             default suite",
+            dialling[0]
+        ));
+    }
+    out
+}
+
+/// Every `.rs` under the two crates whose sources may construct a client.
+fn construction_walk() -> Vec<(String, String)> {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    for crate_src in [
+        root.join("crates/logweir/src"),
+        root.join("crates/weirkeeper/src"),
+    ] {
+        rs_files(&crate_src, &mut files);
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let body = std::fs::read_to_string(&p).unwrap();
+            (rel, body)
+        })
+        .collect()
+}
+
+/// **THE GUARD.** No file under `crates/logweir/src/**` or
+/// `crates/weirkeeper/src/**` builds a Kafka client's auth except the four
+/// sanctioned sites, each through `AuthConfig::from_spec`, each pinning no
+/// arm, each confining the dialling constructor to the one function named
+/// beside it.
+///
+/// Derived, not listed: this is Task 6's row and Task 15c's row, merged, with
+/// the file list computed from the tree instead of typed out. Plan erratum
+/// **E11(e)**, review finding **M-2**.
+#[test]
+fn the_one_construction_site_rule_is_derived_from_the_tree() {
+    let files = construction_walk();
+    let mut offences: Vec<String> = Vec::new();
+    for (rel, body) in &files {
+        offences.extend(construction_offences(rel, body));
+    }
+    assert!(
+        offences.is_empty(),
+        "{} breach(es) of the ONE-construction-site rule (interface I1):\n  {}",
+        offences.len(),
+        offences.join("\n  ")
+    );
+
+    // EVERY SANCTIONED SITE WAS ACTUALLY SEEN. Without this, deleting a site —
+    // or breaking the walk — leaves an allowlist entry standing for a file
+    // nothing checks, and the guard reports a clean tree forever.
+    for (path, _, reason) in CONSTRUCTION_SITES {
+        let (_, body) = files
+            .iter()
+            .find(|(rel, _)| rel == path)
+            .unwrap_or_else(|| panic!("the walk did not reach the sanctioned site {path}"));
+        assert!(
+            code_of(body).contains("AuthConfig::from_spec"),
+            "{path} is on the sanctioned list ({reason}) but no longer constructs anything; \
+             remove the entry in the same commit that removed the site"
+        );
+    }
+}
+
+/// The walk reaches both crates, and a walk that visits nothing asserts
+/// nothing.
+#[test]
+fn the_construction_walk_covers_both_crates() {
+    let files = construction_walk();
+    assert!(
+        files.len() >= 30,
+        "the construction walk visited only {} files",
+        files.len()
+    );
+    for expected in [
+        "crates/logweir/src/probe.rs",
+        "crates/weirkeeper/src/controllers/kafka_cluster.rs",
+    ] {
+        assert!(
+            files.iter().any(|(rel, _)| rel == expected),
+            "the walk did not reach {expected}; `crates/weirkeeper/src/**` is walked because the \
+             controller links `logweir-kafka` (Global Constraint 27, since Task 15c) and could \
+             therefore construct a client"
+        );
+    }
+}
+
+/// The guard has TEETH: a construction site planted in a file that is not on
+/// the list is flagged, and so is each way a sanctioned one can go wrong.
+///
+/// THE MUTANT M-2 IS ABOUT. Task 6's guard iterated a fixed three-file list,
+/// so this plant — a fourth file that dials — was invisible to it. Here it is
+/// one offence, by name.
+#[test]
+fn a_construction_site_planted_in_an_unlisted_file_is_flagged() {
+    // 1. A fifth site, in a file nobody listed.
+    let planted = construction_offences(
+        "crates/logweir/src/a_new_module_someone_adds.rs",
+        "fn go() {\n    let auth = AuthConfig::from_spec(&spec, None).unwrap();\n    \
+         let r = RdKafkaReader::connect(&servers, auth);\n}\n",
+    );
+    assert_eq!(
+        planted.len(),
+        1,
+        "an unlisted construction site must be exactly one offence: {planted:?}"
+    );
+    assert!(
+        planted[0].contains("not a sanctioned construction site"),
+        "and it must say so: {}",
+        planted[0]
+    );
+
+    // 2. THE SAME PLANT IN WEIRKEEPER. The controller never dials; a client
+    //    constructed there is the same offence and is reached by the same walk.
+    let in_controller = construction_offences(
+        "crates/weirkeeper/src/controllers/a_new_reconciler.rs",
+        "fn reconcile() {\n    let r = RdKafkaReader::connect(&servers, auth);\n}\n",
+    );
+    assert_eq!(in_controller.len(), 1, "{in_controller:?}");
+
+    // 3. A sanctioned site that PINS AN ARM — Task 6's original defect.
+    let pinned = construction_offences(
+        "crates/logweir/src/doctor.rs",
+        "fn check_target() {\n    let auth = AuthConfig::Plaintext;\n    \
+         let r = RdKafkaReader::connect(&servers, auth);\n}\n",
+    );
+    assert_eq!(pinned.len(), 2, "{pinned:?}");
+    assert!(
+        pinned.iter().any(|o| o.contains("AuthConfig::from_spec")),
+        "it stopped using the ONE constructor: {pinned:?}"
+    );
+    assert!(
+        pinned
+            .iter()
+            .any(|o| o.contains("pins `AuthConfig::Plaintext`")),
+        "and it pinned an arm: {pinned:?}"
+    );
+
+    // 4. A sanctioned site whose dial MOVED OUT of its one function — Task
+    //    15c's own claim, now asserted for all four sites.
+    let moved = construction_offences(
+        "crates/logweir/src/probe.rs",
+        "fn dial() {\n    let a = AuthConfig::from_spec(&s, None);\n}\n\
+         fn outcome() {\n    let r = RdKafkaReader::connect(&servers, auth);\n}\n",
+    );
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(
+        moved[0].contains("not by the sanctioned `fn dial(`"),
+        "{}",
+        moved[0]
+    );
+
+    // 5. PROSE IS NOT CODE. `backup/mod.rs` names the constructor in a doc
+    //    comment explaining the rule; a guard that could not tell would force
+    //    the reasoning out of the source.
+    assert!(
+        construction_offences(
+            "crates/logweir/src/a_documented_module.rs",
+            "/// This module never names RdKafkaReader::connect( or AuthConfig::Plaintext.\n\
+             fn go() {}\n",
+        )
+        .is_empty(),
+        "a comment mentioning the tokens is not a construction site"
+    );
+}

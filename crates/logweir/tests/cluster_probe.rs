@@ -117,48 +117,6 @@ fn probe_src() -> String {
     .expect("crates/logweir/src/probe.rs is readable")
 }
 
-/// The bodies of every `fn` in a source file, keyed by the signature line's
-/// trimmed text.
-///
-/// Brace-counted rather than regexed: "exactly one function names the
-/// constructor" is a claim about a BODY, and a line-based scan cannot tell
-/// which function a line is inside.
-fn fn_bodies(src: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    // The running BYTE offset of each line. Every index below lands on a `{` or
-    // a `}`, both ASCII, so slicing `src` by them is always on a char boundary
-    // even though the file's comments carry multi-byte punctuation.
-    let mut line_start = 0usize;
-    for line in src.lines() {
-        let start = line_start;
-        line_start += line.len() + 1;
-        let t = line.trim_start();
-        if !(t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub(crate) fn ")) {
-            continue;
-        }
-        let Some(open) = src[start..].find('{').map(|i| start + i) else {
-            continue;
-        };
-        let mut depth = 0usize;
-        let mut end = open;
-        for (i, c) in src[open..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = open + i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        out.push((t.to_string(), src[open..=end].to_string()));
-    }
-    out
-}
-
 /// `src` with comment lines removed. The file legitimately DISCUSSES what it
 /// must not do, and a scan that could not tell prose from code would force the
 /// reasoning out of the source.
@@ -361,51 +319,24 @@ fn the_probe_reads_no_allowlist_and_no_approver_key() {
     }
 }
 
-/// The one construction site (interface **I1**) is preserved, and `probe.rs` is
-/// the SECOND sanctioned place that dials.
-///
-/// Two claims, both over the source: the file builds its client's auth through
-/// `AuthConfig::from_spec` and pins no arm itself, and **exactly one function
-/// in it names the constructor**. The second is the property that keeps the
-/// pure half pure: a real dial reachable from `outcome` or
-/// `probe` would put a real dial inside the functions every row above drives.
-#[test]
-fn probe_builds_its_auth_through_the_one_construction_site() {
-    let src = probe_src();
-    assert!(
-        src.contains("AuthConfig::from_spec"),
-        "probe.rs must build its auth through the ONE construction site (interface I1)"
-    );
-    let code = code_only(&src);
-    assert!(
-        !code.contains("AuthConfig::Plaintext") && !code.contains("AuthConfig::ScramSha512"),
-        "probe.rs pins an `AuthConfig` arm in CODE: a `--auth-mode scramSha512` command line \
-         would then be dialled unauthenticated, which is the defect interface I1 exists to \
-         prevent"
-    );
-
-    // COMPOSED, NOT WRITTEN OUT. `no_network_in_unit_tests.rs`'s `DIAL_TOKENS`
-    // matches by substring and its allow-list is by PATH, so a test file that
-    // spelled the constructor would have to be allow-listed to talk about it —
-    // a standing permission for a file that constructs nothing. Two halves
-    // joined here carry the same meaning and earn no entry.
-    let constructor = concat!("RdKafkaReader", "::connect(");
-    let dialling: Vec<String> = fn_bodies(&src)
-        .into_iter()
-        .filter(|(_, body)| body.contains(constructor))
-        .map(|(sig, _)| sig)
-        .collect();
-    assert_eq!(
-        dialling.len(),
-        1,
-        "exactly one function in probe.rs may name the constructor; found {dialling:?}"
-    );
-    assert!(
-        dialling[0].starts_with("fn dial("),
-        "and it is `dial`, the impure wrapper — not `outcome`, not `probe`, not `run`: {:?}",
-        dialling[0]
-    );
-}
+// THE ONE-CONSTRUCTION-SITE ROW THAT STOOD HERE IS GONE, AND IT IS NOT LOST.
+//
+// Task 15c wrote `probe_builds_its_auth_through_the_one_construction_site` in
+// this file because Task 6's guard iterated a FIXED three-file list and so did
+// not extend to `probe.rs` — disclosed at the time, and raised by Task 15c's
+// review as finding **M-2**. Task 16b replaced that list with a DERIVED walk
+// over `crates/logweir/src/**` and `crates/weirkeeper/src/**`:
+// `no_network_in_unit_tests.rs::the_one_construction_site_rule_is_derived_from_the_tree`.
+//
+// Every claim this row made is asserted there, for `probe.rs` among the four
+// sanctioned sites and no longer only for it: the file builds its auth through
+// `AuthConfig::from_spec`, it pins neither `AuthConfig` arm in code, and
+// EXACTLY ONE function in it names the dialling constructor — `fn dial(`, the
+// impure wrapper, not `outcome`, not `probe`, not `run`. The `fn_bodies`
+// brace-counter that made the last claim possible moved with it, verbatim.
+//
+// ONE GUARD AND ONE ALLOWLIST was the point: a tree carrying two guards for
+// one rule is a tree where the next site is added to neither.
 
 /// The dial is BOUNDED, and the bound is shorter than the reader's own.
 ///
