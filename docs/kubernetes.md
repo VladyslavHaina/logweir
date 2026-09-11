@@ -2139,8 +2139,10 @@ at the previous commit contained no `verification.rs` at all, so Phase B could
 not run against it), and the current pins are
 **`logweir@sha256:6440a4a0…`** in `crates/weirkeeper/src/job.rs`,
 `examples/cronjob-drill.yaml` and `e2e/k8s/phase-b-demo.md`, and
-**`weirkeeper@sha256:a5aa6dc1…`** in `config/manager/deployment.yaml` and
+**`weirkeeper@sha256:d198c8e2…`** in `config/manager/deployment.yaml` and
 `logweir.yaml`. `scripts/check-dod.sh` compares the tree against those.
+
+And once more, before this task landed: the re-review of fix round 1 rebuilt the controller image from the fixed source to prove the crashed-path fix live, so `a5aa6dc1…` — built before the fix — was superseded by `d198c8e2…`, and the pins above were moved to it by the controller at landing. Same rule (E19a): a local digest is a measurement of the last build; the pinned files are the truth, this paragraph is history.
 
 This section is **not** edited to match, and that is deliberate: it is a
 transcript of commands that were run and the values they printed on the day
