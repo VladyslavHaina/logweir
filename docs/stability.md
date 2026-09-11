@@ -782,9 +782,10 @@ OVERLAPS the sample window, so a straddling segment claims records the window de
 excludes. Nothing here was short: the archive side returned every record the window contains, and
 the shortfall exists only against a figure derived from records the window excludes — so a signed
 document reporting `fail-integrity` with `mismatches: 0` over a restore that was verified
-record-by-record off the broker is a false negative, not a correct refusal. **Filed as Task 10b**
-(in flight); this row is updated when it lands. Until then the workaround is the operator
-consequence. **The consequence for an operator is
+record-by-record off the broker is a false negative, not a correct refusal. **Fixed by Task 10b:** `claimed` now sums only the segments wholly inside the sample window and treats
+a straddler as an upper bound, so this restore scores `pass` at `records_per_partition: 25` (re-review,
+2026-09-10: `claimed=0` on all three partitions, `Verified { checked: 2 }`, exit 0). The fixture still asks
+for 2 until Task 12 raises it; the sentence below is the pre-fix operator consequence, kept as history. **The consequence for an operator is
 concrete: on a point-in-time restore, set `sample.records_per_partition` at or below the number of
 records each partition holds inside the window, or the run reports `fail-integrity` about its own
 sample rather than about the restore.** The G-PITR fixture asks for 2, which is what its window
