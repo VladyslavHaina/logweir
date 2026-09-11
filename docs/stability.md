@@ -297,6 +297,58 @@ pre-release ruling by accident.**
   `immutable`/`retain_until` today. A bucket genuinely under Object Lock will
   not be recognised as such until that API exists.
 
+### The controller image is multi-architecture in CI only — and CI has never run: `blocked: no remote`
+
+**Task 30b, 2026-09-11. The status of this entry is `blocked: no remote`, and
+what would close it is one sentence: a green tagged run of
+`.github/workflows/release.yml` whose `pullback` job summary carries the runner
+digest and the controller manifest digest, pulled on a machine that did not
+produce them.** No git remote is configured for this repository, so no tag can be
+pushed, no workflow can start, and no such summary exists. Everything below is
+the shape of a file and the measurement of a laptop.
+
+**What the workflow now says.** `ghcr.io/logweir/weirkeeper` is published as a
+manifest list carrying `linux/amd64` and `linux/arm64`. Each variant is compiled
+by a job of its own, on a runner **of that architecture**
+(`build-weirkeeper-amd64` on `ubuntu-24.04`, `build-weirkeeper-arm64` on
+`ubuntu-24.04-arm`, GitHub's hosted arm64 label for public repositories; an owner
+of a private repository substitutes a self-hosted arm64 label). Each of those
+jobs asserts its own image with all five of `scripts/check-image-weirkeeper.sh`'s
+checks **by execution** — a native runner can run what it just produced — and
+then hands the bytes on as a tarball, pushing nothing. The `image` job loads both
+tarballs, asserts the amd64 variant by execution again and the arm64 variant with
+`scripts/check-image-weirkeeper.sh --no-exec` (`docker create` + `docker cp`, ELF
+header, licence set and org-root anchor read on the host, nothing executed from
+the image), and only then pushes. Every push in the workflow is in that one job.
+
+**Why not one job with a two-platform build, which is the obvious shape.** It
+cannot work here and the reason is measured, not assumed. `Dockerfile.weirkeeper`
+refuses a cross compile by name: the workspace graph contains `aws-lc-sys`, whose
+cmake and bindgen steps read the host `/usr/include`, and a cross attempt on
+2026-09-11 died after 106 s on `sys/types.h: No such file or directory`. The only
+remaining way to produce a foreign variant on one machine is QEMU, which STANDING
+RULE 10 forbids — the emulated cargo layer measured elsewhere on this page at
+**33x** is what that rule is made of. A multi-platform image also cannot be
+`--load`ed into a daemon at all, so a gate that inspects a local tag would have
+nothing to inspect.
+
+**The wall clocks, and the one that is missing.** A native `linux/arm64`
+controller image on this host (Docker Desktop, `just image-weirkeeper`,
+2026-09-11): **182 s**, exit 0, with the base layers already cached. The matching
+**amd64 figure is `blocked: no amd64 host`** — there is no x86-64 machine here and
+the cross path is the refusal above, so the ratio between them cannot be measured
+from this tree. That ratio was a proxy for "is a leg being emulated"; under the
+per-architecture jobs above it is moot, because each leg runs natively and the
+`dpkg --print-architecture` assertion inside the builder stage fails if it does
+not.
+
+**And the digest moved again.** Rebuilding the controller image for the dry run
+above produced `weirkeeper@sha256:6ab14111…`, superseding `…e6e3384e…` in
+`config/manager/deployment.yaml` and `logweir.yaml`. That is the fourth time this
+one pin has moved in this plan, which is the entry above restated: a locally
+pinned digest is the measurement of one build on one machine, and it is not a
+reproducible identifier for anything.
+
 ### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
 
 `sample.anchor` chooses WHICH records in the sampled window a drill reconciles.

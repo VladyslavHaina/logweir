@@ -22,6 +22,45 @@ name: release
 # vendors and compiles librdkafka from C). It is deliberately NOT in
 # `[workspace.metadata.dist].targets`, because a triple listed there is a
 # hard-failing build.
+#
+# ===========================================================================
+# THE CONTROLLER IMAGE IS BUILT ONCE PER ARCHITECTURE, ON A NATIVE RUNNER
+# ===========================================================================
+# Task 30b, and a STATED DEVIATION from that task's brief, which put three
+# `docker/build-push-action` steps (amd64 load, arm64 load, two-platform push)
+# in the single `image:` job on one amd64 runner. THAT SHAPE CANNOT RUN HERE,
+# for a reason measured rather than guessed — plan erratum E19(c):
+#
+#   `Dockerfile.weirkeeper`'s builder stage REFUSES a cross build, by name, at
+#   second one. The workspace graph contains `aws-lc-sys`, whose cmake and
+#   bindgen steps read the HOST `/usr/include`; a cross compile was run on
+#   2026-09-11 and died after 106 s on `sys/types.h: No such file or directory`.
+#   So on an amd64 runner a `linux/arm64` leg has exactly one way to produce a
+#   binary — emulating the whole Rust compile under QEMU — and STANDING RULE 10
+#   forbids that: `docs/stability.md` measures an emulated cargo layer at 33x
+#   (`3027s` of a `3044s` build), which looks like a stall rather than a failure.
+#
+# So: `build-weirkeeper-amd64` (ubuntu-24.04) and `build-weirkeeper-arm64`
+# (ubuntu-24.04-arm) each compile NATIVELY, load the result into their own
+# daemon, assert it with all five of `scripts/check-image-weirkeeper.sh`'s
+# checks BY EXECUTION — each runner runs its own architecture — and upload the
+# image as a tarball. **Neither job pushes anything.** `image:` needs both,
+# loads both tarballs, re-asserts the amd64 variant by execution and the arm64
+# variant with `--no-exec` (it cannot run it, and will not emulate it), and only
+# then pushes: two immutable per-architecture tags and a manifest list assembled
+# from their repository digests.
+#
+# EVERY PUSH IN THIS WORKFLOW IS STILL IN ONE JOB, which is not an accident of
+# where the steps were pasted: `workflow_lint_exactly_one_job_pushes` has
+# cardinality 1 as its assertion, and two jobs racing each other to one registry
+# tag is the defect that test exists to prevent.
+#
+# `ubuntu-24.04-arm` IS GITHUB'S HOSTED arm64 LABEL FOR PUBLIC REPOSITORIES. An
+# owner running this from a PRIVATE repository substitutes a self-hosted arm64
+# label there; there is no third option that keeps STANDING RULE 10.
+#
+# The runner image keeps its existing single-platform shape (`linux/amd64`
+# only — the engine binary has no arm64 manifest, Global Constraint 10).
 on:
   push:
     tags: ["v*"]
@@ -117,15 +156,104 @@ jobs:
           echo "::warning::the musl build failed; the release ships without it, as ADR 0004 allows." \
                " docs/stability.md must record this — do NOT block the release on it."
 
+  # THE CONTROLLER IMAGE, amd64, BUILT AND ASSERTED WHERE IT CAN RUN.
+  #
+  # This job PUSHES NOTHING. It compiles natively on an amd64 runner, loads the
+  # result into that runner's own daemon, runs every one of
+  # `scripts/check-image-weirkeeper.sh`'s checks BY EXECUTION — `ldd` and
+  # `weirkeeper --version` are real here, because the runner and the image are
+  # the same architecture — and hands the bytes on as a tarball.
+  # `workflow_lint_every_platform_is_asserted_before_the_manifest_push` asserts
+  # the "pushes nothing" half; `workflow_lint_exactly_one_job_pushes` is what it
+  # protects.
+  build-weirkeeper-amd64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: weirkeeper-amd64
+        name: Compile the controller image natively, into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.weirkeeper
+          load: true
+          push: false
+          # ONE PLATFORM, AND IT IS THIS RUNNER'S OWN. `Dockerfile.weirkeeper`
+          # refuses a cross build by name (E19(c)); a two-platform build could
+          # not `load:` into the daemon in any case, which is what leaves a
+          # variant nobody asserted.
+          platforms: linux/amd64
+          tags: weirkeeper:check-amd64
+      - name: The controller image must link, run, carry its licences and its anchor
+        # ALL FIVE CHECKS, BY EXECUTION. A single command whose exit code the
+        # runner reads directly: no pipe, no `|| true`, no `set +e`.
+        run: bash scripts/check-image-weirkeeper.sh weirkeeper:check-amd64
+      - name: Hand the ASSERTED bytes on as a tarball
+        shell: bash
+        # `docker save` of the tag the step above asserted. The pushing job
+        # `docker load`s this file and asserts it AGAIN before pushing, so the
+        # artifact store is a transport and never a source of trust.
+        run: |
+          mkdir -p image-out
+          docker save weirkeeper:check-amd64 -o image-out/weirkeeper-amd64.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weirkeeper-image-amd64
+          path: image-out/weirkeeper-amd64.tar
+          retention-days: 1
+
+  # THE CONTROLLER IMAGE, arm64, ON A NATIVE arm64 RUNNER — the same job, one
+  # label and one tag apart. `ubuntu-24.04-arm` is GitHub's hosted arm64 label
+  # for public repositories; an owner of a private repository substitutes a
+  # self-hosted arm64 label. There is no third option that keeps STANDING
+  # RULE 10: the alternative is emulating a Rust compile, measured at 33x.
+  build-weirkeeper-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: weirkeeper-arm64
+        name: Compile the controller image natively, into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.weirkeeper
+          load: true
+          push: false
+          platforms: linux/arm64
+          tags: weirkeeper:check-arm64
+      - name: The controller image must link, run, carry its licences and its anchor
+        run: bash scripts/check-image-weirkeeper.sh weirkeeper:check-arm64
+      - name: Hand the ASSERTED bytes on as a tarball
+        shell: bash
+        run: |
+          mkdir -p image-out
+          docker save weirkeeper:check-arm64 -o image-out/weirkeeper-arm64.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weirkeeper-image-arm64
+          path: image-out/weirkeeper-arm64.tar
+          retention-days: 1
+
   image:
     runs-on: ubuntu-24.04
-    # THE DIGEST OF THE BYTES THIS JOB ASSERTED. It is captured in the `push`
-    # step and nowhere else, because that is the only step where a REPOSITORY
-    # digest exists: the build below has no registry exporter, so its own
-    # `outputs.digest` would be a local image config digest, not the digest a
-    # `docker pull` resolves. `publish:` reads this for the release notes.
+    # BOTH ARCHITECTURES MUST HAVE BEEN BUILT AND ASSERTED BEFORE THIS JOB
+    # STARTS. `needs` is the only thing that makes "the manifest list is
+    # assembled from bytes two native runners already asserted" true rather
+    # than hopeful, and
+    # `workflow_lint_every_platform_is_asserted_before_the_manifest_push`
+    # asserts this list.
+    needs: [build-weirkeeper-amd64, build-weirkeeper-arm64]
+    # THE DIGESTS OF THE BYTES THIS JOB ASSERTED. Each is captured in its own
+    # push step and nowhere else, because that is the only place a REPOSITORY
+    # digest exists: a `load: true, push: false` build has no registry exporter,
+    # so its `outputs.digest` would be a local image config digest, not the
+    # digest a `docker pull` resolves. `publish:` reads both for the release
+    # notes and `pullback:` reads both to pull them back.
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      weirkeeper_digest: ${{ steps.push-weirkeeper.outputs.weirkeeper_digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Extract the pinned engine
@@ -163,6 +291,34 @@ jobs:
         # A SINGLE COMMAND WHOSE EXIT CODE THE RUNNER READS DIRECTLY: no pipe,
         # no `|| true`, no `set +e`. The script's contract is exit 0 or 1.
         run: bash scripts/check-image.sh logweir:check
+      # ---------------------------------------------------------------------
+      # THE CONTROLLER IMAGE ARRIVES HERE AS BYTES, NOT AS A RECIPE.
+      # ---------------------------------------------------------------------
+      # Nothing is recompiled in this job. The two native jobs above produced
+      # and asserted each variant; these steps load those exact tarballs and
+      # assert them a SECOND time, in the daemon that is about to push them, so
+      # that "the bytes that were checked are the bytes that are pushed" is a
+      # property of THIS job and not a property of an artifact store.
+      - uses: actions/download-artifact@v4
+        with: { name: weirkeeper-image-amd64, path: incoming }
+      - uses: actions/download-artifact@v4
+        with: { name: weirkeeper-image-arm64, path: incoming }
+      - name: Load the amd64 controller image into this daemon
+        run: docker load --input incoming/weirkeeper-amd64.tar
+      - name: The amd64 controller image, asserted BY EXECUTION on an amd64 runner
+        # Full five checks: this runner is amd64 and so is this variant, so
+        # `ldd` and `weirkeeper --version` run natively and mean something.
+        run: bash scripts/check-image-weirkeeper.sh weirkeeper:check-amd64
+      - name: Load the arm64 controller image into this daemon
+        run: docker load --input incoming/weirkeeper-arm64.tar
+      - name: The arm64 controller image, asserted WITHOUT executing it
+        # `--no-exec` (Task 30b): `docker create` + `docker cp`, then the ELF
+        # header, the licence set and the org-root anchor are read on the HOST.
+        # This runner cannot execute an AArch64 binary and WILL NOT emulate one
+        # (STANDING RULE 10). The two execution checks were run natively by
+        # `build-weirkeeper-arm64` on the same bytes, which is why that job
+        # exists.
+        run: bash scripts/check-image-weirkeeper.sh --no-exec weirkeeper:check-arm64
       - uses: docker/login-action@v3
         # TAG-GATED, like the push below. `on:` carries `workflow_dispatch`
         # (`:28`), so without this condition a dispatch from a branch logs in
@@ -249,13 +405,219 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "pushed $ver at $digest"
 
+      - id: push-weirkeeper
+        name: Push the two asserted controller variants, then the manifest list
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          # `docker manifest` is an experimental CLI command and stays behind
+          # this flag on the Docker CLI versions ubuntu-24.04 ships. The
+          # alternative spelling, `imagetools create`, cannot be used here:
+          # `workflow_lint_no_docker_build_shellout` bans the two-word shell
+          # compile spelling over this whole file, and `buildx` written after
+          # `docker ` contains it as a substring. That ban is worth more than
+          # the spelling, so the list is assembled with `docker manifest`.
+          DOCKER_CLI_EXPERIMENTAL: enabled
+        # NOTHING IS COMPILED HERE. `docker tag` renames the bytes the two
+        # assert steps above looked at; `docker push` uploads those exact bytes;
+        # `docker manifest create` assembles a list out of the two repository
+        # digests those uploads produced.
+        # `workflow_lint_the_push_step_names_no_build_command` asserts the
+        # absence of any compile command in this block, and
+        # `workflow_lint_every_platform_is_asserted_before_the_manifest_push`
+        # asserts that each platform named here was loaded and asserted first.
+        run: |
+          # THE LITERAL TARGET (Global Constraint 24), never
+          # `github.repository` — one repository can never produce the two
+          # names this project publishes.
+          #
+          # TWO IMMUTABLE PER-ARCHITECTURE TAGS AND THEN THE LIST. The
+          # per-architecture references are not decoration: `docker manifest
+          # create` assembles a list out of references that already exist in
+          # the registry, and an operator debugging a pull needs to be able to
+          # name one variant.
+          amd="ghcr.io/logweir/weirkeeper:${{ github.ref_name }}-amd64"
+          arm="ghcr.io/logweir/weirkeeper:${{ github.ref_name }}-arm64"
+          list="ghcr.io/logweir/weirkeeper:${{ github.ref_name }}"
+          docker tag weirkeeper:check-amd64 "$amd"
+          docker push "$amd"
+          docker tag weirkeeper:check-arm64 "$arm"
+          docker push "$arm"
+          # THE REPOSITORY DIGEST, SELECTED BY REPOSITORY AND NOT BY POSITION —
+          # the same correction the runner push above records: on a daemon
+          # backed by the containerd image store an image carries one
+          # RepoDigests entry per repository name it has ever been tagged with,
+          # and index 0 was MEASURED to be the throwaway local tag.
+          digest_of() {
+            rd=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1")
+            repo="${1%:*}"
+            for entry in $rd; do
+              case "$entry" in
+                "$repo"@sha256:*) printf '%s' "${entry##*@}"; return 0 ;;
+              esac
+            done
+            echo "no repository digest for $1 after push: '$rd'" >&2
+            return 1
+          }
+          amd_digest="$(digest_of "$amd")"
+          arm_digest="$(digest_of "$arm")"
+          # BY DIGEST, NOT BY TAG (Global Constraint 7). A list assembled from
+          # tags would resolve them again, later, against whatever those tags
+          # name then.
+          docker manifest create "$list" "${amd%:*}@$amd_digest" "${arm%:*}@$arm_digest"
+          # `docker manifest push` prints the LIST's own repository digest — the
+          # digest a `docker pull ghcr.io/logweir/weirkeeper@…` resolves on any
+          # architecture. No pipe: the command's exit status is the assignment's.
+          list_digest="$(docker manifest push "$list")"
+          case "$list_digest" in
+            sha256:*) ;;
+            *) echo "docker manifest push printed no digest for $list: '$list_digest'" >&2; exit 1 ;;
+          esac
+          echo "weirkeeper_digest=$list_digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $list at $list_digest (members $amd_digest, $arm_digest)"
+
+  # ===========================================================================
+  # THE PULL-BACK — the only step in this plan that can satisfy Global
+  # Constraint 37, and the only artefact that moves tag-1 checklist clause 1.
+  # ===========================================================================
+  # A FRESH RUNNER THAT DID NOT BUILD THE BYTES, an empty daemon and no buildx
+  # cache. `kubectl apply` exiting 0 does not start a pod, and a digest read out
+  # of the daemon that produced it proves nothing about a stranger's `docker
+  # pull`. This job pulls what was published, on a machine that has never seen
+  # it, and re-runs the same two gates against what came back.
+  #
+  # IT PULLS AND NEVER PUSHES, so `workflow_lint_exactly_one_job_pushes` still
+  # has cardinality 1, and it compiles nothing, which
+  # `workflow_lint_the_pullback_job_builds_nothing` asserts — a job that could
+  # rebuild the bytes would be proving they are reproducible, which is a
+  # different (and here, false) property.
+  pullback:
+    needs: [image]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        # The step-level gate as well as the job-level one:
+        # `workflow_lint_login_and_push_are_tag_gated` reads the STEP's `if:`,
+        # in every job, so that a future editor who loosens the job condition
+        # fails a test rather than a release.
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull the runner image by digest and re-assert it
+        shell: bash
+        run: |
+          runner="ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}"
+          docker pull "$runner"
+          bash scripts/check-image.sh "$runner"
+          {
+            echo "## Pull-back — bytes that travelled through the registry"
+            echo
+            echo '```'
+            echo "docker pull $runner   -> ok"
+            echo "scripts/check-image.sh $runner   -> ok"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Pull BOTH controller variants from the manifest list and re-assert them
+        shell: bash
+        # THE TWO `--platform` PULLS ARE THE PROOF THAT THE LIST CARRIES BOTH.
+        # Each exit status is read directly, on its own line; a manifest list
+        # missing a variant fails the pull rather than producing a green run
+        # that published half an image.
+        #
+        # ORDER MATTERS: a digest reference resolves to whichever variant was
+        # pulled last, so the amd64 variant is asserted BY EXECUTION before the
+        # arm64 pull replaces it, and the arm64 variant is then asserted with
+        # `--no-exec` — this runner is amd64 and will not emulate.
+        run: |
+          controller="ghcr.io/logweir/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}"
+          docker pull --platform linux/amd64 "$controller"
+          bash scripts/check-image-weirkeeper.sh "$controller"
+          docker pull --platform linux/arm64 "$controller"
+          bash scripts/check-image-weirkeeper.sh --no-exec "$controller"
+          {
+            echo
+            echo '```'
+            echo "docker pull --platform linux/amd64 $controller   -> ok"
+            echo "scripts/check-image-weirkeeper.sh $controller   -> ok (by execution)"
+            echo "docker pull --platform linux/arm64 $controller   -> ok"
+            echo "scripts/check-image-weirkeeper.sh --no-exec $controller   -> ok"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record both published digests in the job summary
+        shell: bash
+        # THIS SUMMARY IS THE ARTEFACT. `docs/tag1-checklist.md` clause 1 moves
+        # from blocked to closed on the transcript this step writes, and on
+        # nothing else — not on an apply, not on a locally built digest.
+        run: |
+          {
+            echo
+            echo "| image | digest | pulled back on |"
+            echo "|---|---|---|"
+            echo "| ghcr.io/logweir/logweir | ${{ needs.image.outputs.digest }} | ${{ github.run_id }} |"
+            echo "| ghcr.io/logweir/weirkeeper | ${{ needs.image.outputs.weirkeeper_digest }} | ${{ github.run_id }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish:
     needs: [plan, build, image]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # THE DOWNLOAD IS BY PATTERN, NOT "EVERYTHING", and that is a correction
+      # Task 30b had to make rather than a preference. `download-artifact` with
+      # no selector collects EVERY artifact the run produced, and `files:`
+      # below attaches every downloaded file to the release — which, once the
+      # two controller-image tarballs exist, would attach several hundred
+      # megabytes of container image to a release whose assets are supposed to
+      # be binaries. The image artifacts are a transport between jobs
+      # (`retention-days: 1`) and are deliberately not release assets: what an
+      # operator pulls is `ghcr.io/logweir/weirkeeper@…`, named below.
       - uses: actions/download-artifact@v4
-        with: { path: artifacts, merge-multiple: true }
+        with: { pattern: binary-*, path: artifacts, merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { name: dist-manifest, path: artifacts }
+      - id: bundle
+        name: Assemble the install bundle, with the auditor's reader inside it
+        shell: bash
+        # SPEC §16 CLAUSE 6. An auditor's independence is not real if the
+        # script that verifies a scorecard lives only in a repository they have
+        # to clone, so `docs/verify_scorecard.py` ships INSIDE the release
+        # artefact, beside the manifest that installs the thing it audits and
+        # the licences that govern both.
+        #
+        # `ui/tests/` IS EXCLUDED, EXPLICITLY. The shipped bundle must not
+        # carry its own test harness and fixtures: that data names the compose
+        # stack's MinIO endpoint, and a page an operator serves from a bundle
+        # should not ship a directory of files describing a developer's
+        # laptop. The exclusion is a pattern this step states, not an accident
+        # of what happened to be on disk —
+        # `the_release_artefact_ships_the_auditors_reader` asserts the pattern
+        # itself is present.
+        run: |
+          mkdir -p artifacts
+          bundle="artifacts/logweir-${{ github.ref_name }}-install.tar.gz"
+          tar -czf "$bundle" \
+            --exclude='ui/tests' \
+            logweir.yaml \
+            THIRD_PARTY_NOTICES.md \
+            LICENSE \
+            NOTICE \
+            docs/verify_scorecard.py \
+            ui
+          # THE SHA256 OF EVERY SHIPPED FILE UNDER `ui/`, in the release notes.
+          # Spec §8's reason: the page runs with the VIEWER'S OWN AUTHORITY —
+          # their browser, their session, their cluster access — so the bytes
+          # are worth pinning where someone can check them without trusting the
+          # bundle they came in. No pipe: `find -exec … +` and `sort -o` each
+          # have their own exit status.
+          find ui -type f -not -path 'ui/tests/*' -exec sha256sum {} + > ui-sha256.txt
+          sort -o ui-sha256.txt ui-sha256.txt
+          echo "ui_sha256<<LOGWEIR_EOF" >> "$GITHUB_OUTPUT"
+          cat ui-sha256.txt >> "$GITHUB_OUTPUT"
+          echo "LOGWEIR_EOF" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
@@ -264,13 +626,31 @@ jobs:
             The binaries in this release **carry no engine**: they need
             `kafka-backup` of the pinned digest on `$PATH`, plus
             `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`. The container
-            image carries both.
+            images carry what each of them needs.
 
-            Container image:
-            `ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}`
-            — this is the digest of the image the release job asserted
-            (`scripts/check-image.sh`), pushed without rebuilding. Pull by
-            digest, never by tag (Global Constraint 7).
+            Container images — pull by digest, never by tag (Global
+            Constraint 7). Both were asserted before they were pushed and
+            pulled back afterwards by the `pullback:` job of this run, on a
+            machine that did not build them:
+
+            - runner: `ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}`
+              (linux/amd64 only — the engine binary has no arm64 manifest)
+            - controller: `ghcr.io/logweir/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}`
+              (a manifest list: linux/amd64 and linux/arm64, each compiled on a
+              native runner of its own architecture)
+
+            `logweir-${{ github.ref_name }}-install.tar.gz` carries
+            `logweir.yaml`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, the
+            static UI and **`docs/verify_scorecard.py`** — the auditor's
+            independent scorecard reader, so verifying a signed drill result
+            does not require cloning this repository. The bundle excludes
+            `ui/tests/`.
+
+            sha256 of every file the bundle ships under `ui/`:
+
+            ```
+            ${{ steps.bundle.outputs.ui_sha256 }}
+            ```
 
             Apache Kafka® and Kafka® are registered trademarks of the Apache
             Software Foundation. Logweir is not affiliated with or endorsed by

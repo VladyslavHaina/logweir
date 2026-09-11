@@ -26,12 +26,12 @@ closer.
 
 | # | Spec §16 clause | Status | Closer or recorded evidence |
 |---|---|---|---|
-| 1 | `kubectl apply --server-side -f logweir.yaml` works twice on a clean docker-desktop, **and** the image digests that file carries have been pulled back from a registry the author does not control | `blocked: images not published` | `docs/kubernetes.md` §13 (the X-APPLY transcript) · `docs/install.md` (the two digest rows, both blocked) · `logweir.yaml` · `crates/logweir/tests/manifest_lint.rs` |
+| 1 | `kubectl apply --server-side -f logweir.yaml` works twice on a clean docker-desktop, **and** the image digests that file carries have been pulled back from a registry the author does not control | `blocked: images not published` | `docs/kubernetes.md` §13 (the X-APPLY transcript) · `docs/install.md` (the two digest rows, both blocked) · `logweir.yaml` · `crates/logweir/tests/manifest_lint.rs` · **2026-09-11, still blocked. What would close it: the pullback job's summary from one tagged run — the two pulled digests and the pull transcript, written on a runner that did not build the bytes. Nothing else does.** |
 | 2 | Demo 1 runs end to end **in CI on a `kind` cluster created by the workflow**; X-APPLY is additionally recorded once on docker-desktop; Demo 2 is documented and labelled | `blocked: no remote` | `e2e/k8s/laptop-demo.md` (the recorded docker-desktop walkthrough, X-APPLY included) · `crates/logweir/tests/laptop_demo_lint.rs` · `docs/kubernetes.md` §13 |
 | 3 | Every shipped image is referenced by `@sha256:` and asserted before push; the engine digest stays in `third_party/kafka-backup-binary.digest`; the extraction script's tag pull is fixed | `closed` | `docs/kubernetes.md` §14 (the X-DIGEST transcript) · `crates/logweir/tests/extract_engine.rs` · `crates/logweir/tests/manifest_lint.rs` · `scripts/check-image.sh` · `scripts/check-image-weirkeeper.sh` · `third_party/kafka-backup-binary.digest` · `scripts/check-dod.sh` |
-| 4 | Task 9's F1–F4 are closed before the first real push, and `release.yml` then runs for real, once | `blocked: no remote` | `crates/logweir/tests/workflow_lint.rs` · `.github/workflows/release.yml` |
+| 4 | Task 9's F1–F4 are closed before the first real push, and `release.yml` then runs for real, once | `blocked: no remote` | `crates/logweir/tests/workflow_lint.rs` · `.github/workflows/release.yml` · **2026-09-11, still blocked. What would close it: the URL of one tagged run of that workflow, green.** |
 | 5 | LICENSE, NOTICE, README, SECURITY.md and CONTRIBUTING with DCO are present; every doc footer carries the ASF sentence; both images `COPY` LICENSE and NOTICE | `closed` | `crates/logweir/tests/doc_lint.rs` · `scripts/check-dod.sh` · `scripts/check-image.sh` · `scripts/check-image-weirkeeper.sh` · `THIRD_PARTY_NOTICES.md` |
-| 6 | `docs/verify_scorecard.py` ships **inside the release artefact**, not only in the repository | `blocked: no remote` | `docs/verify_scorecard.py` · `.github/workflows/release.yml` |
+| 6 | `docs/verify_scorecard.py` ships **inside the release artefact**, not only in the repository | `blocked: no remote` | `docs/verify_scorecard.py` · `.github/workflows/release.yml` · `crates/logweir/tests/workflow_lint.rs` · **2026-09-11, still blocked. What would close it: the download URL of the published install bundle asset, with the reader inside it.** |
 | 7 | The drift gate covers the scorecard **and** the backup receipt, and both readers agree on each | `closed` | `crates/logweir-core/tests/schema_drift.rs` · `scripts/check-verifier-parity.sh` · `crates/logweir/tests/two_reader_parity.rs` · `crates/logweir/tests/two_reader_parity_receipt.rs` · `.github/workflows/ci.yml` |
 | 8 | The trademark position is cleared by counsel, or the name is explicitly a placeholder, with the registry namespace already fixed | `blocked: owner action` | `TRADEMARKS.md` · `crates/logweir/tests/doc_lint.rs` |
 | 9 | Every mark in the shipped docs is labelled in place, with what would verify it | `closed` | `bash scripts/check-unverified-labels.sh` · `crates/logweir/tests/label_gate.rs` |
@@ -57,6 +57,21 @@ What moves this row to `closed` is Task 30b's pull-back: a git remote, one
 `release.yml` run against it, and a pull of the published digests **on a host
 that did not build them**. Nothing in this tree can do it, and no test here
 asserts otherwise.
+
+**2026-09-11 — Task 30b ran and stopped here.** The mechanism now exists and the
+clause is unchanged. `.github/workflows/release.yml` carries a `pullback` job:
+`needs: [image]`, a fresh `ubuntu-24.04` runner with an empty daemon and no
+build cache, which pulls the runner digest and pulls the controller manifest
+digest **twice, once per `--platform`**, re-runs `scripts/check-image.sh` and
+`scripts/check-image-weirkeeper.sh` against what came back, and writes both
+digests and the pull transcript into the run's job summary.
+`crates/logweir/tests/workflow_lint.rs`'s
+`workflow_lint_the_pullback_job_builds_nothing` holds its shape. **That job has
+never run**, because there is still no git remote to push a tag to, so the
+transcript that would close this row does not exist. The digests in
+`logweir.yaml` are still one laptop's — and Task 30b moved the controller one
+again (the fourth time in this plan), which is the same point restated: a local
+digest is the measurement of one build.
 
 ### 2 — Demo 1, in CI, on a workflow-created cluster
 
@@ -89,9 +104,12 @@ all; and the engine pin itself is one `sha256:` line in
 `third_party/kafka-backup-binary.digest`.
 
 Closed here does **not** mean the images are published — that is row 1, and it
-is blocked. Task 30b adds `workflow_lint_every_platform_is_asserted_before_the_manifest_push`
-for the multi-architecture push; that test does not exist today and this row
-does not name it.
+is blocked. Task 30b added
+`workflow_lint_every_platform_is_asserted_before_the_manifest_push` for the
+multi-architecture controller push: every platform the manifest list carries has
+a `docker load` and an assert step before the push, in the pushing job, and each
+was compiled on a runner of its own architecture. That test now exists, in
+`crates/logweir/tests/workflow_lint.rs`, which row 4 names.
 
 ### 4 — Task 9's F1–F4, and one real run
 
@@ -111,9 +129,23 @@ is pushed before the moving one), and
 four exist to protect: the bytes the image checker interrogated are the bytes
 that reach the registry.
 
+Task 30b added four more, and renamed one. New:
+`workflow_lint_every_platform_is_asserted_before_the_manifest_push` (every
+platform inside the pushed manifest list was loaded and asserted first, in the
+pushing job, and was compiled on a native runner of its own architecture),
+`workflow_lint_the_pullback_job_builds_nothing` (the job that pulls the
+published digests back compiles nothing and pushes nothing) and
+`the_release_artefact_ships_the_auditors_reader` (clause 6's subject, below).
+Renamed: Task 30's `workflow_lint_the_asserted_image_is_the_pushed_image` is now
+`workflow_lint_every_image_is_asserted_before_push`, because there are three
+images and the singular had gone stale.
+
 The **"runs for real, once" half is blocked**: `.github/workflows/release.yml`
-has never executed on any commit, and cannot until a remote exists. Task 30b is
-what runs it.
+has never executed on any commit, and cannot until a remote exists.
+**2026-09-11 — Task 30b built the release, and stopped at the release step.**
+There is no git remote, so there is no tag to push and no run to link. What
+would close this half is one thing and it is not in this tree: the URL of a
+green tagged run.
 
 ### 5 — the licence and attribution files
 
@@ -140,8 +172,20 @@ independent reader, and is exercised on every signed artefact by
 `scripts/check-verifier-parity.sh` and by the e2e suite. What is missing is a
 **published release artefact that contains it**: an auditor's independence is
 not real if the script lives only in a repository they have to clone.
-`the_release_artefact_ships_the_auditors_reader` is Task 30b's test and does not
-exist today, so this row does not name it.
+
+**2026-09-11 — Task 30b built the artefact and could not publish it.**
+`.github/workflows/release.yml`'s `publish` job now assembles
+`logweir-<tag>-install.tar.gz` out of `logweir.yaml`, `LICENSE`, `NOTICE`,
+`THIRD_PARTY_NOTICES.md`, `docs/verify_scorecard.py` and `ui/` — with `ui/tests/`
+excluded by a stated pattern, so the bundle carries no fixture naming a
+developer's compose stack — and publishes a sha256 listing of every file it
+ships under `ui/` in the release notes.
+`crates/logweir/tests/workflow_lint.rs`'s
+`the_release_artefact_ships_the_auditors_reader` asserts all of that, and now
+exists, which is why this row names that file. What does **not** exist is a
+published artefact: no remote, no tag, no run, nothing to download. The row
+stays blocked, because the clause is about a file an auditor can fetch and not
+about a workflow that says it would produce one.
 
 ### 7 — the drift gate and the parity gate
 

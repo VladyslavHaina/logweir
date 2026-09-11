@@ -1,7 +1,7 @@
 //! Lints on `.github/workflows/release.yml`. THIS PROVES THE WORKFLOW SAYS THE
 //! RIGHT THING, NOT THAT IT DOES — the workflow has never executed on any
-//! commit (release.yml:4-8). Task 30b extends this file with the `weirkeeper`
-//! image; keep the helpers reusable.
+//! commit (release.yml's header). There is no git remote, so it cannot; every
+//! assertion here is about the shape of the file.
 //!
 //! The property the file exists for is one sentence: the bytes
 //! `scripts/check-image.sh` interrogated are the bytes that reach `ghcr.io`.
@@ -21,11 +21,34 @@
 //! one. Task 30b adds `weirkeeper` to THAT SAME job, deliberately, so the
 //! invariant survives the join rather than being weakened by it.
 //!
+//! **TASK 30b: THREE IMAGES, TWO GATES, AND A PLATFORM DIMENSION.** The
+//! controller image is a manifest list of two variants, each compiled on a
+//! runner of its own architecture (`Dockerfile.weirkeeper` refuses a cross build
+//! by name — plan erratum E19(c) — and STANDING RULE 10 forbids emulating the
+//! compile, measured at 33x). Three consequences for this file, each one a place
+//! a Task 30 helper had a fixed string where it needed a set:
+//!
+//! * the gate is no longer one script. `IMAGE_GATES` holds both, and
+//!   `asserted_reference` reads the reference each was handed — skipping
+//!   `--no-exec`, which sits between the script and its argument.
+//! * the local tag is no longer `logweir:check`. Three jobs build three tags,
+//!   and the property was never the string: it is that the tag handed to a gate
+//!   is the tag the build produced.
+//! * "asserted before pushed" is no longer a statement about three step indices.
+//!   `workflow_lint_every_image_is_asserted_before_push` (Task 30's F1 rewrite,
+//!   renamed here from `..._the_asserted_image_is_the_pushed_image`) states it
+//!   over sets, and
+//!   `workflow_lint_every_platform_is_asserted_before_the_manifest_push` adds
+//!   the dimension the singular form cannot see: a manifest list whose digest is
+//!   captured looks asserted even when one variant inside it was never loaded.
+//!
 //! NO DOCKER, NO NETWORK, NO `#[ignore]`: every test here reads files from the
 //! working tree and parses them, so they run in the default
 //! `cargo test --workspace`. `serde_yaml` is a regular dependency of this crate
 //! (`crates/logweir/Cargo.toml`), which is linked into integration-test targets;
 //! no dev-dependency is added for this file.
+
+use std::collections::BTreeSet;
 
 use serde_yaml::Value;
 
@@ -118,7 +141,19 @@ fn is_pushing_step(step: &Value) -> bool {
     let action_pushes = uses(step).contains("build-push-action")
         && (step["with"]["push"].as_bool() == Some(true)
             || step["with"]["push"].as_str().map(str::trim) == Some("true"));
-    action_pushes || run(step).contains("docker push")
+    let block = run(step);
+    // `docker manifest push` is Task 30b's spelling for uploading a manifest
+    // list, and it does NOT contain the substring `docker push`. Without this
+    // arm a step that published the multi-architecture controller image and
+    // nothing else would not be a pushing step to any lint in this file:
+    // `workflow_lint_exactly_one_job_pushes` would not count it, and
+    // `workflow_lint_login_and_push_are_tag_gated` would not require its tag
+    // gate. `imagetools create` is the buildx spelling of the same act and is
+    // named for the same reason, even though this workflow cannot use it.
+    action_pushes
+        || block.contains("docker push")
+        || block.contains("docker manifest push")
+        || block.contains("imagetools create")
 }
 
 /// Is this the registry login step?
@@ -153,38 +188,148 @@ fn build_step_index(steps: &[Value]) -> usize {
     found[0]
 }
 
-/// The index of the step that calls the shared gate script, or `None`.
-fn try_check_step_index(steps: &[Value]) -> Option<usize> {
-    steps
-        .iter()
-        .position(|s| run(s).contains("scripts/check-image.sh"))
-}
+/// THE TWO IMAGE GATES. `scripts/check-image.sh` asserts the runner image;
+/// `scripts/check-image-weirkeeper.sh` asserts the controller image — a
+/// SEPARATE script (interface I25), because all six of the former's checks are
+/// written around the runner's two binaries, its MIT notice and its x86-64 ELF,
+/// and five of them fail against the controller image for the right reason.
+///
+/// Neither name is a substring of the other (`check-image.sh` does not occur
+/// inside `check-image-weirkeeper.sh`), so the order of the two arms below
+/// cannot matter — which is worth stating, because before Task 30b every helper
+/// here looked for one fixed string and a job asserting the OTHER image read as
+/// a job asserting nothing.
+const IMAGE_GATES: [&str; 2] = [
+    "scripts/check-image.sh",
+    "scripts/check-image-weirkeeper.sh",
+];
 
-/// The index of the step that calls the shared gate script.
-fn check_step_index(steps: &[Value]) -> usize {
-    try_check_step_index(steps).expect("no step in this job runs scripts/check-image.sh")
-}
-
-/// The index of the step that pushes, or `None`.
-fn try_push_step_index(steps: &[Value]) -> Option<usize> {
-    steps.iter().position(is_pushing_step)
-}
-
-/// The index of the step that pushes.
-fn push_step_index(steps: &[Value]) -> usize {
-    try_push_step_index(steps).expect("no step in this job pushes the image")
-}
-
-/// The first whitespace-delimited token after `needle` on the line that holds
-/// it — the image reference an argument-taking command was handed.
-fn arg_after(text: &str, needle: &str) -> Option<String> {
+/// The first NON-FLAG token after `needle` on the line that holds it. Task 30b's
+/// `--no-exec` sits between the script and the reference, and a helper that
+/// returned the first token would compare a built tag against `--no-exec` and
+/// call that a mismatch.
+fn arg_after_skipping_flags(text: &str, needle: &str) -> Option<String> {
     for line in text.lines() {
         if let Some(rest) = line.split_once(needle) {
-            return rest.1.split_whitespace().next().map(str::to_string);
+            return rest
+                .1
+                .split_whitespace()
+                .find(|t| !t.starts_with('-'))
+                .map(str::to_string);
         }
     }
     None
 }
+
+/// The image reference this step ASSERTS, if it runs either image gate.
+fn asserted_reference(step: &Value) -> Option<String> {
+    let block = run(step);
+    IMAGE_GATES
+        .iter()
+        .find(|g| block.contains(**g))
+        .and_then(|g| arg_after_skipping_flags(block, g))
+}
+
+/// `(step index, asserted reference)` for every gate step in a job, in order.
+fn asserted_references(steps: &[Value]) -> Vec<(usize, String)> {
+    steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| asserted_reference(s).map(|r| (i, r)))
+        .collect()
+}
+
+/// The index of the first step that runs either image gate, or `None`.
+fn try_check_step_index(steps: &[Value]) -> Option<usize> {
+    steps.iter().position(|s| asserted_reference(s).is_some())
+}
+
+/// The index of the FIRST step that pushes, or `None`.
+fn try_push_step_index(steps: &[Value]) -> Option<usize> {
+    steps.iter().position(is_pushing_step)
+}
+
+/// Does this step load an image into the job's own daemon? Either half of the
+/// two ways bytes get there: a `load: true` build, or `docker load` of a
+/// tarball another job produced.
+fn is_loading_step(step: &Value) -> bool {
+    let action_loads =
+        uses(step).contains("build-push-action") && step["with"]["load"].as_bool() == Some(true);
+    action_loads || run(step).contains("docker load")
+}
+
+/// Does this step build the CONTROLLER image? Identified by the Dockerfile it
+/// names, never by the job's name or the step's `id:`, so a rename cannot make
+/// the lint blind. The runner image's build step carries no `file:` (it uses the
+/// default `Dockerfile`), so it is not one of these.
+fn builds_the_controller_image(step: &Value) -> bool {
+    uses(step).contains("build-push-action")
+        && step["with"]["file"].as_str().map(str::trim) == Some("Dockerfile.weirkeeper")
+}
+
+/// The architecture tokens `text` names, out of the two this project publishes.
+/// `linux/arm64`, `weirkeeper:check-arm64`, `weirkeeper-arm64.tar` and
+/// `ghcr.io/logweir/weirkeeper:-arm64` (a tag whose `${{ … }}` half has been
+/// stripped) all yield `arm64`.
+///
+/// THE SET IS CLOSED AT TWO ON PURPOSE. `linux/s390x` is not a platform this
+/// project builds, and a lint that silently discovered new ones would report a
+/// typo (`linux/arm46`) as a platform with no assertion rather than as a typo.
+fn arch_tokens(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for w in words(text) {
+        for arch in ["amd64", "arm64"] {
+            if w == arch || w.ends_with(&format!("-{arch}")) {
+                out.insert(arch.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Every platform a PUSHING step publishes, as architecture tokens. Two sources,
+/// because there are two ways to push more than one:
+///   * a `build-push-action` with `push: true` names them in `with.platforms`
+///     (the shape T30b's brief assumed, and the shape E19(c) makes unrunnable
+///     here — but a mutant can still write it, and this is what catches it);
+///   * a `run:` block names them in the references it tags and pushes.
+///
+/// A step that names no architecture token is single-platform: the runner image
+/// is pushed by exactly such a step, and
+/// `workflow_lint_every_image_is_asserted_before_push` is what covers it.
+fn pushed_platforms(step: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if let Some(p) = step["with"]["platforms"].as_str() {
+        out.extend(arch_tokens(p));
+    }
+    let code = strip_shell_comments(&strip_gha_expressions(run(step)));
+    out.extend(arch_tokens(&code));
+    out
+}
+
+/// `needs:` of a job, as a list. A bare string (`needs: image`) and a sequence
+/// (`needs: [image]`) are both legal YAML for the same thing.
+fn needs_of(doc: &Value, job: &str) -> Vec<String> {
+    let v = &doc["jobs"][job]["needs"];
+    if let Some(s) = v.as_str() {
+        return vec![s.to_string()];
+    }
+    v.as_sequence()
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|n| n.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// `arg_after` — the first WHITESPACE-DELIMITED token after a needle — lived
+// here until Task 30b and is now `arg_after_skipping_flags` above, its only
+// caller having grown a flag between the script and the reference
+// (`check-image-weirkeeper.sh --no-exec <ref>`). It is deleted rather than kept
+// beside its successor: two helpers differing in one subtlety is how the wrong
+// one gets called, and `cargo clippy -- -D warnings` refuses the unused one
+// anyway.
 
 /// Every reference a `docker tag` line in `text` tags FROM.
 fn docker_tag_sources(text: &str) -> Vec<String> {
@@ -376,13 +521,13 @@ fn workflow_lint_release_builds_the_image_once() {
             "job `{job}` must build the release image exactly once; found {n} build-push-action steps"
         );
 
-        let has_check = steps
-            .iter()
-            .any(|s| run(s).contains("scripts/check-image.sh"));
+        let has_check = steps.iter().any(|s| asserted_reference(s).is_some());
         assert!(
             has_check,
-            "job `{job}` builds an image but runs no assertion: the image assertions must be the \
-             shared scripts/check-image.sh, not inline run: steps"
+            "job `{job}` builds an image but runs no assertion: the image assertions must be one \
+             of the shared gates ({IMAGE_GATES:?}), not inline run: steps. Task 30b's two native \
+             controller-image jobs each build once and assert with \
+             scripts/check-image-weirkeeper.sh."
         );
     }
 
@@ -443,10 +588,25 @@ fn workflow_lint_the_build_step_does_not_push() {
             "job `{job}`: load: true is what leaves the built image in the local daemon for \
              scripts/check-image.sh to assert"
         );
-        assert_eq!(
-            Some("logweir:check"),
-            step["with"]["tags"].as_str().map(str::trim),
-            "job `{job}`: the build step must produce exactly the local tag the assert step is handed"
+        // THE BUILT TAG IS THE TAG THIS JOB ASSERTS — not a fixed string.
+        // Until Task 30b that literal was `logweir:check`, because the runner
+        // image was the only image any job built. There are now three local
+        // tags across three jobs (`logweir:check`, `weirkeeper:check-amd64`,
+        // `weirkeeper:check-arm64`), and hard-coding one of them would either
+        // fail on a correct tree or, widened to "any string", assert nothing.
+        // The property was never the string: it is that the tag handed to the
+        // gate is the tag the build produced.
+        let built = step["with"]["tags"]
+            .as_str()
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("job `{job}`: the build step must name a tag"));
+        let asserted = asserted_references(steps);
+        assert!(
+            asserted.iter().any(|(_, r)| r == built),
+            "job `{job}`: the build step produces `{built}`, which no gate step in this job is \
+             handed. The assert step's argument and the build step's tag are one string, or the \
+             bytes that were checked are not the bytes that ship. This job asserts: {:?}",
+            asserted.iter().map(|(_, r)| r).collect::<Vec<_>>()
         );
     }
 
@@ -455,53 +615,104 @@ fn workflow_lint_the_build_step_does_not_push() {
 
 // --------------------------------------------------------------------- 4
 
-/// THE TASK'S PROPERTY. The tag that is built, the tag that is asserted and the
-/// tag that is pushed from are one string, and they happen in that order.
+/// THE TASK'S PROPERTY. Every image that reaches a registry was asserted first,
+/// in the job that pushes it, from the tag that holds those exact bytes.
 ///
-/// F1: over EVERY job that builds OR pushes. A job that pushes without building
-/// and asserting first is the exact defect this file exists to prevent, so the
-/// `expect`s below are the assertion, not an accident of helper choice.
+/// RENAMED BY TASK 30b, from `workflow_lint_the_asserted_image_is_the_pushed_image`
+/// to the name that task's brief and acceptance use. The rename is not cosmetic:
+/// the old name says "the image", and there are now three of them — the runner
+/// image and both controller variants — so the singular was the thing that had
+/// gone stale. Nothing outside this file referenced the old name (checked at
+/// landing: one occurrence in the tree, the definition).
+///
+/// RESTRUCTURED, and the restructure is forced by the shape E19(c) requires. The
+/// Task 30 form read exactly one build index, one assert index and one push
+/// index per job and compared them pairwise. Task 30b's controller-image jobs
+/// BUILD AND ASSERT AND DO NOT PUSH, so `push_step_index`'s `expect` would have
+/// panicked on a correct tree; and the pushing job now asserts THREE references
+/// before pushing, so one `check_step_index` would have read only the first. The
+/// property is therefore stated over sets instead of over three integers, which
+/// is strictly stronger — it holds for every build and every push in the job
+/// rather than for the first of each:
+///
+///   * every `load: true` build's tag is asserted LATER in the same job;
+///   * every reference a push step `docker tag`s FROM was asserted EARLIER in
+///     the same job.
+///
+/// Both halves together are "build → assert → push", and neither alone is.
 #[test]
-fn workflow_lint_the_asserted_image_is_the_pushed_image() {
+fn workflow_lint_every_image_is_asserted_before_push() {
     let doc = workflow();
-    let mut seen = 0usize;
+    let mut builds_seen = 0usize;
+    let mut pushes_seen = 0usize;
 
     for (job, steps) in jobs(&doc) {
-        if try_build_step_index(steps).is_none() && try_push_step_index(steps).is_none() {
-            continue;
+        let asserted = asserted_references(steps);
+
+        for (b, step) in steps.iter().enumerate() {
+            if !uses(step).contains("build-push-action") {
+                continue;
+            }
+            if step["with"]["load"].as_bool() != Some(true) {
+                continue;
+            }
+            builds_seen += 1;
+            let built = step["with"]["tags"]
+                .as_str()
+                .unwrap_or_else(|| panic!("job `{job}`: the build step must name a tag"))
+                .trim()
+                .to_string();
+            let at = asserted.iter().find(|(_, r)| *r == built);
+            let Some((c, _)) = at else {
+                panic!(
+                    "job `{job}`: step {b} builds `{built}` into the daemon and no step in this \
+                     job hands that reference to an image gate. This job asserts: {:?}",
+                    asserted.iter().map(|(_, r)| r).collect::<Vec<_>>()
+                );
+            };
+            assert!(
+                b < *c,
+                "job `{job}`: `{built}` is asserted at step {c}, BEFORE it is built at step {b}. \
+                 The gate would be inspecting whatever the daemon already held under that tag."
+            );
         }
-        seen += 1;
 
-        let b = build_step_index(steps);
-        let c = check_step_index(steps);
-        let p = push_step_index(steps);
-
-        let built_tag = steps[b]["with"]["tags"]
-            .as_str()
-            .unwrap_or_else(|| panic!("job `{job}`: the build step must name a tag"))
-            .trim()
-            .to_string();
-        let checked_tag =
-            arg_after(run(&steps[c]), "scripts/check-image.sh").unwrap_or_else(|| {
-                panic!("job `{job}`: the assert step must hand check-image.sh an image reference")
-            });
-        let sources = docker_tag_sources(run(&steps[p]));
-        assert!(
-            !sources.is_empty(),
-            "job `{job}`: the push step must `docker tag` the asserted image before pushing it"
-        );
-
-        assert!(
-            b < c && c < p,
-            "job `{job}`: order must be build({b}) → assert({c}) → push({p})"
-        );
-        assert_eq!(built_tag, checked_tag, "job `{job}`");
-        for pushed_from_tag in &sources {
-            assert_eq!(built_tag, *pushed_from_tag, "job `{job}`");
+        for (p, step) in steps.iter().enumerate() {
+            if !is_pushing_step(step) {
+                continue;
+            }
+            pushes_seen += 1;
+            let sources = docker_tag_sources(run(step));
+            assert!(
+                !sources.is_empty(),
+                "job `{job}`: step {p} pushes but never `docker tag`s a local reference. \
+                 `docker tag` renaming asserted bytes is what makes \"the bytes that were \
+                 checked are the bytes that are pushed\" readable at all; a push of something \
+                 this job never named is the defect this file exists for."
+            );
+            for src in &sources {
+                let at = asserted.iter().find(|(_, r)| r == src);
+                let Some((c, _)) = at else {
+                    panic!(
+                        "job `{job}`: step {p} pushes from `{src}`, which no gate step in this \
+                         job asserted. This job asserts: {:?}",
+                        asserted.iter().map(|(_, r)| r).collect::<Vec<_>>()
+                    );
+                };
+                assert!(
+                    *c < p,
+                    "job `{job}`: `{src}` is pushed at step {p} and asserted at step {c}; the \
+                     order must be assert THEN push."
+                );
+            }
         }
     }
 
-    assert!(seen > 0, "release.yml neither builds nor pushes an image");
+    assert!(
+        builds_seen > 0 && pushes_seen > 0,
+        "release.yml has {builds_seen} loaded build step(s) and {pushes_seen} push step(s); \
+         this lint would be vacuous"
+    );
 }
 
 // --------------------------------------------------------------------- 5
@@ -521,48 +732,62 @@ fn workflow_lint_pushed_digest_is_captured() {
     let mut seen = 0usize;
 
     for (job, steps) in jobs(&doc) {
-        let Some(p) = try_push_step_index(steps) else {
-            continue;
-        };
-        seen += 1;
+        // EVERY pushing step, not only the first. Task 30b puts two in one job
+        // — the runner image and the controller manifest list — and a helper
+        // that returned `position(...)` would have left the second one's digest
+        // unexamined while the test still reported a pass.
+        for push in steps.iter().filter(|s| is_pushing_step(s)) {
+            seen += 1;
 
-        let push = &steps[p];
-        let id = push["id"].as_str().unwrap_or_else(|| {
-            panic!(
-                "job `{job}`: the push step must carry an `id:` so the job can publish its digest"
-            )
-        });
-
-        let outputs = doc["jobs"][job.as_str()]["outputs"]
-            .as_mapping()
-            .unwrap_or_else(|| {
+            let id = push["id"].as_str().unwrap_or_else(|| {
                 panic!(
-                    "job `{job}` pushes but declares no outputs: block carrying the pushed digest"
+                    "job `{job}`: every push step must carry an `id:` so the job can publish its \
+                     digest"
                 )
             });
-        let v = outputs
-            .get(Value::from("digest"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| panic!("jobs.{job}.outputs must have a `digest` key"))
-            .to_string();
-        assert!(
-            v.contains(&format!("steps.{id}.outputs.digest")),
-            "jobs.{job}.outputs.digest must come from the PUSH step `{id}` (the only step with a \
-             repository digest); it reads {v:?}"
-        );
 
-        let push_run = run(push);
-        assert!(
-            push_run.contains(">> \"$GITHUB_OUTPUT\"") && push_run.contains("digest="),
-            "job `{job}`: the push step must write digest=… to $GITHUB_OUTPUT; its run block is:\n{push_run}"
-        );
+            let outputs = doc["jobs"][job.as_str()]["outputs"]
+                .as_mapping()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "job `{job}` pushes but declares no outputs: block carrying the pushed \
+                         digest"
+                    )
+                });
+            // The KEY is not fixed — `digest` for the runner image,
+            // `weirkeeper_digest` for the controller — but the VALUE has to
+            // come from this step, which is the property.
+            let needle = format!("steps.{id}.outputs.");
+            let key = outputs
+                .iter()
+                .find(|(_, v)| v.as_str().map(|s| s.contains(&needle)) == Some(true))
+                .and_then(|(k, _)| k.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "jobs.{job}.outputs must publish a value read from the PUSH step `{id}` \
+                         (the only step where a repository digest exists: a `load: true, \
+                         push: false` build has no registry exporter). Its outputs are: {:?}",
+                        outputs
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect::<Vec<_>>()
+                    )
+                });
 
-        let needle = format!("needs.{job}.outputs.digest");
-        assert!(
-            raw().contains(&needle),
-            "a captured digest nobody reads is not a captured digest: nothing in release.yml reads \
-             {needle}"
-        );
+            let push_run = run(push);
+            assert!(
+                push_run.contains(">> \"$GITHUB_OUTPUT\"") && push_run.contains("digest="),
+                "job `{job}`, push step `{id}`: must write digest=… to $GITHUB_OUTPUT; its run \
+                 block is:\n{push_run}"
+            );
+
+            let read_as = format!("needs.{job}.outputs.{key}");
+            assert!(
+                raw().contains(&read_as),
+                "a captured digest nobody reads is not a captured digest: nothing in release.yml \
+                 reads {read_as}"
+            );
+        }
     }
 
     assert!(
@@ -606,7 +831,7 @@ fn workflow_lint_exactly_one_job_pushes() {
     let steps = job_steps(&doc, &pushing[0]);
     assert!(
         try_check_step_index(steps).is_some(),
-        "the pushing job `{}` runs no scripts/check-image.sh",
+        "the pushing job `{}` runs neither of the image gates ({IMAGE_GATES:?})",
         pushing[0]
     );
 }
@@ -925,6 +1150,372 @@ fn stability_doc_no_longer_claims_the_release_workflow_builds_twice() {
              the image more than once. It builds it ONCE (release.yml, id: build) and pushes \
              only after scripts/check-image.sh returns 0. Delete the sentence rather than \
              appending a newer, contradictory one."
+        );
+    }
+}
+
+// -------------------------------------------------------------------- 12
+
+/// TASK 30b. EVERY PLATFORM THE WORKFLOW PUBLISHES WAS LOADED AND ASSERTED IN
+/// THE PUSHING JOB, BEFORE THE PUSH — AND WAS COMPILED ON A NATIVE RUNNER.
+///
+/// `workflow_lint_every_image_is_asserted_before_push` above says the *tags* are
+/// the same and in the right order. That is not enough once an image is a
+/// manifest list: `docker/build-push-action` with
+/// `platforms: linux/amd64,linux/arm64` and `load: true` DOES NOT WORK (the
+/// docker exporter cannot export a manifest list into the daemon — critique D
+/// H4), and even if it did, a gate that asserts by RUNNING the image cannot
+/// exercise a foreign variant on an amd64 runner. So the invariant the whole
+/// file exists for — the bytes that were checked are the bytes that are pushed —
+/// is reachable for a multi-architecture image only if EACH VARIANT is loaded
+/// and asserted separately. This test is what makes that a machine check.
+///
+/// THE NATIVE-JOBS ARM IS THE SECOND HALF, and it is a deviation from this
+/// task's brief recorded in the test rather than only in a report. The brief put
+/// all three controller build steps in the pushing job on one amd64 runner; on
+/// that runner a `linux/arm64` leg can only be produced by emulating a Rust
+/// compile, which STANDING RULE 10 forbids and which `Dockerfile.weirkeeper`
+/// refuses by name (plan erratum E19(c): `aws-lc-sys` reads the host
+/// `/usr/include` and dies in 106 s on a cross build). So each architecture is
+/// compiled by its own native job, and this test asserts that those jobs PUSH
+/// NOTHING and that the pushing job `needs` every one of them — without which
+/// "the manifest list is assembled from bytes two native runners asserted" is a
+/// sentence in a comment rather than a property of the file.
+#[test]
+fn workflow_lint_every_platform_is_asserted_before_the_manifest_push() {
+    let doc = workflow();
+    let mut multi_arch_pushes = 0usize;
+
+    for (job, steps) in jobs(&doc) {
+        let Some(first_push) = try_push_step_index(steps) else {
+            continue;
+        };
+        for (p, step) in steps.iter().enumerate() {
+            if !is_pushing_step(step) {
+                continue;
+            }
+            let platforms = pushed_platforms(step);
+            if platforms.len() < 2 {
+                // Single-platform: the runner image is pushed by exactly such a
+                // step (linux/amd64 only — the engine binary has no arm64
+                // manifest, Global Constraint 10). There is no per-platform
+                // question to ask, and
+                // `workflow_lint_every_image_is_asserted_before_push` has
+                // already asked the one that matters.
+                continue;
+            }
+            multi_arch_pushes += 1;
+
+            for platform in &platforms {
+                let loaded = steps
+                    .iter()
+                    .enumerate()
+                    .find(|(i, s)| {
+                        *i < first_push
+                            && is_loading_step(s)
+                            && arch_tokens(run(s)).contains(platform)
+                    })
+                    .map(|(i, _)| i);
+                assert!(
+                    loaded.is_some(),
+                    "job `{job}`, push step {p} publishes `linux/{platform}`, and no step before \
+                     the first push (step {first_push}) loads that variant into this job's \
+                     daemon. A multi-platform build cannot `load:` — the docker exporter refuses \
+                     a manifest list — so each variant arrives as a `docker load` of a tarball a \
+                     native job produced and asserted."
+                );
+
+                let assert_at = asserted_references(steps)
+                    .into_iter()
+                    .find(|(i, r)| *i < first_push && arch_tokens(r).contains(platform))
+                    .map(|(i, _)| i);
+                assert!(
+                    assert_at.is_some(),
+                    "job `{job}`, push step {p} publishes `linux/{platform}`, and no step before \
+                     the first push (step {first_push}) hands a `{platform}` reference to an \
+                     image gate. An unasserted variant inside a manifest list is exactly the \
+                     defect this file exists to prevent — it is invisible to every other lint \
+                     here, because the LIST's digest is captured and the list looks asserted."
+                );
+                // Both indices are already < first_push by construction above;
+                // this states the ordering the failure messages promise.
+                assert!(
+                    loaded.unwrap() < first_push && assert_at.unwrap() < first_push,
+                    "job `{job}`: `linux/{platform}` must be loaded and asserted before step \
+                     {first_push}"
+                );
+            }
+
+            // EACH PUBLISHED PLATFORM WAS COMPILED NATIVELY, IN A JOB OF ITS
+            // OWN. Without this, a mutant that deleted the arm64 job and added
+            // `platforms: linux/arm64` to a load-and-assert step inside THIS
+            // job would satisfy everything above — and would be emulating a
+            // Rust compile on an amd64 runner.
+            let mut native: BTreeSet<String> = BTreeSet::new();
+            for (other, other_steps) in jobs(&doc) {
+                for s in other_steps
+                    .iter()
+                    .filter(|s| builds_the_controller_image(s))
+                {
+                    let built_for = arch_tokens(s["with"]["platforms"].as_str().unwrap_or(""));
+                    if built_for.is_empty() {
+                        panic!(
+                            "job `{other}` builds Dockerfile.weirkeeper without naming a \
+                             `platforms:`. A defaulted platform is how a runner's own \
+                             architecture silently becomes the shipped one."
+                        );
+                    }
+                    assert!(
+                        !other_steps.iter().any(is_pushing_step),
+                        "job `{other}` compiles the controller image AND pushes. The compile jobs \
+                         hand their bytes on as tarballs and push nothing: one job pushes \
+                         (`workflow_lint_exactly_one_job_pushes`), and it is the job that loaded \
+                         and asserted both variants."
+                    );
+                    assert!(
+                        needs_of(&doc, &job).contains(&other),
+                        "job `{job}` pushes a manifest list but does not `needs:` `{other}`, \
+                         which is the job that compiles and asserts one of its variants. \
+                         Without the edge the tarball may not exist when the push runs — and the \
+                         ordering this test asserts would be an accident of scheduling."
+                    );
+                    native.extend(built_for);
+                }
+            }
+            assert_eq!(
+                platforms, native,
+                "job `{job}`, push step {p} publishes {platforms:?} and the workflow compiles the \
+                 controller image natively for {native:?}. Every published platform is built by a \
+                 job running ON that architecture — `Dockerfile.weirkeeper` refuses a cross build \
+                 by name (E19(c)) and STANDING RULE 10 forbids the emulated alternative, measured \
+                 at 33x."
+            );
+        }
+    }
+
+    assert_eq!(
+        1, multi_arch_pushes,
+        "release.yml must push exactly one multi-platform image — the controller manifest list. \
+         Found {multi_arch_pushes}; at 0 this lint is vacuous."
+    );
+}
+
+// -------------------------------------------------------------------- 13
+
+/// TASK 30b. THE PULL-BACK JOB PULLS AND BUILDS NOTHING.
+///
+/// Global Constraint 37: "publishable" is proven by a pull, not by an apply. A
+/// locally built digest is author-only, and it CHANGES ON EVERY BUILD — BuildKit
+/// regenerates the provenance attestation even for a cached no-op rebuild — so
+/// the only evidence that the shipped digests are pullable is a pull, on a host
+/// that did not build the bytes.
+///
+/// THE TEST IS ABOUT WHAT THE JOB MUST NOT DO. A `pullback:` job that rebuilt
+/// the image and compared it would prove the bytes are REPRODUCIBLE, which is a
+/// different property and, for an image whose digest moves on every build, a
+/// false one. It would also be green on a run where nothing was ever published.
+#[test]
+fn workflow_lint_the_pullback_job_builds_nothing() {
+    let doc = workflow();
+    let steps = job_steps(&doc, "pullback");
+
+    for (i, step) in steps.iter().enumerate() {
+        assert!(
+            !uses(step).contains("build-push-action"),
+            "pullback step {i} uses `{}`: this job pulls what was published and compiles nothing",
+            uses(step)
+        );
+        assert!(
+            !is_pushing_step(step),
+            "pullback step {i} pushes. It pulls, and only pulls — so that \
+             `workflow_lint_exactly_one_job_pushes` keeps cardinality 1."
+        );
+        // `${{ … }}` first, then `#` comments: a comment may legitimately
+        // discuss a compile, and `${{ needs.build-weirkeeper-amd64… }}` is a
+        // reference to a job's name, not a command.
+        let code = strip_shell_comments(&strip_gha_expressions(run(step)));
+        for line in code.lines() {
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            for (j, t) in toks.iter().enumerate() {
+                let is_compile = *t == "build" || *t == "buildx";
+                if is_compile && j > 0 && toks[j - 1].ends_with("docker") {
+                    panic!(
+                        "pullback step {i} names a compile command: {line:?}. The job exists to \
+                         prove the PUBLISHED bytes can be pulled by a stranger; rebuilding them \
+                         proves something else."
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        vec!["image".to_string()],
+        needs_of(&doc, "pullback"),
+        "pullback must `needs: [image]` — it reads that job's two published digests, and without \
+         the edge it would run before anything was pushed"
+    );
+
+    // NOT VACUOUS: it must actually pull, both digests, and BOTH PLATFORMS of
+    // the manifest list. The two `--platform` pulls are what prove the list
+    // carries both variants; one pull would resolve to the runner's own
+    // architecture and say nothing about the other.
+    let body: String = steps.iter().map(run).collect::<Vec<_>>().join("\n");
+    for needle in [
+        "docker pull",
+        "--platform linux/amd64",
+        "--platform linux/arm64",
+        "needs.image.outputs.digest",
+        "needs.image.outputs.weirkeeper_digest",
+        "GITHUB_STEP_SUMMARY",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the pullback job must contain {needle:?}: without it the job is not the pull-back \
+             Global Constraint 37 asks for. Its run blocks are:\n{body}"
+        );
+    }
+    for gate in IMAGE_GATES {
+        assert!(
+            body.contains(gate),
+            "the pullback job must re-run `{gate}` against what came BACK from the registry — the \
+             same assertions, now on bytes that travelled"
+        );
+    }
+}
+
+// -------------------------------------------------------------------- 14
+
+/// TASK 30b. SPEC §16 CLAUSE 6 — THE AUDITOR'S READER SHIPS INSIDE THE RELEASE
+/// ARTEFACT, AND THE UI'S OWN TEST HARNESS DOES NOT.
+///
+/// An auditor's independence is not real if `docs/verify_scorecard.py` lives
+/// only in a repository they have to clone: the whole argument for a second,
+/// independent reader is that someone who does not trust this project can check
+/// a signed scorecard, and "first clone the project" is the one step that
+/// argument cannot afford.
+///
+/// THE EXCLUSION IS ASSERTED AS PRESENT, NOT INFERRED FROM ABSENCE, and that
+/// distinction is the test. `ui/tests/` carries fixtures whose data names the
+/// compose stack's MinIO endpoint (critique C `:410`); a bundle that happens not
+/// to contain them today because nobody copied them is one refactor away from
+/// containing them. A stated `--exclude` pattern is a decision; an absence is a
+/// coincidence.
+#[test]
+fn the_release_artefact_ships_the_auditors_reader() {
+    let doc = workflow();
+
+    let mut found: Vec<(String, usize, String)> = Vec::new();
+    for (job, steps) in jobs(&doc) {
+        for (i, step) in steps.iter().enumerate() {
+            if run(step).contains("--exclude=") {
+                found.push((job.clone(), i, run(step).to_string()));
+            }
+        }
+    }
+    assert_eq!(
+        1,
+        found.len(),
+        "exactly one step in release.yml assembles the install bundle (the one naming an \
+         `--exclude=` pattern); found {}: {:?}",
+        found.len(),
+        found.iter().map(|(j, i, _)| (j, i)).collect::<Vec<_>>()
+    );
+    let (job, index, block) = &found[0];
+
+    // The archive members, one per line, with the shell's line continuation
+    // stripped. Parsed rather than substring-matched, because `NOTICE` is a
+    // substring of `THIRD_PARTY_NOTICES.md` and a `contains` check would report
+    // a bundle carrying only the inventory as carrying both.
+    let members: Vec<String> = block
+        .lines()
+        .map(|l| l.trim().trim_end_matches('\\').trim().to_string())
+        .collect();
+
+    for required in [
+        "logweir.yaml",
+        "THIRD_PARTY_NOTICES.md",
+        "LICENSE",
+        "NOTICE",
+        "docs/verify_scorecard.py",
+        "ui",
+    ] {
+        assert!(
+            members.iter().any(|m| m == required),
+            "job `{job}` step {index} assembles the release bundle without `{required}` as an \
+             archive member of its own. Spec §16 clause 6 names \
+             docs/verify_scorecard.py; Global Constraint 15 names the three licence files. The \
+             members it does name are: {members:?}"
+        );
+    }
+
+    let excludes_ui_tests = [
+        "--exclude='ui/tests'",
+        "--exclude=\"ui/tests\"",
+        "--exclude=ui/tests",
+    ]
+    .iter()
+    .any(|pattern| block.contains(pattern));
+    assert!(
+        excludes_ui_tests,
+        "job `{job}` step {index} ships `ui` without an explicit `--exclude` for `ui/tests`. The \
+         shipped bundle must not carry its own test harness and fixtures, whose data names the \
+         compose stack's MinIO endpoint — and the exclusion is asserted as PRESENT rather than \
+         inferred from what happens to be on disk today. Its run block is:\n{block}"
+    );
+
+    // THE BUNDLE HAS TO REACH THE RELEASE. A tarball written into a directory
+    // the release action never reads is a bundle nobody can download.
+    assert!(
+        block.contains("artifacts/"),
+        "job `{job}` step {index} must write the bundle under `artifacts/`, which is what the \
+         release step attaches"
+    );
+    let release_files = doc["jobs"][job.as_str()]["steps"]
+        .as_sequence()
+        .expect("the publish job must have steps")
+        .iter()
+        .filter(|s| uses(s).contains("action-gh-release"))
+        .filter_map(|s| s["with"]["files"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(
+        release_files.iter().any(|f| f.contains("artifacts/")),
+        "job `{job}` assembles a bundle under `artifacts/` and its release step attaches \
+         {release_files:?}"
+    );
+
+    // THE sha256 LISTING OF EVERY SHIPPED FILE UNDER `ui/` REACHES THE NOTES.
+    // Spec §8's reason: the page runs with the viewer's own authority, so the
+    // bytes are worth pinning somewhere a reader can check without trusting the
+    // bundle they arrived in.
+    assert!(
+        block.contains("sha256sum"),
+        "job `{job}` step {index} must compute a sha256 listing of the files it ships under `ui/`"
+    );
+    assert!(
+        raw().contains("steps.bundle.outputs.ui_sha256"),
+        "the sha256 listing must be read into the release notes; a listing nobody publishes is \
+         not a listing"
+    );
+
+    // AND THE TWO CONTAINER REFERENCES, as the literals an operator pulls.
+    //
+    // THE NEEDLES ARE ASSEMBLED, NOT SPELLED, and that is not style: interface
+    // I15 allows the runner image's literal reference EXACTLY ONE occurrence
+    // under `crates/` — `crates/weirkeeper/src/job.rs`'s `RUNNER_IMAGE` — so
+    // that a digest bump cannot update one call site and miss another, and
+    // `crates/weirkeeper/tests/crd_shape.rs::the_runner_image_is_named_once`
+    // counts them. Writing the string here would make THIS file the second
+    // occurrence and fail that test, which is exactly what happened while this
+    // test was being written. The same `format!` idiom is used there, for the
+    // same reason.
+    let text = raw();
+    for name in ["logweir", "weirkeeper"] {
+        let literal = format!("{}{name}@", "ghcr.io/logweir/");
+        assert!(
+            text.contains(&literal),
+            "the release notes must name `{literal}<digest>`: a release that publishes images and \
+             does not say what to pull has published nothing anybody can use"
         );
     }
 }
