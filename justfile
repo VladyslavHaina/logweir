@@ -151,8 +151,21 @@ schema:
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
 
 # The Python auditor verifier. Task 7 — needs `pip install cryptography pytest`.
+#
+# ONE INTERPRETER-RESOLUTION ORDER IN THE REPOSITORY, and this is the second
+# copy of it: $LOGWEIR_PYTHON, then $LOGWEIR_E2E_PYTHON, then the repo-local
+# .e2e/venv, then a bare python3 — token for token the order
+# `scripts/check-verifier-parity.sh` resolves (its if/elif chain), asserted
+# equal by `crates/logweir/tests/extract_engine.rs`'s
+# `verify_py_resolves_the_interpreter_like_the_parity_gate`. It used to be a
+# hardcoded system `python3`, which is the one interpreter on a contributor's
+# machine that is guaranteed NOT to be the venv the rest of the repository
+# built for `cryptography` — so this recipe failed on exactly the trees where
+# the parity gate passed. It is ONE recipe line because `just` runs each line
+# in its own shell, and no new script is added for it (Global Constraint 38:
+# nothing new enters the tree that an existing file can carry).
 verify-py:
-    python3 -m pytest docs/test_verify_scorecard.py -q
+    "${LOGWEIR_PYTHON:-${LOGWEIR_E2E_PYTHON:-$([ -x .e2e/venv/bin/python3 ] && echo .e2e/venv/bin/python3 || echo python3)}}" -m pytest docs/test_verify_scorecard.py -q
 
 # Mints the checked-in signed fixtures under e2e/fixtures/signed/. Task 6.
 #

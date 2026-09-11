@@ -164,17 +164,28 @@ jobs:
         # no `|| true`, no `set +e`. The script's contract is exit 0 or 1.
         run: bash scripts/check-image.sh logweir:check
       - uses: docker/login-action@v3
+        # TAG-GATED, like the push below. `on:` carries `workflow_dispatch`
+        # (`:28`), so without this condition a dispatch from a branch logs in
+        # with `packages: write` and the step after it publishes `:<branch>` —
+        # and moves `:latest` — from a ref no tag ever named. The condition is
+        # on BOTH steps because logging in without pushing is still an
+        # unnecessary credential exchange, and because a future editor who
+        # removes one of the two should fail a test rather than a release.
+        # `workflow_lint_login_and_push_are_tag_gated` asserts both, in every
+        # job.
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: push
         name: Push the image that was just asserted, and capture its digest
+        if: startsWith(github.ref, 'refs/tags/')
         # `shell: bash` is not decoration: the runner's default for `run:` on
         # Linux is `bash -e {0}` WITHOUT pipefail, and this shell is
         # `bash --noprofile --norc -eo pipefail {0}`.
         shell: bash
-        # ghcr.io under THIS repository's own namespace. Global Constraint 14:
+        # ghcr.io under the LITERAL `logweir/` namespace. Global Constraint 14:
         # Logweir never publishes under `osodevops/`, `kafkabackup.com` or
         # `oso.sh`. Pulling upstream's image to extract the engine is a
         # different act and is permitted (global ruling GR6).
@@ -182,14 +193,32 @@ jobs:
         # NOTHING IS REBUILT HERE. `docker tag` renames the bytes the step above
         # asserted; `docker push` uploads those exact bytes.
         run: |
-          ver="ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
-          # TASK 10 (T0-18) DELETES THE NEXT THREE LINES AND NOTHING ELSE IN THIS
-          # STEP: `:latest` moves from here into a new `latest:` job gated on `publish`.
-          latest="ghcr.io/${{ github.repository }}:latest"
-          docker tag logweir:check "$latest"
-          docker push "$latest"
+          # THE LITERAL TARGET (Global Constraint 24), never
+          # `github.repository`. That expression is `<owner>/<repo>`: it equals
+          # the required string only when the repository is literally
+          # `logweir/logweir`, and one repository can never produce the TWO
+          # names this project publishes (`logweir`, the runner, here; and
+          # `weirkeeper`, the controller, from the same job in Task 30b). The
+          # shipped control plane names these same repositories —
+          # `logweir.yaml`'s Deployment and `crates/weirkeeper/src/job.rs`'s
+          # `RUNNER_IMAGE` — and
+          # `workflow_lint_pushed_references_match_the_shipped_manifest`
+          # asserts that what is pushed here is a subset of what ships there.
+          ver="ghcr.io/logweir/logweir:${{ github.ref_name }}"
+          latest="ghcr.io/logweir/logweir:latest"
+          # `$ver` FIRST, `:latest` SECOND, and the ORDER IS THE POINT: a failed
+          # `$ver` push must not leave `:latest` already moved onto bytes that
+          # no immutable reference names. (The comment that stood here
+          # instructed a "Task 10" to move these `:latest` lines into a separate
+          # job; that stage-2 task never landed, so the instruction is retired
+          # rather than left to mislead the next reader. If `:latest` ever does
+          # move to its own job, this ordering constraint moves with it.)
+          # `workflow_lint_version_tag_is_pushed_before_latest` asserts the two
+          # line indices inside this block.
           docker tag logweir:check "$ver"
           docker push "$ver"
+          docker tag logweir:check "$latest"
+          docker push "$latest"
           # RepoDigests is populated by the push above. No pipe: the exit code
           # that matters is `docker inspect`'s, and `${rd##*@}` is shell
           # expansion, not a process.
@@ -238,7 +267,7 @@ jobs:
             image carries both.
 
             Container image:
-            `ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}`
+            `ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}`
             — this is the digest of the image the release job asserted
             (`scripts/check-image.sh`), pushed without rebuilding. Pull by
             digest, never by tag (Global Constraint 7).
