@@ -739,6 +739,23 @@ pub struct AllowedClusters {
     pub source_cluster_id: Option<String>,
 }
 
+/// The wire spelling `subject_kind` takes when the approval does not say.
+///
+/// `Restore`, and this is a COMPATIBILITY default, not a policy one: every
+/// approval minted before Task 22 carries no `subject_kind` at all, and tag
+/// 1's only approved subject is a restore (spec §5 contains no `approv`; §16
+/// puts the second kind in tag 2). A pre-existing `approval.json` therefore
+/// keeps verifying unchanged on the runner path. The CONTROLLER makes the
+/// opposite call on purpose: `weirkeeper::controllers::approval`'s document
+/// defaults the field to `""`, so an absent field is refused by check 8 when
+/// the referent is not a `Restore` — fail-closed where a cluster object is
+/// being authorised, backwards-compatible where a file is being read.
+pub const SUBJECT_KIND_RESTORE: &str = "Restore";
+
+fn default_subject_kind() -> String {
+    SUBJECT_KIND_RESTORE.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalDoc {
     pub approver: String,
@@ -746,6 +763,23 @@ pub struct ApprovalDoc {
     /// sha256 over the canonical bytes of the drill spec.
     pub plan_hash: String,
     pub approved_at: chrono::DateTime<chrono::Utc>,
+    /// Which kind of subject this approval authorises — `Restore` or
+    /// `Backup`, the wire spellings
+    /// `weirkeeper::crds::approval::SubjectKind` serialises to.
+    ///
+    /// **INSIDE THE SIGNED BYTES, and that is the whole value of the field.**
+    /// `logweir drill approve` serialises this struct and signs the resulting
+    /// payload, so the kind an approval binds cannot be changed without
+    /// invalidating the signature. The controller's check 8 compares it
+    /// against the referent's actual kind; if the field lived in the DSSE
+    /// sidecar instead, check 8 would be comparing a value anyone with
+    /// `patch` on the Secret could rewrite.
+    ///
+    /// Defaults to [`SUBJECT_KIND_RESTORE`] on READ so approvals minted before
+    /// the field existed still parse; `serde` writes it on every mint, so a
+    /// document this workspace produces always names its kind.
+    #[serde(default = "default_subject_kind")]
+    pub subject_kind: String,
 }
 
 #[cfg(test)]

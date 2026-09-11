@@ -1403,3 +1403,205 @@ fn every_shipped_yaml_file_parses() {
     }
     assert!(seen >= 20, "only {seen} YAML files were walked");
 }
+
+// ---------------------------------------------------------------------------
+// Task 22 — the approval bundle is a Secret, in every manifest
+// ---------------------------------------------------------------------------
+
+/// The four files at `/approval` are the KEYS of a Secret, in every shipped
+/// manifest, and **never** of a ConfigMap.
+///
+/// # Why this walks every manifest instead of naming one file
+///
+/// The property is about the tree, not about `examples/cronjob-drill.yaml`. A
+/// future task adding a second CronJob, a sample, or an overlay that projected
+/// the approver's public key or the cluster allowlist from a ConfigMap would
+/// reopen exactly the hole this move closed — a subject with `patch configmaps`
+/// in the namespace replacing the material that decides who may authorise a
+/// run and which clusters it may write into. A ConfigMap's `patch` and a
+/// Secret's are different RBAC verbs; that difference IS the control, and a
+/// per-file assertion cannot see a new file.
+///
+/// The `Restore` Job the operator builds is not a shipped manifest and is
+/// asserted on the other side, in
+/// `crates/weirkeeper/tests/restore_controller.rs`.
+#[test]
+fn manifest_lint_approval_bundle_comes_from_a_secret() {
+    /// The files whose PROJECTION is a security boundary.
+    const AUTHORISING: [&str; 4] = [
+        "approval.json",
+        "approval.sig",
+        "approver.pub.pem",
+        "allowed-clusters.json",
+    ];
+    const BUNDLE: &str = "logweir-approval-bundle";
+
+    let manifests = all_manifests();
+    assert!(
+        manifests.len() >= 20,
+        "only {} manifests were walked; this gate would pass vacuously",
+        manifests.len()
+    );
+
+    let mut seen_in_a_secret = 0usize;
+    for m in &manifests {
+        // Every `volumes:` list anywhere in the document, at any depth: a
+        // PodSpec lives under `spec.template.spec` in a Deployment, under
+        // `spec.jobTemplate.spec.template.spec` in a CronJob, and directly
+        // under `spec` in a bare Pod. Walking for the KEY rather than for a
+        // path is what makes a new kind of workload visible to this test.
+        let mut stack = vec![&m.value];
+        while let Some(node) = stack.pop() {
+            match node {
+                Value::Mapping(map) => {
+                    for (k, val) in map {
+                        if k.as_str() == Some("volumes") {
+                            for vol in val.as_sequence().into_iter().flatten() {
+                                let name = vol["name"].as_str().unwrap_or("<unnamed>");
+                                let keys: Vec<&str> = ["configMap", "secret"]
+                                    .into_iter()
+                                    .filter(|src| !vol[*src].is_null())
+                                    .collect();
+                                for src in keys {
+                                    let items: Vec<&str> = vol[src]["items"]
+                                        .as_sequence()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(|i| i["key"].as_str())
+                                        .collect();
+                                    let hits: Vec<&&str> = AUTHORISING
+                                        .iter()
+                                        .filter(|a| items.contains(&**a))
+                                        .collect();
+                                    if hits.is_empty() {
+                                        continue;
+                                    }
+                                    assert_eq!(
+                                        src, "secret",
+                                        "{} doc {} volume `{name}` projects {hits:?} from a \
+                                         `{src}`. A ConfigMap's patch verb is not a Secret's, \
+                                         and that difference is the whole control: these four \
+                                         files decide who may authorise this run and which \
+                                         clusters it may write into.",
+                                        m.origin, m.index
+                                    );
+                                    let secret_name =
+                                        vol["secret"]["secretName"].as_str().unwrap_or("");
+                                    assert_eq!(
+                                        secret_name, BUNDLE,
+                                        "{} doc {} volume `{name}` projects {hits:?} from the \
+                                         Secret `{secret_name}`. It must be `{BUNDLE}` and not, \
+                                         for instance, `logweir-signing-key`: folding approver \
+                                         material into the signing-key Secret widens what a \
+                                         single `get` returns to include BOTH the key that signs \
+                                         and the material that authorises (spec §7 amendment 4c).",
+                                        m.origin, m.index
+                                    );
+                                    seen_in_a_secret += 1;
+                                }
+                            }
+                        }
+                        stack.push(val);
+                    }
+                }
+                Value::Sequence(seq) => stack.extend(seq.iter()),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        seen_in_a_secret, 1,
+        "exactly one shipped manifest projects the approval bundle today \
+         (examples/cronjob-drill.yaml). Finding none means the walk stopped seeing it and this \
+         gate went quiet; finding more is fine only if this number is updated deliberately."
+    );
+}
+
+/// The volume comment in `examples/cronjob-drill.yaml` states the REASON for
+/// the Secret, and no longer states the reason for the ConfigMap.
+///
+/// A manifest whose comment still says "it belongs in a ConfigMap" beside a
+/// `secret:` volume is worse than either alone: the next editor reads the
+/// comment, believes the move was accidental, and reverts it. The comment is
+/// the only place the *why* survives a `kubectl get -o yaml`, which strips it.
+#[test]
+fn the_bundle_comment_states_the_reason() {
+    let text = read("examples/cronjob-drill.yaml");
+    assert!(
+        !text.contains("it belongs in a ConfigMap"),
+        "the old rationale is still in the file beside a Secret volume"
+    );
+    // The COMMENT prose, with the `#` markers and the line wrapping taken out,
+    // so the assertion is about what an editor reads and not about where the
+    // lines happen to break.
+    let flat: String = text
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with('#'))
+        .map(|l| l.trim_start_matches('#').trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat.contains(
+            "reading a Secret is a different RBAC verb from reading a ConfigMap, so the four \
+             files that decide WHO may authorise this run and WHICH clusters it may touch are \
+             no longer replaceable by any subject holding `patch configmaps` in this namespace"
+        ),
+        "the one-sentence reason for the Secret must be in the volume's comment: {text}"
+    );
+    assert!(
+        flat.contains("None of this stops a cluster-admin"),
+        "and O0 is stated on this surface too, never implied away"
+    );
+}
+
+/// `docs/stability.md` records the `kube`/`k8s-openapi` pair Task 15 resolved
+/// and the toolchain they were pinned against — read from the manifests, so
+/// the page cannot drift from the build.
+#[test]
+fn the_stability_note_records_the_resolved_kube_pair() {
+    let stability = read("docs/stability.md");
+    let manifest = read("crates/weirkeeper/Cargo.toml");
+    let toolchain = read("rust-toolchain.toml");
+
+    let channel = toolchain
+        .lines()
+        .find_map(|l| l.split_once("channel"))
+        .and_then(|(_, r)| r.split('"').nth(1))
+        .expect("rust-toolchain.toml declares a channel")
+        .to_string();
+    assert_eq!(channel, "1.89.0", "the pin this note names");
+
+    for (crate_name, want) in [("kube", "0.99"), ("k8s-openapi", "0.24")] {
+        assert!(
+            manifest.contains(&format!("{crate_name} = {{ version = \"{want}\"")),
+            "crates/weirkeeper/Cargo.toml must still declare {crate_name} {want}"
+        );
+    }
+    // The RESOLVED versions, which are what the note names — the manifest
+    // carries the requirement, `Cargo.lock` carries what it resolved to.
+    let lock = read("Cargo.lock");
+    for want in ["kube 0.99.0", "k8s-openapi 0.24.0"] {
+        let (name, version) = want.split_once(' ').unwrap();
+        assert!(
+            lock.contains(&format!("name = \"{name}\"\nversion = \"{version}\"")),
+            "Cargo.lock must still resolve {want}"
+        );
+        assert!(
+            stability.contains(&format!("`{name} {version}`")),
+            "docs/stability.md must name the resolved `{want}`"
+        );
+    }
+    assert!(
+        stability.contains(&format!("**`{channel}`**")),
+        "docs/stability.md must name the toolchain {channel} the pair was resolved against"
+    );
+    assert!(
+        stability.contains("O0, default (a)")
+            && stability.contains("none of this stops a cluster-admin"),
+        "the same section carries the O0 sentence, accepted and stated"
+    );
+}

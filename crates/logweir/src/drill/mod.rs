@@ -188,6 +188,19 @@ pub struct RunArgs {
     /// `offsets.json` in this run's workdir (`run_workdir`), beside the
     /// checkpoint.
     pub offset_report_out: Option<PathBuf>,
+    /// `--approver-key-ids`, repeated. The approver key ids this run accepts.
+    ///
+    /// **EMPTY MEANS NOT PINNED**, which is today's behaviour exactly: the
+    /// flag is additive and no existing adopter breaks. A non-empty set is
+    /// checked by `phase1_approval::admit_pinned_approver_key_id` BEFORE
+    /// phase 0 dials anything, and an approver key outside it is exit 3.
+    ///
+    /// The operator fills this from the `TrustRoster`
+    /// (`weirkeeper::controllers::restore::approver_key_ids`: every
+    /// `spec.approverKeys[].keyId` that `status.expiredKeyIds` does not name,
+    /// in roster order), which is how the one source of truth reaches a pod
+    /// that holds no cluster credential.
+    pub approver_key_ids: Vec<String>,
 }
 
 /// The log filter used when `RUST_LOG` is unset or blank.
@@ -1115,6 +1128,16 @@ pub fn execute_with_outcome(
     run_id: &str,
     c: &Ctx,
 ) -> Result<RestoreOutcome, DrillError> {
+    // BEFORE PHASE 0, AND THAT IS THE POINT. `--approver-key-ids` is a phase-1
+    // property — it is about the approval — but phase 0 DIALS, and Global
+    // Constraint 11 reserves exit 3 for a refusal made "before anything ran".
+    // Left at phase 1 this refusal would arrive after the target cluster had
+    // been contacted, and on a host with no broker it would never arrive at
+    // all. It is hoisted here, ahead of `new_scorecard`, so the run is refused
+    // having touched nothing. Omitting the flag is a no-op (see
+    // `admit_pinned_approver_key_id`).
+    phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)?;
+
     let mut sc = new_scorecard(run_id, args, c);
     // Phase 9 deletes through the SAME client, and since Task 8 phase 0's
     // preflight and the target-topic creation step write through it too. Named
@@ -2232,6 +2255,8 @@ mod tests {
             out: None,
             metrics_file,
             offset_report_out: None,
+            // NOT PINNED, which is the default every existing caller gets.
+            approver_key_ids: Vec::new(),
         }
     }
 

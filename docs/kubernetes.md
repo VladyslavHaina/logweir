@@ -231,13 +231,38 @@ All **verified** on `docker-desktop`:
   `defaultMode: 0440`, so the manifest states the permission that actually
   lands rather than one kubelet silently widens.
 - **The ConfigMap was never the failing half, and that was checked, not
-  assumed.** The drill spec, the approval and the allowed-clusters list mount as
-  a ConfigMap; the manifest sets no `defaultMode` there, so kubelet's `0644`
-  applies. Verified live in the same pod shape, with **no `fsGroup`**:
-  `-rw-r--r-- root root drill.yaml`, `cat` exit 0. The files are `root:root` for
-  the same reason the Secret's are — the group bits simply do not matter when
-  the world bits are set. That is also why the key is a Secret and not a
-  ConfigMap.
+  assumed.** The drill spec mounts as a ConfigMap; the manifest sets no
+  `defaultMode` there, so kubelet's `0644` applies. Verified live in the same
+  pod shape, with **no `fsGroup`**: `-rw-r--r-- root root drill.yaml`, `cat`
+  exit 0. The files are `root:root` for the same reason the Secret's are — the
+  group bits simply do not matter when the world bits are set. That is also why
+  the key is a Secret and not a ConfigMap.
+- **The approval bundle is a Secret, and reading it is a different RBAC verb.**
+  `approval.json`, `approval.sig`, `approver.pub.pem` and
+  `allowed-clusters.json` were all ConfigMap keys, projected at `/etc/logweir`;
+  they are now the four keys of the Secret `logweir-approval-bundle`, mounted at
+  **`/approval`** in `examples/cronjob-drill.yaml` exactly as the operator's
+  `Restore` Job mounts them (§12). The ConfigMap keeps `drill.yaml` and nothing
+  else — the plan is public and authorises nothing on its own, because every
+  topic, window and target it names is re-checked against the approval and the
+  allowlist before anything runs.
+
+  **The reason is one sentence**: a ConfigMap's `get`/`patch` and a Secret's are
+  *different RBAC verbs*, so the four files that decide WHO may authorise this
+  run and WHICH clusters it may write into are no longer replaceable by a
+  subject holding `patch configmaps` in the drill's namespace. The phase-0
+  `cluster_id ∈ allowedClusterIds` check itself was never the weak half — it
+  reads the cluster id from the broker, never from the spec; the FILE was.
+  **None of this stops a cluster-admin**, and that is stated rather than implied
+  — `docs/stability.md`, O0.
+- **Pin the approvers a run accepts with `--approver-key-ids`.** The flag is
+  repeatable — one flag per id, which is the shape the operator emits, one per
+  unexpired `TrustRoster` approver key — and an approval whose approver key id
+  is outside the set is refused with **exit 3 before phase 0 dials anything**.
+  Omitting it changes nothing at all, so it is additive for every existing
+  adopter. `logweir drill approve --subject-kind <Restore|Backup>` writes the
+  kind into the signed bytes for the controller's check 8 (§8); absent, the
+  runner reads it as `Restore`.
 - **`emptyDir` is verified** for the engine's scratch directory. **No PVC was
   exercised.** The only StorageClass on the test cluster was `hostpath`.
 - **The metrics file must NOT be an `emptyDir`** — see §5.

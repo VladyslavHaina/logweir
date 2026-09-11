@@ -87,9 +87,12 @@ spec:
                 - drill
                 - run
                 - --spec=/etc/logweir/drill.yaml
-                - --approval=/etc/logweir/approval.json
-                - --approver-key=/etc/logweir/approver.pub.pem
-                - --allowed-clusters=/etc/logweir/allowed-clusters.json
+                # The four AUTHORISING files come from the Secret mounted at
+                # /approval, never from the ConfigMap — see the `approval`
+                # volume below for why.
+                - --approval=/approval/approval.json
+                - --approver-key=/approval/approver.pub.pem
+                - --allowed-clusters=/approval/allowed-clusters.json
                 - --signing-key=/etc/logweir-keys/signing.pem
                 - --out=/scratch/scorecard.json
                 - --metrics-file=/metrics/logweir.prom
@@ -130,10 +133,11 @@ spec:
                   valueFrom:
                     secretKeyRef: { name: logweir-s3, key: secret-access-key }
               volumeMounts:
-                - { name: config,  mountPath: /etc/logweir,      readOnly: true }
-                - { name: keys,    mountPath: /etc/logweir-keys, readOnly: true }
-                - { name: scratch, mountPath: /scratch }
-                - { name: metrics, mountPath: /metrics }
+                - { name: config,   mountPath: /etc/logweir,      readOnly: true }
+                - { name: approval, mountPath: /approval,         readOnly: true }
+                - { name: keys,     mountPath: /etc/logweir-keys, readOnly: true }
+                - { name: scratch,  mountPath: /scratch }
+                - { name: metrics,  mountPath: /metrics }
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
@@ -142,9 +146,23 @@ spec:
                 requests: { cpu: "250m", memory: "512Mi" }
                 limits:   { memory: "2Gi" }
           volumes:
-            # The plan, the approval and the cluster allowlist. The approval is
-            # a public, signed document — it belongs in a ConfigMap, and the
-            # approver's PUBLIC key beside it.
+            # THE PLAN, AND ONLY THE PLAN. What stays in the ConfigMap is what
+            # is public AND authorises nothing: `drill.yaml` names topics, a
+            # window and a target, and every one of those is re-checked against
+            # the approval and the allowlist before anything runs.
+            - name: config
+              configMap:
+                name: logweir-drill-config
+                items:
+                  - { key: drill.yaml, path: drill.yaml }
+            # THE APPROVAL BUNDLE, IN ITS OWN SECRET, AND THE REASON IS ONE
+            # SENTENCE: reading a Secret is a different RBAC verb from reading
+            # a ConfigMap, so the four files that decide WHO may authorise this
+            # run and WHICH clusters it may touch are no longer replaceable by
+            # any subject holding `patch configmaps` in this namespace.
+            #
+            # None of this stops a cluster-admin, and the file says so rather
+            # than implying otherwise — docs/stability.md, O0.
             #
             # Produce `approval.json` and `approval.sig` with the SHIPPED
             # binary, on the approver's own machine, with the approver's
@@ -153,16 +171,21 @@ spec:
             #   docker run --rm -v "$PWD:/w" -w /w logweir:v0.1.0 drill approve \
             #     --spec drill.yaml --key approver.pem \
             #     --approver sre-oncall@example.com --ticket CHG-40881 \
-            #     --out approval.json
+            #     --subject-kind Restore --out approval.json
             #
             # RE-RUN IT ON EVERY EDIT OF drill.yaml, the sample window
             # included: `plan_hash` binds the approval to the spec's exact
             # bytes and phase 1 refuses a mismatch with exit 3.
-            - name: config
-              configMap:
-                name: logweir-drill-config
+            #
+            # `approver.pub.pem` is the PUBLIC half. No private key reaches a
+            # runner pod on this path; `approver.pem` never leaves the
+            # approver's machine. Create the Secret with the command in
+            # config/samples/secrets.yaml §2.
+            - name: approval
+              secret:
+                secretName: logweir-approval-bundle
+                defaultMode: 0440
                 items:
-                  - { key: drill.yaml,             path: drill.yaml }
                   - { key: approval.json,          path: approval.json }
                   - { key: approval.sig,           path: approval.sig }
                   - { key: approver.pub.pem,       path: approver.pub.pem }

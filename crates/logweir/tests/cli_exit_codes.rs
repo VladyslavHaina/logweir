@@ -401,3 +401,168 @@ fn a_missing_password_is_operational_and_a_broken_one_is_a_guard_refusal() {
          it: stdout:\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 22 — the pinned-approver refusal's exit code, and the flag's shape
+// ---------------------------------------------------------------------------
+
+/// The five flags a `restore run` needs, over the shipped example plan.
+fn restore_base() -> Vec<String> {
+    [
+        "restore",
+        "run",
+        "--spec",
+        "../../examples/drill.yaml",
+        "--approval",
+        "../../examples/approval.json",
+        "--approver-key",
+        "../../e2e/fixtures/signed/public.pem",
+        "--allowed-clusters",
+        "../../examples/allowed-clusters.json",
+        "--signing-key",
+        "../../e2e/fixtures/signed/signing.pem",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+/// The approver refusal is a GUARD refusal: exit **3**, never 1.
+///
+/// The distinction is the whole exit-code contract (Global Constraint 11,
+/// `crates/logweir/src/exit.rs`): 1 says "Logweir could not do its job, retry",
+/// 3 says "the plan is refused and nothing ran". A pinned-set miss is the
+/// second: the approval is authentic, it is simply not one this run accepts.
+/// Exit 1 would tell a CronJob to retry a plan that will never be admitted.
+#[test]
+fn approver_refusal_is_a_guard_refusal() {
+    let mut args = restore_base();
+    args.push("--approver-key-ids".to_string());
+    args.push("sha256:not-this-one".to_string());
+    let out = bin().args(&args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a pinned-set miss is exit 3 (GuardRefused), never 1 (Operational): {stderr}"
+    );
+    assert!(
+        stderr.contains("is not in the pinned set"),
+        "and it is THIS refusal, not some other exit-3 guard: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end()
+            .ends_with("refusal-reason=GuardRefused"),
+        "interface I9: the reason line, on stdout, last"
+    );
+}
+
+/// The `subject_kind` refusal SHARES the exit-3 mapping, and this arm reads a
+/// real process's code to prove the mapping is 3 and not 1.
+///
+/// # Why the mutation itself is not driven through the binary
+///
+/// `drill/mod.rs` runs phase 0 before phase 1, and phase 0 DIALS the target
+/// cluster. A `restore run` over a plan good enough to reach phase 1 needs a
+/// live broker, so a process-level assertion on the mutation would be green
+/// only while somebody else's compose stack happened to be up — measured:
+/// with the stack up it exits 3 on the signature, with it down it exits 1 at
+/// phase 0 and never observes the refusal at all. Global Constraint 22 keeps
+/// dialling tests out of the default suite, so this file asserts the two
+/// halves that ARE deterministic:
+///
+/// 1. the mutation produces `DrillError::Guard(GuardRefusal(_))` — the same
+///    variant, from the same module, asserted at the `phase1_approval::verify`
+///    seam in `approval.rs::subject_kind_is_inside_the_signed_bytes`; and
+/// 2. that variant exits **3** in a real process, read from the process
+///    status directly, via the one phase-1 guard reachable with no broker —
+///    the pinned-approver refusal this task lands.
+#[test]
+fn the_subject_kind_refusal_shares_the_exit_3_mapping() {
+    use logweir::drill::{phase1_approval, DrillError};
+    use logweir_core::guard::GuardRefusal;
+
+    let dir = tempfile::tempdir().unwrap();
+    let spec_text = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    let spec = dir.path().join("drill.yaml");
+    std::fs::write(&spec, &spec_text).unwrap();
+    let key = dir.path().join("approver.pem");
+    let sk = logweir_evidence::keys::SigningKey::generate_p256();
+    std::fs::write(&key, sk.to_pkcs8_pem().unwrap()).unwrap();
+    let approver_pub = dir.path().join("approver.pub.pem");
+    std::fs::write(
+        &approver_pub,
+        sk.verifying_key().to_public_key_pem().unwrap(),
+    )
+    .unwrap();
+    let approval = dir.path().join("approval.json");
+
+    let minted = bin()
+        .args(["drill", "approve"])
+        .arg("--spec")
+        .arg(&spec)
+        .arg("--key")
+        .arg(&key)
+        .args(["--approver", "sre-oncall@example.com"])
+        .args(["--ticket", "CHG-40881"])
+        .args(["--subject-kind", "Backup"])
+        .arg("--out")
+        .arg(&approval)
+        .output()
+        .unwrap();
+    assert_eq!(minted.status.code(), Some(0));
+
+    let doc = std::fs::read_to_string(&approval).unwrap();
+    let mutated = doc.replace(
+        r#""subject_kind": "Backup""#,
+        r#""subject_kind": "Restore""#,
+    );
+    assert_ne!(doc, mutated, "the mutation must change the file");
+    std::fs::write(&approval, mutated).unwrap();
+
+    // 1 — the variant.
+    let signing = logweir_evidence::keys::SigningKey::generate_p256().verifying_key();
+    let err = phase1_approval::verify(&spec_text, &approval, &approver_pub, &signing).unwrap_err();
+    assert!(
+        matches!(err, DrillError::Guard(GuardRefusal(_))),
+        "a mutated field inside the signed bytes is a guard refusal, got {err:?}"
+    );
+
+    // 2 — that variant's code, from a real process.
+    let mut args = restore_base();
+    args.push("--approver-key-ids".to_string());
+    args.push("sha256:not-this-one".to_string());
+    let out = bin().args(&args).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "DrillError::Guard maps to 3, never to 1: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// **THE FLAG SHAPE, PINNED.** `--approver-key-ids` is REPEATABLE and is NOT
+/// comma-separated: a comma-joined value is ONE id, and since no key id
+/// contains a comma it matches nothing and refuses, naming the whole string.
+///
+/// This is a decision, not an accident. The operator emits one flag per id
+/// (`weirkeeper::controllers::restore::runner_argv`, asserted by
+/// `restore_controller.rs::only_unexpired_roster_key_ids_reach_the_argv`:
+/// "repeated flags, never one comma-joined value"). Accepting BOTH shapes
+/// would mean two spellings of the same set, one of which nothing in this
+/// workspace produces — and a `value_delimiter` would silently reinterpret an
+/// id that somehow contained a comma instead of refusing it.
+#[test]
+fn a_comma_joined_approver_key_id_is_one_id_not_two() {
+    let mut args = restore_base();
+    args.push("--approver-key-ids".to_string());
+    args.push("sha256:aaaa,sha256:bbbb".to_string());
+    let out = bin().args(&args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("the pinned set {sha256:aaaa,sha256:bbbb}"),
+        "the comma-joined value is ONE member of the set, printed whole: {stderr}"
+    );
+}

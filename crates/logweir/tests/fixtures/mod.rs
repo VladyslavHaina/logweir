@@ -1527,6 +1527,12 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // the directory `execute_with_outcome` creates and the one
             // `FixtureEngine::restore` writes into (Task 9b).
             offset_report_out: None,
+            // NOT PINNED. The orchestrator fixture drives the whole phase
+            // sequence, and pinning here would put a guard ahead of phase 0 in
+            // ~40 tests that are about other things entirely. Task 22's own
+            // tests call `admit_pinned_approver_key_id` directly and drive the
+            // pinned path through the real binary.
+            approver_key_ids: Vec::new(),
         },
         run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {

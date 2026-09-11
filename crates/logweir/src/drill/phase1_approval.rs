@@ -11,6 +11,77 @@ use std::path::Path;
 
 pub const PAYLOAD_TYPE_APPROVAL: &str = "application/vnd.logweir.drill-approval+json;version=1.0.0";
 
+/// The refusal `admit_pinned_approver_key_id` produces, as one function of the
+/// two things it compares, so the message a test asserts and the message an
+/// operator reads are the same bytes.
+///
+/// The pinned set is rendered `{a, b}` — comma-and-space inside braces, in the
+/// order the flags were given, which is roster order when the operator built
+/// the argv (`weirkeeper::controllers::restore::approver_key_ids`). An EMPTY
+/// set never reaches here: an empty `--approver-key-ids` list means "not
+/// pinned", and the guard returns `Ok` before formatting anything.
+#[must_use]
+pub fn pinned_set_refusal(key_id: &str, pinned: &[String]) -> String {
+    format!(
+        "approver key id {key_id} is not in the pinned set {{{}}}; --approver-key-ids pins which \
+         approvers this run accepts, and an approval outside it is refused before phase 0 dials \
+         anything",
+        pinned.join(", ")
+    )
+}
+
+/// `--approver-key-ids` — the pinned approver set, checked **before phase 0
+/// dials anything**.
+///
+/// # Why this is a separate function and not a parameter of [`verify`]
+///
+/// [`verify`] runs at phase 1, and phase 0 runs first and DIALS: a run whose
+/// approver is outside the pinned set would otherwise be refused only after
+/// the target cluster had been contacted, and on a host with no broker it
+/// would exit 1 at phase 0 and never reach the refusal at all (the exact
+/// ambiguity Task 20's Why records). Global Constraint 11 reserves exit 3 for
+/// "refused by a guard, **before anything ran**", so the check is hoisted
+/// ahead of phase 0 by `drill::execute_with_outcome` and given its own entry
+/// point here, beside the approval logic it belongs to.
+///
+/// Keeping it out of [`verify`]'s signature also keeps that signature at four
+/// arguments, which is why `crates/logweir/tests/approval.rs`'s existing suite
+/// compiles and passes **unmodified**: omitting the flag is not merely
+/// permitted, it is a zero-diff property of every existing caller.
+///
+/// # What is compared
+///
+/// The key id of the ACTUAL approver key file this run was given
+/// (`--approver-key`), computed the same way [`verify`] computes it, against
+/// the ids `--approver-key-ids` names. Not a value read from the approval
+/// document: a document cannot be trusted to name the key that signed it, and
+/// the id is derived from key material either way.
+///
+/// # Errors
+///
+/// * `pinned` empty → `Ok(())`. **Omitting the flag preserves today's
+///   behaviour exactly.**
+/// * The approver key cannot be read or parsed → [`DrillError::Operational`]
+///   (exit 1), matching [`verify`]'s routing for the same failure: a broken
+///   input to the tool is not a statement about the plan's authorisation.
+/// * The id is outside the set → [`DrillError::Guard`] (exit 3), carrying
+///   [`pinned_set_refusal`]'s message.
+pub fn admit_pinned_approver_key_id(
+    approver_key: &Path,
+    pinned: &[String],
+) -> Result<(), DrillError> {
+    if pinned.is_empty() {
+        return Ok(());
+    }
+    let key = VerifyingKey::from_pem_file(approver_key)
+        .map_err(|e| DrillError::Operational(e.to_string()))?;
+    let key_id = key.key_id();
+    if pinned.iter().any(|p| p == &key_id) {
+        return Ok(());
+    }
+    Err(GuardRefusal(pinned_set_refusal(&key_id, pinned)).into())
+}
+
 #[derive(Debug)]
 pub struct Approved {
     pub approval: ApprovalInfo,

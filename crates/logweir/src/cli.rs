@@ -156,6 +156,18 @@ pub enum DrillCmd {
         /// `drill run` looks for it.
         #[arg(long, default_value = "approval.json")]
         out: PathBuf,
+        /// Which kind of subject this approval authorises. Written INSIDE the
+        /// signed bytes, so it cannot be changed without invalidating the
+        /// signature.
+        ///
+        /// RUNNER: an approval with no `subject_kind` at all — every approval
+        /// minted before this flag existed — is treated as `Restore` and
+        /// verifies unchanged. CONTROLLER: the same approval is refused by
+        /// the `Approval` reconciler's check 8 when the referent it names is
+        /// not a `Restore`, because there the field is compared against the
+        /// referent's actual kind and an absent field matches nothing.
+        #[arg(long, value_enum, default_value_t = SubjectKindArg::Restore)]
+        subject_kind: SubjectKindArg,
     },
     /// Run the drill: restore a sampled window into the scratch cluster,
     /// reconcile it per record, and emit a signed scorecard.
@@ -259,6 +271,26 @@ pub struct RestoreRunArgs {
     /// signing key. Equal keys are labelled self_attested, never refused.
     #[arg(long)]
     pub approver_key: PathBuf,
+    /// Pin which approver key ids this run accepts. REPEATABLE — one flag per
+    /// id (`--approver-key-ids a --approver-key-ids b`), which is the shape
+    /// the operator emits, one flag per unexpired `TrustRoster` approver key.
+    ///
+    /// OMITTING IT CHANGES NOTHING: with no ids given the run behaves exactly
+    /// as it did before this flag existed. With ids given, an approval whose
+    /// approver key id is outside the set is refused with exit 3 BEFORE phase
+    /// 0 dials anything.
+    //
+    // NO `value_delimiter`, DELIBERATELY, and this comment is the pin. A
+    // comma-separated form would make `--approver-key-ids "a,b"` silently mean
+    // two ids while the operator never emits that shape
+    // (`restore_controller.rs::only_unexpired_roster_key_ids_reach_the_argv`:
+    // "repeated flags, never one comma-joined value"). One accepted shape
+    // means a comma-joined value is ONE id, matches nothing, and refuses
+    // loudly with the offending string in the message instead of being
+    // reinterpreted. `crates/logweir/tests/cli_exit_codes.rs::
+    // a_comma_joined_approver_key_id_is_one_id_not_two` asserts it.
+    #[arg(long)]
+    pub approver_key_ids: Vec<String>,
     #[arg(long)]
     pub allowed_clusters: PathBuf,
     #[arg(long)]
@@ -293,6 +325,7 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             spec: a.spec,
             approval: a.approval,
             approver_key: a.approver_key,
+            approver_key_ids: a.approver_key_ids,
             allowed_clusters: a.allowed_clusters,
             signing_key: a.signing_key,
             triggered_by: a.triggered_by,
@@ -350,4 +383,40 @@ pub enum BackupCmd {
         #[arg(long)]
         backup_id_override: Option<String>,
     },
+}
+
+/// `--subject-kind`'s two values, spelled as they are spelled on the wire.
+///
+/// `#[value(name = ...)]` on both variants, and that is load-bearing: clap's
+/// default `ValueEnum` rendering is kebab-case (`restore`, `backup`), and the
+/// string this flag produces goes INTO THE SIGNED BYTES where
+/// `weirkeeper::controllers::approval`'s check 8 compares it against the
+/// referent's Kubernetes `kind` — `Restore` and `Backup`, capitalised.
+/// A lower-cased value would mint approvals that verify on the runner and are
+/// refused by every controller, with no error naming the case.
+/// `crates/logweir/tests/cli_approve.rs::
+/// the_subject_kind_values_are_the_wire_spellings` pins both strings.
+///
+/// This is a SECOND declaration of the same two names, not a shared type: the
+/// `logweir` binary must not take a dependency on `weirkeeper` (the dependency
+/// runs the other way, and the CLI ships without a Kubernetes client at all).
+/// The coupling is therefore pinned by a test over the strings, which is the
+/// only thing the two sides actually share.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum SubjectKindArg {
+    #[value(name = "Restore")]
+    Restore,
+    #[value(name = "Backup")]
+    Backup,
+}
+
+impl SubjectKindArg {
+    /// The wire spelling, as it is written into `approval.json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Restore => "Restore",
+            Self::Backup => "Backup",
+        }
+    }
 }

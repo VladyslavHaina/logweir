@@ -40,6 +40,12 @@ pub struct ApproveArgs {
     pub approver: String,
     pub ticket: String,
     pub out: PathBuf,
+    /// `--subject-kind`, as the wire string that goes into the document —
+    /// `Restore` or `Backup`. Held as a `String` rather than as
+    /// `cli::SubjectKindArg` so this module stays independent of the argument
+    /// parser: `mint` writes the bytes, and `cli.rs` decides what a command
+    /// line may spell.
+    pub subject_kind: String,
 }
 
 /// Everything here is `ExitCode::Operational` (1) on failure: this command
@@ -86,6 +92,12 @@ pub fn mint(args: &ApproveArgs) -> Result<String, String> {
         // validated the signature — so a skewed approver clock cannot inflate
         // or deflate a measured objective.
         approved_at: chrono::Utc::now(),
+        // INSIDE THE SIGNED BYTES. `payload` below is what `sign_detached`
+        // covers, and this struct is what `payload` is serialised from, so
+        // the kind is bound by the signature. Writing it into the SIDECAR
+        // instead would leave check 8 comparing a field anyone who can write
+        // the approval bundle could rewrite without touching the signature.
+        subject_kind: args.subject_kind.clone(),
     };
     let mut payload =
         serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialising the approval: {e}"))?;
@@ -106,13 +118,15 @@ pub fn mint(args: &ApproveArgs) -> Result<String, String> {
 
     Ok(format!(
         "approved {spec}\n  plan_hash  {plan_hash}\n  approver   {approver}\n  \
-         ticket     {ticket}\n  key_id     {key_id}\n  wrote      {out}\n  wrote      {sig}\n\
+         ticket     {ticket}\n  subject    {subject_kind}\n  key_id     {key_id}\n  \
+         wrote      {out}\n  wrote      {sig}\n\
          \nThis approval binds the EXACT bytes of {spec}. Edit the spec — including its\n\
          sample window — and `logweir drill run` refuses with exit 3 until you re-run\n\
          this command.\n",
         spec = args.spec.display(),
         approver = args.approver,
         ticket = args.ticket,
+        subject_kind = args.subject_kind,
         key_id = key.key_id(),
         out = args.out.display(),
         sig = sig_path.display(),

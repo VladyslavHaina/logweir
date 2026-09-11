@@ -888,6 +888,40 @@ spend).
   CLI's flags and exit codes are covered by the stability promises above;
   internal crate APIs may change in any release before 1.0.
 
+## Kubernetes: what the control plane does not stop, and what it was built against
+
+**O0, default (a): none of this stops a cluster-admin, and that is accepted and
+stated rather than implied.** Logweir's Kubernetes surface narrows *who can
+change what*, and it does so with real mechanisms — the approval bundle
+(`approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json`)
+lives in the Secret `logweir-approval-bundle` rather than in a ConfigMap,
+because a Secret's `get` and `patch` are different RBAC verbs from a
+ConfigMap's; `--approver-key-ids` pins which approver key ids a run accepts and
+refuses anything outside the set with exit 3 before phase 0 dials; and
+`subject_kind` is inside the signed bytes so an approval cannot be retargeted at
+another kind of object. **None of that is a claim about a cluster-admin.**
+Anyone holding `create pods` in the runner's namespace can mount the signing
+Secret and sign whatever they like with no Logweir crate involved
+(`scripts/check-one-signer.sh`'s header states the same thing about the
+narrowed link-time gate), and anyone who can edit a Secret can replace the
+approval bundle wholesale. The boundary this product draws is between *namespace
+users* and *the operator's own trust roster*, not between an adopter and their
+own cluster administrator. A document that said otherwise would be a guarantee
+the code does not deliver, which is the defect class these pages exist to
+remove.
+
+**The Kubernetes client pair, and the toolchain it was resolved against.**
+`crates/weirkeeper` is built against **`kube 0.99.0`** (`default-features =
+false`, features `client`, `runtime`, `derive`, `rustls-tls`) and
+**`k8s-openapi 0.24.0`** (feature `v1_29`), resolved and pinned under Rust
+**`1.89.0`** (`rust-toolchain.toml`). `kube 0.99`'s own `rust-version` is
+`1.81.0`, comfortably below the pin, and `k8s-openapi 0.24` is the release that
+exposes the `v1_29` feature Global Constraint 25's minimum Kubernetes needs —
+so the pair was taken as resolved, with no `cargo update --precise` anywhere.
+The versions are declared in `crates/weirkeeper/Cargo.toml` and in the
+workspace root's pin-list comment; this page is where the *reason* lives, so a
+future bump has something to disagree with.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

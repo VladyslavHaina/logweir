@@ -21,6 +21,7 @@ use futures::future::BoxFuture;
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     CONDITION_REASONS, CONDITION_REASON_GUARD_REFUSED, CONDITION_REASON_OK, REASON_ADMITTED,
@@ -3167,4 +3168,227 @@ async fn a_steady_restore_issues_no_second_status_patch() {
         0,
         "the second pass over an unchanged object writes NOTHING: {second:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task 22 — the roster reaches the runner, END TO END
+// ---------------------------------------------------------------------------
+
+/// The runner's DEBUG binary — the one the e2e harness runs too (erratum
+/// **E9**), located from this crate's manifest directory.
+///
+/// A weirkeeper test cannot use `env!("CARGO_BIN_EXE_logweir")`: that variable
+/// exists only for targets of the package that declares the binary, and
+/// `weirkeeper` must NOT declare `logweir` as a dependency of any kind —
+/// `scripts/check-one-signer.sh`'s check 1 counts normal, build **and** dev
+/// edges, and the set of crates from which `logweir-evidence` is reachable is
+/// pinned at exactly `{logweir, e2e}`. Taking even a dev-dependency here would
+/// put `weirkeeper` in that set and turn the link-time single-signer gate red.
+/// So the two sides meet through the filesystem and a process, which is also
+/// what they do in a cluster.
+fn runner_binary() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target")
+                .to_path_buf()
+        },
+        PathBuf::from,
+    );
+    let bin = target.join("debug").join("logweir");
+    assert!(
+        bin.exists(),
+        "the runner binary is not at {}. This row is END-TO-END on purpose: it feeds the argv \\
+         THIS crate emits to the parser that has to accept it. `cargo test --workspace` builds \\
+         it; `cargo test -p weirkeeper` alone does not — run `cargo build -p logweir` first.",
+        bin.display()
+    );
+    bin
+}
+
+/// A roster with THREE approver keys, one of them expired by its own status.
+///
+/// The first id is the REAL key id of the checked-in fixture public key,
+/// computed here rather than written down, so the end-to-end half is pinning
+/// the id the runner will actually derive from `--approver-key` and not a
+/// string that merely looks like one. (The other two are the file's existing
+/// synthetic ids; nothing verifies a signature on this path.)
+fn roster_of_three(first_key_id: &str) -> weirkeeper::crds::trust_roster::TrustRoster {
+    const KEY_ID_THIRD: &str =
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    let json = format!(
+        r#"{{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "TrustRoster",
+  "metadata": {{ "name": "default", "uid": "dddddddd-0000-4000-8000-00000000000d" }},
+  "spec": {{
+    "approverKeys": [
+      {{ "keyId": "{first_key_id}", "spkiPem": "-----BEGIN PUBLIC KEY-----\nA\n-----END PUBLIC KEY-----\n" }},
+      {{ "keyId": "{KEY_ID_EXPIRED}", "spkiPem": "-----BEGIN PUBLIC KEY-----\nB\n-----END PUBLIC KEY-----\n" }},
+      {{ "keyId": "{KEY_ID_THIRD}", "spkiPem": "-----BEGIN PUBLIC KEY-----\nC\n-----END PUBLIC KEY-----\n" }}
+    ],
+    "signingKeys": [],
+    "allowedClusterIds": ["MkU3OEVBNTcwNTJENDM2Qk"]
+  }},
+  "status": {{ "loaded": true, "expiredKeyIds": ["{KEY_ID_EXPIRED}"] }}
+}}"#
+    );
+    serde_json::from_str(&json).expect("the fixture is a TrustRoster")
+}
+
+/// Every UNEXPIRED roster key id reaches the Job's argv, in roster order — and
+/// the runner ACCEPTS every id this crate emits.
+///
+/// # This row is end-to-end, and erratum **E10** is why
+///
+/// Task 20 landed the argv half while the shipped `logweir restore run` still
+/// refused the flag: measured in-pod, `error: unexpected argument
+/// '--approver-key-ids' found`, exit 1, so a `Restore` with a non-empty
+/// `TrustRoster` could not run at all. An argv-shape assertion cannot see that
+/// — both sides looked correct in isolation. **The mechanism here is
+/// process-level**: the `--approver-key-ids <id>` pairs are taken out of
+/// `runner_argv`'s own output and handed to the runner's DEBUG binary, with
+/// the fixture's public key as `--approver-key` and a plan phase 0 refuses on
+/// a purely local check.
+///
+/// Three things then have to be true at once, and each has its own failure
+/// mode: the flag parses (a usage error would be exit 1 with `unexpected
+/// argument`), the id the reconciler emitted is INSIDE the pinned set (a miss
+/// is exit 3 naming the pinned set), and the run reached phase 0 (whose local
+/// refusal is the message asserted). The negative twin at the end removes the
+/// matching id and requires the refusal, so a guard that admitted everything
+/// would fail too.
+///
+/// No broker is dialled and none is needed: the pinned check is hoisted ahead
+/// of phase 0, and phase 0's mapping check is local.
+#[test]
+fn the_restore_job_projects_every_unexpired_roster_key_id() {
+    let fixture_pub =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../e2e/fixtures/signed/public.pem");
+    let fixture_id = logweir_verify::VerifyingKey::from_pem_file(&fixture_pub)
+        .expect("the checked-in fixture public key parses")
+        .key_id();
+    let roster = roster_of_three(&fixture_id);
+
+    // --- the projection -----------------------------------------------------
+    let ids = approver_key_ids(Some(&roster));
+    assert_eq!(
+        ids,
+        vec![
+            fixture_id.clone(),
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333".to_string()
+        ],
+        "three keys, one expired: exactly the two unexpired ids, in ROSTER order"
+    );
+
+    let argv = runner_argv(&restore(), &ids);
+    let pairs: Vec<(String, String)> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--approver-key-ids")
+        .map(|w| (w[0].clone(), w[1].clone()))
+        .collect();
+    assert_eq!(
+        pairs.len(),
+        2,
+        "exactly two values, one flag each: {argv:?}"
+    );
+    assert_eq!(
+        pairs.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(),
+        ids,
+        "in roster order"
+    );
+    assert!(
+        !argv.contains(&KEY_ID_EXPIRED.to_string()),
+        "and the expired id is nowhere in the argv: {argv:?}"
+    );
+
+    // --- end to end: the runner accepts every id this crate emitted ---------
+    let dir = scratch_dir("t22-roster-argv");
+    let spec = dir.join("phase0-refuses.yaml");
+    let plan = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/drill.yaml"),
+    )
+    .expect("the shipped example plan is readable")
+    .replace(
+        "topic_mapping_prefix: \"drill-\"",
+        "topic_mapping_prefix: \"\"",
+    );
+    std::fs::write(&spec, plan).expect("the scratch plan is writable");
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut cmd = std::process::Command::new(runner_binary());
+    cmd.args(["restore", "run", "--spec"])
+        .arg(&spec)
+        .arg("--approval")
+        .arg(root.join("examples/approval.json"))
+        .arg("--approver-key")
+        .arg(&fixture_pub)
+        .arg("--allowed-clusters")
+        .arg(root.join("examples/allowed-clusters.json"))
+        .arg("--signing-key")
+        .arg(root.join("e2e/fixtures/signed/signing.pem"));
+    for (flag, value) in &pairs {
+        cmd.arg(flag).arg(value);
+    }
+    let out = cmd.output().expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "THE ERRATUM E10 FAILURE, and the reason this row is end-to-end: the runner refused a \\
+         flag this crate emits. {stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "the run is refused by phase 0's local check, not by a usage error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("is not in the pinned set"),
+        "every id the reconciler emitted must be ACCEPTED — the approver key's own id is the \\
+         first entry of the roster: {stderr}"
+    );
+    assert!(
+        stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
+        "and the run reached PHASE 0, whose refusal this is: {stderr}"
+    );
+
+    // --- the negative twin: drop the matching id and it refuses -------------
+    let mut cmd = std::process::Command::new(runner_binary());
+    cmd.args(["restore", "run", "--spec"])
+        .arg(&spec)
+        .arg("--approval")
+        .arg(root.join("examples/approval.json"))
+        .arg("--approver-key")
+        .arg(&fixture_pub)
+        .arg("--allowed-clusters")
+        .arg(root.join("examples/allowed-clusters.json"))
+        .arg("--signing-key")
+        .arg(root.join("e2e/fixtures/signed/signing.pem"))
+        .args(["--approver-key-ids", KEY_ID_EXPIRED]);
+    let out = cmd.output().expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "approver key id {fixture_id} is not in the pinned set"
+        )),
+        "pinning only the EXPIRED id refuses the run before phase 0 — so the flag is \\
+         load-bearing and the positive half above is not vacuous: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A scratch directory under the system temp dir, made by hand.
+///
+/// `tempfile` is not a dependency of this crate and is not being added for one
+/// test: `tests/linkage.rs` measures this crate's declared entries, and a new
+/// one would have to justify itself there. The directory is created fresh and
+/// removed at the end of the test that made it.
+fn scratch_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("logweir-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+    dir
 }

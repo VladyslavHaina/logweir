@@ -211,3 +211,85 @@ fn approve_is_listed_in_drill_help() {
         "`drill --help` omits approve:\n{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 22 — `--subject-kind`
+// ---------------------------------------------------------------------------
+
+/// The two values `--subject-kind` accepts are the WIRE spellings, capitalised
+/// — and the help text states both halves of what the field means.
+///
+/// clap's default `ValueEnum` rendering is kebab-case (`restore`, `backup`).
+/// The string this flag produces goes inside the signed bytes and is compared
+/// by the controller's check 8 against a Kubernetes `kind`, so a lower-cased
+/// value would mint approvals that verify on the runner and are refused by
+/// every controller with a message naming two strings that differ only in
+/// case. `cli::SubjectKindArg` therefore pins both with `#[value(name = ...)]`,
+/// and this is the test that fails if someone drops them.
+#[test]
+fn the_subject_kind_values_are_the_wire_spellings() {
+    let out = bin().args(["drill", "approve", "--help"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        help.contains("[possible values: Restore, Backup]"),
+        "the capitalised wire spellings, in the order the enum declares them: {help}"
+    );
+    assert!(
+        help.contains("[default: Restore]"),
+        "absent means Restore: {help}"
+    );
+    // BOTH HALVES, in the flag's own help text.
+    let flat: String = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("RUNNER: an approval with no `subject_kind` at all")
+            && flat.contains("is treated as `Restore` and verifies unchanged"),
+        "the RUNNER half — an approval with no subject_kind verifies as Restore: {help}"
+    );
+    assert!(
+        flat.contains(
+            "CONTROLLER: the same approval is refused by the `Approval` reconciler's check 8 \
+             when the referent it names is not a `Restore`"
+        ),
+        "the CONTROLLER half — refused by check 8 when the referent is not a Restore: {help}"
+    );
+
+    // And the two constants the rest of the workspace compares against.
+    assert_eq!(logweir::cli::SubjectKindArg::Restore.as_str(), "Restore");
+    assert_eq!(logweir::cli::SubjectKindArg::Backup.as_str(), "Backup");
+    assert_eq!(
+        logweir_core::spec::SUBJECT_KIND_RESTORE,
+        logweir::cli::SubjectKindArg::Restore.as_str(),
+        "the runner's compatibility default and the flag's default are one string"
+    );
+}
+
+/// A lower-cased value is REFUSED, not silently accepted — the mutant "drop
+/// the `#[value(name = ...)]` attributes" is killed here as well as by the
+/// help-text assertion above.
+#[test]
+fn a_lower_cased_subject_kind_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = dir.path().join("drill.yaml");
+    std::fs::write(&spec, example_spec()).unwrap();
+    let key = write_key(dir.path());
+    let out = bin()
+        .args(["drill", "approve"])
+        .arg("--spec")
+        .arg(&spec)
+        .arg("--key")
+        .arg(&key)
+        .args(["--approver", "a@example.com"])
+        .args(["--ticket", "CHG-1"])
+        .args(["--subject-kind", "restore"])
+        .arg("--out")
+        .arg(dir.path().join("approval.json"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a usage error is exit 1, never 2 (Global Constraint 11): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

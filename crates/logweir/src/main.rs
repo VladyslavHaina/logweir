@@ -80,12 +80,15 @@ fn main() -> std::process::ExitCode {
             approver,
             ticket,
             out,
+            subject_kind,
         }) => logweir::approve::run(&logweir::approve::ApproveArgs {
             spec,
             key,
             approver,
             ticket,
             out,
+            // The parser owns the vocabulary; `approve` owns the bytes.
+            subject_kind: subject_kind.as_str().to_string(),
         }),
         cli::Command::Drill(cli::DrillCmd::Verify {
             scorecard,
