@@ -1519,3 +1519,45 @@ fn the_release_artefact_ships_the_auditors_reader() {
         );
     }
 }
+
+/// **Task 30b review, finding F1: `publish:` waits for the pull-back.** The
+/// release notes assert the digests were pulled back by this run's
+/// `pullback:` job; a graph that did not order the two would publish that
+/// claim after a failed pull-back. The job carries NO job-level tag gate,
+/// because a skipped `needs` dependency skips `publish:` on every branch run
+/// — every step carries the gate instead, so a branch run passes through the
+/// job with nothing executed, and a tag run's failed pull-back blocks the
+/// release.
+#[test]
+fn workflow_lint_publish_waits_for_the_pullback() {
+    let doc = workflow();
+    let needs = needs_of(&doc, "publish");
+    assert!(
+        needs.iter().any(|n| n == "pullback"),
+        "publish must `needs` pullback (got {needs:?}): without the edge a failed pull-back \
+         still publishes the notes that claim it succeeded"
+    );
+    let job = &doc["jobs"]["pullback"];
+    assert!(
+        job.get("if").is_none(),
+        "pullback must carry NO job-level `if:`: a job skipped at job level skips every job \
+         that `needs` it, and publish now does"
+    );
+    let steps = job_steps(&doc, "pullback");
+    assert!(!steps.is_empty(), "pullback has steps");
+    for (i, step) in steps.iter().enumerate() {
+        let is_checkout = step
+            .get("uses")
+            .and_then(Value::as_str)
+            .map(|u| u.starts_with("actions/checkout"))
+            .unwrap_or(false);
+        if is_checkout {
+            continue;
+        }
+        let cond = step.get("if").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            cond.contains("startsWith(github.ref, 'refs/tags/')"),
+            "pullback step {i} must carry the tag gate on the STEP (the job has none): {step:?}"
+        );
+    }
+}

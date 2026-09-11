@@ -410,13 +410,14 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
-          # `docker manifest` is an experimental CLI command and stays behind
-          # this flag on the Docker CLI versions ubuntu-24.04 ships. The
-          # alternative spelling, `imagetools create`, cannot be used here:
-          # `workflow_lint_no_docker_build_shellout` bans the two-word shell
-          # compile spelling over this whole file, and `buildx` written after
-          # `docker ` contains it as a substring. That ban is worth more than
-          # the spelling, so the list is assembled with `docker manifest`.
+          # `docker manifest` is GA on every Docker CLI since 20.10 and needs no
+          # experimental flag (Task 30b's review measured CLI 29.2 with the variable
+          # unset); the variable is kept only for a CLI older than that, where it
+          # is harmless. The alternative spelling, `imagetools create`, cannot be
+          # used here: `workflow_lint_no_docker_build_shellout` bans the two-word
+          # shell compile spelling over this whole file, and `buildx` written after
+          # `docker ` contains it as a substring. That ban is worth more than the
+          # spelling, so the list is assembled with `docker manifest`.
           DOCKER_CLI_EXPERIMENTAL: enabled
         # NOTHING IS COMPILED HERE. `docker tag` renames the bytes the two
         # assert steps above looked at; `docker push` uploads those exact bytes;
@@ -491,10 +492,15 @@ jobs:
   # `workflow_lint_the_pullback_job_builds_nothing` asserts — a job that could
   # rebuild the bytes would be proving they are reproducible, which is a
   # different (and here, false) property.
+  # THE JOB HAS NO JOB-LEVEL TAG GATE ON PURPOSE (Task 30b's review, F1): `publish:`
+  # `needs` this job, and a job skipped by a job-level `if:` would skip `publish:`
+  # on every branch run with it. Every step carries the tag gate instead, so on a
+  # branch the job runs with every step skipped and succeeds; on a tag a failed
+  # pull-back FAILS this job and `publish:` never runs — which is the point: the
+  # release notes claim the digests were pulled back, and the graph now orders it.
   pullback:
     needs: [image]
     runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -508,6 +514,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull the runner image by digest and re-assert it
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           runner="ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}"
@@ -522,6 +529,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Pull BOTH controller variants from the manifest list and re-assert them
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         # THE TWO `--platform` PULLS ARE THE PROOF THAT THE LIST CARRIES BOTH.
         # Each exit status is read directly, on its own line; a manifest list
@@ -548,6 +556,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Record both published digests in the job summary
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         # THIS SUMMARY IS THE ARTEFACT. `docs/tag1-checklist.md` clause 1 moves
         # from blocked to closed on the transcript this step writes, and on
@@ -562,7 +571,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
-    needs: [plan, build, image]
+    needs: [plan, build, image, pullback]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
