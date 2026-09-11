@@ -3266,6 +3266,91 @@ mod tests {
         );
     }
 
+    /// **Reviewer's guard (Task 10b review, M5).** `supportable_claim` clamps a
+    /// negative `record_count` to 0 (interface I5) on BOTH of its sums — the
+    /// wholly-inside claim and the straddler disclosure. The module doc asserts
+    /// this ("A negative `record_count` contributes 0 rather than wrapping a
+    /// `u64`"), and until this row nothing in the tree observed it: deleting
+    /// both `.max(0)` calls left the whole workspace green.
+    ///
+    /// A wrapped `-1` is `u64::MAX`, which does not merely mis-size the claim —
+    /// it makes `compared >= claimed` unreachable for every archive, turning
+    /// one malformed manifest field into a `fail-integrity` on a correct
+    /// restore, which is the very class of defect Task 10b exists to remove.
+    #[test]
+    fn a_negative_or_zero_record_count_contributes_nothing_and_never_wraps() {
+        // (a) WHOLLY INSIDE, record_count -1 → supports 0, not 2^64-1.
+        let (facts, store) = facts_and_store(&[("logweir/neg.kbak", T_MS - 10, T_MS - 1, -1)]);
+        let (fps, consumed) = pairs(2, T_MS - 2);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &sel_window(25, (T_MS - 20, T_MS)),
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+        assert_eq!(
+            v.claimed, 0,
+            "a negative record_count clamps to 0 and never wraps a u64 (I5); a wrapped \
+             u64::MAX would make `compared >= claimed` unreachable for every archive"
+        );
+        assert_eq!(v.records, Evidence::Verified { checked: 2 });
+
+        // (b) a STRADDLER with a negative count discloses 0 records, not 2^64-1.
+        let straddler_rows: [(&str, i64, i64, i64); 2] = [
+            ("logweir/inside.kbak", T_MS - 10, T_MS - 1, 5),
+            ("logweir/neg-straddler.kbak", T_MS - 1, T_MS + 1, -1),
+        ];
+        let (facts, store) = facts_and_store(&straddler_rows);
+        let (fps, consumed) = pairs(3, T_MS - 2);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &sel_window(25, (T_MS - 20, T_MS)),
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+        assert_eq!(
+            v.claimed, 5,
+            "the negative straddler adds nothing to the claim"
+        );
+        let why = v.records.why().expect("a short sample must say so");
+        assert!(
+            why.contains("(1 straddling segment holds 0 records the window may exclude)"),
+            "a negative straddler is disclosed as 0 records, never as a wrapped u64: {why}"
+        );
+
+        // (c) a straddler whose count is exactly 0 is still DISCLOSED.
+        let zero_rows: [(&str, i64, i64, i64); 2] = [
+            ("logweir/inside.kbak", T_MS - 10, T_MS - 1, 5),
+            ("logweir/zero-straddler.kbak", T_MS - 1, T_MS + 1, 0),
+        ];
+        let (facts, store) = facts_and_store(&zero_rows);
+        let (fps, consumed) = pairs(3, T_MS - 2);
+        let v = verdict_for_selection(
+            &Restored(consumed),
+            &store,
+            &facts,
+            &sel_window(25, (T_MS - 20, T_MS)),
+            &orders_mapping(),
+            &SelectionArchive::Fingerprints(fps),
+        )
+        .unwrap();
+        assert_eq!(
+            v.claimed, 5,
+            "a zero-count straddler adds nothing to the claim"
+        );
+        assert!(v
+            .records
+            .why()
+            .expect("short")
+            .contains("1 straddling segment holds 0 records"));
+    }
+
     #[test]
     fn classify_parity_all_refuses_an_empty_mapping() {
         struct Unreachable;
