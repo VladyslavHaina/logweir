@@ -48,21 +48,27 @@
 //!   the records the manifest claims. Nothing in `roll_up` branches on
 //!   `level`, so the lane cannot opt out of an obligation that is not
 //!   written in the lane.
-//! - **Short counts as unverified.** What the archive (or the target)
-//!   actually returned is compared against what the manifest claims —
-//!   `min(sel.count, Σ SegmentFacts.record_count)` over the segments the
-//!   sampled window matches. Both halves come from figures the drill already
-//!   signs: `Σ record_count` over the in-window segments is precisely the
-//!   per-partition term `phase4_sample` sums into `sample.records_expected`,
-//!   and `sel.count` is `sample.records_per_partition`. It is the MINIMUM of
-//!   the two, not `records_expected` itself — `phase4_sample`'s per-partition
-//!   term is deliberately UNCAPPED by `records_per_partition`, so holding a
-//!   25-record sample of a 250-record window to 250 would fail every healthy
-//!   drill. Holding the archive to the min therefore adds no new claim; it
-//!   holds the drill to the smaller of two numbers it already publishes.
-//!   Pinned by `claimed_is_the_manifest_window_sum_capped_by_the_selections
-//!   _own_count`. One fingerprint where the manifest claims 25 is 24 records
-//!   unexamined, not a smaller successful sample.
+//! - **Short counts as unverified — against what the manifest can SUPPORT.**
+//!   What the archive (or the target) actually returned is compared against
+//!   `claimed` = `min(sel.count, Σ SegmentFacts.record_count over the matched
+//!   segments WHOLLY INSIDE the sampled window)`, both window ends inclusive.
+//!   `sel.count` is `sample.records_per_partition`; the sum is the manifest's
+//!   own figure for the window, held down to the segments it PROVES are in
+//!   it. A segment the window cuts across contributes NOTHING: its records are
+//!   an upper bound, not a claim (`supportable_claim`, which carries the
+//!   reasoning and the measured false negative that produced this rule). It is
+//!   the MINIMUM of the two, and it is not `sample.records_expected` — that
+//!   scorecard field is Σ `count`, the canary the drill set out to reconcile,
+//!   and `phase4_sample`'s own manifest total is deliberately UNCAPPED by
+//!   `records_per_partition`, so holding a 25-record sample of a 250-record
+//!   window to 250 would fail every healthy drill. Holding the archive to
+//!   `claimed` therefore adds no new claim; it holds the drill to the smaller
+//!   of two numbers it already has. Pinned by
+//!   `claimed_is_the_manifests_wholly_inside_sum_capped_by_the_selections
+//!   _own_count`. One fingerprint where the manifest supports 25 is 24 records
+//!   unexamined, not a smaller successful sample — and 2 fingerprints where a
+//!   straddling segment happens to hold 3 is the whole window, not a short
+//!   read.
 //! - **The mode is PER SELECTION.** `probe_archive_modes` no longer returns
 //!   one `ConsumeOnly` for the whole backup set on the first `Unsupported`
 //!   (which also discarded the fingerprints it had already collected): a
@@ -417,16 +423,15 @@ struct SelectionVerdict {
     /// `"topic/partition"` — the selection this verdict is about, and the
     /// prefix every reason string carries into the signed `partial_reason`.
     id: String,
-    /// What the MANIFEST claims this selection covers, capped by the
+    /// What the MANIFEST can SUPPORT for this selection, capped by the
     /// selection's own `count`: `min(sel.count, Σ record_count)` over the
-    /// segments the sampled window actually matches. `Σ record_count` over
-    /// the in-window segments is exactly the per-partition term
-    /// `phase4_sample` sums into the scorecard's `sample.records_expected`,
-    /// and `sel.count` is `sample.records_per_partition` — but this is the
-    /// MIN of the two, NOT `records_expected` itself, which `phase4_sample`
-    /// deliberately leaves uncapped by `records_per_partition`. Both inputs
-    /// are already-signed figures, so holding the archive to their minimum
-    /// adds no new claim.
+    /// matched segments **wholly inside** the sampled window, both ends
+    /// inclusive — see `supportable_claim`. A segment the window cuts across
+    /// contributes nothing, because the records it holds outside the window
+    /// cannot be fingerprinted and must not be demanded. `sel.count` is
+    /// `sample.records_per_partition`; this is the MIN of the two, and it is
+    /// NOT the scorecard's `sample.records_expected`, which is Σ `count` over
+    /// the selections and answers a different question.
     claimed: u64,
     /// (a) archive-segment sha256 evidence for THIS selection's segments.
     segments: Evidence,
@@ -878,6 +883,92 @@ fn mapped_topic<'a>(
     })
 }
 
+/// What the manifest can SUPPORT for one selection, and the straddling
+/// segments it deliberately did not count: `(claimed, straddlers)` where
+/// `claimed` is `min(sel.count, Σ record_count over the matched segments
+/// WHOLLY INSIDE the sample window)` and `straddlers` is
+/// `(how many, how many records they hold)`.
+///
+/// # Why WHOLLY inside, and not overlapping (Task 10b)
+///
+/// Because that is the only number an archive can be held to. The archive side
+/// (`OsoCliEngine::fingerprints`) returns exactly the records whose timestamp
+/// lies inside `[w0, w1]` — the engine's own filter is `r.timestamp >= s &&
+/// r.timestamp <= e`, both ends inclusive — while `record_count` is a property
+/// of a whole SEGMENT. When a window edge falls inside a segment (the normal
+/// case for point-in-time recovery, and guaranteed for any `point_in_time`
+/// that is not a segment boundary) that segment holds records the window
+/// EXCLUDES, so summing it into the claim demands fingerprints that cannot
+/// exist.
+///
+/// Round 1 summed every OVERLAPPING segment and shipped exactly that false
+/// negative: measured 2026-09-10 against engine 0.21.0
+/// (`sha256:8ff5be71…`) on Kafka 3.7.1, a three-partition `point_in_time`
+/// restore verified record-by-record off the broker scored
+/// `outcome: fail-integrity`, exit 2, with `integrity.mismatches: 0` and
+/// `claimed 3` against the 2 fingerprints each partition could offer — a
+/// correct restore failing about its own sample.
+///
+/// So a straddler's `record_count` is an UPPER bound and never a claim. That
+/// is the same rule `logweir_core::engine::expected_restored_count` already
+/// applies to the restored COUNT (`lower` sums the wholly-inside segments;
+/// straddlers only widen `upper`), which is why this is one rule for "what a
+/// manifest can support" rather than two, and why it needs no new manifest
+/// data. The straddlers are returned rather than dropped because the
+/// `Unverified` message has to disclose them: an auditor reading "supports at
+/// least 5" over a manifest that mentions 8 must be able to see where the
+/// other 3 went.
+///
+/// The bound is only a LOWER bound, so it can under-claim: an archive that
+/// returns fewer records than the window genuinely holds inside a straddler is
+/// not caught here. That is deliberate and is the same trade
+/// `expected_restored_count` documents — the manifest's finest granularity is
+/// the segment and it carries no per-record timestamp, so an exact figure is
+/// not derivable, and a bound that over-claims fails CORRECT implementations
+/// (STANDING RULE 21). The guard that still binds on such a selection is the
+/// positive, non-vacuous `compared > 0` conjunct at the call site: a selection
+/// the archive answered with NOTHING is `Unverified` whatever the manifest
+/// says.
+///
+/// A negative `record_count` contributes 0 rather than wrapping a `u64`,
+/// exactly as `expected_restored_count` does (interface I5).
+fn supportable_claim(s: &SampleSelection, segs: &[&SegmentFacts]) -> (u64, (usize, u64)) {
+    let (w0, w1) = s.window;
+    let wholly_inside = |g: &SegmentFacts| g.start_timestamp >= w0 && g.end_timestamp <= w1;
+    let supported: u64 = segs
+        .iter()
+        .filter(|g| wholly_inside(g))
+        .map(|g| g.record_count.max(0) as u64)
+        .sum();
+    let straddling: Vec<_> = segs.iter().filter(|g| !wholly_inside(g)).collect();
+    let straddling_records: u64 = straddling
+        .iter()
+        .map(|g| g.record_count.max(0) as u64)
+        .sum();
+    let cap = s.count as u64;
+    let claimed = if segs.is_empty() {
+        cap
+    } else {
+        cap.min(supported)
+    };
+    (claimed, (straddling.len(), straddling_records))
+}
+
+/// The parenthetical the short-sample messages carry when the claim was held
+/// down by segments the window cuts across — empty when none were matched, so
+/// a message never invents a straddler that is not there.
+fn straddler_note((count, records): (usize, u64)) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({count} straddling segment{} hold{} {records} records the window may exclude)",
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "s" } else { "" },
+        )
+    }
+}
+
 /// Builds the ONE verdict for ONE selection. Every lane's conclusion is a
 /// value in the returned `SelectionVerdict`; nothing here decides pass or
 /// fail, and nothing here may return "no opinion".
@@ -907,10 +998,18 @@ fn mapped_topic<'a>(
 /// arms must construct.
 ///
 /// **Short is unverified, not a smaller successful sample.** An archive that
-/// returns 1 fingerprint where the manifest claims 25 has not sampled less
+/// returns 1 fingerprint where the manifest SUPPORTS 25 has not sampled less
 /// successfully — it has left 24 records unexamined, and reporting a
 /// `pass_rate` of 1.0 over the 1 is exactly the false assurance the fourth
 /// door signed over a 96%-lossy partition.
+///
+/// **Short against what the manifest SUPPORTS, never against what it
+/// overlaps.** `claimed` comes from `supportable_claim`, which sums only the
+/// segments wholly inside the sampled window: a straddling segment's records
+/// lie partly outside the window and cannot be fingerprinted, so demanding
+/// them turned CORRECT point-in-time restores into `fail-integrity` — the
+/// false negative Task 10b fixes, and the reason the two sentences above are
+/// about a lower bound rather than about a total.
 ///
 /// **Severity: a drill result, not an operational failure.** Round 2 split
 /// this class of finding two ways — the zero-sample case degraded to
@@ -939,21 +1038,22 @@ fn verdict_for_selection(
     let mapped = mapped_topic(mapping, &s.topic)?;
 
     let segs = sampled_segments_for(facts, s);
-    // `min(sel.count, Σ record_count)`: the cap the sample asked for, or all
-    // the manifest says exists in the window, whichever is smaller. Both
-    // halves matter — without the cap a 25-record sample of a million-record
-    // partition would always read short; without the manifest sum a window
-    // holding fewer records than `records_per_partition` would too. When the
-    // window matches no segment at all there is no manifest figure to use,
-    // so the plan's own ask stands as the claim (and `segments` is already
-    // `Unverified`, so the selection cannot pass regardless).
-    let manifest_records: u64 = segs.iter().map(|g| g.record_count.max(0) as u64).sum();
-    let cap = s.count as u64;
-    let claimed = if segs.is_empty() {
-        cap
-    } else {
-        cap.min(manifest_records)
-    };
+    // `min(sel.count, Σ record_count over the segments WHOLLY INSIDE the
+    // window)`: the cap the sample asked for, or all the manifest can SUPPORT
+    // inside the window, whichever is smaller. Both halves matter — without
+    // the cap a 25-record sample of a million-record partition would always
+    // read short; without the manifest sum a window holding fewer records than
+    // `records_per_partition` would too. When the window matches no segment at
+    // all there is no manifest figure to use, so the plan's own ask stands as
+    // the claim (and `segments` is already `Unverified`, so the selection
+    // cannot pass regardless).
+    //
+    // Task 10b: this sums only the WHOLLY-INSIDE segments — see
+    // `supportable_claim` for why a straddler contributes nothing, and for the
+    // false negative that rule fixes. The OVERLAP predicate stays exactly
+    // where it was for `segs` itself: every overlapping segment's sha256 is
+    // still checked by `segment_evidence`.
+    let (claimed, straddlers) = supportable_claim(s, &segs);
 
     let segments = segment_evidence(store, &segs)?;
     let consumed = reader.consume_range(mapped, s.partition, 0, s.count)?;
@@ -989,11 +1089,17 @@ fn verdict_for_selection(
                         .into(),
                 }
             } else {
+                // "SUPPORTS AT LEAST", not "claims": `claimed` is a LOWER
+                // bound over the wholly-inside segments, and the straddlers
+                // it did not count are disclosed so an auditor can see the
+                // difference between this figure and the manifest's own total
+                // (see `supportable_claim`).
                 Evidence::Unverified {
                     why: format!(
-                        "the archive returned {compared} fingerprints where the manifest claims \
-                         {claimed} for this selection; a short sample is coverage the drill did \
-                         not obtain, not a smaller successful sample"
+                        "the archive returned {compared} fingerprints where the manifest \
+                         supports at least {claimed} for this selection{}; a short sample is \
+                         coverage the drill did not obtain, not a smaller successful sample",
+                        straddler_note(straddlers)
                     ),
                 }
             };
@@ -1025,11 +1131,17 @@ fn verdict_for_selection(
                         .into(),
                 }
             } else {
+                // Mirrors the byte-fingerprint lane's wording, over the same
+                // `claimed` and the same disclosure: the two lanes carry the
+                // same obligation and differ only in the strength of the
+                // CLAIM, so they may not differ in what they hold the
+                // manifest to.
                 Evidence::Unverified {
                     why: format!(
                         "the target partition gave back {records_restored} records where the \
-                         manifest claims {claimed} for this selection; a short read-back is \
-                         coverage the drill did not obtain"
+                         manifest supports at least {claimed} for this selection{}; a short \
+                         read-back is coverage the drill did not obtain",
+                        straddler_note(straddlers)
                     ),
                 }
             };
