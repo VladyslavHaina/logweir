@@ -2244,6 +2244,164 @@ the rest from the Rust side, including that the serving command above is byte
 identical in `ui/README.md`, in this document and in the `ui` recipe of the
 `justfile`.
 
+## 17. Approving a restore out of band
+
+A `Restore` does not run because it exists. It runs when an `Approval` naming it
+carries a signature by a key the cluster-scoped `TrustRoster` lists, over the
+exact bytes of that restore's plan. Nothing in this product can produce that
+signature: `weirkeeper` holds no approver key, and the UI holds no key of any
+kind. The approver signs on their own machine, and this section is that flow as
+an operator performs it.
+
+### Why both names are minted before either object exists
+
+`Restore.spec.approvalRef` names an `Approval`, `Approval.spec.subjectRef` names
+the `Restore`, and **both `.spec`s are sealed by an object-level CEL rule**
+(`self == oldSelf`; every `.spec` in this group except
+`BackupSchedule.spec.suspend`). So neither reference can be filled in afterwards,
+and "create one, then create the other and point them at each other" is not a
+sequence that exists.
+
+The rule is therefore: **mint both `metadata.name`s from the plan bytes first.**
+
+    restore-<first 8 hex of sha256(planBytes)>
+    approval-<the same 8 hex>
+
+Create the `Restore` **first**, with `spec.approvalRef.name` set to an approval
+that does not exist yet. The reconciler sets `Verified=False` with reason
+`ApprovalNotVerified` and **requeues every 30 s** until the `Approval` arrives;
+it creates no Job in the meantime. Create the `Approval` second. Neither name is
+ever edited, because neither spec can be -- and the shared suffix is what lets
+you read the pair off one `kubectl get` without a join.
+
+### The flow
+
+**1. Render the plan and read its hash.** The restore wizard (§16) renders the
+plan document, shows its sha256 and shows both minted names before either object
+exists. The plan document's grammar is the runner's own `restore.yaml` -- the
+controller writes `spec.planBytes` verbatim into the runner's plan `ConfigMap` as
+`data["restore.yaml"]` and the runner parses it with `serde_yaml` -- so what the
+wizard emits is a document `logweir restore run --spec` accepts and nothing else.
+
+**2. Get the exact bytes.** Use the wizard's **download** button, or take them
+from the cluster after the `Restore` exists:
+
+```bash
+kubectl --context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > <name>.yaml
+```
+
+Copying out of the page is the one route that can lose bytes: several browsers
+strip trailing whitespace from a `<pre>` copy, and a plan whose last line ends in
+spaces has a different sha256 from the one the page showed. Hash exactly what you
+downloaded.
+
+**3. Sign it, on the machine that holds the private key.** Nothing about this
+step involves the cluster or the page:
+
+```bash
+logweir drill approve --spec <file> --key <privkey> --approver <id> --ticket <id>   --subject-kind Restore --out <file>
+```
+
+`--out` is shown because it defaults to `approval.json` in the caller's current
+working directory, and the DSSE sidecar lands beside it with the extension
+replaced by `.sig`. The command prints
+
+```
+plan_hash  sha256:<64 lowercase hex>
+```
+
+which must equal the hash the wizard showed, character for character. If it does
+not, you signed different bytes.
+
+**4. Record it.** The approvals page takes the two files as text and does one
+`create` on `approvals` with them **verbatim** -- never base64, and never parsed.
+It refuses a file whose name ends `.pem` or `.key`, or whose content carries a
+private-key header, with the message *this page never accepts a private key*. The
+object it posts carries all four spec fields: `subjectRef{kind,name}` and
+`planHash` come from the route the wizard navigated to, because the page is
+forbidden from parsing the two documents and so cannot lift the hash out of
+`approval.json` either.
+
+**5. The controller decides.** It recomputes the plan hash from the referent's
+own bytes, resolves the signing key id out of the signature (the **matched** key
+id, never the first one listed), checks that id against
+`TrustRoster.spec.approverKeys[]`, compares the `payloadType` in full, and
+compares the subject *kind* inside the signed bytes with the referent's actual
+kind -- so a restore's approval can never authorise anything else. Only then does
+`Approval.status.verified` become `true`, the `Restore`'s next reconcile passes,
+and the Job is created.
+
+An `Approval` that exists is not an approval. One whose status the controller set
+to `Verified=True` is. A submission that does not verify stays in the cluster
+with `Verified=False` and its reason, which is the record of a rejected attempt
+and is worth keeping.
+
+### Checking a key out of band
+
+A roster row says which key id the controller will accept. It cannot say that the
+material behind that id is still the one its holder has -- that is what an
+undisclosed rotation changes and nothing in the cluster observes. Ask the holder
+for the public half and compute its fingerprint yourself:
+
+```bash
+openssl pkey -pubin -outform DER -in <key>.pub.pem | openssl dgst -sha256
+```
+
+The digest is the `keyId` the roster carries and the `matchedKeyId` the
+controller records.
+
+### Editing the roster
+
+`TrustRoster` is cluster-scoped and admin-only, so the keys page renders this and
+does not submit it (the plural is absent from the page's writable set, and
+`api.create` refuses it by name before any request is built):
+
+```yaml
+apiVersion: logweir.dev/v1alpha1
+kind: TrustRoster
+metadata:
+  name: default
+spec:
+  approverKeys:
+    - keyId: <sha256 of the DER SPKI, lowercase hex>
+      spkiPem: |
+        -----BEGIN PUBLIC KEY-----
+        <the approver's PUBLIC half>
+        -----END PUBLIC KEY-----
+      subject: <who holds it>
+      notAfter: "2027-01-01T00:00:00Z"
+  signingKeys:
+    - keyId: <sha256 of the DER SPKI, lowercase hex>
+      spkiPem: |
+        -----BEGIN PUBLIC KEY-----
+        <the runner's PUBLIC half>
+        -----END PUBLIC KEY-----
+      subject: <the runner identity>
+      notAfter: "2027-01-01T00:00:00Z"
+  allowedClusterIds: []
+```
+
+```bash
+kubectl --context docker-desktop apply -f roster.yml
+```
+
+`signingKeys[]` carries key **material**, not ids: `verify_evidence` resolves a
+runner's signing key from the roster and has nothing to verify against without
+it. An empty `signingKeys[]` makes every verification `NotAttempted`, and the UI
+renders that as what it is.
+
+### Editing a plan
+
+There is no such thing. `Restore.spec` is immutable, so the wizard's "edit"
+prefills a **new** draft, mints new names from the new bytes, and says so in the
+page:
+
+> Restore.spec is immutable. This creates a NEW Restore with a new plan hash; the
+> existing approval does not cover it.
+
+The old approval still covers the old restore, which is the correct outcome: an
+approval binds bytes, and these are different bytes.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

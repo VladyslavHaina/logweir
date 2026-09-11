@@ -14,6 +14,18 @@
 # that keypair was generated outside the tree and destroyed (docs/kubernetes.md
 # §14).
 !/third_party/org-root.pub.pem
+# Task 27: the UI behaviour suite's throwaway approver keypair, on the exact
+# precedent of `/e2e/fixtures/signed/*.pem` above. `the_plan_hash_the_page_shows
+# _is_the_hash_the_cli_computes` spawns the release binary, `logweir drill
+# approve` requires `--key`, and a cross-language hash equality is worth nothing
+# against a stub -- so the pair has to be checked in or the row cannot exist.
+# Without this un-ignore `git add -A` silently stages neither half and a fresh
+# checkout fails the row on a missing file, which is exactly what a mutation
+# worktree measured before this line was added. It signs nothing outside this
+# repository's own test suite (`ui/tests/fixtures/README.md` states the rule
+# verbatim from its `e2e/fixtures/signed/` sibling), and the `*.key` line above
+# stands for everything else.
+!/ui/tests/fixtures/*.pem
 /e2e/compose/.data
 # The engine binary is extracted by scripts/extract-engine.sh, never committed;
 # the vendored hedge is the tarball in third_party/ (Global Constraint 15).

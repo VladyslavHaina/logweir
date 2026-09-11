@@ -44,6 +44,40 @@ import { renderRetentionPanel, renderScheduleList } from "../pages/schedules.js"
 import { renderBackupDetail, renderBackupList } from "../pages/backups.js";
 import { renderHistoryList, renderRestoreDetail } from "../pages/history.js";
 
+// -- Task 27: the wizard, the approval flow and the roster ------------------
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { mintNames, planHash, renderPlanBytes } from "../plan.js";
+import {
+  APPROVE_COMMAND,
+  approvalRoute,
+  draftFrom,
+  initialState,
+  preparePlan,
+  renderPointInTimeStep,
+  renderRestoreWizard,
+  renderTargetStep,
+  submitRestore,
+} from "../pages/restore-wizard.js";
+import {
+  refuseKeyMaterial,
+  renderApprovalsPage,
+  submitApproval,
+} from "../pages/approvals.js";
+import { mountKeys, renderKeysPage } from "../pages/keys.js";
+import {
+  CONVENIENCE_SENTENCE,
+  COPY_CAVEAT,
+  PRIVATE_KEY_REFUSAL,
+  RESTORE_IMMUTABLE_SENTENCE,
+  SELF_ATTESTED_FALSE,
+  SELF_ATTESTED_TRUE,
+} from "../render.js";
+
 // ------------------------------------------------------------------ helpers
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -440,4 +474,692 @@ test("no_secret_value_is_rendered", () => {
   );
   assert.ok(out.includes("scramSha512"), "the mode is rendered");
   assert.ok(out.includes("logweir-reader"), "and the username, which is what planBytes binds");
+});
+
+// ===========================================================================
+// TASK 27 -- the restore wizard, the out-of-band approval flow, and the
+// read-only roster.
+//
+// THE ONE ROW THAT LEAVES THIS PROCESS is the cross-language hash equality: it
+// spawns the release `logweir` binary, because the whole value of that
+// assertion is that the two numbers were computed by two languages and a stub
+// would make it a test of one. It writes into `node:os.tmpdir()` and nothing
+// into the worktree. `the_ui_behaviour_suite_never_dials` still holds -- a
+// subprocess is not a socket, and this one reaches no network.
+// ===========================================================================
+
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+/** The api stub every write row uses: it RECORDS and it never reaches a
+ *  network. The rows that assert a page writes NOTHING use `throwingApi`
+ *  instead, whose writers throw on entry. */
+function recordingApi(reads) {
+  const calls = [];
+  return {
+    calls: calls,
+    create: async (ns, plural, body) => {
+      calls.push({ ns: ns, plural: plural, body: body });
+      return body;
+    },
+    patchSuspend: async (ns, name, value) => {
+      // Recorded, not thrown: a mutant that reached for the one update this UI
+      // has must be caught by an assertion naming what it did, not by a
+      // TypeError about a missing stub function.
+      calls.push({ ns: ns, plural: "backupschedules", patch: { name: name, value: value } });
+      return {};
+    },
+    list: async (ns, plural) => (reads || {})[plural] || { items: [] },
+    listCluster: async (plural) => (reads || {})[plural] || { items: [] },
+  };
+}
+
+function throwingApi(reads) {
+  return {
+    create: () => {
+      throw new Error("this page issued a create; it must not");
+    },
+    patchSuspend: () => {
+      throw new Error("this page issued a patch; it must not");
+    },
+    list: async (ns, plural) => (reads || {})[plural] || { items: [] },
+    listCluster: async (plural) => (reads || {})[plural] || { items: [] },
+  };
+}
+
+/** A node stand-in. `node --test` has no DOM and this tree has no shim, so the
+ *  mount halves are exercised against the smallest object `render.js`'s
+ *  `replace` actually touches, with the fragment parser injected. */
+function fakeNode() {
+  return {
+    firstChild: null,
+    adopted: [],
+    appendChild(child) {
+      this.adopted.push(child);
+    },
+    removeChild() {},
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+}
+
+const fakeParse = (html) => [{ html: html }];
+
+/** The text inside the plan `<pre>`, decoded back to what a viewer reads. */
+function planPreOf(html) {
+  const open = "<pre class=\"plan-bytes\" id=\"plan-bytes\">";
+  const start = html.indexOf(open);
+  assert.ok(start !== -1, "the plan step renders the bytes in a read-only pre");
+  const end = html.indexOf("</pre>", start);
+  assert.ok(end !== -1, "the pre is closed");
+  return decode(html.slice(start + open.length, end));
+}
+
+function bytesOf(text) {
+  return new TextEncoder().encode(text);
+}
+
+/** The wizard state the rows below drive, built the way the page builds it. */
+function wizardState() {
+  return initialState(
+    "logweir-t27",
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups.json"),
+  );
+}
+
+// -------------------------------------------------------------------- rows
+
+test("render_plan_bytes_emits_a_document_the_runner_parses", () => {
+  // ARM 2 (node). Arm 1 lives in `crates/logweir/tests/ui_lint.rs` and
+  // deserialises this same golden into `logweir_core::spec::RestoreSpec` from
+  // Rust -- because a hash-equality test cannot catch an invented shape
+  // (sha256 of X in JavaScript equals sha256 of X in Rust whatever X is), and
+  // a byte comparison between two JavaScript halves cannot either once both
+  // have been regenerated together.
+  const fields = fixture("plan-fields.json");
+  const golden = readFileSync(FIXTURES + "plan.golden.yaml", "utf8");
+  const rendered = renderPlanBytes(fields);
+
+  const left = bytesOf(rendered);
+  const right = bytesOf(golden);
+  assert.equal(
+    left.length,
+    right.length,
+    "the emitter and the committed golden are the same LENGTH. A field added to the " +
+      "emitter without regenerating the golden fails here, and `check-ui-behaviour.sh`'s " +
+      "`diff -u` arm fails beside it.",
+  );
+  assert.deepEqual(
+    Array.from(left),
+    Array.from(right),
+    "byte for byte. These bytes are what Restore.spec.planBytes carries and what the " +
+      "controller writes into the runner's plan ConfigMap verbatim.",
+  );
+
+  // And the three values arm 1 reads back out of the golden are in it, so the
+  // two arms are reading the same document and not two coincidences.
+  assert.ok(rendered.includes("mode: \"" + fields.target.mode + "\""));
+  assert.ok(rendered.includes("prefix: \"" + fields.target.topicPrefix + "\""));
+  assert.ok(rendered.includes("point_in_time: \"" + fields.pointInTime + "\""));
+});
+
+test("the_plan_hash_the_page_shows_is_the_hash_the_cli_computes", async () => {
+  const bytes = renderPlanBytes(fixture("plan-fields.json"));
+  const directory = mkdtempSync(join(tmpdir(), "logweir-ui-hash-"));
+  const spec = join(directory, "plan.yml");
+  writeFileSync(spec, bytes);
+
+  const binary = process.env.LOGWEIR_BIN || join(REPO_ROOT, "target/release/logweir");
+  const run = spawnSync(
+    binary,
+    [
+      "drill",
+      "approve",
+      "--spec",
+      spec,
+      "--key",
+      FIXTURES + "approver.pem",
+      "--approver",
+      "ui-test",
+      "--ticket",
+      "UI-1",
+      "--subject-kind",
+      "Restore",
+      "--out",
+      join(directory, "approval.json"),
+    ],
+    { encoding: "utf8", cwd: REPO_ROOT },
+  );
+  assert.equal(
+    run.status,
+    0,
+    "the release binary ran. STANDING RULE 5's fourth prerequisite; the gate refuses " +
+      "without it.\nstdout:\n" + String(run.stdout) + "\nstderr:\n" + String(run.stderr),
+  );
+
+  let printed = null;
+  for (const line of String(run.stdout).split("\n")) {
+    const at = line.indexOf("plan_hash");
+    if (at !== -1) {
+      printed = line.slice(at + "plan_hash".length).trim();
+    }
+  }
+  assert.ok(printed !== null, "the CLI printed a plan_hash line; stdout was:\n" + run.stdout);
+
+  const computed = await planHash(bytes);
+  assert.equal(
+    computed,
+    printed,
+    "ONE EXACT STRING, CROSS-LANGUAGE. `logweir_core::ids::sha256_prefixed` over the file's " +
+      "bytes and `crypto.subtle` over the same string in this page must agree, or the hash " +
+      "the operator reads off the page is not the hash the approval binds.",
+  );
+  assert.match(computed, /^sha256:[0-9a-f]{64}$/, "and it is the sha256:<lowercase hex> form");
+});
+
+test("the_wizard_never_reserialises_the_plan_bytes", async () => {
+  // A plan whose last line ENDS IN TWO SPACES and whose `name` carries a
+  // non-ASCII character: the two shapes a re-serialisation actually destroys.
+  // (This file is under `ui/tests/`, which `the_ui_sources_are_ascii_only`
+  // excludes; every shipped byte under `ui/` outside it is ASCII.)
+  const fields = fixture("plan-fields.json");
+  fields.name = "restauração-4471";
+  const rendered = renderPlanBytes(fields);
+  const crafted = rendered.slice(0, rendered.length - 1) + "  \n";
+  assert.equal(crafted.slice(-3), "  \n", "the fixture ends in two spaces and a newline");
+  assert.ok(crafted.indexOf("ç") !== -1, "and carries a non-ASCII character");
+
+  const state = wizardState();
+  state.planBytes = crafted;
+  const api = recordingApi();
+  const shown = planPreOf(await renderRestoreWizard(state));
+  await submitRestore(state, api);
+
+  assert.equal(api.calls.length, 1, "one create");
+  const submitted = api.calls[0].body.spec.planBytes;
+  const left = bytesOf(shown);
+  const right = bytesOf(submitted);
+  assert.equal(
+    left.length,
+    right.length,
+    "THE LENGTHS MATCH. A trim, a normalise or a JSON round-trip changes this number, and " +
+      "a hash over the shorter string is a hash of a document the approver never signed.",
+  );
+  assert.deepEqual(
+    Array.from(left),
+    Array.from(right),
+    "byte for byte, the string in the pre is the string handed to create",
+  );
+  assert.deepEqual(
+    Array.from(right),
+    Array.from(bytesOf(crafted)),
+    "and both are the bytes the wizard was given",
+  );
+});
+
+test("the_wizard_mints_both_names_before_either_create", async () => {
+  const state = wizardState();
+  const api = recordingApi();
+  const route = await submitRestore(state, api);
+
+  const bytes = (await preparePlan(state)).bytes;
+  // An INDEPENDENT digest: node's own hash implementation, not the one the
+  // page used. A suffix taken from `mintNames` would only prove the page
+  // agrees with itself.
+  const suffix = createHash("sha256").update(bytes, "utf8").digest("hex").slice(0, 8);
+
+  // THE ORDER ASSERTION COMES FIRST, DELIBERATELY. A mutant that creates the
+  // Approval before the Restore also changes the COUNT, and a count assertion
+  // placed first would report "2 !== 1" -- true, but not the defect. The
+  // defect is that the first write went to the wrong kind.
+  assert.equal(
+    api.calls[0].plural,
+    "restores",
+    "THE FIRST CREATE IS THE RESTORE. Both references are immutable, so the Restore goes " +
+      "first with a dangling approvalRef and the reconciler requeues at 30 s until the " +
+      "Approval arrives; an Approval created first names a subject that does not exist.",
+  );
+  assert.equal(
+    api.calls.length,
+    1,
+    "and it is the ONLY create the wizard issues. The second object is created by the " +
+      "approvals page, from the two documents an approver's own machine produced.",
+  );
+
+  const body = api.calls[0].body;
+  assert.equal(body.metadata.name, "restore-" + suffix);
+  assert.equal(
+    typeof (body.spec.approvalRef || {}).name,
+    "string",
+    "spec.approvalRef IS SET ON THE CREATE. Restore.spec is sealed by an object-level CEL " +
+      "rule, so a reference left out here can never be added: there is no later patch that " +
+      "would be accepted, and api.js exports none for a page to try.",
+  );
+  assert.equal(
+    body.spec.approvalRef.name,
+    "approval-" + suffix,
+    "the Restore names an Approval that DOES NOT EXIST YET -- interface I19",
+  );
+  assert.equal(body.spec.planBytes, bytes, "and carries the bytes both names were minted from");
+
+  assert.ok(
+    route.indexOf("subject=" + encodeURIComponent("restore-" + suffix)) !== -1,
+    "the approvals route carries the restore name as its subject; route was " + route,
+  );
+  assert.ok(
+    route.indexOf("name=" + encodeURIComponent("approval-" + suffix)) !== -1,
+    "and the minted approval name; route was " + route,
+  );
+  assert.ok(route.indexOf("hash=" + encodeURIComponent(await planHash(bytes))) !== -1);
+
+  // The two names really are one function of the bytes, computed before
+  // anything was sent.
+  const minted = await mintNames(bytes);
+  assert.deepEqual(minted, {
+    restoreName: "restore-" + suffix,
+    approvalName: "approval-" + suffix,
+  });
+});
+
+test("the_approval_form_builds_all_four_spec_fields", async () => {
+  const route = {
+    ns: "logweir-t27",
+    subject: "restore-1a2b3c4d",
+    hash: "sha256:" + "ab12cd34".repeat(8),
+    name: "approval-1a2b3c4d",
+  };
+  assert.match(route.hash, /^sha256:[0-9a-f]{64}$/);
+  const api = recordingApi();
+  const refusal = await submitApproval(
+    route,
+    { approvalBytes: "{\"approver\": \"ui-test\"}\n", sidecarBytes: "{\"signatures\": []}\n" },
+    api,
+  );
+  assert.equal(refusal, null, "nothing about this submission is key material");
+  assert.equal(api.calls.length, 1);
+  assert.equal(api.calls[0].plural, "approvals");
+
+  const body = api.calls[0].body;
+  // THE FOUR KEYS FIRST. `Approval.spec` has four required fields, and a form
+  // that posted only the two documents posts an object the CRD schema rejects
+  // -- which is a 422 an operator sees and not a value this test can read, so
+  // the shape is asserted before anything in it is dereferenced.
+  assert.deepEqual(
+    Object.keys(body.spec).sort(),
+    ["approvalBytes", "planHash", "sidecarBytes", "subjectRef"],
+    "FOUR spec fields. subjectRef and planHash cannot be derived here: the page is forbidden " +
+      "from parsing the two documents, so the hash cannot be lifted out of approval.json " +
+      "either. Both come from the route the wizard navigated to.",
+  );
+  assert.equal(body.metadata.name, "approval-1a2b3c4d", "metadata.name comes from the route");
+  assert.equal(body.spec.subjectRef.kind, "Restore");
+  assert.equal(body.spec.subjectRef.name, "restore-1a2b3c4d");
+  assert.equal(
+    body.spec.planHash,
+    route.hash,
+    "planHash comes from the ROUTE. This page is forbidden from parsing the two documents, " +
+      "so it cannot be lifted out of approval.json either -- and the controller recomputes " +
+      "it from the referent's own bytes regardless (Task 16 check 5).",
+  );
+  assert.ok(body.spec.approvalBytes.length > 0);
+  assert.ok(body.spec.sidecarBytes.length > 0);
+});
+
+test("the_approval_form_refuses_a_private_key", async () => {
+  const route = {
+    ns: "logweir-t27",
+    subject: "restore-1a2b3c4d",
+    hash: "sha256:" + "ab12cd34".repeat(8),
+    name: "approval-1a2b3c4d",
+  };
+  const cases = [
+    ["a file named approver.pem", { approvalFileName: "approver.pem", approvalBytes: "x" }],
+    ["a pasted PKCS#8 body", { approvalBytes: "-----BEGIN PRIVATE KEY-----\nMIG…\n" }],
+    ["a file named x.key", { sidecarFileName: "x.key", sidecarBytes: "y" }],
+  ];
+  for (const [label, documents] of cases) {
+    const refusal = await submitApproval(route, documents, throwingApi());
+    assert.equal(
+      refusal,
+      "this page never accepts a private key",
+      label + ": refused with the exact message. v0.1 has no key lifecycle, and a page that " +
+        "filled that gap would be inventing the most consequential missing subsystem in " +
+        "this product inside a browser.",
+    );
+    assert.equal(refusal, PRIVATE_KEY_REFUSAL, label + ": and it is the shared constant");
+  }
+  // The refusal is a pure function, so the same three shapes are refusable
+  // before a file is ever read.
+  assert.equal(refuseKeyMaterial("approver.PEM", ""), PRIVATE_KEY_REFUSAL, "case-insensitive");
+  assert.equal(refuseKeyMaterial("", "-----BEGIN EC PRIVATE KEY-----"), PRIVATE_KEY_REFUSAL);
+  assert.equal(refuseKeyMaterial("approval.json", "{\"approver\": \"x\"}"), null, "and lets a real approval through");
+});
+
+test("the_approval_bytes_are_submitted_verbatim", async () => {
+  // Trailing whitespace and a BOM-free UTF-8 non-ASCII approver name.
+  const document =
+    "{\n  \"approver\": \"Zoë Ramírez\",\n  \"ticket\": \"INC-4471\"\n}   \n";
+  const route = {
+    ns: "logweir-t27",
+    subject: "restore-1a2b3c4d",
+    hash: "sha256:" + "ab12cd34".repeat(8),
+    name: "approval-1a2b3c4d",
+  };
+  const api = recordingApi();
+  await submitApproval(route, { approvalBytes: document, sidecarBytes: "{}\n" }, api);
+
+  const submitted = api.calls[0].body.spec.approvalBytes;
+  const left = bytesOf(submitted);
+  const right = bytesOf(document);
+  assert.equal(left.length, right.length, "the lengths match, trailing whitespace included");
+  assert.deepEqual(Array.from(left), Array.from(right), "byte for byte");
+  assert.ok(
+    submitted.indexOf("\"approver\"") !== -1,
+    "AND IT IS NOT BASE64. Interface I18: approvalBytes and sidecarBytes are the UTF-8 " +
+      "document text, verbatim. An encoding step between the approver's file and the " +
+      "hashed bytes is the class of transformation planBytes exists to forbid.",
+  );
+});
+
+test("self_attested_risk_is_explained_not_asserted", () => {
+  const route = { ns: "logweir-t27", subject: "", hash: "", name: "" };
+  const sentences = [
+    ["approvals-selfattested.json", true, SELF_ATTESTED_TRUE],
+    ["approvals-not-selfattested.json", false, SELF_ATTESTED_FALSE],
+  ];
+  for (const [name, value, sentence] of sentences) {
+    const object = fixture(name);
+    assert.equal(object.items[0].status.selfAttestedRisk, value, name + ": the fixture's value");
+    const out = renderApprovalsPage(object, route, Date.parse("2026-09-11T13:41:00Z"));
+    assert.ok(out.includes(sentence), name + ": the exact sentence is rendered");
+
+    // AND NO BARE BOOLEAN BESIDE IT. `false` here means only that the two
+    // matched key ids differ -- one operator holding both keys satisfies it --
+    // so a `false` next to the words reads as "two people signed off".
+    const lower = out.toLowerCase();
+    for (const spelling of ["selfattested", "self-attested", "self attested"]) {
+      let at = lower.indexOf(spelling);
+      while (at !== -1) {
+        const window = lower.slice(at, at + spelling.length + 40);
+        assert.equal(window.indexOf("true"), -1, name + ": no bare `true` beside " + spelling);
+        assert.equal(window.indexOf("false"), -1, name + ": no bare `false` beside " + spelling);
+        at = lower.indexOf(spelling, at + 1);
+      }
+    }
+  }
+  // The two sentences are one sentence and its second half, which is what
+  // makes "for false, the second half alone" checkable.
+  assert.ok(SELF_ATTESTED_TRUE.endsWith(SELF_ATTESTED_FALSE));
+});
+
+test("the_approvals_list_renders_the_five_columns", () => {
+  const route = { ns: "logweir-t27", subject: "restore-1a2b3c4d", hash: "sha256:x", name: "approval-1a2b3c4d" };
+  const object = fixture("approvals-selfattested.json");
+  const out = renderApprovalsPage(object, route, Date.parse("2026-09-11T13:41:00Z"));
+  for (const column of ["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"]) {
+    assert.ok(out.includes("<th scope=\"col\">" + column + "</th>"), "column " + column);
+  }
+  assert.ok(out.includes("Restore/restore-1a2b3c4d"), "the subject names its kind");
+  assert.ok(out.includes(object.items[0].status.matchedKeyId), "the matched key id");
+  assert.ok(out.includes(">60m<"), "the age, from creationTimestamp against the given instant");
+  assert.equal(
+    out.includes("verified in your browser"),
+    false,
+    "this page holds no key and verified nothing",
+  );
+  // The four inputs are all there, and the hash one is read-only.
+  const text = decode(out);
+  assert.ok(text.includes("SUBJECT KIND"));
+  assert.ok(text.includes("SUBJECT NAME"));
+  assert.ok(text.includes("PLAN HASH"));
+  assert.ok(out.includes("id=\"plan-hash\" name=\"planHash\" readonly"));
+  assert.ok(text.includes("approval.json") && text.includes("approval.sig"));
+});
+
+test("the_keys_page_submits_nothing", async () => {
+  const node = fakeNode();
+  const api = throwingApi({ trustrosters: fixture("trustroster-default.json") });
+  let writes = 0;
+  api.create = () => {
+    writes += 1;
+    throw new Error("the keys page issued a create");
+  };
+  api.patchSuspend = () => {
+    writes += 1;
+    throw new Error("the keys page issued a patch");
+  };
+  // The mount is allowed to THROW here, and the write count is read first
+  // either way: a page that issued a write and then failed inside its own
+  // error branch would otherwise report whatever the error branch happened to
+  // die on rather than the write that is the actual defect.
+  let mountError = null;
+  try {
+    await mountKeys(node, fakeParse, api);
+  } catch (error) {
+    mountError = error;
+  }
+  assert.equal(
+    writes,
+    0,
+    "THE KEYS PAGE ISSUES NO WRITE. The TrustRoster is cluster-scoped and admin-only, and " +
+      "`trustrosters` is absent from api.js's frozen writable set, so the write would throw " +
+      "a RangeError anyway -- but a page that TRIED is a page whose contract changed.",
+  );
+  assert.equal(
+    mountError,
+    null,
+    "and the read half completed: " + String(mountError && mountError.message),
+  );
+  assert.equal(node.adopted.length, 1, "and it rendered");
+  assert.ok(
+    node.adopted[0].html.includes("TrustRoster"),
+    "the roster page, not an error box: " + JSON.stringify(node.adopted[0]).slice(0, 200),
+  );
+});
+
+test("the_keys_page_shows_expiry_from_the_roster_status", () => {
+  const roster = fixture("trustroster-default.json");
+  const spec = roster.items[0].spec;
+  const expired = roster.items[0].status.expiredKeyIds;
+  assert.ok(expired.indexOf(spec.approverKeys[0].keyId) !== -1, "the first approver key IS expired");
+  assert.equal(expired.indexOf(spec.signingKeys[0].keyId), -1, "the first signing key is NOT");
+
+  const out = renderKeysPage(roster);
+  const rowOf = (keyId) => {
+    const at = out.indexOf(keyId);
+    assert.ok(at !== -1, "the key id " + keyId + " is rendered");
+    const end = out.indexOf("</tr>", at);
+    return out.slice(at, end);
+  };
+  assert.ok(rowOf(spec.approverKeys[0].keyId).includes("<td>expired</td>"), "marked expired");
+  assert.ok(rowOf(spec.signingKeys[0].keyId).includes("<td>valid</td>"), "marked valid");
+  assert.ok(
+    rowOf(spec.approverKeys[1].keyId).includes("<td>valid</td>"),
+    "and a second, unexpired approver key is valid -- so the column reads the status list " +
+      "and not the position",
+  );
+
+  // The fingerprint command and the roster snippet, neither of them submitted.
+  const text = decode(out);
+  assert.ok(
+    text.includes("openssl pkey -pubin -outform DER -in <key>.pub.pem | openssl dgst -sha256"),
+    "the out-of-band fingerprint command, which is the only step that catches an " +
+      "undisclosed key rotation",
+  );
+  assert.ok(text.includes("kubectl --context docker-desktop apply -f roster.yml"));
+  assert.ok(text.includes("kind: TrustRoster"));
+  // A Secret's value never reaches this page; the roster carries PUBLIC halves.
+  assert.equal(text.indexOf("PRIVATE KEY"), -1, "no private key material anywhere on this page");
+});
+
+test("an_edit_creates_a_new_restore_and_says_so", async () => {
+  const original = fixture("restore-for-edit.json");
+  assert.ok(original.spec.planBytes.length > 0);
+
+  const state = wizardState();
+  state.fields = draftFrom(original, state.fields);
+  state.editing = { name: original.metadata.name };
+  assert.equal(
+    state.fields.pointInTime,
+    original.spec.pointInTime,
+    "the draft is PREFILLED from the existing object",
+  );
+
+  const rendered = await renderRestoreWizard(state);
+  assert.ok(
+    rendered.includes(
+      "Restore.spec is immutable. This creates a NEW Restore with a new plan hash; " +
+        "the existing approval does not cover it.",
+    ),
+    "the exact sentence, in the page, above the form",
+  );
+  assert.ok(rendered.includes(RESTORE_IMMUTABLE_SENTENCE), "and it is the shared constant");
+
+  // Now change something, as an edit does, and submit.
+  state.fields.pointInTime = "2026-09-07T14:04:00Z";
+  state.fields.target.topicPrefix = "incident-4471-";
+  const api = recordingApi();
+  await submitRestore(state, api);
+
+  assert.equal(api.calls.length, 1, "one write");
+  assert.equal(
+    api.calls[0].plural,
+    "restores",
+    "A CREATE, NEVER A PATCH. Restore.spec is sealed by an object-level CEL rule, so there is " +
+      "no edit that the API server would accept; a page that tried to patch one would be " +
+      "offering an operation that cannot succeed.",
+  );
+  assert.ok(
+    api.calls[0].body !== undefined,
+    "and a create BODY was recorded, which a patch does not produce",
+  );
+  const body = api.calls[0].body;
+
+  assert.notEqual(
+    body.spec.planBytes,
+    original.spec.planBytes,
+    "a NEW document: Restore.spec is CEL-immutable, so an edit cannot be a patch",
+  );
+  assert.notEqual(
+    body.metadata.name,
+    original.metadata.name,
+    "and a new name, because the name is a function of the bytes",
+  );
+  assert.notEqual(body.spec.approvalRef.name, original.spec.approvalRef.name);
+});
+
+test("the_wizard_prefills_the_default_prefix", async () => {
+  // The DEFAULT route: the newest backup's covered `toMs` is
+  // 2026-09-07T14:05:00Z, so the wizard's own default point in time is that
+  // instant and the prefix follows from it with nothing typed.
+  const state = wizardState();
+  assert.equal(state.fields.pointInTime, "2026-09-07T14:05:00Z");
+  assert.equal(
+    state.fields.target.topicPrefix,
+    "restore-20260907T140500Z-",
+    "the same string logweir_core::spec::default_topic_prefix produces for that instant. " +
+      "`ui_lint.rs::the_default_prefix_agrees_with_the_rust_one` computes the Rust half and " +
+      "compares it with this literal, so the two cannot drift.",
+  );
+
+  // And it reaches the field, and stays editable.
+  const blank = wizardState();
+  blank.fields.target.topicPrefix = "";
+  const out = renderTargetStep(blank);
+  assert.ok(
+    out.includes("value=\"restore-20260907T140500Z-\""),
+    "the prefix field is prefilled: " + out,
+  );
+  assert.ok(out.includes("<option value=\"scratch\""), "mode option scratch");
+  assert.ok(out.includes("<option value=\"newTopic\""), "mode option newTopic");
+  assert.equal(
+    (out.match(/<option value="/g) || []).length,
+    3,
+    "two modes and one target cluster; the mode select has exactly the two values " +
+      "TargetMode accepts",
+  );
+});
+
+test("the_client_side_window_check_is_labelled_a_convenience", () => {
+  const state = wizardState();
+  const out = renderPointInTimeStep(state);
+  assert.ok(
+    out.includes(
+      "the archive covers [2026-09-07T12:00:00Z, 2026-09-07T14:05:00Z]; " +
+        "a point outside it cannot be restored",
+    ),
+    "both bounds as RFC 3339, from windowCovered.fromMs and .toMs (interface I22). A page " +
+      "that read covered.from/covered.to renders `Invalid Date` twice and defaults step 3 " +
+      "to nothing.",
+  );
+  assert.equal(out.indexOf("Invalid Date"), -1);
+  assert.equal(out.indexOf("1788782400000"), -1, "the raw integers are never printed");
+  assert.ok(
+    out.includes(
+      "this check is a convenience and never the gate: the controller and phase 0 " +
+        "are the gate, and they read the bytes you submit.",
+    ),
+    "the page says what the gate actually is",
+  );
+  assert.ok(out.includes(CONVENIENCE_SENTENCE));
+
+  // A point outside the window complains, and a point inside does not.
+  const outside = wizardState();
+  outside.fields.pointInTime = "2026-09-08T00:00:00Z";
+  assert.ok(renderPointInTimeStep(outside).includes("<p class=\"complaint\">"));
+  assert.equal(renderPointInTimeStep(state).indexOf("<p class=\"complaint\">"), -1);
+});
+
+test("the_plan_step_shows_the_hash_the_names_the_caveat_and_the_command", async () => {
+  const state = wizardState();
+  const rendered = await renderRestoreWizard(state);
+  const prepared = await preparePlan(state);
+  const text = decode(rendered);
+
+  assert.ok(rendered.includes(prepared.hash), "the hash, beside the bytes");
+  assert.ok(rendered.includes(prepared.restoreName), "the minted Restore name");
+  assert.ok(rendered.includes(prepared.approvalName), "the minted Approval name");
+  assert.equal(prepared.restoreName.slice(8), prepared.approvalName.slice(9), "one suffix, both names");
+
+  assert.ok(
+    text.includes(
+      "copy loses trailing whitespace in some browsers; download, or run kubectl " +
+        "--context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > " +
+        "<name>.yaml, and hash exactly what you downloaded.",
+    ),
+    "the copy caveat, verbatim, with the kubectl route to the same bytes",
+  );
+  assert.ok(text.includes(COPY_CAVEAT));
+  assert.ok(
+    text.includes(
+      "logweir drill approve --spec <file> --key <privkey> --approver <id> " +
+        "--ticket <id> --subject-kind Restore --out <file>",
+    ),
+    "the exact command, with --out shown because it defaults into the caller's cwd",
+  );
+  assert.ok(text.includes(APPROVE_COMMAND));
+  assert.equal(
+    rendered.toLowerCase().indexOf("generate a key"),
+    -1,
+    "this page offers no key generation of any kind",
+  );
+
+  // The preflight sentence, over the topics this plan actually names.
+  assert.ok(
+    rendered.includes(
+      "Logweir will create 2 topics with message.timestamp.type=CreateTime and " +
+        "retention.ms=-1 before the engine runs, and will refuse if the broker is " +
+        "LogAppendTime and rejects the override.",
+    ),
+    "step 5 names what the run will do to the target before the engine starts",
+  );
+
+  // And the route the "Request approval" action navigates to.
+  const route = approvalRoute(state, prepared);
+  assert.ok(route.startsWith("#/approvals?"), "a hash route and nothing else: " + route);
+  assert.ok(route.indexOf("ns=logweir-t27") !== -1);
 });

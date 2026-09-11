@@ -142,6 +142,109 @@ export const RETENTION_SENTENCE =
  *  "verified in your browser": this page verified nothing. */
 export const UNVERIFIED = "unverified";
 
+// ---------------------------------------------------------------------------
+// THE RESTORE-SIDE FIXED SENTENCES (Task 27). Same rule as the five above:
+// each is a sentence of OURS, rendered verbatim and never through `esc`, and
+// each is asserted by name in `ui/tests/pages.spec.js`. They live here rather
+// than in the three pages that print them for one reason -- a sentence that
+// exists in two files is a sentence two editors can make disagree.
+// ---------------------------------------------------------------------------
+
+/** `Restore.spec` is CEL-immutable (`self == oldSelf`, spec section 3.2), so
+ *  there is no such thing as editing a plan in place: "edit" prefills a NEW
+ *  draft whose bytes hash differently, and the approval that covered the old
+ *  one does not cover it. The page says so IN THE PAGE, above the form, rather
+ *  than discovering it at the 422 (C48). */
+export const RESTORE_IMMUTABLE_SENTENCE =
+  "Restore.spec is immutable. This creates a NEW Restore with a new plan hash; " +
+  "the existing approval does not cover it.";
+
+/** Why a download button exists beside the copy button.
+ *
+ *  The plan bytes are the thing an approval binds, so "nearly the same bytes"
+ *  is not a degraded copy -- it is a different document with a different
+ *  sha256, and `logweir drill approve` would sign the wrong one. Several
+ *  browsers strip trailing whitespace from a clipboard copy of a `<pre>`, and
+ *  a plan whose last line ends in spaces is not exotic. So the page offers the
+ *  download, and names the `kubectl` route to the same bytes for anyone who
+ *  would rather take them from the cluster. */
+export const COPY_CAVEAT =
+  "copy loses trailing whitespace in some browsers; download, or run kubectl " +
+  "--context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > " +
+  "<name>.yaml, and hash exactly what you downloaded.";
+
+/** The client-side window lint is a CONVENIENCE and never the gate. The
+ *  controller recomputes the hash from the referent's own bytes and phase 0
+ *  refuses a point the archive does not cover; a page that presented its own
+ *  check as the gate would be claiming an authority it does not have. */
+export const CONVENIENCE_SENTENCE =
+  "this check is a convenience and never the gate: the controller and phase 0 " +
+  "are the gate, and they read the bytes you submit.";
+
+/** The approvals page's refusal, verbatim. It is the whole of the message: a
+ *  page that took a private key would be the most consequential missing
+ *  subsystem in this product reimplemented inside a browser (Global
+ *  Constraint 28). */
+export const PRIVATE_KEY_REFUSAL = "this page never accepts a private key";
+
+/** `Approval.status.selfAttestedRisk` rendered as a SENTENCE and never as a
+ *  bare boolean, for `true`.
+ *
+ *  A tick or a `false` beside the words "self attested" reads as "two people
+ *  signed off". It means only that the two matched key ids differ, and one
+ *  operator may hold both keys (spec section 9). */
+export const SELF_ATTESTED_TRUE =
+  "self-attested: the approver key and the signing key are the same; " +
+  "\"not self-attested\" means only two different keys, and one operator may hold both";
+
+/** The same field for `false`: the second half of [`SELF_ATTESTED_TRUE`]
+ *  alone, because the first half is a statement about THIS approval and only
+ *  the second is true of it. */
+export const SELF_ATTESTED_FALSE =
+  "\"not self-attested\" means only two different keys, and one operator may hold both";
+
+/** The window the archive covers, both bounds as RFC 3339, and the refusal a
+ *  point outside it gets. Interface I22: `Backup.status.windowCovered` is two
+ *  INTEGERS, so a page that read `covered.from`/`covered.to` would render
+ *  `Invalid Date` on both bounds and default step 3 to nothing. */
+export function windowMessage(fromMs, toMs) {
+  return (
+    "the archive covers [" +
+    rfc3339(fromMs) +
+    ", " +
+    rfc3339(toMs) +
+    "]; a point outside it cannot be restored"
+  );
+}
+
+/** What the run will do to the target BEFORE the engine starts, named in the
+ *  page so an operator reads it before the plan is signed rather than out of a
+ *  refusal afterwards (spec section 6.1, guard G-TS). */
+export function preflightSentence(topicCount) {
+  return (
+    "Logweir will create " +
+    String(topicCount) +
+    " topics with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
+    "engine runs, and will refuse if the broker is LogAppendTime and rejects the override."
+  );
+}
+
+/** An RFC 3339 instant as epoch milliseconds, or `null` when it is not an
+ *  instant this page can read.
+ *
+ *  THE COMPARISON RUNS IN MILLISECONDS, NOT IN STRINGS. `windowCovered` is two
+ *  integers and the point-in-time field is text; comparing the two as strings
+ *  would silently accept every point, because a string is never less than an
+ *  integer under a relational operator in JavaScript -- it is `NaN`, and every
+ *  comparison against `NaN` is `false`. */
+export function epochMs(instant) {
+  if (typeof instant !== "string" || instant.length === 0) {
+    return null;
+  }
+  const at = Date.parse(instant);
+  return isNaN(at) ? null : at;
+}
+
 /** What a page prints where a field the API server never set would go. */
 export const ABSENT = "-";
 
@@ -286,6 +389,26 @@ export function bucketOf(url) {
   const slash = rest.indexOf("/");
   const bucket = slash === -1 ? rest : rest.slice(0, slash);
   return bucket.length === 0 ? "<your evidence bucket>" : bucket;
+}
+
+/** The key prefix an object-store URL names: everything after the bucket.
+ *  The twin of [`bucketOf`], and built the same way, so a plan document's
+ *  `storage.prefix` and the fetch command beside it come from one reading of
+ *  one string. An empty prefix is the empty string, which is what the runner's
+ *  `StorageUrl` defaults to. */
+export function prefixOf(url) {
+  if (typeof url !== "string" || url.length === 0) {
+    return "";
+  }
+  const marker = ":" + "//";
+  const at = url.indexOf(marker);
+  const rest = at === -1 ? url : url.slice(at + marker.length);
+  const slash = rest.indexOf("/");
+  if (slash === -1) {
+    return "";
+  }
+  const prefix = rest.slice(slash + 1);
+  return prefix;
 }
 
 /** THE INDEPENDENT CHECK, AND IT FETCHES BEFORE IT VERIFIES.

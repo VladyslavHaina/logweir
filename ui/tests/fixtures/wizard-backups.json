@@ -1,0 +1,59 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupList",
+  "metadata": {
+    "resourceVersion": "41030"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "orders-hourly-20260907-140500",
+        "namespace": "logweir-t27",
+        "uid": "3d4e5f60-7182-493a-a4b5-c6d7e8f90123",
+        "resourceVersion": "41029",
+        "generation": 1,
+        "creationTimestamp": "2026-09-07T14:05:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "payments"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/drill-demo",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "orders-hourly"
+        },
+        "slot": "20260907-140500",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "ok",
+        "backupId": "01JB7Z0000000000000000000B",
+        "manifestKey": "drill-demo/01JB7Z0000000000000000000B/manifest.json",
+        "manifestSha256": "sha256:0f2c1b6e4a8d3f5709c1e2b4a6d8f0123456789abcdef0123456789abcdef0123",
+        "records": 128400,
+        "windowCovered": {
+          "fromMs": 1788782400000,
+          "toMs": 1788789900000
+        },
+        "auth": {
+          "mode": "scramSha512",
+          "username": "logweir-reader"
+        }
+      }
+    }
+  ]
+}

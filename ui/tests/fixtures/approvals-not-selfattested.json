@@ -1,0 +1,47 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "ApprovalList",
+  "metadata": {
+    "resourceVersion": "41060"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Approval",
+      "metadata": {
+        "name": "approval-9f8e7d6c",
+        "namespace": "logweir-t27",
+        "uid": "5f607182-93a4-4b5c-96d7-e8f901234567",
+        "resourceVersion": "41059",
+        "generation": 1,
+        "creationTimestamp": "2026-09-11T12:41:00Z"
+      },
+      "spec": {
+        "subjectRef": {
+          "kind": "Restore",
+          "name": "restore-9f8e7d6c"
+        },
+        "planHash": "sha256:f8584333e6bea8c693dbaa97f7adfeb843abf393d86669bb9baf9c2d5d7999d1",
+        "approvalBytes": "{\n  \"plan_hash\": \"sha256:f8584333e6bea8c693dbaa97f7adfeb843abf393d86669bb9baf9c2d5d7999d1\",\n  \"approver\": \"incident-commander\",\n  \"ticket\": \"INC-4471\",\n  \"subject_kind\": \"Restore\"\n}\n",
+        "sidecarBytes": "{\n  \"payloadType\": \"application/vnd.logweir.approval+json\",\n  \"signatures\": [{\"keyid\": \"24f4f5a02694bdf2e800a471545287d2c5d4b4b361212bb270ab4a4722921cdd\", \"sig\": \"MEQCIB…\"}]\n}\n"
+      },
+      "status": {
+        "verified": true,
+        "matchedKeyId": "24f4f5a02694bdf2e800a471545287d2c5d4b4b361212bb270ab4a4722921cdd",
+        "approver": "incident-commander",
+        "ticket": "INC-4471",
+        "selfAttestedRisk": false,
+        "conditions": [
+          {
+            "type": "Verified",
+            "status": "True",
+            "reason": "Verified",
+            "message": "verified against approver key 24f4f5a02694bdf2e800a471545287d2c5d4b4b361212bb270ab4a4722921cdd",
+            "lastTransitionTime": "2026-09-11T12:41:04Z",
+            "observedGeneration": 1
+          }
+        ]
+      }
+    }
+  ]
+}

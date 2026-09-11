@@ -1195,3 +1195,331 @@ fn the_offline_gate_refuses_a_bare_module_specifier() {
         text(&green.stderr)
     );
 }
+
+// ===========================================================================
+// TASK 27 -- the plan document, the submit region, the download and the
+// read-only roster page.
+// ===========================================================================
+
+/// The three tokens the wizard's SUBMIT REGION may not carry, plus the plan
+/// document's file extension, which is the fourth.
+///
+/// WHY THIS LIST AND NOT A GREP FOR "TRANSFORMATION". Each of these is an
+/// entry point that produces a NEW string from the plan bytes, and a new
+/// string is a new document with a new sha256 -- which is a document the
+/// approver never signed. JavaScript has no string identity operator, so a
+/// behavioural `===` arm holds under a mutant that reserialised to an equal
+/// string; the byte comparison in `pages.spec.js` catches the mutants that
+/// change the bytes and this scan catches the machinery that could.
+const RESERIALISERS: [&str; 6] = [
+    "JSON.parse",
+    "JSON.stringify",
+    "structuredClone",
+    ".trim(",
+    ".normalize(",
+    "yaml",
+];
+
+/// The three whose presence anywhere in the wizard is a defect, not just in
+/// the submit region: nothing in a page that renders a document and posts it
+/// verbatim has any use for them.
+const RESERIALISERS_FILE_WIDE: [&str; 3] = ["JSON.parse", "JSON.stringify", "structuredClone"];
+
+fn wizard_source() -> String {
+    read(&ui_root().join("pages").join("restore-wizard.js"))
+}
+
+/// The text between two marker comments, with both markers asserted present.
+/// A mutant that deletes a marker fails here rather than emptying the region
+/// and passing.
+fn region_of(source: &str, begin: &str, end: &str) -> String {
+    let start = source.find(begin).unwrap_or_else(|| {
+        panic!("the marker {begin} is gone; the region it delimits cannot be scanned")
+    });
+    let stop = source.find(end).unwrap_or_else(|| {
+        panic!("the marker {end} is gone; the region it delimits cannot be scanned")
+    });
+    assert!(
+        start < stop,
+        "{begin} must come before {end}; a region that reads backwards scans nothing"
+    );
+    source[start + begin.len()..stop].to_string()
+}
+
+// -------------------- 18. the plan document the runner parses (arm 1)
+
+#[test]
+fn render_plan_bytes_emits_a_document_the_runner_parses() {
+    // ARM 1: Rust, no node. It deserialises the checked-in golden into the
+    // RUNNER'S OWN TYPE, which is the only assertion that catches an invented
+    // shape. `Restore.spec.planBytes` is opaque to the API server and to the
+    // controller and it is still not arbitrary: Task 20 writes those bytes
+    // VERBATIM into the runner's plan ConfigMap as `data["restore.yaml"]` and
+    // the runner parses them with `serde_yaml::from_str::<RestoreSpec>`. An
+    // invented shape passes the 201, passes `drill approve` (which hashes
+    // whatever bytes it reads), passes all five approval checks (the hash
+    // matches) and fails only inside the runner pod, after every gate has
+    // reported green. A hash-equality test cannot see it: sha256 of X in
+    // JavaScript equals sha256 of X in Rust whatever X is.
+    //
+    // The grammar is stated ONCE, in docs/mvp/03-spec.md section 6.1's
+    // paragraph "The restore plan document has ONE grammar, and it is the
+    // runner's restore.yaml (amendment 4)". This test cites it and does not
+    // restate it.
+    let golden_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan.golden.yaml");
+    let golden = read(&golden_path);
+    let spec: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&golden).unwrap_or_else(|e| {
+        panic!(
+            "{} does not deserialise into logweir_core::spec::RestoreSpec: {e}\n\nThe UI's \
+             renderPlanBytes emits the runner's document and nothing else. Regenerate the \
+             golden with `node ui/tests/emit-plan.js > ui/tests/fixtures/plan.golden.yaml` \
+             AFTER fixing the emitter -- regenerating it does not make it correct, which is \
+             exactly what this arm exists to say.",
+            shown(&golden_path)
+        )
+    });
+
+    let fields_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan-fields.json");
+    let fields: serde_json::Value =
+        serde_json::from_str(&read(&fields_path)).expect("plan-fields.json is JSON");
+
+    assert_eq!(
+        spec.target.mode.to_string(),
+        fields["target"]["mode"]
+            .as_str()
+            .expect("target.mode is a string"),
+        "the deserialised mode is the one the wizard state names. These two strings are the \
+         runner's TargetMode and the Restore CRD's own enum, byte for byte (interface I33)."
+    );
+    let naming = spec
+        .target
+        .topic_naming
+        .as_ref()
+        .expect("the golden states target.topic_naming");
+    assert_eq!(
+        naming.prefix,
+        fields["target"]["topicPrefix"]
+            .as_str()
+            .expect("topicPrefix is a string"),
+        "the deserialised prefix is the one the wizard prefilled"
+    );
+    let point_in_time = spec
+        .restore
+        .point_in_time
+        .expect("the golden states restore.point_in_time");
+    let expected: chrono::DateTime<chrono::Utc> = fields["pointInTime"]
+        .as_str()
+        .expect("pointInTime is a string")
+        .parse()
+        .expect("pointInTime is an RFC 3339 instant");
+    assert_eq!(
+        point_in_time, expected,
+        "the recovery point round-trips. It is the window's END; its FLOOR is the archive's \
+         own earliest covered timestamp, read from the manifest by the runner, and is \
+         deliberately not a field of this document."
+    );
+
+    // And the emitter that produced it is the one the gate re-runs, so a
+    // regenerated golden and the committed one cannot silently diverge.
+    let emitter = ui_root().join("tests").join("emit-plan.js");
+    assert!(
+        emitter.is_file(),
+        "{} is the golden's emitter; `scripts/check-ui-behaviour.sh` runs it and `diff -u`s \
+         the result against the committed bytes",
+        shown(&emitter)
+    );
+}
+
+// -------------------- 19. the wizard never reserialises the plan bytes
+
+#[test]
+fn the_wizard_never_reserialises_the_plan_bytes() {
+    let source = wizard_source();
+
+    // THE THREE THAT ARE NEVER NEEDED ANYWHERE IN THIS FILE.
+    for token in RESERIALISERS_FILE_WIDE {
+        assert!(
+            !source.contains(token),
+            "ui/pages/restore-wizard.js names {token:?}. The bytes in the `<pre>` are the bytes \
+             `create` sends, and there is no step in between: a page that round-tripped the \
+             plan through a parser would post a document whose sha256 is not the one it \
+             showed, and `logweir drill approve` would have signed the other one."
+        );
+    }
+
+    // AND THE SUBMIT REGION CARRIES NONE OF THE SIX. `.trim(` reads a form
+    // control outside the region and the plan document's extension appears
+    // only in the download handler, which is why the scan is a region and not
+    // the whole file -- and why both markers are asserted present above.
+    let region = region_of(&source, "// SUBMIT-REGION-BEGIN", "// SUBMIT-REGION-END");
+    assert!(
+        region.len() > 400,
+        "the submit region is {} bytes, which is not a submit path. A mutant that moved the \
+         write out of the region would pass a scan over an empty string.",
+        region.len()
+    );
+    assert!(
+        region.contains("create("),
+        "the submit region is where the write happens; if `create(` is not in it, this scan is \
+         guarding a region that does nothing"
+    );
+    for token in RESERIALISERS {
+        assert!(
+            !region.contains(token),
+            "the submit region of ui/pages/restore-wizard.js names {token:?}. Every one of these \
+             produces a NEW string from the plan bytes, and a new string is a new document with \
+             a new hash."
+        );
+    }
+
+    // The behavioural half is the one that can actually hold the property; it
+    // must exist, because this scan alone would pass over a page that
+    // reserialised with a token nobody thought of.
+    let behaviour = read(&ui_root().join("tests").join("pages.spec.js"));
+    assert!(
+        behaviour.contains("the_wizard_never_reserialises_the_plan_bytes"),
+        "the byte-comparison arm lives in ui/tests/pages.spec.js and is what proves the bytes \
+         survive; this source scan only forbids the machinery"
+    );
+}
+
+// -------------------- 20. the download writes no scheme and no cluster write
+
+#[test]
+fn the_plan_download_writes_no_scheme_and_no_cluster_write() {
+    let source = wizard_source();
+
+    assert!(
+        source.contains("new Blob("),
+        "the download is a client-side Blob over exactly the bytes in the `<pre>`"
+    );
+    assert!(
+        source.contains("type: \"text/yaml\""),
+        "and it carries the plan document's own media type, so a saved file opens as what it is"
+    );
+
+    let region = region_of(&source, "// DOWNLOAD-BEGIN", "// DOWNLOAD-END");
+    assert!(
+        !region.contains("create("),
+        "THE DOWNLOAD WRITES NOTHING TO THE CLUSTER. It hands the browser bytes the page \
+         already has; an object created by a download handler would be a write an operator \
+         did not ask for. The region was:\n{region}"
+    );
+    assert!(
+        !region.contains("fetch("),
+        "and it issues no request: `api.js` is the only module in this tree that does"
+    );
+
+    // NO URL SCHEME ANYWHERE IN THE FILE. `check-ui-offline.sh` enforces the
+    // same rule over the whole directory; this arm names the file the download
+    // lives in, so a scheme introduced by a "share this plan" feature fails
+    // here with the reason attached.
+    for token in [FORBIDDEN[0], FORBIDDEN[1]] {
+        assert!(
+            !source.contains(token),
+            "ui/pages/restore-wizard.js carries {token:?}. Every identifier this page names is \
+             relative to the origin that served it; a scheme here is a resource outside the \
+             directory the page was served from."
+        );
+    }
+}
+
+// -------------------- 21. the keys page submits nothing (source arm)
+
+#[test]
+fn the_keys_page_submits_nothing() {
+    let source = read(&ui_root().join("pages").join("keys.js"));
+    for token in ["create(", "patchSuspend("] {
+        assert!(
+            !source.contains(token),
+            "ui/pages/keys.js names {token:?}. The TrustRoster is cluster-scoped and \
+             admin-only: this page reads it, prints the fingerprint command and surfaces the \
+             `kubectl apply` snippet WITHOUT submitting it. `trustrosters` is absent from the \
+             frozen writable set in api.js, so the write would throw -- but a page that tried \
+             is a page whose contract changed, and that is what this arm notices."
+        );
+    }
+    assert!(
+        source.contains("listCluster("),
+        "it does still READ the roster; a keys page that read nothing would pass the two \
+         assertions above having checked nothing"
+    );
+    // The behavioural half, with a stub whose writers throw.
+    let behaviour = read(&ui_root().join("tests").join("pages.spec.js"));
+    assert!(
+        behaviour.contains("the_keys_page_submits_nothing"),
+        "the stub-api arm lives in ui/tests/pages.spec.js"
+    );
+}
+
+// -------------------- 22. the prefix default agrees across the two languages
+
+#[test]
+fn the_default_prefix_agrees_with_the_rust_one() {
+    // THE PAGE PREFILLS A STRING THE RUNNER ALSO COMPUTES, so the two halves
+    // are pinned to each other rather than to two independent literals. The
+    // page's value reaches `Restore.spec.target.topicNaming.prefix` and the
+    // plan document's `target.topic_naming.prefix`; the runner's value is what
+    // phase 0 maps every source topic through when a spec states none. A drift
+    // between them is a restore whose topics are not the ones the page named.
+    let at: chrono::DateTime<chrono::Utc> =
+        "2026-09-07T14:05:00Z".parse().expect("the instant parses");
+    let rust = logweir_core::spec::default_topic_prefix(at);
+    assert_eq!(
+        rust, "restore-20260907T140500Z-",
+        "default_topic_prefix's own output for that instant"
+    );
+
+    let behaviour = read(&ui_root().join("tests").join("pages.spec.js"));
+    assert!(
+        behaviour.contains(&format!("\"{rust}\"")),
+        "ui/tests/pages.spec.js asserts the wizard prefills {rust:?}. If this fails, the node \
+         row and this one have drifted and one of the two is now describing a prefix the other \
+         half of the product does not produce."
+    );
+
+    // The compact form is for KAFKA topic names only -- Kubernetes object
+    // names are DNS-1123 and reject the uppercase T and Z, which is why the
+    // two MINTED names use a hash suffix and never this.
+    assert!(rust.contains('T') && rust.contains('Z'));
+}
+
+// -------------------- 23. the secure-context spec stands alone
+
+#[test]
+fn the_secure_context_spec_imports_nothing_at_module_scope() {
+    // An ES module already imported in a process is NEVER re-evaluated, so
+    // `plan.js`'s module-scope refusal can be observed exactly once per
+    // process -- and only if nothing has imported it first. A static import
+    // anywhere in this file is hoisted above the line that removes
+    // `crypto.subtle`, so adding one would leave the test green while
+    // asserting nothing, which is the state STANDING RULE 21 calls worse than
+    // no guard.
+    let spec_path = ui_root().join("tests").join("plan-secure-context.spec.js");
+    let source = read(&spec_path);
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        assert!(
+            !trimmed.starts_with("import ") && !trimmed.starts_with("import{"),
+            "{}:{}: a STATIC import. This file may only import dynamically, after it has \
+             removed `crypto.subtle` from the global: {line}",
+            shown(&spec_path),
+            index + 1
+        );
+    }
+    assert!(
+        source.contains("await import(\"../plan.js\")")
+            || source.contains("import(\"../plan.js\")"),
+        "and it must actually import plan.js, dynamically, inside the assertion"
+    );
+    assert!(
+        source.contains("plan_js_refuses_a_non_secure_origin"),
+        "the row's name is what `scripts/check-ui-behaviour.sh` reports"
+    );
+}

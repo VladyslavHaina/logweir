@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "The wizard state the checked-in golden is rendered from. It is the ARGUMENT to",
+    "`renderPlanBytes`, not a Kubernetes object: every other fixture in this directory is",
+    "shaped like something the API server returns, and this one is shaped like the form the",
+    "wizard accumulates across its six steps.",
+    "",
+    "Both arms of `render_plan_bytes_emits_a_document_the_runner_parses` read this file.",
+    "Arm 2 (node, pages.spec.js) renders it and byte-compares the result with",
+    "plan.golden.yaml. Arm 1 (Rust, crates/logweir/tests/ui_lint.rs) deserialises the golden",
+    "into `logweir_core::spec::RestoreSpec` and compares target.mode,",
+    "target.topic_naming.prefix and restore.point_in_time with the three values below --",
+    "so an emitter that produced a parseable document carrying somebody else's values still",
+    "fails.",
+    "",
+    "Regenerate the golden with `node ui/tests/emit-plan.js > ui/tests/fixtures/plan.golden.yaml`;",
+    "`scripts/check-ui-behaviour.sh` re-runs that emitter and `diff -u`s it against the",
+    "committed bytes on every `just lint`."
+  ],
+  "name": "orders-pitr-4471",
+  "backupSetRef": "01JB7Z0000000000000000000B",
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "pointInTime": "2026-09-07T14:05:00Z",
+  "source": {
+    "bucket": "kafka-backups",
+    "prefix": "drill-demo",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "target": {
+    "bootstrapServers": [
+      "localhost:9092"
+    ],
+    "mode": "newTopic",
+    "topicPrefix": "restore-20260907T140500Z-",
+    "topicMappingPrefix": "restore-20260907T140500Z-",
+    "markerTopic": "logweir.scratch",
+    "replicationFactor": 1,
+    "teardown": "delete"
+  },
+  "sample": {
+    "windowStart": "2026-09-07T12:00:00Z",
+    "windowEnd": "2026-09-07T15:00:00Z",
+    "recordsPerPartition": 25,
+    "anchor": "head"
+  },
+  "objectives": {
+    "rtoSeconds": 900,
+    "rpoSeconds": 300,
+    "passRate": 1.0
+  },
+  "evidence": {
+    "bucket": "logweir-evidence",
+    "prefix": "logweir/",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  }
+}

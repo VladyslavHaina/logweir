@@ -19,6 +19,9 @@ import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountSchedules } from "./pages/schedules.js";
 import { mountBackupDetail, mountBackups } from "./pages/backups.js";
 import { mountHistory, mountRestoreDetail } from "./pages/history.js";
+import { mountRestoreWizard } from "./pages/restore-wizard.js";
+import { mountApprovals } from "./pages/approvals.js";
+import { mountKeys } from "./pages/keys.js";
 
 // The seven routes, in navigation order. The hash is the whole route.
 const ROUTES = [
@@ -26,9 +29,9 @@ const ROUTES = [
   { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules },
   { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
   { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },
-  { hash: "#/restore", title: "Restore", blurb: "Restore runs and the preflight the runner reported." },
-  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one." },
-  { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only." },
+  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: archive, set, point in time, target, preflight, plan.", mount: mountRestoreWizard },
+  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true },
+  { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true },
 ];
 
 const DEFAULT_HASH = ROUTES[0].hash;
@@ -42,13 +45,22 @@ const DEFAULT_HASH = ROUTES[0].hash;
 // cannot serve.
 const DEFAULT_NAMESPACE = "default";
 
-/** The `#/route?ns=name` a hash carries: the route half and the namespace. */
+/** The `#/route?ns=name` a hash carries: the route half, the namespace, and
+ *  every other parameter the hash names.
+ *
+ *  `params` exists for the approvals route, which the restore wizard navigates
+ *  to as `#/approvals?subject=<restore>&hash=<planHash>&name=<approval>`. Those
+ *  three values are where `Approval.spec.subjectRef` and `planHash` come from:
+ *  the page is forbidden from parsing the two approval documents, so the hash
+ *  cannot be lifted out of `approval.json` either, and the create form reads
+ *  the ROUTE and never the bytes. */
 export function parseHash(hash) {
   const text = typeof hash === "string" ? hash : "";
   const question = text.indexOf("?");
   const route = question === -1 ? text : text.slice(0, question);
   let ns = DEFAULT_NAMESPACE;
   let name = "";
+  const params = {};
   if (question !== -1) {
     for (const pair of text.slice(question + 1).split("&")) {
       const equals = pair.indexOf("=");
@@ -57,6 +69,7 @@ export function parseHash(hash) {
       }
       const key = pair.slice(0, equals);
       const value = decodeURIComponent(pair.slice(equals + 1)).trim();
+      params[key] = value;
       if (key === "ns" && value.length > 0) {
         ns = value;
       }
@@ -65,7 +78,7 @@ export function parseHash(hash) {
       }
     }
   }
-  return { route: route, ns: ns, name: name };
+  return { route: route, ns: ns, name: name, params: params };
 }
 
 function routeFor(hash) {
@@ -164,6 +177,27 @@ function render() {
     if (here.name !== "" && typeof current.detail === "function") {
       replace(main, el("p", { class: "pending" }, "Reading " + here.name + "..."));
       current.detail(main, here.ns, here.name, parseFragment);
+    } else if (current.cluster === true && typeof current.mount === "function") {
+      // The one CLUSTER-SCOPED read in this application. It takes no
+      // namespace, because the TrustRoster has none.
+      replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+      current.mount(main, parseFragment);
+    } else if (current.route === true && typeof current.mount === "function") {
+      // The approvals page reads `subject`, `hash` and `name` off the hash the
+      // wizard navigated to. They are route parameters and never values parsed
+      // out of the two approval documents.
+      replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+      current.mount(
+        main,
+        here.ns,
+        {
+          ns: here.ns,
+          subject: here.params.subject || "",
+          hash: here.params.hash || "",
+          name: here.params.name || "",
+        },
+        parseFragment,
+      );
     } else if (typeof current.mount === "function") {
       replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
       current.mount(main, here.ns, parseFragment);

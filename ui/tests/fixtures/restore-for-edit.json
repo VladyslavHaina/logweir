@@ -1,0 +1,50 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Restore",
+  "metadata": {
+    "name": "restore-f8584333",
+    "namespace": "logweir-t27",
+    "uid": "60718293-a4b5-4c6d-9e8f-901234567890",
+    "resourceVersion": "41077",
+    "generation": 1,
+    "creationTimestamp": "2026-09-07T14:06:00Z"
+  },
+  "spec": {
+    "planBytes": "# The restore plan document. Its grammar is the runner's restore document:\n# logweir_core::spec::RestoreSpec, stated once in docs/mvp/03-spec.md section 6.1,\n# \"The restore plan document has ONE grammar, and it is the runner's\n# restore.yaml (amendment 4)\". These bytes are what Restore.spec.planBytes\n# carries, what the controller writes into the runner's plan ConfigMap verbatim,\n# and what logweir restore run --spec parses. Rendered by the Logweir UI; the\n# sha256 of exactly these bytes is the plan hash an approval binds.\nname: \"orders-pitr-4471\"\nsource:\n  storage:\n    backend: \"s3\"\n    bucket: \"kafka-backups\"\n    prefix: \"drill-demo\"\n    region: \"us-east-1\"\n    endpoint: \"http://localhost:9000\"\n    path_style: true\n    allow_http: true\n  backup: \"01JB7Z0000000000000000000B\"\n  topics:\n    - \"orders\"\n    - \"payments\"\ntarget:\n  bootstrap_servers:\n    - \"localhost:9092\"\n  mode: \"newTopic\"\n  topic_naming:\n    prefix: \"restore-20260907T140500Z-\"\n  topic_mapping_prefix: \"restore-20260907T140500Z-\"\n  marker_topic: \"logweir.scratch\"\n  default_replication_factor: 1\n  teardown: \"delete\"\nrestore:\n  point_in_time: \"2026-09-07T14:05:00Z\"\nsample:\n  window_start: \"2026-09-07T12:00:00Z\"\n  window_end: \"2026-09-07T15:00:00Z\"\n  records_per_partition: 25\n  anchor: \"head\"\nobjectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\nevidence:\n  backend: \"s3\"\n  bucket: \"logweir-evidence\"\n  prefix: \"logweir/\"\n  region: \"us-east-1\"\n  endpoint: \"http://localhost:9000\"\n  path_style: true\n  allow_http: true\nnotifications:\n  webhooks: []\n",
+    "approvalRef": {
+      "name": "approval-f8584333"
+    },
+    "sourceArchive": {
+      "url": "s3://kafka-backups/drill-demo",
+      "secretRef": {
+        "name": "logweir-s3"
+      }
+    },
+    "backupSetRef": "01JB7Z0000000000000000000B",
+    "pointInTime": "2026-09-07T14:05:00Z",
+    "target": {
+      "clusterRef": {
+        "name": "orders-recovery"
+      },
+      "mode": "newTopic",
+      "topicNaming": {
+        "prefix": "restore-20260907T140500Z-"
+      }
+    },
+    "deadlineSeconds": 3600
+  },
+  "status": {
+    "phase": "Pending",
+    "reason": "ApprovalNotVerified",
+    "conditions": [
+      {
+        "type": "Verified",
+        "status": "False",
+        "reason": "ApprovalNotVerified",
+        "message": "approval-f8584333 does not exist yet; requeued in 30s",
+        "lastTransitionTime": "2026-09-07T14:06:05Z",
+        "observedGeneration": 1
+      }
+    ]
+  }
+}

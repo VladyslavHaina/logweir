@@ -1,0 +1,70 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaClusterList",
+  "metadata": {
+    "resourceVersion": "41022"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "KafkaCluster",
+      "metadata": {
+        "name": "orders-prod",
+        "namespace": "logweir-t27",
+        "uid": "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9",
+        "resourceVersion": "40998",
+        "generation": 1,
+        "creationTimestamp": "2026-09-04T08:55:00Z"
+      },
+      "spec": {
+        "bootstrapServers": [
+          "kafka-0.orders.svc:9093"
+        ],
+        "auth": {
+          "mode": "scramSha512",
+          "username": "logweir-reader",
+          "secretRef": {
+            "name": "orders-scram"
+          },
+          "tls": true
+        },
+        "role": "source",
+        "markerTopic": "logweir.scratch"
+      },
+      "status": {
+        "reachable": true,
+        "clusterId": "MkU3NEVCTTlSM0FCQVRMQQ",
+        "observedAt": "2026-09-11T12:44:31Z",
+        "reason": "Reachable"
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "KafkaCluster",
+      "metadata": {
+        "name": "orders-recovery",
+        "namespace": "logweir-t27",
+        "uid": "2c3d4e5f-6071-4829-93a4-b5c6d7e8f901",
+        "resourceVersion": "41001",
+        "generation": 1,
+        "creationTimestamp": "2026-09-04T08:57:00Z"
+      },
+      "spec": {
+        "bootstrapServers": [
+          "localhost:9092"
+        ],
+        "auth": {
+          "mode": "plaintext"
+        },
+        "role": "target",
+        "markerTopic": "logweir.scratch"
+      },
+      "status": {
+        "reachable": true,
+        "clusterId": "OFBSTDZBRTFRRUsyVTlXWQ",
+        "observedAt": "2026-09-11T12:44:33Z",
+        "reason": "Reachable"
+      }
+    }
+  ]
+}

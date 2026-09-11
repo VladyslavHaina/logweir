@@ -40,6 +40,44 @@ the browser no credential, and leaves every call to the apiserver a cross-origin
 request to a server that sends no CORS headers unless it was started with
 `--cors-allowed-origins`, which no adopter has set.
 
+### It must be a secure context, and the supported address already is
+
+The restore wizard computes the plan's sha256 in the browser, with
+`crypto.subtle`, and shows it before anything is submitted -- because the only
+design in which the hash the page displays is the hash the controller recomputes
+is one where the page produces the bytes itself. `globalThis.crypto.subtle` is
+`undefined` on any origin that is not "potentially trustworthy".
+
+**`http://127.0.0.1:8001/ui/` is trustworthy** -- loopback over plain transport
+qualifies -- so the supported serving path above works with nothing extra.
+Anything else must be a TLS origin. An OIDC-aware ingress on plain transport, or
+a `--address=0.0.0.0` plus a browse to a LAN address, is not, and `ui/plan.js`
+**refuses at module load** rather than rendering a plan with no hash beside it:
+
+```
+this page must be served from a secure context: loopback (127.0.0.1 or localhost)
+over plain transport, or any TLS origin. SubtleCrypto is unavailable here and the
+plan hash cannot be computed.
+```
+
+That message names no URL scheme, deliberately: `scripts/check-ui-offline.sh`
+scans `ui/plan.js` like every other shipped byte and has no exemption inside
+`ui/`.
+
+### Taking the plan bytes back out of the cluster
+
+The plan document an approver signs is `Restore.spec.planBytes`, verbatim. The
+wizard offers a **download** beside the copy button for one reason: copying a
+`<pre>` loses trailing whitespace in some browsers, and a plan whose last line
+ends in spaces has a different sha256 from the one the page showed. If you would
+rather take the bytes from the cluster than from the page:
+
+```bash
+kubectl --context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > <name>.yaml
+```
+
+Hash exactly what you downloaded, and approve that file.
+
 ### What that costs, said plainly
 
 `kubectl proxy` forwards every API path except pod exec and attach, on the same
@@ -108,6 +146,10 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `app.js` | the hash router and the frame. Seven routes: `#/clusters`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. |
 | `api.js` | the **only** module that issues a network request. |
 | `render.js` | DOM helpers. Sets text, never `innerHTML`. |
+| `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
+| `pages/restore-wizard.js` | the six wizard steps, the plan bytes, and the create that names an Approval which does not exist yet. |
+| `pages/approvals.js` | the Approval list and the four-input create form. Refuses a private key and never parses the two documents. |
+| `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
 | `style.css` | the stylesheet. System fonts; no font is fetched from anywhere. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
 | `tests/api.spec.js` | the behaviour arm of the two mechanical claims, under `node --test`. |
@@ -173,7 +215,12 @@ the quoted glob above is the form that works, and node expands it itself.
 ## What this page does not do
 
 It does not mint an approval, hold a key, or submit the cluster-scoped
-`TrustRoster`. The roster is a cluster-admin step -- see install step 1b in
+`TrustRoster`. There is no "Approve" button that produces a signature anywhere
+in it: the approver runs `logweir drill approve` where their private key lives,
+and the approvals page takes the two files that command wrote -- as UTF-8 text,
+verbatim -- and refuses anything whose name ends `.pem` or `.key` or whose
+content carries a private-key header, with the message **this page never accepts
+a private key**. The roster is a cluster-admin step -- see install step 1b in
 [../docs/kubernetes.md](../docs/kubernetes.md) -- and the page surfaces that
 snippet rather than submitting it.
 
