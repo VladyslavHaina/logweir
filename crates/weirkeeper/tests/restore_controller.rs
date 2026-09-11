@@ -51,7 +51,7 @@ use weirkeeper::controllers::restore::{
 use weirkeeper::crds::restore::{Restore, RestoreStatus};
 use weirkeeper::job::{self, APPROVAL_MOUNT_PATH, APPROVAL_VOLUME};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
-use weirkeeper::verification::unverified_evidence;
+use weirkeeper::verification::{unverified_evidence, VerificationResult, VerificationVerdict};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2295,6 +2295,265 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
         outcome.requeue,
         Requeue::AwaitChange,
         "and it never watches forever"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The steady object, and the terminal object whose pod is gone — Task 24
+// fix round 1. The `Backup` twins live in `tests/verification.rs`.
+// ---------------------------------------------------------------------------
+
+/// A scorecard oracle that answers with a PASSING, digestible observation.
+///
+/// The digest is what makes the verification reachable at all: the second
+/// patch is attempted only when both mandatory keys AND a digest the
+/// controller computed over the bytes it fetched are present.
+fn passing_scorecard(_key: String) -> BoxFuture<'static, Option<ScorecardObservation>> {
+    Box::pin(async {
+        Some(ScorecardObservation {
+            outcome: Some("pass".to_string()),
+            last_phase_completed: Some(9),
+            scorecard_sha256: Some(
+                "sha256:1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+                    .to_string(),
+            ),
+            ..ScorecardObservation::default()
+        })
+    })
+}
+
+/// A verify oracle answering `Valid`, reached at `at`.
+///
+/// THE INSTANT IS A PARAMETER FOR THE REASON THE `Backup` TWIN'S IS
+/// (`tests/verification.rs::valid_oracle_at`): `verify_evidence` reads its own
+/// clock, so a re-verification on a later pass really does reach a later
+/// instant, and the rule that keeps a steady object quiet is that an UNCHANGED
+/// verdict keeps the instant it was first reached at. An oracle returning a
+/// constant cannot see that rule at all.
+fn valid_evidence_at(
+    at: DateTime<Utc>,
+) -> impl Fn(weirkeeper::verification::EvidenceRef) -> BoxFuture<'static, VerificationResult> {
+    move |r| {
+        Box::pin(async move {
+            VerificationResult {
+                result: VerificationVerdict::Valid,
+                matched_key_id: Some(
+                    "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd".to_string(),
+                ),
+                payload_type: r.payload_type.to_string(),
+                verified_at: at,
+                detail: None,
+            }
+        })
+    }
+}
+
+/// One finished, verified pass over a fresh `Restore`, and the object the API
+/// server would hold afterwards.
+///
+/// Built by RUNNING the pass and applying its patches the way the server does
+/// (`conditions::apply_merge_patch`), never by writing a status literal: a
+/// hand-written fixture pins what this file's author believes a verified
+/// `Restore` looks like, and both rows below are about what the controller
+/// does to the one it actually produced.
+async fn settled_verified_restore() -> (Restore, Vec<Value>) {
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 10, 12, 0)),
+        now(),
+    )
+    .await
+    .expect("the first reconcile succeeds");
+    let seen = bodies.lock().expect("readable").clone();
+    let patches = patched_statuses(&seen);
+    let mut status = Value::Object(serde_json::Map::new());
+    for p in &patches {
+        apply_merge_patch(&mut status, p);
+    }
+    let mut settled: Value = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME))
+        .expect("the fixture parses");
+    settled["status"] = status;
+    (
+        serde_json::from_value(settled).expect("the settled object is a Restore"),
+        patches,
+    )
+}
+
+/// **A VERIFIED `Restore` RECONCILES AGAIN AND SENDS NOTHING** — the twin of
+/// `tests/verification.rs::a_verified_object_reconciles_without_a_patch`,
+/// which had only the `Backup` half.
+///
+/// Plan erratum **E11(d)**, MEASURED on a live cluster during the Phase B run:
+/// **20 `Restore` reconciles per second**, each a real write, because a JSON
+/// merge patch REPLACES arrays and the terminal patch's `conditions` deleted
+/// the `Verified` condition the second patch had just added.
+///
+/// KILLS: removing `verification::carry_verified` from `finished_status_patch`
+/// — asserted twice over, because the two guards are independent. The
+/// already-terminal return (step 2b) stops the SECOND PASS from reaching the
+/// builder at all, so the last arm reaches the builder DIRECTLY: a patch built
+/// for a verified object carries `Verified` whatever the caller does.
+#[tokio::test]
+async fn a_verified_restore_reconciles_without_a_patch() {
+    let (settled, first) = settled_verified_restore().await;
+    assert_eq!(first.len(), 2, "the first pass writes both patches");
+    assert_eq!(
+        first[1].pointer("/evidence/verification/result"),
+        Some(&Value::String("Valid".to_string())),
+        "the second patch is the verification; got {}",
+        first[1]
+    );
+    let status = serde_json::to_value(settled.status.as_ref().expect("a settled status"))
+        .expect("the status serialises");
+    let types: Vec<String> = conditions_of(&status)
+        .into_iter()
+        .map(|(t, ..)| t)
+        .collect();
+    assert!(
+        types.iter().any(|t| t == "Verified") && types.iter().any(|t| t == "Complete"),
+        "after both patches the object carries BOTH the run's own conditions and the \
+         controller's verdict about it; got {types:?}"
+    );
+    assert_eq!(status["outcome"], Value::String("pass".to_string()));
+
+    // PASS TWO, over that object, with BOTH clocks moved — the reconcile's
+    // (12:00 -> 12:30) and the verification's own (12:00 -> 18:45). NOTHING IS
+    // SENT.
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(
+        &settled,
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 11, 18, 45)),
+        utc(2026, 9, 10, 12, 30),
+    )
+    .await
+    .expect("the second reconcile succeeds");
+    let seen = bodies.lock().expect("readable").clone();
+    let second = patched_statuses(&seen);
+    assert_eq!(
+        second.len(),
+        0,
+        "A STEADY OBJECT ISSUES ZERO `/status` PATCHES. A reconciler's own status write is what \
+         wakes it, so one patch per pass is a LOOP and not an inefficiency. Sent: {second:?}"
+    );
+
+    // AND THE BUILDER ITSELF, REACHED DIRECTLY. `finished_status_patch` owns
+    // the whole `conditions` array it writes, so it owes the parts of it that
+    // are not its own: `Verified` is the controller's fact about the run,
+    // computed after the terminal write, and a builder that dropped it would
+    // start the loop again the moment any caller reached it.
+    let rebuilt = finished_status_patch(
+        &settled,
+        0,
+        &restore_evidence_keys(&log_body(&i8_tail())),
+        None,
+        None,
+        None,
+        None,
+        utc(2026, 9, 10, 12, 30),
+    );
+    let rebuilt_types: Vec<String> = conditions_of(&rebuilt["status"])
+        .into_iter()
+        .map(|(t, ..)| t)
+        .collect();
+    assert!(
+        rebuilt_types.iter().any(|t| t == "Verified"),
+        "`finished_status_patch` carries the existing `Verified` condition forward \
+         (`verification::carry_verified`); got {rebuilt_types:?} from {rebuilt}"
+    );
+}
+
+/// **A TERMINAL, VERIFIED `Restore` WHOSE RUNNER POD IS GONE IS LEFT ALONE.**
+///
+/// Task 24 review, Milestone 5 — **proven on a live cluster**. A `Restore` at
+/// `phase: Succeeded`, `exitCode: 0`, `outcome: pass` and
+/// `verification.result: Valid` became `phase: Failed`, `exitReason:
+/// operational`, its `[Complete, EvidenceRecorded, Verified]` conditions
+/// replaced by one `Failed/NoExitCode` — after a plain `kubectl rollout
+/// restart deploy/weirkeeper`. Not a crash: an upgrade, a node reboot, an
+/// eviction or an OOM does the same thing, because the restarted controller
+/// re-lists a finished Job whose pod has been garbage-collected and re-derives
+/// an exit code from it. The Job outlives its pod by seven days.
+///
+/// KILLS: removing `reconcile_restore`'s already-terminal guard (step 2b,
+/// before `find_pod`). Without it this pass finds no pod, takes the crashed
+/// branch and PATCHES.
+#[tokio::test]
+async fn a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched() {
+    let (settled, _) = settled_verified_restore().await;
+    let before = serde_json::to_value(settled.status.as_ref().expect("a settled status"))
+        .expect("the status serialises");
+    assert_eq!(before["phase"], Value::String("Succeeded".to_string()));
+
+    // THE POD IS GONE AND THE JOB IS NOT — and the `/pods` route is PRESENT,
+    // so "it did not list the pods" is an assertion and not an inability.
+    let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string();
+    let (client, rec, bodies) =
+        mock_client_recording_bodies(finished_routes(empty, log_body(""), "Complete"));
+    let outcome = reconcile_restore(
+        &settled,
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 11, 18, 45)),
+        utc(2026, 9, 10, 12, 30),
+    )
+    .await
+    .expect("the reconcile completes");
+
+    let seen = bodies.lock().expect("readable").clone();
+    let patches = patched_statuses(&seen);
+    assert_eq!(
+        patches.len(),
+        0,
+        "A FINISHED RUN WHOSE POD HAS BEEN GARBAGE-COLLECTED IS NOT RE-JUDGED. A merge patch \
+         REPLACES arrays, so every patch listed here deletes `Complete` and `EvidenceRecorded` \
+         off an object that earned them and relabels a run that exited 0 with a signed, `Valid`, \
+         PASSING scorecard as `Failed`/`operational`. Sent: {patches:?}"
+    );
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "the outcome reports the code already ON the object, not a code re-derived from a pod \
+         that no longer exists"
+    );
+    assert_eq!(outcome.terminal_state, None);
+    assert_eq!(outcome.requeue, Requeue::AwaitChange);
+    let requests = rec.lock().expect("readable").clone();
+    assert!(
+        !requests.iter().any(|r| path(&r.uri).ends_with("/pods")),
+        "…and the pod list is not even READ: the guard is before `find_pod`, so a terminal \
+         object costs one `GET /jobs` and nothing else. Saw: {:?}",
+        requests
+            .iter()
+            .map(|r| (&r.method, path(&r.uri)))
+            .collect::<Vec<_>>()
+    );
+
+    // BELT AND BRACES, AND A SEPARATE CLAIM. Even reached directly — by a
+    // future edit that moves the guard, or by a caller this file does not know
+    // about — the crashed-path builder no longer owns the whole condition
+    // array.
+    let crashed = crashed_status_patch(&settled, "NoExitCode", NAME, utc(2026, 9, 10, 12, 30));
+    let types: Vec<String> = conditions_of(&crashed["status"])
+        .into_iter()
+        .map(|(t, ..)| t)
+        .collect();
+    assert!(
+        types.iter().any(|t| t == "Verified"),
+        "`crashed_status_patch` goes through `verification::carry_verified`, so the controller's \
+         own verdict about the run survives a patch that is not about it. Got {crashed}"
     );
 }
 

@@ -722,6 +722,26 @@ struct Seen {
 /// answers both of them the same way, so "the second one 500s and the first
 /// one's values survive" is unassertable through it.
 fn sequenced_client(status_codes: Vec<u16>) -> (kube::Client, Arc<Mutex<Vec<Seen>>>) {
+    sequenced_client_with_pods(status_codes, pod_list())
+}
+
+/// An EMPTY pod list — the runner pod GC'd, evicted or deleted out from under
+/// a finished Job, which the Job outlives by seven days
+/// (`TTL_SECONDS_AFTER_FINISHED`).
+fn no_pods() -> String {
+    r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string()
+}
+
+/// [`sequenced_client`] with the `/pods` answer as a parameter.
+///
+/// THE POD LIST IS THE VARIABLE IN THE CRASHED-PATH ROW and a constant
+/// everywhere else, so it is a parameter of this function and not a second
+/// copy of the double.
+fn sequenced_client_with_pods(
+    status_codes: Vec<u16>,
+    pods: String,
+) -> (kube::Client, Arc<Mutex<Vec<Seen>>>) {
+    let pods = Arc::new(pods);
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::new(Mutex::new(Vec::new()));
     let patches = Arc::new(AtomicUsize::new(0));
     let codes = Arc::new(status_codes);
@@ -731,6 +751,7 @@ fn sequenced_client(status_codes: Vec<u16>) -> (kube::Client, Arc<Mutex<Vec<Seen
             let seen = Arc::clone(&seen);
             let patches = Arc::clone(&patches);
             let codes = Arc::clone(&codes);
+            let pods = Arc::clone(&pods);
             async move {
                 let method = req.method().to_string();
                 let uri = req.uri().to_string();
@@ -764,7 +785,7 @@ fn sequenced_client(status_codes: Vec<u16>) -> (kube::Client, Arc<Mutex<Vec<Seen
                 } else if path.ends_with("/log") {
                     (200, log_body())
                 } else if path.ends_with("/pods") {
-                    (200, pod_list())
+                    (200, pods.as_ref().clone())
                 } else {
                     (200, job_body())
                 };
@@ -1044,6 +1065,185 @@ async fn a_verified_object_reconciles_without_a_patch() {
     // not passing because nothing changed: it is passing because `verifiedAt`
     // and every `lastTransitionTime` are WHEN THE FACT CHANGED, not when it
     // was last re-confirmed.
+
+    // AND THE BUILDER ITSELF, REACHED DIRECTLY — Task 24 fix round 1.
+    //
+    // The zero above is now defended by TWO independent guards: `carry_verified`
+    // in this builder, and `reconcile_backup`'s already-terminal return (step
+    // 2b), which stops a settled object from reaching the builder at all. The
+    // second one masks the first, so the count alone can no longer tell whether
+    // `carry_verified` is still there. This arm asks the builder directly, and
+    // it is the arm that dies when `carry_verified` is removed.
+    let rebuilt = weirkeeper::controllers::backup::finished_status_patch(
+        &settled,
+        0,
+        &weirkeeper::controllers::backup::evidence_keys(&log_body()),
+        None,
+        None,
+        None,
+        Some(RECEIPT_DIGEST),
+        Utc.with_ymd_and_hms(2026, 11, 9, 4, 0, 0).unwrap(),
+    );
+    let rebuilt_types = condition_types(rebuilt.pointer("/status").expect("a status"));
+    assert!(
+        rebuilt_types.iter().any(|t| t == CONDITION_VERIFIED),
+        "`finished_status_patch` carries the object's existing `Verified` condition forward — a \
+         merge patch REPLACES arrays, so a builder that dropped it would delete the condition \
+         the second patch adds, which would re-add it, which would wake the reconciler. That is \
+         the loop, measured at 20 reconciles per second. Got {rebuilt_types:?} from {rebuilt}"
+    );
+}
+
+/// The settled object of [`a_verified_object_reconciles_without_a_patch`]'s
+/// first pass: terminal, `exitCode: 0`, `Valid`, and carrying `Complete`,
+/// `EvidenceRecorded` and `Verified`.
+///
+/// Built by RUNNING the first pass and applying its two patches the way the
+/// API server would (`conditions::apply_merge_patch`), never by writing a
+/// status literal: a hand-written fixture would pin what this test's author
+/// believes a verified `Backup` looks like, and the defect below is about what
+/// the controller does to the one it actually produced.
+async fn settled_verified_backup() -> Backup {
+    let (client, seen) = sequenced_client(vec![200, 200]);
+    reconcile_backup(
+        &backup(),
+        &client,
+        &observed_archive,
+        &valid_oracle,
+        Utc.with_ymd_and_hms(2026, 11, 9, 3, 20, 0).unwrap(),
+    )
+    .await
+    .expect("the first reconcile succeeds");
+    let mut status = json!({});
+    for p in seen
+        .lock()
+        .expect("readable")
+        .iter()
+        .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
+    {
+        let body: Value = serde_json::from_str(&p.body).expect("the patch is JSON");
+        weirkeeper::conditions::apply_merge_patch(
+            &mut status,
+            body.get("status").expect("the patch carries a status"),
+        );
+    }
+    let mut settled: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+    settled["status"] = status;
+    serde_json::from_value(settled).expect("the settled object is a Backup")
+}
+
+/// The condition `type`s on a status value, in order.
+fn condition_types(status: &Value) -> Vec<String> {
+    status["conditions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c["type"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **A TERMINAL, VERIFIED `Backup` WHOSE RUNNER POD IS GONE IS LEFT ALONE.**
+///
+/// Task 24 review, Milestone 5 — **proven on a live cluster**, not reasoned
+/// about. A `Backup` at `phase: Succeeded`, `exitCode: 0`, a signed receipt in
+/// the bucket and `verification.result: Valid` was turned into
+///
+/// | field | before | after |
+/// |---|---|---|
+/// | `status.phase` | `Succeeded` | `Failed` |
+/// | `status.exitReason` | *(absent)* | `operational` |
+/// | `status.conditions` | `[Complete, EvidenceRecorded, Verified]` | `[Failed/NoExitCode]` |
+///
+/// by nothing more than `kubectl delete pod` on its already-finished runner.
+/// The Job survives its pod by seven days (`TTL_SECONDS_AFTER_FINISHED`), and
+/// in that window pod GC, an eviction or a node restart does the same thing;
+/// the `Restore` twin needs only a controller restart. The exit code was not
+/// re-read — it was RE-DERIVED from a pod that no longer exists, and a run that
+/// exited 0 and verified `Valid` was relabelled a failure that contradicts its
+/// own `exitCode`.
+///
+/// KILLS: removing `reconcile_backup`'s already-terminal guard (step 2b,
+/// before `find_pod`). Without it this pass finds no pod, takes the crashed
+/// branch and PATCHES — the count goes from 0, and the patch's `conditions`
+/// array is what replaces the three above.
+#[tokio::test]
+async fn a_terminal_verified_backup_whose_pod_is_gone_is_not_re_patched() {
+    let settled = settled_verified_backup().await;
+    let before = serde_json::to_value(settled.status.as_ref().expect("the settled object has one"))
+        .expect("the status serialises");
+    let types = condition_types(&before);
+    assert!(
+        types.iter().any(|t| t == CONDITION_VERIFIED) && types.iter().any(|t| t == "Complete"),
+        "the fixture this row is about carries the conditions the defect deletes; got {types:?}"
+    );
+    assert_eq!(
+        before["phase"],
+        json!("Succeeded"),
+        "…and it is terminal and green"
+    );
+
+    // THE POD IS GONE AND THE JOB IS NOT. This is the cluster state the review
+    // produced with one `kubectl delete pod`.
+    let (client, seen) = sequenced_client_with_pods(vec![200, 200], no_pods());
+    reconcile_backup(
+        &settled,
+        &client,
+        &observed_archive,
+        &valid_oracle,
+        Utc.with_ymd_and_hms(2026, 11, 9, 4, 0, 0).unwrap(),
+    )
+    .await
+    .expect("the reconcile completes");
+
+    let log = seen.lock().expect("readable").clone();
+    let patches: Vec<String> = log
+        .iter()
+        .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
+        .map(|s| {
+            let body: Value = serde_json::from_str(&s.body).unwrap_or(Value::Null);
+            format!(
+                "phase={} exitReason={} conditions={:?}",
+                body.pointer("/status/phase").unwrap_or(&Value::Null),
+                body.pointer("/status/exitReason").unwrap_or(&Value::Null),
+                condition_types(body.pointer("/status").unwrap_or(&Value::Null))
+            )
+        })
+        .collect();
+    assert_eq!(
+        patches.len(),
+        0,
+        "A FINISHED RUN WHOSE POD HAS BEEN GARBAGE-COLLECTED IS NOT RE-JUDGED. A merge patch \
+         REPLACES arrays, so every patch listed here deletes `Complete` and `EvidenceRecorded` \
+         off an object that earned them, and relabels a run that exited 0 with a signed, `Valid` \
+         receipt as `Failed`/`operational`. Sent:\n  {}",
+        patches.join("\n  ")
+    );
+    assert!(
+        !log.iter().any(|s| s.path.ends_with("/pods")),
+        "…and the pod list is not even READ: the guard is before `find_pod`, so a terminal \
+         object costs one `GET /jobs` and nothing else. Saw: {:?}",
+        log.iter().map(|s| (&s.method, &s.path)).collect::<Vec<_>>()
+    );
+
+    // BELT AND BRACES, AND IT IS A SEPARATE CLAIM. Even reached directly —
+    // by a future edit that moves the guard, or by a caller this file does not
+    // know about — the crashed-path builder no longer OWNS the whole condition
+    // array: it carries the `Verified` condition it did not write.
+    let crashed = weirkeeper::controllers::backup::crashed_status_patch(
+        &settled,
+        "NoExitCode",
+        NAME,
+        Utc.with_ymd_and_hms(2026, 11, 9, 4, 0, 0).unwrap(),
+    );
+    assert!(
+        condition_types(crashed.pointer("/status").expect("the patch has a status"))
+            .iter()
+            .any(|t| t == CONDITION_VERIFIED),
+        "`crashed_status_patch` goes through `verification::carry_verified`, so the controller's \
+         own verdict about the run survives a patch that is not about it. Got {crashed}"
+    );
 }
 
 /// With no evidence credential the controller constructs `None` and every

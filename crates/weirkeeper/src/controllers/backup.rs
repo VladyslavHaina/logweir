@@ -1267,6 +1267,15 @@ pub fn finished_status_patch(
 /// [`REASON_OPERATIONAL`]: a run whose code is unrecoverable produced no
 /// artifact either, which is exactly what GC11's code 1 means, and the
 /// SUB-CASE is the condition's `reason`.
+///
+/// THE CONDITION ARRAY GOES THROUGH [`crate::verification::carry_verified`],
+/// as [`finished_status_patch`]'s does — belt and braces beside the
+/// already-terminal guard in `reconcile_backup`. A merge patch REPLACES
+/// arrays, so a builder that owns the array owes the parts of it that are not
+/// its own; `Verified` is the controller's fact about the run and not this
+/// branch's to delete. With the guard in place this branch can no longer be
+/// reached by an object that carries one, and a builder whose correctness
+/// depends on a caller's guard is one refactor from being wrong again.
 #[must_use]
 pub fn crashed_status_patch(
     backup: &Backup,
@@ -1274,20 +1283,24 @@ pub fn crashed_status_patch(
     job_name: &str,
     now: DateTime<Utc>,
 ) -> Value {
+    let conditions = crate::verification::carry_verified(
+        backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            backup,
+            CONDITION_FAILED,
+            "True",
+            terminal_state,
+            "the Job finished but no container named runner reported a terminated state; \
+             the exit code is unrecoverable",
+            now,
+        )],
+    );
     json!({
         "status": {
             "phase": PHASE_FAILED,
             "exitReason": REASON_OPERATIONAL,
             "jobRef": { "name": job_name },
-            "conditions": [condition(
-                backup,
-                CONDITION_FAILED,
-                "True",
-                terminal_state,
-                "the Job finished but no container named runner reported a terminated state; \
-                 the exit code is unrecoverable",
-                now,
-            )],
+            "conditions": conditions,
         }
     })
 }
@@ -1309,6 +1322,9 @@ pub fn crashed_status_patch(
 /// review finding MEDIUM-1, measured on a 64-character `Backup`. A refusal the
 /// controller can decide by itself is a terminal answer, and an answer belongs
 /// on the object.
+///
+/// Its condition array goes through [`crate::verification::carry_verified`]
+/// for [`crashed_status_patch`]'s reason.
 #[must_use]
 pub fn refused_status_patch(
     backup: &Backup,
@@ -1316,11 +1332,22 @@ pub fn refused_status_patch(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
+    let conditions = crate::verification::carry_verified(
+        backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            backup,
+            CONDITION_FAILED,
+            "True",
+            reason,
+            message,
+            now,
+        )],
+    );
     json!({
         "status": {
             "phase": PHASE_FAILED,
             "exitReason": REASON_OPERATIONAL,
-            "conditions": [condition(backup, CONDITION_FAILED, "True", reason, message, now)],
+            "conditions": conditions,
         }
     })
 }
@@ -1809,6 +1836,52 @@ async fn reconcile_backup_inner(
             job_name,
             created: false,
             exit_code: None,
+            terminal_state: None,
+            keys: EvidenceKeys::default(),
+            ttl_patched: false,
+        });
+    }
+
+    // STEP 2b. ALREADY TERMINAL: READ NOTHING AND WRITE NOTHING.
+    //
+    // **PROVEN LIVE** by the Task 24 review, on both kinds, on ordinary paths.
+    // A finished `Backup` at `phase: Succeeded`, `exitCode: 0`, a signed
+    // receipt in the bucket and `verification.result: Valid` was relabelled
+    // `phase: Failed`, `exitReason: operational`, its `[Complete,
+    // EvidenceRecorded, Verified]` conditions replaced by a single
+    // `Failed/NoExitCode` — by nothing more than one `kubectl delete pod` on
+    // its finished runner. The Job outlives its pod by
+    // [`TTL_SECONDS_AFTER_FINISHED`] (seven days), and in that window pod GC,
+    // an eviction, a node restart or a plain delete is enough; on the
+    // `Restore` side a controller RESTART is enough on its own. The exit code
+    // was never re-read — it was RE-DERIVED from a pod that no longer exists,
+    // and the honest answer to "what did that pod exit with" is the one
+    // already on the object.
+    //
+    // THE SAME RULE THE JOB-ABSENT BRANCH ABOVE ALREADY APPLIES, one branch
+    // later: a run that recorded a terminal exit code is finished, and nothing
+    // a later pass can observe about its pod is news. `Restore` carries the
+    // twin.
+    //
+    // WHAT THIS GIVES UP, SAID PLAINLY: a pass that wrote the terminal status
+    // and then failed on the TTL patch or on the verification patch is not
+    // retried by a later pass over the same object — the object is terminal,
+    // so every later pass stops here. Both are recoverable by an edit (which
+    // is what `Action::await_change` waits for on the `Restore` side) and
+    // neither is a falsehood on the object; re-deriving a terminal status from
+    // a vanished pod IS one, forever, with no edit able to fix it.
+    if status_is_terminal(backup) {
+        debug!(
+            backup = %name,
+            namespace = %namespace,
+            job = %job_name,
+            "the status is already terminal; the runner's pod is not read again and no patch is \
+             sent"
+        );
+        return Ok(BackupOutcome {
+            job_name,
+            created: false,
+            exit_code: backup.status.as_ref().and_then(|s| s.exit_code),
             terminal_state: None,
             keys: EvidenceKeys::default(),
             ttl_patched: false,

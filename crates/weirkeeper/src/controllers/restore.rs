@@ -1339,6 +1339,9 @@ pub fn admission_hold_patch(
 /// `PHASE` column, and nothing for `kubectl describe restore` to say. That is
 /// review finding MEDIUM-1 and errata **E5d**, measured on a 64-character
 /// `Backup`.
+///
+/// Its condition array goes through [`crate::verification::carry_verified`]
+/// for [`crashed_status_patch`]'s reason.
 #[must_use]
 pub fn refused_status_patch(
     restore: &Restore,
@@ -1346,6 +1349,17 @@ pub fn refused_status_patch(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
+    let conditions = crate::verification::carry_verified(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            restore,
+            CONDITION_FAILED,
+            "True",
+            reason,
+            message,
+            now,
+        )],
+    );
     json!({
         "status": {
             "phase": PHASE_FAILED,
@@ -1357,7 +1371,7 @@ pub fn refused_status_patch(
             // `PlanHashMismatch`, `ClusterNotReachable` and `NameTooLong`
             // alike. `reason` is the SUB-CASE, verbatim the condition's own.
             "reason": reason,
-            "conditions": [condition(restore, CONDITION_FAILED, "True", reason, message, now)],
+            "conditions": conditions,
         }
     })
 }
@@ -1675,6 +1689,12 @@ pub fn measured_block(o: &ScorecardObservation) -> serde_json::Map<String, Value
 /// "this run has no exit code" rather than fabricating a `1` (indistinguishable
 /// from a real operational failure) or a `0` (a green badge for a run that
 /// never reported).
+///
+/// THE CONDITION ARRAY GOES THROUGH [`crate::verification::carry_verified`],
+/// as [`finished_status_patch`]'s does — belt and braces beside the
+/// already-terminal guard in `reconcile_restore`, and for the reason the
+/// `Backup` twin states: a merge patch REPLACES arrays, so a builder that owns
+/// the array owes the parts of it that are not its own.
 #[must_use]
 pub fn crashed_status_patch(
     restore: &Restore,
@@ -1682,6 +1702,18 @@ pub fn crashed_status_patch(
     job_name: &str,
     now: DateTime<Utc>,
 ) -> Value {
+    let conditions = crate::verification::carry_verified(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            restore,
+            CONDITION_FAILED,
+            "True",
+            terminal_state,
+            "the Job finished but no container named runner reported a terminated state; \
+             the exit code is unrecoverable",
+            now,
+        )],
+    );
     json!({
         "status": {
             "phase": PHASE_FAILED,
@@ -1692,15 +1724,7 @@ pub fn crashed_status_patch(
             // `PodUnschedulable` and `NoExitCode` were indistinguishable in
             // the `REASON` column. Verbatim the condition's own `reason`.
             "reason": terminal_state,
-            "conditions": [condition(
-                restore,
-                CONDITION_FAILED,
-                "True",
-                terminal_state,
-                "the Job finished but no container named runner reported a terminated state; \
-                 the exit code is unrecoverable",
-                now,
-            )],
+            "conditions": conditions,
         }
     })
 }
@@ -2292,6 +2316,43 @@ async fn reconcile_restore_inner(
             keys: RestoreEvidenceKeys::default(),
             ttl_patched: false,
             requeue: Requeue::After(REQUEUE_SECS),
+        });
+    }
+
+    // STEP 2b. ALREADY TERMINAL: READ NOTHING AND WRITE NOTHING.
+    //
+    // The `Backup` twin (`controllers::backup.rs`, same position, same guard)
+    // carries the measurement this is written from. The `Restore` half was
+    // proven live on its own: a terminal, verified `Restore` at `Succeeded` /
+    // `0` / `outcome: pass` / `Valid` became `phase: Failed` with its
+    // `[Complete, EvidenceRecorded, Verified]` conditions replaced by one
+    // `Failed/NoExitCode` after a plain `kubectl rollout restart
+    // deploy/weirkeeper` — an upgrade, a node reboot, an eviction or an OOM,
+    // any of which re-lists a finished Job whose pod is gone. A terminal
+    // `Restore` requeues `AwaitChange`, so it does not even need the 15 s
+    // timer to get there.
+    //
+    // The trade is the `Backup` file's, written out there: a TTL or
+    // verification patch that failed on the pass that made the object terminal
+    // is not retried. Neither leaves a false statement on the object; the
+    // re-derivation did.
+    if status_is_terminal(restore) {
+        debug!(
+            restore = %name,
+            namespace = %namespace,
+            job = %job_name,
+            "the status is already terminal; the runner's pod is not read again and no patch is \
+             sent"
+        );
+        return Ok(RestoreOutcome {
+            job_name,
+            created: false,
+            admission: None,
+            exit_code: restore.status.as_ref().and_then(|s| s.exit_code),
+            terminal_state: None,
+            keys: RestoreEvidenceKeys::default(),
+            ttl_patched: false,
+            requeue: Requeue::AwaitChange,
         });
     }
 
