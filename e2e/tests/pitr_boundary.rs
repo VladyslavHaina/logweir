@@ -39,8 +39,9 @@
 //! ms` is not addressable in it. So this row produces its own records with
 //! explicit `CreateTime` (`harness::produce_with_timestamps`), takes its own
 //! backup with `logweir backup run` under its own `backup_id`, and **sweeps
-//! that archive out of the shared bucket at both ends** — see
-//! `sweep_pitr_archives`.
+//! that archive out of the shared bucket at the start of the row and from a
+//! `Drop` guard** — so the panicking path leaves the bucket clean too. See
+//! `sweep_pitr_archives` and `SweptArchive`.
 //!
 //! # What it asserts, and what it deliberately does not
 //!
@@ -408,9 +409,16 @@ fn restore_spec(backup_id: &str) -> serde_yaml::Value {
 /// `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`
 /// quarantine THIS row's segment and then watch an intact drill archive exit
 /// 0. That was measured once already, in Task 4's fix round, for the
-/// `t4real-…` prefix. Swept at the START too, so a row that died mid-flight in
-/// an earlier run cannot poison a later one.
-fn sweep_pitr_archives() {
+/// `t4real-…` prefix. Swept at the START of the row as well, so a row that died
+/// mid-flight in an EARLIER run cannot poison a later one — and, since Task 11
+/// fix round 1, from a `Drop` guard rather than from a last statement, so THIS
+/// row dying mid-flight cannot poison a later one either (see `SweptArchive`).
+///
+/// Returns the keys that SURVIVED the sweep instead of asserting on them, so
+/// each caller can decide what a survivor means: an assertion on a normal
+/// path, a stderr diagnostic on an unwinding one — where a second panic would
+/// abort the process and take this row's real failure message with it.
+fn sweep_archive_keys() -> Vec<String> {
     let mine = |keys: Vec<String>| -> Vec<String> {
         keys.into_iter()
             .filter(|k| {
@@ -454,13 +462,82 @@ fn sweep_pitr_archives() {
             &format!("local/{ARCHIVE_BUCKET}/{p}/"),
         ]);
     }
-    let left = mine(list());
+    mine(list())
+}
+
+/// Sweep, and REQUIRE that nothing of this row's survived it.
+///
+/// The start-of-row call. A survivor here means an earlier run left an archive
+/// behind, which is precisely the condition that would mis-aim
+/// `harness::corrupt_a_non_oldest_segment`, so it is an assertion.
+fn sweep_pitr_archives() {
+    let left = sweep_archive_keys();
     assert!(
         left.is_empty(),
         "this row's archive is still in {ARCHIVE_BUCKET}, and \
          harness::corrupt_a_non_oldest_segment would quarantine one of ITS segments instead \
          of the drill's: {left:?}"
     );
+}
+
+/// Puts the SHARED ARCHIVE BUCKET back on **every** exit path, including a
+/// panicking assertion — the object-store half of what `RestoredBrokerState`
+/// does for the broker.
+///
+/// **Why this is a second guard and not a call inside
+/// `RestoredBrokerState::drop`.** Two reasons, and the second is the
+/// load-bearing one:
+///
+/// 1. Two shared resources, two owners. `RestoredBrokerState` is Task 9b's
+///    guard reused verbatim in shape (see its own doc comment), it deletes
+///    broker topics, and every statement in its `drop` is an ignored `let _`.
+///    Bucket keys are a different resource with a different failure mode.
+/// 2. **A sweep that fails must be able to assert, and a `Drop` that panics
+///    while the thread is already unwinding ABORTS the process** — which would
+///    destroy the assertion message this row exists to print. Only a
+///    purpose-built guard can branch on `std::thread::panicking()`; folding
+///    that branch into the topic guard would make a guard that never panics
+///    panic conditionally.
+///
+/// Before this guard existed the sweep ran as the row's LAST STATEMENT, so a
+/// panic anywhere after the backup left `pitr-<nonce>/…` in the shared
+/// `kafka-backups` bucket. `harness::archive_segment_keys` lists the bucket
+/// ROOT and `corrupt_a_non_oldest_segment` takes the LAST key in sort order —
+/// and `pitr-…` sorts after `drill-demo/…` — so the leftover would be
+/// quarantined on a LATER run in place of the drill's own segment, and
+/// `full_drill`'s corruption row would then watch an intact drill archive exit
+/// 0. Within one suite run the alphabet hides it (`full_drill` runs before
+/// `pitr_boundary`) and the start-of-row sweep protects this row itself;
+/// neither protects the next run against the same volume. `--no-fail-fast`
+/// (this task's own addition to `just e2e`) makes "the suite carried on after a
+/// panicking row" the normal case, so the panicking path is not exotic.
+struct SweptArchive;
+
+impl Drop for SweptArchive {
+    fn drop(&mut self) {
+        let left = sweep_archive_keys();
+        if std::thread::panicking() {
+            // The row is already failing and its message is already on stderr.
+            // Say what the sweep could not remove and let the real failure
+            // stand; an assertion here would abort the process instead.
+            if !left.is_empty() {
+                eprintln!(
+                    "[pitr] SWEEP INCOMPLETE on the panicking path — still in \
+                     {ARCHIVE_BUCKET}: {left:?}. \
+                     harness::corrupt_a_non_oldest_segment may quarantine one of these \
+                     instead of the drill's segment on the next run; \
+                     `just e2e-down -v` clears it."
+                );
+            }
+        } else {
+            assert!(
+                left.is_empty(),
+                "this row's archive is still in {ARCHIVE_BUCKET}, and \
+                 harness::corrupt_a_non_oldest_segment would quarantine one of ITS segments \
+                 instead of the drill's: {left:?}"
+            );
+        }
+    }
 }
 
 /// **G-PITR.** The inclusive point-in-time boundary, across three partitions,
@@ -518,6 +595,11 @@ fn pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time() {
     let _restored = RestoredBrokerState {
         targets: vec![SRC_TOPIC.to_string(), target_topic.clone()],
     };
+    // The archive half of the same invariant, armed at the same point and for
+    // the same reason (F-MED, Task 11 review). Declared AFTER `_restored`, so
+    // it drops FIRST: the bucket is swept, then the topics go. Before section 2
+    // there is no archive and its drop is a no-op listing.
+    let _archive = SweptArchive;
     delete_topics_and_wait(&[SRC_TOPIC.to_string(), target_topic.clone()]);
 
     // ------------------------------------------------- 1. the fixture, produced
@@ -857,7 +939,7 @@ fn pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time() {
          lower is 0, and every record the archive holds over {SRC_TOPIC} is in upper"
     );
 
-    // Leave the shared bucket exactly as it was found; the topics go with the
-    // `Drop` guard.
-    sweep_pitr_archives();
+    // The shared bucket and the two topics both go with their `Drop` guards —
+    // `SweptArchive` first, then `RestoredBrokerState` — so this row leaves the
+    // stack as it found it on the panicking path too, not only on this one.
 }
