@@ -124,6 +124,17 @@ impl EvidenceTree {
     fn remove(&self, rel: &str) {
         std::fs::remove_file(self.root.join(rel)).expect("the fixture object is removable");
     }
+
+    /// An object's mode. `0o000` is how this test reaches `StoreError::Io`
+    /// rather than `StoreError::NotFound` — see
+    /// [`a_storage_failure_is_not_invalid`]'s second arm for why a directory
+    /// path does not.
+    #[cfg(unix)]
+    fn chmod(&self, rel: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(self.root.join(rel), std::fs::Permissions::from_mode(mode))
+            .expect("the fixture object's mode is settable");
+    }
 }
 
 impl Drop for EvidenceTree {
@@ -455,28 +466,38 @@ fn a_storage_failure_is_not_invalid() {
         r.detail
     );
 
-    // SECOND ARM — an UNREADABLE path: the key names a directory, so the
-    // backend answers with something other than NotFound and the error's own
-    // `Display` is carried.
+    // SECOND ARM — AN UNREADABLE OBJECT, which is `StoreError::Io` and NOT
+    // `NotFound`. This arm is the one that kills "map a StoreError other than
+    // NotFound to Invalid", and it took two attempts to write: a key naming a
+    // DIRECTORY comes back from `LocalFileSystem` as `NotFound` too, so the
+    // first version of this arm exercised the same branch as the first and the
+    // mutant SURVIVED at 14 passed / 0 failed. A file whose mode is `000` is
+    // the shape that actually reaches the other branch.
     let tree = EvidenceTree::new("unreadable", payload.as_bytes(), sidecar.as_bytes());
     let store = tree.handle();
+    tree.chmod(PAYLOAD_KEY, 0o000);
     let r = verify_evidence(
         Some(&store),
         &roster(keys.clone()),
-        "logweir/drills",
+        PAYLOAD_KEY,
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
     );
+    tree.chmod(PAYLOAD_KEY, 0o600);
     assert_eq!(
         r.result,
         VerificationVerdict::NotAttempted,
-        "EVERY StoreError is NotAttempted, not only NotFound. Got {r:?}"
+        "EVERY StoreError is NotAttempted, not only NotFound — a bucket that will not answer has \
+         made no claim about the document. Got {r:?}"
     );
+    let detail = r
+        .detail
+        .expect("a NotAttempted from storage carries the error");
     assert!(
-        r.detail.is_some(),
-        "the error's own Display is the detail, so an operator reads the storage failure rather \
-         than a verdict about a document"
+        detail.contains("could not be read"),
+        "an unreadable object is DISTINGUISHED from an absent one, because they are different \
+         things for an operator to act on; got {detail}"
     );
 
     // THIRD ARM — no credential at all. The documented switch (spec §9): an
