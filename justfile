@@ -58,6 +58,7 @@ lint:
     ./scripts/check-no-archive-write.sh
     ./scripts/check-ui-offline.sh
     ./scripts/check-ui-behaviour.sh
+    ./scripts/check-unverified-labels.sh
 
 # Task 7 (Phase 1 line item 1c). G2′: the set of workspace crates from which
 # the signing API is reachable is exactly {logweir, e2e}, computed from the

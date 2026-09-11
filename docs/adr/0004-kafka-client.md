@@ -31,11 +31,12 @@ to depend on, not whether to write one. Two realistic candidates:
   this ADR, see Consequences) reach `logweir-kafka` too.
 
 The task brief pre-declares `rdkafka` as the default outcome (`rskafka` "is a
-deliberately minimal produce/consume client and [UNVERIFIED] does not expose
-`DescribeConfigs`") and caps the confirming spike at 2 hours (spec §12 spike
-1): connect to a live KRaft broker on `localhost:9092` (the compose stack
-`just e2e-up` brings up) with `rskafka@0.5` and attempt `DescribeConfigs` for
-`ConfigResource::TOPIC` against `logweir.scratch`.
+deliberately minimal produce/consume client and
+[UNVERIFIED — read rskafka 0.5's public API for a DescribeConfigs entry point]
+does not expose `DescribeConfigs`") and caps the confirming spike at 2 hours
+(spec §12 spike 1): connect to a live KRaft broker on `localhost:9092` (the
+compose stack `just e2e-up` brings up) with `rskafka@0.5` and attempt
+`DescribeConfigs` for `ConfigResource::TOPIC` against `logweir.scratch`.
 
 ## Spike outcome
 

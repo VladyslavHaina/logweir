@@ -219,7 +219,7 @@ pre-release ruling by accident.**
   2. MinIO is the only S3-compatible backend Logweir has tested. **Real AWS S3
      is NOT exercised in v0.1** — Global Constraint 17 forbids provisioning a
      cloud resource, and no task in this plan supplies a bucket, a region or a
-     credential source. The AWS leg is `[UNVERIFIED against real S3]` and is
+     credential source. The AWS leg is `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` and is
      confirmed by the first adopter run, not by this plan.
   3. Any other S3-compatible backend that answers `NotSupported` (or
      `NotImplemented`) to `PutMode::Create` takes the HEAD-then-PUT fallback in

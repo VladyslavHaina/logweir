@@ -222,6 +222,115 @@ else
   bad "v0.19.1's below-floor status is not recorded"
 fi
 
+# --------------------------------------------------------------------------
+# Task 29b. THE TAG-1 CHECKLIST: TEN ROWS, ONE PER SPEC §16 CLAUSE, AND NO ROW
+# THAT READS `closed` WITHOUT A CLOSER THAT EXISTS.
+# --------------------------------------------------------------------------
+# Spec §16 lists ten clauses that together mean "publishable". Five of them
+# cannot be closed from this tree — three need a git remote, one needs images
+# published to a registry the author does not control, one needs an act by the
+# owner — and the failure mode a checklist has is that such a row gets ticked
+# anyway, because the tick costs nothing and nothing reads it back.
+#
+# So this arm reads the file back. It asserts the shape (ten rows, numbered
+# 1-10), the grammar (each status is exactly one of three literals), and the
+# one property that makes a tick mean something: EVERY `closed` ROW NAMES A
+# PATH OR A COMMAND THAT EXISTS ON DISK. A row that cites a test a later task
+# will write is the same defect as a tick with no closer at all.
+#
+# The BLOCKED rows are collected here and printed at the end of this script,
+# under the "NOT CHECKED HERE" heading, so they are counted as what they are:
+# not checked. A blocked row is never a pass.
+echo "== Task 29b: docs/tag1-checklist.md, one row per spec §16 clause =="
+checklist=docs/tag1-checklist.md
+blocked_list=""
+if [ ! -s "$checklist" ]; then
+  bad "$checklist is missing or empty; spec §16 clause 9 and the tag ledger both live in it"
+else
+  ok "$checklist"
+  # One pass over the table. A row is a table line whose first cell is a
+  # number; the status cell is unwrapped from its backticks, and every
+  # backticked token in the closer cell of a `closed` row is emitted
+  # separately so the existence test below is a plain `test -e` and not a
+  # pattern match. A `bash ` or `just ` prefix and a `::test_name` suffix are
+  # stripped: the thing that has to exist is the file. Tokens are emitted for
+  # `closed` rows ONLY -- a blocked row's cell records evidence and reasons,
+  # not closers, and holding it to the same rule would make the reason itself
+  # a path that has to exist.
+  parsed=$(awk -F'|' '
+    /^\|[ \t]*[0-9]+[ \t]*\|/ {
+      num = $2; gsub(/[ \t]/, "", num)
+      st = $4; gsub(/`/, "", st); sub(/^[ \t]+/, "", st); sub(/[ \t]+$/, "", st)
+      printf "ROW\t%s\t%s\n", num, st
+      if (st != "closed") next
+      n = split($5, seg, "`")
+      for (i = 2; i <= n; i += 2) {
+        t = seg[i]
+        sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+        sub(/^bash /, "", t); sub(/^just /, "", t)
+        p = index(t, "::"); if (p > 0) t = substr(t, 1, p - 1)
+        if (t != "") printf "TOKEN\t%s\t%s\n", num, t
+      }
+    }' "$checklist")
+  nrows=0; expected=1; ordered=1; badstatus=0; badcloser=0; badnote=0
+  # A here-document, not a pipe: the loop has to run in THIS shell or
+  # `blocked_list` would be built in a subshell and lost.
+  while IFS="$(printf '\t')" read -r kind num rest; do
+    case "$kind" in
+      ROW)
+        nrows=$((nrows + 1))
+        [ "$num" = "$expected" ] || ordered=0
+        expected=$((expected + 1))
+        case "$rest" in
+          closed|open) : ;;
+          "blocked: "?*) blocked_list="$blocked_list$num	$rest
+" ;;
+          *) echo "      row $num: status \"$rest\" is none of closed / blocked: <reason> / open"
+             badstatus=1 ;;
+        esac
+        # THE TABLE AND THE NOTE SAY THE SAME THING. Each clause has a note
+        # below the table that OPENS with its status; the one-line edit that
+        # ticks a row without arguing with its own paragraph is exactly the
+        # edit this catches. Only the note's FIRST line counts: the body of a
+        # blocked note says what would close it, and naming `closed` there is
+        # the whole point of the row rather than a second status.
+        note=$(awk -v n="$num" '
+          $0 ~ "^### " n " " { inside = 1; next }
+          /^### / { inside = 0 }
+          inside && NF { print; exit }' "$checklist")
+        case "$note" in
+          *"\`$rest\`"*) : ;;
+          *) echo "      row $num: the table says \"$rest\" and the note below does not say so"
+             badnote=1 ;;
+        esac
+        ;;
+      TOKEN)
+        [ -e "$rest" ] || {
+          echo "      row $num: the closer \"$rest\" does not exist on disk"
+          badcloser=1
+        }
+        ;;
+    esac
+  done <<EOF
+$parsed
+EOF
+  [ "$nrows" -eq 10 ] \
+    && ok "ten rows, one per spec §16 clause" \
+    || bad "$checklist carries $nrows numbered rows; spec §16 has ten clauses"
+  [ "$ordered" -eq 1 ] \
+    && ok "the rows are numbered 1-10, in order" \
+    || bad "$checklist's rows are not numbered 1-10 in order"
+  [ "$badstatus" -eq 0 ] \
+    && ok "every status is one of closed / blocked: <reason> / open" \
+    || bad "the rows above carry a status outside the three-literal grammar"
+  [ "$badcloser" -eq 0 ] \
+    && ok "every closed row names a path or a command that exists on disk" \
+    || bad "the rows above read closed and name a closer that is not there"
+  [ "$badnote" -eq 0 ] \
+    && ok "every row's status is repeated in that clause's own note" \
+    || bad "the rows above carry a status their own note does not state"
+fi
+
 echo
 echo "== NOT CHECKED HERE, and therefore UNVERIFIED =="
 note "release.yml produced binaries and a debian:bookworm-slim image"
@@ -232,6 +341,17 @@ note "just e2e (needs \`just e2e-up\` and a seeded stack)"
 note "./scripts/demo.sh (needs docker; run it, it is the task's own test)"
 note "cargo deny check (run it, or read the CI job)"
 note "cargo xtask sync-upstream --tag v0.21.0 (needs an upstream checkout)"
+# Task 29b. The blocked rows of the tag-1 checklist, echoed here rather than
+# counted above: a clause that cannot be closed from this tree is NOT a pass,
+# and the only honest place for it is the list of things this script did not
+# check (tag-1 STANDING RULE 22 — a blocked mark is recorded as blocked, never
+# as closed).
+note "docs/tag1-checklist.md rows that are BLOCKED, and are therefore not passes:"
+while IFS="$(printf '\t')" read -r num st; do
+  [ -n "$num" ] && note "  spec §16 clause $num -- $st"
+done <<EOF
+$blocked_list
+EOF
 
 echo
 echo "passed $pass, failed $fail"
