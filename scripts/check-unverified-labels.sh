@@ -60,15 +60,19 @@
 #
 # RULE 2 -- NOT CONTRADICTED. The line must not also assert the thing is true.
 #   Implemented as: DELETE the bracket token and its `[VERIFIED` sibling from
-#   the line FIRST, then reject if what remains contains any of the four
-#   LOWERCASE, WHOLE-WORD, CASE-SENSITIVE tokens `verified`, `proves`,
-#   `confirms`, `we know`. The pre-strip and the case-sensitivity are both
-#   load-bearing. Matched case-insensitively the rule fires on the token
-#   itself -- the word it is built from ENDS in "verified" -- so every mark in
-#   the tree goes red at once; and this repository writes `[VERIFIED …]` all
-#   over its own documents. Whole-word matching is what keeps the legitimate
-#   "confirmed by the first adopter run" at `docs/stability.md` from being a
-#   red, and what keeps "unverified" from matching "verified".
+#   the line FIRST, then LOWERCASE what remains, then reject if it contains any
+#   of the four WHOLE-WORD tokens `verified`, `proves`, `confirms`, `we know`.
+#   The pre-strip is load-bearing: matched without it the rule fires on the
+#   token itself -- the word it is built from ENDS in "verified" -- so every
+#   mark in the tree goes red at once, and this repository writes `[VERIFIED …]`
+#   all over its own documents. Whole-word matching is what keeps the
+#   legitimate "confirmed by the first adopter run" at `docs/stability.md` from
+#   being a red, and what keeps "unverified" from matching "verified". The
+#   plan's brief asked for CASE-SENSITIVE matching as a third guard; Task 29b's
+#   review measured that with the pre-strip and whole-word in place the case
+#   guard protects nothing on this tree and lets "Verified against MSK" beside
+#   a mark through, so the controller made the match case-insensitive at
+#   landing (erratum E26).
 #
 # RULE 3 -- INVENTORIED. Every mark this script ACCEPTED is printed with its
 #   file, its line and its description, so the count is visible on every `lint`
@@ -130,7 +134,7 @@ fi
 
 awk '
 function wordhit(s, w,   re) {
-  # Whole-word and case-sensitive. Word characters are letters, digits and the
+  # Whole-word over the LOWERCASED remainder. Word characters are letters, digits and the
   # underscore, so "unverified" does not contain the token "verified" and a
   # Rust identifier is not split in the middle.
   re = "(^|[^A-Za-z0-9_])" w "([^A-Za-z0-9_]|$)"
@@ -229,6 +233,7 @@ BEGIN {
     t = text
     gsub(RE_T, "", t)
     gsub(RE_V, "", t)
+    t = tolower(t)
     if (wordhit(t, "verified"))      hit = "verified"
     else if (wordhit(t, "proves"))   hit = "proves"
     else if (wordhit(t, "confirms")) hit = "confirms"
