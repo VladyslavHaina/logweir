@@ -23,5 +23,24 @@ logweir-evidence = { path = "../crates/logweir-evidence" }
 logweir-kafka = { path = "../crates/logweir-kafka" }
 base64.workspace = true
 chrono.workspace = true
+# Task 11, and the ONE thing this suite could not do before: PRODUCE a record
+# with an explicit `CreateTime`. `harness::produce_with_timestamps` is the
+# G-PITR fixture's only writer, and no tool already in the tree can write it —
+# `kafka-console-producer` (which `scripts/e2e-seed.sh` uses) has no timestamp
+# property at all, so every record it writes is stamped "now" and the seeded
+# archive's restore window is only seconds wide (measured 4,337 ms and 6,728 ms
+# on two seeds). A boundary test whose boundary is wall-clock-relative is
+# irreproducible, so the fixture states its instants and this producer writes
+# them.
+#
+# ADDS NO PACKAGE (Global Constraint 38 / GC21): `rdkafka` is already a
+# resolved member of this workspace's graph — `crates/logweir-kafka` depends on
+# it — so `cargo metadata --offline` holds at 392. The FEATURE SET is copied
+# from `crates/logweir-kafka/Cargo.toml` verbatim rather than defaulted,
+# because `cargo test -p e2e --features e2e` (what `just pitr` runs) resolves a
+# narrower graph than `cargo test --workspace --features e2e`, and a producer
+# built against a different librdkafka than the reader in the same process is
+# not a difference this suite should be able to have.
+rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "zstd", "ssl", "sasl", "tokio"] }
 serde_json.workspace = true
 serde_yaml.workspace = true

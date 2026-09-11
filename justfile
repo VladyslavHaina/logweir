@@ -228,8 +228,17 @@ e2e-down:
 # instance, and the MinIO credentials the e2e harness needs come from the
 # environment, never from IMDS. Set for the whole run rather than per test:
 # nothing here should ever probe it.
+#
+# `--no-fail-fast` (Task 11): without it cargo stops at the FIRST test binary
+# that reports a failure and never runs the later ones, so one red suite hides
+# every suite after it in the alphabet — a reviewer reading the output sees one
+# failure and no information at all about `pitr_boundary`, `scram` or `smoke`.
+# The e2e suites are independent (they share the stack, not state), and
+# `--test-threads=1` still serialises them, so running all of them and
+# reporting every failure is both safe and the only way the run is diagnostic.
+# cargo's own exit code is unchanged: non-zero if any binary failed.
 e2e:
-    AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e -- --test-threads=1 --nocapture
+    AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e --no-fail-fast -- --test-threads=1 --nocapture
 
 # Produce, back up with the pinned engine, and refresh the two fixtures that
 # must come from a REAL archive. Needs a FRESH stack (`e2e-down` then `e2e-up`);
@@ -336,3 +345,34 @@ smoke: image
 # edge between them.
 crds:
     cargo run -p weirkeeper --example emit_crds -- --out config/crd
+
+# Task 11, chain J slot 12. **G-PITR on its own**: the inclusive point-in-time
+# boundary, across three partitions, proved against the real stack — without
+# waiting for the whole e2e suite. One test, named exactly, so the reviewer who
+# wants to see the guard (or watch a mutant kill it) pays for one restore
+# instead of twenty.
+#
+# THIS RECIPE ASSUMES THE STACK IS ALREADY UP. It does not run `e2e-up` and it
+# does not run `e2e-down`: the compose stack is a shared resource with one
+# owner at a time (STANDING RULE 3), and a recipe that tore it down would pull
+# it out from under whoever was using it. Run it as:
+#
+#     just e2e-up
+#     just pitr; echo "rc=$?"
+#     just e2e-down
+#
+# `just e2e-up` ALONE is enough, and that is measured: this row needs nothing
+# from `scripts/e2e-seed.sh`. It creates its own topic, produces its own nine
+# records with explicit CreateTime, takes its own backup under its own
+# `backup_id`, restores in `newTopic` mode (which requires no marker topic),
+# and sweeps that archive out of the shared bucket at both ends. All it wants
+# from the stack is a broker and the two buckets `e2e-up` creates.
+#
+# `cargo build -p logweir` FIRST, and it is not optional (plan erratum E9): the
+# harness runs `target/debug/logweir`, and `cargo test -p e2e` does not rebuild
+# the BINARY — only the library it links. Without this line the row tests
+# whatever binary was left over from an earlier build, which is how a mutant
+# survives a run that looks green.
+pitr:
+    cargo build -p logweir
+    AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --test pitr_boundary -- --exact pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time --test-threads=1 --nocapture

@@ -715,6 +715,93 @@ and by phase 6 the admission guard has passed, the plan has been rendered and th
 `validate-restore` has already executed. The ADR that would normally record this decision is gated
 on an open question and is deferred; this section is the record.
 
+### Guard G-PITR: upstream's six point-in-time tests contain zero assertions, so Logweir proves the boundary itself
+
+`kafka-backup` 0.21.0 declares six point-in-time tests —
+`crates/kafka-backup-core/tests/integration_suite/pitr_accuracy.rs:25,40,54,66,78,86`: accuracy,
+boundary-inclusive, multi-partition consistency, millisecond precision, empty window, and
+`test_full_restore_no_pitr`. Every one of them is `#[ignore = "requires Docker"]` with a body that
+is one `println!` and a comment beginning "This test would:", and the file
+**contains zero assertions** (`grep -c assert` → 0). The filter at the centre of this product has no
+executable evidence upstream, the `<=` boundary included. The source-level answer is readable and
+inclusive — `r.timestamp >= s && r.timestamp <= e`
+(`crates/kafka-backup-core/src/restore/helpers.rs:74-82`) — so Logweir's guard **confirms a stated
+expectation** rather than discovering one.
+
+**The recorded result.** `e2e/tests/pitr_boundary.rs::pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time`,
+run by `just pitr` with the compose stack live. Measured against engine **0.21.0** at digest
+`sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`, Apache Kafka **3.7.1**
+(KRaft, node 1001), on 2026-09-10:
+
+```
+[pitr] point_in_time=2025-10-09T08:53:20Z (T=1760000000000) -> target topic restore-20251009T085320Z-pitr-src
+[e2e] produced 9 record(s) into pitr-src across 3 partition(s) with explicit CreateTime; end offsets 0 -> 9
+[pitr] partition 0: p0-before-1ms@ts=1759999999999 offset=0 x-original-offset=Some(0)  p0-boundary@ts=1760000000000 offset=1 x-original-offset=Some(1)
+[pitr] partition 1: p1-before-1ms@ts=1759999999999 offset=0 x-original-offset=Some(0)  p1-boundary@ts=1760000000000 offset=1 x-original-offset=Some(1)
+[pitr] partition 2: p2-before-1ms@ts=1759999999999 offset=0 x-original-offset=Some(0)  p2-boundary@ts=1760000000000 offset=1 x-original-offset=Some(1)
+[pitr] manifest bound over [1759999999999, 1760000000000] = [0, 9]; restored 6
+```
+
+The signed scorecard for that run: `outcome: pass`, `integrity.result: pass`,
+`integrity.records_sampled: 6`, `records_sampled_matching: 6`, `mismatches: 0`,
+`pass_rate_measured: 1.0`, `sample.records_restored: 6`, `measured.rpo_seconds: 0`,
+`target.mode: newTopic`, `target.topic_mapping_prefix: restore-20251009T085320Z-`. Both readers
+accept it (`logweir drill verify` and `docs/verify_scorecard.py` 1.13.0).
+
+The fixture is nine records with explicit `CreateTime` — `T − 1 ms`, `T`, `T + 1 ms` on **each** of
+three partitions, where `T` is the fixed literal `1_760_000_000_000` (2025-10-09T08:53:20Z) and never
+a clock read. A `mode: newTopic` restore at `point_in_time = T` brought back
+**six of the nine records**: `T − 1 ms` and `T` on every partition, and none of the three at
+`T + 1 ms`. Partitions 0, 1 and 2 each returned exactly two records, on the partition they were
+produced to, each carrying an 8-byte little-endian `x-original-offset` decoding to its source
+offset. The boundary record — the one whose timestamp equals `point_in_time` exactly — came back on
+all three partitions, still stamped `T`.
+
+**What this measurement also found: the canary size cannot exceed what the window really holds.**
+`sample.records_per_partition: 25` over this fixture scored `fail-integrity`, and correctly so:
+
+```
+selection pitr-src/1  claimed 3  records Unverified { why: "the archive returned 2 fingerprints
+  where the manifest claims 3 for this selection; a short sample is coverage the drill did not
+  obtain, not a smaller successful sample" }
+```
+
+`phase7_verify::verdict_for_selection` claims
+`min(records_per_partition, Σ record_count over the segments overlapping the sample window)`, and
+the manifest's finest granularity is the SEGMENT — so a recovery point that falls INSIDE a segment
+makes the manifest claim the whole segment (3) while the archive side correctly yields only the
+records inside the window (2). This is the same segment-granularity fact that makes
+`expected_restored_count` a bound rather than an equality, and it is not a defect in either place:
+a short sample IS coverage the restore did not obtain. **The consequence for an operator is
+concrete: on a point-in-time restore, set `sample.records_per_partition` at or below the number of
+records each partition holds inside the window, or the run reports `fail-integrity` about its own
+sample rather than about the restore.** The G-PITR fixture asks for 2, which is what its window
+holds per partition.
+
+**The count is bounded, never equated.** The nine records land in one segment per partition
+(`segment_max_records: 1000`), and each of those segments straddles `T`: it starts at `T − 1 ms` and
+ends at `T + 1 ms`. Nothing is wholly inside `[floor, T]`, so
+`logweir_core::engine::expected_restored_count` returns **`[0, 9]`** and the six restored records are
+inside it. That is the whole claim a manifest can support: `point_in_time` falls INSIDE a segment on
+any real archive and `SegmentFacts` carries no per-record timestamp, so an equality would fail a
+correct implementation and would then be "fixed" by weakening it. The boundary property is proved by
+the restored payload **set**; the count is proved only to be within the bound.
+
+### A broker on `LogAppendTime` honours a per-topic `CreateTime` override (Task 8, residual 3)
+
+Apache Kafka 3.7.1 (KRaft, node 1001) whose effective `log.message.timestamp.type` is
+**`LogAppendTime`** **honours a per-topic `message.timestamp.type=CreateTime` override** — measured
+by execution, with the broker setting applied as a dynamic config and reverted (and the revert
+asserted) in the same step. Two consequences, and they pull in opposite directions, which is why the
+sentence is recorded rather than assumed: phase 0's override probe can therefore succeed on such a
+broker, so `TargetTopicConfigRefused`'s binary arm is unreachable on this stack by construction (its
+deterministic arm is
+`crates/logweir/tests/topic_preflight.rs::a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`);
+and a topic that states the override keeps the timestamps its producer states, which is what makes
+G-PITR's fixture possible at all. MSK is a different broker and is not covered by this measurement —
+spec §10's MSK item 4 stays `[UNVERIFIED — needs an MSK cluster]` (Global Constraint 17 forbids the
+spend).
+
 ## Engine compatibility and support policy
 
 - **Engine version floors, and why each exists (spec §7.2).** `kafka-backup`

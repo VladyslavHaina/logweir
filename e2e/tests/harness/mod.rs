@@ -470,6 +470,170 @@ pub fn create_topic(topic: &str, partitions: i32) {
     panic!("topic {topic} still absent 15s after --create");
 }
 
+/// `create_topic` with topic-level config entries — the only way to seed a
+/// fixture whose record timestamps are the fixture's own.
+///
+/// **Why it has to exist.** `message.timestamp.type` is a topic config, and on
+/// `LogAppendTime` the broker REPLACES every timestamp a producer states with
+/// its own wall clock — which is the exact failure `render_restore.rs:112-114`
+/// describes for a restore target and the exact failure a point-in-time
+/// FIXTURE has to avoid. Task 8 closed residual 3 by execution on this very
+/// broker: Apache Kafka 3.7.1 (KRaft, node 1001) on
+/// `log.message.timestamp.type=LogAppendTime` HONOURS a per-topic
+/// `message.timestamp.type=CreateTime` override. So the override is stated
+/// here rather than inherited: this stack's broker sets no
+/// `KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE` and therefore runs Kafka's own
+/// `CreateTime` default today, and a fixture that depended on that default
+/// would break silently the day the compose file gained the variable.
+pub fn create_topic_with_configs(topic: &str, partitions: i32, configs: &[(&str, &str)]) {
+    let mut args: Vec<String> = [
+        "--bootstrap-server",
+        "kafka-broker-1:9094",
+        "--create",
+        "--if-not-exists",
+        "--partitions",
+        &partitions.to_string(),
+        "--replication-factor",
+        "1",
+        "--topic",
+        topic,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for (k, v) in configs {
+        args.push("--config".into());
+        args.push(format!("{k}={v}"));
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    ok(kafka_topics(&borrowed), "create topic with configs");
+    for _ in 0..60 {
+        if topic_exists(topic) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    panic!("topic {topic} still absent 15s after --create");
+}
+
+/// The total number of records the broker holds for `topic`, over every
+/// partition — the sum of its end offsets. Reported the same way
+/// `phase7_verify::check_restored_count` counts a restored topic, so a fixture
+/// that says "the broker has n records" means it in the same units the product
+/// does.
+pub fn record_count_on_broker(topic: &str) -> Result<i64, String> {
+    let r = reader();
+    let ends =
+        ClusterReader::end_offsets(&r, topic).map_err(|e| format!("end_offsets({topic}): {e}"))?;
+    Ok(ends.iter().map(|(_, hi)| (*hi).max(0)).sum())
+}
+
+/// **Task 11 — the G-PITR fixture's only writer.** Produces one record per
+/// `(timestamp_ms, payload)` with that EXACT `CreateTime`, and returns only
+/// once the broker's end offsets have advanced by `records.len()`.
+///
+/// # Why this is not `kafka-console-producer`
+///
+/// `scripts/e2e-seed.sh` produces through `kafka-console-producer`, which has
+/// no timestamp property of any kind: every record it writes is stamped with
+/// the moment it was written, so the seeded archive's whole restore window is
+/// seconds wide (measured 4,337 ms and 6,728 ms on two seeds). A boundary test
+/// cannot be built on that — `point_in_time ± 1 ms` is not addressable when
+/// the data spans 4 seconds of whenever-the-suite-ran, and a fixture bound to
+/// `Utc::now()` asserts a different thing on every run. So the fixture states
+/// its instants and this function writes them; `rdkafka`'s `BaseRecord`
+/// carries a timestamp and is the only writer in the tree that does.
+///
+/// # Placement is by ORDER, round-robin over the topic's partitions
+///
+/// `records[i]` goes to partition `i % <the topic's partition count>`, read off
+/// the broker rather than assumed. There is deliberately no partition argument
+/// — the signature is the one interface **I** of Task 11's brief fixes
+/// verbatim — so a caller that wants a specific record on a specific partition
+/// controls it by the order it lists them in, which is what
+/// `e2e/tests/pitr_boundary.rs` does (nine records, three timestamps × three
+/// partitions, listed timestamp-major).
+///
+/// # It returns only when the BROKER agrees, and a timeout is an `Err`
+///
+/// `flush` proves librdkafka's queue drained; it does not prove the broker
+/// accepted anything. With the default (no-op) delivery callback a rejected
+/// record is dropped silently, so the end-offset read is what makes this
+/// function fail closed: a bounded foreground poll (40 × 250 ms), never a bare
+/// sleep, and on timeout an `Err(String)` naming the topic and the offsets
+/// seen. A fixture that produced nothing and reported success would make the
+/// whole restore downstream of it a test of an empty window.
+pub fn produce_with_timestamps(topic: &str, records: &[(i64, &str)]) -> Result<(), String> {
+    use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+
+    if records.is_empty() {
+        return Err(format!(
+            "produce_with_timestamps({topic}) was asked for zero records; a fixture that \
+             produces nothing would make every assertion downstream of it vacuous"
+        ));
+    }
+    let before = record_count_on_broker(topic)?;
+    let partitions = ClusterReader::list_topics(&reader())
+        .map_err(|e| format!("list_topics: {e}"))?
+        .into_iter()
+        .find(|t| t.name == topic)
+        .map(|t| t.partitions)
+        .ok_or_else(|| format!("topic {topic} does not exist; create it before producing"))?;
+    if partitions <= 0 {
+        return Err(format!("topic {topic} reports {partitions} partitions"));
+    }
+
+    let producer: BaseProducer = rdkafka::config::ClientConfig::new()
+        .set("bootstrap.servers", BOOTSTRAP)
+        .set("message.timeout.ms", "10000")
+        // `acks=all` is librdkafka's default and is stated anyway: a fixture
+        // whose records are only on the leader's page cache is a fixture whose
+        // end offsets can move after this function returns.
+        .set("acks", "all")
+        .create()
+        .map_err(|e| format!("producer for {topic} at {BOOTSTRAP}: {e}"))?;
+
+    for (i, (ts, payload)) in records.iter().enumerate() {
+        let partition = (i % partitions as usize) as i32;
+        let key = format!("{topic}-{i:03}");
+        producer
+            .send(
+                BaseRecord::to(topic)
+                    .partition(partition)
+                    .key(&key)
+                    .payload(*payload)
+                    .timestamp(*ts),
+            )
+            .map_err(|(e, _)| {
+                format!("enqueue {topic}/{partition} ts={ts} payload={payload:?}: {e}")
+            })?;
+    }
+    producer
+        .flush(std::time::Duration::from_secs(10))
+        .map_err(|e| format!("flush {topic}: {e}"))?;
+
+    let want = before + records.len() as i64;
+    let mut seen = before;
+    for _ in 0..40 {
+        seen = record_count_on_broker(topic)?;
+        if seen >= want {
+            eprintln!(
+                "[e2e] produced {} record(s) into {topic} across {partitions} partition(s) \
+                 with explicit CreateTime; end offsets {before} -> {seen}",
+                records.len()
+            );
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Err(format!(
+        "produce_with_timestamps({topic}): the broker's end offsets are {seen} after 10s, \
+         expected {want} ({before} before + {} produced); the records were enqueued and \
+         flushed, so the broker rejected some of them",
+        records.len()
+    ))
+}
+
 pub fn recreate_marker_topic() {
     ok(
         kafka_topics(&[
@@ -735,6 +899,17 @@ pub struct RunOpts<'a> {
     /// plaintext drill carry a projected credential it never asked for, which
     /// is the shape of a false green rather than a false red.
     pub env: Vec<(String, String)>,
+    /// Spawn `logweir restore run` instead of `logweir drill run` (Task 11).
+    ///
+    /// The two take ONE clap struct (`cli::RestoreRunArgs`, flattened into both
+    /// subcommands) so the flag list below cannot differ between them, and
+    /// `crates/logweir/tests/restore_mode.rs::cli_drill_run_is_an_alias_for_restore_run`
+    /// pins that in process. What only a process can show is that the
+    /// CANONICAL name really runs the whole thing end to end: every e2e row
+    /// before Task 11 drove the tag-0 alias, so `restore run` had no live
+    /// coverage at all. `false` keeps every existing caller on `drill run`
+    /// byte for byte.
+    pub restore_run: bool,
 }
 
 impl<'a> RunOpts<'a> {
@@ -747,6 +922,7 @@ impl<'a> RunOpts<'a> {
             approval: Approval::Valid,
             pre_create: Vec::new(),
             env: Vec::new(),
+            restore_run: false,
         }
     }
 }
@@ -823,7 +999,12 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
     let _ = std::fs::remove_file(out_json.with_extension("sig"));
 
     let mut cmd = Command::new(bin());
-    cmd.args(["drill", "run", "--spec"])
+    // `restore run` is the canonical name (interface I20); `drill run` is the
+    // tag-0 alias, which prints one deprecation line and does nothing else
+    // differently. Both flatten the SAME clap struct, so the flags below are
+    // one list either way.
+    let verb = if o.restore_run { "restore" } else { "drill" };
+    cmd.args([verb, "run", "--spec"])
         .arg(&sp)
         .arg("--approval")
         .arg(&approval)
