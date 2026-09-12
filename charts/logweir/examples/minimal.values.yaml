@@ -1,6 +1,7 @@
-# minimal.values.yaml — the operator only, at the shipped digests, pointed at
-# an archive YOU already have. Every default of values.yaml stays as shipped;
-# these are the THREE values a stranger must set, and what each one is.
+# minimal.values.yaml — the operator only, at the chart's shipped image
+# defaults, pointed at an archive YOU already have. Every default of
+# values.yaml stays as shipped; these are the THREE values a stranger must set,
+# and what each one is.
 #
 #     helm install logweir charts/logweir -n logweir-system --create-namespace \
 #       -f charts/logweir/examples/minimal.values.yaml
@@ -11,10 +12,24 @@
 # (the controller's READ-ONLY evidence credential, a different principal) goes
 # in the release namespace beside the controller.
 #
-# The shipped digests are locally built measurements (`blocked: images not
-# published`): on a cluster with no access to ghcr.io/logweir/… the controller
-# pod sits in ImagePullBackOff, which is the recorded, expected result of
-# docs/install.md path (a).
+# THE CHART'S IMAGE DEFAULTS NAME THE `latest` TAG, not a digest — the owner's
+# decision of 2026-09-12, with the trade-off written out in values.yaml's own
+# header. Nothing has been pushed to ghcr.io/logweir/… (`blocked: images not
+# published`; release.yml has never run), so on a cluster with no access to
+# that namespace the controller pod sits in ImagePullBackOff, which is the
+# recorded, expected result of docs/install.md path (a) — the same outcome the
+# digests produced.
+#
+# To pin the two Logweir images back to digests, resolve each tag with
+# `docker buildx imagetools inspect <repository>:latest` (a manifest read, not
+# a pull) and set all four values together:
+#
+#     --set controllerImage=<repository>@sha256:… \
+#     --set runnerImage=<repository>@sha256:… \
+#     --set imagePullPolicy=IfNotPresent --set runnerImagePullPolicy=IfNotPresent
+#
+# The four third-party images this chart can bring (MinIO, mc, apache/kafka,
+# kubectl) are pinned by digest and are untouched by that ruling.
 archive:
   # (1) The bucket-and-prefix the controller's evidence handle is built over.
   #     The runner writes receipts and scorecards under `logweir/` in this

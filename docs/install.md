@@ -101,8 +101,8 @@ helm install logweir charts/logweir -n logweir-system --create-namespace
 [`charts/logweir`](../charts/logweir/README.md) installs the same objects
 `logweir.yaml` carries — the six CRDs (from `crds/`, once; Helm never upgrades
 them), the RBAC, the controller Deployment, the NetworkPolicy — into the
-release namespace, at the same pinned digests, with `values.yaml` documenting
-every knob and three optional components behind three flags: `minio.enabled`
+release namespace, with `values.yaml` documenting every knob and three optional
+components behind three flags: `minio.enabled`
 (an in-cluster archive with the two buckets and the `logweir-s3` Secret),
 `demoKafka.enabled` (two throwaway KRaft brokers, `orders` and `payments`
 seeded on the source, the marker topic on the target) and `ui.enabled` (the
@@ -111,17 +111,34 @@ authority — the chart's README says exactly whose). `scripts/check-chart.sh`
 (`just chart-check`, in `just gate`) holds the chart's CRDs and UI files
 byte-identical to this tree and its rendered control plane to `logweir.yaml`.
 
-**The same caveat as (a) and (b) decides which world you are in.** The chart's
-defaults are the shipped digests, so on a cluster with no access to
-`ghcr.io/logweir/…` the controller pod sits in `ImagePullBackOff` exactly as
-path (a) records — `blocked: images not published` until `release.yml` has run
-on a pushed tag. `charts/logweir/examples/author-only.values.yaml` is path (b)
-as values — `weirkeeper:check`, `logweir:check`, `imagePullPolicy: Never` —
-and it is **author-only** everywhere it appears: images you built and loaded
-yourself, **never** evidence for spec §16 clause 1. The chart was walked end
-to end on the author's docker-desktop with those images on 2026-09-12
-([kubernetes.md](kubernetes.md) §19), which proves the chart's objects work
-together and proves nothing about publication.
+**The chart's two Logweir images are named by the `latest` TAG, and only in
+this chart.** That is the owner's decision of 2026-09-12: `controllerImage` and
+`runnerImage` default to the repository half of the tree's own two pins followed
+by `:latest`, while `config/manager/deployment.yaml`, `logweir.yaml` and the
+operator's compiled-in `weirkeeper::job::RUNNER_IMAGE` are untouched and still
+pin **digests** (Global Constraint 7), as do the chart's four third-party images.
+`charts/logweir/values.yaml`'s header carries the whole trade-off — what a
+mutable tag gives up, and the `docker buildx imagetools inspect` recipe that
+pins the two back to digests together with `--set imagePullPolicy=IfNotPresent
+--set runnerImagePullPolicy=IfNotPresent`. Because the reference is a tag, the
+chart's pull policies default to `Always` (Kubernetes' own default for
+`:latest`), and `runnerImagePullPolicy` is a second value that reaches the runner
+Jobs through the controller.
+
+**The same caveat as (a) and (b) still decides which world you are in.** Nothing
+has been pushed to `ghcr.io/logweir/…` — `blocked: images not published` until
+`release.yml` has run on a pushed tag, and it never has — so `:latest` resolves
+in no registry and on a cluster with no access to that namespace the controller
+pod sits in `ImagePullBackOff` exactly as path (a) records. The tag changed the
+reference, not the fact: **the default path has never been exercised on any
+cluster, and nothing here claims it has.**
+`charts/logweir/examples/author-only.values.yaml` is path (b) as values —
+`weirkeeper:check`, `logweir:check`, `imagePullPolicy: Never`,
+`runnerImagePullPolicy: Never` — and it is **author-only** everywhere it
+appears: images you built and loaded yourself, **never** evidence for spec §16
+clause 1. The chart was walked end to end on the author's docker-desktop with
+those images on 2026-09-12 ([kubernetes.md](kubernetes.md) §19), which proves
+the chart's objects work together and proves nothing about publication.
 
 The five Secrets, the two keypairs, the `TrustRoster` and the per-namespace
 runner ServiceAccount below are the same on this path; the chart creates none

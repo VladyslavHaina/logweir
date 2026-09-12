@@ -901,6 +901,10 @@ pub fn runner_job_spec(
         // function is a pure function of the custom resource and stays one:
         // the override is a property of the PROCESS, read once in `main`.
         image: None,
+        // AND THE COMPILED-IN `job::IMAGE_PULL_POLICY`, OVERWRITTEN THE SAME
+        // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
+        // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
+        image_pull_policy: None,
     })
 }
 
@@ -2074,16 +2078,26 @@ pub async fn reconcile_restore(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<RestoreOutcome, RestoreError> {
-    reconcile_restore_with_runner_image(restore, client, scorecard, verify, now, None).await
+    reconcile_restore_with_runner_image(
+        restore,
+        client,
+        scorecard,
+        verify,
+        now,
+        &job::RunnerImage::default(),
+    )
+    .await
 }
 
-/// [`reconcile_restore`], with the runner image this controller process was
-/// handed — Task 33.
+/// [`reconcile_restore`], with the runner image and pull policy this controller
+/// process was handed — Task 33, and Task 37's policy beside it.
 ///
-/// `runner_image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
-/// `Some(reference)` for the value `main` read out of `job::RUNNER_IMAGE_ENV`.
-/// It becomes `job::RunnerJobSpec::image` and changes nothing else; the
-/// `imagePullPolicy` stays `job::IMAGE_PULL_POLICY`. It is a second function
+/// `runner.image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
+/// `Some(reference)` for the value `main` read out of `job::RUNNER_IMAGE_ENV`;
+/// `runner.image_pull_policy` is `None` for the compiled-in
+/// `job::IMAGE_PULL_POLICY` and `Some(policy)` for `job::RUNNER_PULL_POLICY_ENV`'s.
+/// The pair becomes `job::RunnerJobSpec::{image, image_pull_policy}` and changes
+/// nothing else about the Job. It is a second function
 /// rather than a sixth parameter for the reason
 /// [`super::backup::reconcile_backup_with_runner_image`] gives: the thirty-two
 /// rows in `tests/restore_controller.rs` are not about the image.
@@ -2097,9 +2111,9 @@ pub async fn reconcile_restore_with_runner_image(
     scorecard: ScorecardOracle<'_>,
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
-    runner_image: Option<&str>,
+    runner: &job::RunnerImage,
 ) -> Result<RestoreOutcome, RestoreError> {
-    match reconcile_restore_inner(restore, client, scorecard, verify, now, runner_image).await {
+    match reconcile_restore_inner(restore, client, scorecard, verify, now, runner).await {
         Err(RestoreError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `RestoreError::Refused`, so the
@@ -2150,7 +2164,7 @@ async fn reconcile_restore_inner(
     scorecard: ScorecardOracle<'_>,
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
-    runner_image: Option<&str>,
+    runner: &job::RunnerImage,
 ) -> Result<RestoreOutcome, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -2290,9 +2304,11 @@ async fn reconcile_restore_inner(
         };
         let key_ids = approver_key_ids(get_roster(client).await?.as_ref());
         let mut spec = runner_job_spec(restore, &cluster, &key_ids)?;
-        // THE ONE LINE THE OVERRIDE IS (Task 33). `None` leaves the shipped
-        // pin in place, which is what every test that does not pass one sees.
-        spec.image = runner_image.map(str::to_string);
+        // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
+        // policy). `None` in either leaves the compiled-in constant in place,
+        // which is what every test that does not pass one sees.
+        spec.image = runner.image.clone();
+        spec.image_pull_policy = runner.image_pull_policy.clone();
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
         // (errata E5a). The Job mounts `<name>-plan` at `/plan`, so a Job
@@ -2656,7 +2672,7 @@ async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action, R
         &oracle,
         &verify,
         Utc::now(),
-        ctx.runner_image.as_deref(),
+        &ctx.runner_image,
     )
     .await?;
     Ok(action_for(&outcome))
@@ -2683,13 +2699,14 @@ fn error_policy(restore: Arc<Restore>, err: &RestoreError, _ctx: Arc<Context>) -
 /// records the exit code and the evidence keys and writes no scorecard-derived
 /// field, which is the truthful answer and not a degraded one.
 ///
-/// `runner_image` is Task 33's runtime override, read once in `main`: `None`
-/// is the shipped pin `job::RUNNER_IMAGE`, `Some(reference)` the image the
-/// operator loaded onto this cluster's nodes.
+/// `runner_image` is Task 33's runtime override and Task 37's beside it, read
+/// once each in `main`: an unset field is the compiled-in constant, a set one
+/// the image this cluster's nodes hold and the pull policy that makes it
+/// resolvable.
 pub fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
-    runner_image: Option<String>,
+    runner_image: job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Restore> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());

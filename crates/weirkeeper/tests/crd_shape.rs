@@ -1631,6 +1631,113 @@ fn main_reads_the_runner_image_override_once() {
     );
 }
 
+/// Task 37's half of interface **I15**'s runtime shape: `main` reads
+/// `job::RUNNER_PULL_POLICY_ENV` **once**, through the predicate, logs it once,
+/// and **refuses to start** when the predicate refuses.
+///
+/// FOUR PROPERTIES, AND THE FOURTH IS THE ONE THIS VARIABLE ADDS.
+///
+/// 1. **One read.** A second `std::env::var` of the same variable is a second
+///    decision, and the two can disagree — the `Backup` reconciler and the
+///    probe reconciler would then create Jobs under different pull policies in
+///    one cluster. Exactly the argument
+///    [`main_reads_the_runner_image_override_once`] makes for the image.
+/// 2. **Through `job::configured_runner_pull_policy`.** A decision behind
+///    `fn main` is reachable from no test at all — which is how plan erratum
+///    **E19(e)**'s wrong ERROR line survived to Task 24.
+/// 3. **One `info!`, naming the policy AND its source.** A controller silently
+///    running under a policy the operator did not set is the failure this
+///    variable exists to fix, not to create.
+/// 4. **A refusal EXITS.** `imagePullPolicy` is a closed set the API server
+///    validates at Job CREATE, so a controller that started under `always`
+///    would turn every `Backup` and every `Restore` into a rejected Job with
+///    nothing but an API error per object to say why. The `Err` arm must
+///    `return ExitCode::FAILURE`, not log and continue.
+#[test]
+fn main_reads_the_runner_pull_policy_once() {
+    let root = repo_root();
+    let main_rs = std::fs::read_to_string(root.join("crates/weirkeeper/src/main.rs"))
+        .expect("crates/weirkeeper/src/main.rs is read");
+    // Whitespace-free, so the assertion is about the CALL and not about how
+    // rustfmt chose to break the line.
+    let dense: String = main_rs.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let reads = dense
+        .matches("std::env::var(weirkeeper::job::RUNNER_PULL_POLICY_ENV")
+        .count();
+    assert_eq!(
+        reads, 1,
+        "`main` must read the runner pull-policy variable EXACTLY ONCE; found {reads} reads. Two \
+         reads are two decisions, and the reconcilers they feed would then create Jobs under \
+         different policies in one cluster."
+    );
+    assert!(
+        dense.contains(
+            "configured_runner_pull_policy(std::env::var(weirkeeper::job::RUNNER_PULL_POLICY_ENV"
+        ),
+        "the read must be the ARGUMENT of `job::configured_runner_pull_policy`: the predicate is \
+         the whole of the decision (empty is unset — plan erratum E19(e); a non-policy is a \
+         refusal) and `main` supplies only the read"
+    );
+    assert_eq!(
+        dense.matches("configured_runner_pull_policy(").count(),
+        1,
+        "and the predicate is called once"
+    );
+
+    // The one `info!` line, naming the policy AND where it came from.
+    assert!(
+        main_rs.contains("\"the runner pull policy every Job this controller creates will carry\""),
+        "`main` must log, once, which pull policy this process will use — a controller silently \
+         running under a policy the operator did not set is the failure this variable exists to \
+         fix, not to create"
+    );
+    assert!(
+        main_rs.contains("\"shipped constant\"") && main_rs.contains("RUNNER_PULL_POLICY_ENV"),
+        "and that line must say WHERE the policy came from: the shipped constant, or the \
+         environment variable named by `job::RUNNER_PULL_POLICY_ENV`"
+    );
+
+    // A refusal EXITS. The `Err` arm returns a failure code rather than
+    // logging and carrying on under a policy the API server will reject.
+    let err_arm = dense
+        .find("Err(message)=>{")
+        .expect("`main`'s pull-policy match carries an `Err(message)` arm");
+    let tail = &dense[err_arm..err_arm + 200.min(dense.len() - err_arm)];
+    assert!(
+        tail.contains("returnExitCode::FAILURE"),
+        "the `Err` arm must REFUSE TO START (`return ExitCode::FAILURE`), because a Job with an \
+         invalid pull policy is rejected by the API server at every Backup instead: {tail}"
+    );
+    assert!(
+        tail.contains("error!("),
+        "and it must say so on the way out, at ERROR: {tail}"
+    );
+
+    // The variable's name is spelt in `job.rs` and nowhere else in the crate's
+    // sources. Split, so this file is not itself an occurrence.
+    let needle = format!("{}{}", "LOGWEIR_RUNNER_", "PULL_POLICY");
+    let expected = root.join("crates/weirkeeper/src/job.rs");
+    let mut where_ = Vec::new();
+    for (path, text) in files_under(&root.join("crates/weirkeeper/src")) {
+        let n = text.matches(needle.as_str()).count();
+        if n > 0 {
+            where_.push(format!("{} ({n}x)", path.display()));
+        }
+    }
+    assert_eq!(
+        where_,
+        vec![format!("{} (1x)", expected.display())],
+        "the variable's name belongs to `job::RUNNER_PULL_POLICY_ENV` and is spelt there once; \
+         every other site names the constant"
+    );
+    assert_eq!(
+        weirkeeper::job::RUNNER_PULL_POLICY_ENV,
+        "LOGWEIR_RUNNER_PULL_POLICY",
+        "and this is the spelling `charts/logweir/templates/deployment.yaml` renders"
+    );
+}
+
 /// `just crds` regenerates the checked-in CRDs.
 ///
 /// Membership only — not the recipe's length, not its line numbers, not the

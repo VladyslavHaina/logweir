@@ -21,17 +21,27 @@
 #      charts/logweir/rendered` is EMPTY afterwards — the drift idiom of
 #      `just crds-check`: a template change lands as a diff a reviewer reads.
 #   5. Every container image reference in the rendered files is
-#      `<name>@sha256:<64 hex>` (Global Constraint 7) — EXCEPT
-#      `rendered/author-only.yaml`, exempt BY NAME: that example's whole
-#      premise is a locally built tag under `imagePullPolicy: Never`, and a
-#      locally built digest changes on every build (plan erratum E19(a)), the
-#      same reason `config/overlays/local-images` rewrites to a tag.
+#      `<name>@sha256:<64 hex>` (Global Constraint 7) — with TWO exceptions,
+#      and nothing else:
+#        * THE TWO LOGWEIR REPOSITORIES, which must be exactly
+#          `<repository>:latest` (the owner's decision of 2026-09-12; arm 7
+#          derives the repositories). A digest there, or any other tag, is a
+#          red; so is `:latest` on ANY OTHER image, which is still refused.
+#        * `rendered/author-only.yaml`, exempt BY NAME: that example's whole
+#          premise is a locally built tag under `imagePullPolicy: Never`, and a
+#          locally built digest changes on every build (plan erratum E19(a)),
+#          the same reason `config/overlays/local-images` rewrites to a tag.
 #   6. `values.schema.json` REFUSES a non-boolean flag: `--set
 #      demoKafka.enabled=yes` (and `minio.`/`ui.`) must exit non-zero.
-#   7. `values.yaml` pins the tree's own digests: `controllerImage` is the
-#      image `config/manager/deployment.yaml` carries and `runnerImage` is
-#      `weirkeeper::job::RUNNER_IMAGE` — a re-pin in the tree that missed the
-#      chart is a red here, not a surprise at install.
+#   7. `values.yaml` names THE TREE'S OWN REPOSITORIES AT `latest`:
+#      `controllerImage` is the repository half of the image
+#      `config/manager/deployment.yaml` carries and `runnerImage` is the
+#      repository half of `weirkeeper::job::RUNNER_IMAGE`, each followed by
+#      `:latest`. The repositories are DERIVED, never spelt here, so a
+#      namespace change in the tree propagates; the TAG is this chart's ruling
+#      (the owner's decision of 2026-09-12) and `config/`, `logweir.yaml` and
+#      that Rust constant keep their digests under Global Constraint 7. A
+#      digest written back into either value is a red.
 #
 # WHAT IT DOES NOT PROVE: that the chart installs. That is a cluster gate —
 # `just helm-demo` on docker-desktop, `.github/workflows/helm-demo.yml` on
@@ -58,6 +68,10 @@ HELM_MIN_MAJOR=4
 # The one rendered file the digest arm exempts, by name, for the reason in the
 # header. A literal, never a pattern.
 DIGEST_EXEMPT="author-only.yaml"
+# THE TAG THE TWO LOGWEIR IMAGES CARRY IN THIS CHART'S DEFAULTS — the owner's
+# decision of 2026-09-12. Arms 7 and 5 both read it; the REPOSITORIES are
+# derived from the tree (arm 7) and are never spelt in this file.
+LOGWEIR_TAG="latest"
 
 fail=0
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/logweir-chart-check.XXXXXX")"
@@ -155,25 +169,37 @@ else
 fi
 
 # ---------------------------------------------------------------- 7. the pins
-# Early, because a wrong pin makes every rendered file wrong too.
-echo "== 7. values.yaml pins the tree's own digests =="
+# Early, because a wrong value makes every rendered file wrong too — and
+# because arm 5 below uses the two repositories this arm derives.
+echo "== 7. values.yaml names the tree's own repositories at $LOGWEIR_TAG =="
 values_controller="$(sed -n 's/^controllerImage:[[:space:]]*//p' "$CHART/values.yaml")"
 values_runner="$(sed -n 's/^runnerImage:[[:space:]]*//p' "$CHART/values.yaml")"
-tree_controller="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr\.io\/logweir\/weirkeeper@sha256:[0-9a-f]\{64\}\)[[:space:]]*$/\1/p' config/manager/deployment.yaml)"
+# THE TREE'S REFERENCES, WHOLE — each still a digest under Global Constraint 7.
+tree_controller="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' config/manager/deployment.yaml)"
 tree_runner="$(grep -A1 '^pub const RUNNER_IMAGE: &str =' crates/weirkeeper/src/job.rs | sed -n 's/^[[:space:]]*"\(.*\)";$/\1/p')"
-if [ -z "$tree_controller" ] || [ -z "$tree_runner" ]; then
-  echo "FAIL: could not read the tree's pins (controller '$tree_controller', runner '$tree_runner')" >&2
+# THE REPOSITORY HALVES, DERIVED. Never spelt in this script: a namespace change
+# in the tree must propagate to the chart without editing this gate.
+controller_repo="${tree_controller%@sha256:*}"
+runner_repo="${tree_runner%@sha256:*}"
+if [ -z "$controller_repo" ] || [ -z "$runner_repo" ] ||
+   [ "$controller_repo" = "$tree_controller" ] || [ "$runner_repo" = "$tree_runner" ]; then
+  echo "FAIL: could not derive the tree's repositories from its digests (controller '$tree_controller', runner '$tree_runner')" >&2
+  echo "      config/manager/deployment.yaml and crates/weirkeeper/src/job.rs must each pin <repository>@sha256:<64 hex>" >&2
   fail=1
 fi
-if [ "$values_controller" != "$tree_controller" ]; then
-  echo "FAIL: values.yaml controllerImage is '$values_controller'; config/manager/deployment.yaml pins '$tree_controller'" >&2
+want_controller="$controller_repo:$LOGWEIR_TAG"
+want_runner="$runner_repo:$LOGWEIR_TAG"
+if [ "$values_controller" != "$want_controller" ]; then
+  echo "FAIL: values.yaml controllerImage is '$values_controller'; it must be exactly '$want_controller'" >&2
+  echo "      (arm 7: the repository is config/manager/deployment.yaml's, the tag is this chart's ruling of 2026-09-12)" >&2
   fail=1
 fi
-if [ "$values_runner" != "$tree_runner" ]; then
-  echo "FAIL: values.yaml runnerImage is '$values_runner'; crates/weirkeeper/src/job.rs pins '$tree_runner'" >&2
+if [ "$values_runner" != "$want_runner" ]; then
+  echo "FAIL: values.yaml runnerImage is '$values_runner'; it must be exactly '$want_runner'" >&2
+  echo "      (arm 7: the repository is crates/weirkeeper/src/job.rs's RUNNER_IMAGE, the tag is this chart's ruling of 2026-09-12)" >&2
   fail=1
 fi
-[ "$values_controller" = "$tree_controller" ] && [ "$values_runner" = "$tree_runner" ] && echo "   ok: controllerImage and runnerImage are the tree's pins"
+[ "$values_controller" = "$want_controller" ] && [ "$values_runner" = "$want_runner" ] && echo "   ok: controllerImage and runnerImage are the tree's repositories at $LOGWEIR_TAG"
 
 # ---------------------------------------------------------------- 3 + 4. lint and render
 echo "== 3. helm lint, default values and every example =="
@@ -243,8 +269,12 @@ else
 fi
 
 # ---------------------------------------------------------------- 5. GC7
-echo "== 5. every rendered image reference is a digest (except $DIGEST_EXEMPT, by name) =="
+# The two Logweir repositories come from arm 7 above, which is why that arm runs
+# first. They are the ONLY references allowed to be a tag here, and the only tag
+# allowed is $LOGWEIR_TAG — exactly.
+echo "== 5. every rendered image is a digest, except the two Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
 images=0
+logweir_tagged=0
 for f in "$RENDERED"/*.yaml; do
   base="$(basename "$f")"
   if [ "$base" = "$DIGEST_EXEMPT" ]; then
@@ -258,6 +288,20 @@ for f in "$RENDERED"/*.yaml; do
     ref="${ref//\'/}"
     ref="$(printf '%s' "$ref" | tr -d '[:space:]')"
     images=$((images + 1))
+    # THE TWO LOGWEIR IMAGES, BY REPOSITORY. Each must be exactly
+    # `<repository>:$LOGWEIR_TAG` — a digest there is this chart's ruling
+    # reverted, and any other tag is a value nobody chose.
+    case "$ref" in
+      "$controller_repo":*|"$runner_repo":*|"$controller_repo"@*|"$runner_repo"@*)
+        logweir_tagged=$((logweir_tagged + 1))
+        if [ "$ref" != "$controller_repo:$LOGWEIR_TAG" ] && [ "$ref" != "$runner_repo:$LOGWEIR_TAG" ]; then
+          echo "FAIL: $base references a Logweir image as '$ref'; this chart names both by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
+          fail=1
+        fi
+        continue
+        ;;
+    esac
+    # EVERY OTHER IMAGE: a digest, and never a tag of any kind.
     case "$ref" in
       *@sha256:????????????????????????????????????????????????????????????????) : ;;
       *)
@@ -266,15 +310,18 @@ for f in "$RENDERED"/*.yaml; do
         ;;
     esac
     case "$ref" in
-      *:latest*) echo "FAIL: $base references :latest ('$ref')" >&2; fail=1 ;;
+      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the two Logweir images may carry a tag here" >&2; fail=1 ;;
     esac
   done < <(grep -E '^[[:space:]]+(- )?image:[[:space:]]' "$f")
 done
 if [ "$images" -lt 3 ]; then
   echo "FAIL: only $images image reference(s) found across the rendered files — this arm would be asserting almost nothing" >&2
   fail=1
+elif [ "$logweir_tagged" -lt 1 ]; then
+  echo "FAIL: no rendered file references a Logweir repository at all — the tag arm would be asserting nothing" >&2
+  fail=1
 else
-  echo "   ok: $images image reference(s), every one @sha256:<64 hex>"
+  echo "   ok: $images image reference(s) — $logweir_tagged Logweir at :$LOGWEIR_TAG, the rest @sha256:<64 hex>"
 fi
 
 # ---------------------------------------------------------------- 6. the schema
@@ -296,6 +343,7 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 echo "ok: charts/logweir — CRDs and UI byte-identical, helm lint clean, rendered files current,"
-echo "    every image a digest (author-only exempt by name), the schema refuses a non-boolean flag,"
-echo "    and values.yaml carries the tree's own pins."
+echo "    every image a digest except the two Logweir images at :$LOGWEIR_TAG (author-only exempt by"
+echo "    name), the schema refuses a non-boolean flag, and values.yaml names the tree's own"
+echo "    repositories at :$LOGWEIR_TAG."
 exit 0

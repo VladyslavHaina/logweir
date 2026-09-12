@@ -15,10 +15,22 @@
 # changes on every build (plan erratum E19(a)), so a digest here would be
 # stale after the next `just image`. `imagePullPolicy: Never` is what keeps
 # the tag honest — nothing is pulled, so nothing mutable is fetched from
-# anywhere. `runnerImage` is handed to the controller as LOGWEIR_RUNNER_IMAGE
-# (Task 33) and every runner Job it creates names it; runner Jobs always pull
-# with `Never`. scripts/check-chart.sh's every-image-is-a-digest arm exempts
-# this one rendered file BY NAME, for this reason.
+# anywhere. These tags are LOCAL NAMES, not the chart's `:latest` defaults:
+# `weirkeeper:check` and `logweir:check` exist only in this node's image store,
+# which is why `Never` is right for them and `Always` — the chart's default,
+# for a registry tag — would fail on a node with no registry to reach.
+# `runnerImage` is handed to the controller as LOGWEIR_RUNNER_IMAGE (Task 33)
+# and every runner Job it creates names it. scripts/check-chart.sh's
+# every-image-is-a-digest arm exempts this one rendered file BY NAME, for this
+# reason.
 controllerImage: weirkeeper:check
 runnerImage: logweir:check
 imagePullPolicy: Never
+# AND THE RUNNER JOBS' POLICY, WHICH IS NOW ITS OWN VALUE (Task 37) BECAUSE THE
+# CHART'S DEFAULT IS `Always`. `LOGWEIR_RUNNER_PULL_POLICY: Never` is what makes
+# a runner Job naming `logweir:check` start from the image you loaded rather
+# than try to pull a tag no registry holds — and a wrong reference then fails as
+# `ErrImageNeverPull`, naming the whole reference, instead of as a pull error
+# naming a registry. Set it beside `runnerImage`, always: the image and its pull
+# policy are two halves of one decision.
+runnerImagePullPolicy: Never

@@ -1,39 +1,102 @@
 # Default values for the Logweir chart. EVERY value is documented in place, and
 # the defaults are THE SHIPPED INSTALL: `helm template charts/logweir` with
-# nothing overridden renders the same control plane `logweir.yaml` carries —
-# the same controller digest, the same pull policy, the same env, the same
-# security context, the same ClusterRole rules — and
+# nothing overridden renders the control plane `logweir.yaml` carries — the
+# same env, the same security context, the same args, the same ClusterRole
+# rules, the same CRDs, the same NetworkPolicy — and
 # `crates/logweir/tests/chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file`
-# holds the two together. Nothing optional is on by default.
+# holds the two together. It permits EXACTLY FOUR differences, all of them this
+# chart's image ruling (below): the controller image (the same repository, at
+# `:latest` rather than at the install file's digest), `imagePullPolicy`
+# (`Always` rather than `IfNotPresent`), and the two envs
+# `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY`, which the install
+# file does not set at all. Nothing optional is on by default.
 
 # ---------------------------------------------------------------------------
-# THE TWO IMAGES, BY DIGEST (Global Constraint 7), AND WHAT THE DIGESTS ARE
+# THE TWO LOGWEIR IMAGES, BY THE `latest` TAG — THE OWNER'S DECISION OF
+# 2026-09-12, AND WHAT IT COSTS
 # ---------------------------------------------------------------------------
-# `controllerImage` is the value `config/manager/deployment.yaml` carries and
-# `runnerImage` is `weirkeeper::job::RUNNER_IMAGE` (`crates/weirkeeper/src/job.rs`).
-# Both are LOCALLY BUILT measurements — `blocked: images not published`
-# (Global Constraint 37) until `release.yml` has run on a pushed tag — so a
-# cluster with no access to `ghcr.io/logweir/…` leaves the controller pod in
-# `ImagePullBackOff`, exactly as `docs/install.md` path (a) records. A re-pin
-# of either digest in the tree must be repeated here;
-# `chart_lint_values_pin_the_shipped_digests` fails when they disagree.
+# These two values named DIGESTS until 2026-09-12. The owner decided, after
+# being told the trade-off, that the chart's DEFAULTS name the two Logweir
+# images by the `latest` tag instead. This block is that trade-off, written
+# down, because a default nobody can read the cost of is a default nobody
+# chose.
+#
+# `controllerImage`'s repository is the repository half of the image
+# `config/manager/deployment.yaml` carries; `runnerImage`'s is the repository
+# half of `weirkeeper::job::RUNNER_IMAGE` (`crates/weirkeeper/src/job.rs`).
+# Those two files still pin DIGESTS — Global Constraint 7 governs `config/`,
+# `logweir.yaml` and that constant, and this ruling does not touch them — and
+# so do the four third-party images further down. Only these two values, and
+# only in this chart, name a tag. `scripts/check-chart.sh` arm 7 and
+# `chart_lint_values_name_the_shipped_repositories_at_latest` DERIVE the two
+# repositories from those two files and require exactly `<repository>:latest`,
+# so a namespace change in the tree propagates here and a digest written back
+# into either value is a red.
+#
+# WHAT A MUTABLE TAG MEANS. The bytes behind `:latest` can change under you:
+# the same reference resolves to different content tomorrow, on a different
+# node, or mid-rollout. A digest named BYTES, and what those bytes carried is
+# the org-root anchor baked into the image
+# (`/etc/logweir/org-root.fingerprint`) — a tag under a policy that pulls can
+# be replaced upstream without a single Kubernetes object changing, and the
+# anchor a digest protected is what stops that being invisible. That protection
+# is what this default trades away.
+#
+# AND `latest` EXISTS IN NO REGISTRY TODAY. `blocked: images not published`
+# (Global Constraint 37) is UNCHANGED by this ruling: `release.yml` has never
+# run, nothing has been pushed, and `ghcr.io/logweir/…:latest` resolves
+# nowhere. A cluster with no access to that namespace leaves the controller pod
+# in `ImagePullBackOff`, exactly as `docs/install.md` path (a) records — the
+# same outcome the digests produced, for the same reason.
+#
+# HOW TO PIN, if you want the digest guarantee back. Resolve each tag to the
+# bytes it names right now — a MANIFEST read, not a pull:
+#
+#     docker buildx imagetools inspect ghcr.io/logweir/weirkeeper:latest
+#     docker buildx imagetools inspect ghcr.io/logweir/logweir:latest
+#
+# then install with all four values set together:
+#
+#     helm install logweir charts/logweir -n logweir-system --create-namespace \
+#       --set controllerImage=ghcr.io/logweir/weirkeeper@sha256:… \
+#       --set runnerImage=ghcr.io/logweir/logweir@sha256:… \
+#       --set imagePullPolicy=IfNotPresent \
+#       --set runnerImagePullPolicy=IfNotPresent
+#
+# The two policies belong in that command: a digest names bytes that cannot
+# change, so re-pulling them on every pod start buys nothing.
 #
 # The controller image. Rendered into the `weirkeeper` Deployment.
-controllerImage: ghcr.io/logweir/weirkeeper@sha256:51145a3fe6420eb90151b3cc87266fc2db084ca5e4638d03c3d5ed8a43bb4b24
+controllerImage: ghcr.io/logweir/weirkeeper:latest
 # The runner image — Task 33's `LOGWEIR_RUNNER_IMAGE` override, set as an env
 # on the Deployment so every Job the controller creates names THIS reference.
-# The default is the compiled-in constant, so the default install creates the
-# Jobs it always created. For an author-only install (images you built and
-# `kind load`ed / `docker tag`ged yourself) set it to the loaded tag; the pull
-# policy of runner Jobs stays `Never` (the constant is not overridable), which
-# is right for an image LOADED onto the node.
-runnerImage: ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229
-# The CONTROLLER container's pull policy. `IfNotPresent` is the shipped value;
-# `Never` is the author-only overlay's (`config/overlays/local-images`), for a
-# tag that exists only in the node's image store. The optional components
-# below pull their own digests with `IfNotPresent` regardless of this value —
-# they are public images, and `Never` would refuse them on a fresh node.
-imagePullPolicy: IfNotPresent
+# For an author-only install (images you built and `kind load`ed /
+# `docker tag`ged yourself) set it to the loaded tag AND set
+# `runnerImagePullPolicy: Never` beside it — see
+# `examples/author-only.values.yaml`.
+runnerImage: ghcr.io/logweir/logweir:latest
+# The CONTROLLER container's pull policy. `Always` is the shipped value, and it
+# follows from the tag above: it is Kubernetes' own default for a `:latest`
+# reference, and `IfNotPresent` under a mutable tag is a pod that keeps running
+# whatever bytes its node happened to cache first and never refreshes. `Never`
+# is the author-only overlay's (`config/overlays/local-images`), for a tag that
+# exists only in the node's image store. The optional components below pull
+# their own digests with `IfNotPresent` regardless of this value — they are
+# public images pinned by digest, and `Never` would refuse them on a fresh node.
+imagePullPolicy: Always
+# The RUNNER Jobs' pull policy — rendered as `LOGWEIR_RUNNER_PULL_POLICY` on the
+# Deployment beside `LOGWEIR_RUNNER_IMAGE`, and read once at startup by
+# `weirkeeper::job::configured_runner_pull_policy`.
+#
+# IT EXISTS BECAUSE `runnerImage` NAMES A TAG. The compiled-in
+# `weirkeeper::job::IMAGE_PULL_POLICY` is `Never` and still is — right for an
+# image LOADED onto the node, and what an unset variable still means — but a
+# `:latest` reference under `Never` is a Job the kubelet cannot start at all.
+# So the policy follows the image, and the two are set together or not at all.
+# One of `Never`, `IfNotPresent`, `Always`; the controller REFUSES TO START on
+# anything else, because the API server would otherwise reject every runner Job
+# it created, forever, one `Backup` at a time.
+runnerImagePullPolicy: Always
 
 controller:
   # `RUST_LOG`. `info` is the floor, not a preference: below it the per-object

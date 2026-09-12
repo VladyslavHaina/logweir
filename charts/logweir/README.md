@@ -15,7 +15,7 @@ install document; this README is the chart's own.
 |---|---|---|
 | the six `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
 | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller, no verb on `secrets`, no `delete` on anything |
-| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, the archive env from `archive.*` |
+| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*` |
 | `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver` | always, **unbound** | the three human roles; who may act where is your decision |
 | `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | apply both into every other namespace that runs Jobs (`docs/install.md` steps 4 and 6) |
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
@@ -67,7 +67,7 @@ header: **an author-only install is not evidence of publication.**
 ## Pointing a real install at a real archive
 
 [`examples/minimal.values.yaml`](examples/minimal.values.yaml) is the operator
-alone at the shipped digests with the three values a stranger sets:
+alone at the chart's shipped image defaults with the three values a stranger sets:
 `archive.url`, `archive.s3.endpoint` (empty for Amazon S3 proper) and
 `archive.s3.region`. Then, **before any custom resource**, the five Secrets of
 `docs/install.md` step 3 — the chart creates none of them on this path — the
@@ -80,10 +80,64 @@ Secret in the release namespace. It is `optional: true` on the Deployment: the
 controller starts without it and every verification reads `NotAttempted`,
 which is a choice and not a bad document.
 
-**The shipped digests are locally built measurements** — `blocked: images not
-published` (Global Constraint 37) until `release.yml` has run on a pushed tag.
-On a cluster with no access to `ghcr.io/logweir/…` the controller pod sits in
-`ImagePullBackOff`, exactly as `docs/install.md` path (a) records.
+## The two Logweir images, and why they name a tag
+
+**The chart's defaults name `controllerImage` and `runnerImage` by the `latest`
+TAG, not by a digest. That is the owner's decision of 2026-09-12**, taken after
+the trade-off below was put to them, and it is this chart's ruling alone:
+`config/manager/deployment.yaml`, `logweir.yaml` and
+`weirkeeper::job::RUNNER_IMAGE` still pin digests under Global Constraint 7, and
+so do the four third-party images this chart can bring (MinIO, `mc`,
+`apache/kafka`, `kubectl`). The two repositories are the tree's own — the gate
+derives them from those two files rather than spelling them — so a namespace
+change propagates here on its own.
+
+**What a mutable tag does not promise.** The bytes behind `:latest` can change
+under you: the same reference can resolve to different content tomorrow, on a
+different node, or mid-rollout. A digest named bytes, and those bytes carried
+the org-root anchor baked into the image (`/etc/logweir/org-root.fingerprint`);
+under a tag, an image can be replaced upstream without a single Kubernetes
+object changing. That is the guarantee this default trades away, and it is why
+the two pull policies below are what they are.
+
+**The pull policies follow the tag.** `imagePullPolicy` defaults to `Always` —
+Kubernetes' own default for a `:latest` reference; `IfNotPresent` under a
+mutable tag is a pod running whatever bytes its node happened to cache first.
+`runnerImagePullPolicy` is a separate value, rendered as
+`LOGWEIR_RUNNER_PULL_POLICY` on the Deployment and read once at startup by the
+controller, and it defaults to `Always` for the same reason. The compiled-in
+default the controller falls back to when that variable is unset is still
+`Never`, which is right for an image LOADED onto a node — the laptop path,
+`kind`, and `examples/author-only.values.yaml`, which sets
+`runnerImagePullPolicy: Never` explicitly. A value outside `Never` /
+`IfNotPresent` / `Always` makes the controller refuse to start, because the API
+server would otherwise reject every runner Job it created.
+
+**`latest` exists in no registry today.** `blocked: images not published`
+(Global Constraint 37) is unchanged by this: `release.yml` has never run,
+nothing has been pushed, and `ghcr.io/logweir/…:latest` resolves nowhere. On a
+cluster with no access to that namespace the controller pod sits in
+`ImagePullBackOff`, exactly as `docs/install.md` path (a) records — the same
+outcome the digests produced, for the same reason. So the DEFAULT path cannot
+be exercised on any cluster today, and nothing here claims it has been.
+
+**How to pin them back.** Resolve each tag to the bytes it names — a manifest
+read, not a pull:
+
+```bash
+docker buildx imagetools inspect <repository>:latest
+```
+
+then install with all four values together, because a digest names bytes that
+cannot change and re-pulling them buys nothing:
+
+```bash
+helm install logweir charts/logweir -n logweir-system --create-namespace \
+  --set controllerImage=<repository>@sha256:… \
+  --set runnerImage=<repository>@sha256:… \
+  --set imagePullPolicy=IfNotPresent \
+  --set runnerImagePullPolicy=IfNotPresent
+```
 
 ## The UI's authority
 
@@ -156,9 +210,11 @@ Logweir — Global Constraint 6.
 * `scripts/check-chart.sh` (`just chart-check`, in `just gate`): CRDs and UI
   byte-identical to the tree; `helm lint` for the defaults and every example;
   `helm template` regenerated into `rendered/` with no drift; every rendered
-  image a digest (the author-only render exempt by name — its whole premise is
-  a locally built tag); the schema refusing `--set demoKafka.enabled=yes`;
-  `values.yaml` carrying the tree's own pins.
+  image a digest EXCEPT the two Logweir images, which must be exactly
+  `<repository>:latest` (and `:latest` on any other image is still refused),
+  with the author-only render exempt by name — its whole premise is a locally
+  built tag; the schema refusing `--set demoKafka.enabled=yes`; `values.yaml`
+  naming the tree's own repositories at `:latest`.
 * `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
   `logweir.yaml`; nothing optional renders under defaults; each flag renders
   its named objects; the UI ConfigMap is the tree's bytes and no key material.

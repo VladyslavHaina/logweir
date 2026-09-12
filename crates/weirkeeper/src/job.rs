@@ -230,15 +230,138 @@ pub const APPROVAL_MOUNT_PATH: &str = "/approval";
 /// naming the whole reference, until the image is tagged into that repository
 /// name locally; then the pod starts (`docs/kubernetes.md` §14).
 ///
-/// **TASK 33 MADE THE IMAGE OVERRIDABLE AND DELIBERATELY LEFT THIS ALONE.**
-/// [`RUNNER_IMAGE_ENV`] exists for images that were LOADED onto the node by
-/// the operator, which is the one case `Never` is exactly right for; making
-/// the policy overridable too would only ever buy a pull against a registry
-/// namespace that resolves to nothing, and would turn a wrong reference from
-/// `ErrImageNeverPull` — which names the whole reference — into a pull error
-/// that names a registry. `the_runner_image_override_does_not_touch_the_pull_policy`
-/// holds it.
+/// **TASK 33 MADE THE IMAGE OVERRIDABLE AND DELIBERATELY LEFT THIS ALONE —
+/// AND TASK 37 CHANGED THAT. This is the history and the reason.** Task 33's
+/// argument was that [`RUNNER_IMAGE_ENV`] exists for images LOADED onto the
+/// node, which is the one case `Never` is exactly right for, so an overridable
+/// policy would only ever buy a pull against a registry namespace that
+/// resolves to nothing. What broke that argument is not a defect in it: **the
+/// owner decided, on 2026-09-12, that `charts/logweir`'s defaults name the two
+/// Logweir images by the `latest` TAG rather than by a digest.** A chart whose
+/// default reference is a mutable tag under a policy that never pulls is a
+/// chart that cannot work — the kubelet would refuse a tag no node holds — so
+/// the policy had to become configurable alongside the image. It is configured
+/// by [`RUNNER_PULL_POLICY_ENV`], which the chart renders from its own
+/// `runnerImagePullPolicy` value (default `Always`, matching Kubernetes' own
+/// default for a `:latest` tag).
+///
+/// **AN UNSET VARIABLE STILL MEANS `Never`, AND THAT IS THE POINT OF LEAVING
+/// THE CONSTANT WHERE IT IS.** Nothing outside the chart sets the variable:
+/// the laptop walk, `scripts/demo-steps.sh`'s kind path and every unit test
+/// create Jobs for images that were BUILT or `kind load`ed onto the node, and
+/// for those `Never` is still exactly right — a wrong reference fails as
+/// `ErrImageNeverPull` naming the whole reference instead of as a pull error
+/// naming a registry. Only an install that asked for another policy gets one.
+/// `the_runner_image_override_does_not_touch_the_pull_policy` still holds:
+/// the IMAGE override does not move the policy. The policy has its own
+/// override now, and `a_runner_pull_policy_override_does_not_touch_the_image`
+/// holds the other half.
 pub const IMAGE_PULL_POLICY: &str = "Never";
+
+/// The environment variable that overrides [`IMAGE_PULL_POLICY`] for the Jobs
+/// one running controller creates — **Task 37**, the twin of
+/// [`RUNNER_IMAGE_ENV`].
+///
+/// # Why it exists
+///
+/// See [`IMAGE_PULL_POLICY`]'s doc: the chart's defaults now name the two
+/// Logweir images by the `latest` tag (the owner's decision of 2026-09-12), and
+/// a mutable tag under a policy that never pulls is a reference no node can
+/// resolve. The chart renders this variable from its `runnerImagePullPolicy`
+/// value beside [`RUNNER_IMAGE_ENV`], so the two halves of one decision travel
+/// together.
+///
+/// THE NAME IS A NAME, NOT A REFERENCE, exactly as [`RUNNER_IMAGE_ENV`] is,
+/// and it carries no registry path — so
+/// `tests/crd_shape.rs::the_runner_image_is_named_once` is untouched by it.
+pub const RUNNER_PULL_POLICY_ENV: &str = "LOGWEIR_RUNNER_PULL_POLICY";
+
+/// The three values Kubernetes accepts for `imagePullPolicy`, and the whole of
+/// what [`configured_runner_pull_policy`] admits.
+///
+/// SPELT HERE AND NOWHERE ELSE. The API server refuses anything else with a
+/// validation error on the Job, at CREATE time — which is to say, at every
+/// `Backup` and every `Restore`, forever, from a controller that started
+/// happily. Refusing the value once at startup is the difference between one
+/// legible failure and an unbounded stream of illegible ones.
+pub const PULL_POLICIES: [&str; 3] = ["Never", "IfNotPresent", "Always"];
+
+/// [`RUNNER_PULL_POLICY_ENV`]'s value as a decision: `Ok(None)` for "unset"
+/// (the compiled-in [`IMAGE_PULL_POLICY`]), `Ok(Some(policy))` for one of
+/// [`PULL_POLICIES`], and `Err(message)` for anything else.
+///
+/// **AN EMPTY VALUE IS UNSET — PLAN ERRATUM E19(e)**, the same ruling
+/// [`configured_runner_image`] and `retention::configured_archive_url` carry,
+/// for the same reason: a Kubernetes `env:` entry with an empty `value:` makes
+/// `env::var` return `Ok("")`, not `Err(NotPresent)`. Whitespace trims to the
+/// same answer.
+///
+/// # Why a wrong value is an `Err` and not a fallback
+///
+/// [`configured_runner_image`] validates nothing, because only a kubelet can
+/// say whether a reference resolves on a node. A pull POLICY is the opposite:
+/// the set of legal values is closed, it is known here, and a Job carrying
+/// `imagePullPolicy: always` is rejected by the API server's own validation at
+/// CREATE. A controller that silently fell back to [`IMAGE_PULL_POLICY`] would
+/// run an entire install under a policy the operator did not ask for; one that
+/// passed the value through would turn every `Backup` into a rejected Job with
+/// no `Backup` to show for it. `main` refuses to start and says which value it
+/// refused (`crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_pull_policy_once`).
+///
+/// The message names the variable and the value, because an operator reading a
+/// crashed controller's last log line has nothing else to go on.
+///
+/// # Why it takes the `Result`
+///
+/// So a test can hand it `Ok(String::new())` — the exact value the E19(e)
+/// defect is about — without mutating process-global state the rest of the
+/// binary shares. The predicate is the whole of the decision; `main` supplies
+/// the read, exactly once.
+///
+/// # Errors
+///
+/// A value that is not one of [`PULL_POLICIES`] after trimming.
+pub fn configured_runner_pull_policy(
+    raw: Result<String, std::env::VarError>,
+) -> Result<Option<String>, String> {
+    let Ok(value) = raw else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if PULL_POLICIES.contains(&value) {
+        return Ok(Some(value.to_string()));
+    }
+    Err(format!(
+        "{RUNNER_PULL_POLICY_ENV}={value:?} is not an imagePullPolicy; it must be one of {}. \
+         The API server would reject every runner Job this controller created, so it refuses \
+         to start instead.",
+        PULL_POLICIES.join(", ")
+    ))
+}
+
+/// The image AND the pull policy one running controller puts in every runner
+/// Job it creates — **Task 37**, the pair Task 33's single `Option<String>`
+/// grew into.
+///
+/// ONE STRUCT AND NOT TWO PARALLEL `Option`s. Task 33 threaded the image
+/// through `Context::runner_image` and a `reconcile_*_with_runner_image`
+/// sibling per reconciler; the policy travels the same path, for the same
+/// reason, and a second parallel parameter beside the first is how the two
+/// halves of one decision come to disagree. Both fields are `None` by default
+/// and `None` means the compiled-in constant — [`RUNNER_IMAGE`] and
+/// [`IMAGE_PULL_POLICY`] — so a controller handed nothing creates exactly the
+/// Jobs it created before either override existed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunnerImage {
+    /// [`RunnerJobSpec::image`]: the reference, or `None` for [`RUNNER_IMAGE`].
+    pub image: Option<String>,
+    /// [`RunnerJobSpec::image_pull_policy`]: the policy, or `None` for
+    /// [`IMAGE_PULL_POLICY`].
+    pub image_pull_policy: Option<String>,
+}
 
 /// The engine version the runner container declares, and the digest beside it.
 ///
@@ -408,6 +531,17 @@ pub struct RunnerJobSpec {
     /// the one call site where the answer is not `None`. The field puts the
     /// decision where the Job's other per-run values already are.
     pub image: Option<String>,
+    /// This Job's `imagePullPolicy`, or **`None` for the compiled-in**
+    /// [`IMAGE_PULL_POLICY`] — Task 37.
+    ///
+    /// `None` IS THE DEFAULT AND THE DEFAULT IS `Never`, exactly as before this
+    /// field existed. It is a sibling of [`RunnerJobSpec::image`] and not a
+    /// consequence of it: an image override alone does NOT move the policy
+    /// (`the_runner_image_override_does_not_touch_the_pull_policy`), because
+    /// the two are separate decisions that the operator makes separately —
+    /// [`RUNNER_IMAGE_ENV`] and [`RUNNER_PULL_POLICY_ENV`], rendered from the
+    /// chart's `runnerImage` and `runnerImagePullPolicy`.
+    pub image_pull_policy: Option<String>,
 }
 
 /// The `podFailurePolicy` every runner Job carries, **in this exact order**.
@@ -487,9 +621,14 @@ pub fn failure_policy() -> PodFailurePolicy {
 ///
 /// Task 33 added a fifth thing to check: **the container's image is
 /// [`RunnerJobSpec::image`] when that is `Some`, and [`RUNNER_IMAGE`]
-/// otherwise**, while `imagePullPolicy` is [`IMAGE_PULL_POLICY`] either way.
-/// The signature did not change, because the override is a property of the
-/// spec and not of the builder.
+/// otherwise**. The signature did not change, because the override is a
+/// property of the spec and not of the builder.
+///
+/// Task 37 added the SIXTH, in the same shape: **`imagePullPolicy` is
+/// [`RunnerJobSpec::image_pull_policy`] when that is `Some`, and
+/// [`IMAGE_PULL_POLICY`] otherwise**. The two are independent — an image
+/// override leaves the policy alone and a policy override leaves the image
+/// alone — and nothing else in the Job moved.
 #[must_use]
 pub fn build(spec: &RunnerJobSpec) -> Job {
     let mut env: Vec<EnvVar> = Vec::new();
@@ -600,9 +739,17 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
         name: CONTAINER_NAME.to_string(),
         // THE SHIPPED PIN UNLESS THE OPERATOR HANDED THIS PROCESS ANOTHER
         // IMAGE — Task 33, `RunnerJobSpec::image` and [`RUNNER_IMAGE_ENV`].
-        // The policy below is NOT part of that decision and stays `Never`.
         image: Some(spec.image.as_deref().unwrap_or(RUNNER_IMAGE).to_string()),
-        image_pull_policy: Some(IMAGE_PULL_POLICY.to_string()),
+        // AND THE COMPILED-IN POLICY UNLESS IT HANDED THIS PROCESS ANOTHER
+        // ONE — Task 37, `RunnerJobSpec::image_pull_policy` and
+        // [`RUNNER_PULL_POLICY_ENV`]. A SEPARATE decision from the image
+        // above: neither override moves the other.
+        image_pull_policy: Some(
+            spec.image_pull_policy
+                .as_deref()
+                .unwrap_or(IMAGE_PULL_POLICY)
+                .to_string(),
+        ),
         args: Some(spec.args.clone()),
         env: Some(env),
         volume_mounts: Some(mounts),

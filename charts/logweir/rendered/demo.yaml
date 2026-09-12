@@ -7460,14 +7460,16 @@ spec:
           type: RuntimeDefault
       containers:
         - name: weirkeeper
-          image: ghcr.io/logweir/weirkeeper@sha256:51145a3fe6420eb90151b3cc87266fc2db084ca5e4638d03c3d5ed8a43bb4b24
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/logweir/weirkeeper:latest
+          imagePullPolicy: Always
           args: []
           env:
             - name: RUST_LOG
               value: "info"
             - name: LOGWEIR_RUNNER_IMAGE
-              value: "ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229"
+              value: "ghcr.io/logweir/logweir:latest"
+            - name: LOGWEIR_RUNNER_PULL_POLICY
+              value: "Always"
             - name: LOGWEIR_ARCHIVE_URL
               value: "s3://kafka-backups/logweir"
             - name: AWS_ENDPOINT_URL

@@ -1066,11 +1066,12 @@ pub fn controller(
     let ctx = Arc::new(Context {
         client,
         archive,
-        // Task 33: this reconciler creates no runner Job, so the runner image
-        // this process was handed would be carried and never read. `None` here
-        // is "unused", never "no override is configured" — see
+        // Task 33 (and Task 37's pull policy beside it): this reconciler
+        // creates no runner Job, so the image and policy this process was
+        // handed would be carried and never read. The default here is
+        // "unused", never "no override is configured" — see
         // `super::Context::runner_image`.
-        runner_image: None,
+        runner_image: crate::job::RunnerImage::default(),
     });
     async move {
         Controller::new(api, watcher::Config::default())

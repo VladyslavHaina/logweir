@@ -1724,6 +1724,8 @@ spec:
               value: "info"
             - name: LOGWEIR_RUNNER_IMAGE
               value: "logweir:check"
+            - name: LOGWEIR_RUNNER_PULL_POLICY
+              value: "Never"
             - name: LOGWEIR_ARCHIVE_URL
               value: ""
             - name: AWS_ACCESS_KEY_ID

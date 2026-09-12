@@ -995,6 +995,10 @@ pub fn runner_job_spec(backup: &Backup) -> Result<RunnerJobSpec, BackupError> {
         // function is a pure function of the custom resource and stays one:
         // the override is a property of the PROCESS, read once in `main`.
         image: None,
+        // AND THE COMPILED-IN `job::IMAGE_PULL_POLICY`, OVERWRITTEN THE SAME
+        // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
+        // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
+        image_pull_policy: None,
     })
 }
 
@@ -1689,17 +1693,28 @@ pub async fn reconcile_backup(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<BackupOutcome, BackupError> {
-    reconcile_backup_with_runner_image(backup, client, archive, verify, now, None).await
+    reconcile_backup_with_runner_image(
+        backup,
+        client,
+        archive,
+        verify,
+        now,
+        &job::RunnerImage::default(),
+    )
+    .await
 }
 
-/// [`reconcile_backup`], with the runner image this controller process was
-/// handed — Task 33.
+/// [`reconcile_backup`], with the runner image and pull policy this controller
+/// process was handed — Task 33, and Task 37's policy beside it.
 ///
-/// `runner_image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
+/// `runner.image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
 /// `Some(reference)` for the value `main` read out of `job::RUNNER_IMAGE_ENV`;
-/// it becomes `job::RunnerJobSpec::image` and therefore the image of every Job
-/// this reconciler creates, and it changes nothing else — the
-/// `imagePullPolicy` stays `job::IMAGE_PULL_POLICY`.
+/// `runner.image_pull_policy` is `None` for the compiled-in
+/// `job::IMAGE_PULL_POLICY` and `Some(policy)` for the value `main` read out of
+/// `job::RUNNER_PULL_POLICY_ENV`. The pair becomes
+/// `job::RunnerJobSpec::{image, image_pull_policy}` and therefore the image and
+/// the pull policy of every Job this reconciler creates, and it changes nothing
+/// else about the Job.
 ///
 /// WHY THIS IS A SECOND FUNCTION AND NOT A SIXTH PARAMETER ON
 /// [`reconcile_backup`]. Forty-three rows in `tests/backup_controller.rs` and
@@ -1713,9 +1728,9 @@ pub async fn reconcile_backup_with_runner_image(
     archive: ArchiveOracle<'_>,
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
-    runner_image: Option<&str>,
+    runner: &job::RunnerImage,
 ) -> Result<BackupOutcome, BackupError> {
-    match reconcile_backup_inner(backup, client, archive, verify, now, runner_image).await {
+    match reconcile_backup_inner(backup, client, archive, verify, now, runner).await {
         Err(BackupError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `BackupError::Refused`, so the
@@ -1766,7 +1781,7 @@ async fn reconcile_backup_inner(
     archive: ArchiveOracle<'_>,
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
-    runner_image: Option<&str>,
+    runner: &job::RunnerImage,
 ) -> Result<BackupOutcome, BackupError> {
     let name = backup.name_any();
     let namespace = backup
@@ -1841,9 +1856,11 @@ async fn reconcile_backup_inner(
             });
         }
         let mut spec = runner_job_spec(backup)?;
-        // THE ONE LINE THE OVERRIDE IS (Task 33). `None` leaves the shipped
-        // pin in place, which is what every test that does not pass one sees.
-        spec.image = runner_image.map(str::to_string);
+        // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
+        // policy). `None` in either leaves the compiled-in constant in place,
+        // which is what every test that does not pass one sees.
+        spec.image = runner.image.clone();
+        spec.image_pull_policy = runner.image_pull_policy.clone();
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
         // (errata E5a). The Job mounts `<name>-plan` at `/plan`, so a Job
@@ -2194,7 +2211,7 @@ async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, Bac
         &oracle,
         &verify,
         Utc::now(),
-        ctx.runner_image.as_deref(),
+        &ctx.runner_image,
     )
     .await?;
     Ok(Action::requeue(std::time::Duration::from_secs(
@@ -2227,15 +2244,16 @@ fn error_policy(backup: Arc<Backup>, err: &BackupError, _ctx: Arc<Context>) -> A
 /// `windowCovered` and records no `OrphanedScorecard`, which is the truthful
 /// answer and not a degraded one (see [`ArchiveOracle`]).
 ///
-/// `runner_image` is Task 33's runtime override, read once in `main` out of
-/// `job::RUNNER_IMAGE_ENV`: `None` is the shipped pin `job::RUNNER_IMAGE`, and
-/// `Some(reference)` is the image the operator LOADED onto this cluster's
-/// nodes, which is the only thing that can run on a cluster that did not build
-/// the pins.
+/// `runner_image` is Task 33's runtime override and Task 37's beside it, read
+/// once each in `main` out of `job::RUNNER_IMAGE_ENV` and
+/// `job::RUNNER_PULL_POLICY_ENV`: an unset field is the compiled-in constant,
+/// and a set one is what the operator's install asked for — the image this
+/// cluster's nodes actually hold, and the policy that makes that reference
+/// resolvable (a LOADED tag must not be pulled; a `latest` tag must be).
 pub fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
-    runner_image: Option<String>,
+    runner_image: job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Backup> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());

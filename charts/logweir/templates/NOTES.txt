@@ -7,7 +7,8 @@ INSTALLED (the control plane, the same objects logweir.yaml ships):
   * ServiceAccount, ClusterRole and ClusterRoleBinding "weirkeeper"
   * Deployment "weirkeeper", image {{ .Values.controllerImage }}
     (imagePullPolicy {{ .Values.imagePullPolicy }}); every runner Job it creates
-    will use {{ .Values.runnerImage }}
+    will use {{ .Values.runnerImage }} with imagePullPolicy
+    {{ .Values.runnerImagePullPolicy }}
   * NetworkPolicy "logweir-runner-egress" and ServiceAccount "logweir-runner",
     both in this namespace only — apply them into each namespace that will run
     Backups, Restores or KafkaClusters (docs/install.md steps 4 and after)
@@ -42,9 +43,12 @@ BEFORE ANY CUSTOM RESOURCE — the five Secrets, the two keypairs, the
 cluster-scoped TrustRoster named "default" and the per-namespace runner
 ServiceAccount: docs/install.md. Then `just check-secrets <namespace>`.
 
-The digests this chart pins are LOCALLY BUILT measurements (Global Constraint
-37, `blocked: images not published`): a cluster with no access to
-ghcr.io/logweir/… leaves the controller pod in ImagePullBackOff, exactly as
-docs/install.md path (a) records. An author-only install (images you built and
-loaded yourself) is examples/author-only.values.yaml, and it is not evidence
-that anything was published.
+THE TWO LOGWEIR IMAGES ABOVE ARE NAMED BY THE `latest` TAG by default — the
+owner's decision of 2026-09-12; values.yaml's header carries the trade-off and
+the command that pins them back to digests. `latest` exists in NO registry
+today (Global Constraint 37, `blocked: images not published`: release.yml has
+never run), so a cluster with no access to ghcr.io/logweir/… leaves the
+controller pod in ImagePullBackOff, exactly as docs/install.md path (a)
+records. An author-only install (images you built and loaded yourself) is
+examples/author-only.values.yaml — with runnerImagePullPolicy: Never beside
+them — and it is not evidence that anything was published.

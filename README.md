@@ -41,7 +41,13 @@ carries install steps.
 
 **Or with Helm** — the same control plane as one chart, with an optional
 backend, two demo Kafka clusters and the UI behind three flags
-([charts/logweir/README.md](charts/logweir/README.md); `docs/install.md` path (c)):
+([charts/logweir/README.md](charts/logweir/README.md); `docs/install.md` path (c)).
+The chart's defaults name the two Logweir images by the **`latest` tag** rather
+than by a digest (the owner's decision of 2026-09-12; `charts/logweir/values.yaml`
+carries the trade-off and the command that pins them back). `config/`,
+`logweir.yaml` and the operator's compiled-in runner reference are unchanged and
+still pin digests, and `latest` exists in no registry either — `blocked: images
+not published` stands:
 
 ```bash
 helm install logweir charts/logweir -n logweir-system --create-namespace \

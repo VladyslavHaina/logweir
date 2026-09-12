@@ -19,15 +19,19 @@
 //!   and the fourteen shipped UI files — asserted here with `std::fs` and in
 //!   the script with `cmp`, so the property holds whichever runs first.
 //! * The DEFAULT render and `logweir.yaml` agree on the substance of the
-//!   control plane: the Deployment's image, pull policy, args, every env name
-//!   and value, both security contexts and the ServiceAccount; the same four
-//!   ClusterRoles with the same rules as sets; the same six CRD names. The one
-//!   permitted difference is `LOGWEIR_RUNNER_IMAGE` — Task 33's override, which
-//!   `logweir.yaml` does not set — whose default must be the compiled-in
-//!   constant, read from `crates/weirkeeper/src/job.rs` and never spelt here
-//!   (`crd_shape.rs::the_runner_image_is_named_once` counts that string under
-//!   `crates/`). There is no namespace-derived env in the shipped Deployment,
-//!   so nothing else is excepted.
+//!   control plane: the Deployment's args, every other env name and value,
+//!   both security contexts, the resources and the ServiceAccount; the same
+//!   four ClusterRoles with the same rules as sets; the same six CRD names.
+//!   **Exactly FOUR differences are permitted**, all of them the chart's image
+//!   ruling of 2026-09-12 (`values.yaml`'s header): the controller image (the
+//!   SAME repository, at `:latest` rather than at the install file's digest —
+//!   asserted, not assumed), `imagePullPolicy` (`Always` rather than
+//!   `IfNotPresent`), and the two envs `LOGWEIR_RUNNER_IMAGE` (Task 33) and
+//!   `LOGWEIR_RUNNER_PULL_POLICY` (Task 37), which `logweir.yaml` does not set
+//!   at all. The runner reference is read from `crates/weirkeeper/src/job.rs`
+//!   and never spelt here (`crd_shape.rs::the_runner_image_is_named_once`
+//!   counts that string under `crates/`). There is no namespace-derived env in
+//!   the shipped Deployment, so nothing else is excepted.
 //! * `demoKafka`, `minio` and `ui` render NOTHING under the defaults and under
 //!   the minimal example, and render their named objects under the demo
 //!   example: two StatefulSets and a seed Job whose command names the marker
@@ -235,6 +239,41 @@ fn runner_image_constant() -> String {
     rest[open + 1..open + 1 + close].to_string()
 }
 
+/// The controller image `config/manager/deployment.yaml` pins, read out of that
+/// file so this test never spells a registry path.
+fn controller_image_pin() -> String {
+    read("config/manager/deployment.yaml")
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("image: "))
+        .expect("config/manager/deployment.yaml names the controller image")
+        .trim()
+        .to_string()
+}
+
+/// The REPOSITORY half of a `<repository>@sha256:<64 hex>` reference.
+///
+/// DERIVED AND NEVER SPELT. Both Logweir repositories come from the tree —
+/// `config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE` — so a
+/// namespace change there propagates into the chart without editing this file,
+/// and `crd_shape.rs::the_runner_image_is_named_once` keeps finding the runner
+/// reference named exactly once under `crates/`.
+fn repository_of(reference: &str) -> String {
+    let (repository, _) = reference.split_once("@sha256:").unwrap_or_else(|| {
+        panic!("the tree pins `{reference}` by digest, as Global Constraint 7 requires")
+    });
+    assert!(
+        !repository.is_empty(),
+        "an empty repository in `{reference}`"
+    );
+    repository.to_string()
+}
+
+/// The tag this chart's defaults give the two Logweir images — **the owner's
+/// decision of 2026-09-12**, in place of the digests these values carried
+/// before it. `config/`, `logweir.yaml` and `weirkeeper::job::RUNNER_IMAGE` are
+/// untouched by that ruling and still pin digests (Global Constraint 7).
+const LOGWEIR_TAG: &str = "latest";
+
 fn is_digest_reference(reference: &str) -> bool {
     let Some((name, digest)) = reference.split_once("@sha256:") else {
         return false;
@@ -323,11 +362,28 @@ fn chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else() {
 // ================================================ the default render vs logweir.yaml
 
 /// **The default render and `logweir.yaml` agree on the substance of the
-/// control plane.** Image, pull policy, args, every env name and value, both
-/// security contexts, the ServiceAccount, the four ClusterRoles' rules as
+/// control plane.** Args, every other env name and value, both security
+/// contexts, the resources, the ServiceAccount, the four ClusterRoles' rules as
 /// sets, the ClusterRoleBinding's subject, the six CRD names, the
-/// NetworkPolicy's spec. The ONE permitted difference is `LOGWEIR_RUNNER_IMAGE`,
-/// whose default must be `job::RUNNER_IMAGE`.
+/// NetworkPolicy's spec.
+///
+/// **EXACTLY FOUR DIFFERENCES ARE PERMITTED, and each is asserted rather than
+/// skipped:**
+///
+/// 1. the controller IMAGE — the SAME REPOSITORY as the install file's, at
+///    `:latest` rather than at its digest (the owner's decision of 2026-09-12);
+///    the repository equality is the assertion that keeps this from becoming
+///    "any image at all";
+/// 2. `imagePullPolicy` — `Always` here, `IfNotPresent` there, because a
+///    mutable tag under a policy that does not refresh is a pod running
+///    whatever its node cached first;
+/// 3. `LOGWEIR_RUNNER_IMAGE` (Task 33), whose default is the repository of
+///    `job::RUNNER_IMAGE` at the same tag;
+/// 4. `LOGWEIR_RUNNER_PULL_POLICY` (Task 37), whose default is `Always` for the
+///    same reason as (2).
+///
+/// Everything else — securityContexts, args, the other envs, the SA, the
+/// resources, the rules, the CRD specs, the NetworkPolicy — is still identical.
 #[test]
 fn chart_lint_default_render_agrees_with_the_install_file() {
     let chart = rendered("default");
@@ -338,15 +394,34 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     let id = find(&install, "Deployment", "weirkeeper");
     let cc = container(cd);
     let ic = container(id);
-    assert_eq!(ic["image"], cc["image"], "the controller image differs");
+    // DIFFERENCE 1: the same REPOSITORY, a different reference.
+    let install_image = ic["image"].as_str().expect("logweir.yaml names an image");
+    let chart_image = cc["image"].as_str().expect("the render names an image");
     assert!(
-        is_digest_reference(cc["image"].as_str().unwrap_or("")),
-        "the default render's controller image is not a digest: {:?}",
-        cc["image"]
+        is_digest_reference(install_image),
+        "logweir.yaml still pins the controller image BY DIGEST (Global Constraint 7): \
+         {install_image}"
     );
     assert_eq!(
-        ic["imagePullPolicy"], cc["imagePullPolicy"],
-        "imagePullPolicy differs"
+        format!("{}:{LOGWEIR_TAG}", repository_of(install_image)),
+        chart_image,
+        "the default render's controller image must be logweir.yaml's REPOSITORY at \
+         `:{LOGWEIR_TAG}` — the same repository, the chart's own tag ruling"
+    );
+    assert!(
+        !is_digest_reference(chart_image),
+        "and it is a tag, not a digest: {chart_image}"
+    );
+    // DIFFERENCE 2: the pull policy follows the tag.
+    assert_eq!(
+        Some("IfNotPresent"),
+        ic["imagePullPolicy"].as_str(),
+        "logweir.yaml's pull policy, unchanged by this chart's ruling"
+    );
+    assert_eq!(
+        Some("Always"),
+        cc["imagePullPolicy"].as_str(),
+        "the chart's default follows its `:latest` image — Kubernetes' own default for a tag"
     );
     assert_eq!(ic["args"], cc["args"], "args differ");
     assert_eq!(
@@ -370,19 +445,35 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     );
     let mut chart_env = env_of(cc);
     let install_env = env_of(ic);
+    // DIFFERENCE 3: the runner image env, at the same repository and tag.
     let runner = chart_env
         .remove("LOGWEIR_RUNNER_IMAGE")
         .expect("the chart renders LOGWEIR_RUNNER_IMAGE (Task 33's override) on the Deployment");
     assert_eq!(
-        Some(runner_image_constant().as_str()),
+        Some(format!(
+            "{}:{LOGWEIR_TAG}",
+            repository_of(&runner_image_constant())
+        ))
+        .as_deref(),
         runner["value"].as_str(),
-        "LOGWEIR_RUNNER_IMAGE's default must be weirkeeper::job::RUNNER_IMAGE, so the default \
-         install creates the Jobs it always created"
+        "LOGWEIR_RUNNER_IMAGE's default must be weirkeeper::job::RUNNER_IMAGE's REPOSITORY at \
+         `:{LOGWEIR_TAG}`"
+    );
+    // DIFFERENCE 4: the runner pull policy env, which follows that tag.
+    let runner_policy = chart_env.remove("LOGWEIR_RUNNER_PULL_POLICY").expect(
+        "the chart renders LOGWEIR_RUNNER_PULL_POLICY (Task 37's override) on the Deployment — \
+         a runner image named by tag under a policy that never pulls is a Job no kubelet starts",
+    );
+    assert_eq!(
+        Some("Always"),
+        runner_policy["value"].as_str(),
+        "and its default is `Always`, for the same reason the controller's is"
     );
     assert_eq!(
         install_env, chart_env,
-        "the Deployment's env differs between logweir.yaml and the default render (LOGWEIR_RUNNER_IMAGE \
-         is the one permitted extra, already removed)"
+        "the Deployment's env differs between logweir.yaml and the default render \
+         (LOGWEIR_RUNNER_IMAGE and LOGWEIR_RUNNER_PULL_POLICY are the two permitted extras, \
+         already removed)"
     );
 
     // The four ClusterRoles, as sets of rules.
@@ -474,32 +565,65 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     }
 }
 
-/// **`values.yaml` pins the tree's own digests, and every image value is a
-/// digest with its provenance beside it.**
+/// **`values.yaml` names the tree's own REPOSITORIES at `latest`, and every
+/// other image value is a digest with its provenance beside it.**
+///
+/// THE OWNER'S DECISION OF 2026-09-12, and the whole of what changed. These two
+/// values named digests until that day; they now name the repository half of
+/// the tree's own two pins, followed by `:latest`. The repositories are DERIVED
+/// from `config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE`,
+/// never spelt here, so a namespace change in the tree propagates and a digest
+/// written back into either value is a red.
+///
+/// THE FOUR THIRD-PARTY IMAGES ARE UNTOUCHED: MinIO, mc, apache/kafka and
+/// kubectl are still digests, and still carry the resolution command and the
+/// date beside them — the `kindest/node` provenance idiom. That assertion moved
+/// HERE, to those four, because the two Logweir values no longer have a digest
+/// to record the provenance of.
 #[test]
-fn chart_lint_values_pin_the_shipped_digests() {
+fn chart_lint_values_name_the_shipped_repositories_at_latest() {
     let values: Value =
         serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
-    let deployment = read("config/manager/deployment.yaml");
-    let controller = deployment
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("image: "))
-        .expect("deployment.yaml names the controller image")
-        .trim()
-        .to_string();
+    let controller_repo = repository_of(&controller_image_pin());
+    let runner_repo = repository_of(&runner_image_constant());
     assert_eq!(
-        Some(controller.as_str()),
+        Some(format!("{controller_repo}:{LOGWEIR_TAG}")).as_deref(),
         values["controllerImage"].as_str(),
-        "values.yaml controllerImage must be config/manager/deployment.yaml's image"
+        "values.yaml controllerImage must be config/manager/deployment.yaml's REPOSITORY at \
+         `:{LOGWEIR_TAG}` — the repository so a namespace change propagates, the tag because the \
+         owner decided on 2026-09-12 that this chart's defaults name a tag"
     );
     assert_eq!(
-        Some(runner_image_constant().as_str()),
+        Some(format!("{runner_repo}:{LOGWEIR_TAG}")).as_deref(),
         values["runnerImage"].as_str(),
-        "values.yaml runnerImage must be weirkeeper::job::RUNNER_IMAGE"
+        "values.yaml runnerImage must be weirkeeper::job::RUNNER_IMAGE's REPOSITORY at \
+         `:{LOGWEIR_TAG}`"
     );
     for (path, v) in [
         ("controllerImage", &values["controllerImage"]),
         ("runnerImage", &values["runnerImage"]),
+    ] {
+        let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
+        assert!(
+            !is_digest_reference(s),
+            "{path} is a digest ({s}) — that is this chart's ruling reverted, not a tightening. \
+             The tree's own pins stay digests; this chart's two defaults do not"
+        );
+    }
+    // THE TREE ITSELF IS STILL PINNED BY DIGEST. Global Constraint 7 governs
+    // `config/`, `logweir.yaml` and the Rust constant, and this ruling does not
+    // reach them — `repository_of` above would have panicked otherwise, and this
+    // says so out loud.
+    assert!(
+        is_digest_reference(&controller_image_pin()),
+        "config/manager/deployment.yaml still pins the controller image BY DIGEST (GC7)"
+    );
+    assert!(
+        is_digest_reference(&runner_image_constant()),
+        "weirkeeper::job::RUNNER_IMAGE is still a digest (GC7)"
+    );
+    // The four third-party images, still digests, still with provenance.
+    for (path, v) in [
         ("minio.image", &values["minio"]["image"]),
         ("minio.mcImage", &values["minio"]["mcImage"]),
         ("demoKafka.image", &values["demoKafka"]["image"]),
@@ -508,7 +632,8 @@ fn chart_lint_values_pin_the_shipped_digests() {
         let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
         assert!(
             is_digest_reference(s),
-            "{path} is not a digest reference: {s}"
+            "{path} is not a digest reference: {s} — the third-party images are NOT part of the \
+             `latest` ruling"
         );
     }
     // The two MinIO images are the compose stack's, byte for byte.
@@ -521,7 +646,7 @@ fn chart_lint_values_pin_the_shipped_digests() {
             "{path} ({s}) is not the reference e2e/compose/docker-compose.yml pins"
         );
     }
-    // The two digests this task resolved carry the command and the date.
+    // The two digests the chart resolved itself carry the command and the date.
     let text = read("charts/logweir/values.yaml");
     for command in [
         "docker buildx imagetools inspect apache/kafka:3.7.1",
@@ -529,12 +654,22 @@ fn chart_lint_values_pin_the_shipped_digests() {
     ] {
         assert!(
             text.contains(command),
-            "values.yaml must record the resolution command `{command}` beside the digest (the kindest/node idiom)"
+            "values.yaml must record the resolution command `{command}` beside the THIRD-PARTY \
+             digest (the kindest/node idiom)"
         );
     }
     assert!(
         text.contains("2026-09-12"),
-        "values.yaml must record the date the digests were resolved"
+        "values.yaml must record the date the third-party digests were resolved — and the date \
+         the owner decided the two Logweir images are named by tag"
+    );
+    // And the way back to a digest is written down, because a default whose
+    // cost is real must say how to undo it.
+    assert!(
+        text.contains("docker buildx imagetools inspect")
+            && text.contains("--set runnerImagePullPolicy="),
+        "values.yaml must carry the pinning recipe: how to resolve a tag to a digest, and the \
+         four --set values that pin it back"
     );
     // The defaults are the shipped install: nothing optional on.
     for flag in ["minio", "demoKafka", "ui"] {
@@ -544,7 +679,19 @@ fn chart_lint_values_pin_the_shipped_digests() {
             "{flag}.enabled defaults to false"
         );
     }
-    assert_eq!(Some("IfNotPresent"), values["imagePullPolicy"].as_str());
+    // AND THE TWO POLICIES FOLLOW THE TAG. `Always` is Kubernetes' own default
+    // for a `:latest` reference; `IfNotPresent` under a mutable tag is a pod
+    // that never refreshes, and `Never` is a pod that cannot start at all.
+    assert_eq!(
+        Some("Always"),
+        values["imagePullPolicy"].as_str(),
+        "the CONTROLLER's pull policy follows its `:latest` image"
+    );
+    assert_eq!(
+        Some("Always"),
+        values["runnerImagePullPolicy"].as_str(),
+        "and so does the RUNNER Jobs' — rendered as LOGWEIR_RUNNER_PULL_POLICY (Task 37)"
+    );
 }
 
 // ============================================ the three flags, off and on
@@ -1043,11 +1190,28 @@ fn chart_lint_only_the_proxy_and_the_controller_hold_a_token() {
     );
 }
 
-/// **Every rendered image is a digest, except in the author-only render, by
-/// name** — its premise is a locally built tag.
+/// **Every rendered image is a digest, except the two Logweir images — which
+/// must be exactly `<repository>:latest` — and except the author-only render,
+/// by name.**
+///
+/// THE TWO EXCEPTIONS ARE DIFFERENT KINDS OF THING. The Logweir images carry a
+/// tag by the owner's decision of 2026-09-12, and the tag is checked EXACTLY:
+/// a digest there is the ruling reverted and any other tag is a value nobody
+/// chose. The author-only render is exempt by NAME because its whole premise is
+/// a locally built tag under `imagePullPolicy: Never`, and a locally built
+/// digest changes on every build (plan erratum E19(a)).
+///
+/// The third-party images — MinIO, mc, apache/kafka, kubectl — are untouched by
+/// the ruling and are still digests, in every render including this one.
 #[test]
-fn chart_lint_every_rendered_image_is_a_digest_except_the_author_only_example() {
+fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and_the_author_only_example(
+) {
+    let logweir_repos = [
+        repository_of(&controller_image_pin()),
+        repository_of(&runner_image_constant()),
+    ];
     let mut total = 0usize;
+    let mut tagged = 0usize;
     for rel in files_under("charts/logweir/rendered") {
         let name = rel.trim_start_matches("charts/logweir/rendered/");
         for d in docs_in(&rel) {
@@ -1066,9 +1230,23 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_author_only_example() 
                 );
                 continue;
             }
+            if let Some(repo) = logweir_repos.iter().find(|r| {
+                image.starts_with(&format!("{r}:")) || image.starts_with(&format!("{r}@"))
+            }) {
+                tagged += 1;
+                assert_eq!(
+                    format!("{repo}:{LOGWEIR_TAG}"),
+                    image,
+                    "{name}: {}/{} names a Logweir image as {image}; this chart names both by \
+                     `<repository>:{LOGWEIR_TAG}`",
+                    d.kind,
+                    d.name()
+                );
+                continue;
+            }
             assert!(
                 is_digest_reference(&image),
-                "{name}: {}/{} references {image} by tag",
+                "{name}: {}/{} references {image} by tag — only the two Logweir images may",
                 d.kind,
                 d.name()
             );
@@ -1077,6 +1255,10 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_author_only_example() 
     assert!(
         total >= 10,
         "only {total} image references across the rendered files"
+    );
+    assert!(
+        tagged >= 1,
+        "no rendered file names a Logweir repository at all — the tag arm would be vacuous"
     );
 }
 
@@ -1116,6 +1298,38 @@ fn chart_lint_values_schema_types_the_three_flags_as_booleans() {
     for top in ["controllerImage", "runnerImage"] {
         assert_eq!(Some("string"), schema["properties"][top]["type"].as_str());
     }
+    // THE TWO PULL POLICIES ARE A CLOSED ENUM, and `runnerImagePullPolicy` is
+    // required — Task 37. An install that set the runner image and forgot its
+    // policy would be an install whose Jobs cannot start.
+    for policy in ["imagePullPolicy", "runnerImagePullPolicy"] {
+        assert_eq!(
+            Some("string"),
+            schema["properties"][policy]["type"].as_str(),
+            "{policy} is a string"
+        );
+        let enumerated: BTreeSet<String> = schema["properties"][policy]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{policy} must carry an enum of the three Kubernetes values"))
+            .iter()
+            .map(|v| v.as_str().expect("a string").to_string())
+            .collect();
+        assert_eq!(
+            BTreeSet::from([
+                "Always".to_string(),
+                "IfNotPresent".to_string(),
+                "Never".to_string()
+            ]),
+            enumerated,
+            "{policy}'s enum is Kubernetes' three and nothing else"
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .map(|a| a.iter().any(|v| v == policy))
+                .unwrap_or(false),
+            "{policy} must be required at the top level"
+        );
+    }
     assert_eq!(
         Some(false),
         schema["additionalProperties"].as_bool(),
@@ -1142,6 +1356,13 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "HELM_MIN_MAJOR=4",
         "crates/weirkeeper/src/job.rs",
         "config/manager/deployment.yaml",
+        // Task 37: the tag is a named constant, the two repositories are
+        // DERIVED from the tree, and arm 5 reads them.
+        "LOGWEIR_TAG=\"latest\"",
+        "controller_repo=\"${tree_controller%@sha256:*}\"",
+        "runner_repo=\"${tree_runner%@sha256:*}\"",
+        "$controller_repo:$LOGWEIR_TAG",
+        "$runner_repo:$LOGWEIR_TAG",
     ] {
         assert!(
             script.contains(needle),
@@ -1229,6 +1450,13 @@ fn chart_lint_examples_and_readme_say_what_they_are() {
     assert!(author_only.contains("imagePullPolicy: Never"));
     assert!(author_only.contains("controllerImage: weirkeeper:check"));
     assert!(author_only.contains("runnerImage: logweir:check"));
+    // Task 37: the runner Jobs' policy is its own value now, and this example
+    // is the one place `Never` is still right — images LOADED onto the node.
+    assert!(
+        author_only.contains("runnerImagePullPolicy: Never"),
+        "author-only.values.yaml must set runnerImagePullPolicy: Never beside runnerImage — the \
+         chart's default is Always, which would try to pull a tag no registry holds"
+    );
     let minimal = read("charts/logweir/examples/minimal.values.yaml");
     for key in ["url:", "endpoint:", "region:"] {
         assert!(minimal.contains(key), "minimal.values.yaml sets `{key}`");

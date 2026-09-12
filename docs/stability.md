@@ -353,6 +353,8 @@ reproducible identifier for anything.
 
 **And a fifth time**, after the Helm chart landed (2026-09-12): the pinned build predated Task 33's `LOGWEIR_RUNNER_IMAGE`, so the controller image was rebuilt from the tree that carries it, and `weirkeeper@sha256:6ab14111…` was superseded by `weirkeeper@sha256:51145a3f…` in the same two files and in `charts/logweir/values.yaml` (with the chart's rendered files regenerated).
 
+**And a sixth time**, for Task 37 (2026-09-12): the chart's two Logweir images are now named by the `latest` tag and the runner Jobs' pull policy follows it through a new `LOGWEIR_RUNNER_PULL_POLICY`, which the pinned build did not know — measured, 0 occurrences in that image's binary against 2 in the rebuild. A 223 s native `arm64` rebuild moved `weirkeeper@sha256:51145a3f…` to `weirkeeper@sha256:fa0060bd…` in `config/manager/deployment.yaml` and `logweir.yaml`. It moved it in **nothing else**, which is the one thing this entry adds: the chart's values no longer carry a controller digest, so the sixth instance of "a locally pinned digest is a measurement, not a reproducible pin" cost two files instead of six. That is what naming a tag buys, and `charts/logweir/values.yaml`'s header says what it costs.
+
 ### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
 
 `sample.anchor` chooses WHICH records in the sampled window a drill reconciles.

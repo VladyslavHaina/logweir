@@ -1,12 +1,14 @@
 {{- /*
 The `weirkeeper` Deployment — `config/manager/deployment.yaml`, with three
 things parameterised and nothing else changed: the image and its pull policy
-(`controllerImage`, `imagePullPolicy`), the runner image the controller hands
-every Job (`runnerImage`, Task 33's `LOGWEIR_RUNNER_IMAGE` — the ONE env this
-chart renders that `logweir.yaml` does not; its default is the compiled-in
-constant, so the default install creates the Jobs it always created), and the
-archive addressing env the `config/overlays/k8s-demo` patch sets
-(`archive.*`, rendered only when a value or `minio.enabled` supplies one).
+(`controllerImage`, `imagePullPolicy`), the runner image AND the runner pull
+policy the controller hands every Job (`runnerImage`, `runnerImagePullPolicy`
+— the TWO envs this chart renders that `logweir.yaml` does not,
+`LOGWEIR_RUNNER_IMAGE` from Task 33 and `LOGWEIR_RUNNER_PULL_POLICY` from Task
+37; they are set TOGETHER because the chart's `runnerImage` default names a
+`latest` tag and a tag under a policy that never pulls is a Job no kubelet can
+start), and the archive addressing env the `config/overlays/k8s-demo` patch
+sets (`archive.*`, rendered only when a value or `minio.enabled` supplies one).
 
 Everything the source manifest says about this PodSpec still holds: it is the
 ONE `automountServiceAccountToken` exemption (the only Kubernetes API client
@@ -16,8 +18,12 @@ Constraint 30), no probes and no ports (Global Constraint 32 — no HTTP surface
 projected `optional: true` so a cluster that has not created it still gets a
 running controller whose verifications read `NotAttempted`.
 `chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file` holds
-this copy to `logweir.yaml`: image, pull policy, args, every env name and
-value, both security contexts and the ServiceAccount.
+this copy to `logweir.yaml`: args, every other env name and value, both
+security contexts, the resources and the ServiceAccount. It permits exactly
+four differences, all of them the image ruling `values.yaml` records: the
+controller image (the SAME repository, at `:latest` rather than at the install
+file's digest), `imagePullPolicy` (`Always` rather than `IfNotPresent`) and the
+two runner envs.
 */ -}}
 {{- $endpoint := include "logweir.archive.endpoint" . -}}
 {{- $region := include "logweir.archive.region" . -}}
@@ -62,6 +68,8 @@ spec:
               value: {{ .Values.controller.logLevel | quote }}
             - name: LOGWEIR_RUNNER_IMAGE
               value: {{ .Values.runnerImage | quote }}
+            - name: LOGWEIR_RUNNER_PULL_POLICY
+              value: {{ .Values.runnerImagePullPolicy | quote }}
             - name: LOGWEIR_ARCHIVE_URL
               value: {{ include "logweir.archive.url" . | quote }}
             {{- if $endpoint }}

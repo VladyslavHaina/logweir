@@ -95,24 +95,34 @@ pub struct Context {
     /// configured holds no archive handle at all, which is the shape every
     /// gate in this task runs in.
     pub archive: Option<std::sync::Arc<logweir_store::Store>>,
-    /// The image the runner Jobs THIS controller creates will name, or `None`
-    /// for the shipped pin `crate::job::RUNNER_IMAGE` — Task 33, interface
-    /// **I15**'s runtime half.
+    /// The image the runner Jobs THIS controller creates will name AND the
+    /// pull policy they will carry — Task 33's interface **I15** runtime half,
+    /// grown by Task 37 into the pair `crate::job::RunnerImage` holds. Each
+    /// field is `None` for the compiled-in constant
+    /// (`crate::job::RUNNER_IMAGE`, `crate::job::IMAGE_PULL_POLICY`).
     ///
-    /// READ ONCE IN `main`, out of `crate::job::RUNNER_IMAGE_ENV`, through
-    /// `crate::job::configured_runner_image` — the same arrangement
+    /// READ ONCE EACH IN `main`, out of `crate::job::RUNNER_IMAGE_ENV` and
+    /// `crate::job::RUNNER_PULL_POLICY_ENV`, through
+    /// `crate::job::configured_runner_image` and
+    /// `crate::job::configured_runner_pull_policy` — the same arrangement
     /// [`Context::archive`] has, and for the same reason: a decision behind
-    /// `fn main` is reachable from no test at all. `main` logs which of the
-    /// two answers it got, once, at startup.
+    /// `fn main` is reachable from no test at all. `main` logs which answer it
+    /// got for each, once, at startup, and REFUSES TO START on a pull policy
+    /// the API server would reject.
     ///
-    /// **THE THREE CONTROLLERS THAT CREATE NO RUNNER JOBS PASS `None` HERE,
-    /// AND THAT IS NOT A STATEMENT ABOUT THE ENVIRONMENT.** `approval`,
+    /// ONE FIELD CARRYING BOTH, and not two beside each other: the image and
+    /// its pull policy are two halves of one decision (a `latest` tag must be
+    /// pulled; a loaded tag must not be), and two parallel `Option`s threaded
+    /// through three reconcilers are how the halves come to disagree.
+    ///
+    /// **THE THREE CONTROLLERS THAT CREATE NO RUNNER JOBS PASS THE DEFAULT
+    /// HERE, AND THAT IS NOT A STATEMENT ABOUT THE ENVIRONMENT.** `approval`,
     /// `trust_roster` and `backup_schedule` create no `Job` at all — a
     /// `BackupSchedule` creates `Backup` objects, and the `Backup` reconciler
     /// is what turns those into Jobs — so the value would be carried and never
     /// read. A task that gives one of them a Job must thread the value in
-    /// rather than reading `None` as "no override is configured".
-    pub runner_image: Option<String>,
+    /// rather than reading the default as "no override is configured".
+    pub runner_image: crate::job::RunnerImage,
 }
 
 /// The cluster-scoped `TrustRoster`'s `spec`, or `None` when it could not be

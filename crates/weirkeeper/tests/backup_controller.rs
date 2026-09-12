@@ -856,6 +856,149 @@ fn the_runner_image_override_does_not_touch_the_pull_policy() {
     );
 }
 
+/// `job::configured_runner_pull_policy`: the eight answers, two of which are
+/// refusals — Task 37.
+///
+/// THE EMPTY STRING IS UNSET, for plan erratum **E19(e)**'s reason: a
+/// Kubernetes `env:` entry with an empty `value:` makes `env::var` return
+/// `Ok("")`, and a controller that read that as a configured value would put
+/// `imagePullPolicy: ""` in every Job it created — which the API server
+/// rejects at CREATE.
+///
+/// AND A VALUE THAT IS NOT A POLICY IS AN `Err`, WHICH IS THE ONE PLACE THIS
+/// PREDICATE DIFFERS FROM `configured_runner_image`. An image reference cannot
+/// be validated here (only a kubelet can say whether one resolves on a node);
+/// a pull policy's legal set is closed, is known here, and is validated by the
+/// API server at every Job CREATE. Accepting `always` would mean an install
+/// that silently created rejected Jobs forever.
+///
+/// KILLS: a predicate that lower-cases, title-cases or otherwise "helps" the
+/// value through; a predicate that falls back to the constant instead of
+/// refusing; an empty value read as configured.
+#[test]
+fn an_empty_runner_pull_policy_override_is_unset() {
+    assert_eq!(
+        job::configured_runner_pull_policy(Ok(String::new())),
+        Ok(None),
+        "an empty `value:` on the Deployment's env entry is the variable being UNSET (E19(e)); \
+         read as configured it puts `imagePullPolicy: \"\"` in every Job this controller creates"
+    );
+    assert_eq!(
+        job::configured_runner_pull_policy(Ok("  ".to_string())),
+        Ok(None),
+        "whitespace is the same fact as empty"
+    );
+    assert_eq!(
+        job::configured_runner_pull_policy(Err(std::env::VarError::NotPresent)),
+        Ok(None),
+        "an absent variable is unset — and unset is the compiled-in `job::IMAGE_PULL_POLICY`, \
+         which is what every path that LOADS an image onto the node still wants"
+    );
+    for policy in job::PULL_POLICIES {
+        assert_eq!(
+            job::configured_runner_pull_policy(Ok(policy.to_string())),
+            Ok(Some(policy.to_string())),
+            "`{policy}` is one of the three Kubernetes accepts"
+        );
+    }
+    assert_eq!(
+        job::configured_runner_pull_policy(Ok("  Always\n".to_string())),
+        Ok(Some("Always".to_string())),
+        "trimmed, so a YAML block scalar's trailing newline is not part of the policy"
+    );
+    for wrong in ["always", "Sometimes", "ALWAYS", "IfNotpresent", "never"] {
+        let refused = job::configured_runner_pull_policy(Ok(wrong.to_string()));
+        let message = refused.expect_err(&format!(
+            "`{wrong}` is not an imagePullPolicy and must be refused, not coerced"
+        ));
+        assert!(
+            message.contains(job::RUNNER_PULL_POLICY_ENV),
+            "the refusal must name the environment variable — an operator reading a crashed \
+             controller's last line has nothing else to go on: {message}"
+        );
+        assert!(
+            message.contains(wrong),
+            "and the value it refused: {message}"
+        );
+    }
+    assert_eq!(
+        job::PULL_POLICIES,
+        ["Never", "IfNotPresent", "Always"],
+        "the closed set is Kubernetes' own three, spelt Kubernetes' way"
+    );
+    assert_eq!(
+        job::RUNNER_PULL_POLICY_ENV,
+        "LOGWEIR_RUNNER_PULL_POLICY",
+        "the variable the chart renders beside the image one"
+    );
+}
+
+/// With a pull-policy override the Job carries it — and **nothing else in the
+/// Job moves**, the image least of all.
+///
+/// THE ASSERTION IS A WHOLE-OBJECT DIFF, not a field read. The two Jobs are
+/// serialised and compared after the one field this override is allowed to
+/// change is set to the same value on both; anything else `build` did
+/// differently shows up as a JSON inequality naming itself. That is the
+/// property the ruling asks for — "otherwise byte-identical to the default
+/// Job" — rather than a spot check that a future edit could walk around.
+///
+/// KILLS: a `build` that ignores `RunnerJobSpec::image_pull_policy`; a `build`
+/// that lets the policy override move the image (or the argv, the volumes, the
+/// failure policy, the security context, the deadline …).
+#[test]
+fn a_runner_pull_policy_override_moves_only_the_policy() {
+    let default_spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    assert_eq!(
+        default_spec.image_pull_policy, None,
+        "`runner_job_spec` is a pure function of the custom resource and builds NO pull policy: \
+         the override is a property of the process, read once in `main`"
+    );
+    let mut overridden = default_spec.clone();
+    overridden.image_pull_policy = Some("Always".to_string());
+
+    let default_job = job::build(&default_spec);
+    let overridden_job = job::build(&overridden);
+
+    let container_of = |j: &k8s_openapi::api::batch::v1::Job| {
+        j.spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .and_then(|p| p.containers.first())
+            .expect("the pod template has the one runner container")
+            .clone()
+    };
+    assert_eq!(
+        container_of(&default_job).image_pull_policy.as_deref(),
+        Some(job::IMAGE_PULL_POLICY),
+        "with no override the policy is the compiled-in constant, exactly as before Task 37"
+    );
+    assert_eq!(
+        container_of(&overridden_job).image_pull_policy.as_deref(),
+        Some("Always"),
+        "with an override it is the operator's value — the whole point of \
+         `job::RUNNER_PULL_POLICY_ENV`, and what `kubectl get job -o yaml` shows"
+    );
+    assert_eq!(
+        container_of(&overridden_job).image.as_deref(),
+        Some(RUNNER_IMAGE),
+        "and the POLICY override does not touch the IMAGE: the two are separate decisions, and \
+         this is the mirror of `the_runner_image_override_does_not_touch_the_pull_policy`"
+    );
+
+    // The whole-object diff: normalise the one permitted difference away and
+    // require byte equality of everything else.
+    let mut normalised: Value =
+        serde_json::to_value(&overridden_job).expect("the Job serialises to JSON");
+    normalised["spec"]["template"]["spec"]["containers"][0]["imagePullPolicy"] =
+        Value::String(job::IMAGE_PULL_POLICY.to_string());
+    assert_eq!(
+        serde_json::to_value(&default_job).expect("the Job serialises to JSON"),
+        normalised,
+        "the pull-policy override changes `imagePullPolicy` and NOTHING else in the Job"
+    );
+}
+
 /// The Job's name is the CR's name, with no prefix added.
 #[test]
 fn the_job_name_is_the_cr_name() {

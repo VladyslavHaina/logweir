@@ -464,6 +464,10 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         // function is a pure function of the custom resource and stays one:
         // the override is a property of the PROCESS, read once in `main`.
         image: None,
+        // AND THE COMPILED-IN `job::IMAGE_PULL_POLICY`, OVERWRITTEN THE SAME
+        // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
+        // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
+        image_pull_policy: None,
     })
 }
 
@@ -879,18 +883,19 @@ pub async fn reconcile_cluster(
     client: &kube::Client,
     now: DateTime<Utc>,
 ) -> Result<ProbeOutcome, KafkaClusterError> {
-    reconcile_cluster_with_runner_image(cluster, client, now, None).await
+    reconcile_cluster_with_runner_image(cluster, client, now, &job::RunnerImage::default()).await
 }
 
-/// [`reconcile_cluster`], with the runner image this controller process was
-/// handed — Task 33.
+/// [`reconcile_cluster`], with the runner image and pull policy this controller
+/// process was handed — Task 33, and Task 37's policy beside it.
 ///
 /// The probe Job runs the SAME image the backup and restore runners do
-/// (`logweir cluster-probe` is a subcommand of the one binary), so the
-/// override reaches it too: on a cluster that did not build the pins, a probe
+/// (`logweir cluster-probe` is a subcommand of the one binary), so both
+/// overrides reach it too: on a cluster that did not build the pins, a probe
 /// Job naming the compile-time digest is `ErrImageNeverPull` exactly as a
-/// backup Job would be. `None` is the shipped pin; the `imagePullPolicy` is
-/// `job::IMAGE_PULL_POLICY` either way.
+/// backup Job would be, and a probe Job naming a `latest` tag under a policy
+/// that never pulls is the same failure again. An unset field is the
+/// compiled-in constant — `job::RUNNER_IMAGE`, `job::IMAGE_PULL_POLICY`.
 ///
 /// # Errors
 ///
@@ -899,9 +904,9 @@ pub async fn reconcile_cluster_with_runner_image(
     cluster: &KafkaCluster,
     client: &kube::Client,
     now: DateTime<Utc>,
-    runner_image: Option<&str>,
+    runner: &job::RunnerImage,
 ) -> Result<ProbeOutcome, KafkaClusterError> {
-    match reconcile_cluster_inner(cluster, client, now, runner_image).await {
+    match reconcile_cluster_inner(cluster, client, now, runner).await {
         Err(KafkaClusterError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN, so it cannot be
             // forgotten at one of the refusal sites.
@@ -946,7 +951,7 @@ async fn reconcile_cluster_inner(
     cluster: &KafkaCluster,
     client: &kube::Client,
     now: DateTime<Utc>,
-    runner_image: Option<&str>,
+    runner: &job::RunnerImage,
 ) -> Result<ProbeOutcome, KafkaClusterError> {
     let name = cluster.name_any();
     let namespace = cluster
@@ -996,9 +1001,11 @@ async fn reconcile_cluster_inner(
             });
         }
         let mut spec = runner_job_spec(cluster)?;
-        // THE ONE LINE THE OVERRIDE IS (Task 33). `None` leaves the shipped
-        // pin in place, which is what every test that does not pass one sees.
-        spec.image = runner_image.map(str::to_string);
+        // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
+        // policy). `None` in either leaves the compiled-in constant in place,
+        // which is what every test that does not pass one sees.
+        spec.image = runner.image.clone();
+        spec.image_pull_policy = runner.image_pull_policy.clone();
         jobs.create(&PostParams::default(), &job::build(&spec))
             .await
             .map_err(KafkaClusterError::Api)?;
@@ -1162,13 +1169,9 @@ async fn reconcile(
     cluster: Arc<KafkaCluster>,
     ctx: Arc<Context>,
 ) -> Result<Action, KafkaClusterError> {
-    let outcome = reconcile_cluster_with_runner_image(
-        &cluster,
-        &ctx.client,
-        Utc::now(),
-        ctx.runner_image.as_deref(),
-    )
-    .await?;
+    let outcome =
+        reconcile_cluster_with_runner_image(&cluster, &ctx.client, Utc::now(), &ctx.runner_image)
+            .await?;
     Ok(action_for(&outcome))
 }
 
@@ -1199,15 +1202,16 @@ fn error_policy(cluster: Arc<KafkaCluster>, err: &KafkaClusterError, _ctx: Arc<C
 /// interface **I13**'s files.
 pub fn controller(
     client: kube::Client,
-    runner_image: Option<String>,
+    runner_image: job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<KafkaCluster> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
     let ctx = Arc::new(Context {
         client,
         archive: None,
-        // Task 33: this reconciler creates no BACKUP Job, but it does create
-        // the probe Job, and that Job runs the runner image.
+        // Task 33 and Task 37: this reconciler creates no BACKUP Job, but it
+        // does create the probe Job, and that Job runs the runner image under
+        // the runner pull policy.
         runner_image,
     });
     async move {

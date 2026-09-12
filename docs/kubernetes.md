@@ -1909,7 +1909,17 @@ exactly what `Never` is right for), and step 3 of `scripts/demo-steps.sh` sets
 that variable with `kubectl set env`, puts the author-only controller image back
 with `kubectl set image`, and restores the overlay's `imagePullPolicy: Never` —
 all three **after** X-APPLY, which a server-side apply of `logweir.yaml` had
-just taken back. **The ninth run, 34700987743 on commit `a113dd2`, 2026-09-12,
+just taken back. **Task 37 gave the policy its own override.**
+`LOGWEIR_RUNNER_PULL_POLICY` is read the same way, once, through
+`job::configured_runner_pull_policy`, and the parenthesis above is now history:
+the compiled-in `job::IMAGE_PULL_POLICY` is still `Never` and an unset variable
+still means it — which is why this demo, `kind` and the laptop path are
+unchanged — but `charts/logweir` names its two Logweir images by the `latest`
+tag (the owner's decision of 2026-09-12) and a tag under a policy that never
+pulls is a Job no kubelet starts, so the chart renders the variable beside the
+image one. A value that is not one of `Never` / `IfNotPresent` / `Always` makes
+the controller refuse to start, because the API server would otherwise reject
+every runner Job it created. **The ninth run, 34700987743 on commit `a113dd2`, 2026-09-12,
 is green**: step 3 handed the cluster its own images, the rollout settled, and
 all twelve steps ran through to `PHASE C EXIT CRITERION MET`. The first fires whenever the run was handed a runner reference
 that is not the default — both install branches; the other two only under the
@@ -1991,6 +2001,8 @@ And once more again, for Task 28a: the controller now writes `Backup.status.back
 And a fourth time, for Task 30b: the release task's local dry run rebuilt the controller image to assert `scripts/check-image-weirkeeper.sh`'s new `--no-exec` arm against freshly produced bytes (182 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:e6e3384e…` was superseded by **`weirkeeper@sha256:6ab14111…`** in `config/manager/deployment.yaml` and `logweir.yaml` — the same rule, the fourth instance, and the reason clause 1 of the tag-1 checklist still reads blocked.
 
 And a fifth time, after the Helm chart landed (Task 35, 2026-09-12): the `weirkeeper:check` the tree pinned (`6ab14111…`, built 2026-09-11 for Task 30b's dry run) predates Task 33, so its binary carries no `LOGWEIR_RUNNER_IMAGE` at all — measured by the chart's walk on docker-desktop, whose runner Jobs sat in `ErrImageNeverPull` under the compiled-in runner reference until the runner image was tagged with that name (E19(b)), and confirmed by the review (`strings` over the image's binary: zero occurrences). The controller image was rebuilt from the tree at `1f77f79` (338 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:6ab14111…` was superseded by **`weirkeeper@sha256:51145a3f…`** in `config/manager/deployment.yaml`, `logweir.yaml`, `charts/logweir/values.yaml` and the chart's three digest-pinned rendered files — the fifth instance of the same rule.
+
+And a sixth time, for Task 37 (2026-09-12): the chart's images are now named by the `latest` tag and the runner Jobs' pull policy follows, which means the controller reads a variable — `LOGWEIR_RUNNER_PULL_POLICY` — that `51145a3f…` was built before and therefore does not know. A walk against that image would have proven nothing about the value it was supposed to prove. The controller image was rebuilt from this branch (**223 s**, native `arm64`, the runner image untouched, `bash scripts/check-image-weirkeeper.sh weirkeeper:check` ok on all four checks), and `grep -ao LOGWEIR_RUNNER_PULL_POLICY /usr/local/bin/weirkeeper | wc -l` inside the image answered **2** — the constant and its use in the refusal message — against **0** for the image it replaced. So `weirkeeper@sha256:51145a3f…` was superseded by **`weirkeeper@sha256:fa0060bd…`** in `config/manager/deployment.yaml` and `logweir.yaml` (`./scripts/render-install.sh` then `--check` rc=0), and in **nothing else**: `charts/logweir/values.yaml` no longer carries a controller digest to move, and the chart's rendered files name `<repository>:latest`, so the re-pin does not touch them at all. The sixth instance of the same rule, and the first one whose blast radius the tag ruling shrank.
 
 This section is **not** edited to match, and that is deliberate: it is a
 transcript of commands that were run and the values they printed on the day

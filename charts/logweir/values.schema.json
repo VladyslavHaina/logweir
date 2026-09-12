@@ -4,21 +4,26 @@
   "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "controller", "archive", "minio", "demoKafka", "ui"],
+  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "controller", "archive", "minio", "demoKafka", "ui"],
   "properties": {
     "controllerImage": {
       "type": "string",
-      "description": "The weirkeeper image, `<repository>@sha256:<64 hex>` — the value config/manager/deployment.yaml pins.",
+      "description": "The weirkeeper image. The default is the repository config/manager/deployment.yaml pins, at the `latest` TAG (the owner's decision of 2026-09-12); `<repository>@sha256:<64 hex>` is accepted and is how you pin it back.",
       "minLength": 1
     },
     "runnerImage": {
       "type": "string",
-      "description": "The runner image, rendered as LOGWEIR_RUNNER_IMAGE on the Deployment (Task 33). Default: weirkeeper::job::RUNNER_IMAGE.",
+      "description": "The runner image, rendered as LOGWEIR_RUNNER_IMAGE on the Deployment (Task 33). The default is the repository weirkeeper::job::RUNNER_IMAGE pins, at the `latest` TAG.",
       "minLength": 1
     },
     "imagePullPolicy": {
       "type": "string",
-      "description": "The CONTROLLER container's pull policy.",
+      "description": "The CONTROLLER container's pull policy. Default `Always`, which is Kubernetes' own default for a `:latest` tag.",
+      "enum": ["IfNotPresent", "Never", "Always"]
+    },
+    "runnerImagePullPolicy": {
+      "type": "string",
+      "description": "The RUNNER Jobs' pull policy, rendered as LOGWEIR_RUNNER_PULL_POLICY on the Deployment (Task 37). Default `Always`, because runnerImage names a tag; `Never` for an image you loaded onto the node yourself. The controller refuses to start on anything outside this enum.",
       "enum": ["IfNotPresent", "Never", "Always"]
     },
     "controller": {

@@ -230,6 +230,56 @@ fn run() -> ExitCode {
         "the runner image every Job this controller creates will name"
     );
 
+    // AND THE PULL POLICY THOSE JOBS WILL CARRY — Task 37, and the THIRD thing
+    // this file reads out of the environment.
+    //
+    // WHY IT EXISTS. The owner decided, on 2026-09-12, that `charts/logweir`'s
+    // defaults name the two Logweir images by the `latest` TAG rather than by a
+    // digest. A mutable tag under `weirkeeper::job::IMAGE_PULL_POLICY` — which
+    // is `Never`, and stays the compiled-in default for every path that LOADS
+    // an image onto the node — is a reference the kubelet cannot resolve, so
+    // the policy had to become configurable alongside the image. The chart
+    // renders this variable from its own `runnerImagePullPolicy` value beside
+    // the image one, so the two halves of one decision travel together.
+    //
+    // SAME ARRANGEMENT AS THE TWO READS ABOVE: the read is here and the
+    // DECISION is a pure predicate in the library, so a test can hand it the
+    // empty string an `env:` entry with an empty `value:` actually produces
+    // (plan erratum E19(e)) without touching process-global state.
+    //
+    // AND ON A BAD VALUE THIS PROCESS REFUSES TO START. `imagePullPolicy` is a
+    // closed set the API server validates at Job CREATE, so a controller that
+    // started under `always` or `Sometimes` would turn every `Backup` and every
+    // `Restore` into a rejected Job, forever, with nothing but an API error per
+    // object to say why. One legible refusal at startup is the whole of the
+    // difference.
+    let runner_pull_policy = match weirkeeper::job::configured_runner_pull_policy(std::env::var(
+        weirkeeper::job::RUNNER_PULL_POLICY_ENV,
+    )) {
+        Ok(policy) => policy,
+        Err(message) => {
+            error!(error = %message, "refusing to start: the runner pull policy is not a policy");
+            return ExitCode::FAILURE;
+        }
+    };
+    info!(
+        runner_pull_policy = runner_pull_policy
+            .as_deref()
+            .unwrap_or(weirkeeper::job::IMAGE_PULL_POLICY),
+        source = if runner_pull_policy.is_some() {
+            weirkeeper::job::RUNNER_PULL_POLICY_ENV
+        } else {
+            "shipped constant"
+        },
+        "the runner pull policy every Job this controller creates will carry"
+    );
+
+    // The pair, threaded as ONE value from here on.
+    let runner = weirkeeper::job::RunnerImage {
+        image: runner_image,
+        image_pull_policy: runner_pull_policy,
+    };
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -297,7 +347,7 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::backup::controller(
             client.clone(),
             archive.clone(),
-            runner_image.clone(),
+            runner.clone(),
         )));
         // Task 20 pushes the FIFTH — the `Restore` reconciler that admits a
         // run only against a `Verified=True` approval whose own bytes carry
@@ -310,7 +360,7 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::restore::controller(
             client.clone(),
             archive.clone(),
-            runner_image.clone(),
+            runner.clone(),
         )));
         // Task 15c pushes the SIXTH — the `KafkaCluster` probe reconciler that
         // makes `status.reachable` mean something, by running `logweir
@@ -320,10 +370,7 @@ fn run() -> ExitCode {
         // needs nothing but a client. `tests/linkage.rs`'s `"controllers":6`
         // moved in this same commit.
         controllers.push(Box::pin(
-            weirkeeper::controllers::kafka_cluster::controller(
-                client.clone(),
-                runner_image.clone(),
-            ),
+            weirkeeper::controllers::kafka_cluster::controller(client.clone(), runner.clone()),
         ));
 
         let registered = controllers.len();
