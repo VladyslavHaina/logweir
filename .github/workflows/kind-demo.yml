@@ -126,9 +126,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: cmake (rdkafka vendors and builds librdkafka from C)
-        # + libsasl2-dev: sasl2-sys links the system SASL, which a runner lacks
-        # (first run, 2026-09-12). The image builds install their own.
-        run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev
+          # The Dockerfile's build-stage package list, verbatim: the runner compiles
+        # the same crates the image does (sasl2-sys wants libsasl2, librdkafka's
+        # cmake build wants curl's headers — both missing on a bare runner, both
+        # found by the first two CI runs on 2026-09-12).
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - uses: taiki-e/install-action@v2
         with: { tool: just@1.58.0 }
       - name: kind, install only (the cluster is created by a step of this job)
