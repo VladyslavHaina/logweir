@@ -118,8 +118,10 @@ needs the compose stack, a Kubernetes cluster or a Docker build. They are in
 
 ## Before you open a pull request
 
-- `just gate` exits 0. (`just lint` and `cargo test --workspace` are subsets of
-  it, and still useful for a fast inner loop.)
+- `just gate` exits 0. (`cargo test --workspace` is one of its lines, and
+  `just lint` overlaps it almost entirely — fourteen of its fifteen lines are
+  gate lines, and the fifteenth's property is held by a test the gate runs — so
+  both remain useful for a fast inner loop.)
 - A new dependency is a decision, not a detail: the workspace graph is closed
   and `THIRD_PARTY_NOTICES.md` is generated from it
   (`bash scripts/gen-third-party-notices.sh --write`), so adding a crate means

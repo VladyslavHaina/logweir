@@ -1331,3 +1331,50 @@ fn gate_lint_docs_record_the_measured_seconds() {
         "docs/gates.md must state the two-compilation shape beside the measured total"
     );
 }
+
+/// THE TIMING LINE'S PLACE IS ASSERTED, NOT INFERRED. The review ran the
+/// reorder mutant (M6) for real: with `./scripts/time-unit-suite.sh` moved above
+/// `cargo test --workspace` on a cold target, the suite still passed — 64 s
+/// inside its window and 115 s of compile OUTSIDE it, because the script builds
+/// every test binary before its clock starts. So nothing in the gate's own
+/// figures catches a reorder; the budget is a slow, indirect signal for a
+/// one-line ordering rule. This is the direct one: the timer sits immediately
+/// after the debug workspace test and before the release one, and those two are
+/// the only workspace compilations the gate contains.
+#[test]
+fn gate_lint_the_timing_line_sits_between_the_two_compilations() {
+    let gate = gate_lines();
+    let at = |line: &str| -> usize {
+        gate.iter()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("`just gate` has no line `{line}`:\n  {gate:#?}"))
+    };
+    let debug = at("cargo test --workspace");
+    let timer = at("./scripts/time-unit-suite.sh");
+    let release = at("cargo test --workspace --release");
+    assert_eq!(
+        timer,
+        debug + 1,
+        "`./scripts/time-unit-suite.sh` (line {}) must come IMMEDIATELY after `cargo test \
+         --workspace` (line {}): run earlier, it pays for a debug compile the gate would have paid \
+         for anyway and measures nothing about the order; run later, the release compile sits \
+         between the build and the measurement",
+        timer + 1,
+        debug + 1
+    );
+    assert!(
+        release > timer,
+        "`cargo test --workspace --release` (line {}) must come after the timing line (line {})",
+        release + 1,
+        timer + 1
+    );
+    let compiles: Vec<&String> = gate
+        .iter()
+        .filter(|l| l.starts_with("cargo test") || l.starts_with("cargo build"))
+        .collect();
+    assert_eq!(
+        compiles.len(),
+        2,
+        "the gate compiles the workspace exactly twice, one debug and one release; found {compiles:?}"
+    );
+}

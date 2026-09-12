@@ -37,7 +37,7 @@ what makes that true.** `./scripts/time-unit-suite.sh` sits immediately after
 same target directory: at that position it is a second **run** of artefacts the
 previous line already built, not a third build. `cargo clippy --workspace
 --all-targets` shares the debug target set. Twenty of the remaining lines
-compile nothing at all.
+compile nothing at all. A fully cold run — no target directory at all, measured by the review on 2026-09-11 — took 698 s, 142 s under the 840 s threshold; a cold run that crosses the threshold is a report, not a `cargo clean`.
 
 **Move the timing line above `cargo test --workspace` and nothing goes red.**
 `just gate` still exits 0; what changes is that the timing line silently absorbs
