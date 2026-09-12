@@ -36,6 +36,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # `libsasl2-dev`: rdkafka's `sasl` feature links the system libsasl2, which a
+      # runner lacks (first run, 2026-09-12: clippy failed in `sasl2-sys`'s build script).
+      - run: sudo apt-get update && sudo apt-get install -y libsasl2-dev
       - name: Extract the pinned engine
         run: ./scripts/extract-engine.sh
       - run: cargo fmt --all -- --check
@@ -184,7 +187,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y cmake
+      # `libsasl2-dev`: `logweir-kafka` builds rdkafka with its `sasl` feature, and
+      # `sasl2-sys` links the SYSTEM libsasl2 — present on macOS's SDK and in the
+      # image builds' own apt line, absent on a GitHub runner (measured on the
+      # first run, 2026-09-12: "Unable to find libsasl2 on your system").
+      - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev
       # `docs/verify_scorecard.py` is the auditor's independent verifier and the
       # e2e suite runs it on every signed artifact. `harness::python_verify`
       # PANICS rather than skipping when `cryptography` is missing, so this
@@ -229,7 +236,7 @@ jobs:
       # job installs this for the same reason; a plain `cargo build -p logweir`
       # needs it too. No engine extraction: that is a RUNTIME dependency of the
       # drill tests, and nothing here runs a drill.
-      - run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev
       - run: pip install cryptography pytest
       - name: Build the Rust reader (the parity check compares the two readers)
         run: cargo build -p logweir

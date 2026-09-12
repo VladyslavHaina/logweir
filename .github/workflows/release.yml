@@ -110,7 +110,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cmake (rdkafka vendors and builds librdkafka from C)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        # + libsasl2-dev: sasl2-sys links the system SASL (macOS's SDK ships it;
+        # a Linux runner does not — measured on the first CI run, 2026-09-12).
+        run: sudo apt-get update && sudo apt-get install -y cmake libsasl2-dev
       - name: cmake (macOS)
         if: runner.os == 'macOS'
         run: brew install cmake
