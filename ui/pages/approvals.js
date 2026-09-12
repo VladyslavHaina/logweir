@@ -128,6 +128,11 @@ export function refuseKeyMaterial(fileName, text) {
   return null;
 }
 
+/** The sentence the approvals table carries when the namespace holds none. */
+export const NO_APPROVAL_SENTENCE =
+  "No Approval in this namespace yet. Record one with the form below, from the two files " +
+  "logweir drill approve wrote on the approver's own machine.";
+
 /** Every `Approval` in the namespace. */
 export function renderApprovalList(collection, now) {
   const at = typeof now === "number" ? now : Date.now();
@@ -140,7 +145,9 @@ export function renderApprovalList(collection, now) {
       cell(subject.kind ? subject.kind + "/" + String(subject.name) : subject.name),
       verifiedBadge(status),
       cell(status.approver),
-      cell(status.matchedKeyId),
+      typeof status.matchedKeyId === "string" && status.matchedKeyId.length > 0
+        ? "<code>" + esc(status.matchedKeyId) + "</code>"
+        : cell(null),
       cell(ageOf(meta.creationTimestamp, at)),
     ];
   });
@@ -149,7 +156,7 @@ export function renderApprovalList(collection, now) {
     "<p class=\"blurb\">An Approval that exists is not an approval; an Approval whose " +
     "status weirkeeper set to Verified=True is. One that did not verify stays here with " +
     "its reason, as the record of a rejected attempt.</p>" +
-    table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows) +
+    table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE) +
     listFooter()
   );
 }
@@ -166,12 +173,12 @@ export function renderApprovalStatus(object) {
   const spec = (object || {}).spec || {};
   const subject = spec.subjectRef || {};
   return (
-    "<section class=\"approval\"><h3>" + cell(meta.name) + "</h3>" +
+    "<section class=\"approval\"><div class=\"card-head\"><h3>" + cell(meta.name) + "</h3>" +
+    verifiedBadge(status) + "</div>" +
     facts([
       ["subject kind", cell(subject.kind)],
       ["subject name", cell(subject.name)],
       ["plan hash", "<code>" + esc(spec.planHash) + "</code>"],
-      ["verified", verifiedBadge(status)],
       ["matched key id", cell(status.matchedKeyId)],
       ["approver", cell(status.approver)],
       ["ticket", cell(status.ticket)],
@@ -211,26 +218,34 @@ export function renderApprovalForm(route) {
     "approver signed, so anything this page did to them in between would be a different " +
     "document.</p>" +
     "<form id=\"approval-form\">" +
-    "<label for=\"subject-kind\">SUBJECT KIND</label>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"subject-kind\">SUBJECT KIND</label>" +
     "<select id=\"subject-kind\" name=\"subjectKind\">" +
     "<option value=\"" + esc(SUBJECT_KIND) + "\" selected>" + esc(SUBJECT_KIND) + "</option>" +
     "</select>" +
-    "<label for=\"subject-name\">SUBJECT NAME</label>" +
+    "<p class=\"help\">The one kind an approval may name in this release.</p></div>" +
+    "<div class=\"field\"><label for=\"subject-name\">SUBJECT NAME</label>" +
     "<input id=\"subject-name\" name=\"subjectName\" value=\"" + esc(r.subject) + "\">" +
-    "<label for=\"plan-hash\">PLAN HASH</label>" +
+    "<p class=\"help\">The Restore this approval covers, from the route the wizard opened.</p></div>" +
+    "</div>" +
+    "<div class=\"field\"><label for=\"plan-hash\">PLAN HASH</label>" +
     "<input id=\"plan-hash\" name=\"planHash\" readonly value=\"" + esc(r.hash) + "\">" +
-    "<label for=\"approval-json\">approval.json</label>" +
+    "<p class=\"help\">Read-only: the sha256 the wizard showed beside the plan bytes. The " +
+    "controller recomputes it from the Restore's own bytes.</p></div>" +
+    "<div class=\"field\"><label for=\"approval-json\">approval.json</label>" +
     "<input type=\"file\" id=\"approval-json-file\" name=\"approvalFile\">" +
     "<textarea id=\"approval-json\" name=\"approvalBytes\" rows=\"8\"></textarea>" +
-    "<label for=\"approval-sig\">approval.sig</label>" +
+    "<p class=\"help\">Choose the file, or paste its text. It is sent exactly as it is here.</p></div>" +
+    "<div class=\"field\"><label for=\"approval-sig\">approval.sig</label>" +
     "<input type=\"file\" id=\"approval-sig-file\" name=\"sidecarFile\">" +
     "<textarea id=\"approval-sig\" name=\"sidecarBytes\" rows=\"8\"></textarea>" +
+    "<p class=\"help\">The signature sidecar the same command wrote beside it.</p></div>" +
     "<p class=\"note\">metadata.name is " + esc(r.name) + ", minted from the plan bytes " +
     "before the Restore was created. Neither name is ever edited: both specs are " +
     "immutable.</p>" +
     "<p class=\"refusal-rule\">" + PRIVATE_KEY_REFUSAL + ". A file named for one, or any " +
     "text carrying a private-key header, is refused here and nothing is sent.</p>" +
-    "<button type=\"submit\">Create the Approval</button>" +
+    "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create the Approval</button></div>" +
     "</form></section>"
   );
 }

@@ -1,0 +1,63 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "TrustRosterList",
+  "metadata": {
+    "resourceVersion": "41044"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "TrustRoster",
+      "metadata": {
+        "name": "default",
+        "uid": "4e5f6071-8293-4a4b-b5c6-d7e8f9012345",
+        "resourceVersion": "41043",
+        "generation": 3,
+        "creationTimestamp": "2026-09-04T08:50:00Z"
+      },
+      "spec": {
+        "approverKeys": [
+          {
+            "keyId": "1111222233334444555566667777888899990000111122223333444455556666",
+            "spkiPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEa5/Fnvd6XAER9DqmxWndT9CwlXfU\nfRmA/n04RJmkFV/A+p7UDXyl18QzA5CleUTNnNk8gEatFXE55isDthZL7Q==\n-----END PUBLIC KEY-----\n",
+            "subject": "release-rota@example.invalid",
+            "notAfter": "2026-06-30T00:00:00Z"
+          },
+          {
+            "keyId": "24f4f5a02694bdf2e800a471545287d2c5d4b4b361212bb270ab4a4722921cdd",
+            "spkiPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEa5/Fnvd6XAER9DqmxWndT9CwlXfU\nfRmA/n04RJmkFV/A+p7UDXyl18QzA5CleUTNnNk8gEatFXE55isDthZL7Q==\n-----END PUBLIC KEY-----\n",
+            "subject": "incident-commander@example.invalid",
+            "notAfter": "2027-06-30T00:00:00Z"
+          }
+        ],
+        "signingKeys": [
+          {
+            "keyId": "6ea0c47f9a1b4d2e8c5f0a3b7d6e9012aabbccddeeff00112233445566778899",
+            "spkiPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEa5/Fnvd6XAER9DqmxWndT9CwlXfU\nfRmA/n04RJmkFV/A+p7UDXyl18QzA5CleUTNnNk8gEatFXE55isDthZL7Q==\n-----END PUBLIC KEY-----\n",
+            "subject": "weirkeeper runner",
+            "notAfter": "2027-12-31T00:00:00Z"
+          }
+        ],
+        "allowedClusterIds": [
+          "OFBSTDZBRTFRRUsyVTlXWQ"
+        ]
+      },
+      "status": {
+        "loaded": true,
+        "expiredKeyIds": [
+          "1111222233334444555566667777888899990000111122223333444455556666"
+        ],
+        "conditions": [
+          {
+            "type": "Loaded",
+            "status": "True",
+            "reason": "Loaded",
+            "message": "3 keys parsed, 1 expired",
+            "lastTransitionTime": "2026-09-11T12:44:40Z",
+            "observedGeneration": 3
+          }
+        ]
+      }
+    }
+  ]
+}

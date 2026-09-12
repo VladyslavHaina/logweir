@@ -23,6 +23,7 @@
 import { list, create, patchSuspend } from "../api.js";
 import {
   RETENTION_SENTENCE,
+  badge,
   cell,
   copyBlock,
   errorBox,
@@ -53,6 +54,20 @@ export function conditionStatus(object, type) {
   return cell(null);
 }
 
+/** `spec.suspend` as a badge that says the state in words: `suspended`, or
+ *  `not suspended`. The field is a boolean the operator set; the badge
+ *  renders it and decides nothing. */
+export function suspendBadge(spec) {
+  return (spec || {}).suspend === true
+    ? badge("warn", "suspended")
+    : badge("flat", "not suspended");
+}
+
+/** The sentence the schedules table carries when the namespace holds none. */
+export const NO_SCHEDULE_SENTENCE =
+  "No BackupSchedule in this namespace yet. Create one with the form below; it fires a " +
+  "Backup at each slot of its cron schedule.";
+
 /** The schedules table. NAME, SCHEDULE, SUSPEND, LAST, NEXT, READY. */
 export function renderScheduleList(input) {
   const rows = itemsOf(input).map((object) => {
@@ -60,8 +75,8 @@ export function renderScheduleList(input) {
     const status = object.status || {};
     return [
       nameOf(object),
-      cell(spec.schedule),
-      cell(spec.suspend === true),
+      "<code>" + cell(spec.schedule) + "</code>",
+      suspendBadge(spec),
       cell(status.lastFireTime),
       cell(status.nextFireTime),
       conditionStatus(object, "Ready"),
@@ -72,7 +87,7 @@ export function renderScheduleList(input) {
     "<p class=\"blurb\">Every BackupSchedule in this namespace. " +
     "<code>suspend</code> is the only field of a schedule's spec that can be changed " +
     "after it is created.</p>" +
-    table(["NAME", "SCHEDULE", "SUSPEND", "LAST", "NEXT", "READY"], rows) +
+    table(["NAME", "SCHEDULE", "SUSPEND", "LAST", "NEXT", "READY"], rows, NO_SCHEDULE_SENTENCE) +
     listFooter()
   );
 }
@@ -173,22 +188,34 @@ export function renderRetentionPanel(object) {
 export function renderScheduleForm() {
   return (
     "<section class=\"create\"><h3>Create a BackupSchedule</h3>" +
+    "<p class=\"note\">A schedule fires a Backup of the named topics at each slot and writes " +
+    "it to the archive. Every field but suspend is sealed once the object exists.</p>" +
     "<form id=\"schedule-form\">" +
-    "<label for=\"schedule-name\">name</label>" +
-    "<input id=\"schedule-name\" name=\"name\" required>" +
-    "<label for=\"schedule-cron\">schedule, five cron fields</label>" +
+    "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
+    "<input id=\"schedule-name\" name=\"name\" required></div>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"schedule-cron\">schedule, five cron fields</label>" +
     "<input id=\"schedule-cron\" name=\"cron\" value=\"0 * * * *\" required>" +
-    "<label for=\"schedule-source\">source KafkaCluster</label>" +
+    "<p class=\"help\">minute hour day-of-month month day-of-week, in UTC.</p></div>" +
+    "<div class=\"field\"><label for=\"schedule-source\">source KafkaCluster</label>" +
     "<input id=\"schedule-source\" name=\"source\" required>" +
-    "<label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
+    "<p class=\"help\">The name of a KafkaCluster in this namespace.</p></div>" +
+    "</div>" +
+    "<div class=\"field\"><label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
     "<input id=\"schedule-topics\" name=\"topics\" required>" +
-    "<label for=\"schedule-archive\">archive URL</label>" +
+    "<p class=\"help\">An explicit allowlist. A wildcard is refused before anything runs.</p></div>" +
+    "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
     "<input id=\"schedule-archive\" name=\"archive\" required>" +
-    "<label for=\"schedule-keeplast\">retention keepLast</label>" +
+    "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p></div>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
     "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\">" +
-    "<label for=\"schedule-keepdays\">retention keepDays</label>" +
+    "<p class=\"help\">How many sets a retention evaluation keeps. It reports; it never deletes.</p></div>" +
+    "<div class=\"field\"><label for=\"schedule-keepdays\">retention keepDays</label>" +
     "<input id=\"schedule-keepdays\" name=\"keepDays\" type=\"number\" min=\"0\">" +
-    "<button type=\"submit\">Create</button>" +
+    "<p class=\"help\">How many days of sets it keeps. Leave both blank for no evaluation.</p></div>" +
+    "</div>" +
+    "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
     "</form></section>"
   );
 }
@@ -232,8 +259,9 @@ export async function mountSchedules(node, ns, parse) {
     const panels = objects
       .map(
         (object) =>
-          "<section class=\"schedule\"><h3>" + nameOf(object) + "</h3>" +
+          "<section class=\"schedule\"><div class=\"card-head\"><h3>" + nameOf(object) + "</h3>" +
           renderSuspendToggle(object) +
+          "</div>" +
           renderRetentionPanel(object) +
           "</section>",
       )

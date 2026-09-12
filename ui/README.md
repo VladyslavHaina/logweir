@@ -170,9 +170,32 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `pages/restore-wizard.js` | the six wizard steps, the plan bytes, and the create that names an Approval which does not exist yet. |
 | `pages/approvals.js` | the Approval list and the four-input create form. Refuses a private key and never parses the two documents. |
 | `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
-| `style.css` | the stylesheet. System fonts; no font is fetched from anywhere. |
+| `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
 | `tests/api.spec.js` | the behaviour arm of the two mechanical claims, under `node --test`. |
+| `tests/pages.spec.js` | the behaviour suite over the page modules: the badge rules, the wizard, the approval form, the roster. |
+| `tests/design.spec.js` | the design system's guarantees: the token layer, both schemes, reduced motion, the focus ring, badges with words, the stepper. |
+| `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
+
+**The design system** lives in `style.css` and nowhere else. It is written from
+tokens: a type scale and a spacing scale, radii and two shadows, and one
+colour system with semantic roles -- surface, surface-raised, border, text,
+text-muted, accent, success, warning, danger, info -- defined once for the
+light scheme and redefined once under `prefers-color-scheme: dark`, so every
+component reads from the same ten names in both. Every text-on-surface pair
+in both schemes measures 4.5:1 or better. Tables read as tables on a laptop
+and **stack into cards below 720 px**, each cell captioned by its column: the
+caption is copied from the header row into `data-label` by `app.js` when it
+adopts the parsed nodes, so the page modules stay pure functions from a JSON
+object to a string. Status badges carry their state in **words and colour**,
+never colour alone. The restore wizard opens with a **stepper** -- the six
+steps, which are done, which one you are on, which needs attention -- that
+summarises the same state the six sections render and gates nothing: the
+client-side checks are a convenience, and the controller and phase 0 are the
+gate. Every interactive element has a visible focus ring, and
+`prefers-reduced-motion` switches off every transition and animation at once.
+`tests/design.spec.js` asserts each of those over the bytes of `style.css` and
+the page modules' own output.
 
 A **hash** router, because the static half of `kubectl proxy` is Go's
 `http.StripPrefix(prefix, http.FileServer(http.Dir(base)))`: a plain file server
@@ -239,6 +262,12 @@ executed that tool as a test file and counted it as one passing test, which
 disarmed the gate's zero-count refusal: with every `*.spec.js` deleted the run
 still reported one test and exited 0. The suffix is what keeps that refusal able
 to refuse.
+
+## Previewing with fixtures
+
+`node ui/tests/preview-server.js` serves this directory over the JSON under `tests/fixtures/preview/`, with no cluster and no credential anywhere.
+Open `http://127.0.0.1:8011/ui/`; the namespace `default` is populated, `forbidden` answers every read with a 403, and any other name is empty.
+It is a development tool and not a test, not a proxy and not part of the product: it binds loopback only, answers every write with a 405, and the release bundle and the gates never see it.
 
 ## What this page does not do
 

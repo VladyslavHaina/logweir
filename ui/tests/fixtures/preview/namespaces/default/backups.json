@@ -1,0 +1,377 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupList",
+  "metadata": {
+    "resourceVersion": "60466"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "orders-hourly-20260912-080000",
+        "namespace": "default",
+        "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e51",
+        "resourceVersion": "60219",
+        "generation": 1,
+        "creationTimestamp": "2026-09-12T08:00:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "orders-dlq"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/orders",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "orders-hourly"
+        },
+        "slot": "20260912-080000",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "ok",
+        "backupId": "01JB7X00000000000000000009",
+        "manifestKey": "orders/01JB7X00000000000000000009/manifest.json",
+        "manifestSha256": "sha256:0f2c1b6e4a8d3f5709c1e2b4a6d8f0123456789abcdef0123456789abcdef0123",
+        "records": 118200,
+        "windowCovered": {
+          "fromMs": 1789196400000,
+          "toMs": 1789200000000
+        },
+        "auth": {
+          "mode": "scramSha512",
+          "username": "logweir-reader"
+        },
+        "evidence": {
+          "receiptKey": "logweir/backups/01JB7X00000000000000000009/r1.receipt.json",
+          "receiptSha256": "sha256:9a8b7c6d5e4f30211122334455667788990011223344556677889900aabbccdd",
+          "sidecarKey": "logweir/backups/01JB7X00000000000000000009/r1.receipt.sig",
+          "verification": {
+            "result": "Valid",
+            "payloadType": "application/vnd.logweir.backup-receipt+json",
+            "matchedKeyId": "6ea0c47f9a1b4d2e8c5f0a3b7d6e9012aabbccddeeff00112233445566778899",
+            "verifiedAt": "2026-09-12T08:02:21Z"
+          }
+        },
+        "jobRef": {
+          "name": "orders-hourly-20260912-080000-job"
+        },
+        "conditions": [
+          {
+            "type": "Complete",
+            "status": "True",
+            "reason": "Ok",
+            "lastTransitionTime": "2026-09-12T08:02:10Z",
+            "observedGeneration": 1,
+            "message": "the runner exited 0 (ok)"
+          },
+          {
+            "type": "EvidenceRecorded",
+            "status": "True",
+            "reason": "EvidenceRecorded",
+            "lastTransitionTime": "2026-09-12T08:02:15Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "Verified",
+            "status": "True",
+            "reason": "Verified",
+            "lastTransitionTime": "2026-09-12T08:02:21Z",
+            "observedGeneration": 1,
+            "message": "verified by weirkeeper at 2026-09-12T08:02:21Z against key 6ea0c47f9a1b4d2e8c5f0a3b7d6e9012aabbccddeeff00112233445566778899"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "orders-hourly-20260912-090000",
+        "namespace": "default",
+        "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e52",
+        "resourceVersion": "60288",
+        "generation": 1,
+        "creationTimestamp": "2026-09-12T09:00:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "orders-dlq"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/orders",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "orders-hourly"
+        },
+        "slot": "20260912-090000",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "ok",
+        "backupId": "01JB7Y0000000000000000000A",
+        "manifestKey": "orders/01JB7Y0000000000000000000A/manifest.json",
+        "manifestSha256": "sha256:0f2c1b6e4a8d3f5709c1e2b4a6d8f0123456789abcdef0123456789abcdef0123",
+        "records": 121900,
+        "windowCovered": {
+          "fromMs": 1789200000000,
+          "toMs": 1789203600000
+        },
+        "auth": {
+          "mode": "scramSha512",
+          "username": "logweir-reader"
+        },
+        "evidence": {
+          "receiptKey": "logweir/backups/01JB7Y0000000000000000000A/r1.receipt.json",
+          "receiptSha256": "sha256:9a8b7c6d5e4f30211122334455667788990011223344556677889900aabbccdd",
+          "sidecarKey": "logweir/backups/01JB7Y0000000000000000000A/r1.receipt.sig",
+          "verification": {
+            "result": "Invalid",
+            "payloadType": "application/vnd.logweir.backup-receipt+json",
+            "verifiedAt": "2026-09-12T09:02:21Z",
+            "detail": "the signature did not verify against any rostered signing key"
+          }
+        },
+        "jobRef": {
+          "name": "orders-hourly-20260912-090000-job"
+        },
+        "conditions": [
+          {
+            "type": "Complete",
+            "status": "True",
+            "reason": "Ok",
+            "lastTransitionTime": "2026-09-12T09:02:10Z",
+            "observedGeneration": 1,
+            "message": "the runner exited 0 (ok)"
+          },
+          {
+            "type": "EvidenceRecorded",
+            "status": "True",
+            "reason": "EvidenceRecorded",
+            "lastTransitionTime": "2026-09-12T09:02:15Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "Verified",
+            "status": "False",
+            "reason": "Invalid",
+            "lastTransitionTime": "2026-09-12T09:02:21Z",
+            "observedGeneration": 1,
+            "message": "unverified"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "orders-hourly-20260912-100000",
+        "namespace": "default",
+        "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e53",
+        "resourceVersion": "60340",
+        "generation": 1,
+        "creationTimestamp": "2026-09-12T10:00:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "orders-dlq"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/orders",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "orders-hourly"
+        },
+        "slot": "20260912-100000",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "ok",
+        "backupId": "01JB7Z0000000000000000000B",
+        "manifestKey": "orders/01JB7Z0000000000000000000B/manifest.json",
+        "manifestSha256": "sha256:0f2c1b6e4a8d3f5709c1e2b4a6d8f0123456789abcdef0123456789abcdef0123",
+        "records": 128400,
+        "windowCovered": {
+          "fromMs": 1789203600000,
+          "toMs": 1789207200000
+        },
+        "auth": {
+          "mode": "scramSha512",
+          "username": "logweir-reader"
+        },
+        "evidence": {
+          "receiptKey": "logweir/backups/01JB7Z0000000000000000000B/r1.receipt.json",
+          "receiptSha256": "sha256:9a8b7c6d5e4f30211122334455667788990011223344556677889900aabbccdd",
+          "sidecarKey": "logweir/backups/01JB7Z0000000000000000000B/r1.receipt.sig",
+          "verification": {
+            "result": "Valid",
+            "payloadType": "application/vnd.logweir.backup-receipt+json",
+            "matchedKeyId": "6ea0c47f9a1b4d2e8c5f0a3b7d6e9012aabbccddeeff00112233445566778899",
+            "verifiedAt": "2026-09-12T10:02:21Z"
+          }
+        },
+        "jobRef": {
+          "name": "orders-hourly-20260912-100000-job"
+        },
+        "conditions": [
+          {
+            "type": "Complete",
+            "status": "True",
+            "reason": "Ok",
+            "lastTransitionTime": "2026-09-12T10:02:10Z",
+            "observedGeneration": 1,
+            "message": "the runner exited 0 (ok)"
+          },
+          {
+            "type": "EvidenceRecorded",
+            "status": "True",
+            "reason": "EvidenceRecorded",
+            "lastTransitionTime": "2026-09-12T10:02:15Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "Verified",
+            "status": "True",
+            "reason": "Verified",
+            "lastTransitionTime": "2026-09-12T10:02:21Z",
+            "observedGeneration": 1,
+            "message": "verified by weirkeeper at 2026-09-12T10:02:21Z against key 6ea0c47f9a1b4d2e8c5f0a3b7d6e9012aabbccddeeff00112233445566778899"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "orders-hourly-20260912-110000",
+        "namespace": "default",
+        "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e54",
+        "resourceVersion": "60402",
+        "generation": 1,
+        "creationTimestamp": "2026-09-12T11:00:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "orders-dlq"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/orders",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "orders-hourly"
+        },
+        "slot": "20260912-110000",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Failed",
+        "exitCode": 1,
+        "exitReason": "operational",
+        "reason": "Failed",
+        "jobRef": {
+          "name": "orders-hourly-20260912-110000-job"
+        },
+        "conditions": [
+          {
+            "type": "Failed",
+            "status": "True",
+            "reason": "Operational",
+            "lastTransitionTime": "2026-09-12T11:00:48Z",
+            "observedGeneration": 1,
+            "message": "the runner exited 1 (operational): the archive credential was refused by the object store"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "Backup",
+      "metadata": {
+        "name": "orders-hourly-20260912-120000",
+        "namespace": "default",
+        "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e55",
+        "resourceVersion": "60466",
+        "generation": 1,
+        "creationTimestamp": "2026-09-12T12:00:00Z"
+      },
+      "spec": {
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "orders-dlq"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/orders",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "scheduleRef": {
+          "name": "orders-hourly"
+        },
+        "slot": "20260912-120000",
+        "triggeredBy": "schedule",
+        "deadlineSeconds": 1800
+      },
+      "status": {
+        "phase": "Running",
+        "jobRef": {
+          "name": "orders-hourly-20260912-120000-job"
+        },
+        "conditions": [
+          {
+            "type": "Running",
+            "status": "True",
+            "reason": "JobRunning",
+            "lastTransitionTime": "2026-09-12T12:00:04Z",
+            "observedGeneration": 1,
+            "message": "the runner Job is running"
+          }
+        ]
+      }
+    }
+  ]
+}

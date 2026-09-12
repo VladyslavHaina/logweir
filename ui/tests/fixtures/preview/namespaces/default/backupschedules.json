@@ -1,0 +1,142 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupScheduleList",
+  "metadata": {
+    "resourceVersion": "60901"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "BackupSchedule",
+      "metadata": {
+        "name": "orders-hourly",
+        "namespace": "default",
+        "uid": "3b2a1c0d-9e8f-4a7b-8c6d-5e4f3a2b1c0d",
+        "resourceVersion": "60877",
+        "generation": 2,
+        "creationTimestamp": "2026-09-04T09:00:00Z"
+      },
+      "spec": {
+        "schedule": "0 * * * *",
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "orders",
+          "orders-dlq"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/orders",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "retention": {
+          "keepLast": 3,
+          "keepDays": 7
+        },
+        "suspend": false
+      },
+      "status": {
+        "lastFireTime": "2026-09-12T12:00:00Z",
+        "nextFireTime": "2026-09-12T13:00:00Z",
+        "activeBackupRef": {
+          "name": "orders-hourly-20260912-120000"
+        },
+        "lastMissedSlot": "20260910-030000",
+        "retentionReport": {
+          "evaluatedAt": "2026-09-12T12:05:02Z",
+          "keepLast": 3,
+          "keepDays": 7,
+          "setsKept": [
+            "01JB7Z0000000000000000000B",
+            "01JB7Y0000000000000000000A",
+            "01JB7X00000000000000000009"
+          ],
+          "setsThatWouldBeRemoved": [
+            {
+              "backupId": "01JB7A00000000000000000001",
+              "newestRecordAt": "2026-09-01T10:15:00Z",
+              "reason": "OlderThanKeepDays",
+              "days": 7
+            },
+            {
+              "backupId": "01JB7B00000000000000000002",
+              "newestRecordAt": "2026-09-08T10:15:00Z",
+              "reason": "BeyondKeepLast",
+              "rank": 4
+            }
+          ],
+          "awsCli": [
+            "aws s3 rm 's3://kafka-backups/orders/01JB7A00000000000000000001/' --recursive",
+            "aws s3 rm 's3://kafka-backups/orders/01JB7B00000000000000000002/' --recursive"
+          ],
+          "mcCli": [
+            "mc rm --recursive --force 'local/kafka-backups/orders/01JB7A00000000000000000001/'",
+            "mc rm --recursive --force 'local/kafka-backups/orders/01JB7B00000000000000000002/'"
+          ],
+          "skipped": [
+            {
+              "key": "orders/stray/manifest.json",
+              "reason": "is not a backup manifest"
+            }
+          ]
+        },
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "Scheduled",
+            "lastTransitionTime": "2026-09-12T12:00:05Z",
+            "observedGeneration": 2,
+            "message": "next slot 2026-09-12T13:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "BackupSchedule",
+      "metadata": {
+        "name": "payments-nightly",
+        "namespace": "default",
+        "uid": "4c3b2a1d-0e9f-4b8c-9d7e-6f5a4b3c2d1e",
+        "resourceVersion": "60901",
+        "generation": 3,
+        "creationTimestamp": "2026-09-05T11:30:00Z"
+      },
+      "spec": {
+        "schedule": "30 2 * * *",
+        "sourceRef": {
+          "name": "orders-prod"
+        },
+        "topics": [
+          "payments"
+        ],
+        "archive": {
+          "url": "s3://kafka-backups/payments",
+          "secretRef": {
+            "name": "logweir-s3"
+          }
+        },
+        "retention": {
+          "keepLast": 7
+        },
+        "suspend": true
+      },
+      "status": {
+        "lastFireTime": "2026-09-11T02:30:00Z",
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "Suspended",
+            "lastTransitionTime": "2026-09-12T08:12:00Z",
+            "observedGeneration": 3,
+            "message": "suspended; no slot fires until spec.suspend is false"
+          }
+        ]
+      }
+    }
+  ]
+}

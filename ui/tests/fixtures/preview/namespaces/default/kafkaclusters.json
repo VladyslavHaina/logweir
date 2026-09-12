@@ -1,0 +1,127 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaClusterList",
+  "metadata": {
+    "resourceVersion": "60120"
+  },
+  "items": [
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "KafkaCluster",
+      "metadata": {
+        "name": "orders-prod",
+        "namespace": "default",
+        "uid": "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9",
+        "resourceVersion": "60110",
+        "generation": 1,
+        "creationTimestamp": "2026-09-04T08:55:00Z"
+      },
+      "spec": {
+        "bootstrapServers": [
+          "kafka-0.orders.svc:9093",
+          "kafka-1.orders.svc:9093"
+        ],
+        "auth": {
+          "mode": "scramSha512",
+          "username": "logweir-reader",
+          "secretRef": {
+            "name": "orders-scram"
+          },
+          "tls": true
+        },
+        "role": "source",
+        "markerTopic": "logweir.scratch"
+      },
+      "status": {
+        "reachable": true,
+        "clusterId": "MkU3NEVCTTlSM0FCQVRMQQ",
+        "observedAt": "2026-09-12T09:14:31Z",
+        "reason": "Reachable",
+        "conditions": [
+          {
+            "type": "Reachable",
+            "status": "True",
+            "reason": "Reachable",
+            "lastTransitionTime": "2026-09-12T09:14:31Z",
+            "observedGeneration": 1,
+            "message": "the probe reached a broker and read the cluster id"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "KafkaCluster",
+      "metadata": {
+        "name": "orders-recovery",
+        "namespace": "default",
+        "uid": "2c3d4e5f-6071-4829-93a4-b5c6d7e8f901",
+        "resourceVersion": "60112",
+        "generation": 1,
+        "creationTimestamp": "2026-09-04T08:57:00Z"
+      },
+      "spec": {
+        "bootstrapServers": [
+          "kafka-0.recovery.svc:9092"
+        ],
+        "auth": {
+          "mode": "plaintext"
+        },
+        "role": "target",
+        "markerTopic": "logweir.scratch"
+      },
+      "status": {
+        "reachable": true,
+        "clusterId": "OFBSTDZBRTFRRUsyVTlXWQ",
+        "observedAt": "2026-09-12T09:14:33Z",
+        "reason": "Reachable",
+        "conditions": [
+          {
+            "type": "Reachable",
+            "status": "True",
+            "reason": "Reachable",
+            "lastTransitionTime": "2026-09-12T09:14:33Z",
+            "observedGeneration": 1,
+            "message": "the probe reached a broker and read the cluster id"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "logweir.dev/v1alpha1",
+      "kind": "KafkaCluster",
+      "metadata": {
+        "name": "analytics-replica",
+        "namespace": "default",
+        "uid": "3d4e5f60-7182-493a-a4b5-c6d7e8f90123",
+        "resourceVersion": "60120",
+        "generation": 2,
+        "creationTimestamp": "2026-09-10T16:20:00Z"
+      },
+      "spec": {
+        "bootstrapServers": [
+          "kafka-0.analytics.svc:9092"
+        ],
+        "auth": {
+          "mode": "plaintext"
+        },
+        "role": "source"
+      },
+      "status": {
+        "reachable": false,
+        "observedAt": "2026-09-12T09:14:40Z",
+        "reason": "ProbeTimedOut",
+        "conditions": [
+          {
+            "type": "Reachable",
+            "status": "False",
+            "reason": "ProbeTimedOut",
+            "lastTransitionTime": "2026-09-12T09:14:40Z",
+            "observedGeneration": 2,
+            "message": "no broker answered within 10s"
+          }
+        ]
+      }
+    }
+  ]
+}

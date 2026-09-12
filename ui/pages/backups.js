@@ -46,12 +46,18 @@ import {
   facts,
   independentCheck,
   listFooter,
+  phaseBadge,
   replace,
   table,
 } from "../render.js";
 import { itemsOf } from "./clusters.js";
 
 const PLURAL = "backups";
+
+/** The sentence the backups table carries when the namespace holds none. */
+export const NO_BACKUP_SENTENCE =
+  "No Backup has run in this namespace yet. A BackupSchedule creates one at its next slot, " +
+  "and it appears here with the evidence weirkeeper recorded for it.";
 
 /** The verification half of BOTH rules, and nothing else.
  *
@@ -118,7 +124,7 @@ export function renderBackupList(input, ns) {
     const meta = object.metadata || {};
     return [
       nameCell(object, ns),
-      cell(status.phase),
+      phaseBadge(status.phase),
       cell(status.exitCode),
       cell(status.records),
       backupBadge(status),
@@ -130,7 +136,7 @@ export function renderBackupList(input, ns) {
     "<p class=\"blurb\">Every Backup run in this namespace. The AGE column is the " +
     "object's own creation instant, not a duration: these views are computed without " +
     "reading a clock.</p>" +
-    table(["NAME", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"], rows) +
+    table(["NAME", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"], rows, NO_BACKUP_SENTENCE) +
     listFooter()
   );
 }
@@ -147,7 +153,7 @@ export function renderBackupDetail(object) {
     "<h2>Backup " + nameOf(object) + "</h2>" +
     backupBadge(status) +
     facts([
-      ["phase", cell(status.phase)],
+      ["phase", phaseBadge(status.phase)],
       ["exit code", cell(status.exitCode)],
       ["exit reason", cell(status.exitReason)],
       ["backup id", cell(status.backupId)],
@@ -160,7 +166,7 @@ export function renderBackupDetail(object) {
     ]) +
     "<p class=\"covered\">" + esc(coveredWindow(status.windowCovered)) + "</p>" +
     evidenceBlock(evidence) +
-    "<h3>Check it yourself</h3>" +
+    "<section class=\"check\"><h3>Check it yourself</h3>" +
     "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
     "take local files. So the first two lines fetch, and the last two verify -- once " +
     "with the Rust reader and once with the Python one.</p>" +
@@ -171,7 +177,8 @@ export function renderBackupDetail(object) {
       evidence.sidecarKey || "",
       "receipt.json",
       "receipt.sig",
-    )
+    ) +
+    "</section>"
   );
 }
 

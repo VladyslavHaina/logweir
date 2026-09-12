@@ -76,7 +76,11 @@ export function renderKeyTable(caption, entries, expiredKeyIds) {
   });
   return (
     "<h3>" + esc(caption) + "</h3>" +
-    table(["KEY ID", "SUBJECT", "NOT AFTER", "EXPIRY"], rows)
+    table(
+      ["KEY ID", "SUBJECT", "NOT AFTER", "EXPIRY"],
+      rows,
+      "no key of this kind in the roster",
+    )
   );
 }
 
@@ -109,11 +113,12 @@ export function renderKeysPage(collection) {
     ]) +
     renderKeyTable("approverKeys", spec.approverKeys, status.expiredKeyIds) +
     renderKeyTable("signingKeys", spec.signingKeys, status.expiredKeyIds) +
-    "<h3>Check a key out of band</h3>" +
+    "<section class=\"check\"><h3>Check a key out of band</h3>" +
     "<p class=\"note\">A row above says which key id the controller accepts. It cannot say " +
     "that the material behind that id is still the one its holder has. Run this against " +
     "the public half they give you and compare the digest with the KEY ID column.</p>" +
     copyBlock([FINGERPRINT_COMMAND]) +
+    "</section>" +
     renderRosterSnippet() +
     listFooter()
   );
@@ -122,7 +127,7 @@ export function renderKeysPage(collection) {
 /** The snippet a cluster admin applies. RENDERED AND NEVER SUBMITTED. */
 export function renderRosterSnippet() {
   return (
-    "<h3>Editing the roster is a cluster-admin step</h3>" +
+    "<section class=\"check\"><h3>Editing the roster is a cluster-admin step</h3>" +
     "<p class=\"note\">This page shows the document and does not apply it. TrustRoster is " +
     "cluster-scoped, its plural is absent from this page's writable set, and the API " +
     "server would refuse a namespace-scoped viewer in any case. Save this as roster.yml " +
@@ -152,7 +157,8 @@ export function renderRosterSnippet() {
       "  allowedClusterIds: []",
       "",
       "kubectl --context docker-desktop apply -f roster.yml",
-    ])
+    ]) +
+    "</section>"
   );
 }
 

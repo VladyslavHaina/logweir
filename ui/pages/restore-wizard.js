@@ -95,13 +95,14 @@ export function renderArchiveStep(state) {
     ];
   });
   return (
-    "<section class=\"step\" id=\"step-archive\"><h3>1. Archive</h3>" +
+    "<section class=\"step\" id=\"step-archive\" tabindex=\"-1\"><h3>1. Archive</h3>" +
     "<p class=\"blurb\">The source cluster this restore reads an archive of. The archives " +
     "below were read from this namespace's Backup objects: this page holds no bucket " +
     "credential and lists no object storage.</p>" +
     table(
       ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "ARCHIVE", "ARCHIVE CREDENTIAL"],
       rows,
+      "no KafkaCluster in this namespace carries role: source",
     ) +
     renderArchiveCredentialField(s) +
     renderStoreFields(s) +
@@ -129,6 +130,7 @@ export function renderArchiveCredentialField(state) {
   const name = typeof s.archiveSecretName === "string" ? s.archiveSecretName : "";
   return (
     "<h4>The credential that reaches that archive</h4>" +
+    "<div class=\"field\">" +
     "<label for=\"archive-secret\">ARCHIVE CREDENTIAL (Secret name)</label>" +
     "<input id=\"archive-secret\" name=\"archiveSecret\" value=\"" + esc(name) + "\">" +
     "<p class=\"note\">The runner reads the archive with this credential: weirkeeper mounts " +
@@ -137,7 +139,8 @@ export function renderArchiveCredentialField(state) {
     "ADMITTED and then fails at the archive, not at admission -- the field is optional in " +
     "the CRD, so nothing refuses it until the Job cannot read an object. Leave it blank only " +
     "for an archive reached anonymously or by an instance role. This page shows and sends " +
-    "the NAME; it never reads the Secret.</p>"
+    "the NAME; it never reads the Secret.</p>" +
+    "</div>"
   );
 }
 
@@ -160,19 +163,21 @@ export function renderStoreFields(state) {
     "<h4>Where that archive actually is</h4>" +
     "<p class=\"note\">Leave the endpoint blank for AWS S3. These three values are not on " +
     "any object in the cluster, and the runner reads them from the plan bytes.</p>" +
-    "<label for=\"store-endpoint\">endpoint</label>" +
-    "<input id=\"store-endpoint\" name=\"endpoint\" value=\"" + esc(store.endpoint) + "\">" +
-    "<label for=\"store-region\">region</label>" +
-    "<input id=\"store-region\" name=\"region\" value=\"" + esc(store.region) + "\">" +
-    "<label for=\"store-pathStyle\">path_style addressing</label>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"store-endpoint\">endpoint</label>" +
+    "<input id=\"store-endpoint\" name=\"endpoint\" value=\"" + esc(store.endpoint) + "\"></div>" +
+    "<div class=\"field\"><label for=\"store-region\">region</label>" +
+    "<input id=\"store-region\" name=\"region\" value=\"" + esc(store.region) + "\"></div>" +
+    "</div>" +
+    "<label class=\"inline\" for=\"store-pathStyle\">" +
     "<input type=\"checkbox\" id=\"store-pathStyle\" name=\"pathStyle\"" +
-    (store.pathStyle === true ? " checked" : "") + ">" +
-    "<label for=\"evidence-bucket\">evidence bucket</label>" +
+    (store.pathStyle === true ? " checked" : "") + "> path_style addressing</label>" +
+    "<div class=\"field\"><label for=\"evidence-bucket\">evidence bucket</label>" +
     "<input id=\"evidence-bucket\" name=\"evidenceBucket\" value=\"" +
     esc(((s.fields || {}).evidence || {}).bucket) + "\">" +
     "<p class=\"note\">The evidence prefix is fixed at " + esc(EVIDENCE_PREFIX) + " by Global " +
     "Constraint 6 and is not an input: a plan naming another one is refused at phase 0, " +
-    "after the approver has already signed it.</p>"
+    "after the approver has already signed it.</p></div>"
   );
 }
 
@@ -226,7 +231,7 @@ export function completedBackups(backups) {
 export function renderNoCompletedBackup(ns, backups) {
   return (
     "<h2>Restore wizard</h2>" +
-    "<p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p>" +
+    "<div class=\"empty-state\"><p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p></div>" +
     renderBackupSetStep({ ns: ns, backups: backups, fields: {} })
   );
 }
@@ -260,7 +265,7 @@ export function renderBackupSetStep(state) {
         esc(String(((chosen.status || {}).backupId) || "(none -- this run wrote no set)")) +
         ". " + (succeeded ? RELOAD_SENTENCE : NO_SUCCEEDED_SENTENCE) + "</p>";
   return (
-    "<section class=\"step\" id=\"step-backup-set\"><h3>2. Backup set</h3>" +
+    "<section class=\"step\" id=\"step-backup-set\" tabindex=\"-1\"><h3>2. Backup set</h3>" +
     "<p class=\"blurb\">The sets this archive holds. The wizard restores from the run that " +
     "COMPLETED most recently -- the newest Succeeded row, not the newest row: the newest row " +
     "is usually still running and has no set to restore from. The covered range is " +
@@ -268,6 +273,7 @@ export function renderBackupSetStep(state) {
     table(
       ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
       rows,
+      "no Backup names this archive in this namespace",
     ) +
     chose +
     "</section>"
@@ -291,14 +297,16 @@ export function renderPointInTimeStep(state) {
       : rfc3339(covered.toMs);
   const complaint = windowComplaint(value, covered);
   return (
-    "<section class=\"step\" id=\"step-point-in-time\"><h3>3. Point in time</h3>" +
+    "<section class=\"step\" id=\"step-point-in-time\" tabindex=\"-1\"><h3>3. Point in time</h3>" +
     "<p class=\"blurb\">An RFC 3339 instant. The window is closed at both ends: a record " +
     "whose timestamp equals this exactly is restored. Its FLOOR is the archive's own " +
     "earliest covered timestamp, read from the manifest by the runner, and is never a " +
     "field of this plan.</p>" +
+    "<div class=\"field\">" +
     "<label for=\"point-in-time\">point in time</label>" +
     "<input id=\"point-in-time\" name=\"pointInTime\" value=\"" + esc(value) + "\">" +
     "<p class=\"window\">" + windowMessage(covered.fromMs, covered.toMs) + "</p>" +
+    "</div>" +
     (complaint === null ? "" : "<p class=\"complaint\">" + complaint + "</p>") +
     "<p class=\"note\">" + CONVENIENCE_SENTENCE + "</p>" +
     "</section>"
@@ -382,21 +390,25 @@ export function renderTargetStep(state) {
       ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
       : "";
   return (
-    "<section class=\"step\" id=\"step-target\"><h3>4. Target and naming</h3>" +
+    "<section class=\"step\" id=\"step-target\" tabindex=\"-1\"><h3>4. Target and naming</h3>" +
     "<p class=\"blurb\">Where the restored records are written. Nothing that already " +
     "exists is written to: a Restore only ever creates topics that did not exist, and " +
     "refuses outright if a mapped target topic is already there.</p>" +
-    "<label for=\"target-cluster\">target cluster</label>" +
-    "<select id=\"target-cluster\" name=\"targetCluster\">" + clusterOptions + "</select>" +
-    (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
-    "<label for=\"target-mode\">mode</label>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"target-cluster\">target cluster</label>" +
+    "<select id=\"target-cluster\" name=\"targetCluster\">" + clusterOptions + "</select></div>" +
+    "<div class=\"field\"><label for=\"target-mode\">mode</label>" +
     "<select id=\"target-mode\" name=\"mode\">" + options + "</select>" +
+    "<p class=\"help\">newTopic writes beside what is there; scratch needs a target that " +
+    "proves it is scratch.</p></div>" +
+    "</div>" +
+    (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
     markerWarning +
-    "<label for=\"topic-prefix\">topicNaming.prefix</label>" +
+    "<div class=\"field\"><label for=\"topic-prefix\">topicNaming.prefix</label>" +
     "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\">" +
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
-    "recovered to. It is editable.</p>" +
+    "recovered to. It is editable.</p></div>" +
     "</section>"
   );
 }
@@ -414,7 +426,9 @@ export function renderPreflightStep(state) {
   const status = (cluster || {}).status || {};
   const topics = (s.fields || {}).topics || [];
   return (
-    "<section class=\"step\" id=\"step-preflight\"><h3>5. Target-topic preflight</h3>" +
+    "<section class=\"step\" id=\"step-preflight\" tabindex=\"-1\"><h3>5. Target-topic preflight</h3>" +
+    "<p class=\"blurb\">The target cluster's own most recent status, and what the run will " +
+    "do to it before the engine starts.</p>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
       ["reachable", cell(status.reachable)],
@@ -432,7 +446,9 @@ export function renderPlanStep(prepared, state) {
   const p = prepared || {};
   const s = state || {};
   return (
-    "<section class=\"step\" id=\"step-plan\"><h3>6. Plan, hash and names</h3>" +
+    "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
+    "<p class=\"blurb\">The document an approver signs, exactly as it will be sent, with " +
+    "its sha256 and the two names minted from it.</p>" +
     "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>" +
     facts([
       ["plan hash", "<code>" + esc(p.hash) + "</code>"],
@@ -443,15 +459,19 @@ export function renderPlanStep(prepared, state) {
     "exists. The Restore is created first, naming an Approval that is not there yet; the " +
     "reconciler requeues every 30 s until it arrives. Neither name is ever edited, because " +
     "neither spec can be.</p>" +
+    "<div class=\"actions\">" +
     "<button type=\"button\" id=\"copy-plan\">Copy plan</button>" +
     "<button type=\"button\" id=\"download-plan\">Download plan</button>" +
+    "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
     "<h4>Approve it out of band</h4>" +
     "<p class=\"note\">Run this on the machine that holds the approver's private key. This " +
     "page never sees it.</p>" +
     copyBlock([APPROVE_COMMAND]) +
-    "<button type=\"button\" id=\"create-restore\">Create the Restore</button>" +
+    "<div class=\"actions actions-final\">" +
+    "<button type=\"button\" id=\"create-restore\" class=\"primary\">Create the Restore</button>" +
     "<button type=\"button\" id=\"request-approval\">Request approval</button>" +
+    "</div>" +
     "</section>"
   );
 }
@@ -468,14 +488,146 @@ export const APPROVE_COMMAND =
   "logweir drill approve --spec <file> --key <privkey> --approver <id> " +
   "--ticket <id> --subject-kind Restore --out <file>";
 
+/** The six steps as the stepper names them: id, number and title, in the
+ *  order the sections render. The titles are the section headings' own
+ *  words. */
+export const STEPS = Object.freeze([
+  { id: "step-archive", title: "Archive" },
+  { id: "step-backup-set", title: "Backup set" },
+  { id: "step-point-in-time", title: "Point in time" },
+  { id: "step-target", title: "Target and naming" },
+  { id: "step-preflight", title: "Target-topic preflight" },
+  { id: "step-plan", title: "Plan, hash and names" },
+]);
+
+/** THE STEPPER'S STATE: which steps are done, which one you are on, what is
+ *  next, and which one needs attention -- one entry per step, in order.
+ *
+ *  All six sections are on the page at once, so "the step you are on" is the
+ *  FIRST one whose inputs are not yet whole: an archive with no URL, a chosen
+ *  run with no backup set, a point outside the covered window, a target with
+ *  no mode or no prefix, a target cluster whose recorded status is not
+ *  reachable. When the five input steps are whole, the plan step is the
+ *  current one and reads `ready`. A step that is not whole because the page
+ *  has a complaint about it reads `attention`; one that merely waits its
+ *  turn reads `todo`.
+ *
+ *  THIS DECIDES NOTHING THE RUNNER DECIDES. It reads the same state the six
+ *  sections read and summarises it; the create button is never gated on it,
+ *  because the client-side checks are a convenience and never the gate. Pure:
+ *  no DOM, no network, no clock. */
+export function stepStates(state) {
+  const s = state || {};
+  const fields = s.fields || {};
+  const targetFields = fields.target || {};
+  const chosen = chosenBackup(s);
+  const covered = coveredOf(s);
+  const value =
+    typeof fields.pointInTime === "string" && fields.pointInTime.length > 0
+      ? fields.pointInTime
+      : rfc3339(covered.toMs);
+  const target = targetCluster(s);
+  const targetStatus = (target || {}).status || {};
+  const targetSpec = (target || {}).spec || {};
+  const setChosen =
+    chosen !== null &&
+    typeof ((chosen.status || {}).backupId) === "string" &&
+    chosen.status.backupId.length > 0;
+  const whole = [
+    typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
+    setChosen,
+    windowComplaint(value, covered) === null,
+    target !== null &&
+      TARGET_MODES.indexOf(targetFields.mode) !== -1 &&
+      typeof targetFields.topicPrefix === "string" &&
+      targetFields.topicPrefix.length > 0,
+    target !== null && targetStatus.reachable === true,
+  ];
+  const attention = [
+    false,
+    chosen !== null && !setChosen,
+    !whole[2],
+    target !== null &&
+      targetFields.mode === "scratch" &&
+      typeof targetSpec.markerTopic !== "string",
+    target !== null && !whole[4],
+  ];
+  let firstOpen = 5;
+  for (let i = 0; i < 5; i += 1) {
+    if (!whole[i]) {
+      firstOpen = i;
+      break;
+    }
+  }
+  return STEPS.map((step, i) => {
+    let status;
+    if (i === 5) {
+      status = firstOpen === 5 ? "ready" : "todo";
+    } else if (whole[i]) {
+      status = attention[i] ? "attention" : "done";
+    } else {
+      status = attention[i] ? "attention" : "todo";
+    }
+    return {
+      id: step.id,
+      number: i + 1,
+      title: step.title,
+      status: status,
+      current: i === firstOpen,
+    };
+  });
+}
+
+/** The word a stepper entry carries beside its title. Text, so the state is
+ *  never colour alone. */
+function stepWord(step) {
+  if (step.status === "done") {
+    return "done";
+  }
+  if (step.status === "attention") {
+    return "needs attention";
+  }
+  if (step.status === "ready") {
+    return "review and create";
+  }
+  return step.current ? "you are here" : "next";
+}
+
+/** The stepper: an ordered list of the six steps, each a button that scrolls
+ *  to its section, carrying the step's number, its title and its state in
+ *  words. The current one is marked `aria-current="step"`. */
+export function renderStepper(state) {
+  const items = stepStates(state)
+    .map((step) => {
+      const classes =
+        "stepper-item is-" + step.status + (step.current ? " is-current" : "");
+      return (
+        "<li class=\"" + classes + "\">" +
+        "<button type=\"button\" class=\"stepper-link\" data-target=\"" + step.id + "\"" +
+        (step.current ? " aria-current=\"step\"" : "") + ">" +
+        "<span class=\"stepper-num\">" + String(step.number) + "</span>" +
+        "<span class=\"stepper-title\">" + esc(step.title) + "</span>" +
+        "<span class=\"stepper-status\">" + stepWord(step) + "</span>" +
+        "</button></li>"
+      );
+    })
+    .join("");
+  return "<ol class=\"stepper\" aria-label=\"The six steps\">" + items + "</ol>";
+}
+
 /** The whole wizard, all six steps, over one state. */
 export async function renderRestoreWizard(state) {
   const prepared = await preparePlan(state);
   return (
     "<h2>Restore wizard</h2>" +
+    "<p class=\"blurb\">Six steps, all on this page: the archive, the backup set, the " +
+    "point in time, the target, the preflight, and the plan whose bytes the Restore " +
+    "carries. Every value was read from this namespace's own objects or is editable " +
+    "below.</p>" +
     ((state || {}).editing
       ? "<p class=\"immutable-note\">" + RESTORE_IMMUTABLE_SENTENCE + "</p>"
       : "") +
+    renderStepper(state) +
     renderArchiveStep(state) +
     renderBackupSetStep(state) +
     renderPointInTimeStep(state) +
@@ -985,6 +1137,23 @@ function wire(node, state, parse, api) {
     if (field !== null) {
       field.addEventListener("change", refresh);
     }
+  }
+
+  // The stepper: each entry scrolls its section into view and hands it focus,
+  // so a keyboard reader lands where a pointer reader looks. Motion follows
+  // the reader's own preference.
+  for (const link of node.querySelectorAll(".stepper-link")) {
+    link.addEventListener("click", () => {
+      const section = node.querySelector("#" + link.getAttribute("data-target"));
+      if (section === null) {
+        return;
+      }
+      const still =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      section.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "start" });
+      section.focus({ preventScroll: true });
+    });
   }
 
   const copy = node.querySelector("#copy-plan");

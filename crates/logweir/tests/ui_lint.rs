@@ -1608,3 +1608,115 @@ fn the_behaviour_gate_runs_only_the_spec_files() {
         orphans.join("\n")
     );
 }
+
+// ===========================================================================
+// TASK 36 -- the design system, and the fixture-driven preview.
+// ===========================================================================
+
+// -------------------- 25. the preview binds loopback and refuses writes
+
+#[test]
+fn the_preview_server_binds_loopback_and_refuses_writes() {
+    // `ui/tests/preview-server.js` serves the page over checked-in JSON so
+    // the design can be looked at with no cluster. It is a development tool
+    // and it opens a socket, which is exactly why its two safety properties
+    // are pinned from here, over its source, the way every other claim in
+    // this file is pinned: it binds the loopback address and nothing else,
+    // and it answers every write with a 405 and never stores, forwards or
+    // mutates anything.
+    let path = ui_root().join("tests").join("preview-server.js");
+    let source = read(&path);
+
+    // (i) LOOPBACK, by a module-level constant `listen` is handed by name.
+    let declaration = "const HOST = \"127.0.0.1\";";
+    assert!(
+        source.contains(declaration),
+        "{} must bind the loopback literal through a module-level `const HOST`; expected the \
+         line {declaration:?}. A preview that listened anywhere else would be a directory \
+         listing and a JSON store on the LAN.",
+        shown(&path)
+    );
+    let offset = source.find(declaration).expect("the declaration was found");
+    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    assert_eq!(
+        &source[line_start..offset],
+        "",
+        "the declaration is at module level, not indented inside a function; {}:{}",
+        shown(&path),
+        line_of(&source, offset)
+    );
+    assert!(
+        source.contains(".listen(PORT, HOST"),
+        "and `listen` is handed HOST by name, so the address cannot drift away from the \
+         declaration"
+    );
+    for token in ["0.0.0.0", "[::]", "\"::\""] {
+        assert!(
+            !source.contains(token),
+            "{} carries the wildcard address {token:?}",
+            shown(&path)
+        );
+    }
+    assert!(
+        contains_bare_token(&source, "127.0.0.1").is_some(),
+        "the loopback literal is present as a bare token"
+    );
+
+    // (ii) WRITES REFUSED, before anything is looked up, with the code the
+    // page renders as the API server's refusal.
+    assert!(
+        source.contains("const METHOD_NOT_ALLOWED = 405;"),
+        "the refusal is a module-level constant"
+    );
+    assert!(
+        contains_bare_token(&source, "405").is_some(),
+        "and 405 is the bare token the response carries"
+    );
+    assert!(
+        source.contains("method !== \"GET\" && method !== \"HEAD\""),
+        "every method that is not a read is refused"
+    );
+    for token in [
+        "writeFileSync",
+        "appendFileSync",
+        "createWriteStream",
+        "child_process",
+    ] {
+        assert!(
+            !source.contains(token),
+            "{} names {token:?}; the preview writes nothing, not even a file, and spawns \
+             nothing",
+            shown(&path)
+        );
+    }
+
+    // (iii) A TOOL, NOT A SUITE, AND NOT AN ASSET. The gate's glob cannot
+    // match it, the gate never names it, and the shipped-asset scan skips it
+    // by the one scope rule this file has.
+    assert!(
+        !path.to_string_lossy().ends_with(".spec.js"),
+        "the preview is not a test file"
+    );
+    let gate = read(&repo_root().join("scripts").join("check-ui-behaviour.sh"));
+    assert!(
+        !gate.contains("preview-server"),
+        "scripts/check-ui-behaviour.sh must not run the preview: a lint gate never opens a \
+         socket (STANDING RULE 7)"
+    );
+    assert!(is_under_tests(&path), "it lives under ui/tests/");
+    assert!(
+        !shipped_assets().contains(&path),
+        "and is therefore outside the shipped assets and the release bundle"
+    );
+
+    // (iv) DOCUMENTED, under its own heading, with the command.
+    let readme = read(&ui_root().join("README.md"));
+    assert!(
+        readme.contains("## Previewing with fixtures"),
+        "ui/README.md carries the `Previewing with fixtures` heading"
+    );
+    assert!(
+        readme.contains("node ui/tests/preview-server.js"),
+        "and the command that starts it"
+    );
+}
