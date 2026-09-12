@@ -38,6 +38,7 @@ import {
   facts,
   independentCheck,
   listFooter,
+  phaseBadge,
   replace,
   table,
 } from "../render.js";
@@ -46,6 +47,11 @@ import { backupBadge, greenLabel, validVerification } from "./backups.js";
 
 const PLURAL = "restores";
 const BACKUPS = "backups";
+
+/** The sentence the history table carries when the namespace holds no run. */
+export const NO_HISTORY_SENTENCE =
+  "No run in this namespace yet. Backups and Restores appear here, newest first, as soon " +
+  "as they exist.";
 
 /** **The Restore badge rule.** Green if and only if the recorded verification
  *  is `Valid` AND the run's own outcome is `pass`. */
@@ -129,7 +135,7 @@ export function renderHistoryList(input, second, ns) {
     nameCell(object, ns),
     esc(kindOf(object)),
     cell(createdAt(object)),
-    cell((object.status || {}).phase),
+    phaseBadge((object.status || {}).phase),
     resultCell(object),
     rowBadge(object),
   ]);
@@ -139,7 +145,7 @@ export function renderHistoryList(input, second, ns) {
     "<p class=\"blurb\">Completed runs of both kinds, newest first. A Backup's result " +
     "is its exit code; a Restore's is its outcome. The two kinds do not share a badge " +
     "rule, because they do not share a field.</p>" +
-    table(["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED"], rows) +
+    table(["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED"], rows, NO_HISTORY_SENTENCE) +
     listFooter()
   );
 }
@@ -161,7 +167,7 @@ export function renderRestoreDetail(object) {
     "<h2>Restore " + nameOf(object) + "</h2>" +
     restoreBadge(status) +
     facts([
-      ["phase", cell(status.phase)],
+      ["phase", phaseBadge(status.phase)],
       ["exit code", cell(status.exitCode)],
       ["reason", cell(status.reason)],
       ["last phase completed", cell(status.lastPhaseCompleted)],
@@ -199,7 +205,7 @@ export function renderRestoreDetail(object) {
     ]) +
     evidenceBlock(evidence) +
     "<p class=\"engine-subreport\">" + ENGINE_SUBREPORT_LINE + "</p>" +
-    "<h3>Check it yourself</h3>" +
+    "<section class=\"check\"><h3>Check it yourself</h3>" +
     "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
     "take local files. So the first two lines fetch, and the last two verify -- once " +
     "with the Rust reader and once with the Python one.</p>" +
@@ -210,7 +216,8 @@ export function renderRestoreDetail(object) {
       evidence.sidecarKey || "",
       "scorecard.json",
       "scorecard.sig",
-    )
+    ) +
+    "</section>"
   );
 }
 

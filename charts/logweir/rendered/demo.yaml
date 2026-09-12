@@ -1972,11 +1972,39 @@ data:
         "<!doctype html><body>" + html,
         "text/html",
       );
+      labelTableCells(parsed);
       const nodes = [];
       for (const child of Array.from(parsed.body.childNodes)) {
         nodes.push(document.importNode(child, true));
       }
       return nodes;
+    }
+  
+    // THE STACKED-CARD LABELS, SET HERE AND NOT IN THE STRING. Below 720 px the
+    // stylesheet turns every `table.grid` row into a card and shows each cell's
+    // column caption beside its value, read from the cell's `data-label`. The
+    // caption is copied from the header row at adoption time, with `setAttribute`
+    // and never `innerHTML`, so the page modules stay pure functions from a JSON
+    // object to a string -- which is what keeps the string the behaviour suite
+    // asserts on identical to the string a browser receives -- and the header row
+    // remains the one place a column's caption is written.
+    function labelTableCells(parsed) {
+      for (const table of Array.from(parsed.querySelectorAll("table.grid"))) {
+        const captions = Array.from(table.querySelectorAll("thead th")).map(
+          (th) => th.textContent,
+        );
+        for (const row of Array.from(table.querySelectorAll("tbody tr"))) {
+          const cells = Array.from(row.children);
+          for (let i = 0; i < cells.length; i += 1) {
+            if (cells[i].hasAttribute("colspan")) {
+              continue;
+            }
+            if (typeof captions[i] === "string" && captions[i].length > 0) {
+              cells[i].setAttribute("data-label", captions[i]);
+            }
+          }
+        }
+      }
     }
   
     function nav(current, ns) {
@@ -2043,12 +2071,12 @@ data:
       }
       if (main !== null) {
         if (here.name !== "" && typeof current.detail === "function") {
-          replace(main, el("p", { class: "pending" }, "Reading " + here.name + "..."));
+          replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));
           current.detail(main, here.ns, here.name, parseFragment);
         } else if (current.cluster === true && typeof current.mount === "function") {
           // The one CLUSTER-SCOPED read in this application. It takes no
           // namespace, because the TrustRoster has none.
-          replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+          replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
           current.mount(main, parseFragment);
         } else if (current.route === true && typeof current.mount === "function") {
           // The approvals page reads `subject`, `hash` and `name` off the hash the
@@ -2061,10 +2089,10 @@ data:
           // hop no test in either language could reach, and swapping two of these
           // three values left the whole suite green. `approvalRouteParams` is a
           // pure function of the hash string, and the suite calls it.
-          replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+          replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
           current.mount(main, here.ns, approvalRouteParams(hash), parseFragment);
         } else if (typeof current.mount === "function") {
-          replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+          replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
           current.mount(main, here.ns, parseFragment);
         } else {
           replace(main, view(current));
@@ -2074,6 +2102,20 @@ data:
     }
   
     window.addEventListener("hashchange", render);
+  
+    // THE SKIP LINK IS A BUTTON, NOT AN ANCHOR. An `<a href="#view-slot">` would
+    // set the hash, and every hash on this page is a route: the router would
+    // read `#view-slot`, find no such route, and render the default one. So the
+    // control moves focus with a script and touches the hash not at all.
+    const skip = document.getElementById("skip-link");
+    if (skip !== null) {
+      skip.addEventListener("click", () => {
+        const main = document.getElementById("view-slot");
+        if (main !== null) {
+          main.focus();
+        }
+      });
+    }
   
     if (window.location.hash === "") {
       window.location.hash = DEFAULT_HASH;
@@ -2086,6 +2128,7 @@ data:
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="color-scheme" content="light dark">
         <title>Logweir</title>
         <!--
           EVERY REFERENCE ON THIS PAGE IS RELATIVE, AND THERE ARE ONLY TWO.
@@ -2095,22 +2138,35 @@ data:
           line here that names an external resource.
   
           The icon is an empty inline one, so the browser asks for no icon at all
-          rather than requesting a file that does not exist.
+          rather than requesting a file that does not exist. The one graphic on
+          the page -- the mark beside the product name -- is inline SVG below,
+          decorative and hidden from assistive technology.
         -->
         <link rel="icon" href="data:,">
         <link rel="stylesheet" href="./style.css">
         <script type="module" src="./app.js"></script>
       </head>
       <body>
+        <button class="skip-link" type="button" id="skip-link">Skip to content</button>
         <header class="masthead">
-          <h1>Logweir</h1>
-          <p class="tagline">
-            A Kubernetes API client. It runs with the authority of the kubeconfig
-            that started the proxy serving it, and it holds no credential of its own.
-          </p>
+          <div class="masthead-row">
+            <div class="brand">
+              <svg class="brand-mark" viewBox="0 0 32 32" width="36" height="36" aria-hidden="true" focusable="false">
+                <rect class="brand-mark-bg" x="1" y="1" width="30" height="30" rx="8"></rect>
+                <path class="brand-mark-fg" d="M6 8h20v3.2H6zM12 14.4h14v3.2H12zM18 20.8h8v3.2h-8z"></path>
+              </svg>
+              <div class="brand-text">
+                <h1>Logweir</h1>
+                <p class="tagline">
+                  A Kubernetes API client. It runs with the authority of the kubeconfig
+                  that started the proxy serving it, and it holds no credential of its own.
+                </p>
+              </div>
+            </div>
+          </div>
           <div id="nav-slot"></div>
         </header>
-        <main id="view-slot"></main>
+        <main id="view-slot" tabindex="-1"></main>
         <footer class="colophon">
           <p>
             Served by <code>kubectl proxy</code>, which attaches the viewer's own
@@ -2255,6 +2311,11 @@ data:
       return null;
     }
   
+    /** The sentence the approvals table carries when the namespace holds none. */
+    export const NO_APPROVAL_SENTENCE =
+      "No Approval in this namespace yet. Record one with the form below, from the two files " +
+      "logweir drill approve wrote on the approver's own machine.";
+  
     /** Every `Approval` in the namespace. */
     export function renderApprovalList(collection, now) {
       const at = typeof now === "number" ? now : Date.now();
@@ -2267,7 +2328,9 @@ data:
           cell(subject.kind ? subject.kind + "/" + String(subject.name) : subject.name),
           verifiedBadge(status),
           cell(status.approver),
-          cell(status.matchedKeyId),
+          typeof status.matchedKeyId === "string" && status.matchedKeyId.length > 0
+            ? "<code>" + esc(status.matchedKeyId) + "</code>"
+            : cell(null),
           cell(ageOf(meta.creationTimestamp, at)),
         ];
       });
@@ -2276,7 +2339,7 @@ data:
         "<p class=\"blurb\">An Approval that exists is not an approval; an Approval whose " +
         "status weirkeeper set to Verified=True is. One that did not verify stays here with " +
         "its reason, as the record of a rejected attempt.</p>" +
-        table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows) +
+        table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE) +
         listFooter()
       );
     }
@@ -2293,12 +2356,12 @@ data:
       const spec = (object || {}).spec || {};
       const subject = spec.subjectRef || {};
       return (
-        "<section class=\"approval\"><h3>" + cell(meta.name) + "</h3>" +
+        "<section class=\"approval\"><div class=\"card-head\"><h3>" + cell(meta.name) + "</h3>" +
+        verifiedBadge(status) + "</div>" +
         facts([
           ["subject kind", cell(subject.kind)],
           ["subject name", cell(subject.name)],
           ["plan hash", "<code>" + esc(spec.planHash) + "</code>"],
-          ["verified", verifiedBadge(status)],
           ["matched key id", cell(status.matchedKeyId)],
           ["approver", cell(status.approver)],
           ["ticket", cell(status.ticket)],
@@ -2338,26 +2401,34 @@ data:
         "approver signed, so anything this page did to them in between would be a different " +
         "document.</p>" +
         "<form id=\"approval-form\">" +
-        "<label for=\"subject-kind\">SUBJECT KIND</label>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"subject-kind\">SUBJECT KIND</label>" +
         "<select id=\"subject-kind\" name=\"subjectKind\">" +
         "<option value=\"" + esc(SUBJECT_KIND) + "\" selected>" + esc(SUBJECT_KIND) + "</option>" +
         "</select>" +
-        "<label for=\"subject-name\">SUBJECT NAME</label>" +
+        "<p class=\"help\">The one kind an approval may name in this release.</p></div>" +
+        "<div class=\"field\"><label for=\"subject-name\">SUBJECT NAME</label>" +
         "<input id=\"subject-name\" name=\"subjectName\" value=\"" + esc(r.subject) + "\">" +
-        "<label for=\"plan-hash\">PLAN HASH</label>" +
+        "<p class=\"help\">The Restore this approval covers, from the route the wizard opened.</p></div>" +
+        "</div>" +
+        "<div class=\"field\"><label for=\"plan-hash\">PLAN HASH</label>" +
         "<input id=\"plan-hash\" name=\"planHash\" readonly value=\"" + esc(r.hash) + "\">" +
-        "<label for=\"approval-json\">approval.json</label>" +
+        "<p class=\"help\">Read-only: the sha256 the wizard showed beside the plan bytes. The " +
+        "controller recomputes it from the Restore's own bytes.</p></div>" +
+        "<div class=\"field\"><label for=\"approval-json\">approval.json</label>" +
         "<input type=\"file\" id=\"approval-json-file\" name=\"approvalFile\">" +
         "<textarea id=\"approval-json\" name=\"approvalBytes\" rows=\"8\"></textarea>" +
-        "<label for=\"approval-sig\">approval.sig</label>" +
+        "<p class=\"help\">Choose the file, or paste its text. It is sent exactly as it is here.</p></div>" +
+        "<div class=\"field\"><label for=\"approval-sig\">approval.sig</label>" +
         "<input type=\"file\" id=\"approval-sig-file\" name=\"sidecarFile\">" +
         "<textarea id=\"approval-sig\" name=\"sidecarBytes\" rows=\"8\"></textarea>" +
+        "<p class=\"help\">The signature sidecar the same command wrote beside it.</p></div>" +
         "<p class=\"note\">metadata.name is " + esc(r.name) + ", minted from the plan bytes " +
         "before the Restore was created. Neither name is ever edited: both specs are " +
         "immutable.</p>" +
         "<p class=\"refusal-rule\">" + PRIVATE_KEY_REFUSAL + ". A file named for one, or any " +
         "text carrying a private-key header, is refused here and nothing is sent.</p>" +
-        "<button type=\"submit\">Create the Approval</button>" +
+        "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create the Approval</button></div>" +
         "</form></section>"
       );
     }
@@ -2565,12 +2636,18 @@ data:
       facts,
       independentCheck,
       listFooter,
+      phaseBadge,
       replace,
       table,
     } from "../render.js";
     import { itemsOf } from "./clusters.js";
   
     const PLURAL = "backups";
+  
+    /** The sentence the backups table carries when the namespace holds none. */
+    export const NO_BACKUP_SENTENCE =
+      "No Backup has run in this namespace yet. A BackupSchedule creates one at its next slot, " +
+      "and it appears here with the evidence weirkeeper recorded for it.";
   
     /** The verification half of BOTH rules, and nothing else.
      *
@@ -2637,7 +2714,7 @@ data:
         const meta = object.metadata || {};
         return [
           nameCell(object, ns),
-          cell(status.phase),
+          phaseBadge(status.phase),
           cell(status.exitCode),
           cell(status.records),
           backupBadge(status),
@@ -2649,7 +2726,7 @@ data:
         "<p class=\"blurb\">Every Backup run in this namespace. The AGE column is the " +
         "object's own creation instant, not a duration: these views are computed without " +
         "reading a clock.</p>" +
-        table(["NAME", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"], rows) +
+        table(["NAME", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"], rows, NO_BACKUP_SENTENCE) +
         listFooter()
       );
     }
@@ -2666,7 +2743,7 @@ data:
         "<h2>Backup " + nameOf(object) + "</h2>" +
         backupBadge(status) +
         facts([
-          ["phase", cell(status.phase)],
+          ["phase", phaseBadge(status.phase)],
           ["exit code", cell(status.exitCode)],
           ["exit reason", cell(status.exitReason)],
           ["backup id", cell(status.backupId)],
@@ -2679,7 +2756,7 @@ data:
         ]) +
         "<p class=\"covered\">" + esc(coveredWindow(status.windowCovered)) + "</p>" +
         evidenceBlock(evidence) +
-        "<h3>Check it yourself</h3>" +
+        "<section class=\"check\"><h3>Check it yourself</h3>" +
         "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
         "take local files. So the first two lines fetch, and the last two verify -- once " +
         "with the Rust reader and once with the Python one.</p>" +
@@ -2690,7 +2767,8 @@ data:
           evidence.sidecarKey || "",
           "receipt.json",
           "receipt.sig",
-        )
+        ) +
+        "</section>"
       );
     }
   
@@ -2797,6 +2875,25 @@ data:
       return parts.join(" ");
     }
   
+    /** `status.reachable` as a badge whose WORDS carry the state as well as its
+     *  colour. An unset field is the absent marker, not a claim either way: the
+     *  controller has not probed this cluster yet. */
+    export function reachableBadge(status) {
+      const reachable = (status || {}).reachable;
+      if (reachable === true) {
+        return badge("ok", "reachable");
+      }
+      if (reachable === false) {
+        return badge("flat", "not reachable");
+      }
+      return cell(null);
+    }
+  
+    /** The sentence the clusters table carries when the namespace holds none. */
+    export const NO_CLUSTER_SENTENCE =
+      "No KafkaCluster in this namespace yet. Create one with the form below, or pick another " +
+      "namespace above.";
+  
     /** The clusters table. NAME, ROLE, REACHABLE, CLUSTER-ID, OBSERVED, AUTH. */
     export function renderClusterList(input, ns) {
       const rows = itemsOf(input).map((object) => {
@@ -2805,7 +2902,7 @@ data:
         return [
           nameCell(object, ns),
           cell(spec.role),
-          cell(status.reachable),
+          reachableBadge(status),
           cell(status.clusterId),
           cell(status.observedAt),
           authCell(spec),
@@ -2815,7 +2912,7 @@ data:
         "<h2>Clusters</h2>" +
         "<p class=\"blurb\">Every KafkaCluster in this namespace. " +
         "<code>clusterId</code> is read from the broker and never from a spec.</p>" +
-        table(["NAME", "ROLE", "REACHABLE", "CLUSTER-ID", "OBSERVED", "AUTH"], rows) +
+        table(["NAME", "ROLE", "REACHABLE", "CLUSTER-ID", "OBSERVED", "AUTH"], rows, NO_CLUSTER_SENTENCE) +
         listFooter()
       );
     }
@@ -2825,10 +2922,9 @@ data:
       const spec = (object && object.spec) || {};
       const status = (object && object.status) || {};
       const servers = Array.isArray(spec.bootstrapServers) ? spec.bootstrapServers : [];
-      const reachable = status.reachable === true;
       return (
         "<h2>Cluster " + nameOf(object) + "</h2>" +
-        badge(reachable ? "ok" : "flat", reachable ? "reachable" : "not reachable") +
+        reachableBadge(status) +
         facts([
           ["role", cell(spec.role)],
           ["bootstrap servers", servers.length === 0 ? cell(null) : esc(servers.join(", "))],
@@ -2846,24 +2942,35 @@ data:
     export function renderClusterForm() {
       return (
         "<section class=\"create\"><h3>Create a KafkaCluster</h3>" +
+        "<p class=\"note\">A KafkaCluster names a set of brokers and how to reach them. The " +
+        "controller probes it and records the cluster id it reads from the broker.</p>" +
         "<form id=\"cluster-form\">" +
-        "<label for=\"cluster-name\">name</label>" +
+        "<div class=\"field\"><label for=\"cluster-name\">name</label>" +
         "<input id=\"cluster-name\" name=\"name\" required>" +
-        "<label for=\"cluster-servers\">bootstrap servers, comma separated</label>" +
+        "<p class=\"help\">A Kubernetes object name: lowercase, digits and dashes.</p></div>" +
+        "<div class=\"field\"><label for=\"cluster-servers\">bootstrap servers, comma separated</label>" +
         "<input id=\"cluster-servers\" name=\"servers\" required>" +
-        "<label for=\"cluster-role\">role</label>" +
+        "<p class=\"help\">host:port pairs, as a client would dial them from inside the cluster.</p></div>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"cluster-role\">role</label>" +
         "<input id=\"cluster-role\" name=\"role\" value=\"source\" required>" +
-        "<label for=\"cluster-mode\">auth mode</label>" +
+        "<p class=\"help\">A label the controller reports: source or target. It authorises nothing.</p></div>" +
+        "<div class=\"field\"><label for=\"cluster-mode\">auth mode</label>" +
         "<select id=\"cluster-mode\" name=\"mode\">" +
         "<option value=\"plaintext\">plaintext</option>" +
         "<option value=\"scramSha512\">scramSha512</option>" +
-        "</select>" +
-        "<label for=\"cluster-username\">auth username</label>" +
-        "<input id=\"cluster-username\" name=\"username\">" +
-        "<label for=\"cluster-secret\">auth Secret name</label>" +
+        "</select></div>" +
+        "</div>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"cluster-username\">auth username</label>" +
+        "<input id=\"cluster-username\" name=\"username\"></div>" +
+        "<div class=\"field\"><label for=\"cluster-secret\">auth Secret name</label>" +
         "<input id=\"cluster-secret\" name=\"secret\">" +
+        "<p class=\"help\">The NAME of the Secret holding the credential. The value is never read " +
+        "by this page.</p></div>" +
+        "</div>" +
         "<label class=\"inline\"><input id=\"cluster-tls\" name=\"tls\" type=\"checkbox\"> TLS</label>" +
-        "<button type=\"submit\">Create</button>" +
+        "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
         "</form>" +
         "<p class=\"note\">The credential itself lives in the Secret named above and " +
         "is never read by this page, by a status field or by a rendered document.</p>" +
@@ -2991,6 +3098,7 @@ data:
       facts,
       independentCheck,
       listFooter,
+      phaseBadge,
       replace,
       table,
     } from "../render.js";
@@ -2999,6 +3107,11 @@ data:
   
     const PLURAL = "restores";
     const BACKUPS = "backups";
+  
+    /** The sentence the history table carries when the namespace holds no run. */
+    export const NO_HISTORY_SENTENCE =
+      "No run in this namespace yet. Backups and Restores appear here, newest first, as soon " +
+      "as they exist.";
   
     /** **The Restore badge rule.** Green if and only if the recorded verification
      *  is `Valid` AND the run's own outcome is `pass`. */
@@ -3082,7 +3195,7 @@ data:
         nameCell(object, ns),
         esc(kindOf(object)),
         cell(createdAt(object)),
-        cell((object.status || {}).phase),
+        phaseBadge((object.status || {}).phase),
         resultCell(object),
         rowBadge(object),
       ]);
@@ -3092,7 +3205,7 @@ data:
         "<p class=\"blurb\">Completed runs of both kinds, newest first. A Backup's result " +
         "is its exit code; a Restore's is its outcome. The two kinds do not share a badge " +
         "rule, because they do not share a field.</p>" +
-        table(["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED"], rows) +
+        table(["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED"], rows, NO_HISTORY_SENTENCE) +
         listFooter()
       );
     }
@@ -3114,7 +3227,7 @@ data:
         "<h2>Restore " + nameOf(object) + "</h2>" +
         restoreBadge(status) +
         facts([
-          ["phase", cell(status.phase)],
+          ["phase", phaseBadge(status.phase)],
           ["exit code", cell(status.exitCode)],
           ["reason", cell(status.reason)],
           ["last phase completed", cell(status.lastPhaseCompleted)],
@@ -3152,7 +3265,7 @@ data:
         ]) +
         evidenceBlock(evidence) +
         "<p class=\"engine-subreport\">" + ENGINE_SUBREPORT_LINE + "</p>" +
-        "<h3>Check it yourself</h3>" +
+        "<section class=\"check\"><h3>Check it yourself</h3>" +
         "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
         "take local files. So the first two lines fetch, and the last two verify -- once " +
         "with the Rust reader and once with the Python one.</p>" +
@@ -3163,7 +3276,8 @@ data:
           evidence.sidecarKey || "",
           "scorecard.json",
           "scorecard.sig",
-        )
+        ) +
+        "</section>"
       );
     }
   
@@ -3267,7 +3381,11 @@ data:
       });
       return (
         "<h3>" + esc(caption) + "</h3>" +
-        table(["KEY ID", "SUBJECT", "NOT AFTER", "EXPIRY"], rows)
+        table(
+          ["KEY ID", "SUBJECT", "NOT AFTER", "EXPIRY"],
+          rows,
+          "no key of this kind in the roster",
+        )
       );
     }
   
@@ -3300,11 +3418,12 @@ data:
         ]) +
         renderKeyTable("approverKeys", spec.approverKeys, status.expiredKeyIds) +
         renderKeyTable("signingKeys", spec.signingKeys, status.expiredKeyIds) +
-        "<h3>Check a key out of band</h3>" +
+        "<section class=\"check\"><h3>Check a key out of band</h3>" +
         "<p class=\"note\">A row above says which key id the controller accepts. It cannot say " +
         "that the material behind that id is still the one its holder has. Run this against " +
         "the public half they give you and compare the digest with the KEY ID column.</p>" +
         copyBlock([FINGERPRINT_COMMAND]) +
+        "</section>" +
         renderRosterSnippet() +
         listFooter()
       );
@@ -3313,7 +3432,7 @@ data:
     /** The snippet a cluster admin applies. RENDERED AND NEVER SUBMITTED. */
     export function renderRosterSnippet() {
       return (
-        "<h3>Editing the roster is a cluster-admin step</h3>" +
+        "<section class=\"check\"><h3>Editing the roster is a cluster-admin step</h3>" +
         "<p class=\"note\">This page shows the document and does not apply it. TrustRoster is " +
         "cluster-scoped, its plural is absent from this page's writable set, and the API " +
         "server would refuse a namespace-scoped viewer in any case. Save this as roster.yml " +
@@ -3343,7 +3462,8 @@ data:
           "  allowedClusterIds: []",
           "",
           "kubectl --context docker-desktop apply -f roster.yml",
-        ])
+        ]) +
+        "</section>"
       );
     }
   
@@ -3456,13 +3576,14 @@ data:
         ];
       });
       return (
-        "<section class=\"step\" id=\"step-archive\"><h3>1. Archive</h3>" +
+        "<section class=\"step\" id=\"step-archive\" tabindex=\"-1\"><h3>1. Archive</h3>" +
         "<p class=\"blurb\">The source cluster this restore reads an archive of. The archives " +
         "below were read from this namespace's Backup objects: this page holds no bucket " +
         "credential and lists no object storage.</p>" +
         table(
           ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "ARCHIVE", "ARCHIVE CREDENTIAL"],
           rows,
+          "no KafkaCluster in this namespace carries role: source",
         ) +
         renderArchiveCredentialField(s) +
         renderStoreFields(s) +
@@ -3490,6 +3611,7 @@ data:
       const name = typeof s.archiveSecretName === "string" ? s.archiveSecretName : "";
       return (
         "<h4>The credential that reaches that archive</h4>" +
+        "<div class=\"field\">" +
         "<label for=\"archive-secret\">ARCHIVE CREDENTIAL (Secret name)</label>" +
         "<input id=\"archive-secret\" name=\"archiveSecret\" value=\"" + esc(name) + "\">" +
         "<p class=\"note\">The runner reads the archive with this credential: weirkeeper mounts " +
@@ -3498,7 +3620,8 @@ data:
         "ADMITTED and then fails at the archive, not at admission -- the field is optional in " +
         "the CRD, so nothing refuses it until the Job cannot read an object. Leave it blank only " +
         "for an archive reached anonymously or by an instance role. This page shows and sends " +
-        "the NAME; it never reads the Secret.</p>"
+        "the NAME; it never reads the Secret.</p>" +
+        "</div>"
       );
     }
   
@@ -3521,19 +3644,21 @@ data:
         "<h4>Where that archive actually is</h4>" +
         "<p class=\"note\">Leave the endpoint blank for AWS S3. These three values are not on " +
         "any object in the cluster, and the runner reads them from the plan bytes.</p>" +
-        "<label for=\"store-endpoint\">endpoint</label>" +
-        "<input id=\"store-endpoint\" name=\"endpoint\" value=\"" + esc(store.endpoint) + "\">" +
-        "<label for=\"store-region\">region</label>" +
-        "<input id=\"store-region\" name=\"region\" value=\"" + esc(store.region) + "\">" +
-        "<label for=\"store-pathStyle\">path_style addressing</label>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"store-endpoint\">endpoint</label>" +
+        "<input id=\"store-endpoint\" name=\"endpoint\" value=\"" + esc(store.endpoint) + "\"></div>" +
+        "<div class=\"field\"><label for=\"store-region\">region</label>" +
+        "<input id=\"store-region\" name=\"region\" value=\"" + esc(store.region) + "\"></div>" +
+        "</div>" +
+        "<label class=\"inline\" for=\"store-pathStyle\">" +
         "<input type=\"checkbox\" id=\"store-pathStyle\" name=\"pathStyle\"" +
-        (store.pathStyle === true ? " checked" : "") + ">" +
-        "<label for=\"evidence-bucket\">evidence bucket</label>" +
+        (store.pathStyle === true ? " checked" : "") + "> path_style addressing</label>" +
+        "<div class=\"field\"><label for=\"evidence-bucket\">evidence bucket</label>" +
         "<input id=\"evidence-bucket\" name=\"evidenceBucket\" value=\"" +
         esc(((s.fields || {}).evidence || {}).bucket) + "\">" +
         "<p class=\"note\">The evidence prefix is fixed at " + esc(EVIDENCE_PREFIX) + " by Global " +
         "Constraint 6 and is not an input: a plan naming another one is refused at phase 0, " +
-        "after the approver has already signed it.</p>"
+        "after the approver has already signed it.</p></div>"
       );
     }
   
@@ -3587,7 +3712,7 @@ data:
     export function renderNoCompletedBackup(ns, backups) {
       return (
         "<h2>Restore wizard</h2>" +
-        "<p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p>" +
+        "<div class=\"empty-state\"><p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p></div>" +
         renderBackupSetStep({ ns: ns, backups: backups, fields: {} })
       );
     }
@@ -3621,7 +3746,7 @@ data:
             esc(String(((chosen.status || {}).backupId) || "(none -- this run wrote no set)")) +
             ". " + (succeeded ? RELOAD_SENTENCE : NO_SUCCEEDED_SENTENCE) + "</p>";
       return (
-        "<section class=\"step\" id=\"step-backup-set\"><h3>2. Backup set</h3>" +
+        "<section class=\"step\" id=\"step-backup-set\" tabindex=\"-1\"><h3>2. Backup set</h3>" +
         "<p class=\"blurb\">The sets this archive holds. The wizard restores from the run that " +
         "COMPLETED most recently -- the newest Succeeded row, not the newest row: the newest row " +
         "is usually still running and has no set to restore from. The covered range is " +
@@ -3629,6 +3754,7 @@ data:
         table(
           ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
           rows,
+          "no Backup names this archive in this namespace",
         ) +
         chose +
         "</section>"
@@ -3652,14 +3778,16 @@ data:
           : rfc3339(covered.toMs);
       const complaint = windowComplaint(value, covered);
       return (
-        "<section class=\"step\" id=\"step-point-in-time\"><h3>3. Point in time</h3>" +
+        "<section class=\"step\" id=\"step-point-in-time\" tabindex=\"-1\"><h3>3. Point in time</h3>" +
         "<p class=\"blurb\">An RFC 3339 instant. The window is closed at both ends: a record " +
         "whose timestamp equals this exactly is restored. Its FLOOR is the archive's own " +
         "earliest covered timestamp, read from the manifest by the runner, and is never a " +
         "field of this plan.</p>" +
+        "<div class=\"field\">" +
         "<label for=\"point-in-time\">point in time</label>" +
         "<input id=\"point-in-time\" name=\"pointInTime\" value=\"" + esc(value) + "\">" +
         "<p class=\"window\">" + windowMessage(covered.fromMs, covered.toMs) + "</p>" +
+        "</div>" +
         (complaint === null ? "" : "<p class=\"complaint\">" + complaint + "</p>") +
         "<p class=\"note\">" + CONVENIENCE_SENTENCE + "</p>" +
         "</section>"
@@ -3743,21 +3871,25 @@ data:
           ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
           : "";
       return (
-        "<section class=\"step\" id=\"step-target\"><h3>4. Target and naming</h3>" +
+        "<section class=\"step\" id=\"step-target\" tabindex=\"-1\"><h3>4. Target and naming</h3>" +
         "<p class=\"blurb\">Where the restored records are written. Nothing that already " +
         "exists is written to: a Restore only ever creates topics that did not exist, and " +
         "refuses outright if a mapped target topic is already there.</p>" +
-        "<label for=\"target-cluster\">target cluster</label>" +
-        "<select id=\"target-cluster\" name=\"targetCluster\">" + clusterOptions + "</select>" +
-        (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
-        "<label for=\"target-mode\">mode</label>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"target-cluster\">target cluster</label>" +
+        "<select id=\"target-cluster\" name=\"targetCluster\">" + clusterOptions + "</select></div>" +
+        "<div class=\"field\"><label for=\"target-mode\">mode</label>" +
         "<select id=\"target-mode\" name=\"mode\">" + options + "</select>" +
+        "<p class=\"help\">newTopic writes beside what is there; scratch needs a target that " +
+        "proves it is scratch.</p></div>" +
+        "</div>" +
+        (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
         markerWarning +
-        "<label for=\"topic-prefix\">topicNaming.prefix</label>" +
+        "<div class=\"field\"><label for=\"topic-prefix\">topicNaming.prefix</label>" +
         "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\">" +
         "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
         "produces for this instant, so a topic name says both what it is and what point it was " +
-        "recovered to. It is editable.</p>" +
+        "recovered to. It is editable.</p></div>" +
         "</section>"
       );
     }
@@ -3775,7 +3907,9 @@ data:
       const status = (cluster || {}).status || {};
       const topics = (s.fields || {}).topics || [];
       return (
-        "<section class=\"step\" id=\"step-preflight\"><h3>5. Target-topic preflight</h3>" +
+        "<section class=\"step\" id=\"step-preflight\" tabindex=\"-1\"><h3>5. Target-topic preflight</h3>" +
+        "<p class=\"blurb\">The target cluster's own most recent status, and what the run will " +
+        "do to it before the engine starts.</p>" +
         facts([
           ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
           ["reachable", cell(status.reachable)],
@@ -3793,7 +3927,9 @@ data:
       const p = prepared || {};
       const s = state || {};
       return (
-        "<section class=\"step\" id=\"step-plan\"><h3>6. Plan, hash and names</h3>" +
+        "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
+        "<p class=\"blurb\">The document an approver signs, exactly as it will be sent, with " +
+        "its sha256 and the two names minted from it.</p>" +
         "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>" +
         facts([
           ["plan hash", "<code>" + esc(p.hash) + "</code>"],
@@ -3804,15 +3940,19 @@ data:
         "exists. The Restore is created first, naming an Approval that is not there yet; the " +
         "reconciler requeues every 30 s until it arrives. Neither name is ever edited, because " +
         "neither spec can be.</p>" +
+        "<div class=\"actions\">" +
         "<button type=\"button\" id=\"copy-plan\">Copy plan</button>" +
         "<button type=\"button\" id=\"download-plan\">Download plan</button>" +
+        "</div>" +
         "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
         "<h4>Approve it out of band</h4>" +
         "<p class=\"note\">Run this on the machine that holds the approver's private key. This " +
         "page never sees it.</p>" +
         copyBlock([APPROVE_COMMAND]) +
-        "<button type=\"button\" id=\"create-restore\">Create the Restore</button>" +
+        "<div class=\"actions actions-final\">" +
+        "<button type=\"button\" id=\"create-restore\" class=\"primary\">Create the Restore</button>" +
         "<button type=\"button\" id=\"request-approval\">Request approval</button>" +
+        "</div>" +
         "</section>"
       );
     }
@@ -3829,14 +3969,146 @@ data:
       "logweir drill approve --spec <file> --key <privkey> --approver <id> " +
       "--ticket <id> --subject-kind Restore --out <file>";
   
+    /** The six steps as the stepper names them: id, number and title, in the
+     *  order the sections render. The titles are the section headings' own
+     *  words. */
+    export const STEPS = Object.freeze([
+      { id: "step-archive", title: "Archive" },
+      { id: "step-backup-set", title: "Backup set" },
+      { id: "step-point-in-time", title: "Point in time" },
+      { id: "step-target", title: "Target and naming" },
+      { id: "step-preflight", title: "Target-topic preflight" },
+      { id: "step-plan", title: "Plan, hash and names" },
+    ]);
+  
+    /** THE STEPPER'S STATE: which steps are done, which one you are on, what is
+     *  next, and which one needs attention -- one entry per step, in order.
+     *
+     *  All six sections are on the page at once, so "the step you are on" is the
+     *  FIRST one whose inputs are not yet whole: an archive with no URL, a chosen
+     *  run with no backup set, a point outside the covered window, a target with
+     *  no mode or no prefix, a target cluster whose recorded status is not
+     *  reachable. When the five input steps are whole, the plan step is the
+     *  current one and reads `ready`. A step that is not whole because the page
+     *  has a complaint about it reads `attention`; one that merely waits its
+     *  turn reads `todo`.
+     *
+     *  THIS DECIDES NOTHING THE RUNNER DECIDES. It reads the same state the six
+     *  sections read and summarises it; the create button is never gated on it,
+     *  because the client-side checks are a convenience and never the gate. Pure:
+     *  no DOM, no network, no clock. */
+    export function stepStates(state) {
+      const s = state || {};
+      const fields = s.fields || {};
+      const targetFields = fields.target || {};
+      const chosen = chosenBackup(s);
+      const covered = coveredOf(s);
+      const value =
+        typeof fields.pointInTime === "string" && fields.pointInTime.length > 0
+          ? fields.pointInTime
+          : rfc3339(covered.toMs);
+      const target = targetCluster(s);
+      const targetStatus = (target || {}).status || {};
+      const targetSpec = (target || {}).spec || {};
+      const setChosen =
+        chosen !== null &&
+        typeof ((chosen.status || {}).backupId) === "string" &&
+        chosen.status.backupId.length > 0;
+      const whole = [
+        typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
+        setChosen,
+        windowComplaint(value, covered) === null,
+        target !== null &&
+          TARGET_MODES.indexOf(targetFields.mode) !== -1 &&
+          typeof targetFields.topicPrefix === "string" &&
+          targetFields.topicPrefix.length > 0,
+        target !== null && targetStatus.reachable === true,
+      ];
+      const attention = [
+        false,
+        chosen !== null && !setChosen,
+        !whole[2],
+        target !== null &&
+          targetFields.mode === "scratch" &&
+          typeof targetSpec.markerTopic !== "string",
+        target !== null && !whole[4],
+      ];
+      let firstOpen = 5;
+      for (let i = 0; i < 5; i += 1) {
+        if (!whole[i]) {
+          firstOpen = i;
+          break;
+        }
+      }
+      return STEPS.map((step, i) => {
+        let status;
+        if (i === 5) {
+          status = firstOpen === 5 ? "ready" : "todo";
+        } else if (whole[i]) {
+          status = attention[i] ? "attention" : "done";
+        } else {
+          status = attention[i] ? "attention" : "todo";
+        }
+        return {
+          id: step.id,
+          number: i + 1,
+          title: step.title,
+          status: status,
+          current: i === firstOpen,
+        };
+      });
+    }
+  
+    /** The word a stepper entry carries beside its title. Text, so the state is
+     *  never colour alone. */
+    function stepWord(step) {
+      if (step.status === "done") {
+        return "done";
+      }
+      if (step.status === "attention") {
+        return "needs attention";
+      }
+      if (step.status === "ready") {
+        return "review and create";
+      }
+      return step.current ? "you are here" : "next";
+    }
+  
+    /** The stepper: an ordered list of the six steps, each a button that scrolls
+     *  to its section, carrying the step's number, its title and its state in
+     *  words. The current one is marked `aria-current="step"`. */
+    export function renderStepper(state) {
+      const items = stepStates(state)
+        .map((step) => {
+          const classes =
+            "stepper-item is-" + step.status + (step.current ? " is-current" : "");
+          return (
+            "<li class=\"" + classes + "\">" +
+            "<button type=\"button\" class=\"stepper-link\" data-target=\"" + step.id + "\"" +
+            (step.current ? " aria-current=\"step\"" : "") + ">" +
+            "<span class=\"stepper-num\">" + String(step.number) + "</span>" +
+            "<span class=\"stepper-title\">" + esc(step.title) + "</span>" +
+            "<span class=\"stepper-status\">" + stepWord(step) + "</span>" +
+            "</button></li>"
+          );
+        })
+        .join("");
+      return "<ol class=\"stepper\" aria-label=\"The six steps\">" + items + "</ol>";
+    }
+  
     /** The whole wizard, all six steps, over one state. */
     export async function renderRestoreWizard(state) {
       const prepared = await preparePlan(state);
       return (
         "<h2>Restore wizard</h2>" +
+        "<p class=\"blurb\">Six steps, all on this page: the archive, the backup set, the " +
+        "point in time, the target, the preflight, and the plan whose bytes the Restore " +
+        "carries. Every value was read from this namespace's own objects or is editable " +
+        "below.</p>" +
         ((state || {}).editing
           ? "<p class=\"immutable-note\">" + RESTORE_IMMUTABLE_SENTENCE + "</p>"
           : "") +
+        renderStepper(state) +
         renderArchiveStep(state) +
         renderBackupSetStep(state) +
         renderPointInTimeStep(state) +
@@ -4348,6 +4620,23 @@ data:
         }
       }
   
+      // The stepper: each entry scrolls its section into view and hands it focus,
+      // so a keyboard reader lands where a pointer reader looks. Motion follows
+      // the reader's own preference.
+      for (const link of node.querySelectorAll(".stepper-link")) {
+        link.addEventListener("click", () => {
+          const section = node.querySelector("#" + link.getAttribute("data-target"));
+          if (section === null) {
+            return;
+          }
+          const still =
+            typeof window.matchMedia === "function" &&
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          section.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "start" });
+          section.focus({ preventScroll: true });
+        });
+      }
+  
       const copy = node.querySelector("#copy-plan");
       if (copy !== null) {
         copy.addEventListener("click", async () => {
@@ -4442,6 +4731,7 @@ data:
     import { list, create, patchSuspend } from "../api.js";
     import {
       RETENTION_SENTENCE,
+      badge,
       cell,
       copyBlock,
       errorBox,
@@ -4472,6 +4762,20 @@ data:
       return cell(null);
     }
   
+    /** `spec.suspend` as a badge that says the state in words: `suspended`, or
+     *  `not suspended`. The field is a boolean the operator set; the badge
+     *  renders it and decides nothing. */
+    export function suspendBadge(spec) {
+      return (spec || {}).suspend === true
+        ? badge("warn", "suspended")
+        : badge("flat", "not suspended");
+    }
+  
+    /** The sentence the schedules table carries when the namespace holds none. */
+    export const NO_SCHEDULE_SENTENCE =
+      "No BackupSchedule in this namespace yet. Create one with the form below; it fires a " +
+      "Backup at each slot of its cron schedule.";
+  
     /** The schedules table. NAME, SCHEDULE, SUSPEND, LAST, NEXT, READY. */
     export function renderScheduleList(input) {
       const rows = itemsOf(input).map((object) => {
@@ -4479,8 +4783,8 @@ data:
         const status = object.status || {};
         return [
           nameOf(object),
-          cell(spec.schedule),
-          cell(spec.suspend === true),
+          "<code>" + cell(spec.schedule) + "</code>",
+          suspendBadge(spec),
           cell(status.lastFireTime),
           cell(status.nextFireTime),
           conditionStatus(object, "Ready"),
@@ -4491,7 +4795,7 @@ data:
         "<p class=\"blurb\">Every BackupSchedule in this namespace. " +
         "<code>suspend</code> is the only field of a schedule's spec that can be changed " +
         "after it is created.</p>" +
-        table(["NAME", "SCHEDULE", "SUSPEND", "LAST", "NEXT", "READY"], rows) +
+        table(["NAME", "SCHEDULE", "SUSPEND", "LAST", "NEXT", "READY"], rows, NO_SCHEDULE_SENTENCE) +
         listFooter()
       );
     }
@@ -4592,22 +4896,34 @@ data:
     export function renderScheduleForm() {
       return (
         "<section class=\"create\"><h3>Create a BackupSchedule</h3>" +
+        "<p class=\"note\">A schedule fires a Backup of the named topics at each slot and writes " +
+        "it to the archive. Every field but suspend is sealed once the object exists.</p>" +
         "<form id=\"schedule-form\">" +
-        "<label for=\"schedule-name\">name</label>" +
-        "<input id=\"schedule-name\" name=\"name\" required>" +
-        "<label for=\"schedule-cron\">schedule, five cron fields</label>" +
+        "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
+        "<input id=\"schedule-name\" name=\"name\" required></div>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"schedule-cron\">schedule, five cron fields</label>" +
         "<input id=\"schedule-cron\" name=\"cron\" value=\"0 * * * *\" required>" +
-        "<label for=\"schedule-source\">source KafkaCluster</label>" +
+        "<p class=\"help\">minute hour day-of-month month day-of-week, in UTC.</p></div>" +
+        "<div class=\"field\"><label for=\"schedule-source\">source KafkaCluster</label>" +
         "<input id=\"schedule-source\" name=\"source\" required>" +
-        "<label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
+        "<p class=\"help\">The name of a KafkaCluster in this namespace.</p></div>" +
+        "</div>" +
+        "<div class=\"field\"><label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
         "<input id=\"schedule-topics\" name=\"topics\" required>" +
-        "<label for=\"schedule-archive\">archive URL</label>" +
+        "<p class=\"help\">An explicit allowlist. A wildcard is refused before anything runs.</p></div>" +
+        "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
         "<input id=\"schedule-archive\" name=\"archive\" required>" +
-        "<label for=\"schedule-keeplast\">retention keepLast</label>" +
+        "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p></div>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
         "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\">" +
-        "<label for=\"schedule-keepdays\">retention keepDays</label>" +
+        "<p class=\"help\">How many sets a retention evaluation keeps. It reports; it never deletes.</p></div>" +
+        "<div class=\"field\"><label for=\"schedule-keepdays\">retention keepDays</label>" +
         "<input id=\"schedule-keepdays\" name=\"keepDays\" type=\"number\" min=\"0\">" +
-        "<button type=\"submit\">Create</button>" +
+        "<p class=\"help\">How many days of sets it keeps. Leave both blank for no evaluation.</p></div>" +
+        "</div>" +
+        "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
         "</form></section>"
       );
     }
@@ -4651,8 +4967,9 @@ data:
         const panels = objects
           .map(
             (object) =>
-              "<section class=\"schedule\"><h3>" + nameOf(object) + "</h3>" +
+              "<section class=\"schedule\"><div class=\"card-head\"><h3>" + nameOf(object) + "</h3>" +
               renderSuspendToggle(object) +
+              "</div>" +
               renderRetentionPanel(object) +
               "</section>",
           )
@@ -5136,7 +5453,7 @@ data:
       const status = error && error.status ? String(error.status) : "error";
       const reason = error && error.reason ? String(error.reason) : "";
       const message = error && error.message ? String(error.message) : String(error);
-      return el("div", { class: "error" }, [
+      return el("div", { class: "error", role: "alert" }, [
         el("span", { class: "error-status" }, reason.length > 0 ? status + " " + reason : status),
         el("p", { class: "error-message" }, message),
       ]);
@@ -5334,11 +5651,23 @@ data:
       return esc(value);
     }
   
+    /** The sentence an empty table carries when its caller gives it none. */
+    export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
+  
     /** A table. `columns` are header captions; `rows` are arrays of ALREADY
      *  RENDERED cells -- a caller that wants a badge in a cell passes the badge.
      *  A row shorter than `columns` is padded, so a missing status field cannot
-     *  shift a column silently. */
-    export function table(columns, rows) {
+     *  shift a column silently.
+     *
+     *  `empty` is the sentence shown when there is no row: a list view passes one
+     *  that says what to do next, and a caller that passes none gets
+     *  [`EMPTY_TABLE_SENTENCE`]. It is a sentence of OURS and is not escaped.
+     *
+     *  The table sits in a `div.table-wrap`, which scrolls sideways on a narrow
+     *  laptop and lets the stylesheet stack the rows into cards below 720 px; the
+     *  column captions those cards show are copied from the header row by
+     *  `app.js` when the nodes are adopted, so the string here carries them once. */
+    export function table(columns, rows, empty) {
       const head = columns.map((c) => "<th scope=\"col\">" + esc(c) + "</th>").join("");
       const body = rows
         .map((row) => {
@@ -5349,16 +5678,17 @@ data:
           return "<tr>" + cells.join("") + "</tr>";
         })
         .join("");
-      const empty = rows.length === 0
-        ? "<tr><td class=\"empty\" colspan=\"" + columns.length + "\">no object of this kind in this namespace</td></tr>"
+      const sentence = typeof empty === "string" && empty.length > 0 ? empty : EMPTY_TABLE_SENTENCE;
+      const none = rows.length === 0
+        ? "<tr><td class=\"empty\" colspan=\"" + columns.length + "\">" + sentence + "</td></tr>"
         : "";
       return (
-        "<table class=\"grid\"><thead><tr>" +
+        "<div class=\"table-wrap\"><table class=\"grid\"><thead><tr>" +
         head +
         "</tr></thead><tbody>" +
         body +
-        empty +
-        "</tbody></table>"
+        none +
+        "</tbody></table></div>"
       );
     }
   
@@ -5387,6 +5717,21 @@ data:
       return (
         "<span class=\"badge badge-" + esc(kind) + "\">" + esc(text) + "</span>"
       );
+    }
+  
+    /** A recorded `status.phase` as a badge whose caption IS the phase, verbatim.
+     *
+     *  STRUCTURAL, LIKE [`badge`]. The kind is the phase lowercased into a class
+     *  suffix -- `Succeeded` gives `badge-phase-succeeded` -- and the stylesheet
+     *  colours the phases it knows; an unknown phase is a neutral badge that still
+     *  says its own name. Nothing here decides what a phase means, and an absent
+     *  phase renders as [`ABSENT`] rather than as a badge with no words. */
+    export function phaseBadge(phase) {
+      if (typeof phase !== "string" || phase.length === 0) {
+        return ABSENT;
+      }
+      const kind = "phase-" + phase.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      return badge(kind, phase);
     }
   
     /** The footer every list view carries. */
@@ -5551,377 +5896,1168 @@ data:
       );
     }
   style.css: |
-    /* style.css -- the shell's stylesheet.
+    /* style.css -- the design system, in one file.
      *
-     * NO EXTERNAL RESOURCE. No web font is declared and none is fetched; the stack
-     * below is the reader's own system font. No stylesheet is pulled in from
-     * anywhere, no image is referenced, and there is no build step, so the bytes
-     * served are the bytes checked in. `scripts/check-ui-offline.sh` fails the lint
-     * gate on any line here that names an external resource. */
+     * NO EXTERNAL RESOURCE. No web font is declared and none is fetched: the two
+     * stacks below are the reader's own system fonts. No stylesheet is pulled in
+     * from anywhere, no image is referenced, no icon is fetched, and there is no
+     * build step, so the bytes served are the bytes checked in.
+     * `scripts/check-ui-offline.sh` fails the lint gate on any line here that
+     * names a resource outside this directory, and `ui/tests/design.spec.js`
+     * restates that rule for CSS: no import at-rule, and no url reference that does not
+     * begin with a dot or a data scheme.
+     *
+     * HOW THIS FILE IS ORGANISED.
+     *   1. tokens -- the type scale, the spacing scale, radii, shadows, and one
+     *      colour system with semantic roles, defined once for light and once
+     *      more for dark under prefers-color-scheme;
+     *   2. base -- the document, headings, links, code;
+     *   3. the frame -- masthead, navigation, content column, footer;
+     *   4. components -- tables (which stack into cards below 720 px), badges,
+     *      facts, forms, callouts, the error box, copy blocks, cards, the
+     *      restore wizard's stepper, the pending state;
+     *   5. focus, motion and print.
+     *
+     * COLOUR NEVER STANDS ALONE. Every badge carries its state in words as well
+     * as in colour, and every callout carries its message in words; the colour
+     * system here is a second channel, never the only one. Every text-on-surface
+     * pair in both schemes was measured at 4.5:1 or better (WCAG AA), and the
+     * figures are in the task report beside the screenshots.
+     *
+     * EVERY BYTE HERE IS ASCII. The arrow, the ellipsis and the typographic
+     * quotes a design might reach for are spelled as entities in the markup or
+     * left out; `the_ui_sources_are_ascii_only` decides. */
+  
+    /* ==========================================================================
+     * 1. TOKENS
+     * ======================================================================== */
   
     :root {
-      --ink: #16191d;
-      --ink-soft: #55606b;
-      --rule: #d7dce1;
-      --paper: #ffffff;
-      --paper-soft: #f5f7f9;
-      --accent: #1f5f8b;
-      --warn-ink: #6b3a00;
-      --warn-paper: #fff6e6;
-      --warn-rule: #e5c48a;
+      color-scheme: light dark;
+  
+      /* type */
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --text-xs: 0.75rem;
+      --text-sm: 0.8125rem;
+      --text-base: 0.9375rem;
+      --text-md: 1.0625rem;
+      --text-lg: 1.25rem;
+      --text-xl: 1.5rem;
+      --text-2xl: 1.875rem;
+      --leading: 1.55;
+      --measure: 70ch;
+      --measure-wide: 76rem;
+  
+      /* space */
+      --space-1: 0.25rem;
+      --space-2: 0.5rem;
+      --space-3: 0.75rem;
+      --space-4: 1rem;
+      --space-5: 1.5rem;
+      --space-6: 2rem;
+      --space-7: 3rem;
+  
+      /* shape */
+      --radius-s: 6px;
+      --radius-m: 10px;
+      --radius-l: 14px;
+      --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+      --shadow-2: 0 4px 12px rgba(16, 24, 40, 0.08);
+  
+      /* colour, light */
+      --surface: #ffffff;
+      --surface-raised: #f6f8fa;
+      --surface-hover: #eef1f5;
+      --border: #d0d7de;
+      --border-strong: #b6c0ca;
+      --text: #1c2128;
+      --text-muted: #57606a;
+      --accent: #0b5cad;
+      --accent-strong: #094a8c;
+      --accent-soft: #e6f0fb;
+      --on-accent: #ffffff;
+      --success: #0f5d2a;
+      --success-bg: #dcf5e3;
+      --success-border: #8fd0a6;
+      --warning: #7a4b00;
+      --warning-bg: #fff3d6;
+      --warning-border: #e8c47a;
+      --danger: #a40e26;
+      --danger-bg: #ffe3e6;
+      --danger-border: #f0a1ab;
+      --info: #0b4f8a;
+      --info-bg: #dbeafe;
+      --info-border: #9ec2ef;
+      --neutral: #3d4650;
+      --neutral-bg: #eef1f4;
+      --neutral-border: #c6ced6;
+      --code-bg: #1c2128;
+      --code-text: #e6edf3;
+      --focus: #0b5cad;
     }
   
-    * {
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+        --shadow-2: 0 4px 14px rgba(0, 0, 0, 0.55);
+  
+        /* colour, dark: the same roles, redefined once */
+        --surface: #0f1419;
+        --surface-raised: #171d24;
+        --surface-hover: #1f2732;
+        --border: #2d3742;
+        --border-strong: #3d4a58;
+        --text: #e6edf3;
+        --text-muted: #9aa7b4;
+        --accent: #6cb6ff;
+        --accent-strong: #8ec6ff;
+        --accent-soft: #14283d;
+        --on-accent: #0f1419;
+        --success: #7ee2a0;
+        --success-bg: #10331f;
+        --success-border: #2b6b44;
+        --warning: #f2c56b;
+        --warning-bg: #3a2a08;
+        --warning-border: #7a5a1a;
+        --danger: #ff8a96;
+        --danger-bg: #3d1219;
+        --danger-border: #7d2a35;
+        --info: #8fc5ff;
+        --info-bg: #0d2a45;
+        --info-border: #24507c;
+        --neutral: #c3ccd6;
+        --neutral-bg: #232b34;
+        --neutral-border: #3d4a58;
+        --code-bg: #0b0f14;
+        --code-text: #e6edf3;
+        --focus: #8ec6ff;
+      }
+    }
+  
+    /* ==========================================================================
+     * 2. BASE
+     * ======================================================================== */
+  
+    *,
+    *::before,
+    *::after {
       box-sizing: border-box;
+    }
+  
+    html {
+      -webkit-text-size-adjust: 100%;
     }
   
     body {
       margin: 0;
-      padding: 0 1.5rem 3rem;
-      color: var(--ink);
-      background: var(--paper);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      font-size: 15px;
-      line-height: 1.55;
+      background: var(--surface);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: var(--text-base);
+      line-height: var(--leading);
+      -webkit-font-smoothing: antialiased;
+    }
+  
+    h1,
+    h2,
+    h3,
+    h4 {
+      margin: 0;
+      line-height: 1.25;
+      letter-spacing: -0.01em;
+      overflow-wrap: anywhere;
+    }
+  
+    h1 {
+      font-size: var(--text-lg);
+      font-weight: 700;
+    }
+  
+    h2 {
+      font-size: var(--text-xl);
+      font-weight: 650;
+      margin-bottom: var(--space-2);
+    }
+  
+    h3 {
+      font-size: var(--text-md);
+      font-weight: 650;
+      margin-bottom: var(--space-3);
+    }
+  
+    h4 {
+      font-size: var(--text-xs);
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: var(--space-5) 0 var(--space-2);
+    }
+  
+    p {
+      margin: 0 0 var(--space-3);
+      overflow-wrap: anywhere;
+    }
+  
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      text-underline-offset: 0.15em;
+    }
+  
+    a:hover {
+      text-decoration: underline;
     }
   
     code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size: 0.92em;
-      background: var(--paper-soft);
-      border: 1px solid var(--rule);
-      border-radius: 3px;
-      padding: 0.05rem 0.3rem;
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.08em 0.35em;
+      overflow-wrap: anywhere;
+    }
+  
+    ul {
+      margin: 0 0 var(--space-3);
+      padding-left: 1.25rem;
+    }
+  
+    /* ==========================================================================
+     * 3. THE FRAME
+     * ======================================================================== */
+  
+    .skip-link {
+      position: absolute;
+      left: -999px;
+      top: var(--space-2);
+      z-index: 20;
+      padding: var(--space-2) var(--space-3);
+      background: var(--accent);
+      color: var(--on-accent);
+      border: 0;
+      border-radius: var(--radius-s);
+      font: inherit;
+      font-weight: 600;
+    }
+  
+    .skip-link:focus {
+      left: var(--space-2);
     }
   
     .masthead {
-      max-width: 60rem;
-      margin: 0 auto;
-      padding: 1.75rem 0 0;
-      border-bottom: 1px solid var(--rule);
+      background: var(--surface-raised);
+      border-bottom: 1px solid var(--border);
     }
   
-    .masthead h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      letter-spacing: 0.01em;
+    .masthead-row {
+      max-width: var(--measure-wide);
+      margin: 0 auto;
+      padding: var(--space-5) var(--space-5) var(--space-3);
+    }
+  
+    .brand {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-3);
+    }
+  
+    .brand-mark {
+      flex: none;
+      width: 2.25rem;
+      height: 2.25rem;
+      margin-top: 0.1rem;
+    }
+  
+    .brand-mark-bg {
+      fill: var(--accent);
+    }
+  
+    .brand-mark-fg {
+      fill: var(--on-accent);
+    }
+  
+    .brand h1 {
+      font-size: var(--text-lg);
     }
   
     .tagline {
-      margin: 0.4rem 0 1rem;
-      max-width: 48rem;
-      color: var(--ink-soft);
+      margin: var(--space-1) 0 0;
+      max-width: var(--measure);
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+    }
+  
+    .nav-bar {
+      max-width: var(--measure-wide);
+      margin: 0 auto;
+      padding: 0 var(--space-5);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: var(--space-2) var(--space-4);
     }
   
     .nav {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.25rem 1.1rem;
-      padding-bottom: 0.75rem;
+      gap: 0 var(--space-1);
+      margin-bottom: -1px;
     }
   
     .nav-link {
-      color: var(--accent);
-      text-decoration: none;
-      padding: 0.2rem 0;
+      display: inline-block;
+      padding: var(--space-2) var(--space-3);
       border-bottom: 2px solid transparent;
+      border-radius: var(--radius-s) var(--radius-s) 0 0;
+      color: var(--text-muted);
+      font-weight: 500;
+      text-decoration: none;
+      transition: color 120ms ease, background-color 120ms ease;
     }
   
-    .nav-link:hover,
-    .nav-link:focus {
-      text-decoration: underline;
+    .nav-link:hover {
+      color: var(--text);
+      background: var(--surface-hover);
+      text-decoration: none;
     }
   
     .nav-link-current {
-      color: var(--ink);
-      font-weight: 600;
+      color: var(--accent);
+      font-weight: 650;
       border-bottom-color: var(--accent);
     }
   
+    .ns-form {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding-bottom: var(--space-2);
+    }
+  
+    .ns-form label {
+      font-size: var(--text-xs);
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+  
+    .ns-form input {
+      width: 11rem;
+    }
+  
     main {
-      max-width: 60rem;
+      max-width: var(--measure-wide);
       margin: 0 auto;
-      padding-top: 1.5rem;
+      padding: var(--space-6) var(--space-5) var(--space-7);
     }
   
-    main h2 {
-      margin: 0 0 0.35rem;
-      font-size: 1.15rem;
+    main:focus {
+      outline: none;
     }
   
+    main > h2 + .blurb,
     .blurb {
-      margin: 0 0 1rem;
-      color: var(--ink-soft);
+      max-width: var(--measure);
+      color: var(--text-muted);
+      margin-bottom: var(--space-5);
     }
+  
+    .colophon {
+      border-top: 1px solid var(--border);
+      background: var(--surface-raised);
+    }
+  
+    .colophon p {
+      max-width: var(--measure-wide);
+      margin: 0 auto;
+      padding: var(--space-3) var(--space-5) 0;
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+    }
+  
+    .colophon p:last-child {
+      padding-bottom: var(--space-5);
+    }
+  
+    /* ==========================================================================
+     * 4. COMPONENTS
+     * ======================================================================== */
+  
+    /* -- the pending state ------------------------------------------------- */
   
     .pending {
-      margin: 0 0 1.5rem;
-      padding: 0.6rem 0.85rem;
-      background: var(--warn-paper);
-      border: 1px solid var(--warn-rule);
-      border-left-width: 4px;
-      border-radius: 3px;
-      color: var(--warn-ink);
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      color: var(--text-muted);
     }
+  
+    .pending::before {
+      content: "";
+      flex: none;
+      width: 0.9rem;
+      height: 0.9rem;
+      border: 2px solid var(--border-strong);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 900ms linear infinite;
+    }
+  
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  
+    /* -- facts (definition lists) ------------------------------------------- */
   
     .facts {
       display: grid;
-      grid-template-columns: minmax(8rem, max-content) 1fr;
-      gap: 0.4rem 1rem;
-      margin: 0;
+      grid-template-columns: minmax(9rem, max-content) 1fr;
+      gap: var(--space-2) var(--space-5);
+      margin: 0 0 var(--space-4);
+      padding: var(--space-3) var(--space-4);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-m);
+      background: var(--surface);
     }
   
     .facts dt {
-      color: var(--ink-soft);
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+      padding-top: 0.1rem;
     }
   
     .facts dd {
       margin: 0;
+      overflow-wrap: anywhere;
     }
   
-    .error {
-      margin: 1rem 0;
-      padding: 0.7rem 0.9rem;
-      border: 1px solid var(--rule);
-      border-left: 4px solid var(--accent);
-      background: var(--paper-soft);
-      border-radius: 3px;
-    }
+    /* -- tables --------------------------------------------------------------- */
   
-    .error-status {
-      font-weight: 600;
-    }
-  
-    .error-message {
-      margin: 0.3rem 0 0;
-      white-space: pre-wrap;
-    }
-  
-    .colophon {
-      max-width: 60rem;
-      margin: 3rem auto 0;
-      padding-top: 1rem;
-      border-top: 1px solid var(--rule);
-      color: var(--ink-soft);
-      font-size: 0.9em;
-    }
-  
-    .colophon p {
-      margin: 0 0 0.5rem;
-    }
-  
-    /* ---------------------------------------------------------------------------
-     * The four read-and-create pages (Task 26).
-     *
-     * THE GREEN BADGE IS NOT ONLY GREEN. Colour is the least of what a verdict
-     * has to carry: the green badge's caption names the instant weirkeeper
-     * verified and the key id it matched, and the other badge carries the single
-     * word `unverified`. A reader who cannot tell the two hues apart still reads
-     * two different sentences, and a screenshot pasted into a ticket still says
-     * which one it was. Nothing here is a colour-only distinction.
-     * ------------------------------------------------------------------------- */
-  
-    :root {
-      --ok-ink: #14532d;
-      --ok-paper: #e8f5ec;
-      --ok-rule: #8fc7a4;
-      --flat-ink: #3d4650;
-      --flat-paper: #eef1f4;
-      --flat-rule: #c6ced6;
+    .table-wrap {
+      margin: 0 0 var(--space-3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-m);
+      background: var(--surface);
+      overflow-x: auto;
+      box-shadow: var(--shadow-1);
     }
   
     .grid {
       width: 100%;
-      border-collapse: collapse;
-      margin: 0 0 0.75rem;
+      border-collapse: separate;
+      border-spacing: 0;
       font-variant-numeric: tabular-nums;
     }
   
     .grid th,
     .grid td {
       text-align: left;
-      padding: 0.4rem 0.6rem;
-      border-bottom: 1px solid var(--rule);
       vertical-align: top;
+      padding: var(--space-2) var(--space-3);
+      border-bottom: 1px solid var(--border);
     }
   
     .grid thead th {
-      font-size: 0.78rem;
-      letter-spacing: 0.06em;
+      background: var(--surface-raised);
+      color: var(--text-muted);
+      font-size: var(--text-xs);
+      font-weight: 600;
+      letter-spacing: 0.07em;
       text-transform: uppercase;
-      color: var(--ink-soft);
-      border-bottom-width: 2px;
+      white-space: nowrap;
     }
   
-    .grid td.empty {
-      color: var(--ink-soft);
-      font-style: italic;
+    .grid tbody tr:last-child td {
+      border-bottom: 0;
     }
   
-    .badge {
-      display: inline-block;
-      padding: 0.1rem 0.5rem;
-      border-radius: 999px;
-      border: 1px solid var(--flat-rule);
-      background: var(--flat-paper);
-      color: var(--flat-ink);
-      font-size: 0.85em;
+    .grid tbody tr:hover td {
+      background: var(--surface-hover);
     }
   
-    .badge-green {
-      border-color: var(--ok-rule);
-      background: var(--ok-paper);
-      color: var(--ok-ink);
+    /* A short word never breaks mid-word: `break-word` keeps a column at least
+     * as wide as its longest word. Hashes and key ids are the exception, marked
+     * up as code, and may break anywhere so a 64-hex digest does not force a
+     * sideways scroll. */
+    .grid td {
+      overflow-wrap: break-word;
+    }
+  
+    .grid td code {
+      overflow-wrap: anywhere;
+    }
+  
+    .grid td a {
       font-weight: 600;
     }
   
-    .badge-unverified,
-    .badge-flat {
+    .grid td.empty {
+      color: var(--text-muted);
+      padding: var(--space-4) var(--space-3);
+    }
+  
+    /* Below 720 px a table is a stack of cards: the header row is hidden from
+     * sight but not from assistive technology, each row becomes a bordered card,
+     * and each cell shows its column caption, which app.js copies from the
+     * header into data-label when it adopts the parsed nodes. */
+    @media (max-width: 719.98px) {
+      .table-wrap {
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+        overflow: visible;
+      }
+  
+      .grid,
+      .grid tbody,
+      .grid tr,
+      .grid td {
+        display: block;
+      }
+  
+      .grid thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+  
+      .grid tr {
+        margin: 0 0 var(--space-3);
+        padding: var(--space-2) var(--space-3);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-m);
+        background: var(--surface);
+        box-shadow: var(--shadow-1);
+      }
+  
+      .grid tbody tr:hover td {
+        background: transparent;
+      }
+  
+      .grid td {
+        display: grid;
+        grid-template-columns: minmax(6.5rem, 34%) minmax(0, 1fr);
+        gap: var(--space-3);
+        padding: var(--space-1) 0;
+        border-bottom: 0;
+      }
+  
+      .grid td::before {
+        content: attr(data-label);
+        color: var(--text-muted);
+        font-size: var(--text-xs);
+        font-weight: 600;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        padding-top: 0.15rem;
+      }
+  
+      .grid td.empty {
+        display: block;
+        padding: var(--space-2) 0;
+      }
+  
+      .grid td.empty::before {
+        content: none;
+      }
+  
+      /* A fact on a phone reads as a caption over its value. Two columns here let
+       * a long label starve the value column until a topic list or a timestamp
+       * rendered one character per line; one column, and the value wraps inside
+       * the card at word boundaries. The `minmax(0, 1fr)` above is the same
+       * repair for a stacked table cell: an unbreakable id no longer widens the
+       * card past the viewport. */
+      .facts {
+        grid-template-columns: 1fr;
+        gap: var(--space-1) 0;
+      }
+  
+      .facts dd {
+        margin-bottom: var(--space-2);
+      }
+    }
+  
+    /* -- badges --------------------------------------------------------------- */
+  
+    .badge {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.45em;
+      padding: 0.15em 0.65em 0.15em 0.55em;
+      border: 1px solid var(--neutral-border);
+      border-radius: 999px;
+      background: var(--neutral-bg);
+      color: var(--neutral);
+      font-size: var(--text-sm);
+      font-weight: 600;
+      line-height: 1.45;
+      overflow-wrap: break-word;
+    }
+  
+    /* The verdict badge carries a sentence with a key id in it, so it wraps
+     * anywhere and is a rounded block rather than a tall pill. */
+    .badge-green {
+      overflow-wrap: anywhere;
+      border-radius: var(--radius-s);
+    }
+  
+    .badge::before {
+      content: "";
+      flex: none;
+      width: 0.5em;
+      height: 0.5em;
+      border-radius: 50%;
+      background: currentColor;
+      transform: translateY(-0.05em);
+    }
+  
+    .badge-green,
+    .badge-ok,
+    .badge-phase-succeeded {
+      border-color: var(--success-border);
+      background: var(--success-bg);
+      color: var(--success);
+    }
+  
+    .badge-unverified {
       border-style: dashed;
     }
   
-    .badge-ok {
-      border-color: var(--ok-rule);
-      background: var(--ok-paper);
-      color: var(--ok-ink);
+    .badge-unverified::before {
+      background: transparent;
+      box-shadow: inset 0 0 0 1.5px currentColor;
     }
+  
+    .badge-flat,
+    .badge-phase-pending {
+      border-style: dashed;
+    }
+  
+    .badge-warn,
+    .badge-phase-running {
+      border-color: var(--warning-border);
+      background: var(--warning-bg);
+      color: var(--warning);
+    }
+  
+    .badge-info {
+      border-color: var(--info-border);
+      background: var(--info-bg);
+      color: var(--info);
+    }
+  
+    .badge-danger,
+    .badge-phase-failed {
+      border-color: var(--danger-border);
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+  
+    main > .badge {
+      margin: 0 0 var(--space-4);
+    }
+  
+    /* -- the list footer ------------------------------------------------------ */
   
     .list-footer {
-      margin: 0 0 1.5rem;
-      color: var(--ink-soft);
-      font-size: 0.92em;
+      margin: 0 0 var(--space-5);
+      padding-left: var(--space-3);
+      border-left: 3px solid var(--border-strong);
+      color: var(--text-muted);
+      font-size: var(--text-sm);
     }
   
-    .copy {
-      margin: 0.4rem 0 0.9rem;
-      padding: 0.6rem 0.8rem;
-      background: var(--paper-soft);
-      border: 1px solid var(--rule);
-      border-radius: 3px;
+    /* -- copy blocks and monospace lines -------------------------------------- */
+  
+    .copy,
+    .plan-bytes {
+      margin: var(--space-2) 0 var(--space-4);
+      padding: var(--space-3) var(--space-4);
+      background: var(--code-bg);
+      color: var(--code-text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-m);
       overflow-x: auto;
       white-space: pre;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size: 0.86rem;
-      line-height: 1.5;
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      line-height: 1.55;
+      tab-size: 2;
     }
   
     .covered,
     .immutable,
-    .engine-subreport {
-      margin: 0.4rem 0;
-      color: var(--ink-soft);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size: 0.86rem;
+    .engine-subreport,
+    .window {
+      margin: var(--space-2) 0;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      overflow-wrap: anywhere;
     }
+  
+    /* -- cards ---------------------------------------------------------------- */
   
     .evidence,
     .retention,
     .create,
-    .schedule {
-      margin: 1.25rem 0;
-      padding-top: 0.75rem;
-      border-top: 1px solid var(--rule);
+    .schedule,
+    .step,
+    .approval,
+    .check {
+      margin: var(--space-5) 0;
+      padding: var(--space-5);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-l);
+      background: var(--surface-raised);
+      box-shadow: var(--shadow-1);
     }
   
-    .evidence h3,
-    .retention h3,
-    .create h3,
-    .schedule h3 {
-      margin: 0 0 0.5rem;
-      font-size: 1rem;
+    .schedule .retention {
+      margin: var(--space-4) 0 0;
+      background: var(--surface);
+      box-shadow: none;
     }
   
-    .retention h4 {
-      margin: 0.9rem 0 0.3rem;
-      font-size: 0.9rem;
-      color: var(--ink-soft);
+    .card-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2) var(--space-4);
+      margin-bottom: var(--space-3);
+    }
+  
+    .card-head h3 {
+      margin: 0;
     }
   
     .sets {
-      margin: 0.2rem 0;
-      padding-left: 1.2rem;
+      margin: var(--space-1) 0 var(--space-3);
     }
   
-    .never-deletes {
-      margin: 0.6rem 0 0;
-      padding: 0.5rem 0.75rem;
-      background: var(--warn-paper);
-      border: 1px solid var(--warn-rule);
+    .sets li {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      overflow-wrap: anywhere;
+    }
+  
+    /* -- callouts and helper text --------------------------------------------- */
+  
+    .note,
+    .help,
+    .caveat,
+    .self-attested {
+      max-width: var(--measure);
+      margin: var(--space-2) 0 var(--space-3);
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+    }
+  
+    .complaint,
+    .never-deletes,
+    .immutable-note,
+    .refusal,
+    .refusal-rule,
+    .preflight,
+    .empty-state {
+      max-width: var(--measure);
+      margin: var(--space-3) 0;
+      padding: var(--space-3) var(--space-4);
+      border: 1px solid var(--warning-border);
       border-left-width: 4px;
-      border-radius: 3px;
-      color: var(--warn-ink);
+      border-radius: var(--radius-s);
+      background: var(--warning-bg);
+      color: var(--warning);
+      font-size: var(--text-sm);
+    }
+  
+    .never-deletes,
+    .immutable-note {
       font-weight: 600;
     }
   
-    .note {
-      margin: 0.4rem 0;
-      color: var(--ink-soft);
-      max-width: 46rem;
+    .refusal,
+    .refusal-rule {
+      border-color: var(--danger-border);
+      background: var(--danger-bg);
+      color: var(--danger);
     }
   
-    .create form,
-    .suspend {
-      display: grid;
-      gap: 0.3rem 0.8rem;
+    .refusal {
+      font-weight: 600;
+    }
+  
+    .preflight {
+      border-color: var(--info-border);
+      background: var(--info-bg);
+      color: var(--info);
+    }
+  
+    .empty-state {
+      border-color: var(--info-border);
+      background: var(--info-bg);
+      color: var(--info);
+      max-width: none;
+    }
+  
+    .empty-state .note {
+      margin: 0;
+      color: inherit;
+      max-width: var(--measure);
+    }
+  
+    /* -- the error box -------------------------------------------------------- */
+  
+    .error {
+      margin: var(--space-4) 0;
+      padding: var(--space-3) var(--space-4);
+      max-width: var(--measure);
+      border: 1px solid var(--danger-border);
+      border-left-width: 4px;
+      border-radius: var(--radius-s);
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+  
+    .error-status {
+      display: block;
+      font-size: var(--text-xs);
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: var(--space-1);
+    }
+  
+    .error-message {
+      margin: 0;
+      color: var(--text);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+  
+    /* -- forms ---------------------------------------------------------------- */
+  
+    input,
+    select,
+    textarea {
+      font: inherit;
+      color: var(--text);
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-s);
+      padding: 0.45rem 0.6rem;
+      width: 100%;
       max-width: 34rem;
-      margin: 0.5rem 0;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
     }
   
-    .create label {
-      color: var(--ink-soft);
-      font-size: 0.9em;
+    input:hover,
+    select:hover,
+    textarea:hover {
+      border-color: var(--accent);
     }
   
-    .create label.inline {
+    input[readonly] {
+      background: var(--surface-raised);
+      color: var(--text-muted);
+    }
+  
+    input[type="checkbox"] {
+      width: 1rem;
+      height: 1rem;
+      padding: 0;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+  
+    input[type="file"] {
+      padding: 0.35rem;
+      background: var(--surface-raised);
+    }
+  
+    textarea {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      line-height: 1.5;
+      max-width: none;
+      resize: vertical;
+    }
+  
+    select {
+      appearance: auto;
+    }
+  
+    label {
+      display: block;
+      font-size: var(--text-sm);
+      font-weight: 600;
+    }
+  
+    .field {
+      display: grid;
+      gap: var(--space-1);
+      margin: 0 0 var(--space-4);
+    }
+  
+    .field .note,
+    .field .help {
+      margin: var(--space-1) 0 0;
+    }
+  
+    .field-inline,
+    label.inline {
       display: flex;
       align-items: center;
-      gap: 0.4rem;
+      gap: var(--space-2);
+      margin: 0 0 var(--space-4);
     }
   
-    .create input,
-    .create select {
-      padding: 0.3rem 0.4rem;
-      border: 1px solid var(--rule);
-      border-radius: 3px;
-      font: inherit;
+    .field-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+      gap: var(--space-2) var(--space-4);
     }
   
-    .create button,
-    .suspend button,
-    .ns-form button {
-      justify-self: start;
-      padding: 0.3rem 0.9rem;
+    .field-row .field {
+      margin-bottom: var(--space-3);
+    }
+  
+    button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4em;
+      padding: 0.45rem 0.95rem;
       border: 1px solid var(--accent);
-      border-radius: 3px;
-      background: var(--paper);
+      border-radius: var(--radius-s);
+      background: var(--surface);
       color: var(--accent);
       font: inherit;
+      font-weight: 600;
+      line-height: 1.3;
       cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
     }
   
-    .nav-bar {
+    button:hover {
+      background: var(--accent-soft);
+    }
+  
+    button.primary {
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+  
+    button.primary:hover {
+      background: var(--accent-strong);
+      border-color: var(--accent-strong);
+    }
+  
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--space-2) var(--space-3);
+      margin: var(--space-4) 0 var(--space-3);
+    }
+  
+    .actions-final {
+      padding-top: var(--space-4);
+      border-top: 1px solid var(--border);
+    }
+  
+    .suspend {
+      margin: 0;
+    }
+  
+    /* -- the restore wizard's stepper ----------------------------------------- */
+  
+    .stepper {
+      list-style: none;
+      display: grid;
+      gap: var(--space-2);
+      margin: 0 0 var(--space-5);
+      padding: var(--space-3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-l);
+      background: var(--surface-raised);
+    }
+  
+    @media (min-width: 720px) {
+      .stepper {
+        grid-template-columns: repeat(6, 1fr);
+        gap: var(--space-2);
+      }
+    }
+  
+    .stepper-link {
+      width: 100%;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      grid-template-rows: auto auto;
+      column-gap: var(--space-2);
+      row-gap: 0;
+      align-items: center;
+      text-align: left;
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid transparent;
+      border-radius: var(--radius-m);
+      background: transparent;
+      color: var(--text);
+      font-weight: 500;
+    }
+  
+    .stepper-link:hover {
+      background: var(--surface-hover);
+      border-color: var(--border);
+    }
+  
+    .stepper-num {
+      grid-row: 1 / span 2;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      border: 2px solid var(--border-strong);
+      border-radius: 50%;
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+  
+    .stepper-title {
+      font-size: var(--text-sm);
+      font-weight: 600;
+      line-height: 1.3;
+    }
+  
+    .stepper-status {
+      font-size: var(--text-xs);
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+  
+    .is-done .stepper-num {
+      border-color: var(--success-border);
+      background: var(--success-bg);
+      color: var(--success);
+    }
+  
+    .is-done .stepper-status {
+      color: var(--success);
+    }
+  
+    .is-current .stepper-link {
+      background: var(--surface);
+      border-color: var(--accent);
+      box-shadow: var(--shadow-1);
+    }
+  
+    .is-current .stepper-num {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+  
+    .is-current .stepper-status {
+      color: var(--accent);
+      font-weight: 700;
+    }
+  
+    .is-attention .stepper-num {
+      border-color: var(--warning-border);
+      background: var(--warning-bg);
+      color: var(--warning);
+    }
+  
+    .is-attention .stepper-status {
+      color: var(--warning);
+      font-weight: 700;
+    }
+  
+    .is-todo .stepper-title {
+      color: var(--text-muted);
+    }
+  
+    .is-current .stepper-title {
+      color: var(--text);
+    }
+  
+    .is-ready .stepper-num {
+      border-color: var(--accent);
+    }
+  
+    .step-head {
       display: flex;
       flex-wrap: wrap;
       align-items: baseline;
       justify-content: space-between;
-      gap: 0.5rem 1rem;
+      gap: var(--space-2) var(--space-4);
     }
   
-    .ns-form {
-      display: flex;
-      align-items: baseline;
-      gap: 0.4rem;
-      padding-bottom: 0.75rem;
-      color: var(--ink-soft);
-      font-size: 0.9em;
+    .step-head h3 {
+      margin-bottom: var(--space-2);
     }
   
-    .ns-form input {
-      width: 12rem;
-      padding: 0.2rem 0.4rem;
-      border: 1px solid var(--rule);
-      border-radius: 3px;
-      font: inherit;
+    /* ==========================================================================
+     * 5. FOCUS, MOTION, PRINT
+     * ======================================================================== */
+  
+    a:focus-visible,
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    [tabindex]:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+      box-shadow: 0 0 0 4px var(--surface);
+    }
+  
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible {
+      border-color: var(--accent);
+      outline-offset: 1px;
+      box-shadow: none;
+    }
+  
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  
+    @media print {
+      .masthead,
+      .colophon,
+      .skip-link,
+      .actions,
+      .ns-form {
+        display: none;
+      }
+  
+      main {
+        max-width: none;
+        padding: 0;
+      }
     }
 ---
 # Source: logweir/templates/clusterrole.yaml

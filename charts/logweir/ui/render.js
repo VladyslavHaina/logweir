@@ -73,7 +73,7 @@ export function errorBox(error) {
   const status = error && error.status ? String(error.status) : "error";
   const reason = error && error.reason ? String(error.reason) : "";
   const message = error && error.message ? String(error.message) : String(error);
-  return el("div", { class: "error" }, [
+  return el("div", { class: "error", role: "alert" }, [
     el("span", { class: "error-status" }, reason.length > 0 ? status + " " + reason : status),
     el("p", { class: "error-message" }, message),
   ]);
@@ -271,11 +271,23 @@ export function cell(value) {
   return esc(value);
 }
 
+/** The sentence an empty table carries when its caller gives it none. */
+export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
+
 /** A table. `columns` are header captions; `rows` are arrays of ALREADY
  *  RENDERED cells -- a caller that wants a badge in a cell passes the badge.
  *  A row shorter than `columns` is padded, so a missing status field cannot
- *  shift a column silently. */
-export function table(columns, rows) {
+ *  shift a column silently.
+ *
+ *  `empty` is the sentence shown when there is no row: a list view passes one
+ *  that says what to do next, and a caller that passes none gets
+ *  [`EMPTY_TABLE_SENTENCE`]. It is a sentence of OURS and is not escaped.
+ *
+ *  The table sits in a `div.table-wrap`, which scrolls sideways on a narrow
+ *  laptop and lets the stylesheet stack the rows into cards below 720 px; the
+ *  column captions those cards show are copied from the header row by
+ *  `app.js` when the nodes are adopted, so the string here carries them once. */
+export function table(columns, rows, empty) {
   const head = columns.map((c) => "<th scope=\"col\">" + esc(c) + "</th>").join("");
   const body = rows
     .map((row) => {
@@ -286,16 +298,17 @@ export function table(columns, rows) {
       return "<tr>" + cells.join("") + "</tr>";
     })
     .join("");
-  const empty = rows.length === 0
-    ? "<tr><td class=\"empty\" colspan=\"" + columns.length + "\">no object of this kind in this namespace</td></tr>"
+  const sentence = typeof empty === "string" && empty.length > 0 ? empty : EMPTY_TABLE_SENTENCE;
+  const none = rows.length === 0
+    ? "<tr><td class=\"empty\" colspan=\"" + columns.length + "\">" + sentence + "</td></tr>"
     : "";
   return (
-    "<table class=\"grid\"><thead><tr>" +
+    "<div class=\"table-wrap\"><table class=\"grid\"><thead><tr>" +
     head +
     "</tr></thead><tbody>" +
     body +
-    empty +
-    "</tbody></table>"
+    none +
+    "</tbody></table></div>"
   );
 }
 
@@ -324,6 +337,21 @@ export function badge(kind, text) {
   return (
     "<span class=\"badge badge-" + esc(kind) + "\">" + esc(text) + "</span>"
   );
+}
+
+/** A recorded `status.phase` as a badge whose caption IS the phase, verbatim.
+ *
+ *  STRUCTURAL, LIKE [`badge`]. The kind is the phase lowercased into a class
+ *  suffix -- `Succeeded` gives `badge-phase-succeeded` -- and the stylesheet
+ *  colours the phases it knows; an unknown phase is a neutral badge that still
+ *  says its own name. Nothing here decides what a phase means, and an absent
+ *  phase renders as [`ABSENT`] rather than as a badge with no words. */
+export function phaseBadge(phase) {
+  if (typeof phase !== "string" || phase.length === 0) {
+    return ABSENT;
+  }
+  const kind = "phase-" + phase.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return badge(kind, phase);
 }
 
 /** The footer every list view carries. */

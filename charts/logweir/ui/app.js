@@ -112,11 +112,39 @@ function parseFragment(html) {
     "<!doctype html><body>" + html,
     "text/html",
   );
+  labelTableCells(parsed);
   const nodes = [];
   for (const child of Array.from(parsed.body.childNodes)) {
     nodes.push(document.importNode(child, true));
   }
   return nodes;
+}
+
+// THE STACKED-CARD LABELS, SET HERE AND NOT IN THE STRING. Below 720 px the
+// stylesheet turns every `table.grid` row into a card and shows each cell's
+// column caption beside its value, read from the cell's `data-label`. The
+// caption is copied from the header row at adoption time, with `setAttribute`
+// and never `innerHTML`, so the page modules stay pure functions from a JSON
+// object to a string -- which is what keeps the string the behaviour suite
+// asserts on identical to the string a browser receives -- and the header row
+// remains the one place a column's caption is written.
+function labelTableCells(parsed) {
+  for (const table of Array.from(parsed.querySelectorAll("table.grid"))) {
+    const captions = Array.from(table.querySelectorAll("thead th")).map(
+      (th) => th.textContent,
+    );
+    for (const row of Array.from(table.querySelectorAll("tbody tr"))) {
+      const cells = Array.from(row.children);
+      for (let i = 0; i < cells.length; i += 1) {
+        if (cells[i].hasAttribute("colspan")) {
+          continue;
+        }
+        if (typeof captions[i] === "string" && captions[i].length > 0) {
+          cells[i].setAttribute("data-label", captions[i]);
+        }
+      }
+    }
+  }
 }
 
 function nav(current, ns) {
@@ -183,12 +211,12 @@ function render() {
   }
   if (main !== null) {
     if (here.name !== "" && typeof current.detail === "function") {
-      replace(main, el("p", { class: "pending" }, "Reading " + here.name + "..."));
+      replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));
       current.detail(main, here.ns, here.name, parseFragment);
     } else if (current.cluster === true && typeof current.mount === "function") {
       // The one CLUSTER-SCOPED read in this application. It takes no
       // namespace, because the TrustRoster has none.
-      replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+      replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
       current.mount(main, parseFragment);
     } else if (current.route === true && typeof current.mount === "function") {
       // The approvals page reads `subject`, `hash` and `name` off the hash the
@@ -201,10 +229,10 @@ function render() {
       // hop no test in either language could reach, and swapping two of these
       // three values left the whole suite green. `approvalRouteParams` is a
       // pure function of the hash string, and the suite calls it.
-      replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+      replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
       current.mount(main, here.ns, approvalRouteParams(hash), parseFragment);
     } else if (typeof current.mount === "function") {
-      replace(main, el("p", { class: "pending" }, "Reading " + current.title + "..."));
+      replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
       current.mount(main, here.ns, parseFragment);
     } else {
       replace(main, view(current));
@@ -214,6 +242,20 @@ function render() {
 }
 
 window.addEventListener("hashchange", render);
+
+// THE SKIP LINK IS A BUTTON, NOT AN ANCHOR. An `<a href="#view-slot">` would
+// set the hash, and every hash on this page is a route: the router would
+// read `#view-slot`, find no such route, and render the default one. So the
+// control moves focus with a script and touches the hash not at all.
+const skip = document.getElementById("skip-link");
+if (skip !== null) {
+  skip.addEventListener("click", () => {
+    const main = document.getElementById("view-slot");
+    if (main !== null) {
+      main.focus();
+    }
+  });
+}
 
 if (window.location.hash === "") {
   window.location.hash = DEFAULT_HASH;

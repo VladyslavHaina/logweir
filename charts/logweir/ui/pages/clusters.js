@@ -81,6 +81,25 @@ export function authCell(spec) {
   return parts.join(" ");
 }
 
+/** `status.reachable` as a badge whose WORDS carry the state as well as its
+ *  colour. An unset field is the absent marker, not a claim either way: the
+ *  controller has not probed this cluster yet. */
+export function reachableBadge(status) {
+  const reachable = (status || {}).reachable;
+  if (reachable === true) {
+    return badge("ok", "reachable");
+  }
+  if (reachable === false) {
+    return badge("flat", "not reachable");
+  }
+  return cell(null);
+}
+
+/** The sentence the clusters table carries when the namespace holds none. */
+export const NO_CLUSTER_SENTENCE =
+  "No KafkaCluster in this namespace yet. Create one with the form below, or pick another " +
+  "namespace above.";
+
 /** The clusters table. NAME, ROLE, REACHABLE, CLUSTER-ID, OBSERVED, AUTH. */
 export function renderClusterList(input, ns) {
   const rows = itemsOf(input).map((object) => {
@@ -89,7 +108,7 @@ export function renderClusterList(input, ns) {
     return [
       nameCell(object, ns),
       cell(spec.role),
-      cell(status.reachable),
+      reachableBadge(status),
       cell(status.clusterId),
       cell(status.observedAt),
       authCell(spec),
@@ -99,7 +118,7 @@ export function renderClusterList(input, ns) {
     "<h2>Clusters</h2>" +
     "<p class=\"blurb\">Every KafkaCluster in this namespace. " +
     "<code>clusterId</code> is read from the broker and never from a spec.</p>" +
-    table(["NAME", "ROLE", "REACHABLE", "CLUSTER-ID", "OBSERVED", "AUTH"], rows) +
+    table(["NAME", "ROLE", "REACHABLE", "CLUSTER-ID", "OBSERVED", "AUTH"], rows, NO_CLUSTER_SENTENCE) +
     listFooter()
   );
 }
@@ -109,10 +128,9 @@ export function renderClusterDetail(object) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const servers = Array.isArray(spec.bootstrapServers) ? spec.bootstrapServers : [];
-  const reachable = status.reachable === true;
   return (
     "<h2>Cluster " + nameOf(object) + "</h2>" +
-    badge(reachable ? "ok" : "flat", reachable ? "reachable" : "not reachable") +
+    reachableBadge(status) +
     facts([
       ["role", cell(spec.role)],
       ["bootstrap servers", servers.length === 0 ? cell(null) : esc(servers.join(", "))],
@@ -130,24 +148,35 @@ export function renderClusterDetail(object) {
 export function renderClusterForm() {
   return (
     "<section class=\"create\"><h3>Create a KafkaCluster</h3>" +
+    "<p class=\"note\">A KafkaCluster names a set of brokers and how to reach them. The " +
+    "controller probes it and records the cluster id it reads from the broker.</p>" +
     "<form id=\"cluster-form\">" +
-    "<label for=\"cluster-name\">name</label>" +
+    "<div class=\"field\"><label for=\"cluster-name\">name</label>" +
     "<input id=\"cluster-name\" name=\"name\" required>" +
-    "<label for=\"cluster-servers\">bootstrap servers, comma separated</label>" +
+    "<p class=\"help\">A Kubernetes object name: lowercase, digits and dashes.</p></div>" +
+    "<div class=\"field\"><label for=\"cluster-servers\">bootstrap servers, comma separated</label>" +
     "<input id=\"cluster-servers\" name=\"servers\" required>" +
-    "<label for=\"cluster-role\">role</label>" +
+    "<p class=\"help\">host:port pairs, as a client would dial them from inside the cluster.</p></div>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"cluster-role\">role</label>" +
     "<input id=\"cluster-role\" name=\"role\" value=\"source\" required>" +
-    "<label for=\"cluster-mode\">auth mode</label>" +
+    "<p class=\"help\">A label the controller reports: source or target. It authorises nothing.</p></div>" +
+    "<div class=\"field\"><label for=\"cluster-mode\">auth mode</label>" +
     "<select id=\"cluster-mode\" name=\"mode\">" +
     "<option value=\"plaintext\">plaintext</option>" +
     "<option value=\"scramSha512\">scramSha512</option>" +
-    "</select>" +
-    "<label for=\"cluster-username\">auth username</label>" +
-    "<input id=\"cluster-username\" name=\"username\">" +
-    "<label for=\"cluster-secret\">auth Secret name</label>" +
+    "</select></div>" +
+    "</div>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"cluster-username\">auth username</label>" +
+    "<input id=\"cluster-username\" name=\"username\"></div>" +
+    "<div class=\"field\"><label for=\"cluster-secret\">auth Secret name</label>" +
     "<input id=\"cluster-secret\" name=\"secret\">" +
+    "<p class=\"help\">The NAME of the Secret holding the credential. The value is never read " +
+    "by this page.</p></div>" +
+    "</div>" +
     "<label class=\"inline\"><input id=\"cluster-tls\" name=\"tls\" type=\"checkbox\"> TLS</label>" +
-    "<button type=\"submit\">Create</button>" +
+    "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
     "</form>" +
     "<p class=\"note\">The credential itself lives in the Secret named above and " +
     "is never read by this page, by a status field or by a rendered document.</p>" +
