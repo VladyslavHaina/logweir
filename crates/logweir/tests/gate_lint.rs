@@ -945,7 +945,23 @@ impl SuiteFixture {
             "[workspace.package]\nrust-version = \"1.89\"\n",
         )
         .expect("the fixture manifest is writable");
-        SuiteFixture { path }
+        let fixture = SuiteFixture { path };
+        fixture.stub_nc();
+        fixture
+    }
+
+    /// A stub `nc` that answers "closed" for every port.
+    ///
+    /// The harness refuses to time the suite while 127.0.0.1:9092 or :9000
+    /// answers (M10), and it asks `nc` — the real one, first on the host's
+    /// `PATH`. These fixtures exercise the harness's RED PATHS, not the host:
+    /// run under `just e2e` or `ci.yml`'s `e2e` job, where the compose stack is
+    /// up by design, the real `nc` made all three red-path fixtures fail on the
+    /// refusal instead (the fourth CI run, 2026-09-12). With the stub the
+    /// fixtures are stack-agnostic; the refusal stays real for every real run,
+    /// because a real run has no fixture `bin/` on its `PATH`.
+    fn stub_nc(&self) {
+        self.stub("nc", "#!/bin/sh\nexit 1\n");
     }
 
     fn with_toolchain_pin(self) -> SuiteFixture {
