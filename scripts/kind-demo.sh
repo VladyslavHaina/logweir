@@ -216,8 +216,10 @@ awk -v gw="$gw" '
     if (depth > 0) { next }
     buffering = 0
     if (hit == 1) {
-      print "kind-demo: replaced a stale hosts block for host.docker.internal (" n " lines):" > "/dev/stderr"
-      for (i = 1; i <= n; i++) { print "    " buf[i] > "/dev/stderr" }
+      # A pipe to `cat 1>&2`, not `> "/dev/stderr"`: POSIX awk names no special
+      # files, and the runner`s awk is mawk, not the one this was written under.
+      print "kind-demo: replaced a stale hosts block for host.docker.internal (" n " lines):" | "cat 1>&2"
+      for (i = 1; i <= n; i++) { print "    " buf[i] | "cat 1>&2" }
     } else {
       for (i = 1; i <= n; i++) { print buf[i] }
     }
