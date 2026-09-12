@@ -98,6 +98,11 @@ jobs:
         # REFUSES, exit 1, while 9092 or 9000 answers. This job starts no
         # compose stack, which is why the step can live beside the unit tests.
         run: ./scripts/time-unit-suite.sh
+      # cargo-deny is not on a runner (the fifth CI run, 2026-09-12: `no such
+      # command: deny`); the `deny` job below gets it from its action, this job
+      # from the same installer the release uses, pinned to the local version.
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-deny@0.20.2 }
       - name: licence permissions over the resolved graph (Global Constraint 15)
         # `--offline` is a GLOBAL flag and goes before `check`. The `deny` job
         # below runs the same tool through EmbarkStudios/cargo-deny-action; this
