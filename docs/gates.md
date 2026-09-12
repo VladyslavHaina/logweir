@@ -25,7 +25,7 @@ Docker Desktop VM was running throughout, with no compose stack in it.
 |---|---|
 | total | **420.1 s (7 min 0 s)** |
 | of which the release compile | **315.7 s** — line 5, 75% of the run |
-| the same gate re-run immediately, everything cached | **118.9 s (1 min 59 s)** — `just gate` itself, rc 0 |
+| the same gate re-run immediately, everything cached | **118.9 s** and **121.0 s** on two consecutive `just gate` runs, both rc 0 |
 | workspace compilations | **two** — one debug, one release |
 | lines | 25 |
 | standing threshold | **840 s** — 2× the recorded total |
