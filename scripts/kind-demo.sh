@@ -290,13 +290,58 @@ cat "$KIND_OUT/coredns-status.log"
 # ---------------------------------------------------------------------------
 echo
 echo "==> pre 3/3 cluster-probe --bootstrap $BOOTSTRAP_PROBE, from a pod"
+# NOT `--rm --attach`. `kubectl run --attach` connects to the container AFTER
+# the pod is created; a container that has already exited by then — this one
+# lives for a fraction of a second — hands attach nothing, and `kubectl` still
+# exits 0. The tenth CI run (2026-09-12) printed neither I14 line and this gate
+# refused; the ninth had won that race. So the pod runs to completion on its
+# own, its exit code is read from its own status, and its two lines are read
+# from the container log, which the kubelet keeps whether or not anyone was
+# watching. Then the pod is deleted. Every exit code on its own line.
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" run bootstrap-probe --rm --attach --restart=Never --image="$LOGWEIR_DEMO_IMAGE_REF" --image-pull-policy="$LOGWEIR_DEMO_PULL_POLICY" -- cluster-probe --bootstrap "$BOOTSTRAP_PROBE" > "$KIND_OUT/probe.txt" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete pod bootstrap-probe --ignore-not-found > /dev/null 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" run bootstrap-probe --restart=Never --image="$LOGWEIR_DEMO_IMAGE_REF" --image-pull-policy="$LOGWEIR_DEMO_PULL_POLICY" -- cluster-probe --bootstrap "$BOOTSTRAP_PROBE" > "$KIND_OUT/probe-run.txt" 2>&1
 rc=$?
 set -e
-echo "    rc=$rc  (kubectl run bootstrap-probe --rm --attach --restart=Never --image=$LOGWEIR_DEMO_IMAGE_REF --image-pull-policy=$LOGWEIR_DEMO_PULL_POLICY -- cluster-probe --bootstrap $BOOTSTRAP_PROBE)"
+echo "    rc=$rc  (kubectl run bootstrap-probe --restart=Never --image=$LOGWEIR_DEMO_IMAGE_REF --image-pull-policy=$LOGWEIR_DEMO_PULL_POLICY -- cluster-probe --bootstrap $BOOTSTRAP_PROBE)"
+[ "$rc" -eq 0 ] || die "could not create the probe pod (rc=$rc); see $KIND_OUT/probe-run.txt"
+
+# Bounded: up to 120 s for the container to terminate, whichever way it does.
+phase=""
+for i in $(seq 1 60); do
+  set +e
+  phase="$(kubectl --context "$LOGWEIR_KUBE_CONTEXT" get pod bootstrap-probe -o jsonpath='{.status.phase}' 2>/dev/null)"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || die "could not read the probe pod's phase (rc=$rc)"
+  case "$phase" in Succeeded|Failed) break ;; esac
+  sleep 2
+done
+echo "    phase=${phase:-<none>}  (kubectl get pod bootstrap-probe -o jsonpath='{.status.phase}', polled up to 120 s)"
+case "$phase" in Succeeded|Failed) ;; *) die "the probe pod did not terminate within 120 s (phase: ${phase:-<none>}); \`kubectl describe pod bootstrap-probe\` says why" ;; esac
+
+set +e
+probe_exit="$(kubectl --context "$LOGWEIR_KUBE_CONTEXT" get pod bootstrap-probe -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)"
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl get pod bootstrap-probe -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}') -> container exit ${probe_exit:-<none>}"
+[ "$rc" -eq 0 ] || die "could not read the probe container's exit code (rc=$rc)"
+
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" logs bootstrap-probe > "$KIND_OUT/probe.txt" 2> "$KIND_OUT/probe-logs.err"
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl logs bootstrap-probe — the container log, which the kubelet keeps whether or not anyone attached)"
+[ "$rc" -eq 0 ] || die "could not read the probe pod's log (rc=$rc); see $KIND_OUT/probe-logs.err"
 cat "$KIND_OUT/probe.txt"
-[ "$rc" -eq 0 ] || die "the in-cluster probe could not reach $BOOTSTRAP_PROBE (rc=$rc). The CoreDNS hosts block above maps that name to $gw; if the name resolved and the dial still failed, the compose stack's K8S listener is not published on the runner host."
+
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete pod bootstrap-probe > /dev/null 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl delete pod bootstrap-probe)"
+
+[ "${probe_exit:-1}" = "0" ] || die "the in-cluster probe could not reach $BOOTSTRAP_PROBE (container exit ${probe_exit:-<none>}). The CoreDNS hosts block above maps that name to $gw; if the name resolved and the dial still failed, the compose stack's K8S listener is not published on the runner host."
 case "$(cat "$KIND_OUT/probe.txt")" in
   *reachable=true*) echo "    reachable=true — the advertised listener resolves in-cluster." ;;
   *) die "the probe exited 0 without printing \`reachable=true\`. I14's contract is two lines, \`cluster-id=<id>\` then \`reachable=true|false\`; what it printed is above." ;;

@@ -1051,6 +1051,25 @@ fn kind_demo_patches_coredns_before_the_first_step() {
          `logweir doctor` is not used: it makes `--allowed-clusters` and `--approver-key` \
          mandatory and hard-codes Plaintext:\n    {probe_line}"
     );
+    // THE OUTPUT COMES FROM THE CONTAINER LOG, NEVER FROM `--attach`. attach
+    // connects after the pod exists and a container that has already exited
+    // hands it nothing while `kubectl` still exits 0 — the tenth CI run
+    // (2026-09-12) lost both I14 lines that way; `kubectl logs` reads what the
+    // kubelet kept. KILLS: `--rm --attach` put back on the probe line.
+    assert!(
+        !probe_line.contains("--attach") && !probe_line.contains("--rm"),
+        "the probe must not rely on `--attach` (or `--rm`, which needs it): a short-lived \
+         container's output is lost to a late attach while the exit code stays 0. Found:\n    \
+         {probe_line}"
+    );
+    let logs = at("logs bootstrap-probe");
+    let deleted = at("delete pod bootstrap-probe");
+    assert!(
+        probe < logs && logs < deleted && deleted < walk,
+        "after `run bootstrap-probe` (offset {probe}) the two I14 lines are read with `kubectl \
+         logs bootstrap-probe` (offset {logs}) and the pod is deleted (offset {deleted}) before \
+         the walk starts (offset {walk})"
+    );
     assert!(
         !probe_line.contains("$gw"),
         "the probe passes the resolved gateway ADDRESS as `--bootstrap`. That fixes the first \
@@ -1149,10 +1168,14 @@ case "$*" in
   *"apply -f"*) exit 0 ;;
   *"rollout restart"*) exit 0 ;;
   *"rollout status"*) exit 0 ;;
-  *"run bootstrap-probe"*)
+  *"get pod bootstrap-probe"*"status.phase"*) echo Succeeded; exit 0 ;;
+  *"get pod bootstrap-probe"*"terminated.exitCode"*) echo 0; exit 0 ;;
+  *"logs bootstrap-probe"*)
     echo cluster-id=stub
     echo reachable=true
     exit 0 ;;
+  *"delete pod bootstrap-probe"*) exit 0 ;;
+  *"run bootstrap-probe"*) echo pod/bootstrap-probe created; exit 0 ;;
   *"get crd -o name"*) exit 0 ;;
   *"create namespace"*) exit 0 ;;
   *"patch deployment weirkeeper"*) exit 0 ;;
@@ -1590,10 +1613,14 @@ case "$*" in
   *"apply -f"*) exit 0 ;;
   *"rollout restart"*) exit 0 ;;
   *"rollout status"*) exit 0 ;;
-  *"run bootstrap-probe"*)
+  *"get pod bootstrap-probe"*"status.phase"*) echo Succeeded; exit 0 ;;
+  *"get pod bootstrap-probe"*"terminated.exitCode"*) echo 0; exit 0 ;;
+  *"logs bootstrap-probe"*)
     echo cluster-id=stub
     echo reachable=true
     exit 0 ;;
+  *"delete pod bootstrap-probe"*) exit 0 ;;
+  *"run bootstrap-probe"*) echo pod/bootstrap-probe created; exit 0 ;;
 esac
 echo "stub-kubectl: refusing \`kubectl $*\` — this stub answers the kind driver's three pre-steps and step 1's context read, and dials nothing." >&2
 exit 1

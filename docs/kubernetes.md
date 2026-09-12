@@ -2521,9 +2521,12 @@ The three pre-steps, in order, every exit code on its own line and nothing piped
    and `rollout status … --timeout=120s`.
 3. **the probe** (interface register I14, Task 15c), from inside the cluster and
    before step 1 runs:
-   `kubectl run bootstrap-probe --rm --attach --restart=Never --image=… -- cluster-probe --bootstrap host.docker.internal:9095`.
-   `--attach --restart=Never` makes `kubectl`'s exit code the container's, which
-   is read directly; `reachable=true` and exit 0 are step 1's precondition.
+   `kubectl run bootstrap-probe --restart=Never --image=… -- cluster-probe --bootstrap host.docker.internal:9095`,
+   the pod polled to termination, the container's exit code read from the
+   pod's own status, its two lines read with `kubectl logs` — the container
+   log, which the kubelet keeps whether or not anyone attached (`--rm
+   --attach` lost both lines on the tenth CI run while `kubectl` exited 0) —
+   and the pod deleted; exit 0 and `reachable=true` are step 1's precondition.
    `logweir doctor` is not used: it makes `--allowed-clusters` and
    `--approver-key` mandatory and hard-codes `Plaintext`.
 
