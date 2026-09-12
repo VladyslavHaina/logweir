@@ -89,9 +89,9 @@ jobs:
       # stronger claim and its paraphrases, and `check-one-signer.sh:16` binds "the
       # CI step that runs it" by name — so state the narrowed claim, as above, and
       # do not quote the withdrawn one even to deny it. (Same hazard as the
-      # check-dod.sh note two comments below.) Per line item 1g this workflow has
-      # never executed on any commit, so this step is DOCUMENTATION; `just lint`
-      # is the gate.
+      # check-dod.sh note two comments below.) Per line item 1g this step is the
+      # MIRROR of `just lint`'s line (this workflow has executed green since
+      # 2026-09-12); `just lint` is the gate a laptop runs before a push.
       - name: single-signer linkage gate (G2')
         run: ./scripts/check-one-signer.sh
       # `scripts/check-dod.sh` — the sole enforcer of the ASF attribution

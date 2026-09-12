@@ -5,7 +5,8 @@
 # Five of these assertions were lifted VERBATIM IN BEHAVIOUR out of
 # `.github/workflows/release.yml:136-182`, where they had lived since Task 22
 # and where they have NEVER EXECUTED on any commit, including the v0.1.0 tag —
-# there is no git remote and not one of the five workflows has ever run. A gate
+# release.yml has never run because no tag has been pushed (ci.yml, no-oso.yml
+# and kind-demo.yml have run green since 2026-09-12). A gate
 # that has never run is not a gate, so they now live in a file a human can run
 # on a laptop and whose exit code `just` reads directly.
 #

@@ -127,7 +127,7 @@ pre-release ruling by accident.**
   Constraint 7). What is machine-checked is what the workflow *says*:
   `crates/logweir/tests/workflow_lint.rs` parses the YAML on a laptop and
   asserts the shape, in the default `cargo test`. **The workflow itself has
-  still never executed on any commit, including the v0.1.0 tag** (the entry
+  still never executed on any commit, including the v0.1.0 tag — no tag has been pushed** (the entry
   above), so its first run will also be its first debugging session. The digest
   in the release notes is also **not** the digest the Kubernetes manifests pin:
   those name a locally built image, which is a different artifact from a

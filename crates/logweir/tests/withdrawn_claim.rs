@@ -139,9 +139,9 @@ fn the_exemption_list_is_exactly_two_paths() {
     }
 }
 
-/// `just lint` is the enforcement point: `ci.yml` has never executed on any
-/// commit, so membership in the recipe is the only thing that makes this gate
-/// enforced rather than asserted.
+/// `just lint` is the enforcement point: `ci.yml` mirrors it (green since
+/// 2026-09-12), and membership in the recipe is what makes this gate
+/// enforced on a laptop before a push.
 ///
 /// It asserts membership and nothing else — not the recipe's length, not its
 /// line numbers, not the absence of other arms — so a later task adding a guard

@@ -98,8 +98,8 @@
 # Global Constraint 22's 120 s suite budget is untouched by it.
 #
 # Membership in `just lint` is what makes this a gate rather than a script:
-# `.github/workflows/ci.yml` has never executed on any commit, so a workflow
-# step would be documentation. `crates/logweir/tests/label_gate.rs`'s
+# `.github/workflows/ci.yml` mirrors `just gate` (green since 2026-09-12); a
+# workflow step runs on a push, this recipe before one. `crates/logweir/tests/label_gate.rs`'s
 # `just_lint_runs_the_label_gate` keeps the membership honest.
 #
 # `LOGWEIR_ROOT` exists so a fixture can point this at a temp tree, exactly as

@@ -344,9 +344,9 @@ fn one_signer_script_detects_a_direct_primitive_dependency() {
     );
 }
 
-/// `just lint` is the Phase-1 gate (line item 1g): `ci.yml` has never executed
-/// on any commit, so membership in this recipe is the only thing that makes
-/// G2′ enforced rather than asserted.
+/// `just lint` is the Phase-1 gate (line item 1g): `ci.yml` mirrors the gate
+/// (green since 2026-09-12), and membership in this recipe is what makes
+/// G2′ enforced on a laptop before a push.
 ///
 /// It asserts membership and nothing else — not the recipe's length, not its
 /// line numbers, not the absence of other arms — so a later task adding a

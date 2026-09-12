@@ -1,8 +1,8 @@
 name: release
 # Builds the v0.1.0 release artifacts on a `v*` tag.
 #
-# NOT YET EXECUTED. This workflow has never run: there is no GitHub remote
-# configured for this repository at the time of the v0.1.0 tag, so the release
+# NOT YET EXECUTED. This workflow has never run: no tag has been pushed to the
+# remote (which exists since 2026-09-12; the v0.1.0 tag predates it), so the release
 # DoD line "release.yml produced binaries and a debian:bookworm-slim image" is
 # recorded as UNVERIFIED rather than ticked. Whoever first pushes this repo
 # should run it via `workflow_dispatch` before announcing the tag.

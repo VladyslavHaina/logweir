@@ -7,7 +7,7 @@
 //! `logweir` itself dies at the dynamic loader. That has actually happened
 //! here (`Dockerfile:167-177` pastes the failure text), and the assertions that
 //! catch it lived only in `.github/workflows/release.yml`, a workflow that has
-//! never executed on any commit including the tag. A gate that has never run
+//! never executed on any commit including the tag (no tag has been pushed). A gate that has never run
 //! is not a gate; these tests are how it is observed to fail.
 //!
 //! CHECK 6 (Task 8b) IS THE ONE ASSERTION WITH NO PRE-HISTORY IN release.yml.

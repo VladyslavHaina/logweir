@@ -1690,8 +1690,8 @@ fn the_ci_workflow_carries_the_crd_drift_arm() {
 /// The CI arm re-renders with `cargo run` and `diff -u`s the files, which is
 /// the shipped gate. This test asserts the same property with no subprocess
 /// and no shell, so a hand edit to `config/crd/` fails `cargo test` on a
-/// laptop too — `ci.yml` has never executed on any commit, so a gate that
-/// lives only there is documentation.
+/// laptop too — `ci.yml` mirrors `just gate` (green since 2026-09-12), and a
+/// gate that lives only there runs only on a push; this one runs everywhere.
 #[test]
 fn the_checked_in_crds_are_what_the_emitter_renders() {
     let rendered = weirkeeper::crds::render_all();

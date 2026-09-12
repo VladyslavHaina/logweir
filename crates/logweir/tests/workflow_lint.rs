@@ -1,6 +1,6 @@
 //! Lints on `.github/workflows/release.yml`. THIS PROVES THE WORKFLOW SAYS THE
 //! RIGHT THING, NOT THAT IT DOES — the workflow has never executed on any
-//! commit (release.yml's header). There is no git remote, so it cannot; every
+//! commit (release.yml's header): no tag has been pushed to the remote; every
 //! assertion here is about the shape of the file.
 //!
 //! The property the file exists for is one sentence: the bytes

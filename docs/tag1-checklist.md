@@ -67,7 +67,7 @@ digest **twice, once per `--platform`**, re-runs `scripts/check-image.sh` and
 digests and the pull transcript into the run's job summary.
 `crates/logweir/tests/workflow_lint.rs`'s
 `workflow_lint_the_pullback_job_builds_nothing` holds its shape. **That job has
-never run**, because there is still no git remote to push a tag to, so the
+never run**, because no tag has been pushed (the remote exists since 2026-09-12), so the
 transcript that would close this row does not exist. The digests in
 `logweir.yaml` are still one laptop's — and Task 30b moved the controller one
 again (the fourth time in this plan), which is the same point restated: a local
@@ -85,8 +85,8 @@ and the backup it fires, the approval minted out of band, both readers over the
 scorecard and the teardown — with
 `crates/logweir/tests/laptop_demo_lint.rs` refusing a transcript that has been
 forged rather than run. The docker-desktop half of the clause is therefore
-evidenced; the CI half is not, and the row reads `blocked` for the whole clause
-because a row carries one status.
+evidenced; the CI half was not until 2026-09-12 — the row read `blocked` for the whole clause
+because a row carries one status, and reads `closed` since the run recorded below.
 
 **2026-09-11 — Task 31 built the CI half and stopped here.** The workflow now
 exists: `.github/workflows/kind-demo.yml` creates a `kind` cluster from the
@@ -194,7 +194,7 @@ Renamed: Task 30's `workflow_lint_the_asserted_image_is_the_pushed_image` is now
 images and the singular had gone stale.
 
 The **"runs for real, once" half is blocked**: `.github/workflows/release.yml`
-has never executed on any commit.
+has never executed on any commit — no tag has been pushed.
 **2026-09-11 — Task 30b built the release, and stopped at the release step.**
 **2026-09-12 — the repository was pushed and three workflows ran; this was not
 one of them.** `ci.yml` (run 34700987730), `no-oso.yml` (run 34700987811) and
@@ -252,8 +252,8 @@ that says it would produce one.
 **`closed`.** Two drift arms, one per document. `.github/workflows/ci.yml`
 carries them as the steps named *schema drift* (the scorecard) and *backup
 receipt schema drift* (Task 5, deliberately a separate step so a failure names
-which schema drifted). Because `ci.yml` has never executed, the **enforcing**
-copies are the two tests in `crates/logweir-core/tests/schema_drift.rs` —
+which schema drifted). `ci.yml` executes on every push since 2026-09-12 and mirrors them; the **enforcing**
+copies on a laptop are the two tests in `crates/logweir-core/tests/schema_drift.rs` —
 `checked_in_schema_matches_the_types` for the scorecard and
 `backup_receipt_schema_has_no_drift` for the receipt — both in the default
 `cargo test --workspace` set.
@@ -296,8 +296,8 @@ least twelve characters, refuses a mark on a line that also asserts the thing is
 true, prints every accepted mark with its description, prints quotations of the
 form `[UNVERIFIED]` in backticks under their own heading, and prints the
 bare-word mentions without ever failing on them. It is a member of `just lint`,
-which is what makes it a gate: `ci.yml` has never executed, so a workflow step
-would be documentation. `crates/logweir/tests/label_gate.rs` keeps the
+which is what makes it a gate on a laptop: `ci.yml` mirrors `just gate` (green since
+2026-09-12) and runs on a push, the recipe before one. `crates/logweir/tests/label_gate.rs` keeps the
 membership honest, keeps the two formerly defective marks closed, and keeps this
 file's own rows from drifting.
 

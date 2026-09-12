@@ -9,8 +9,8 @@
 //! is a defect that has happened in this repository before:
 //!
 //! 1. A gate that is not in `just lint` is documentation. `.github/workflows/ci.yml`
-//!    has never executed on any commit, so membership in the `lint` recipe is
-//!    the only thing that makes a script run — `just_lint_runs_the_label_gate`
+//!    mirrors `just gate` (green since 2026-09-12); membership in the `lint`
+//!    recipe is what makes a script run on a laptop before a push — `just_lint_runs_the_label_gate`
 //!    is the same test, for the same reason, as
 //!    `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`.
 //! 2. The two marks this task closed were closed by EDITING PROSE, and prose
@@ -130,9 +130,9 @@ fn the_two_pre_existing_marks_are_closed() {
 
 /// **`just lint` runs the label gate.**
 ///
-/// `.github/workflows/ci.yml` has never executed on any commit, so a workflow
-/// step is documentation and membership in the `lint` recipe is what makes a
-/// script a gate. Deleting the line from `justfile` leaves
+/// `.github/workflows/ci.yml` mirrors `just gate` (green since 2026-09-12); a
+/// workflow step runs on a push, and membership in the `lint` recipe is what
+/// makes a script a gate on a laptop before one. Deleting the line from `justfile` leaves
 /// `cargo test --workspace` entirely green, which is the whole reason this test
 /// exists — it is the `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`
 /// pattern, and it asserts membership and nothing else: not the recipe's
