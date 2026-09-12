@@ -8,7 +8,10 @@
 //! whoever holds it can post as that integration, with no other secret. The
 //! asymmetry was the tell — `pagerduty_routing_key`, four lines below in the
 //! same function, was deliberately never logged.
+mod support;
+
 use logweir::drill::phase7_verify::redact_url;
+use support::dial_tokens;
 
 /// The exact shape of the finding: a Slack incoming webhook. Everything that
 /// authorises a post lives after the host.
@@ -524,33 +527,40 @@ const FORBIDDEN: [&str; 6] = [
 /// does not walk.
 ///
 /// A comment cannot hold that property, so this test does. It reads the audit's
-/// source and requires every token here to appear in its `DIAL_TOKENS` literal:
-/// the workspace-wide audit may be BROADER than this one, never narrower.
+/// source and requires every token here to be an ELEMENT of its `DIAL_TOKENS`
+/// literal: the workspace-wide audit may be BROADER than this one, never
+/// narrower.
+///
+/// **IT TOKENISES; IT DOES NOT SLICE** (Task 32, stage-2 carried item (a)).
+/// The first version took `text[start..end]` and asked
+/// `list.contains(&format!("\"{t}\""))` — a substring search, which cannot
+/// distinguish an array element from a mention inside a `//` comment in the
+/// same literal. A token moved from the array into that comment would have kept
+/// this test green while the gate stopped covering it. `support::dial_tokens`
+/// strips comments first and reads the remaining double-quoted literals as a
+/// SET, so the property is now held by a parser;
+/// `crates/logweir/tests/gate_lint.rs::the_ureq_token_lists_agree_under_a_comment`
+/// is the test that proves the parser, and not the slice, is doing the work.
 #[test]
 fn the_two_ureq_token_lists_agree() {
     let audit =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/no_network_in_unit_tests.rs");
     let text =
         std::fs::read_to_string(&audit).unwrap_or_else(|e| panic!("read {}: {e}", audit.display()));
-    let start = text
-        .find("const DIAL_TOKENS")
-        .expect("the audit must still declare DIAL_TOKENS");
-    let end = start
-        + text[start..]
-            .find("];")
-            .expect("DIAL_TOKENS must be a closed array literal");
-    let list = &text[start..end];
+    let elements = dial_tokens::array_elements(&text, "const DIAL_TOKENS");
 
     let missing: Vec<&str> = FORBIDDEN
         .iter()
-        .filter(|t| !list.contains(&format!("\"{t}\"")))
+        .filter(|t| !elements.contains(**t))
         .copied()
         .collect();
     assert!(
         missing.is_empty(),
         "the workspace-wide audit's DIAL_TOKENS is NARROWER than this file's FORBIDDEN \
          list, so a default-suite test outside crates/logweir/src/ can use these and be \
-         caught by neither gate: {missing:?}\n  add them to {}",
+         caught by neither gate: {missing:?}\n  add them to {}\n  (the audit's parsed \
+         elements were {elements:?} — a token that appears only in a comment there is \
+         NOT an element)",
         audit.display()
     );
 }

@@ -1,0 +1,63 @@
+# THE SIGNING-PRIMITIVE CLASSIFICATION — the checked-in half of
+# `scripts/check-one-signer.sh`'s check 2. Task 32.
+#
+# WHY THIS FILE EXISTS. Check 2 used to carry `PRIMITIVES="p256 ed25519-dalek"`
+# as a fixed literal, so a THIRD signing primitive added to `logweir-evidence`
+# passed the gate in silence: the walk kept covering the two crates the literal
+# named and said nothing about the new one. The literal is gone. Check 2 now
+# derives its primitive set from `logweir-evidence`'s DIRECT DEPENDENCIES in
+# `cargo metadata --no-deps` (which resolves nothing, reaches no network and
+# builds no object file) minus the crates classified `non-primitive` here.
+#
+# THE POLARITY IS FAIL-CLOSED, AND THAT IS THE WHOLE DESIGN. A direct
+# dependency nobody has classified is treated as a signing primitive and the
+# gate EXITS 1 NAMING IT. Adding a third signing crate is therefore a diff in
+# this file that a reviewer reads, not a quiet pass. The inverse — defaulting
+# an unknown crate to `non-primitive` — would have reproduced the literal's
+# defect with more machinery.
+#
+# THE FILE IS ALSO CHECKED FOR STALENESS, in both directions, exactly as
+# check 1's allowlist is: an entry naming a crate that is no longer a direct
+# dependency fails too. A classification that has outlived the edge it was
+# written for is how this check quietly stops meaning anything.
+#
+# FORMAT — two lines per entry, and the second one is not optional:
+#
+#     <crate-name> <primitive|non-primitive>
+#     reason: <one line saying why, for a reviewer, not for the parser>
+#
+# An entry without a `reason:` line is REFUSED (exit 1). Blank lines and lines
+# beginning with `#` are ignored. A crate may appear once.
+#
+# "PRIMITIVE" MEANS A SIGNATURE ALGORITHM CRATE — something `sign_detached`
+# could produce a signature with. It does not mean "cryptographic": `rand_core`
+# is the signer's entropy source and signs nothing, and it is classified
+# `non-primitive` with that reason written down rather than left to be
+# re-derived by whoever next reads check 2.
+
+ed25519-dalek primitive
+reason: Ed25519. `SigningKey::Ed25519` signs with it and `VerifyingKey::Ed25519` checks it; one of the exactly two algorithms the DSSE sidecar admits.
+
+p256 primitive
+reason: ECDSA over NIST P-256. `SigningKey::P256` signs with it; the other of the exactly two algorithms the sidecar admits.
+
+base64 non-primitive
+reason: encoding only — `sign_detached` base64-encodes the signature blob after the primitive has produced it.
+
+logweir-verify non-primitive
+reason: the workspace's VERIFYING half. It declares both primitives itself, which is why reaching a primitive is not reaching the signer; who may link it is check 4's `ALLOWED_VERIFY_LINK`, not this file.
+
+rand_core non-primitive
+reason: the signer's ENTROPY source (`getrandom`), not a signature algorithm. It is the one line the verify-only split deliberately did not take, and it signs nothing on its own.
+
+serde_json non-primitive
+reason: the sidecar's on-disk (de)serialisation, used by `tests/key_provenance.rs` and the two `examples/`.
+
+chrono non-primitive
+reason: DEV dependency only — `examples/mint_backup_receipt_fixture.rs` types the fixture receipt's five timestamps. No signing role.
+
+logweir-core non-primitive
+reason: DEV dependency only — the `mint_fixture` example parses and re-serialises a `Scorecard` before signing it. The document type, not the algorithm.
+
+tempfile non-primitive
+reason: DEV dependency only — `tests/key_provenance.rs` mints keys into throwaway directories. No signing role.

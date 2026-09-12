@@ -31,8 +31,54 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-SUITE_BUDGET="${LOGWEIR_UNIT_SUITE_BUDGET_SECS:-120}"
-TEST_BUDGET="${LOGWEIR_UNIT_TEST_BUDGET_SECS:-15}"
+# ----------------------------------------------------------------- budgets
+# THE ALIAS (Task 32, stage-2 carried item (d)). `LOGWEIR_TIME_BUDGET_SECS` sets
+# BOTH budgets at once, because the caller who wants to widen them under load
+# wants to widen both and should not have to learn two names to do it. The two
+# EXPLICIT variables win when they are also set, so a caller can say "everything
+# at 600, except the per-test bound at 15" in one environment.
+#
+# THE RESOLVED VALUES ARE PRINTED, WITH WHERE EACH CAME FROM. A harness that
+# reports a verdict against a budget it does not name is unreadable the one time
+# it matters — the run where somebody set the alias in a shell two levels up.
+TIME_BUDGET_ALIAS="${LOGWEIR_TIME_BUDGET_SECS:-}"
+if [ -n "${LOGWEIR_UNIT_SUITE_BUDGET_SECS:-}" ]; then
+    SUITE_BUDGET="$LOGWEIR_UNIT_SUITE_BUDGET_SECS"
+    SUITE_BUDGET_SOURCE="LOGWEIR_UNIT_SUITE_BUDGET_SECS"
+elif [ -n "$TIME_BUDGET_ALIAS" ]; then
+    SUITE_BUDGET="$TIME_BUDGET_ALIAS"
+    SUITE_BUDGET_SOURCE="LOGWEIR_TIME_BUDGET_SECS (alias)"
+else
+    SUITE_BUDGET="120"
+    SUITE_BUDGET_SOURCE="default"
+fi
+if [ -n "${LOGWEIR_UNIT_TEST_BUDGET_SECS:-}" ]; then
+    TEST_BUDGET="$LOGWEIR_UNIT_TEST_BUDGET_SECS"
+    TEST_BUDGET_SOURCE="LOGWEIR_UNIT_TEST_BUDGET_SECS"
+elif [ -n "$TIME_BUDGET_ALIAS" ]; then
+    TEST_BUDGET="$TIME_BUDGET_ALIAS"
+    TEST_BUDGET_SOURCE="LOGWEIR_TIME_BUDGET_SECS (alias)"
+else
+    TEST_BUDGET="15"
+    TEST_BUDGET_SOURCE="default"
+fi
+echo "time-unit-suite: suite budget    ${SUITE_BUDGET}s (from $SUITE_BUDGET_SOURCE)"
+echo "time-unit-suite: per-test budget ${TEST_BUDGET}s (from $TEST_BUDGET_SOURCE)"
+
+# THE LOAD AVERAGE, PRINTED ON EVERY RED (Task 32, stage-2 carried item (d)).
+# This plan runs up to three agents concurrently at CARGO_BUILD_JOBS=4, and the
+# unit suite has been measured at ~20-35 s idle and ~105-129 s under two
+# concurrent agent builds — twice over the 120 s budget, and green on the same
+# tree when run alone. Without this line a load-induced red is indistinguishable
+# from a regression, and the reader of the transcript has no way to tell which
+# one they are looking at an hour later.
+load_average() {
+    if command -v uptime >/dev/null 2>&1; then
+        echo "time-unit-suite: load average $(uptime | sed 's/.*[Ll]oad average[s]*: *//')" >&2
+    else
+        echo "time-unit-suite: load average unavailable (no uptime on PATH)" >&2
+    fi
+}
 
 # THE COMMAND UNDER TEST, as one string, so it can be printed and checked
 # (mutant M9: a harness that quietly times `cargo test -p logweir-core`
@@ -75,8 +121,47 @@ if [ -f rust-toolchain.toml ]; then
 else
     # No pin file: fall back to the workspace's declared MSRV, and SAY so —
     # `rust-version` is a floor, not a pin, so it is a weaker guarantee.
-    PINNED_TOOLCHAIN="$(sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
-    PIN_SOURCE="Cargo.toml rust-version (no rust-toolchain.toml — an MSRV floor, not a pin)"
+    #
+    # IT RESOLVES A FULL THREE-COMPONENT VERSION, AND NEVER EXPORTS THE FLOOR
+    # ITSELF (Task 32, stage-2 carried item (c)). `Cargo.toml`'s `rust-version`
+    # is `"1.89"` — TWO components — and this branch used to export that string
+    # verbatim as `RUSTUP_TOOLCHAIN`. Handing rustup a channel it may not have
+    # installed makes rustup SYNC IT FROM THE NETWORK, which is the exact
+    # failure the paragraph above documents for `stable`, arriving from inside a
+    # lint gate (STANDING RULE 7, Global Constraint 17) — and arriving on the
+    # one code path that runs when the pin file is missing, i.e. when nobody is
+    # watching.
+    #
+    # So: take the floor, list the toolchains rustup ALREADY HAS, select the
+    # highest installed `<floor>.<patch>`, and export that. If none is
+    # installed, EXIT 1 naming the floor. A lint gate does not install a
+    # toolchain; refusing and saying which one is missing is the whole remedy.
+    MSRV_FLOOR="$(sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+    PINNED_TOOLCHAIN=""
+    if [ -n "$MSRV_FLOOR" ] && command -v rustup >/dev/null 2>&1; then
+        # The floor is a literal, not a pattern: `.` must not match any byte.
+        MSRV_RE="$(printf '%s' "$MSRV_FLOOR" | sed 's/\./\\./g')"
+        # `rustup toolchain list` prints `1.89.0-aarch64-apple-darwin (default)`;
+        # the host triple and the ` (default)` / ` (override)` suffix are dropped
+        # and what is left must be three components or it is not selected.
+        PINNED_TOOLCHAIN="$(rustup toolchain list 2>/dev/null \
+            | awk '{print $1}' \
+            | grep -E "^${MSRV_RE}\.[0-9]+(-.*)?$" \
+            | sed -E "s/^(${MSRV_RE}\.[0-9]+).*/\1/" \
+            | sort -u -t. -k3,3n \
+            | tail -1)"
+    fi
+    if [ -z "$PINNED_TOOLCHAIN" ]; then
+        echo "time-unit-suite: no rust-toolchain.toml, and no installed toolchain matches the" >&2
+        echo "  workspace MSRV floor ${MSRV_FLOOR:-<unreadable from Cargo.toml>} (looked for ${MSRV_FLOOR:-?}.<patch> in \`rustup toolchain list\`)." >&2
+        echo "time-unit-suite: REFUSING to run. The floor is TWO components and exporting it as" >&2
+        echo "  RUSTUP_TOOLCHAIN makes rustup sync that channel FROM THE NETWORK, from inside a" >&2
+        echo "  lint gate. A lint gate does not install a toolchain: run" >&2
+        echo "  \`rustup toolchain install ${MSRV_FLOOR:-1.89}\` yourself, or restore rust-toolchain.toml." >&2
+        load_average
+        exit 1
+    fi
+    PIN_SOURCE="Cargo.toml rust-version $MSRV_FLOOR, resolved to the highest installed $MSRV_FLOOR.x (no rust-toolchain.toml — an MSRV floor, not a pin)"
 fi
 if [ -z "$PINNED_TOOLCHAIN" ]; then
     echo "time-unit-suite: cannot determine the pinned toolchain from rust-toolchain.toml or Cargo.toml." >&2
@@ -132,6 +217,7 @@ cargo build --workspace --tests
 build_rc=$?
 if [ "$build_rc" -ne 0 ]; then
     echo "time-unit-suite: the build failed (exit $build_rc); there is nothing to time" >&2
+    load_average
     exit "$build_rc"
 fi
 
@@ -141,6 +227,13 @@ echo "time-unit-suite: timing \`$SUITE_CMD\`"
 # line, and the verdict below needs to quote the suite's FIRST real failure
 # instead of guessing at a cause (review, prerequisite finding).
 suite_log="$(mktemp)"
+# THE TRAP IS INSTALLED HERE, NOT IN THE SUCCESS BRANCH (Task 32, stage-2
+# carried item (b)). The only `rm` for this file used to live inside the
+# attribution pass's trap, which sits inside `if [ "$suite_rc" -eq 0 ]` — so
+# EVERY RED RUN LEAKED A TEMP FILE, on the runs an agent repeats most. The trap
+# below covers every path including the red one; the trap in the attribution
+# pass EXTENDS this list rather than replacing it.
+trap 'rm -f "$suite_log"' EXIT
 t0="$(now)"
 $SUITE_CMD > "$suite_log" 2>&1
 suite_rc=$?
@@ -268,16 +361,20 @@ if [ "$suite_rc" -ne 0 ]; then
     # here. The prerequisite failures this most often surfaces say exactly what
     # to run — `run \`just engine\` first: .../.engine/kafka-backup missing`
     # is the common one — and repeating them costs two lines.
+    # A REFERENCE, NOT A SECOND COPY (Task 32, stage-2 carried item (b)). The
+    # suite's whole output was already streamed once, by the `cat "$suite_log"`
+    # above; re-printing slices of it here made the same bytes appear twice in
+    # one transcript, which is how a reader ends up debugging the echo. The
+    # verdict now says WHERE to look in the output it already produced.
     panic_at="$(grep -m1 -n 'panicked at' "$suite_log")"
     if [ -n "$panic_at" ]; then
         panic_line="${panic_at%%:*}"
-        echo "  first failure in the suite:" >&2
-        sed -n "${panic_line},$((panic_line + 1))p" "$suite_log" | sed 's/^/    /' >&2
-        echo "  (search the output above for 'panicked at' for the rest)" >&2
+        panic_site="${panic_at#*panicked at }"
+        echo "  first panic at suite-log line $panic_line: $panic_site" >&2
+        echo "  (that line, and the rest, are in the suite output streamed above)" >&2
     else
         echo "  no 'panicked at' line found — the suite failed to build or was killed." >&2
-        echo "  The last lines of its output:" >&2
-        tail -n 5 "$suite_log" | sed 's/^/    /' >&2
+        echo "  Its last lines are at the end of the suite output streamed above." >&2
     fi
     rc=1
 fi
@@ -303,5 +400,9 @@ fi
 
 if [ "$rc" -eq 0 ]; then
     echo "time-unit-suite: PASS — ${total}s total (budget ${SUITE_BUDGET}s), no test over ${TEST_BUDGET}s"
+else
+    # EVERY RED CARRIES THE LOAD AVERAGE. One call, at the one place every
+    # timing red passes through, so no future failure arm can forget it.
+    load_average
 fi
 exit "$rc"

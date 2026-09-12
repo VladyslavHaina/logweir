@@ -87,6 +87,49 @@ elif [ -x "$TARGET_DIR/debug/logweir" ]; then
 else
     BIN="$TARGET_DIR/release/logweir"
 fi
+
+# IT BUILDS THE BINARY IT NEEDS RATHER THAN REFUSING (Task 32, stage-2 carried
+# item (e)). This used to `fail "no built logweir binary at $BIN; run 'cargo
+# build -p logweir' first"` — and Global Constraint 23 then made this gate a
+# COMMIT PRECONDITION for every task touching either scorecard reader, so the
+# refusal was an instruction handed to a script that could carry it out itself.
+# A precondition nobody can satisfy in one command is a precondition people run
+# once and then stop running.
+#
+# ONLY WHEN NOBODY NAMED A BINARY. `$LOGWEIR_BIN` set and not executable stays a
+# hard failure: the caller asked for a specific binary, and building a different
+# one behind their back is how a parity check ends up reporting on bytes nobody
+# meant to test.
+#
+# THE PINNED TOOLCHAIN IS EXPORTED FIRST, and the reason is the one
+# `check-one-signer.sh:95-106` states: a `cargo` reached through rustup's shim
+# with no override in scope resolves rustup's DEFAULT channel and SYNCS IT FROM
+# THE NETWORK, from inside a lint gate (STANDING RULE 7, Global Constraint 17).
+# `cd`-ing into a tree that carries `rust-toolchain.toml` is normally enough;
+# exporting the pin costs one `sed` and removes the possibility.
+#
+# `--release`, DELIBERATELY: the debug arm above is preferred when it exists, so
+# the only tree that reaches this line has neither profile built, and a release
+# binary is the one this gate will find again on the next run whichever profile
+# a later `cargo test` happens to produce.
+if [ ! -x "$BIN" ] && [ -z "${LOGWEIR_BIN:-}" ]; then
+    if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && [ -f "$ROOT/rust-toolchain.toml" ]; then
+        pinned="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/rust-toolchain.toml" | head -1)"
+        if [ -n "$pinned" ]; then
+            export RUSTUP_TOOLCHAIN="$pinned"
+            echo "check-verifier-parity: toolchain pinned to $RUSTUP_TOOLCHAIN (from rust-toolchain.toml)"
+        fi
+    fi
+    echo "check-verifier-parity: no logweir binary in $TARGET_DIR — building it (cargo build --release -p logweir)"
+    set +e
+    cargo build --release -p logweir
+    build_rc=$?
+    set -e
+    if [ "$build_rc" -ne 0 ]; then
+        fail "cargo build --release -p logweir exited $build_rc; the parity claim needs BOTH readers and the first one did not build"
+    fi
+    BIN="$TARGET_DIR/release/logweir"
+fi
 if [ ! -x "$BIN" ]; then
     fail "no built logweir binary at $BIN; run 'cargo build -p logweir' first, or point \$LOGWEIR_BIN at it — the parity claim needs BOTH readers"
 fi

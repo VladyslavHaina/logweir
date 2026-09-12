@@ -1,3 +1,26 @@
+# THIS FILE IS DOCUMENTATION, NOT A GATE — and the sentence below is written
+# from the two preceding tasks' reports rather than from intent.
+#
+# WORKFLOWS IN THIS REPOSITORY THAT HAVE ACTUALLY EXECUTED: none — no remote
+# exists; see docs/tag1-checklist.md clauses 2 and 4. Clause 2 (Demo 1 on a
+# `kind` cluster created by the workflow) and clause 4 (Task 9's F1-F4 closed and
+# then one real tagged run of release.yml) both read `blocked: no remote`, and
+# nothing here may describe ci.yml, release.yml or kind-demo.yml as a check that
+# runs. `kind-demo.yml`'s mechanism was proved once locally, by hand, on
+# author-only images under an explicit controller authorisation; that is not a
+# CI run and is not counted as one.
+#
+# THE ENFORCEMENT POINT IS `just gate` (Task 32), which runs the same set in one
+# order on a laptop. The steps below MIRROR it so that the day a remote exists
+# the workflow is already the same check — and
+# `crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate` asserts the
+# mirror stays complete: every `scripts/*.sh` that `just gate` runs appears on an
+# executed line here, and this comment names the same state the checklist does.
+# Dropping a script from this file fails that test at assertion time.
+#
+# `just gate` itself is deliberately NOT the step here: a workflow that shells
+# `just` hides which check failed behind one red step, and this file's whole
+# purpose is to read as the list.
 name: ci
 on:
   push: { branches: [main] }
@@ -56,6 +79,40 @@ jobs:
       # pattern out in prose here — the guard would report itself.
       - name: definition of done (attribution, GC14 namespaces, link integrity)
         run: ./scripts/check-dod.sh
+      # ------------------------------------------------------------------
+      # THE REST OF `just gate`'s SHELL GATES, in the gate's own order (Task
+      # 32). Each was reachable only from the justfile before this task, which
+      # for a repository whose workflows have never run is the same as being
+      # reachable only from a developer's memory.
+      - name: unit-suite timing bounds (Global Constraint 22)
+        # REFUSES, exit 1, while 9092 or 9000 answers. This job starts no
+        # compose stack, which is why the step can live beside the unit tests.
+        run: ./scripts/time-unit-suite.sh
+      - name: licence permissions over the resolved graph (Global Constraint 15)
+        # `--offline` is a GLOBAL flag and goes before `check`. The `deny` job
+        # below runs the same tool through EmbarkStudios/cargo-deny-action; this
+        # step is the one that matches the local gate line token for token.
+        run: cargo deny --offline check licenses
+      - name: the withdrawn signing claim stays withdrawn (G-SIGN, half two)
+        run: ./scripts/check-withdrawn-claim.sh
+      - name: no archive-write capability outside the runner (Global Constraint 6)
+        run: ./scripts/check-no-archive-write.sh
+      - name: the UI loads no remote asset (spec 8)
+        run: ./scripts/check-ui-offline.sh
+      - name: the UI behaviour suite (interface I24)
+        run: ./scripts/check-ui-behaviour.sh
+      - name: every mark in the shipped docs is labelled (spec 16 clause 9)
+        run: ./scripts/check-unverified-labels.sh
+      - name: the artifact-directory ceiling (STANDING RULE 6)
+        run: ./scripts/check-deps-count.sh
+      - name: relative markdown link integrity (never fetches http/https)
+        run: ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/
+      - name: the install file has no drift (interface I26)
+        run: ./scripts/render-install.sh --check
+      - name: the third-party inventory matches the resolved graph (interface I30)
+        run: |
+          bash scripts/gen-third-party-notices.sh > /tmp/tpn.check
+          diff -u THIRD_PARTY_NOTICES.md /tmp/tpn.check
       - name: schema drift
         run: |
           cargo run -p logweir-core --example emit_schema > /tmp/schema.json

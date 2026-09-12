@@ -121,6 +121,16 @@ impl Overlay {
             path.join("scripts/check-one-signer.sh"),
         )
         .expect("copy the gate script into the overlay");
+        // Task 32: check 2's primitive set is DERIVED from the graph minus this
+        // classification, and an unclassified direct dependency of
+        // `logweir-evidence` is fail-closed to `primitive` and exits 1. The
+        // overlay must therefore carry the gate's INPUT as well as the gate, or
+        // every test here would fail for a reason none of them is about.
+        std::fs::copy(
+            root.join("scripts/logweir-evidence-primitives.classify"),
+            path.join("scripts/logweir-evidence-primitives.classify"),
+        )
+        .expect("copy the primitive classification into the overlay");
 
         Overlay { path }
     }

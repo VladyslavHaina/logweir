@@ -16,4 +16,5 @@
 //! child modules below.
 #![allow(dead_code)]
 
+pub mod dial_tokens;
 pub mod exit_code_lint;

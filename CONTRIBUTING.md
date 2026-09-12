@@ -88,15 +88,47 @@ its dependencies is in [NOTICE](NOTICE) and
 [docs/LICENSE-docs](docs/LICENSE-docs). A change under `docs/` is contributed
 under that licence, with the same DCO sign-off.
 
+## Before you push: run `just gate`
+
+```bash
+just e2e-down              # the timing gate refuses while 9092 or 9000 answers
+just gate; echo "rc=$?"
+```
+
+**`just gate` is the one command that runs every check this repository has**, in
+one order, on a laptop. It takes about **seven minutes** on a quiet
+10-core machine from a warm debug target directory — of which most is the
+release compile — and it contains exactly **two workspace compilations**, one
+debug and one release. `docs/gates.md` carries the per-line seconds, what each
+gate proves, and what each gate does **not** prove; read it before adding a
+check, and add the row in the same commit as the check.
+
+**Please do not treat `.github/workflows/` as the gate.** No workflow in this
+repository has ever executed — there is no remote — so `ci.yml` mirrors the gate
+set as documentation and nothing more (`docs/tag1-checklist.md` clauses 2 and 4
+record that as `blocked: no remote`). If a check is not in `just gate` or in
+`docs/gates.md`'s stack/cluster table, nothing runs it, and
+`crates/logweir/tests/gate_lint.rs` fails when a new `scripts/check-*.sh` is in
+neither.
+
+Seven recipes are deliberately **outside** `just gate` — `e2e`, `smoke`,
+`smoke-weirkeeper`, `mvp-demo`, `k8s-demo`, `laptop-demo`, `pitr` — because each
+needs the compose stack, a Kubernetes cluster or a Docker build. They are in
+`docs/gates.md`'s table with what each proves. Run the one your change touches.
+
 ## Before you open a pull request
 
-- `just lint` and `cargo test --workspace` both exit 0.
+- `just gate` exits 0. (`just lint` and `cargo test --workspace` are subsets of
+  it, and still useful for a fast inner loop.)
 - A new dependency is a decision, not a detail: the workspace graph is closed
   and `THIRD_PARTY_NOTICES.md` is generated from it
   (`bash scripts/gen-third-party-notices.sh --write`), so adding a crate means
   regenerating that file in the same commit.
 - A guard without a mutant is not a guard. A test that cannot fail is worse
   than no test, because the ledger records it as passing.
+- **Every exit code is read directly, never through a pipe.** `cmd | grep`
+  reports grep's status. `crates/logweir/tests/gate_lint.rs` lints the justfile
+  and every file under `scripts/` for that.
 
 ---
 

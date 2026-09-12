@@ -141,9 +141,15 @@ ALLOWED_PRIMITIVE="logweir-evidence logweir logweir-verify weirkeeper"
 # no `sign_detached` and no entropy source, and it leaves ALLOWED_LINK and
 # ALLOWED_SOURCE untouched.
 ALLOWED_VERIFY_LINK="logweir-evidence logweir weirkeeper e2e"
-# The primitive crates themselves, from crates/logweir-evidence/Cargo.toml and
-# crates/logweir-verify/Cargo.toml — both halves declare both.
-PRIMITIVES="p256 ed25519-dalek"
+# The primitive crates check 2 walks are NOT a literal here any more (Task 32,
+# stage-2 carried item). `PRIMITIVES="p256 ed25519-dalek"` was a fixed list, so
+# a THIRD signing primitive added to `logweir-evidence` passed this gate in
+# silence — and the verify-only split is exactly the kind of change during which
+# a primitive moves without anyone noticing. The set is now DERIVED, below check
+# 1, from `logweir-evidence`'s direct dependencies in the `cargo metadata
+# --no-deps` this script already runs, minus the crates the checked-in
+# classification calls non-primitive. See $PRIMITIVES_CLASSIFY.
+PRIMITIVES_CLASSIFY="scripts/logweir-evidence-primitives.classify"
 # The verify-only crate check 4 walks.
 VERIFIER="logweir-verify"
 
@@ -223,6 +229,134 @@ done
 if [ "$fail" -eq 0 ]; then
   echo "ok: the crates reaching $SIGNER are exactly {$(echo $reaching | tr ' ' ',')}"
 fi
+
+# ------------------------------------------------- the primitive set, DERIVED
+# Task 32, stage-2 carried item. `PRIMITIVES` comes from the graph, not from a
+# literal: every DIRECT dependency of $SIGNER in the `cargo metadata --no-deps`
+# check 1 already produced, minus the crates `$PRIMITIVES_CLASSIFY` classifies
+# `non-primitive`.
+#
+# FAIL-CLOSED. A direct dependency nobody has classified is treated as a signing
+# primitive and this exits 1 naming it — so a third signing crate is a diff a
+# reviewer reads rather than a walk that silently keeps covering two. The file
+# is checked for staleness in the other direction too (an entry for a crate that
+# is no longer a direct dependency), for the same reason check 1's allowlist is:
+# a classification that has outlived its edge stops meaning anything. And an
+# entry without a `reason:` line is refused — the reason is the reviewable part.
+#
+# NO SECOND `cargo metadata`: $meta_file is reused, so this costs one python3
+# pass over JSON that is already on disk, reaches no network and builds nothing.
+# The program is run with its status read on its OWN LINE and its output
+# captured to a file — never `VAR="$(python3 … <<HEREDOC …)"`. A heredoc whose
+# body contains backticks inside a command substitution is mis-parsed by bash:
+# measured here, the closing `)` was found 60 lines further down the file and
+# the whole of check 2 ran inside the substitution, exiting 0 with nothing
+# printed. A gate that reports success having run nothing is this repository's
+# signature defect, so the shape that cannot do it is used instead.
+prim_file="$(mktemp)"
+trap 'rm -f "$meta_file" "$prim_file"' EXIT
+set +e
+python3 - "$meta_file" "$SIGNER" "$PRIMITIVES_CLASSIFY" > "$prim_file" <<'PYEOF'
+import json, sys
+
+meta_path, target, classify_path = sys.argv[1], sys.argv[2], sys.argv[3]
+meta = json.load(open(meta_path))
+
+pkg = next((p for p in meta["packages"] if p["name"] == target), None)
+if pkg is None:
+    print(f"FAIL: {target} is not a workspace member — check 2 has nothing to derive its "
+          f"primitive set from", file=sys.stderr)
+    sys.exit(1)
+
+# EVERY dependency kind, exactly as check 1's walk counts every kind: a signing
+# crate added under [dev-dependencies] is a primitive that reached this crate.
+direct = sorted({d["name"] for d in pkg.get("dependencies", [])})
+
+try:
+    raw = open(classify_path).read()
+except OSError as e:
+    print(f"FAIL: cannot read the primitive classification {classify_path}: {e}", file=sys.stderr)
+    print("  Check 2 derives its primitive set from the dependency graph MINUS the crates this",
+          file=sys.stderr)
+    print("  file classifies as non-primitive. Without it every direct dependency is unclassified,",
+          file=sys.stderr)
+    print("  and the fail-closed polarity would name all of them. Restore the file.", file=sys.stderr)
+    sys.exit(1)
+
+VALID = ("primitive", "non-primitive")
+klass, reason = {}, {}
+pending = None          # the crate whose `reason:` line has not arrived yet
+for n, line in enumerate(raw.splitlines(), 1):
+    text = line.strip()
+    if not text or text.startswith("#"):
+        continue
+    if text.startswith("reason:"):
+        if pending is None:
+            print(f"FAIL: {classify_path}:{n}: a `reason:` line with no entry above it",
+                  file=sys.stderr)
+            sys.exit(1)
+        body = text[len("reason:"):].strip()
+        if not body:
+            print(f"FAIL: {classify_path}:{n}: `{pending}`'s reason line is empty — the reason "
+                  f"is the reviewable part of a classification", file=sys.stderr)
+            sys.exit(1)
+        reason[pending] = body
+        pending = None
+        continue
+    if pending is not None:
+        print(f"FAIL: {classify_path}:{n}: `{pending}` has no `reason:` line. Every entry is two "
+              f"lines:\n    <crate> <primitive|non-primitive>\n    reason: <why>", file=sys.stderr)
+        sys.exit(1)
+    parts = text.split()
+    if len(parts) != 2 or parts[1] not in VALID:
+        print(f"FAIL: {classify_path}:{n}: expected `<crate> <primitive|non-primitive>`, got: {text}",
+              file=sys.stderr)
+        sys.exit(1)
+    name, verdict = parts
+    if name in klass:
+        print(f"FAIL: {classify_path}:{n}: `{name}` is classified twice", file=sys.stderr)
+        sys.exit(1)
+    klass[name] = verdict
+    pending = name
+if pending is not None:
+    print(f"FAIL: {classify_path}: `{pending}` has no `reason:` line (end of file)", file=sys.stderr)
+    sys.exit(1)
+
+bad = 0
+for c in direct:
+    if c not in klass:
+        print(f"FAIL: {c} is a direct dependency of {target} and is NOT classified in "
+              f"{classify_path}.", file=sys.stderr)
+        print(f"  Unclassified means PRIMITIVE here (fail-closed): until someone writes down what "
+              f"{c} is,", file=sys.stderr)
+        print(f"  this gate assumes a third signing crate just arrived. Add two lines to "
+              f"{classify_path}:", file=sys.stderr)
+        print(f"      {c} primitive        (or non-primitive)", file=sys.stderr)
+        print(f"      reason: <why>", file=sys.stderr)
+        bad = 1
+for c in sorted(klass):
+    if c not in direct:
+        print(f"FAIL: {classify_path} classifies `{c}`, which is no longer a direct dependency of "
+              f"{target} (the classification is stale)", file=sys.stderr)
+        bad = 1
+if bad:
+    sys.exit(1)
+
+prims = [c for c in direct if klass[c] == "primitive"]
+if not prims:
+    print(f"FAIL: no direct dependency of {target} is classified `primitive` — check 2 would walk "
+          f"nothing, and a walk over an empty set is a check that cannot fail", file=sys.stderr)
+    sys.exit(1)
+print(" ".join(prims))
+PYEOF
+derive_rc=$?
+set -e
+if [ "$derive_rc" -ne 0 ]; then
+  echo "FAIL: could not derive the signing primitives from the dependency graph (exit $derive_rc)" >&2
+  exit 1
+fi
+PRIMITIVES="$(cat "$prim_file")"
+echo "ok: the signing primitives derived from $SIGNER's direct dependencies are {$(echo $PRIMITIVES | tr ' ' ',')} (classified in $PRIMITIVES_CLASSIFY)"
 
 # ---------------------------------------------------------------- check 2
 echo "== cargo tree: only {$ALLOWED_PRIMITIVE} reach the primitive crates ($PRIMITIVES) — reaching a primitive is NOT reaching the signer; for that, see checks 1 and 3 =="
