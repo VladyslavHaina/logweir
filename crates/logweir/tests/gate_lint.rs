@@ -968,6 +968,45 @@ impl SuiteFixture {
         }
     }
 
+    /// A stub `mktemp` that honours `$TMPDIR` even with no template.
+    ///
+    /// **Without this the log-leak check below is vacuous**, and that was
+    /// measured rather than assumed: BSD `mktemp` (this is macOS) ignores
+    /// `$TMPDIR` unless it is given a template or `-t`, and puts a bare
+    /// `mktemp`'s file in `confstr(_CS_DARWIN_USER_TEMP_DIR)` instead — so a
+    /// before/after listing of the fixture's own `$TMPDIR` stayed empty whether
+    /// the harness removed its log or leaked it. A check that cannot fail is
+    /// this build's signature defect; the stub is how this one can.
+    fn stub_mktemp(&self) {
+        let witness = self.path.join("mktemp-witness");
+        self.stub(
+            "mktemp",
+            &format!(
+                "#!/bin/sh\n\
+                 d=\"${{TMPDIR:-/tmp}}\"\n\
+                 if [ \"${{1:-}}\" = -d ]; then p=\"$d/tmpd.$$\"; mkdir -p \"$p\"; \
+                 echo \"$p\" >> {w}; echo \"$p\"; exit 0; fi\n\
+                 i=0\n\
+                 while :; do p=\"$d/tmp.$$.$i\"; [ -e \"$p\" ] || break; i=$((i+1)); done\n\
+                 : > \"$p\"\n\
+                 echo \"$p\" >> {w}\n\
+                 echo \"$p\"\n",
+                w = witness.display()
+            ),
+        );
+    }
+
+    /// Every path the stub `mktemp` handed out, in order.
+    fn mktemp_witness(&self) -> Vec<PathBuf> {
+        let p = self.path.join("mktemp-witness");
+        std::fs::read_to_string(&p)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(PathBuf::from)
+            .collect()
+    }
+
     /// A stub `cargo`. `suite_rc` is what `cargo test --workspace` exits with;
     /// `slow` makes it take about two seconds, which is how a fixture exceeds a
     /// one-second budget without doing any work.
@@ -1010,18 +1049,6 @@ impl SuiteFixture {
             cmd.env(k, v);
         }
         cmd.output().expect("the harness runs")
-    }
-
-    fn tmp_entries(&self) -> Vec<String> {
-        std::fs::read_dir(self.path.join("tmp"))
-            .expect("the fixture TMPDIR is readable")
-            .map(|e| {
-                e.expect("a readable entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect()
     }
 }
 
@@ -1114,7 +1141,7 @@ fn time_unit_suite_removes_its_log_on_a_red() {
 
     let fx = SuiteFixture::new("log").with_toolchain_pin();
     fx.stub_cargo(101, false);
-    let before = fx.tmp_entries();
+    fx.stub_mktemp();
     let out = fx.run(&[]);
     let combined = format!("{}{}", text(&out.stdout), text(&out.stderr));
     assert_ne!(
@@ -1122,10 +1149,23 @@ fn time_unit_suite_removes_its_log_on_a_red() {
         Some(0),
         "the fixture must be red:\n{combined}"
     );
-    let after = fx.tmp_entries();
-    assert_eq!(
-        after, before,
-        "a red run left files behind in its TMPDIR: {after:?}\n{combined}"
+
+    // THE SELF-CHECK FIRST: the stub must have been the `mktemp` the harness
+    // reached, or the survivor check below compares two empty sets for ever.
+    let handed_out = fx.mktemp_witness();
+    assert!(
+        !handed_out.is_empty(),
+        "the stub mktemp was never called, so this test proved nothing about the log's \
+         lifetime. Is `$PATH` still pointing at the fixture's bin/?\n{combined}"
+    );
+    let survivors: Vec<&PathBuf> = handed_out.iter().filter(|p| p.exists()).collect();
+    assert!(
+        survivors.is_empty(),
+        "a red run leaked {} of the {} temp file(s) it created: {survivors:?}\n\
+         Every red run is a run an agent repeats; a trap that only covers the green path \
+         leaks one file per repetition.\n{combined}",
+        survivors.len(),
+        handed_out.len()
     );
 }
 
