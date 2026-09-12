@@ -1120,7 +1120,7 @@ fn install_md_states_the_unpublished_image_caveat() {
     let install = read("docs/install.md");
 
     for literal in [
-        "blocked: no remote",
+        "blocked: images not published",
         "author-only",
         "imagePullPolicy: Never",
         "kubectl --context docker-desktop apply --server-side -k config/overlays/local-images",

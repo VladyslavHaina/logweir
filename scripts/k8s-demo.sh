@@ -23,7 +23,7 @@
 # "Published" means a PULL from a registry the author does not control. This
 # script proves the manifests are right and the binaries run; it says nothing
 # about whether a stranger can install Logweir, and the install file's digest
-# rows still read `blocked: no remote`.
+# rows still read `blocked: images not published`.
 #
 # ===========================================================================
 # WHERE THE OBJECT STORE IS — critique B **H20**, answered

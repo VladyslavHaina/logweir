@@ -8,10 +8,12 @@ just gate; echo "rc=$?"
 ```
 
 Every check here must be reachable by that command or it is not enforced.
-**"Wired into `ci.yml`" is not a gate in this repository.** No workflow here has
-ever executed — there is no git remote — so `.github/workflows/` is
-documentation; `docs/tag1-checklist.md` clauses 2 and 4 record that as
-`blocked: no remote`, and the state is stated again at the bottom of this file.
+**"Wired into `ci.yml`" is still not the gate in this repository**, even now
+that `ci.yml` has executed and is green: a workflow reports after a push and
+this command reports before one, so `.github/workflows/` documents the gate and
+does not replace it. `release.yml` has never run at all —
+`docs/tag1-checklist.md` clause 4 records that as `blocked: no tag pushed` — and
+the whole state is stated again at the bottom of this file.
 
 ## What `just gate` costs, and what makes the number what it is
 
@@ -117,18 +119,34 @@ below are here; fifteen exist.
 
 ## Which workflows have executed
 
-**None — no remote exists; see `docs/tag1-checklist.md` clauses 2 and 4.**
+**Three of the six, all green, all on 2026-09-12**, on
+<https://github.com/VladyslavHaina/logweir>:
 
-Both of those rows read `blocked: no remote`. `ci.yml` mirrors the gate set as
-documentation and `crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate`
-keeps the mirror complete and keeps that sentence agreeing with the checklist —
-but a workflow that has never run has enforced nothing, and this file does not
-describe one as a gate.
+| workflow | first green run | latest green run | what it is |
+|---|---|---|---|
+| `no-oso.yml` | [34692903300](https://github.com/VladyslavHaina/logweir/actions/runs/34692903300), commit `5ea1c73` | [34700987811](https://github.com/VladyslavHaina/logweir/actions/runs/34700987811), commit `a113dd2` | green on every run it has ever had |
+| `ci.yml` | [34700428677](https://github.com/VladyslavHaina/logweir/actions/runs/34700428677), commit `9aa6bb2` | [34700987730](https://github.com/VladyslavHaina/logweir/actions/runs/34700987730), commit `a113dd2` | red on its first seven runs, each on one environment fact a laptop had hidden; jobs `build`, `e2e`, `python-verifier`, `deny`, `sync-upstream` all green |
+| `kind-demo.yml` | [34700987743](https://github.com/VladyslavHaina/logweir/actions/runs/34700987743), commit `a113dd2` | same | red on its first eight runs; the ninth ran all twelve demo steps on a `kind` cluster it created |
 
-`kind-demo.yml`'s **mechanism** was proved once, locally, by hand, on
-author-only images and under an explicit authorisation. That is not a CI run, it
-does not close clause 2, and the row that would close it names what does: the
-URL of one green `kind-demo` run on a cluster that run created.
+**Three have never executed**: `release.yml`, because it fires on a pushed tag
+and no tag has been pushed; `release-drill.yml` and `engine-matrix.yml`, because
+their schedules have not fired. **A workflow that has never run enforces
+nothing**, and this file does not describe those three as gates.
+
+`ci.yml` mirrors the gate set and
+`crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate` keeps the
+mirror complete and keeps its executed-workflows comment agreeing with the
+checklist, row by row, in both states. It is still documentation of `just gate`
+rather than a replacement for it: it reports after a push, and the point of one
+local command is to report before one.
+
+**`kind-demo.yml`'s green run closes checklist clause 2 and nothing else.** It
+installed the **author-only** branch: both images were built by that run and
+loaded onto the `kind` node, never pulled from a registry, so Global Constraint
+37 stands, clause 1 still reads `blocked: images not published`, and no row here
+may be read as evidence that an image was published. The `kind-demo.yml`
+**mechanism** had also been proved once, locally, by hand, under an explicit
+authorisation; that was not a CI run and did not close anything.
 
 ---
 

@@ -1510,7 +1510,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
 ///
 /// Task 23 tightens this to the digest form; until then the tag is what is
 /// checked in, and `job.rs`'s own comment records why (Global Constraint 37 —
-/// no remote exists, so no digest exists to pin).
+/// nothing has been published, so no published digest exists to pin).
 #[test]
 fn the_runner_image_is_named_once() {
     let needle = format!("{}{}", "ghcr.io/logweir/", "logweir");

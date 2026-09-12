@@ -103,10 +103,14 @@ debug and one release. `docs/gates.md` carries the per-line seconds, what each
 gate proves, and what each gate does **not** prove; read it before adding a
 check, and add the row in the same commit as the check.
 
-**Please do not treat `.github/workflows/` as the gate.** No workflow in this
-repository has ever executed — there is no remote — so `ci.yml` mirrors the gate
-set as documentation and nothing more (`docs/tag1-checklist.md` clauses 2 and 4
-record that as `blocked: no remote`). If a check is not in `just gate` or in
+**Please do not treat `.github/workflows/` as the gate.** Three workflows have
+now executed — `ci.yml` (run 34700987730), `no-oso.yml` (run 34700987811) and
+`kind-demo.yml` (run 34700987743), all green on commit `a113dd2`, 2026-09-12 —
+and `ci.yml` still mirrors the gate set as documentation rather than replacing
+it: `just gate` is the enforcement point, it is what a laptop can run before a
+push, and `release.yml` has never run at all (no tag has been pushed, so
+`docs/tag1-checklist.md` clause 4 reads `blocked: no tag pushed` and the digest
+rows read `blocked: images not published`). If a check is not in `just gate` or in
 `docs/gates.md`'s stack/cluster table, nothing runs it, and
 `crates/logweir/tests/gate_lint.rs` fails when a new `scripts/check-*.sh` is in
 neither.

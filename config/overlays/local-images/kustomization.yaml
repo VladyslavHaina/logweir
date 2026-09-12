@@ -9,7 +9,7 @@
 # §11, amendment 5): a locally built or locally loaded tag is **author-only**,
 # and an install proven with this overlay proves that the manifests are right
 # and that the binaries run — and says nothing at all about whether a stranger
-# can install Logweir. The install file's digest rows read `blocked: no remote`
+# can install Logweir. The install file's digest rows read `blocked: images not published`
 # until a git remote exists and `release.yml` has run against it. This is path
 # **(b)** of `docs/install.md` and Task 31's CI branch names it by this path.
 #

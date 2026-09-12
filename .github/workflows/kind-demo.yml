@@ -9,20 +9,38 @@ name: kind-demo
 # on a developer's machine except under a single proving run the controller
 # authorises at dispatch.
 #
-# NOT YET EXECUTED. There is no git remote for this repository, so this workflow
-# has never run, and `docs/tag1-checklist.md` clause 2 reads `blocked: no
-# remote` with the date and the artefact that would move it: the URL of one
-# green run of THIS workflow. Nothing in this tree may record that clause as
-# closed. What HAS been done is the shape: `crates/logweir/tests/workflow_lint.rs`
+# EXECUTED, AND GREEN — run 34700987743, commit a113dd2, 2026-09-12:
+# https://github.com/VladyslavHaina/logweir/actions/runs/34700987743
+#
+# That run created a `kind` cluster from the pinned `e2e/k8s/kind-config.yaml`,
+# brought the compose stack up, built both images natively on the amd64 runner,
+# patched CoreDNS, probed the broker from inside the cluster (`reachable=true`),
+# and then ran all twelve steps of `scripts/demo-steps.sh`: `Backup` reaching
+# `phase: Succeeded`, X-UIWRITE (a) returning HTTP 201 through `kubectl proxy`,
+# the approval minted with the shipped CLI, `Restore` reaching
+# `phase: Succeeded` with `status.outcome: pass`, both readers over the
+# scorecard, `PHASE C EXIT CRITERION MET`, and a clean teardown. It was red on
+# its first eight runs — seven on environment facts a laptop had hidden, and the
+# eighth on the demo's step 3 meeting the laptop's pins, which Task 33 fixed.
+# `docs/tag1-checklist.md` clause 2 now reads `closed` and names that URL.
+#
+# IT TOOK THE AUTHOR-ONLY INSTALL BRANCH, AND THAT IS THE WHOLE LIMIT OF WHAT IT
+# PROVES. Both images were built by that run and `kind load`ed onto the node;
+# nothing was pulled from a registry. So this run is NOT evidence for clause 1
+# (Global Constraint 37): the digest rows still read
+# `blocked: images not published`, and what closes clause 1 is a pull of the
+# published digests on a host that did not build them — one tagged run of
+# `release.yml`, which has never run because no tag has been pushed. The
+# PUBLISHED install branch below has therefore still never executed.
+#
+# The shape is held independently of the run: `crates/logweir/tests/workflow_lint.rs`
 # parses this file; `scripts/kind-demo.sh`'s three pre-steps and the ORDER of the
 # walk are proven dry with stubs (the order with tracers standing in for the step
 # bodies), and step 1's preflight is proven dry BY EXECUTION under this driver —
 # the real `scripts/demo-steps.sh`, no tracers
-# (`laptop_demo_lint.rs::kind_demo_passes_its_first_step_on_its_own_context`);
-# the eleven steps after it are evidenced only by the laptop walkthrough
-# `e2e/k8s/laptop-demo.md`, never yet by a `kind` cluster. One locally authorised
-# proving run is transcribed in `docs/kubernetes.md` §18 and labelled as what it
-# is.
+# (`laptop_demo_lint.rs::kind_demo_passes_its_first_step_on_its_own_context`).
+# One locally authorised proving run is transcribed in `docs/kubernetes.md` §18
+# and labelled as what it is.
 #
 # ===========================================================================
 # THE ONE HARD PROBLEM, AND WHY THERE IS NO `extraPortMappings` HERE

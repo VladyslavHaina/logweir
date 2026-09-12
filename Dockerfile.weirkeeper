@@ -24,8 +24,10 @@
 #
 # SINGLE-PLATFORM, AND LOADED. `docker build --platform a,b` cannot `--load`:
 # the local image store holds single-platform images only, so a multi-platform
-# build must `--push` to a registry — and there is no remote (Global Constraint
-# 37). Either way `weirkeeper:check` would not exist as a local tag,
+# build must `--push` to a registry — and nothing in this tree pushes:
+# publication happens in `release.yml` on a pushed tag, which has never run
+# (Global Constraint 37, `blocked: images not published`). Either way
+# `weirkeeper:check` would not exist as a local tag,
 # `check-image-weirkeeper.sh` would have nothing to inspect, `just
 # check-org-root` could not run and `imagePullPolicy: Never` would find no
 # image on the node. Multi-arch is produced in exactly one place —

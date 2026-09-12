@@ -30,7 +30,7 @@
 /// that image (`/etc/logweir/org-root.fingerprint`, stage-2 Task 16's T1); a
 /// digest names bytes.
 ///
-/// AND IT IS STILL `blocked: no remote` (Global Constraint 37). "Published"
+/// AND IT IS STILL `blocked: images not published` (Global Constraint 37). "Published"
 /// means a PULL from a registry the author does not control, and this digest
 /// names bytes that exist on exactly one laptop. Two things were MEASURED on
 /// docker-desktop v1.34.1 and are written into `docs/kubernetes.md` §14 rather
@@ -48,8 +48,9 @@
 ///     including a fully cached no-op rebuild, because BuildKit re-generates
 ///     the provenance attestation each time. So this value is not reproducible
 ///     even on the machine that produced it, and the install file's digest rows
-///     keep reading `blocked: no remote` until `release.yml` has pushed to a
-///     real registry and the digest comes back from there (Task 30b).
+///     keep reading `blocked: images not published` until `release.yml` has
+///     pushed to a real registry and the digest comes back from there
+///     (Task 30b). No tag has been pushed, so that workflow has never run.
 pub const RUNNER_IMAGE: &str =
     "ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229";
 
@@ -65,7 +66,7 @@ pub const RUNNER_IMAGE: &str =
 /// name (E19b). **On a cluster that did not build the pins it is not.** A
 /// GitHub runner builds both images minutes before the demo, at digests
 /// nothing in the tree names, and the shipped repository is not pullable
-/// (Global Constraint 37, `blocked: no remote`), so a controller that could
+/// (Global Constraint 37, `blocked: images not published`), so a controller that could
 /// only ever name the compile-time pin would create Jobs no such node can
 /// start. This variable is how the operator hands the controller the image
 /// the node actually holds.
@@ -220,8 +221,8 @@ pub const APPROVAL_MOUNT_PATH: &str = "/approval";
 ///
 /// GLOBAL CONSTRAINT 17 AND GC37, TOGETHER. Zero cloud spend means every
 /// demo, test and CI job runs against a locally built image, and GC37 records
-/// that no remote exists yet, so [`RUNNER_IMAGE`] names a repository nothing
-/// can pull from. `Never` makes a missing local image fail legibly as
+/// that the images are not published, so [`RUNNER_IMAGE`] names a repository
+/// nothing can pull from. `Never` makes a missing local image fail legibly as
 /// `ErrImageNeverPull` instead of as an opaque pull error against a registry
 /// path that resolves to nothing. **Task 23 pinned the digest and the policy
 /// did not change**, which is the point: the two are separate decisions.

@@ -297,15 +297,17 @@ pre-release ruling by accident.**
   `immutable`/`retain_until` today. A bucket genuinely under Object Lock will
   not be recognised as such until that API exists.
 
-### The controller image is multi-architecture in CI only — and CI has never run: `blocked: no remote`
+### The controller image is multi-architecture in CI only — and `release.yml` has never run: `blocked: no tag pushed`
 
-**Task 30b, 2026-09-11. The status of this entry is `blocked: no remote`, and
-what would close it is one sentence: a green tagged run of
+**Task 30b, 2026-09-11. The status of this entry is `blocked: no tag pushed`,
+and what would close it is one sentence: a green tagged run of
 `.github/workflows/release.yml` whose `pullback` job summary carries the runner
 digest and the controller manifest digest, pulled on a machine that did not
-produce them.** No git remote is configured for this repository, so no tag can be
-pushed, no workflow can start, and no such summary exists. Everything below is
-the shape of a file and the measurement of a laptop.
+produce them.** **2026-09-12: the remote exists now** —
+<https://github.com/VladyslavHaina/logweir> — and `ci.yml`, `no-oso.yml` and
+`kind-demo.yml` have all run green on it. `release.yml` has not: it fires on a
+pushed tag, no tag has been pushed, so no such summary exists. Everything below
+is the shape of a file and the measurement of a laptop.
 
 **What the workflow now says.** `ghcr.io/logweir/weirkeeper` is published as a
 manifest list carrying `linux/amd64` and `linux/arm64`. Each variant is compiled

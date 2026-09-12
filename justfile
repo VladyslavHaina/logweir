@@ -552,8 +552,9 @@ install-yaml:
 # WHAT THIS DOES AND DOES NOT PROVE. It proves `kubectl apply` exits 0. It does
 # NOT start a pod: the images are referenced by tag, no such image has been
 # pushed, and the Deployment's pod is expected to sit in `ImagePullBackOff`
-# until `release.yml` has run against a git remote (Global Constraint 37 —
-# `blocked: no remote`). For an author-only local run use the overlay:
+# until `release.yml` has run on a pushed tag (Global Constraint 37 —
+# `blocked: images not published`; no tag has been pushed, so that workflow has
+# never run). For an author-only local run use the overlay:
 #
 #     kubectl --context docker-desktop apply --server-side -k config/overlays/local-images
 #
@@ -641,7 +642,9 @@ check-secrets ns scram="kafka-scram":
 # SINGLE-PLATFORM, AND LOADED INTO THE LOCAL DAEMON. `docker build
 # --platform linux/amd64,linux/arm64` CANNOT `--load`: the local image store
 # holds single-platform images only, so a multi-platform build must `--push` to
-# a registry — and there is no remote (Global Constraint 37). Either way
+# a registry — and nothing in this tree pushes: publication happens in
+# `release.yml` on a pushed tag, which has never run (Global Constraint 37,
+# `blocked: images not published`). Either way
 # `weirkeeper:check` would not exist as a local tag,
 # `scripts/check-image-weirkeeper.sh weirkeeper:check` would have nothing to
 # inspect, `just check-org-root` could not run, and `imagePullPolicy: Never`
@@ -781,7 +784,7 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
 # and `config/overlays/k8s-demo/deployment-env-patch.yaml`, which points the
 # controller at this laptop's compose stack. "Published" still means a PULL
 # from a registry the author does not control, and the install file's digest
-# rows still read `blocked: no remote`.
+# rows still read `blocked: images not published`.
 #
 # THE ORDER OF THE FIRST THREE STEPS IS NOT A STYLE CHOICE.
 # `scripts/time-unit-suite.sh` refuses to run, exit 1, while 9092 or 9000
@@ -900,11 +903,12 @@ laptop-demo:
 # check this repository has, in an order chosen so the total is what it is.
 #
 # WHY IT EXISTS. Every check in this tree must be reachable by one local
-# command or it is not enforced. "Wired into ci.yml" is not a gate here: NO
-# WORKFLOW IN THIS REPOSITORY HAS EVER EXECUTED — there is no git remote — so
-# `.github/workflows/` is documentation and `docs/tag1-checklist.md` clauses 2
-# and 4 record that as `blocked: no remote`. This recipe is the enforcement
-# point.
+# command or it is not enforced. "Wired into ci.yml" is still not the gate here,
+# even now that `ci.yml` HAS executed (run 34700987730, commit a113dd2,
+# 2026-09-12, green): a workflow reports after a push, this recipe reports
+# before one, and `docs/tag1-checklist.md` clause 4 still reads
+# `blocked: no tag pushed` because `release.yml` has never run. This recipe is
+# the enforcement point and `ci.yml` is its mirror.
 #
 # THE ORDERING IS THE BUDGET. `./scripts/time-unit-suite.sh` sits IMMEDIATELY
 # after `cargo test --workspace` and BEFORE the `--release` line, because its

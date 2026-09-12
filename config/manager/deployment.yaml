@@ -40,7 +40,7 @@
 # means first adding a listener, which is a tag-2 decision.
 #
 # ---------------------------------------------------------------------------
-# THE IMAGE IS A DIGEST (Task 23), AND IT IS STILL `blocked: no remote`
+# THE IMAGE IS A DIGEST (Task 23), AND IT IS STILL `blocked: images not published`
 # ---------------------------------------------------------------------------
 # Global Constraint 7 pins by digest and never by tag. The reference below is
 # the literal registry namespace of Global Constraint 24 followed by the
@@ -55,7 +55,7 @@
 # unchanged by it. "Published" means a PULL from a registry the author does not
 # control; this digest names bytes that exist on exactly one laptop, and **no
 # such image has been pushed**. Until a git remote exists and `release.yml` has
-# run against it, `logweir.yaml`'s digest rows read `blocked: no remote`.
+# run against it, `logweir.yaml`'s digest rows read `blocked: images not published`.
 # Applying this file on a cluster with no access to that repository leaves the
 # pod in `ImagePullBackOff`, and X-APPLY does not claim otherwise: it proves
 # `kubectl apply` exits 0, not that a pod starts (spec §16 clause 1).

@@ -639,7 +639,7 @@ async fn backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy
     assert_eq!(
         containers[0]["imagePullPolicy"].as_str(),
         Some("Never"),
-        "Global Constraint 17 (zero cloud spend) and GC37 (`blocked: no remote`): the image is \
+        "Global Constraint 17 (zero cloud spend) and GC37 (`blocked: images not published`): the image is \
          local, and `Never` makes a missing one fail as ErrImageNeverPull rather than as an \
          opaque pull error"
     );

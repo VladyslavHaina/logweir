@@ -1917,7 +1917,8 @@ fn workflow_lint_kind_demo_names_the_install_branch() {
     assert!(
         saw_author_only,
         "kind-demo.yml has no `{AUTHOR_ONLY}` install branch. That is the branch that can run \
-         today — there is no remote — and the one whose name refuses the clause-1 claim"
+         today — the images are not published — and the one whose name refuses the clause-1 \
+         claim"
     );
     assert!(
         saw_published,

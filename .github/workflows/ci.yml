@@ -1,18 +1,36 @@
 # THIS FILE IS DOCUMENTATION, NOT A GATE — and the sentence below is written
-# from the two preceding tasks' reports rather than from intent.
+# from the runs themselves rather than from intent.
 #
-# WORKFLOWS IN THIS REPOSITORY THAT HAVE ACTUALLY EXECUTED: none — no remote
-# exists; see docs/tag1-checklist.md clauses 2 and 4. Clause 2 (Demo 1 on a
-# `kind` cluster created by the workflow) and clause 4 (Task 9's F1-F4 closed and
-# then one real tagged run of release.yml) both read `blocked: no remote`, and
-# nothing here may describe ci.yml, release.yml or kind-demo.yml as a check that
-# runs. `kind-demo.yml`'s mechanism was proved once locally, by hand, on
-# author-only images under an explicit controller authorisation; that is not a
-# CI run and is not counted as one.
+# WORKFLOWS IN THIS REPOSITORY THAT HAVE ACTUALLY EXECUTED, as of 2026-09-12, on
+# https://github.com/VladyslavHaina/logweir; see docs/tag1-checklist.md clauses 2
+# and 4:
 #
-# THE ENFORCEMENT POINT IS `just gate` (Task 32), which runs the same set in one
-# order on a laptop. The steps below MIRROR it so that the day a remote exists
-# the workflow is already the same check — and
+#   * no-oso.yml — green on every run since the first, run 34692903300 on commit
+#     5ea1c73, 2026-09-12; latest green run 34700987811 on commit a113dd2.
+#   * ci.yml — red on its first seven runs, each on one environment fact a laptop
+#     had hidden; GREEN on run 34700428677, commit 9aa6bb2, 2026-09-12, and again
+#     on run 34700987730, commit a113dd2. Every job green: build, e2e,
+#     python-verifier, deny, sync-upstream.
+#   * kind-demo.yml — red on its first eight runs; GREEN on run 34700987743,
+#     commit a113dd2, 2026-09-12. That run installed the AUTHOR-ONLY branch: both
+#     images were built by the run and loaded onto the kind node, never pulled.
+#     It closes clause 2 and it is NOT evidence for clause 1 (Global Constraint
+#     37 — the images are still not published).
+#
+# NEVER EXECUTED, not once, on any commit:
+#
+#   * release.yml — it fires on a pushed tag, and no tag has been pushed, so
+#     checklist clause 4 reads `blocked: no tag pushed` and clause 6, whose
+#     artefact this workflow would publish, reads `blocked: no release run`.
+#   * release-drill.yml and engine-matrix.yml — scheduled, and no schedule has
+#     fired.
+#
+# Nothing here may describe those three as checks that run.
+#
+# THE ENFORCEMENT POINT IS STILL `just gate` (Task 32), which runs the same set
+# in one order on a laptop, BEFORE a push rather than after one. The steps below
+# MIRROR it, which is why the first green run of this file needed eleven fix
+# commits and no new check — and
 # `crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate` asserts the
 # mirror stays complete: every `scripts/*.sh` that `just gate` runs appears on an
 # executed line here, and this comment names the same state the checklist does.

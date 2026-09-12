@@ -282,17 +282,23 @@ fn the_tag1_checklist_has_one_row_per_spec_clause() {
     }
 }
 
-/// **No blocked row is written as closed, and the five that are blocked today
-/// are the five that cannot be closed from this tree.**
+/// **No blocked row is written as closed, and the four that are blocked today
+/// are the four that cannot be closed from this tree.**
 ///
 /// Tag-1 STANDING RULE 22: a mark that is blocked is recorded as blocked, never
 /// as closed. The same rule governs a clause. Clause 1 needs images published
-/// to a registry the author does not control; clauses 2, 4 and 6 need a git
-/// remote that does not exist; clause 8 is an act by the owner — a formal
-/// registry search — and no task in the plan closes it.
+/// to a registry the author does not control; clause 4 needs a tagged run of
+/// `release.yml`, and no tag has been pushed; clause 6 needs the artefact that
+/// run would publish; clause 8 is an act by the owner — a formal registry
+/// search — and no task in the plan closes it.
+///
+/// **Clause 2 was one of five until 2026-09-12 and is now `closed`**, by
+/// `kind-demo.yml` run 34700987743 on commit `a113dd2`, which the row names
+/// with its URL. That is what the exactness below is for: the row moved
+/// because a run in the world moved, and the move cost this line of diff.
 ///
 /// The second assertion is deliberately exact rather than a lower bound. If a
-/// later task closes one of the five it must edit this list in the same commit,
+/// later task closes one of the four it must edit this list in the same commit,
 /// which is the point: a row moving from `blocked` to `closed` is a claim about
 /// the world and should cost a reviewer a line of diff.
 #[test]
@@ -321,12 +327,13 @@ fn no_blocked_row_is_written_as_closed() {
         }
     }
 
-    let expected: BTreeSet<u32> = [1, 2, 4, 6, 8].into_iter().collect();
+    let expected: BTreeSet<u32> = [1, 4, 6, 8].into_iter().collect();
     assert_eq!(
         blocked, expected,
-        "clauses 1 (images not published), 2, 4 and 6 (no remote) and 8 (owner action) are \
-         the five that cannot be closed from this tree. A change to this set is a change \
-         to what the project claims, and belongs in the same commit as the work that \
-         earned it."
+        "clauses 1 (images not published), 4 (no tag pushed), 6 (no release run) and 8 \
+         (owner action) are the four that cannot be closed from this tree; clause 2 closed \
+         on 2026-09-12 with the URL of a green `kind-demo.yml` run. A change to this set is \
+         a change to what the project claims, and belongs in the same commit as the work \
+         that earned it."
     );
 }

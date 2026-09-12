@@ -1,11 +1,12 @@
 //! **The gate-recipe closeout.** Task 32, the last task of the tag-1 plan.
 //!
 //! Every check this repository has must be reachable by ONE local command or it
-//! is not enforced. "Wired into `ci.yml`" is not a gate here: no workflow in
-//! this repository has ever executed — there is no git remote — so
-//! `.github/workflows/` is documentation, and `docs/tag1-checklist.md` clauses
-//! 2 and 4 record that as `blocked: no remote`. `just gate` is the enforcement
-//! point, and this file is what keeps it honest.
+//! is not enforced. "Wired into `ci.yml`" is still not the gate here, even now
+//! that `ci.yml` HAS executed (green on 2026-09-12): a workflow reports after a
+//! push and `just gate` reports before one, `release.yml` has never run at all,
+//! and `docs/tag1-checklist.md` clause 4 records that as
+//! `blocked: no tag pushed`. `just gate` is the enforcement point, and this
+//! file is what keeps it honest.
 //!
 //! # The enumeration, and why it is a union rather than a single set
 //!
@@ -415,9 +416,33 @@ fn gate_lint_no_masked_exit_codes() {
 /// **`ci.yml` mirrors the gate, and says what has actually executed.**
 ///
 /// Both halves matter. The mirror keeps the workflow from quietly covering less
-/// than the local gate; the comment keeps the workflow from being read as a
-/// check that runs, which it is not — no workflow in this repository has ever
-/// executed, and `docs/tag1-checklist.md` clauses 2 and 4 say so in those words.
+/// than the local gate; the comment keeps `ci.yml` honest about which workflows
+/// have run and which have not.
+///
+/// # Why part 2 reads the checklist in BOTH states
+///
+/// Until 2026-09-12 this test pinned one sentence — "none — no remote exists" —
+/// which was true and which made the test useless the moment it stopped being
+/// true: the first green run would have turned it red with nothing to say about
+/// what the comment should have become. So it now holds the comment to the
+/// checklist in either state, per row:
+///
+///   * a row that reads `closed` must carry an `actions/runs/<id>` URL, and the
+///     comment must name that row's workflow WITH that run id in the same
+///     entry, under the executed heading;
+///   * a row that reads `blocked: <reason>` must have its workflow named under
+///     the never-executed heading, never under the executed one, and its entry
+///     there must carry the row's own reason.
+///
+/// KILLS: (i) a comment that names a run id other than the one the row carries;
+/// (ii) row 4 flipped to `closed` with the comment left alone — the row then
+/// carries no run URL at all, and `release.yml` is still filed as never run;
+/// (iii) a comment that claims `release.yml` executed, by moving it above the
+/// never-executed heading.
+///
+/// The sentence-joining idiom stays: comment markers stripped and the lines
+/// joined by a space, because a comment that wraps is still one sentence and a
+/// reader of `ci.yml` sees it as one.
 #[test]
 fn gate_lint_ci_mirrors_the_gate() {
     let ci = read(".github/workflows/ci.yml");
@@ -440,26 +465,12 @@ fn gate_lint_ci_mirrors_the_gate() {
          document the whole set; a comment naming a script does not count."
     );
 
-    // 2. The executed-workflows comment, written from the two preceding tasks'
-    //    reports rather than from intent, and naming the same state the
-    //    checklist does.
+    // 2. The executed-workflows comment, written from the runs themselves and
+    //    naming the same state the checklist does — in EITHER state.
     let checklist = read("docs/tag1-checklist.md");
-    let clause_rows: Vec<&str> = checklist
-        .lines()
-        .filter(|l| l.starts_with("| 2 |") || l.starts_with("| 4 |"))
-        .collect();
-    assert_eq!(
-        clause_rows.len(),
-        2,
-        "docs/tag1-checklist.md must carry rows for clauses 2 and 4; found {clause_rows:?}"
-    );
-    let both_blocked = clause_rows.iter().all(|r| r.contains("blocked: no remote"));
-    assert!(
-        both_blocked,
-        "clauses 2 and 4 of docs/tag1-checklist.md no longer BOTH read `blocked: no remote`. \
-         If a workflow has now run, ci.yml's executed-workflows comment must be rewritten to \
-         name it — this test exists so the two cannot disagree.\n{clause_rows:?}"
-    );
+    // The two rows whose subject is a workflow, and the workflow each is about.
+    const ROW_WORKFLOWS: [(&str, &str); 2] = [("| 2 |", "kind-demo.yml"), ("| 4 |", "release.yml")];
+
     // The sentence is read as a SENTENCE: comment markers stripped and the
     // lines joined by a space, because a comment that wraps is still one
     // sentence and a reader of ci.yml sees it as one.
@@ -469,12 +480,127 @@ fn gate_lint_ci_mirrors_the_gate() {
         .map(|l| l.trim_start().trim_start_matches('#').trim())
         .collect::<Vec<&str>>()
         .join(" ");
-    assert!(
-        comments.contains("none — no remote exists; see docs/tag1-checklist.md clauses 2 and 4"),
-        "ci.yml must state, in a comment, exactly which workflows have executed. The checklist \
-         says clauses 2 and 4 are `blocked: no remote`, so the sentence is:\n  \
-         `none — no remote exists; see docs/tag1-checklist.md clauses 2 and 4`"
-    );
+
+    // The comment has two halves and says which is which. Everything before
+    // the never-executed heading is a claim that a workflow RAN; everything
+    // after it is a claim that one did not.
+    const NEVER: &str = "NEVER EXECUTED";
+    let split_at = comments.find(NEVER).unwrap_or_else(|| {
+        panic!(
+            "ci.yml's comment carries no `{NEVER}` heading. The comment is read as two halves \
+             — what has run, and what has not — and without the heading a workflow that never \
+             ran cannot be told from one that did."
+        )
+    });
+    let (executed_half, never_half) = comments.split_at(split_at);
+
+    for (prefix, workflow) in ROW_WORKFLOWS {
+        let row = checklist
+            .lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("docs/tag1-checklist.md must carry a row `{prefix}`"));
+        let status = row
+            .split('|')
+            .nth(3)
+            .unwrap_or("")
+            .trim()
+            .trim_matches('`')
+            .trim();
+
+        if status == "closed" {
+            // A closed row about a workflow is closed BY A RUN, and says which.
+            let ids = run_ids(row);
+            assert!(
+                !ids.is_empty(),
+                "row `{prefix}` of docs/tag1-checklist.md reads `closed` and carries no \
+                 `actions/runs/<id>` URL. A clause about a workflow is closed by a run, and \
+                 the row is where the run is named.\n{row}"
+            );
+            let entry = entry_for(executed_half, workflow).unwrap_or_else(|| {
+                panic!(
+                    "row `{prefix}` reads `closed`, so `{workflow}` ran — and ci.yml's comment \
+                     does not name it above the `{NEVER}` heading. The comment and the \
+                     checklist may not disagree about what has executed."
+                )
+            });
+            for id in &ids {
+                assert!(
+                    entry.contains(id.as_str()),
+                    "row `{prefix}` names run {id}, and ci.yml's `{workflow}` entry does not. \
+                     A comment that names a different run than the row is worse than one that \
+                     names none.\n\nthe entry, verbatim:\n{entry}"
+                );
+            }
+        } else if let Some(reason) = status.strip_prefix("blocked: ") {
+            assert!(
+                entry_for(executed_half, workflow).is_none(),
+                "row `{prefix}` reads `{status}`, and ci.yml's comment names `{workflow}` \
+                 above the `{NEVER}` heading — i.e. as a workflow that has run. One of the \
+                 two is wrong and this test does not guess which."
+            );
+            let entry = entry_for(never_half, workflow).unwrap_or_else(|| {
+                panic!(
+                    "row `{prefix}` reads `{status}`, so `{workflow}` has not run — and \
+                     ci.yml's comment does not say so under its `{NEVER}` heading."
+                )
+            });
+            assert!(
+                entry.contains(reason),
+                "row `{prefix}` gives the reason `{reason}`, and ci.yml's `{workflow}` entry \
+                 under `{NEVER}` does not carry it. The workflow's absence and the reason for \
+                 it are one fact.\n\nthe entry, verbatim:\n{entry}"
+            );
+        } else {
+            panic!(
+                "row `{prefix}` of docs/tag1-checklist.md reads `{status}`; this test reads \
+                 `closed` and `blocked: <reason>` and nothing else."
+            );
+        }
+    }
+}
+
+/// The workflow files this repository ships. Longest first is not needed — no
+/// name is a substring of another — but the set is what makes an "entry"
+/// bounded.
+const WORKFLOW_FILES: [&str; 6] = [
+    "ci.yml",
+    "no-oso.yml",
+    "kind-demo.yml",
+    "release.yml",
+    "release-drill.yml",
+    "engine-matrix.yml",
+];
+
+/// The slice of `text` that belongs to `workflow`: from the first mention of
+/// its name to the next mention of any OTHER workflow. A comment written as one
+/// entry per workflow is read as one entry per workflow, so a run id filed
+/// under the wrong name does not count as filed under the right one.
+fn entry_for<'a>(text: &'a str, workflow: &str) -> Option<&'a str> {
+    let start = text.find(workflow)?;
+    let after = start + workflow.len();
+    let end = WORKFLOW_FILES
+        .iter()
+        .filter(|w| **w != workflow)
+        .filter_map(|w| text[after..].find(w).map(|at| after + at))
+        .min()
+        .unwrap_or(text.len());
+    Some(&text[start..end])
+}
+
+/// Every `actions/runs/<id>` id in `line`, in order. A run URL is how a row
+/// about a workflow names the run that closed it.
+fn run_ids(line: &str) -> Vec<String> {
+    const MARK: &str = "actions/runs/";
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(at) = rest.find(MARK) {
+        rest = &rest[at + MARK.len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if !id.is_empty() {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// **The seven stack/cluster recipes are out of the gate, and all seven are in

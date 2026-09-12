@@ -31,13 +31,13 @@ using the `@sha256:` references the file carries.
 **This path requires that those digests have been pulled back from `ghcr.io`
 on a host that did not build them.** Until the release workflow has run, every
 digest row in this document, in `logweir.yaml`'s own header comment and in
-`docs/tag1-checklist.md` reads **`blocked: no remote`**, and this path is
+`docs/tag1-checklist.md` reads **`blocked: images not published`**, and this path is
 **documented but not yet exercised**.
 
 | image | reference lives in | status |
 |---|---|---|
-| `ghcr.io/logweir/weirkeeper` (controller) | `config/manager/deployment.yaml`, rendered into `logweir.yaml` | `blocked: no remote` |
-| `ghcr.io/logweir/logweir` (runner) | `crates/weirkeeper/src/job.rs`, the constant `RUNNER_IMAGE` | `blocked: no remote` |
+| `ghcr.io/logweir/weirkeeper` (controller) | `config/manager/deployment.yaml`, rendered into `logweir.yaml` | `blocked: images not published` |
+| `ghcr.io/logweir/logweir` (runner) | `crates/weirkeeper/src/job.rs`, the constant `RUNNER_IMAGE` | `blocked: images not published` |
 
 **No digest value is written into this document, on purpose.** A locally built
 image's digest changes on **every build** — three builds of the same source

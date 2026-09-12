@@ -1654,7 +1654,7 @@ echo "rc=$?"
 The waiting message is `Error response from daemon: error from registry:
 denied`. That is the expected and recorded result of Global Constraint 37: the
 image is referenced by tag, no such image has been pushed, and the install file's
-digest rows read `blocked: no remote`. **X-APPLY proves `kubectl apply` exits 0;
+digest rows read `blocked: images not published`. **X-APPLY proves `kubectl apply` exits 0;
 it does not start a pod**, so on its own it can be ticked while the documented
 install works for nobody but the author. What closes spec §16 clause 1 is pulling
 the published digests back from a registry the author does not control, which is
@@ -1761,7 +1761,7 @@ BuildKit attaches a provenance attestation to the manifest list and regenerates
 it on every build, so the list digest moves even when nothing about the image
 does. A locally built digest therefore names bytes that (a) exist on exactly one
 laptop and (b) **cannot be reproduced on that laptop**. This is the strongest
-argument in the tree for Global Constraint 37's `blocked: no remote`, and it is
+argument in the tree for Global Constraint 37's `blocked: images not published`, and it is
 why the shipped digests are recorded as measured values rather than as pins
 anyone can re-derive. A published digest comes back from `release.yml`'s push
 (Task 30b) and is stable because the registry stores the bytes.
@@ -1886,7 +1886,7 @@ node under the same repository name.** No local registry was needed. What the
 gate does **not** show, and what no local run can show, is publication: the
 digests baked into `logweir.yaml` and into `weirkeeper::job::RUNNER_IMAGE` name
 bytes on one laptop, they change on every rebuild, and the install file's digest
-rows therefore still read **`blocked: no remote`** until `release.yml` has
+rows therefore still read **`blocked: images not published`** until `release.yml` has
 pushed to a registry the author does not control and the digests have been
 pulled back from it (spec §16 clause 1, Task 30b).
 
@@ -1906,7 +1906,9 @@ exactly what `Never` is right for), and step 3 of `scripts/demo-steps.sh` sets
 that variable with `kubectl set env`, puts the author-only controller image back
 with `kubectl set image`, and restores the overlay's `imagePullPolicy: Never` —
 all three **after** X-APPLY, which a server-side apply of `logweir.yaml` had
-just taken back. The first fires whenever the run was handed a runner reference
+just taken back. **The ninth run, 34700987743 on commit `a113dd2`, 2026-09-12,
+is green**: step 3 handed the cluster its own images, the rollout settled, and
+all twelve steps ran through to `PHASE C EXIT CRITERION MET`. The first fires whenever the run was handed a runner reference
 that is not the default — both install branches; the other two only under the
 author-only pull policy (`Never`), because only a cluster that LOADED
 `weirkeeper:check` has it to be put back to, and the published branch's cluster
@@ -1958,7 +1960,7 @@ the next `just image` or `just image-weirkeeper` will report yet another digest
 for bytes nobody asked to change. **A locally pinned digest is a measurement,
 not a reproducible pin.** The pin that closes spec §16 clause 1 is the one
 `release.yml` reads back from a registry (Task 30b), and until then these rows
-read `blocked: no remote`.
+read `blocked: images not published`.
 
 The cleanup, which is how this transcript ends:
 
@@ -1993,7 +1995,7 @@ history. The §14.6 paragraph immediately above says why any of these numbers
 move at all: **a locally pinned digest is a measurement, not a reproducible
 pin**, and editing anything in an image's build context — including writing a
 digest into a manifest — changes it again. Task 24's rebuild is the fourth
-instance of exactly that, and `blocked: no remote` still stands until
+instance of exactly that, and `blocked: images not published` still stands until
 `release.yml` reads a digest back from a registry (Task 30b).
 
 ## 15. The evidence credential, the verdict, and the signing-oracle residual
@@ -2439,10 +2441,19 @@ creates**, with the compose broker reached over the published `K8S` listener.
 This section is what that workflow is, why its one hard problem is solved the
 way it is, and exactly what state the clause is in today.
 
-**The clause reads `blocked: no remote`, and nothing below changes that.** There
-is no git remote for this repository, so `.github/workflows/kind-demo.yml` has
-never run and cannot. What would close it is one artefact: the URL of a green
-run of that workflow. `docs/tag1-checklist.md` row 2 says so with the date.
+**The clause is `closed`, by run
+<https://github.com/VladyslavHaina/logweir/actions/runs/34700987743> — one green
+run of `.github/workflows/kind-demo.yml` on commit `a113dd2`, 2026-09-12, on a
+`kind` cluster that run created, all twelve steps.** It was red on its first
+eight runs; the ninth is the artefact the row named, and
+`docs/tag1-checklist.md` row 2 now names it with the date.
+
+**That run took the AUTHOR-ONLY install branch, and closes clause 2 only.** Both
+images were built by the run and loaded onto the node, never pulled, so Global
+Constraint 37 is untouched: clause 1's digest rows still read
+`blocked: images not published`, and nothing in this section may be read as
+evidence that an image was published. The PUBLISHED branch of §18.3 has still
+never run, because `release.yml` has never run, because no tag has been pushed.
 
 ### 18.1 The twelve steps are defined once
 
@@ -2592,7 +2603,10 @@ object's `metadata.managedFields` — a string `curl` cannot produce.
 CoreDNS patch and, from a pod, that the advertised name resolves and the
 published listener answers. Not proven here: the probe and the twelve steps,
 because an arm64 `kind` node cannot start the amd64-only runner image (below).
-The CI run is blocked: no remote.** STANDING RULE 16 makes `kind` a CI-only
+The twelve steps then ran on `kind` in CI on 2026-09-12, on an amd64 runner, in
+run <https://github.com/VladyslavHaina/logweir/actions/runs/34700987743>, which
+is what closed clause 2 — this local run remains the record of what it, and only
+it, proved.** STANDING RULE 16 makes `kind` a CI-only
 cluster with one exception — a single local proving run explicitly authorised by
 the controller at dispatch, deleting its cluster in the same session. This is
 that run. **It is not evidence for spec §16 clause 1 or clause 2**, and the
@@ -2780,8 +2794,10 @@ now runs `scripts/kind-demo.sh` over an UNCHANGED copy of `scripts/demo-steps.sh
 with stubs on `$PATH`, and asserts that the real `step_01` reads the context,
 accepts it, prints no `refusing:` line, and walks on to the next precondition it
 cannot satisfy under stubs (`docker compose ps`, which the stub refuses). The
-other eleven steps are still evidenced by `e2e/k8s/laptop-demo.md` and by the CI
-run that cannot yet happen.
+other eleven steps are evidenced by `e2e/k8s/laptop-demo.md` and, since
+2026-09-12, by the CI run that has now happened: run 34700987743 walked all
+twelve on a `kind` cluster, with no tracer anywhere
+(<https://github.com/VladyslavHaina/logweir/actions/runs/34700987743>).
 
 `bash -n` exits 0 on all three scripts.
 

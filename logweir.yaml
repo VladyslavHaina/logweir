@@ -23,7 +23,7 @@
 # objects and evidence objects all survive it, by design. `docs/kubernetes.md`
 # §13 carries the exact command to remove each.
 #
-# digest rows: blocked: no remote — the images below are referenced by digest (Global Constraint 7, Task 23) and the digest is a LOCALLY BUILT one until release.yml has run against a git remote; a locally built or locally loaded image is author-only and never satisfies spec §16 clause 1
+# digest rows: blocked: images not published — the images below are referenced by digest (Global Constraint 7, Task 23) and the digest is a LOCALLY BUILT one until release.yml has run on a pushed tag (no tag has been pushed, so it never has); a locally built or locally loaded image is author-only and never satisfies spec §16 clause 1
 #
 # Consequence, stated plainly: applying this file on a cluster with no access to
 # `ghcr.io/logweir/weirkeeper` leaves the Deployment's pod in `ImagePullBackOff`.
@@ -35,7 +35,7 @@
 # buy is measured too (X-DIGEST, docs/kubernetes.md §14): a pod referencing it
 # with `imagePullPolicy: Never` starts only once the image has been tagged into
 # that repository name on the node, and the digest a locally built image reports
-# changes on every build. That is why this row reads `blocked: no remote` and
+# changes on every build. That is why this row reads `blocked: images not published` and
 # not `pinned`.
 #
 # [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a

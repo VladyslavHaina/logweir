@@ -1004,19 +1004,19 @@ fn runner_pods_do_not_automount_a_token() {
 
 /// `logweir.yaml`'s header carries Global Constraint 37's literal.
 #[test]
-fn the_install_file_records_blocked_no_remote() {
+fn the_install_file_records_blocked_images_not_published() {
     let text = read("logweir.yaml");
     assert!(
-        text.contains("blocked: no remote"),
-        "logweir.yaml's header must contain the literal `blocked: no remote` (Global Constraint \
+        text.contains("blocked: images not published"),
+        "logweir.yaml's header must contain the literal `blocked: images not published` (Global Constraint \
          37): the images it references are referenced by TAG, no such image has been pushed, and \
          a locally built one is author-only and never satisfies spec §16 clause 1"
     );
     // It is a HEADER, not a line buried mid-file: a stranger reads the top.
     let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
     assert!(
-        head.contains("blocked: no remote"),
-        "the `blocked: no remote` line must be in logweir.yaml's header comment (first 60 lines)"
+        head.contains("blocked: images not published"),
+        "the `blocked: images not published` line must be in logweir.yaml's header comment (first 60 lines)"
     );
 }
 
@@ -2018,7 +2018,9 @@ fn the_runner_image_lives_in_exactly_one_place() {
 ///
 /// (b) `--platform linux/amd64,linux/arm64` cannot `--load`: the local image
 /// store holds single-platform images only, so a multi-platform build must
-/// `--push` to a registry and there is no remote (Global Constraint 37).
+/// `--push` to a registry, and nothing in this tree pushes — publication is
+/// `release.yml` on a pushed tag, which has never run (Global Constraint 37,
+/// `blocked: images not published`).
 /// `weirkeeper:check` would then not exist as a local tag,
 /// `scripts/check-image-weirkeeper.sh` would have nothing to inspect and
 /// `imagePullPolicy: Never` would find no image on the node (critique B H16).
@@ -2073,7 +2075,8 @@ fn the_weirkeeper_image_recipe_takes_its_platform_from_the_environment() {
     );
     assert!(
         !body.contains("--push"),
-        "`just image-weirkeeper` must not push: there is no remote (Global Constraint 37)"
+        "`just image-weirkeeper` must not push: publication is `release.yml`'s, on a pushed \
+         tag (Global Constraint 37, `blocked: images not published`)"
     );
     // A RECIPE HEADER STARTS AT COLUMN 0; a comment that NAMES the absent
     // recipe does not. The justfile's own prose says at length why there is no
@@ -2195,17 +2198,17 @@ fn the_controller_image_owes_no_mit_notice() {
 /// bytes that exist on exactly one laptop — and if that image was pushed to a
 /// local `registry:2` to obtain one, the bytes exist on exactly one laptop
 /// still. So the install file now carries `@sha256:` references AND still reads
-/// `blocked: no remote`, and those two facts are not in tension: the first is
+/// `blocked: images not published`, and those two facts are not in tension: the first is
 /// Global Constraint 7, the second is Global Constraint 37.
 ///
-/// THIS IS NOT A DUPLICATE OF [`the_install_file_records_blocked_no_remote`].
+/// THIS IS NOT A DUPLICATE OF [`the_install_file_records_blocked_images_not_published`].
 /// That one asserts the literal is present. This one asserts the literal
 /// survived the digest pin AND that the header still says, in the same breath,
 /// that a locally built image is author-only and never satisfies spec §16
 /// clause 1 — the mutant being "record the `registry:2` run as satisfying it",
 /// which deletes the qualifying sentence and leaves the four words behind.
 #[test]
-fn the_install_file_still_records_blocked_no_remote() {
+fn the_install_file_still_records_blocked_images_not_published() {
     let text = read("logweir.yaml");
     let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
 
@@ -2224,9 +2227,9 @@ fn the_install_file_still_records_blocked_no_remote() {
     );
 
     assert!(
-        head.contains("blocked: no remote"),
+        head.contains("blocked: images not published"),
         "logweir.yaml's header must STILL carry Global Constraint 37's literal \
-         `blocked: no remote` after the digest pin. A digest that names bytes on one laptop is \
+         `blocked: images not published` after the digest pin. A digest that names bytes on one laptop is \
          not a publication."
     );
     assert!(
@@ -2237,7 +2240,7 @@ fn the_install_file_still_records_blocked_no_remote() {
     assert!(
         head.contains("never satisfies spec §16 clause 1"),
         "logweir.yaml's header must say that an author-only image `never satisfies spec §16 \
-         clause 1`. Deleting that clause while leaving `blocked: no remote` behind is how a local \
+         clause 1`. Deleting that clause while leaving `blocked: images not published` behind is how a local \
          `registry:2` run comes to be recorded as a publication."
     );
     assert!(
