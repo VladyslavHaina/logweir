@@ -1404,7 +1404,11 @@ fn gate_lint_ci_e2e_seeds_like_e2e_up() {
             in_job = true;
             continue;
         }
-        if in_job && line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':') {
+        if in_job
+            && line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.trim_end().ends_with(':')
+        {
             break;
         }
         if in_job && !line.trim_start().starts_with('#') {
