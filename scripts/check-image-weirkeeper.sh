@@ -472,7 +472,7 @@ fi
 # NO PIPE: the image's bytes go to a temp file and `diff`'s exit status is read
 # on its own line, so the status that decides this check is the status of the
 # command that made the comparison (STANDING RULE 20).
-baked_file="$(mktemp "${TMPDIR:-/tmp}/logweir-org-root.XXXXXX.XXXXXX")"
+baked_file="$(mktemp "${TMPDIR:-/tmp}/logweir-org-root.XXXXXX")"
 # shellcheck disable=SC2064 # expand $baked_file now, on purpose.
 trap "rm -f '$baked_file'" EXIT
 printf '%s\n' "$baked" > "$baked_file"

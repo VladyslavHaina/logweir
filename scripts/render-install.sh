@@ -95,7 +95,7 @@ render() {
 if [ "${1:-}" = "--check" ]; then
   # `mktemp` and not a fixed path: two agents running this at once must not
   # write the same temporary file.
-  tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-install-check.XXXXXX.XXXXXX")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-install-check.XXXXXX")"
   # shellcheck disable=SC2064 # expand $tmp now, on purpose.
   trap "rm -f '$tmp'" EXIT
   render > "$tmp"
