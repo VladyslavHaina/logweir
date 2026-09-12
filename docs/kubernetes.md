@@ -1990,6 +1990,8 @@ And once more again, for Task 28a: the controller now writes `Backup.status.back
 
 And a fourth time, for Task 30b: the release task's local dry run rebuilt the controller image to assert `scripts/check-image-weirkeeper.sh`'s new `--no-exec` arm against freshly produced bytes (182 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:e6e3384e…` was superseded by **`weirkeeper@sha256:6ab14111…`** in `config/manager/deployment.yaml` and `logweir.yaml` — the same rule, the fourth instance, and the reason clause 1 of the tag-1 checklist still reads blocked.
 
+And a fifth time, after the Helm chart landed (Task 35, 2026-09-12): the `weirkeeper:check` the tree pinned (`6ab14111…`, built 2026-09-11 for Task 30b's dry run) predates Task 33, so its binary carries no `LOGWEIR_RUNNER_IMAGE` at all — measured by the chart's walk on docker-desktop, whose runner Jobs sat in `ErrImageNeverPull` under the compiled-in runner reference until the runner image was tagged with that name (E19(b)), and confirmed by the review (`strings` over the image's binary: zero occurrences). The controller image was rebuilt from the tree at `1f77f79` (338 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:6ab14111…` was superseded by **`weirkeeper@sha256:51145a3f…`** in `config/manager/deployment.yaml`, `logweir.yaml`, `charts/logweir/values.yaml` and the chart's three digest-pinned rendered files — the fifth instance of the same rule.
+
 This section is **not** edited to match, and that is deliberate: it is a
 transcript of commands that were run and the values they printed on the day
 they were run, and rewriting a measurement to agree with a later one destroys

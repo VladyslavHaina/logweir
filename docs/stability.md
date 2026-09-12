@@ -351,6 +351,8 @@ one pin has moved in this plan, which is the entry above restated: a locally
 pinned digest is the measurement of one build on one machine, and it is not a
 reproducible identifier for anything.
 
+**And a fifth time**, after the Helm chart landed (2026-09-12): the pinned build predated Task 33's `LOGWEIR_RUNNER_IMAGE`, so the controller image was rebuilt from the tree that carries it, and `weirkeeper@sha256:6ab14111…` was superseded by `weirkeeper@sha256:51145a3f…` in the same two files and in `charts/logweir/values.yaml` (with the chart's rendered files regenerated).
+
 ### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
 
 `sample.anchor` chooses WHICH records in the sampled window a drill reconciles.

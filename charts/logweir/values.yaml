@@ -19,7 +19,7 @@
 # `chart_lint_values_pin_the_shipped_digests` fails when they disagree.
 #
 # The controller image. Rendered into the `weirkeeper` Deployment.
-controllerImage: ghcr.io/logweir/weirkeeper@sha256:6ab1411110731d3092fca3d1d08deded1487b227c25057107f206377da1ea60a
+controllerImage: ghcr.io/logweir/weirkeeper@sha256:51145a3fe6420eb90151b3cc87266fc2db084ca5e4638d03c3d5ed8a43bb4b24
 # The runner image — Task 33's `LOGWEIR_RUNNER_IMAGE` override, set as an env
 # on the Deployment so every Job the controller creates names THIS reference.
 # The default is the compiled-in constant, so the default install creates the
