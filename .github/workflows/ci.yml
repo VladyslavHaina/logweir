@@ -114,6 +114,10 @@ jobs:
         run: ./scripts/check-no-archive-write.sh
       - name: the UI loads no remote asset (spec 8)
         run: ./scripts/check-ui-offline.sh
+      # `check-ui-behaviour.sh` refuses without `target/release/logweir` (STANDING
+      # RULE 5's fourth prerequisite). `just gate` has it from its release test
+      # line; this mirror had never built it (the sixth CI run, 2026-09-12).
+      - run: cargo build --release -p logweir
       - name: the UI behaviour suite (interface I24)
         run: ./scripts/check-ui-behaviour.sh
       - name: every mark in the shipped docs is labelled (spec 16 clause 9)
