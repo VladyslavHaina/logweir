@@ -201,6 +201,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # FREE THE DISK FIRST. The runner image ships tens of gigabytes of toolchains
+      # this job never touches (.NET, Android, GHC, Boost, CodeQL); with a debug
+      # build of the workspace and the Docker images beside them MinIO reaches its
+      # free-space floor and refuses every PUT (`XMinioStorageFull`, the sixth CI
+      # run, 2026-09-12 — the same job had passed at the margin one run earlier).
+      # `df` before and after is the record.
+      - name: free disk space (MinIO refuses writes below its free-space floor)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       # The Dockerfile's build-stage package list, verbatim: `logweir-kafka` builds
