@@ -941,15 +941,37 @@ const REQUIRED_PAGE_IDENTIFIERS: [&str; 4] = [
 /// The tokens a test file may not carry. The UI analogue of STANDING RULE 18's
 /// dial-token audit: `just lint` runs with the compose stack down (Global
 /// Constraint 22), and a behaviour suite that opened a socket would be a unit
-/// gate that needs the network.
-const DIAL_TOKENS: [&str; 6] = [
+/// gate that needs the network. Node's five dialling built-ins are listed in
+/// BOTH spellings an ES import can use -- the `node:` scheme and the bare
+/// name, in either quote style -- because a guard that named one spelling was
+/// a guard a file passed by choosing the other (the review of Task 36
+/// measured exactly that: a bare `from "http"` left this test green).
+const DIAL_TOKENS: [&str; 16] = [
     "fetch(",
     "node:net",
     "node:http",
     "node:https",
     "node:tls",
     "node:dgram",
+    "from \"net\"",
+    "from \"http\"",
+    "from \"https\"",
+    "from \"tls\"",
+    "from \"dgram\"",
+    "from 'net'",
+    "from 'http'",
+    "from 'https'",
+    "from 'tls'",
+    "from 'dgram'",
 ];
+
+/// The ONE file under `ui/tests/` that may dial, BY NAME: the fixture-driven
+/// preview server (Task 36), a tool a developer runs to look at the page and
+/// the gate never runs. `the_preview_server_binds_loopback_and_refuses_writes`
+/// pins what it may do (loopback only; every write refused). The converse arm
+/// of `the_ui_behaviour_suite_never_dials` keeps this list from going stale:
+/// a file listed here that carries no dial token fails the test.
+const DIALLING_TOOLS: [&str; 1] = ["preview-server.js"];
 
 /// Every file under `ui/pages/`.
 fn page_modules() -> Vec<PathBuf> {
@@ -1046,15 +1068,41 @@ fn the_suspend_toggle_is_the_only_update() {
 #[test]
 fn the_ui_behaviour_suite_never_dials() {
     let mut findings: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for file in behaviour_suite_files() {
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let exempt = DIALLING_TOOLS.contains(&name.as_str());
         let contents = read(&file);
+        let mut hits = 0usize;
         for (index, line) in contents.lines().enumerate() {
             for token in DIAL_TOKENS {
                 if line.contains(token) {
-                    findings.push(format!("{}:{}: carries {token:?}", shown(&file), index + 1));
+                    hits += 1;
+                    if !exempt {
+                        findings.push(format!("{}:{}: carries {token:?}", shown(&file), index + 1));
+                    }
                 }
             }
         }
+        if exempt {
+            assert!(
+                hits > 0,
+                "{} is exempted from the dial-token rule by name but carries no dial token: the \
+                 exemption is stale; remove it from DIALLING_TOOLS",
+                shown(&file)
+            );
+            seen.push(name);
+        }
+    }
+    for tool in DIALLING_TOOLS {
+        assert!(
+            seen.iter().any(|s| s == tool),
+            "{tool} is exempted from the dial-token rule by name but is not under ui/tests/"
+        );
     }
     assert!(
         findings.is_empty(),
@@ -1062,7 +1110,8 @@ fn the_ui_behaviour_suite_never_dials() {
          a JSON object to an HTML string, and the suite asserts on those strings against \
          checked-in fixtures; nothing in it opens a socket. `just lint` runs with the compose \
          stack down (Global Constraint 22), and the per-test budget is 15 s -- a suite that \
-         dialled would fail one of those two long after it had stopped being reviewable:\n{}",
+         dialled would fail one of those two long after it had stopped being reviewable. The \
+         one file that may dial is exempted BY NAME in DIALLING_TOOLS:\n{}",
         findings.join("\n")
     );
 }

@@ -27,16 +27,17 @@
 //      page renders in its own error box as the API server's refusal. There
 //      is no code path that stores, forwards or mutates anything.
 //
-// THIS FILE OPENS A SOCKET, AND SAYS SO HERE. `ui_lint.rs`'s
-// `the_ui_behaviour_suite_never_dials` forbids the `node:`-prefixed dial
-// specifiers from every file under `ui/tests/`, because the SUITE must run
-// with the compose stack down and open nothing. This tool is not the suite
-// and is never run by the gate, so it names node's built-ins by their bare
-// specifiers instead -- `http`, `fs`, `path`, `url` -- which is a statement
-// about scope and not a hiding place: `createServer` and `listen` are spelled
-// out below for anyone who greps for a server. `ui/tests/` is outside the
-// offline gate's relative-specifier rule by design (`api.spec.js` is the
-// precedent), and nothing here is ever served by the product.
+// THIS FILE OPENS A SOCKET, AND IS EXEMPTED BY NAME. `ui_lint.rs`'s
+// `the_ui_behaviour_suite_never_dials` forbids node's dialling built-ins --
+// in both spellings an import can use -- from every file under `ui/tests/`,
+// because the SUITE must run with the compose stack down and open nothing.
+// This tool is not the suite and is never run by the gate, so that test lists
+// it in `DIALLING_TOOLS`, by file name, and its converse arm fails the moment
+// this file stops dialling while the exemption stands. `createServer` and
+// `listen` are spelled out below for anyone who greps for a server.
+// `ui/tests/` is outside the offline gate's relative-specifier rule by design
+// (`api.spec.js` is the precedent), and nothing here is ever served by the
+// product.
 //
 // THE FIXTURE LAYOUT.
 //   ui/tests/fixtures/preview/namespaces/<ns>/<plural>.json   one list per kind
@@ -50,10 +51,10 @@
 // not carry is a 404. Files are read on every request, so an edited fixture
 // shows on the next reload without a restart.
 
-import { createServer } from "http";
-import { existsSync, readFileSync, statSync } from "fs";
-import { extname, join, resolve, sep } from "path";
-import { fileURLToPath } from "url";
+import { createServer } from "node:http";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Loopback, and nothing else. */
 const HOST = "127.0.0.1";

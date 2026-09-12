@@ -548,7 +548,7 @@ main > h2 + .blurb,
 
   .grid td {
     display: grid;
-    grid-template-columns: minmax(6.5rem, 34%) 1fr;
+    grid-template-columns: minmax(6.5rem, 34%) minmax(0, 1fr);
     gap: var(--space-3);
     padding: var(--space-1) 0;
     border-bottom: 0;
@@ -571,6 +571,21 @@ main > h2 + .blurb,
 
   .grid td.empty::before {
     content: none;
+  }
+
+  /* A fact on a phone reads as a caption over its value. Two columns here let
+   * a long label starve the value column until a topic list or a timestamp
+   * rendered one character per line; one column, and the value wraps inside
+   * the card at word boundaries. The `minmax(0, 1fr)` above is the same
+   * repair for a stacked table cell: an unbreakable id no longer widens the
+   * card past the viewport. */
+  .facts {
+    grid-template-columns: 1fr;
+    gap: var(--space-1) 0;
+  }
+
+  .facts dd {
+    margin-bottom: var(--space-2);
   }
 }
 

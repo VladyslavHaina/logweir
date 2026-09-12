@@ -234,6 +234,31 @@ test("the_tables_collapse_to_cards_below_the_breakpoint", () => {
   assert.ok(out.includes('<div class="table-wrap"><table class="grid"><thead><tr><th scope="col">'));
 });
 
+// Measured at 390 px before these two rules existed (the review of Task 36):
+// a stacked cell holding an unbreakable id widened the page to 417 px, and a
+// two-column fact list rendered a topic list one character per line. The
+// narrow block must keep both: the value column of a stacked cell allowed to
+// shrink to nothing (`minmax(0, 1fr)`), and a fact list in one column.
+test("the_narrow_block_keeps_long_values_inside_their_cards", () => {
+  const narrow = blockAfter(css, "@media (max-width: 719.98px)");
+  assert.ok(narrow !== null, "a max-width: 719.98px block exists -- the stacked-card breakpoint");
+  // The stacked cell's own rule -- not the multi-selector one above it that
+  // also ends in `.grid td {` -- is the one whose display is grid.
+  const cell = blockAfter(narrow.body, ".grid td {\n    display: grid;");
+  assert.ok(cell !== null, "the stacked cell rule (display: grid) exists in the narrow block");
+  assert.ok(
+    /grid-template-columns:\s*minmax\(6\.5rem, 34%\) minmax\(0, 1fr\)/.test(cell.body),
+    "a stacked cell's value column may shrink to nothing, so an id cannot widen the card; the rule was:\n" +
+      cell.body,
+  );
+  const facts = blockAfter(narrow.body, ".facts {");
+  assert.ok(facts !== null, "the narrow block restyles .facts");
+  assert.ok(
+    /grid-template-columns:\s*1fr\s*;/.test(facts.body),
+    "a fact list is one column on a phone -- the caption over its value; the rule was:\n" + facts.body,
+  );
+});
+
 test("every_badge_carries_a_text_label_and_not_only_a_colour", () => {
   // The primitive: a class for the colour, a caption for the words.
   assert.equal(badge("green", "verified"), '<span class="badge badge-green">verified</span>');
