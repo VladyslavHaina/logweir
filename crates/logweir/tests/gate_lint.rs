@@ -952,8 +952,8 @@ impl SuiteFixture {
 
     /// A stub `nc` that answers "closed" for every port.
     ///
-    /// The harness refuses to time the suite while 127.0.0.1:9092 or :9000
-    /// answers (M10), and it asks `nc` — the real one, first on the host's
+    /// The harness refuses to time the suite while the broker port or the MinIO
+    /// port answers on the loopback address (M10), and it asks `nc` — the real one, first on the host's
     /// `PATH`. These fixtures exercise the harness's RED PATHS, not the host:
     /// run under `just e2e` or `ci.yml`'s `e2e` job, where the compose stack is
     /// up by design, the real `nc` made all three red-path fixtures fail on the
