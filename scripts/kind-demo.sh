@@ -300,6 +300,10 @@ echo "==> pre 3/3 cluster-probe --bootstrap $BOOTSTRAP_PROBE, from a pod"
 # watching. Then the pod is deleted. Every exit code on its own line.
 set +e
 kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete pod bootstrap-probe --ignore-not-found > /dev/null 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl delete pod bootstrap-probe --ignore-not-found — a leftover from an aborted run, if any)"
+set +e
 kubectl --context "$LOGWEIR_KUBE_CONTEXT" run bootstrap-probe --restart=Never --image="$LOGWEIR_DEMO_IMAGE_REF" --image-pull-policy="$LOGWEIR_DEMO_PULL_POLICY" -- cluster-probe --bootstrap "$BOOTSTRAP_PROBE" > "$KIND_OUT/probe-run.txt" 2>&1
 rc=$?
 set -e

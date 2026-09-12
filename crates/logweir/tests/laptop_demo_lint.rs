@@ -1063,7 +1063,12 @@ fn kind_demo_patches_coredns_before_the_first_step() {
          {probe_line}"
     );
     let logs = at("logs bootstrap-probe");
-    let deleted = at("delete pod bootstrap-probe");
+    // The pre-run cleanup also deletes that pod name (with `--ignore-not-found`)
+    // BEFORE the run; the delete this asserts is the one after the log read.
+    let deleted = logs
+        + src[logs..]
+            .find("delete pod bootstrap-probe")
+            .expect("the probe pod is deleted after its log is read");
     assert!(
         probe < logs && logs < deleted && deleted < walk,
         "after `run bootstrap-probe` (offset {probe}) the two I14 lines are read with `kubectl \
