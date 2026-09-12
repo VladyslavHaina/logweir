@@ -1173,8 +1173,8 @@ fn gate_tokens(list: &str) -> Vec<String> {
         .collect()
 }
 
-/// Membership in `just lint` is what makes this a gate: `ci.yml` has never
-/// executed on any commit. Same shape as
+/// Membership in `just lint` is what makes this a gate on a laptop before a
+/// push: `ci.yml` mirrors `just gate` (green since 2026-09-12). Same shape as
 /// `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`.
 #[test]
 fn the_no_archive_write_gate_is_in_just_lint() {
