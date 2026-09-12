@@ -559,9 +559,15 @@ install-yaml:
 #
 # NO PIPE ANYWHERE (STANDING RULE 20): `cmd | grep` reports grep's status, and
 # both of these exit codes are load-bearing.
+# THE CONTEXT IS THE DRIVER'S. `scripts/demo-steps.sh` exports
+# `LOGWEIR_KUBE_CONTEXT` (`kind-demo.sh` sets `kind-logweir`, `laptop-demo.sh`
+# sets `docker-desktop`); run by hand, unset, it is the laptop's cluster. STANDING
+# RULE 12 is satisfied by the context ALWAYS being passed. The literal here was
+# what failed the first CI run of the demo (2026-09-12): step 3 on kind asked
+# for a `docker-desktop` context the runner does not have.
 apply-install:
-    kubectl --context docker-desktop apply --server-side -f logweir.yaml
-    kubectl --context docker-desktop apply --server-side -f logweir.yaml
+    kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" apply --server-side -f logweir.yaml
+    kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" apply --server-side -f logweir.yaml
 
 # The pre-flight: refuse a namespace that is missing any of the five Secrets,
 # naming the FIRST absent one.
@@ -602,7 +608,7 @@ check-secrets ns scram="kafka-scram":
                 "logweir-evidence-ro:logweir-system"; do
       name="${pair%%:*}"
       space="${pair##*:}"
-      kubectl --context docker-desktop -n "$space" get secret "$name" -o name >/dev/null 2>&1
+      kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" -n "$space" get secret "$name" -o name >/dev/null 2>&1
       rc=$?
       if [ "$rc" -ne 0 ] && [ -z "$missing" ]; then
         missing="$name"

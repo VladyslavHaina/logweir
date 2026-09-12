@@ -1375,9 +1375,13 @@ fn check_secrets_refuses_a_missing_secret() {
         "`just apply-install` is X-APPLY: `kubectl --context docker-desktop apply --server-side \
          -f logweir.yaml`, TWICE"
     );
+    // STANDING RULE 12: the context is named explicitly, always — as the
+    // variable the demo drivers export, whose DEFAULT is the laptop's cluster.
+    // The literal `--context docker-desktop` was what failed the first CI run
+    // of the demo on a `kind` cluster (2026-09-12).
     assert!(
-        apply.contains("--context docker-desktop"),
-        "STANDING RULE 12: the context is named explicitly, always"
+        apply.contains("--context \"${LOGWEIR_KUBE_CONTEXT:-docker-desktop}\""),
+        "STANDING RULE 12: `just apply-install` must pass `--context \"${{LOGWEIR_KUBE_CONTEXT:-docker-desktop}}\"` — the driver's context, defaulting to the laptop's"
     );
     assert!(
         !apply.contains("| grep") && !apply.contains("|grep"),

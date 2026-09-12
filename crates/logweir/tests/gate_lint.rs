@@ -1378,3 +1378,48 @@ fn gate_lint_the_timing_line_sits_between_the_two_compilations() {
         "the gate compiles the workspace exactly twice, one debug and one release; found {compiles:?}"
     );
 }
+
+/// **`ci.yml`'s `e2e` job seeds the stack exactly as `just e2e-up` does.**
+///
+/// The recipe is the laptop's truth: `up -d --wait` and then the three one-shot
+/// seeders. The CI job had two of the three — no `scram-setup` — and every
+/// SCRAM test failed on the runner with an authentication error (the third CI
+/// run, 2026-09-12). A job that seeds less than the recipe tests a different
+/// stack; this holds the job to every executed line of the recipe.
+///
+/// KILLS: dropping any `docker compose … run --rm <seeder>` line from the job.
+#[test]
+fn gate_lint_ci_e2e_seeds_like_e2e_up() {
+    let recipe = recipe_body(&justfile(), "e2e-up");
+    assert!(
+        recipe.len() >= 4,
+        "`just e2e-up` should be the `up --wait` plus three seeders; found {recipe:?}"
+    );
+    let ci = read(".github/workflows/ci.yml");
+    // The `e2e:` job's executed lines: from its header to the next job header.
+    let mut in_job = false;
+    let mut job = Vec::new();
+    for line in ci.lines() {
+        if line == "  e2e:" {
+            in_job = true;
+            continue;
+        }
+        if in_job && line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':') {
+            break;
+        }
+        if in_job && !line.trim_start().starts_with('#') {
+            job.push(line.trim());
+        }
+    }
+    assert!(!job.is_empty(), "ci.yml has no `e2e:` job");
+    let missing: Vec<&String> = recipe
+        .iter()
+        .filter(|l| !job.iter().any(|j| j.ends_with(l.as_str())))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these lines of `just e2e-up` are not run by ci.yml's `e2e` job: {missing:?}\n  the job \
+         must bring the stack up and seed it exactly as the recipe does — a stack seeded less \
+         is a different stack, and its SCRAM tests fail with an authentication error"
+    );
+}

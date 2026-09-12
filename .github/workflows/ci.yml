@@ -203,11 +203,24 @@ jobs:
       - run: docker compose -f e2e/compose/docker-compose.yml up -d --wait
       - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
       - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
+      # THE THIRD SEEDER IS NOT OPTIONAL: `just e2e-up` runs all three, and a stack
+      # without the SCRAM user fails every SCRAM test with an authentication
+      # error (the third CI run, 2026-09-12). `gate_lint_ci_e2e_seeds_like_e2e_up`
+      # holds this job to the recipe's lines.
+      - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm scram-setup
       # A SUCCESSFUL SEED ALWAYS DIRTIES THE TREE (scripts/e2e-seed.sh says so
       # in those words): the two refreshed fixtures are not byte-reproducible.
       # Never add a `git diff --exit-code` after this step.
       - run: ./scripts/e2e-seed.sh
-      - run: cargo test --workspace --features e2e -- --test-threads=1
+      # ONE TEST IS SKIPPED BY NAME, AND THE NAME IS THE RECORD.
+      # `a_pod_really_reaches_the_k8s_listener` starts a pod on the laptop's
+      # `docker-desktop` cluster; this job has Docker and no Kubernetes, so on a
+      # runner it can only fail on a missing context (the third CI run,
+      # 2026-09-12). The property it proves — a pod reaches the advertised `K8S`
+      # listener — is proven on CI by `kind-demo.yml`'s in-cluster `cluster-probe`
+      # (`reachable=true`, read directly off the pod's exit). `just e2e` on the
+      # laptop still runs it.
+      - run: cargo test --workspace --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
       - if: always()
