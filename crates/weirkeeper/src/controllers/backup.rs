@@ -990,6 +990,11 @@ pub fn runner_job_spec(backup: &Backup) -> Result<RunnerJobSpec, BackupError> {
             env
         },
         plan_config_map: Some(plan_config_map_name(&backup.name_any())),
+        // THE SHIPPED PIN, AND THE RECONCILER OVERWRITES IT IF THIS PROCESS
+        // WAS HANDED ANOTHER IMAGE (Task 33, `job::RUNNER_IMAGE_ENV`). This
+        // function is a pure function of the custom resource and stays one:
+        // the override is a property of the PROCESS, read once in `main`.
+        image: None,
     })
 }
 
@@ -1684,7 +1689,33 @@ pub async fn reconcile_backup(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<BackupOutcome, BackupError> {
-    match reconcile_backup_inner(backup, client, archive, verify, now).await {
+    reconcile_backup_with_runner_image(backup, client, archive, verify, now, None).await
+}
+
+/// [`reconcile_backup`], with the runner image this controller process was
+/// handed — Task 33.
+///
+/// `runner_image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
+/// `Some(reference)` for the value `main` read out of `job::RUNNER_IMAGE_ENV`;
+/// it becomes `job::RunnerJobSpec::image` and therefore the image of every Job
+/// this reconciler creates, and it changes nothing else — the
+/// `imagePullPolicy` stays `job::IMAGE_PULL_POLICY`.
+///
+/// WHY THIS IS A SECOND FUNCTION AND NOT A SIXTH PARAMETER ON
+/// [`reconcile_backup`]. Forty-three rows in `tests/backup_controller.rs` and
+/// `tests/verification.rs` call that function with route-table doubles, and
+/// none of them is about the image: a sixth argument would have written
+/// `None` forty-three times and buried the one call site where the answer is
+/// not `None` (`reconcile`, below).
+pub async fn reconcile_backup_with_runner_image(
+    backup: &Backup,
+    client: &kube::Client,
+    archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner_image: Option<&str>,
+) -> Result<BackupOutcome, BackupError> {
+    match reconcile_backup_inner(backup, client, archive, verify, now, runner_image).await {
         Err(BackupError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `BackupError::Refused`, so the
@@ -1735,6 +1766,7 @@ async fn reconcile_backup_inner(
     archive: ArchiveOracle<'_>,
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
+    runner_image: Option<&str>,
 ) -> Result<BackupOutcome, BackupError> {
     let name = backup.name_any();
     let namespace = backup
@@ -1808,7 +1840,10 @@ async fn reconcile_backup_inner(
                 ttl_patched: false,
             });
         }
-        let spec = runner_job_spec(backup)?;
+        let mut spec = runner_job_spec(backup)?;
+        // THE ONE LINE THE OVERRIDE IS (Task 33). `None` leaves the shipped
+        // pin in place, which is what every test that does not pass one sees.
+        spec.image = runner_image.map(str::to_string);
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
         // (errata E5a). The Job mounts `<name>-plan` at `/plan`, so a Job
@@ -2153,7 +2188,15 @@ async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, Bac
         })
     };
     let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
-    reconcile_backup(&backup, &ctx.client, &oracle, &verify, Utc::now()).await?;
+    reconcile_backup_with_runner_image(
+        &backup,
+        &ctx.client,
+        &oracle,
+        &verify,
+        Utc::now(),
+        ctx.runner_image.as_deref(),
+    )
+    .await?;
     Ok(Action::requeue(std::time::Duration::from_secs(
         REQUEUE_SECS,
     )))
@@ -2183,13 +2226,24 @@ fn error_policy(backup: Arc<Backup>, err: &BackupError, _ctx: Arc<Context>) -> A
 /// `None` is a controller with no archive configured: it writes no
 /// `windowCovered` and records no `OrphanedScorecard`, which is the truthful
 /// answer and not a degraded one (see [`ArchiveOracle`]).
+///
+/// `runner_image` is Task 33's runtime override, read once in `main` out of
+/// `job::RUNNER_IMAGE_ENV`: `None` is the shipped pin `job::RUNNER_IMAGE`, and
+/// `Some(reference)` is the image the operator LOADED onto this cluster's
+/// nodes, which is the only thing that can run on a cluster that did not build
+/// the pins.
 pub fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
+    runner_image: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Backup> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client, archive });
+    let ctx = Arc::new(Context {
+        client,
+        archive,
+        runner_image,
+    });
     async move {
         Controller::new(api, watcher::Config::default())
             .owns(jobs, watcher::Config::default())

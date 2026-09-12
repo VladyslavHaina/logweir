@@ -1063,7 +1063,15 @@ pub fn controller(
     archive: Option<Arc<Store>>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<BackupSchedule> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client, archive });
+    let ctx = Arc::new(Context {
+        client,
+        archive,
+        // Task 33: this reconciler creates no runner Job, so the runner image
+        // this process was handed would be carried and never read. `None` here
+        // is "unused", never "no override is configured" — see
+        // `super::Context::runner_image`.
+        runner_image: None,
+    });
     async move {
         Controller::new(api, watcher::Config::default())
             .run(reconcile, error_policy, ctx)

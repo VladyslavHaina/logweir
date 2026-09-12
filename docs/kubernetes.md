@@ -1890,6 +1890,27 @@ rows therefore still read **`blocked: no remote`** until `release.yml` has
 pushed to a registry the author does not control and the digests have been
 pulled back from it (spec §16 clause 1, Task 30b).
 
+**And on a cluster that did not build the pins, neither reference resolves at
+all — so the demo hands the controller the images that cluster HAS** (Task 33).
+A GitHub runner builds both images minutes before the walk, at digests nothing
+in the tree names, and `ghcr.io/logweir/…` is not pullable; the fourth run of
+`.github/workflows/kind-demo.yml` (2026-09-12) therefore reached step 3, applied
+the shipped `logweir.yaml`, and then watched `rollout status deploy/weirkeeper`
+exit 1 — the Deployment was pointing at the laptop's pinned controller digest,
+and every runner Job the controller would have created would have named the
+laptop's pinned runner digest, which is a Rust constant no manifest can patch.
+The fix touches no shipped file: `weirkeeper` reads **`LOGWEIR_RUNNER_IMAGE`**
+once at startup and puts its value in every Job it creates (`imagePullPolicy`
+stays `Never` — the override exists for an image LOADED onto the node, which is
+exactly what `Never` is right for), and step 3 of `scripts/demo-steps.sh` sets
+that variable with `kubectl set env`, puts the author-only controller image back
+with `kubectl set image`, and restores the overlay's `imagePullPolicy: Never` —
+all three **after** X-APPLY, which a server-side apply of `logweir.yaml` had
+just taken back, and all three only when the run was handed a runner reference
+that is not the default. `logweir.yaml` itself is applied unedited and stays
+byte-identical (`scripts/render-install.sh --check`), and a laptop walk, which
+is handed nothing, touches none of it.
+
 ### 14.6 The instability, demonstrated a second time — by this task
 
 The controller image was rebuilt once after the transcript above, because
@@ -2533,6 +2554,16 @@ the tag is made on the host and the **tagged name** is loaded. `docker save`
 preserves the manifest digest — measured 2026-09-11, the saved index carries
 `sha256:6440a4a0…`, the digest the constant pins — so the reference resolves
 inside the node.
+
+Both branches hand the demo a runner reference that is **not** the one
+`scripts/demo-steps.sh` defaults to, and that is what makes step 3 pass it on to
+the controller as `LOGWEIR_RUNNER_IMAGE` (Task 33): the author-only branch hands
+`logweir:check`, and the published branch hands
+`vars.LOGWEIR_PUBLISHED_RUNNER_REF`, so on that branch the override carries the
+**published** digest into every Job, which is what the branch means. The shipped
+`logweir.yaml` is applied unedited on both and `render-install.sh --check` says
+so; only the live Deployment is touched, and only after X-APPLY has finished
+with it.
 
 ### 18.4 X-UIWRITE in CI is the mechanical half, and the step name says so
 

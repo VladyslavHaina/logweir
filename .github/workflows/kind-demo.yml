@@ -70,6 +70,24 @@ name: kind-demo
 # `ghcr.io/logweir/logweir@sha256:…`, never a tag (Global Constraint 7).
 #
 # ===========================================================================
+# BOTH BRANCHES HAND THE DEMO A REFERENCE THAT IS NOT THE DEFAULT, AND THAT IS
+# WHAT MAKES STEP 3 HAND IT TO THE CONTROLLER (Task 33)
+# ===========================================================================
+# `weirkeeper::job::RUNNER_IMAGE` is a COMPILE-TIME digest and no manifest can
+# patch it, so on a cluster that did not build the pins the controller would
+# create Jobs naming an image that node has never held — which is what stopped
+# the fourth run of this workflow at `rollout status deploy/weirkeeper`. The
+# controller therefore honours `LOGWEIR_RUNNER_IMAGE` at run time, and step 3
+# of `scripts/demo-steps.sh` sets it on the Deployment (with `kubectl set env`)
+# whenever `LOGWEIR_DEMO_IMAGE_REF` is not the value that file defaults it to.
+# Nothing below changes for that: the author-only branch already hands
+# `logweir:check`, and the published branch hands
+# `vars.LOGWEIR_PUBLISHED_RUNNER_REF` — also not the default, so the override
+# carries the PUBLISHED digest into every Job, which is what that branch means.
+# The shipped `logweir.yaml` is applied unedited on both
+# (`scripts/render-install.sh --check`).
+#
+# ===========================================================================
 # X-UIWRITE HAS TWO HALVES AND A RUNNER HAS NO BROWSER
 # ===========================================================================
 # Spec §10's gate is a `create` of a `Restore` FROM THE PAGE. `curl` is not the

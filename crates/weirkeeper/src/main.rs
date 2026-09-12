@@ -190,6 +190,46 @@ fn run() -> ExitCode {
         },
     };
 
+    // THE RUNNER IMAGE THIS PROCESS WILL PUT IN EVERY JOB IT CREATES — Task
+    // 33, and the SECOND thing this file reads out of the environment.
+    //
+    // WHY IT EXISTS. `weirkeeper::job::RUNNER_IMAGE` is a compile-time digest,
+    // measured on the machine that built the image, and plan erratum E19(a)
+    // says a local digest changes on every build. On the laptop that is
+    // survivable — the operator's own build IS the pinned bytes, and one
+    // `docker tag` puts them under the pinned repository name (E19b). On a
+    // cluster that did not build the pins it is not: a GitHub runner builds
+    // both images minutes before the demo, at digests nothing in the tree
+    // names, and the shipped repository is not pullable (Global Constraint 37).
+    // A controller that could only ever name the compile-time pin would create
+    // Jobs no such node can start.
+    //
+    // THE SAME ARRANGEMENT AS THE ARCHIVE URL ABOVE, AND FOR THE SAME REASON:
+    // the read is here and the DECISION is a pure predicate in the library, so
+    // a test can hand it the empty string a Kubernetes `env:` entry with an
+    // empty `value:` actually produces (plan erratum E19(e)) without touching
+    // process-global state. This is the ONLY `std::env::var` of
+    // `weirkeeper::job::RUNNER_IMAGE_ENV` in the crate, and
+    // `crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_image_override_once`
+    // asserts exactly that.
+    //
+    // ONE LINE, NAMING THE IMAGE AND WHERE IT CAME FROM. A controller that
+    // silently used a different image from the one the install file names is
+    // the failure this variable is meant to fix, not to create.
+    let runner_image =
+        weirkeeper::job::configured_runner_image(std::env::var(weirkeeper::job::RUNNER_IMAGE_ENV));
+    info!(
+        runner_image = runner_image
+            .as_deref()
+            .unwrap_or(weirkeeper::job::RUNNER_IMAGE),
+        source = if runner_image.is_some() {
+            weirkeeper::job::RUNNER_IMAGE_ENV
+        } else {
+            "shipped pin"
+        },
+        "the runner image every Job this controller creates will name"
+    );
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -257,6 +297,7 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::backup::controller(
             client.clone(),
             archive.clone(),
+            runner_image.clone(),
         )));
         // Task 20 pushes the FIFTH — the `Restore` reconciler that admits a
         // run only against a `Verified=True` approval whose own bytes carry
@@ -269,6 +310,7 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::restore::controller(
             client.clone(),
             archive.clone(),
+            runner_image.clone(),
         )));
         // Task 15c pushes the SIXTH — the `KafkaCluster` probe reconciler that
         // makes `status.reachable` mean something, by running `logweir
@@ -278,7 +320,10 @@ fn run() -> ExitCode {
         // needs nothing but a client. `tests/linkage.rs`'s `"controllers":6`
         // moved in this same commit.
         controllers.push(Box::pin(
-            weirkeeper::controllers::kafka_cluster::controller(client.clone()),
+            weirkeeper::controllers::kafka_cluster::controller(
+                client.clone(),
+                runner_image.clone(),
+            ),
         ));
 
         let registered = controllers.len();

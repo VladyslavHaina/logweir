@@ -37,6 +37,18 @@
 #                            Task 31's author-only CI branch sets
 #                            `logweir:check`; its published branch sets the
 #                            `ghcr.io/logweir/logweir@sha256:…` digest.
+#                            TASK 33: A REFERENCE THAT IS NOT THE DEFAULT IS
+#                            ALSO THE SIGNAL THAT THIS CLUSTER DID NOT BUILD
+#                            THE PINS. Step 3 then hands it to the controller
+#                            as `LOGWEIR_RUNNER_IMAGE` and puts the loaded
+#                            controller image back on the Deployment; with the
+#                            default reference it touches neither, and the
+#                            laptop walk is byte-identical to what
+#                            `e2e/k8s/laptop-demo.md` recorded. Both CI
+#                            branches are "not the default" — the author-only
+#                            one hands `logweir:check`, the published one the
+#                            digest `vars.LOGWEIR_PUBLISHED_RUNNER_REF`
+#                            carries, which is what that branch MEANS.
 #   LOGWEIR_DEMO_PULL_POLICY `Never` (default) or `IfNotPresent`. It selects
 #                            which world the preflight is checking: under
 #                            `Never` the two images must already be on this
@@ -92,14 +104,23 @@
 # ===========================================================================
 # Defaults are Task 28's values, so a driver that sets nothing gets the laptop
 # walk exactly as it was recorded.
+# The runner reference the LAPTOP walk uses, and the value every comparison
+# below means by "the default". NOT A FOURTH PARAMETER: it is read from no
+# environment variable, it is not exported, and nothing sets it — it is the
+# one place the default is spelt, so `LOGWEIR_DEMO_IMAGE_REF` defaults to it
+# AND step 3 can ask whether this run was handed something else (Task 33).
+DEFAULT_RUNNER_IMAGE_REF=ghcr.io/logweir/logweir:v0.1.0
 LOGWEIR_KUBE_CONTEXT="${LOGWEIR_KUBE_CONTEXT:-docker-desktop}"
-LOGWEIR_DEMO_IMAGE_REF="${LOGWEIR_DEMO_IMAGE_REF:-ghcr.io/logweir/logweir:v0.1.0}"
+LOGWEIR_DEMO_IMAGE_REF="${LOGWEIR_DEMO_IMAGE_REF:-$DEFAULT_RUNNER_IMAGE_REF}"
 LOGWEIR_DEMO_PULL_POLICY="${LOGWEIR_DEMO_PULL_POLICY:-Never}"
 export LOGWEIR_KUBE_CONTEXT LOGWEIR_DEMO_IMAGE_REF LOGWEIR_DEMO_PULL_POLICY
 
 # The tags `just image` and `just image-weirkeeper` LOAD. They are what step 1
-# tags FROM and what the teardown must never remove.
+# tags FROM and what the teardown must never remove — and, on a cluster that
+# did not build the pins, what step 3 puts back on the Deployment after X-APPLY
+# has overwritten it with the shipped digest (Task 33).
 BUILT_RUNNER_TAG=logweir:check
+BUILT_CONTROLLER_TAG=weirkeeper:check
 NS=logweir-t28
 SYS=logweir-system
 OUT=.demo/laptop
@@ -114,7 +135,7 @@ S3_REGION=us-east-1
 TOPIC=laptopdemo
 PROXY_BASE=http://127.0.0.1:8001
 API_BASE="$PROXY_BASE/apis/logweir.dev/v1alpha1/namespaces/$NS"
-RUNNER_IMAGE_TAG="${LOGWEIR_DEMO_IMAGE_REF:-ghcr.io/logweir/logweir:v0.1.0}"
+RUNNER_IMAGE_TAG="${LOGWEIR_DEMO_IMAGE_REF:-$DEFAULT_RUNNER_IMAGE_REF}"
 CONTROLLER_IMAGE_TAG=ghcr.io/logweir/weirkeeper:v0.1.0
 ONLY_STEP="${LOGWEIR_DEMO_ONLY_STEP:-}"
 PROXY_PID=""
@@ -492,6 +513,77 @@ step_03() {
   set -e
   echo "    rc=$rc  (kubectl patch deployment weirkeeper --patch-file config/overlays/k8s-demo/deployment-env-patch.yaml)"
   [ "$rc" -eq 0 ] || die "applying the demo overlay exited $rc; see $OUT/apply-overlay.log"
+
+  # ==========================================================================
+  # THE IMAGES THIS CLUSTER ACTUALLY HAS — TASK 33, AND ONLY WHEN THIS RUN WAS
+  # HANDED A RUNNER REFERENCE THAT IS NOT THE DEFAULT.
+  # ==========================================================================
+  # WHAT BROKE. `logweir.yaml` is applied UNEDITED by X-APPLY (Global
+  # Constraint 37: a stranger must be able to apply it), and it names the two
+  # images the LAPTOP built: `ghcr.io/logweir/weirkeeper@sha256:…` on the
+  # Deployment, and — compiled into the controller, where no manifest can
+  # reach it — `weirkeeper::job::RUNNER_IMAGE` on every runner Job. On
+  # docker-desktop both resolve, because the laptop's own build IS those bytes
+  # and step 1's `docker tag` puts them under the pinned repository name (plan
+  # erratum E19b). On a cluster that did not build them neither resolves: the
+  # fourth CI run of `.github/workflows/kind-demo.yml` (2026-09-12) got this
+  # far and then `rollout status` exited 1, because the runner had built both
+  # images minutes earlier at digests nothing in the tree names and
+  # `ghcr.io/logweir/…` is not pullable (there is no such namespace yet).
+  #
+  # AND THE OVERLAY'S ANSWER IS GONE BY NOW. `config/overlays/local-images`
+  # installs `weirkeeper:check` with `imagePullPolicy: Never`, but X-APPLY's
+  # `kubectl apply --server-side -f logweir.yaml` runs AFTER it and takes both
+  # fields back — MEASURED in the shipped file: the Deployment carries the
+  # pinned digest and `imagePullPolicy: IfNotPresent`. So these three lines
+  # come after X-APPLY and after the env patch, and before `rollout status`,
+  # which is the first thing that would notice.
+  #
+  # THE CONDITION IS THE REFERENCE, NOT A FOURTH VARIABLE. A run handed the
+  # default reference is the recorded laptop walk and nothing here fires, so
+  # `e2e/k8s/laptop-demo.md` stays true byte for byte. A run handed anything
+  # else was handed it by somebody who loaded that image onto this cluster —
+  # which is what both of the workflow's install branches do.
+  if [ "$LOGWEIR_DEMO_IMAGE_REF" != "$DEFAULT_RUNNER_IMAGE_REF" ]; then
+    echo "    this run was handed $LOGWEIR_DEMO_IMAGE_REF, not the default $DEFAULT_RUNNER_IMAGE_REF:"
+    echo "    handing the controller the images this cluster has (the shipped logweir.yaml is not edited)"
+
+    # (1) THE RUNNER IMAGE, as an environment variable on the controller,
+    # because the Job's image is a Rust constant no manifest can patch. The
+    # controller reads it once at startup and puts it in every Job it creates;
+    # `kubectl get job -o yaml` shows the value.
+    set +e
+    kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE="$LOGWEIR_DEMO_IMAGE_REF" > "$OUT/set-runner-image.log" 2>&1
+    rc=$?
+    set -e
+    echo "    rc=$rc  (kubectl set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE=$LOGWEIR_DEMO_IMAGE_REF)"
+    [ "$rc" -eq 0 ] || die "could not hand the controller its runner image (rc=$rc); see $OUT/set-runner-image.log"
+
+    # (2) THE CONTROLLER IMAGE, put back to the one the author-only overlay
+    # installed and X-APPLY replaced with the laptop's pinned digest.
+    set +e
+    kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" set image deployment/weirkeeper weirkeeper="$BUILT_CONTROLLER_TAG" > "$OUT/set-controller-image.log" 2>&1
+    rc=$?
+    set -e
+    echo "    rc=$rc  (kubectl set image deployment/weirkeeper weirkeeper=$BUILT_CONTROLLER_TAG)"
+    [ "$rc" -eq 0 ] || die "could not put the author-only controller image back (rc=$rc); see $OUT/set-controller-image.log"
+
+    # (3) AND THE PULL POLICY THE OVERLAY HAD SET. MEASURED: `logweir.yaml`
+    # carries `imagePullPolicy: IfNotPresent`, so X-APPLY dropped the overlay's
+    # `Never` along with the image. `IfNotPresent` on an unqualified tag is one
+    # absent image away from a pull against Docker Hub; `Never` fails as
+    # `ErrImageNeverPull`, naming the whole reference. A STRATEGIC-MERGE patch,
+    # so the container is selected BY NAME and never by index.
+    set +e
+    kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" patch deployment weirkeeper -p '{"spec":{"template":{"spec":{"containers":[{"name":"weirkeeper","imagePullPolicy":"Never"}]}}}}' > "$OUT/set-pull-policy.log" 2>&1
+    rc=$?
+    set -e
+    echo "    rc=$rc  (kubectl patch deployment weirkeeper -p '{...\"imagePullPolicy\":\"Never\"}' — the overlay's policy, which X-APPLY dropped)"
+    [ "$rc" -eq 0 ] || die "could not restore imagePullPolicy: Never (rc=$rc); see $OUT/set-pull-policy.log"
+  else
+    echo "    the default runner reference ($DEFAULT_RUNNER_IMAGE_REF): the Deployment's image, its"
+    echo "    pull policy and its environment are left exactly as logweir.yaml and the patch above set them"
+  fi
 
   set +e
   kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" rollout status deploy/weirkeeper --timeout=300s > "$OUT/rollout.log" 2>&1

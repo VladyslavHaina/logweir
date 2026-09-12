@@ -727,6 +727,135 @@ fn the_failure_policy_has_no_ignore_on_one() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Task 33 — the runner image the operator was handed
+// ---------------------------------------------------------------------------
+
+/// `job::configured_runner_image`: the four answers, one of which is a defect.
+///
+/// **`Ok("")` IS UNSET** — plan erratum E19(e), the same ruling
+/// `retention::configured_archive_url` carries. A Kubernetes `env:` entry with
+/// an empty `value:` makes `env::var` return `Ok("")`, not `Err(NotPresent)`,
+/// and a controller that read that as a configured value would create every
+/// Job with `image: ""`. Whitespace trims to the same answer.
+///
+/// KILLS: a predicate that tests `is_ok()` instead of the trimmed value.
+#[test]
+fn an_empty_runner_image_override_is_unset() {
+    assert_eq!(
+        job::configured_runner_image(Ok(String::new())),
+        None,
+        "an empty `value:` on the Deployment's env entry is the variable being UNSET (E19(e)); \
+         read as configured it puts `image: \"\"` in every Job this controller creates"
+    );
+    assert_eq!(
+        job::configured_runner_image(Ok("   ".to_string())),
+        None,
+        "whitespace is the same fact as empty"
+    );
+    assert_eq!(
+        job::configured_runner_image(Err(std::env::VarError::NotPresent)),
+        None,
+        "an absent variable is unset"
+    );
+    assert_eq!(
+        job::configured_runner_image(Ok("logweir:check".to_string())),
+        Some("logweir:check".to_string()),
+        "a reference is a reference; nothing about it is validated here, because the kubelet is \
+         the only thing that can say whether a reference resolves on a node"
+    );
+    assert_eq!(
+        job::configured_runner_image(Ok("  logweir:check\n".to_string())),
+        Some("logweir:check".to_string()),
+        "trimmed, so a YAML block scalar's trailing newline is not part of the reference"
+    );
+}
+
+/// With no override the Job carries the shipped pin — the DEFAULT is unchanged.
+///
+/// This is the same assertion
+/// `backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy`
+/// makes over the wire, restated over `job::build` so the default and the
+/// override are one pair of rows.
+///
+/// KILLS: a `build` that reaches for the override when there is none.
+#[test]
+fn the_runner_image_defaults_to_the_shipped_pin() {
+    let spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    assert_eq!(
+        spec.image, None,
+        "`runner_job_spec` is a pure function of the custom resource and builds NO image: the \
+         override is a property of the process, read once in `main`"
+    );
+    let built = job::build(&spec);
+    let container = built
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|p| p.containers.first())
+        .expect("the pod template has the one runner container");
+    assert_eq!(
+        container.image.as_deref(),
+        Some(RUNNER_IMAGE),
+        "interface I15: with no override the image is `job::RUNNER_IMAGE`, exactly as before \
+         Task 33"
+    );
+}
+
+/// With an override the Job carries it — and the pull policy does NOT move.
+///
+/// KILLS (M1): a `build` that ignores `RunnerJobSpec::image`.
+/// KILLS (M5): a pull policy that follows the image, or that becomes
+/// overridable — the override exists for images LOADED onto the node, which is
+/// the one case `Never` is exactly right for, and `Never` is what makes a
+/// wrong reference fail as `ErrImageNeverPull` naming the whole reference
+/// rather than as a pull against a namespace that resolves to nothing.
+#[test]
+fn the_runner_image_override_does_not_touch_the_pull_policy() {
+    let mut spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    spec.image = Some("logweir:check".to_string());
+    let built = job::build(&spec);
+    let container = built
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|p| p.containers.first())
+        .expect("the pod template has the one runner container");
+    assert_eq!(
+        container.image.as_deref(),
+        Some("logweir:check"),
+        "the image the operator handed this controller is the image the Job names — the whole \
+         point of `job::RUNNER_IMAGE_ENV`, and what `kubectl get job -o yaml` shows"
+    );
+    assert_ne!(
+        container.image.as_deref(),
+        Some(RUNNER_IMAGE),
+        "and it is NOT the compile-time pin, which is the reference a cluster that did not build \
+         it cannot start"
+    );
+    assert_eq!(
+        container.image_pull_policy.as_deref(),
+        Some(job::IMAGE_PULL_POLICY),
+        "the POLICY is not overridable and stays `Never`"
+    );
+    assert_eq!(
+        job::IMAGE_PULL_POLICY,
+        "Never",
+        "and `Never` is what it is: the override is for an image LOADED onto the node, so a \
+         wrong reference must fail as ErrImageNeverPull naming the whole reference"
+    );
+    assert_eq!(
+        container.name,
+        job::CONTAINER_NAME,
+        "nothing else about the container moved"
+    );
+    assert_eq!(
+        container.args.as_ref(),
+        Some(&spec.args),
+        "and the argv is still passed through unchanged"
+    );
+}
+
 /// The Job's name is the CR's name, with no prefix added.
 #[test]
 fn the_job_name_is_the_cr_name() {

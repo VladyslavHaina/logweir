@@ -1113,6 +1113,395 @@ fn kind_demo_patches_coredns_before_the_first_step() {
 /// `$PATH` — `kubectl`, `docker`, and the four `command -v` names step 1 wants
 /// on a host that may have none of them. Nothing dials, nothing is created, and
 /// the temporary tree is the only thing written.
+/// Task 33, BY EXECUTION: the real `step_03`, under the real driver, with
+/// stubs — and both arms of its one condition.
+///
+/// # Why a second by-execution test and not another source read
+///
+/// The test above reads offsets, and an offset test passes over a condition
+/// that is never true. The defect this pair exists to prevent is precisely a
+/// shell condition that fires in the wrong arm: on the laptop nothing may
+/// touch the Deployment (`e2e/k8s/laptop-demo.md` is a recorded transcript,
+/// and the step that overwrote its controller image would make it a lie), and
+/// on a cluster that did not build the pins everything must. So the driver is
+/// RUN, twice, differing only in the reference it was handed, and the argv
+/// log is the evidence — the
+/// `kind_demo_passes_its_first_step_on_its_own_context` harness, extended past
+/// step 1 by answering step 2's and step 3's commands.
+///
+/// KILLS (M4): the condition removed, so the override fires on the default
+/// reference too — the walk the laptop transcript recorded.
+#[test]
+fn step_03_hands_the_images_over_only_when_it_was_handed_them() {
+    // A `kubectl` THAT DIALS NOTHING and answers the three pre-steps, step 1's
+    // context read, step 2's two writes and step 3's five. Every other argument
+    // vector is a refusal that names itself.
+    const STUB_KUBECTL: &str = r#"#!/bin/sh
+echo "kubectl $*" >> "$STUB_LOG"
+case "$*" in
+  *"config current-context"*)
+    echo kind-logweir
+    exit 0 ;;
+  *"get configmap coredns"*)
+    printf '%s\n' '.:53 {' '    errors' '    forward . /etc/resolv.conf' '}'
+    exit 0 ;;
+  *"--dry-run=client -o yaml"*) exit 0 ;;
+  *"apply -f"*) exit 0 ;;
+  *"rollout restart"*) exit 0 ;;
+  *"rollout status"*) exit 0 ;;
+  *"run bootstrap-probe"*)
+    echo cluster-id=stub
+    echo reachable=true
+    exit 0 ;;
+  *"get crd -o name"*) exit 0 ;;
+  *"create namespace"*) exit 0 ;;
+  *"patch deployment weirkeeper"*) exit 0 ;;
+  *"set env deployment/weirkeeper"*) exit 0 ;;
+  *"set image deployment/weirkeeper"*) exit 0 ;;
+esac
+echo "stub-kubectl: refusing \`kubectl $*\` — this stub answers the kind driver's pre-steps and steps 1 to 3, and dials nothing." >&2
+exit 1
+"#;
+
+    // A `docker` that answers the gateway, the compose preconditions and the
+    // two image inspects and tags. It builds nothing and pulls nothing.
+    const STUB_DOCKER: &str = r#"#!/bin/sh
+echo "docker $*" >> "$STUB_LOG"
+case "$*" in
+  network*)
+    echo 172.30.0.1
+    exit 0 ;;
+  compose*ps*)
+    printf '%s\n' kafka-broker-1 minio
+    exit 0 ;;
+  "image inspect"*)
+    echo '["logweir@sha256:stub"]'
+    exit 0 ;;
+  tag*) exit 0 ;;
+esac
+echo "stub-docker: refusing \`docker $*\` — this stub answers the gateway, the compose preconditions and the image inspects, and dials nothing." >&2
+exit 1
+"#;
+
+    // A `just` that answers X-APPLY and nothing else. `apply-install` is
+    // `kubectl apply --server-side -f logweir.yaml`, twice; what matters here
+    // is only that it EXITS 0 and that it is on the record before the three
+    // lines this test is about.
+    const STUB_JUST: &str = r#"#!/bin/sh
+echo "just $*" >> "$STUB_LOG"
+case "$*" in
+  apply-install) exit 0 ;;
+esac
+echo "stub-just: refusing \`just $*\` — this stub answers X-APPLY only." >&2
+exit 1
+"#;
+
+    let root = root();
+
+    // ONE RUN OF THE REAL DRIVER. `reference` is what the workflow hands the
+    // demo step; `None` is a run that sets nothing, which is the laptop's.
+    let run = |tag: &str, reference: Option<&str>| -> (Option<i32>, String, String, String) {
+        let tmp = tempdir(tag);
+        let bin = tmp.join("bin");
+        let scripts = tmp.join("scripts");
+        std::fs::create_dir_all(&bin).expect("a stub bin/ directory");
+        std::fs::create_dir_all(&scripts).expect("a scripts/ directory in the temporary tree");
+        for name in ["kind-demo.sh", "demo-steps.sh"] {
+            std::fs::copy(root.join("scripts").join(name), scripts.join(name))
+                .unwrap_or_else(|e| panic!("scripts/{name} is copied verbatim: {e}"));
+        }
+        for (name, body) in [
+            ("kubectl", STUB_KUBECTL),
+            ("docker", STUB_DOCKER),
+            ("just", STUB_JUST),
+        ] {
+            std::fs::write(bin.join(name), body)
+                .unwrap_or_else(|e| panic!("the stub {name} is written: {e}"));
+            make_executable(&bin.join(name));
+        }
+        // The three step 1 only looks for, and `openssl`, which step 4 RUNS —
+        // its refusal is where this walk stops, one step past the step under
+        // test, and is the evidence step 3 finished.
+        for tool in ["openssl", "node", "python3"] {
+            let p = bin.join(tool);
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\necho \"{tool} $*\" >> \"$STUB_LOG\"\necho \"stub-{tool}: refusing \\`{tool} $*\\` — the walk stops at step 4, one step past the step under test.\" >&2\nexit 1\n"
+                ),
+            )
+            .unwrap_or_else(|e| panic!("the stub {tool} is written: {e}"));
+            make_executable(&p);
+        }
+        // Step 1 asks for an EXECUTABLE `logweir` binary and symlinks it onto
+        // PATH; nothing runs it before step 4 stops the walk.
+        let logweir_bin = bin.join("logweir-under-test");
+        std::fs::write(&logweir_bin, "#!/bin/sh\nexit 1\n").expect("the stub logweir is written");
+        make_executable(&logweir_bin);
+
+        let log = tmp.join("argv.log");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut cmd = Command::new("bash");
+        cmd.arg(scripts.join("kind-demo.sh"))
+            .current_dir(&tmp)
+            .env("PATH", &path)
+            .env("STUB_LOG", &log)
+            .env("LOGWEIR_PYTHON", bin.join("python3"))
+            .env("LOGWEIR_BIN", &logweir_bin)
+            .env("LOGWEIR_DEMO_NONINTERACTIVE", "1")
+            // The teardown is DEFERRED: it would append its own `kubectl`
+            // lines to the argv log and it is not what this test reads.
+            .env("LOGWEIR_DEMO_KEEP", "1")
+            .env_remove("LOGWEIR_KUBE_CONTEXT")
+            .env_remove("LOGWEIR_DEMO_ONLY_STEP")
+            .env_remove("LOGWEIR_DEMO_PULL_POLICY")
+            .env_remove("KUBECONFIG");
+        match reference {
+            Some(r) => {
+                cmd.env("LOGWEIR_DEMO_IMAGE_REF", r);
+            }
+            None => {
+                cmd.env_remove("LOGWEIR_DEMO_IMAGE_REF");
+            }
+        }
+        let out = cmd
+            .output()
+            .expect("bash runs the copied scripts/kind-demo.sh");
+        let code = out.status.code();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&tmp);
+        (code, stdout, stderr, argv)
+    };
+
+    // Where a needle first appears in the argv log, as a line index.
+    let at = |argv: &str, needle: &str, seen: &str| -> usize {
+        argv.lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("`{needle}` never reached a stub\n{seen}"))
+    };
+
+    // -----------------------------------------------------------------------
+    // ARM (a) — the author-only CI branch: `LOGWEIR_DEMO_IMAGE_REF=logweir:check`
+    // -----------------------------------------------------------------------
+    let (code, stdout, stderr, argv) = run("logweir-t33-handed", Some("logweir:check"));
+    let seen = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- argv ---\n{argv}");
+    assert!(
+        stdout.contains("3/12 just apply-install"),
+        "the walk must REACH step 3\n{seen}"
+    );
+    let apply_install = at(&argv, "just apply-install", &seen);
+    let env_patch = at(&argv, "--patch-file config/overlays/k8s-demo", &seen);
+    let set_env = at(
+        &argv,
+        "set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE=logweir:check",
+        &seen,
+    );
+    let set_image = at(
+        &argv,
+        "set image deployment/weirkeeper weirkeeper=weirkeeper:check",
+        &seen,
+    );
+    let policy = at(&argv, "\"imagePullPolicy\":\"Never\"", &seen);
+    let rollout = at(&argv, "rollout status deploy/weirkeeper", &seen);
+    assert!(
+        apply_install < env_patch
+            && env_patch < set_env
+            && set_env < set_image
+            && set_image < policy
+            && policy < rollout,
+        "the three lines must run BETWEEN the env patch and the rollout — X-APPLY takes back \
+         every field it owns, and `rollout status` is the first command that would notice an \
+         image this cluster cannot start. Got apply-install={apply_install}, \
+         patch={env_patch}, set-env={set_env}, set-image={set_image}, policy={policy}, \
+         rollout={rollout}\n{seen}"
+    );
+    assert!(
+        stdout.contains(
+            "rc=0  (kubectl set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE=logweir:check)"
+        ),
+        "and the step must PRINT the command and its exit code on its own `rc=` line\n{seen}"
+    );
+    assert!(
+        stdout.contains(
+            "rc=0  (kubectl set image deployment/weirkeeper weirkeeper=weirkeeper:check)"
+        ),
+        "same for the controller image\n{seen}"
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "the walk stops at step 4's `openssl`, one step past the step under test\n{seen}"
+    );
+
+    // -----------------------------------------------------------------------
+    // ARM (b) — the laptop: nothing is handed, so nothing is touched.
+    // -----------------------------------------------------------------------
+    let (code, stdout, stderr, argv) = run("logweir-t33-default", None);
+    let seen = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- argv ---\n{argv}");
+    assert!(
+        stdout.contains("3/12 just apply-install"),
+        "the default-reference walk must reach step 3 too\n{seen}"
+    );
+    assert!(
+        argv.lines().any(|l| l.contains("just apply-install")),
+        "X-APPLY still runs on the laptop path\n{seen}"
+    );
+    assert!(
+        argv.lines()
+            .any(|l| l.contains("--patch-file config/overlays/k8s-demo")),
+        "and so does the demo's env patch\n{seen}"
+    );
+    assert!(
+        argv.lines()
+            .any(|l| l.contains("rollout status deploy/weirkeeper")),
+        "and the rollout it has always waited for\n{seen}"
+    );
+    for forbidden in [
+        "set env deployment/weirkeeper",
+        "set image deployment/weirkeeper",
+        "\"imagePullPolicy\":\"Never\"",
+    ] {
+        assert!(
+            !argv.contains(forbidden),
+            "a run handed the DEFAULT reference must not touch the Deployment: `{forbidden}` \
+             reached kubectl. `e2e/k8s/laptop-demo.md` is a recorded transcript of this walk, \
+             and a step that rewrote the controller's image would make it a lie\n{seen}"
+        );
+    }
+    assert!(
+        stdout.contains("the default runner reference"),
+        "and the step must SAY that it left the Deployment alone\n{seen}"
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "this arm stops at step 4's `openssl` too\n{seen}"
+    );
+}
+
+/// Task 33: step 3 hands the cluster's own images to the controller **after**
+/// X-APPLY and the env patch, and **before** the rollout it would otherwise
+/// fail.
+///
+/// # The ordering is the whole property
+///
+/// `just apply-install` is `kubectl apply --server-side -f logweir.yaml`,
+/// twice, and `logweir.yaml` names the images the LAPTOP built — the pinned
+/// controller digest on the Deployment, and (compiled in, where no manifest
+/// reaches) `weirkeeper::job::RUNNER_IMAGE` on every Job. A server-side apply
+/// takes back every field it owns, so anything set BEFORE it is gone
+/// afterwards: `config/overlays/local-images`'s `weirkeeper:check` and its
+/// `imagePullPolicy: Never` are exactly what X-APPLY overwrote on the fourth
+/// CI run, which is why `rollout status` exited 1 there. And these three must
+/// come before that `rollout status`, because it is the first command that
+/// would notice.
+///
+/// KILLS (M3): a `set env` moved above `just apply-install`.
+#[test]
+fn step_03_hands_the_cluster_its_own_images_between_x_apply_and_the_rollout() {
+    let src = read("scripts/demo-steps.sh");
+
+    // OFFSETS OF COMMANDS, NEVER OF COMMENTS — the `kind_demo_patches_coredns`
+    // idiom. The block above these commands explains what X-APPLY overwrote
+    // and names every one of them in prose.
+    let at = |needle: &str| -> usize {
+        let mut offset = 0usize;
+        for line in src.split_inclusive('\n') {
+            if !line.trim_start().starts_with('#') && line.contains(needle) {
+                return offset;
+            }
+            offset += line.len();
+        }
+        panic!("no COMMAND line of scripts/demo-steps.sh contains `{needle}`")
+    };
+
+    let apply_install = at("just apply-install >");
+    let env_patch = at("--patch-file config/overlays/k8s-demo/deployment-env-patch.yaml >");
+    let set_env = at("set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE=");
+    let set_image = at("set image deployment/weirkeeper weirkeeper=");
+    let pull_policy = at("\\\"imagePullPolicy\\\":\\\"Never\\\"");
+    let rollout = at("rollout status deploy/weirkeeper --timeout=300s");
+
+    assert!(
+        apply_install < env_patch,
+        "X-APPLY runs first and this task did not move it (apply-install at {apply_install}, the \
+         env patch at {env_patch})"
+    );
+    for (name, offset) in [
+        ("set env LOGWEIR_RUNNER_IMAGE", set_env),
+        ("set image weirkeeper", set_image),
+        ("the imagePullPolicy patch", pull_policy),
+    ] {
+        assert!(
+            offset > apply_install,
+            "`{name}` (at {offset}) must run AFTER `just apply-install` (at {apply_install}): a \
+             server-side apply of logweir.yaml takes back every field it owns, so anything set \
+             before it is gone afterwards"
+        );
+        assert!(
+            offset > env_patch,
+            "`{name}` (at {offset}) must run AFTER the `--patch-file` env patch (at {env_patch}), \
+             for the same reason"
+        );
+        assert!(
+            offset < rollout,
+            "`{name}` (at {offset}) must run BEFORE `rollout status deploy/weirkeeper` (at \
+             {rollout}), which is the first command that would notice an image this cluster \
+             cannot start — it is what exited 1 on the fourth CI run"
+        );
+    }
+
+    // THE CONDITION, and it is the reference — not a fourth variable.
+    let guard = at("if [ \"$LOGWEIR_DEMO_IMAGE_REF\" != \"$DEFAULT_RUNNER_IMAGE_REF\" ]; then");
+    assert!(
+        guard < set_env && guard < set_image && guard < pull_policy,
+        "all three commands sit under the non-default-reference guard (guard at {guard}, \
+         commands at {set_env}, {set_image}, {pull_policy}): a run handed the default reference \
+         is the recorded laptop walk and must touch none of them"
+    );
+    // THE NEEDLE IS BUILT FROM TWO PIECES, for the reason
+    // `crd_shape.rs::the_runner_image_is_named_once` and
+    // `manifest_lint.rs::the_runner_image_lives_in_exactly_one_place` both
+    // give: this file is under `crates/`, and a contiguous literal here would
+    // be a second occurrence of the runner reference — in its BARE-TAG form,
+    // which Global Constraint 7 forbids under `crates/` outright.
+    let default_assignment = format!(
+        "DEFAULT_RUNNER_IMAGE_REF={}{}",
+        "ghcr.io/logweir/", "logweir:v0.1.0"
+    );
+    assert_eq!(
+        src.matches(default_assignment.as_str()).count(),
+        1,
+        "the default is spelt ONCE, as `DEFAULT_RUNNER_IMAGE_REF`, and the two defaults plus the \
+         comparison all read it"
+    );
+    assert!(
+        !src.contains("LOGWEIR_DEMO_RUNNER_OVERRIDE") && !src.contains("LOGWEIR_DEMO_SET_ENV"),
+        "and there is no fourth parameter: the condition is on `LOGWEIR_DEMO_IMAGE_REF`"
+    );
+
+    // THE SHIPPED FILE IS NOT EDITED. Three `kubectl` lines against a live
+    // object, and no `sed`/`yq`/`patch` of `logweir.yaml` anywhere in the step.
+    let step_03 = src
+        .split("step_03() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\nstep_04() {").next())
+        .expect("step_03 has a body");
+    assert!(
+        !step_03.contains("sed -i")
+            && !step_03.contains("yq ")
+            && !step_03.contains("> logweir.yaml"),
+        "step 3 must not edit the shipped install file: a stranger applies it unedited (Global \
+         Constraint 37), and `scripts/render-install.sh --check` is what says so"
+    );
+}
+
 #[test]
 fn kind_demo_passes_its_first_step_on_its_own_context() {
     // A `kubectl` THAT DIALS NOTHING and answers exactly what the three

@@ -936,6 +936,11 @@ pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()>
     let ctx = Arc::new(Context {
         client,
         archive: None,
+        // Task 33: this reconciler creates no runner Job, so the runner image
+        // this process was handed would be carried and never read. `None` here
+        // is "unused", never "no override is configured" — see
+        // `super::Context::runner_image`.
+        runner_image: None,
     });
     async move {
         Controller::new(api, watcher::Config::default())

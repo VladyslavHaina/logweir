@@ -896,6 +896,11 @@ pub fn runner_job_spec(
             env
         },
         plan_config_map: Some(plan_config_map_name(&restore.name_any())),
+        // THE SHIPPED PIN, AND THE RECONCILER OVERWRITES IT IF THIS PROCESS
+        // WAS HANDED ANOTHER IMAGE (Task 33, `job::RUNNER_IMAGE_ENV`). This
+        // function is a pure function of the custom resource and stays one:
+        // the override is a property of the PROCESS, read once in `main`.
+        image: None,
     })
 }
 
@@ -2069,7 +2074,32 @@ pub async fn reconcile_restore(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
 ) -> Result<RestoreOutcome, RestoreError> {
-    match reconcile_restore_inner(restore, client, scorecard, verify, now).await {
+    reconcile_restore_with_runner_image(restore, client, scorecard, verify, now, None).await
+}
+
+/// [`reconcile_restore`], with the runner image this controller process was
+/// handed — Task 33.
+///
+/// `runner_image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
+/// `Some(reference)` for the value `main` read out of `job::RUNNER_IMAGE_ENV`.
+/// It becomes `job::RunnerJobSpec::image` and changes nothing else; the
+/// `imagePullPolicy` stays `job::IMAGE_PULL_POLICY`. It is a second function
+/// rather than a sixth parameter for the reason
+/// [`super::backup::reconcile_backup_with_runner_image`] gives: the thirty-two
+/// rows in `tests/restore_controller.rs` are not about the image.
+///
+/// # Errors
+///
+/// [`RestoreError`] for anything that is not an outcome.
+pub async fn reconcile_restore_with_runner_image(
+    restore: &Restore,
+    client: &kube::Client,
+    scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner_image: Option<&str>,
+) -> Result<RestoreOutcome, RestoreError> {
+    match reconcile_restore_inner(restore, client, scorecard, verify, now, runner_image).await {
         Err(RestoreError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `RestoreError::Refused`, so the
@@ -2120,6 +2150,7 @@ async fn reconcile_restore_inner(
     scorecard: ScorecardOracle<'_>,
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
+    runner_image: Option<&str>,
 ) -> Result<RestoreOutcome, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -2258,7 +2289,10 @@ async fn reconcile_restore_inner(
             ));
         };
         let key_ids = approver_key_ids(get_roster(client).await?.as_ref());
-        let spec = runner_job_spec(restore, &cluster, &key_ids)?;
+        let mut spec = runner_job_spec(restore, &cluster, &key_ids)?;
+        // THE ONE LINE THE OVERRIDE IS (Task 33). `None` leaves the shipped
+        // pin in place, which is what every test that does not pass one sees.
+        spec.image = runner_image.map(str::to_string);
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
         // (errata E5a). The Job mounts `<name>-plan` at `/plan`, so a Job
@@ -2616,7 +2650,15 @@ async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action, R
         })
     };
     let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
-    let outcome = reconcile_restore(&restore, &ctx.client, &oracle, &verify, Utc::now()).await?;
+    let outcome = reconcile_restore_with_runner_image(
+        &restore,
+        &ctx.client,
+        &oracle,
+        &verify,
+        Utc::now(),
+        ctx.runner_image.as_deref(),
+    )
+    .await?;
     Ok(action_for(&outcome))
 }
 
@@ -2640,13 +2682,22 @@ fn error_policy(restore: Arc<Restore>, err: &RestoreError, _ctx: Arc<Context>) -
 /// interface **I13**. `None` is a controller with no archive configured: it
 /// records the exit code and the evidence keys and writes no scorecard-derived
 /// field, which is the truthful answer and not a degraded one.
+///
+/// `runner_image` is Task 33's runtime override, read once in `main`: `None`
+/// is the shipped pin `job::RUNNER_IMAGE`, `Some(reference)` the image the
+/// operator loaded onto this cluster's nodes.
 pub fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
+    runner_image: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Restore> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client, archive });
+    let ctx = Arc::new(Context {
+        client,
+        archive,
+        runner_image,
+    });
     async move {
         Controller::new(api, watcher::Config::default())
             .owns(jobs, watcher::Config::default())

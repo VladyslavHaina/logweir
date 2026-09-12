@@ -1545,6 +1545,92 @@ fn the_runner_image_is_named_once() {
     );
 }
 
+/// Interface **I15**'s runtime half: `main` reads
+/// `job::RUNNER_IMAGE_ENV` **once**, and through the predicate — Task 33.
+///
+/// THREE PROPERTIES, AND EACH IS A DEFECT THAT HAS HAPPENED IN THIS TREE.
+///
+/// 1. **One read.** A second `std::env::var` of the same variable is a second
+///    decision, and the two can disagree — the `Backup` reconciler and the
+///    probe reconciler would then create Jobs naming different images in the
+///    same cluster. The value is read here and threaded, exactly as the
+///    archive handle is (interface I13).
+/// 2. **Through `job::configured_runner_image`.** A decision behind `fn main`
+///    is reachable from no test at all, which is precisely how plan erratum
+///    **E19(e)**'s wrong ERROR line on the empty archive URL survived to Task
+///    24. The predicate takes the `Result` so a test can hand it `Ok("")`.
+/// 3. **The variable's NAME is spelt in `job.rs` and nowhere else under
+///    `crates/weirkeeper/src`.** The same argument
+///    [`the_runner_image_is_named_once`] makes about the reference: a second
+///    spelling is how a rename updates one site and misses another.
+#[test]
+fn main_reads_the_runner_image_override_once() {
+    let root = repo_root();
+    let main_rs = std::fs::read_to_string(root.join("crates/weirkeeper/src/main.rs"))
+        .expect("crates/weirkeeper/src/main.rs is read");
+    // Whitespace-free, so the assertion is about the CALL and not about how
+    // rustfmt chose to break the line.
+    let dense: String = main_rs.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let reads = dense
+        .matches("std::env::var(weirkeeper::job::RUNNER_IMAGE_ENV")
+        .count();
+    assert_eq!(
+        reads, 1,
+        "`main` must read the runner-image variable EXACTLY ONCE; found {reads} reads. Two reads \
+         are two decisions, and the reconcilers they feed would then create Jobs naming \
+         different images in one cluster."
+    );
+    assert!(
+        dense.contains("configured_runner_image(std::env::var(weirkeeper::job::RUNNER_IMAGE_ENV"),
+        "the read must be the ARGUMENT of `job::configured_runner_image`: the predicate is the \
+         whole of the decision (empty is unset — plan erratum E19(e)) and `main` supplies only \
+         the read, because a decision behind `fn main` is reachable from no test at all"
+    );
+    assert_eq!(
+        dense.matches("configured_runner_image(").count(),
+        1,
+        "and the predicate is called once"
+    );
+
+    // The one `info!` line, naming the image AND where it came from.
+    assert!(
+        main_rs.contains("\"the runner image every Job this controller creates will name\""),
+        "`main` must log, once, which runner image this process will use — a controller that \
+         silently used a different image from the one the install file names is the failure this \
+         variable exists to fix, not to create"
+    );
+    assert!(
+        main_rs.contains("\"shipped pin\"") && main_rs.contains("RUNNER_IMAGE_ENV"),
+        "and that line must say WHERE the image came from: the shipped pin, or the environment \
+         variable named by `job::RUNNER_IMAGE_ENV`"
+    );
+
+    // The variable's name is spelt in `job.rs` and nowhere else in the crate's
+    // sources. Split, so this file is not itself an occurrence.
+    let needle = format!("{}{}", "LOGWEIR_RUNNER_", "IMAGE");
+    let expected = root.join("crates/weirkeeper/src/job.rs");
+    let mut where_ = Vec::new();
+    for (path, text) in files_under(&root.join("crates/weirkeeper/src")) {
+        let n = text.matches(needle.as_str()).count();
+        if n > 0 {
+            where_.push(format!("{} ({n}x)", path.display()));
+        }
+    }
+    assert_eq!(
+        where_,
+        vec![format!("{} (1x)", expected.display())],
+        "the variable's name belongs to `job::RUNNER_IMAGE_ENV` and is spelt there once; every \
+         other site names the constant"
+    );
+    assert_eq!(
+        weirkeeper::job::RUNNER_IMAGE_ENV,
+        "LOGWEIR_RUNNER_IMAGE",
+        "and this is the spelling `scripts/demo-steps.sh`, `docs/kubernetes.md` §14 and the \
+         Deployment's `set env` all use"
+    );
+}
+
 /// `just crds` regenerates the checked-in CRDs.
 ///
 /// Membership only — not the recipe's length, not its line numbers, not the

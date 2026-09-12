@@ -53,6 +53,62 @@
 pub const RUNNER_IMAGE: &str =
     "ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229";
 
+/// The environment variable that overrides [`RUNNER_IMAGE`] for the Jobs one
+/// running controller creates — Task 33.
+///
+/// # Why an override exists at all
+///
+/// [`RUNNER_IMAGE`] is a COMPILE-TIME digest, measured on the machine that
+/// built it, and plan erratum E19(a) says a local digest changes on every
+/// build. On the laptop that is survivable: the operator's own build IS the
+/// pinned bytes and one `docker tag` puts them under the pinned repository
+/// name (E19b). **On a cluster that did not build the pins it is not.** A
+/// GitHub runner builds both images minutes before the demo, at digests
+/// nothing in the tree names, and the shipped repository is not pullable
+/// (Global Constraint 37, `blocked: no remote`), so a controller that could
+/// only ever name the compile-time pin would create Jobs no such node can
+/// start. This variable is how the operator hands the controller the image
+/// the node actually holds.
+///
+/// # It overrides the image, and NOTHING ELSE
+///
+/// [`IMAGE_PULL_POLICY`] is not overridable and stays `Never` — see its own
+/// doc. The override's whole purpose is an image that was LOADED onto the
+/// node, which is exactly the case `Never` is right for.
+///
+/// THE NAME IS A NAME, NOT A REFERENCE. This string carries no registry path,
+/// so `tests/crd_shape.rs::the_runner_image_is_named_once` still finds the
+/// runner image named exactly once under `crates/` — in [`RUNNER_IMAGE`]
+/// above. The literal default is spelt out only outside `crates/`
+/// (`docs/kubernetes.md` §14, `scripts/demo-steps.sh`).
+pub const RUNNER_IMAGE_ENV: &str = "LOGWEIR_RUNNER_IMAGE";
+
+/// [`RUNNER_IMAGE_ENV`]'s value as a decision: `Some(image)` or "unset".
+///
+/// **AN EMPTY VALUE IS UNSET, AND THAT IS PLAN ERRATUM E19(e)** — the same
+/// ruling `retention::configured_archive_url` carries, for the same reason: a
+/// Kubernetes `env:` entry with an empty `value:` makes `env::var` return
+/// `Ok("")`, not `Err(NotPresent)`, so a controller that treated the empty
+/// string as a configured value would create Jobs with `image: ""`. Whitespace
+/// is trimmed and trims to the same answer.
+///
+/// # Why it takes the `Result` instead of reading the variable itself
+///
+/// So a test can hand it `Ok(String::new())` — the exact value the defect is
+/// about — without mutating process-global state the rest of the binary
+/// shares. The predicate is the whole of the decision; `main` supplies the
+/// read, exactly once, and logs which of the two answers it got
+/// (`crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_image_override_once`).
+#[must_use]
+pub fn configured_runner_image(raw: Result<String, std::env::VarError>) -> Option<String> {
+    let value = raw.ok()?.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 use k8s_openapi::api::batch::v1::{
     Job, JobSpec, PodFailurePolicy, PodFailurePolicyOnExitCodesRequirement,
     PodFailurePolicyOnPodConditionsPattern, PodFailurePolicyRule,
@@ -172,6 +228,15 @@ pub const APPROVAL_MOUNT_PATH: &str = "/approval";
 /// Measured with the digest in place — `ErrImageNeverPull`, with the message
 /// naming the whole reference, until the image is tagged into that repository
 /// name locally; then the pod starts (`docs/kubernetes.md` §14).
+///
+/// **TASK 33 MADE THE IMAGE OVERRIDABLE AND DELIBERATELY LEFT THIS ALONE.**
+/// [`RUNNER_IMAGE_ENV`] exists for images that were LOADED onto the node by
+/// the operator, which is the one case `Never` is exactly right for; making
+/// the policy overridable too would only ever buy a pull against a registry
+/// namespace that resolves to nothing, and would turn a wrong reference from
+/// `ErrImageNeverPull` — which names the whole reference — into a pull error
+/// that names a registry. `the_runner_image_override_does_not_touch_the_pull_policy`
+/// holds it.
 pub const IMAGE_PULL_POLICY: &str = "Never";
 
 /// The engine version the runner container declares, and the digest beside it.
@@ -325,6 +390,23 @@ pub struct RunnerJobSpec {
     /// `backup.yaml` ConfigMap for the `Backup` path, and fixing the NAME here
     /// is what stops the renderer and the mount choosing separately.
     pub plan_config_map: Option<String>,
+    /// The image this Job's one container runs, or **`None` for the shipped
+    /// pin** [`RUNNER_IMAGE`] — Task 33.
+    ///
+    /// `None` IS THE DEFAULT AND THE DEFAULT IS THE PIN. Every
+    /// `runner_job_spec` in `crate::controllers` builds this `None`, so a
+    /// controller handed nothing creates exactly the Jobs it created before
+    /// this field existed; the three reconcilers overwrite it, in one line
+    /// each, with the value `main` read out of [`RUNNER_IMAGE_ENV`]. That is
+    /// why the interface I15 assertions in `tests/backup_controller.rs` and
+    /// `tests/kafka_cluster_controller.rs` needed no edit.
+    ///
+    /// A FIELD AND NOT A PARAMETER OF [`build`]. `build(&spec)` is called from
+    /// six places in the test suite and three in this crate; a second argument
+    /// would have rewritten all nine to say `None`, which is a diff that hides
+    /// the one call site where the answer is not `None`. The field puts the
+    /// decision where the Job's other per-run values already are.
+    pub image: Option<String>,
 }
 
 /// The `podFailurePolicy` every runner Job carries, **in this exact order**.
@@ -401,6 +483,12 @@ pub fn failure_policy() -> PodFailurePolicy {
 ///
 /// Task 23 replaced [`RUNNER_IMAGE`] with a digest reference and nothing else
 /// here changed, exactly as this note predicted.
+///
+/// Task 33 added a fifth thing to check: **the container's image is
+/// [`RunnerJobSpec::image`] when that is `Some`, and [`RUNNER_IMAGE`]
+/// otherwise**, while `imagePullPolicy` is [`IMAGE_PULL_POLICY`] either way.
+/// The signature did not change, because the override is a property of the
+/// spec and not of the builder.
 #[must_use]
 pub fn build(spec: &RunnerJobSpec) -> Job {
     let mut env: Vec<EnvVar> = Vec::new();
@@ -509,7 +597,10 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
 
     let container = Container {
         name: CONTAINER_NAME.to_string(),
-        image: Some(RUNNER_IMAGE.to_string()),
+        // THE SHIPPED PIN UNLESS THE OPERATOR HANDED THIS PROCESS ANOTHER
+        // IMAGE — Task 33, `RunnerJobSpec::image` and [`RUNNER_IMAGE_ENV`].
+        // The policy below is NOT part of that decision and stays `Never`.
+        image: Some(spec.image.as_deref().unwrap_or(RUNNER_IMAGE).to_string()),
         image_pull_policy: Some(IMAGE_PULL_POLICY.to_string()),
         args: Some(spec.args.clone()),
         env: Some(env),

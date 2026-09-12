@@ -459,6 +459,11 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         // Job with an empty `/plan` mount would stall in `ContainerCreating`
         // until its deadline fired (measured live on the `Backup` path).
         plan_config_map: None,
+        // THE SHIPPED PIN, AND THE RECONCILER OVERWRITES IT IF THIS PROCESS
+        // WAS HANDED ANOTHER IMAGE (Task 33, `job::RUNNER_IMAGE_ENV`). This
+        // function is a pure function of the custom resource and stays one:
+        // the override is a property of the PROCESS, read once in `main`.
+        image: None,
     })
 }
 
@@ -874,7 +879,29 @@ pub async fn reconcile_cluster(
     client: &kube::Client,
     now: DateTime<Utc>,
 ) -> Result<ProbeOutcome, KafkaClusterError> {
-    match reconcile_cluster_inner(cluster, client, now).await {
+    reconcile_cluster_with_runner_image(cluster, client, now, None).await
+}
+
+/// [`reconcile_cluster`], with the runner image this controller process was
+/// handed — Task 33.
+///
+/// The probe Job runs the SAME image the backup and restore runners do
+/// (`logweir cluster-probe` is a subcommand of the one binary), so the
+/// override reaches it too: on a cluster that did not build the pins, a probe
+/// Job naming the compile-time digest is `ErrImageNeverPull` exactly as a
+/// backup Job would be. `None` is the shipped pin; the `imagePullPolicy` is
+/// `job::IMAGE_PULL_POLICY` either way.
+///
+/// # Errors
+///
+/// [`KafkaClusterError`] for anything that is not an outcome.
+pub async fn reconcile_cluster_with_runner_image(
+    cluster: &KafkaCluster,
+    client: &kube::Client,
+    now: DateTime<Utc>,
+    runner_image: Option<&str>,
+) -> Result<ProbeOutcome, KafkaClusterError> {
+    match reconcile_cluster_inner(cluster, client, now, runner_image).await {
         Err(KafkaClusterError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN, so it cannot be
             // forgotten at one of the refusal sites.
@@ -919,6 +946,7 @@ async fn reconcile_cluster_inner(
     cluster: &KafkaCluster,
     client: &kube::Client,
     now: DateTime<Utc>,
+    runner_image: Option<&str>,
 ) -> Result<ProbeOutcome, KafkaClusterError> {
     let name = cluster.name_any();
     let namespace = cluster
@@ -967,7 +995,10 @@ async fn reconcile_cluster_inner(
                 requeue: Requeue::AwaitChange,
             });
         }
-        let spec = runner_job_spec(cluster)?;
+        let mut spec = runner_job_spec(cluster)?;
+        // THE ONE LINE THE OVERRIDE IS (Task 33). `None` leaves the shipped
+        // pin in place, which is what every test that does not pass one sees.
+        spec.image = runner_image.map(str::to_string);
         jobs.create(&PostParams::default(), &job::build(&spec))
             .await
             .map_err(KafkaClusterError::Api)?;
@@ -1131,7 +1162,13 @@ async fn reconcile(
     cluster: Arc<KafkaCluster>,
     ctx: Arc<Context>,
 ) -> Result<Action, KafkaClusterError> {
-    let outcome = reconcile_cluster(&cluster, &ctx.client, Utc::now()).await?;
+    let outcome = reconcile_cluster_with_runner_image(
+        &cluster,
+        &ctx.client,
+        Utc::now(),
+        ctx.runner_image.as_deref(),
+    )
+    .await?;
     Ok(action_for(&outcome))
 }
 
@@ -1160,12 +1197,18 @@ fn error_policy(cluster: Arc<KafkaCluster>, err: &KafkaClusterError, _ctx: Arc<C
 /// controller in the crate whose `Context` needs nothing but a client, and
 /// `crates/weirkeeper/src/controllers/kafka_cluster.rs` is therefore not one of
 /// interface **I13**'s files.
-pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
+pub fn controller(
+    client: kube::Client,
+    runner_image: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<KafkaCluster> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
     let ctx = Arc::new(Context {
         client,
         archive: None,
+        // Task 33: this reconciler creates no BACKUP Job, but it does create
+        // the probe Job, and that Job runs the runner image.
+        runner_image,
     });
     async move {
         Controller::new(api, watcher::Config::default())
