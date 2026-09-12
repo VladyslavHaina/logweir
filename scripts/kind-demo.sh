@@ -174,18 +174,56 @@ set -e
 echo "    rc=$rc  (kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')"
 [ "$rc" -eq 0 ] || die "could not read the coredns ConfigMap (rc=$rc); see $KIND_OUT/corefile.err"
 
-# IDEMPOTENT, BY MARKERS — MEASURED, NOT ASSUMED. A second pass over an
-# already-patched Corefile inserts a SECOND `hosts` block, and CoreDNS refuses a
-# server block that declares one plugin twice: the new pods crash-loop, the old
-# ones stay, and `rollout status` times out 120 s later saying only that coredns
-# did not become ready. That happened on the 2026-09-11 authorised proving run.
-# So the awk drops anything it wrote before, by marker, and then writes it
-# again. The markers are Corefile comments and CoreDNS ignores them.
+# IDEMPOTENT — MEASURED, NOT ASSUMED — AND AGAINST AN UNMARKED BLOCK TOO.
+# A second pass over an already-patched Corefile inserts a SECOND `hosts` block,
+# and CoreDNS refuses a server block that declares one plugin twice: the new
+# pods crash-loop, the old ones stay, and `rollout status` times out 120 s later
+# saying only that coredns did not become ready. That happened on the 2026-09-11
+# authorised proving run.
+#
+# So the awk drops TWO things before writing its own: anything bracketed by its
+# markers, AND any `hosts { … }` block whose body names `host.docker.internal`,
+# marked or not. The second half is what an older form of this script left
+# behind — an unmarked block — and against which the marker-only form produced
+# exactly the duplicate-plugin timeout above, whose message names neither the
+# block nor this script. What it drops it PRINTS, on stderr, so a transcript
+# says what was replaced instead of leaving a reader to diff two Corefiles. A
+# `hosts` block for some other name is not this script's and is copied through
+# in place, untouched.
+#
+# THIS CANNOT ARISE IN CI: `.github/workflows/kind-demo.yml` creates the cluster
+# it patches and deletes it in the same run, so the Corefile it reads is always
+# the one the node image shipped. It arises on a REUSED local cluster, which is
+# the state that cost the proving run a delete-and-recreate.
+#
+# The markers are Corefile comments and CoreDNS ignores them.
 set +e
 awk -v gw="$gw" '
   /^ *# logweir-kind-demo: BEGIN/ { skip = 1; next }
   /^ *# logweir-kind-demo: END/   { skip = 0; next }
   skip { next }
+
+  # A `hosts` block is BUFFERED to its closing brace, because whether it
+  # belongs to this script is decided by its BODY and not by its first line.
+  $1 == "hosts" && index($0, "{") > 0 && buffering == 0 {
+    buffering = 1; n = 0; hit = 0; depth = 0
+  }
+  buffering {
+    buf[++n] = $0
+    if (index($0, "host.docker.internal") > 0) { hit = 1 }
+    t = $0; depth += gsub(/\{/, "", t)
+    t = $0; depth -= gsub(/\}/, "", t)
+    if (depth > 0) { next }
+    buffering = 0
+    if (hit == 1) {
+      print "kind-demo: replaced a stale hosts block for host.docker.internal (" n " lines):" > "/dev/stderr"
+      for (i = 1; i <= n; i++) { print "    " buf[i] > "/dev/stderr" }
+    } else {
+      for (i = 1; i <= n; i++) { print buf[i] }
+    }
+    next
+  }
+
   { print }
   /^\.:53 \{/ && inserted == 0 {
     print "    # logweir-kind-demo: BEGIN — the compose stack is on the host"
@@ -196,7 +234,12 @@ awk -v gw="$gw" '
     print "    # logweir-kind-demo: END"
     inserted = 1
   }
-  END { exit inserted == 1 ? 0 : 3 }
+  # A Corefile that ends inside a `hosts` block is malformed already; give its
+  # bytes back rather than swallowing them.
+  END {
+    if (buffering == 1) { for (i = 1; i <= n; i++) { print buf[i] } }
+    exit inserted == 1 ? 0 : 3
+  }
 ' "$KIND_OUT/Corefile" > "$KIND_OUT/Corefile.new"
 rc=$?
 set -e

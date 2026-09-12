@@ -2651,7 +2651,10 @@ measured.
   new pods never became ready and `rollout status` timed out 120 s later saying
   only that coredns had not become ready. The patch now brackets its own block
   with `# logweir-kind-demo: BEGIN/END` markers and removes any previous one
-  before writing. (The cluster was deleted and recreated once, in the same
+  before writing — and, because an older form of this script wrote its block
+  UNMARKED, it also drops any `hosts { … }` block whose body names
+  `host.docker.internal`, printing what it replaced. Only a reused local cluster
+  can be in that state; a CI run creates the cluster it patches. (The cluster was deleted and recreated once, in the same
   session, to recover from the Corefile that second pass had produced.)
 
 **What this run could NOT prove on this host, and why it is not a defect in the
@@ -2671,7 +2674,12 @@ The bytes are on the node — `ctr -n k8s.io images ls` lists all three names at
 the digests the tree pins — but containerd's CRI image service does not surface
 an image whose platform is not the node's, so the kubelet cannot see it. This is
 not emulation being slow; it is the image being invisible, and no wall clock was
-measurable for it. Setting the node's
+measurable for it. **One thing that follows is unproven here**: whether a kind
+node resolves `ghcr.io/logweir/logweir@sha256:…` when it holds that digest under
+the tag `ghcr.io/logweir/logweir:v0.1.0` (plan erratum E19b, transposed to a kind
+node) — an arm64 node cannot surface the amd64 image at all, so the question was
+untestable on this host, and the amd64 runner's own green run of
+`.github/workflows/kind-demo.yml` is what would answer it. Setting the node's
 `[plugins.'io.containerd.runtime.v2.task'] platforms` to include `linux/amd64`
 changed the runtime's list and not the image service's, and was reverted with
 the cluster.
@@ -2723,6 +2731,19 @@ deliberately no fallback to localhost: inside a pod, localhost is the pod.
 rc=1
 kubectl invocations after the refusal: 0
 ```
+
+**The tracers are the gap, and one step is now walked without them.** A tracer
+proves the ORDER and nothing about the step it stands for: the first version of
+`step_01` compared the kubeconfig's current context against the literal
+`docker-desktop`, so the real step refused the `kind` cluster at 1/12 — under
+this very proof, invisibly, because the step that refused had been replaced.
+`crates/logweir/tests/laptop_demo_lint.rs::kind_demo_passes_its_first_step_on_its_own_context`
+now runs `scripts/kind-demo.sh` over an UNCHANGED copy of `scripts/demo-steps.sh`
+with stubs on `$PATH`, and asserts that the real `step_01` reads the context,
+accepts it, prints no `refusing:` line, and walks on to the next precondition it
+cannot satisfy under stubs (`docker compose ps`, which the stub refuses). The
+other eleven steps are still evidenced by `e2e/k8s/laptop-demo.md` and by the CI
+run that cannot yet happen.
 
 `bash -n` exits 0 on all three scripts.
 

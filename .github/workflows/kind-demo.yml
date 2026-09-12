@@ -14,9 +14,15 @@ name: kind-demo
 # remote` with the date and the artefact that would move it: the URL of one
 # green run of THIS workflow. Nothing in this tree may record that clause as
 # closed. What HAS been done is the shape: `crates/logweir/tests/workflow_lint.rs`
-# parses this file, `scripts/kind-demo.sh` and `scripts/demo-steps.sh` are proven
-# dry, and one locally authorised proving run is transcribed in
-# `docs/kubernetes.md` §18 and labelled as what it is.
+# parses this file; `scripts/kind-demo.sh`'s three pre-steps and the ORDER of the
+# walk are proven dry with stubs (the order with tracers standing in for the step
+# bodies), and step 1's preflight is proven dry BY EXECUTION under this driver —
+# the real `scripts/demo-steps.sh`, no tracers
+# (`laptop_demo_lint.rs::kind_demo_passes_its_first_step_on_its_own_context`);
+# the eleven steps after it are evidenced only by the laptop walkthrough
+# `e2e/k8s/laptop-demo.md`, never yet by a `kind` cluster. One locally authorised
+# proving run is transcribed in `docs/kubernetes.md` §18 and labelled as what it
+# is.
 #
 # ===========================================================================
 # THE ONE HARD PROBLEM, AND WHY THERE IS NO `extraPortMappings` HERE

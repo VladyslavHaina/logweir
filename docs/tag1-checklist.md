@@ -101,7 +101,9 @@ from inside the cluster, and then runs the twelve steps of
 transcript that would close this row does not exist. Two things were proven
 instead, and neither is this clause: the script was proven **dry** (a stubbed
 `kubectl` and `docker`, the twelve steps invoked in order after the CoreDNS patch
-and the probe, and the gateway-resolution failure path exiting 1), and one local
+and the probe — **with tracers standing in for the step bodies** — the real
+`step_01` then walked through under the `kind` driver by execution, and the
+gateway-resolution failure path exiting 1), and one local
 `kind` proving run was made under STANDING RULE 16's single authorised
 exception, deleting its cluster in the same session. Its transcript is
 `docs/kubernetes.md` §18.5 and it is labelled there for what it is — author-only

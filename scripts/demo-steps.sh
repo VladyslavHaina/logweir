@@ -119,7 +119,13 @@ CONTROLLER_IMAGE_TAG=ghcr.io/logweir/weirkeeper:v0.1.0
 ONLY_STEP="${LOGWEIR_DEMO_ONLY_STEP:-}"
 PROXY_PID=""
 
-die() { echo; echo "laptop-demo: $*" >&2; exit 1; }
+# EVERY REFUSAL IS ATTRIBUTED TO THE DRIVER THAT RAN (Task 31, fix round 1).
+# This file is sourced, so `$0` is the driver: `laptop-demo` under
+# `bash scripts/laptop-demo.sh` and `kind-demo` under `bash scripts/kind-demo.sh`.
+# It was the literal `laptop-demo:` until the fix round, which attributed every
+# `kind` refusal to the demo that had not run. No fourth variable: the prefix is
+# derived where it is printed.
+die() { echo; echo "$(basename "$0" .sh): $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
 
 # The PAUSE prompt. `LOGWEIR_DEMO_NONINTERACTIVE=1` suppresses it, which is
@@ -308,8 +314,31 @@ step_01() {
   set -e
   found=$(tr -d ' \t\n' < "$OUT/current-context.txt")
   echo "    rc=$rc  (kubectl config current-context) -> ${found:-<empty>}"
-  if [ "$found" != "docker-desktop" ]; then
-    echo "refusing: current context is ${found:-<unreadable>}, not docker-desktop" >&2
+  # THE KUBECONFIG'S CURRENT CONTEXT MUST BE THE CLUSTER THIS DRIVER IS ABOUT.
+  #
+  # `kubectl config current-context` prints the `current-context` FIELD of the
+  # kubeconfig and IGNORES `--context`: that flag chooses the context a
+  # REQUEST is made against, and this subcommand makes no request (the tree's
+  # own `crates/logweir/tests/fixtures/stub-kubectl` says so in its header).
+  # The flag stays on the line above because STANDING RULE 12 is about every
+  # `kubectl` invocation naming its context and
+  # `laptop_demo_names_every_kubectl_context` asserts exactly that — but it is
+  # the COMPARISON here, not the flag, that decides which cluster is
+  # acceptable, so the comparison reads `$LOGWEIR_KUBE_CONTEXT`.
+  #
+  # What the guard therefore means: whatever `kubectl` would do by default
+  # must already be this run's cluster. On the laptop that refuses an operator
+  # whose kubeconfig is pointed somewhere else, before anything dials — Task
+  # 28's reason for the check. On a runner `kind create cluster` sets the
+  # current context to the cluster it just created (`kind-logweir`), so the
+  # same guard passes there with nothing to configure.
+  #
+  # Until Task 31's fix round 1 this compared against the LITERAL
+  # `docker-desktop`, which refused every cluster that was not the laptop's —
+  # the `kind` driver included, at step 1 of 12, on every run of
+  # `.github/workflows/kind-demo.yml`.
+  if [ "$found" != "$LOGWEIR_KUBE_CONTEXT" ]; then
+    echo "refusing: current context is ${found:-<unreadable>}, not $LOGWEIR_KUBE_CONTEXT" >&2
     exit 1
   fi
 
@@ -367,7 +396,7 @@ step_01() {
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl get crd -o name)"
-  [ "$rc" -eq 0 ] || die "the docker-desktop cluster is not reachable (rc=$rc). Enable Kubernetes in Docker Desktop."
+  [ "$rc" -eq 0 ] || die "the $LOGWEIR_KUBE_CONTEXT cluster is not reachable (rc=$rc). On the laptop that means enabling Kubernetes in Docker Desktop; in CI the cluster is the one the workflow created."
   ours=$(grep -c 'logweir.dev' "$OUT/crds.txt" || true)
   echo "    logweir.dev CRDs already installed: $ours"
   if [ "$ours" -ne 0 ] && [ "$ours" -ne 6 ]; then
@@ -407,7 +436,7 @@ step_01() {
   PATH="$PWD/$OUT/bin:$PATH"
   export PATH
 
-  pause "the preflight passed: docker-desktop, the compose stack, both local images."
+  pause "the preflight passed: $LOGWEIR_KUBE_CONTEXT, the compose stack, both local images."
 }
 
 # ---------------------------------------------------------------------------
@@ -1338,7 +1367,7 @@ step_12() {
 
 # ---------------------------------------------------------------------------
 # THE RUN. The drivers' entry point, and the ONE place the twelve steps are
-# invoked — `laptop-demo.sh` is five lines and `kind-demo.sh` runs three
+# invoked — `laptop-demo.sh` is six lines and `kind-demo.sh` runs three
 # pre-steps and then calls this, so there is exactly one ordering of the walk
 # in the tree.
 # ---------------------------------------------------------------------------

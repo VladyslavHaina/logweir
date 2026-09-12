@@ -1064,3 +1064,206 @@ fn kind_demo_patches_coredns_before_the_first_step() {
         "the rendered ConfigMap must be applied from the file the render wrote"
     );
 }
+
+/// **The `kind` driver walks through its own first step — by execution, with
+/// the real `demo-steps.sh`.**
+///
+/// This is the test the review's blocker was found in the absence of. Task 31's
+/// dry proof ran `kind-demo.sh`'s three pre-steps for real but replaced the
+/// twelve steps with tracers in a COPY of `demo-steps.sh`, so the real
+/// `step_01` never ran under this driver — and the real `step_01` compared the
+/// kubeconfig's current context against the LITERAL `docker-desktop`, which
+/// refuses every cluster that is not the laptop's. `kubectl config
+/// current-context` prints the kubeconfig's `current-context` FIELD and ignores
+/// `--context` (`fixtures/stub-kubectl`'s header says so), so parameterising
+/// the flag did not parameterise the comparison: the workflow's demo step would
+/// have died at 1/12 on every run with
+///
+/// ```text
+/// refusing: current context is kind-logweir, not docker-desktop
+/// ```
+///
+/// So this runs the REAL `scripts/kind-demo.sh` over the REAL
+/// `scripts/demo-steps.sh` — both copied UNCHANGED into a temporary tree, no
+/// tracers, nothing rewritten — against stubs that answer the three pre-steps'
+/// reads and the probe, and asserts that the walk gets PAST the context check
+/// and dies at the next precondition it cannot satisfy (the compose stack,
+/// which the stub `docker` refuses). The refusal string is asserted ABSENT.
+///
+/// KILLS: comparing the current context against the literal `docker-desktop`
+/// (or any literal that is not this driver's cluster); the probe moved after
+/// step 1; a pre-step whose exit code stopped being read.
+///
+/// GLOBAL CONSTRAINT 22: every tool the walk reaches for is a stub first on
+/// `$PATH` — `kubectl`, `docker`, and the four `command -v` names step 1 wants
+/// on a host that may have none of them. Nothing dials, nothing is created, and
+/// the temporary tree is the only thing written.
+#[test]
+fn kind_demo_passes_its_first_step_on_its_own_context() {
+    // A `kubectl` THAT DIALS NOTHING and answers exactly what the three
+    // pre-steps and step 1's context read ask of it. Every other argument
+    // vector is a refusal that names itself — the `fixtures/stub-kubectl`
+    // idiom, so a walk that wandered off this path says where it went.
+    const STUB_KUBECTL: &str = r#"#!/bin/sh
+echo "kubectl $*" >> "$STUB_LOG"
+case "$*" in
+  *"config current-context"*)
+    echo kind-logweir
+    exit 0 ;;
+  *"get configmap coredns"*)
+    printf '%s\n' '.:53 {' '    errors' '    forward . /etc/resolv.conf' '}'
+    exit 0 ;;
+  *"--dry-run=client -o yaml"*)
+    printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: coredns'
+    exit 0 ;;
+  *"apply -f"*) exit 0 ;;
+  *"rollout restart"*) exit 0 ;;
+  *"rollout status"*) exit 0 ;;
+  *"run bootstrap-probe"*)
+    echo cluster-id=stub
+    echo reachable=true
+    exit 0 ;;
+esac
+echo "stub-kubectl: refusing \`kubectl $*\` — this stub answers the kind driver's three pre-steps and step 1's context read, and dials nothing." >&2
+exit 1
+"#;
+
+    // A `docker` that answers ONE IPv4 gateway and refuses the rest, naming
+    // what it refused. The refusal is load-bearing twice over: it is what
+    // makes `docker compose ps` fail, which is where this walk is expected to
+    // stop, and it is what proves the walk got that far.
+    const STUB_DOCKER: &str = r#"#!/bin/sh
+echo "docker $*" >> "$STUB_LOG"
+case "$1" in
+  network)
+    echo 172.30.0.1
+    exit 0 ;;
+esac
+echo "stub-docker: refusing \`docker $*\` — this stub answers only \`network inspect\` (one IPv4 gateway) and dials nothing." >&2
+exit 1
+"#;
+
+    let root = root();
+    let tmp = tempdir("logweir-t31-kind-first-step");
+    let bin = tmp.join("bin");
+    let scripts = tmp.join("scripts");
+    std::fs::create_dir_all(&bin).expect("a stub bin/ directory");
+    std::fs::create_dir_all(&scripts).expect("a scripts/ directory in the temporary tree");
+
+    // THE TWO SCRIPTS, COPIED UNCHANGED. `kind-demo.sh` starts with `cd
+    // "$(dirname "$0")/.."`, so the temporary tree is the root of this run and
+    // nothing is written into the repository.
+    for name in ["kind-demo.sh", "demo-steps.sh"] {
+        std::fs::copy(root.join("scripts").join(name), scripts.join(name))
+            .unwrap_or_else(|e| panic!("scripts/{name} is copied verbatim: {e}"));
+    }
+
+    std::fs::write(bin.join("kubectl"), STUB_KUBECTL).expect("the stub kubectl is written");
+    std::fs::write(bin.join("docker"), STUB_DOCKER).expect("the stub docker is written");
+    make_executable(&bin.join("kubectl"));
+    make_executable(&bin.join("docker"));
+
+    // THE FOUR NAMES STEP 1 ONLY LOOKS FOR. `command -v` is all it does with
+    // them, so a stub that refuses if it is ever RUN is both enough and
+    // honest, and it makes this test deterministic on a host that has no
+    // `just`, no `node` and no `openssl`.
+    for tool in ["just", "openssl", "node", "python3"] {
+        let p = bin.join(tool);
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"{tool} $*\" >> \"$STUB_LOG\"\necho \"stub-{tool}: refusing \\`{tool} $*\\` — this stub exists so \\`command -v\\` finds the tool; step 1 stops at the compose precondition before any of these runs.\" >&2\nexit 1\n"
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the stub {tool} is written: {e}"));
+        make_executable(&p);
+    }
+
+    let log = tmp.join("argv.log");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg(scripts.join("kind-demo.sh"))
+        .current_dir(&tmp)
+        .env("PATH", &path)
+        .env("STUB_LOG", &log)
+        .env("LOGWEIR_PYTHON", bin.join("python3"))
+        .env("LOGWEIR_DEMO_NONINTERACTIVE", "1")
+        .env_remove("LOGWEIR_KUBE_CONTEXT")
+        .env_remove("LOGWEIR_DEMO_ONLY_STEP")
+        .env_remove("KUBECONFIG")
+        .output()
+        .expect("bash runs the copied scripts/kind-demo.sh");
+
+    let code = out.status.code();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let seen = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- argv ---\n{argv}");
+
+    // THE DRIVER SAYS WHICH CLUSTER THIS RUN IS ABOUT, FIRST.
+    assert!(
+        stdout
+            .lines()
+            .next()
+            .is_some_and(|l| l.contains("kind-demo: kubectl context kind-logweir")),
+        "the driver's first line of output names its own cluster\n{seen}"
+    );
+
+    // THE PRE-STEPS RAN, IN THEIR ORDER, AND THE PROBE CAME LAST.
+    let rollout = argv
+        .lines()
+        .position(|l| l.contains("rollout status deployment/coredns"))
+        .unwrap_or_else(|| panic!("the CoreDNS `rollout status` never reached kubectl\n{seen}"));
+    let probe = argv
+        .lines()
+        .position(|l| l.contains("run bootstrap-probe"))
+        .unwrap_or_else(|| panic!("the bootstrap probe never reached kubectl\n{seen}"));
+    assert!(
+        rollout < probe,
+        "the probe (argv line {probe}) must follow the CoreDNS rollout (argv line {rollout})\n\
+         {seen}"
+    );
+
+    // STEP 1 RAN, READ THE CONTEXT, AND ACCEPTED IT.
+    assert!(
+        stdout.contains("1/12 preflight"),
+        "the walk must reach step 1 of the twelve\n{seen}"
+    );
+    assert!(
+        stdout.contains("(kubectl config current-context) -> kind-logweir"),
+        "step 1 must print the context it read, and it is this driver's\n{seen}"
+    );
+    assert!(
+        !stdout.contains("refusing: current context")
+            && !stderr.contains("refusing: current context"),
+        "step 1 refused the cluster this driver exists to run on. The comparison is against \
+         `$LOGWEIR_KUBE_CONTEXT`, not a literal: `kubectl config current-context` prints the \
+         kubeconfig's `current-context` field and ignores `--context`, so a literal here \
+         refuses every cluster but one and `.github/workflows/kind-demo.yml` can never go \
+         green\n{seen}"
+    );
+
+    // AND IT WALKED ON, TO THE NEXT PRECONDITION IT CANNOT SATISFY HERE.
+    assert!(
+        stdout.contains("rc=1  (docker compose ps --status running)"),
+        "past the context check, step 1's next precondition is the compose stack, and the stub \
+         `docker` refuses it — that refusal is the evidence the context check was passed\n{seen}"
+    );
+    assert!(
+        stderr.contains("kind-demo: `docker compose ps` exited 1"),
+        "the refusal must be attributed to the driver that ran (`kind-demo:`) and must name the \
+         command that failed\n{seen}"
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "the walk must exit 1 at the compose precondition; it exited {code:?}\n{seen}"
+    );
+}

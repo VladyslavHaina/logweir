@@ -5,15 +5,24 @@
 # copies this file into a temporary directory as `kubectl`, mode 0755, puts
 # that directory FIRST on `$PATH`, points `KUBECONFIG` at
 # `crates/logweir/tests/fixtures/kubeconfig-kind-x.yaml`, and runs
-# `bash scripts/laptop-demo.sh`. The demo's very first command is
+# `bash scripts/laptop-demo.sh`. That driver sets
+# `LOGWEIR_KUBE_CONTEXT=docker-desktop`, and the demo's very first command
+# (in `scripts/demo-steps.sh`'s `step_01` — Task 31 moved the steps there) is
 #
-#     kubectl --context docker-desktop config current-context
+#     kubectl --context "$LOGWEIR_KUBE_CONTEXT" config current-context
 #
-# which this stub answers with `kind-x`; the script must then print
+# which this stub answers with `kind-x` WHATEVER `--context` names — exactly as
+# a real `kubectl` does, because `config current-context` prints the
+# kubeconfig's `current-context` FIELD while `--context` only overrides the
+# context a REQUEST is made against. Step 1 therefore compares that answer with
+# `$LOGWEIR_KUBE_CONTEXT` — the cluster the DRIVER is about — and under this
+# driver the script must print
 #
 #     refusing: current context is kind-x, not docker-desktop
 #
-# on stderr and exit 1, before anything else runs.
+# on stderr and exit 1, before anything else runs. (Comparing against a literal
+# instead was Task 31's blocking defect: it refused every cluster but the
+# laptop's, the `kind` one included.)
 #
 # WHY A STUB AND NOT A REAL `kubectl` POINTED AT AN UNROUTABLE SERVER. Global
 # Constraint 22 keeps the default `cargo test` suite free of anything that
