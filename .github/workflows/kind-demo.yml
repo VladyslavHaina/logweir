@@ -84,6 +84,9 @@ name: kind-demo
 # `logweir:check`, and the published branch hands
 # `vars.LOGWEIR_PUBLISHED_RUNNER_REF` — also not the default, so the override
 # carries the PUBLISHED digest into every Job, which is what that branch means.
+# The controller image and its pull policy are put back to the overlay's only
+# under the author-only policy (`Never`); the published branch keeps the
+# controller image its cluster pulled.
 # The shipped `logweir.yaml` is applied unedited on both
 # (`scripts/render-install.sh --check`).
 #

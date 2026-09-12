@@ -542,8 +542,9 @@ step_03() {
   # THE CONDITION IS THE REFERENCE, NOT A FOURTH VARIABLE. A run handed the
   # default reference is the recorded laptop walk and nothing here fires, so
   # `e2e/k8s/laptop-demo.md` stays true byte for byte. A run handed anything
-  # else was handed it by somebody who loaded that image onto this cluster —
-  # which is what both of the workflow's install branches do.
+  # else was handed it by one of the workflow's two install branches: (1) the
+  # runner image is handed on BOTH (the published branch hands the published
+  # digest); (2) and (3) only on the author-only one, see below.
   if [ "$LOGWEIR_DEMO_IMAGE_REF" != "$DEFAULT_RUNNER_IMAGE_REF" ]; then
     echo "    this run was handed $LOGWEIR_DEMO_IMAGE_REF, not the default $DEFAULT_RUNNER_IMAGE_REF:"
     echo "    handing the controller the images this cluster has (the shipped logweir.yaml is not edited)"
@@ -559,27 +560,38 @@ step_03() {
     echo "    rc=$rc  (kubectl set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE=$LOGWEIR_DEMO_IMAGE_REF)"
     [ "$rc" -eq 0 ] || die "could not hand the controller its runner image (rc=$rc); see $OUT/set-runner-image.log"
 
-    # (2) THE CONTROLLER IMAGE, put back to the one the author-only overlay
-    # installed and X-APPLY replaced with the laptop's pinned digest.
-    set +e
-    kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" set image deployment/weirkeeper weirkeeper="$BUILT_CONTROLLER_TAG" > "$OUT/set-controller-image.log" 2>&1
-    rc=$?
-    set -e
-    echo "    rc=$rc  (kubectl set image deployment/weirkeeper weirkeeper=$BUILT_CONTROLLER_TAG)"
-    [ "$rc" -eq 0 ] || die "could not put the author-only controller image back (rc=$rc); see $OUT/set-controller-image.log"
+    # (2) AND (3) ARE THE AUTHOR-ONLY HALF. Only a cluster that LOADED its
+    # controller image (`LOGWEIR_DEMO_PULL_POLICY=Never` — the overlay's policy)
+    # has `weirkeeper:check` to be put back to; the published branch's cluster
+    # PULLED its controller image by digest and must keep it, so under any other
+    # policy the Deployment's image and pull policy are left as logweir.yaml set
+    # them (the Task 33 review's finding: before this guard the published branch
+    # would have been pointed at a tag it never loaded).
+    if [ "$LOGWEIR_DEMO_PULL_POLICY" = "Never" ]; then
+      # (2) THE CONTROLLER IMAGE, put back to the one the author-only overlay
+      # installed and X-APPLY replaced with the laptop's pinned digest.
+      set +e
+      kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" set image deployment/weirkeeper weirkeeper="$BUILT_CONTROLLER_TAG" > "$OUT/set-controller-image.log" 2>&1
+      rc=$?
+      set -e
+      echo "    rc=$rc  (kubectl set image deployment/weirkeeper weirkeeper=$BUILT_CONTROLLER_TAG)"
+      [ "$rc" -eq 0 ] || die "could not put the author-only controller image back (rc=$rc); see $OUT/set-controller-image.log"
 
-    # (3) AND THE PULL POLICY THE OVERLAY HAD SET. MEASURED: `logweir.yaml`
-    # carries `imagePullPolicy: IfNotPresent`, so X-APPLY dropped the overlay's
-    # `Never` along with the image. `IfNotPresent` on an unqualified tag is one
-    # absent image away from a pull against Docker Hub; `Never` fails as
-    # `ErrImageNeverPull`, naming the whole reference. A STRATEGIC-MERGE patch,
-    # so the container is selected BY NAME and never by index.
-    set +e
-    kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" patch deployment weirkeeper -p '{"spec":{"template":{"spec":{"containers":[{"name":"weirkeeper","imagePullPolicy":"Never"}]}}}}' > "$OUT/set-pull-policy.log" 2>&1
-    rc=$?
-    set -e
-    echo "    rc=$rc  (kubectl patch deployment weirkeeper -p '{...\"imagePullPolicy\":\"Never\"}' — the overlay's policy, which X-APPLY dropped)"
-    [ "$rc" -eq 0 ] || die "could not restore imagePullPolicy: Never (rc=$rc); see $OUT/set-pull-policy.log"
+      # (3) AND THE PULL POLICY THE OVERLAY HAD SET. MEASURED: `logweir.yaml`
+      # carries `imagePullPolicy: IfNotPresent`, so X-APPLY dropped the overlay's
+      # `Never` along with the image. `IfNotPresent` on an unqualified tag is one
+      # absent image away from a pull against Docker Hub; `Never` fails as
+      # `ErrImageNeverPull`, naming the whole reference. A STRATEGIC-MERGE patch,
+      # so the container is selected BY NAME and never by index.
+      set +e
+      kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" patch deployment weirkeeper -p '{"spec":{"template":{"spec":{"containers":[{"name":"weirkeeper","imagePullPolicy":"Never"}]}}}}' > "$OUT/set-pull-policy.log" 2>&1
+      rc=$?
+      set -e
+      echo "    rc=$rc  (kubectl patch deployment weirkeeper -p '{...\"imagePullPolicy\":\"Never\"}' — the overlay's policy, which X-APPLY dropped)"
+      [ "$rc" -eq 0 ] || die "could not restore imagePullPolicy: Never (rc=$rc); see $OUT/set-pull-policy.log"
+    else
+      echo "    pull policy $LOGWEIR_DEMO_PULL_POLICY: this cluster pulled its controller image; the Deployment's image and pull policy stay as logweir.yaml set them"
+    fi
   else
     echo "    the default runner reference ($DEFAULT_RUNNER_IMAGE_REF): the Deployment's image, its"
     echo "    pull policy and its environment are left exactly as logweir.yaml and the patch above set them"

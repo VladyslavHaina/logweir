@@ -1200,7 +1200,10 @@ exit 1
 
     // ONE RUN OF THE REAL DRIVER. `reference` is what the workflow hands the
     // demo step; `None` is a run that sets nothing, which is the laptop's.
-    let run = |tag: &str, reference: Option<&str>| -> (Option<i32>, String, String, String) {
+    let run = |tag: &str,
+               reference: Option<&str>,
+               policy: Option<&str>|
+     -> (Option<i32>, String, String, String) {
         let tmp = tempdir(tag);
         let bin = tmp.join("bin");
         let scripts = tmp.join("scripts");
@@ -1268,6 +1271,11 @@ exit 1
                 cmd.env_remove("LOGWEIR_DEMO_IMAGE_REF");
             }
         }
+        // The published branch hands `IfNotPresent`; the author-only branch and
+        // the laptop leave the policy at the script's default, `Never`.
+        if let Some(p) = policy {
+            cmd.env("LOGWEIR_DEMO_PULL_POLICY", p);
+        }
         let out = cmd
             .output()
             .expect("bash runs the copied scripts/kind-demo.sh");
@@ -1289,7 +1297,7 @@ exit 1
     // -----------------------------------------------------------------------
     // ARM (a) — the author-only CI branch: `LOGWEIR_DEMO_IMAGE_REF=logweir:check`
     // -----------------------------------------------------------------------
-    let (code, stdout, stderr, argv) = run("logweir-t33-handed", Some("logweir:check"));
+    let (code, stdout, stderr, argv) = run("logweir-t33-handed", Some("logweir:check"), None);
     let seen = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- argv ---\n{argv}");
     assert!(
         stdout.contains("3/12 just apply-install"),
@@ -1342,7 +1350,7 @@ exit 1
     // -----------------------------------------------------------------------
     // ARM (b) — the laptop: nothing is handed, so nothing is touched.
     // -----------------------------------------------------------------------
-    let (code, stdout, stderr, argv) = run("logweir-t33-default", None);
+    let (code, stdout, stderr, argv) = run("logweir-t33-default", None, None);
     let seen = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- argv ---\n{argv}");
     assert!(
         stdout.contains("3/12 just apply-install"),
@@ -1377,6 +1385,57 @@ exit 1
     assert!(
         stdout.contains("the default runner reference"),
         "and the step must SAY that it left the Deployment alone\n{seen}"
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "this arm stops at step 4's `openssl` too\n{seen}"
+    );
+
+    // -----------------------------------------------------------------------
+    // ARM (c) — the published branch: a digest reference the cluster PULLED,
+    // and `IfNotPresent`. The runner image is handed (the controller must put
+    // the published digest in its Jobs); the controller image and the pull
+    // policy are NOT touched — that cluster never loaded `weirkeeper:check`,
+    // and `set image` there would point the Deployment at a tag it cannot
+    // start (the Task 33 review's finding). The reference is a stand-in: the
+    // registry path is named exactly once under `crates/`, in `job.rs`.
+    // -----------------------------------------------------------------------
+    let published = "registry.example/published/logweir@sha256:\
+                     0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let (code, stdout, stderr, argv) = run(
+        "logweir-t33-published",
+        Some(published),
+        Some("IfNotPresent"),
+    );
+    let seen = format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- argv ---\n{argv}");
+    assert!(
+        stdout.contains("3/12 just apply-install"),
+        "the published-branch walk must reach step 3\n{seen}"
+    );
+    let set_env = at(
+        &argv,
+        &format!("set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE={published}"),
+        &seen,
+    );
+    let rollout = at(&argv, "rollout status deploy/weirkeeper", &seen);
+    assert!(
+        set_env < rollout,
+        "the published digest is handed to the controller before the rollout\n{seen}"
+    );
+    for forbidden in [
+        "set image deployment/weirkeeper",
+        "\"imagePullPolicy\":\"Never\"",
+    ] {
+        assert!(
+            !argv.contains(forbidden),
+            "the published branch's cluster pulled its controller image and must keep it: \
+             `{forbidden}` reached kubectl\n{seen}"
+        );
+    }
+    assert!(
+        stdout.contains("this cluster pulled its controller image"),
+        "and the step must SAY why it left the controller image alone\n{seen}"
     );
     assert_eq!(
         code,
@@ -1424,6 +1483,13 @@ fn step_03_hands_the_cluster_its_own_images_between_x_apply_and_the_rollout() {
     let apply_install = at("just apply-install >");
     let env_patch = at("--patch-file config/overlays/k8s-demo/deployment-env-patch.yaml >");
     let set_env = at("set env deployment/weirkeeper LOGWEIR_RUNNER_IMAGE=");
+    // The same guard also opens step 1's local-image blocks, so this one is
+    // found FROM the runner-image hand-over on: the author-only half of step 3
+    // begins after (1) and before (2).
+    let author_only = set_env
+        + src[set_env..]
+            .find("if [ \"$LOGWEIR_DEMO_PULL_POLICY\" = \"Never\" ]; then")
+            .expect("step 3 guards (2) and (3) on the author-only pull policy, after (1)");
     let set_image = at("set image deployment/weirkeeper weirkeeper=");
     let pull_policy = at("\\\"imagePullPolicy\\\":\\\"Never\\\"");
     let rollout = at("rollout status deploy/weirkeeper --timeout=300s");
@@ -1435,6 +1501,7 @@ fn step_03_hands_the_cluster_its_own_images_between_x_apply_and_the_rollout() {
     );
     for (name, offset) in [
         ("set env LOGWEIR_RUNNER_IMAGE", set_env),
+        ("the author-only guard on the pull policy", author_only),
         ("set image weirkeeper", set_image),
         ("the imagePullPolicy patch", pull_policy),
     ] {

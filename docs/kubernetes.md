@@ -1906,8 +1906,12 @@ exactly what `Never` is right for), and step 3 of `scripts/demo-steps.sh` sets
 that variable with `kubectl set env`, puts the author-only controller image back
 with `kubectl set image`, and restores the overlay's `imagePullPolicy: Never` —
 all three **after** X-APPLY, which a server-side apply of `logweir.yaml` had
-just taken back, and all three only when the run was handed a runner reference
-that is not the default. `logweir.yaml` itself is applied unedited and stays
+just taken back. The first fires whenever the run was handed a runner reference
+that is not the default — both install branches; the other two only under the
+author-only pull policy (`Never`), because only a cluster that LOADED
+`weirkeeper:check` has it to be put back to, and the published branch's cluster
+pulled its controller image by digest and keeps it. `logweir.yaml` itself is
+applied unedited and stays
 byte-identical (`scripts/render-install.sh --check`), and a laptop walk, which
 is handed nothing, touches none of it.
 
@@ -2560,7 +2564,10 @@ Both branches hand the demo a runner reference that is **not** the one
 the controller as `LOGWEIR_RUNNER_IMAGE` (Task 33): the author-only branch hands
 `logweir:check`, and the published branch hands
 `vars.LOGWEIR_PUBLISHED_RUNNER_REF`, so on that branch the override carries the
-**published** digest into every Job, which is what the branch means. The shipped
+**published** digest into every Job, which is what the branch means. The
+controller image is put back to `weirkeeper:check` only on the author-only
+branch, whose cluster loaded it; the published branch's cluster pulled its
+controller image and keeps it. The shipped
 `logweir.yaml` is applied unedited on both and `render-install.sh --check` says
 so; only the live Deployment is touched, and only after X-APPLY has finished
 with it.
