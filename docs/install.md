@@ -354,11 +354,14 @@ kubectl --context docker-desktop -n <namespace> apply -f config/samples/restore.
 The NetworkPolicy is namespaced and `logweir.yaml` installs it into
 `logweir-system`, where no runner ever runs. Apply it into each runner
 namespace too — and read its `[UNVERIFIED]` mark in
-[kubernetes.md](kubernetes.md) before relying on it:
+[kubernetes.md](kubernetes.md) before relying on it. The source manifest
+carries `namespace: logweir-system` (that is how it lands in `logweir.yaml`),
+and `kubectl apply -n <namespace>` refuses a file whose own namespace
+disagrees — so drop that one line on the way in:
 
 ```bash
 kubectl --context docker-desktop -n <namespace> \
-  apply -f config/manager/networkpolicy.yaml
+  apply -f <(sed '/^  namespace: logweir-system$/d' config/manager/networkpolicy.yaml)
 ```
 
 ---

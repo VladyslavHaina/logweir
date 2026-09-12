@@ -1574,11 +1574,14 @@ timing out while the broker connection succeeds. Neither half has been run.
 
 Two honest caveats. A NetworkPolicy is **namespaced**, and `logweir.yaml`
 installs this one into `logweir-system`, where no runner ever runs — apply it
-into each runner namespace too:
+into each runner namespace too. The source manifest carries
+`namespace: logweir-system` (that is how it lands in `logweir.yaml`), and
+`kubectl apply -n <namespace>` refuses a file whose own namespace disagrees,
+so drop that one line on the way in:
 
 ```bash
 kubectl --context docker-desktop -n <namespace> \
-  apply -f config/manager/networkpolicy.yaml
+  apply -f <(sed '/^  namespace: logweir-system$/d' config/manager/networkpolicy.yaml)
 ```
 
 And the selector is `batch.kubernetes.io/job-name: Exists`, because

@@ -32,10 +32,12 @@
 # A NetworkPolicy is namespaced. `logweir.yaml` installs this one into
 # `logweir-system` because that is the file's namespace, and **runner Jobs do
 # not run there** — they run in the namespace of the `Backup`, `Restore` or
-# `KafkaCluster` object that produced them. Apply it into each of those too:
+# `KafkaCluster` object that produced them. Apply it into each of those too —
+# dropping this file's own `namespace:` line on the way in, because
+# `kubectl apply -n <namespace>` refuses a manifest whose namespace disagrees:
 #
 #     kubectl --context docker-desktop -n <namespace> \
-#       apply -f config/manager/networkpolicy.yaml
+#       apply -f <(sed '/^  namespace: logweir-system$/d' config/manager/networkpolicy.yaml)
 #
 # ---------------------------------------------------------------------------
 # WHAT IS ALLOWED, AND WHAT AN ADOPTER SHOULD TIGHTEN
