@@ -1,0 +1,171 @@
+# The Logweir Helm chart
+
+One chart that installs Logweir's control plane — the same objects
+[`logweir.yaml`](../../logweir.yaml) ships — and, optionally, its own
+object-store backend, two throwaway Kafka clusters and the UI. It is
+**derived from `config/`**, never the other way round: `scripts/check-chart.sh`
+holds the chart's CRDs and UI files byte-identical to the tree, and
+`crates/logweir/tests/chart_lint.rs` holds the rendered control plane to the
+install file. [`docs/install.md`](../../docs/install.md) is still the single
+install document; this README is the chart's own.
+
+## What it installs
+
+| object | when | why |
+|---|---|---|
+| the six `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
+| `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller, no verb on `secrets`, no `delete` on anything |
+| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, the archive env from `archive.*` |
+| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver` | always, **unbound** | the three human roles; who may act where is your decision |
+| `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | apply both into every other namespace that runs Jobs (`docs/install.md` steps 4 and 6) |
+| `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
+| `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
+| `Deployment`, `Service`, `ConfigMap`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the fourteen UI files and the API on one origin, with its own authority (below) |
+
+Nothing optional is on by default, and the defaults are the shipped install:
+`helm template charts/logweir` with nothing overridden renders the same
+controller, env, security context and RBAC rules as `logweir.yaml`
+(`chart_lint_default_render_agrees_with_the_install_file`).
+
+## The three flags, in plain words
+
+* **`minio.enabled`** — *bring a backend.* A MinIO with the two buckets the
+  runner writes and the controller reads, and the `logweir-s3` Secret minted
+  from its root credential. Demo-only: the root user is not a read-only
+  principal, and a production install brings its own archive and its own
+  Secrets and leaves this off. With it on and `archive.*` empty, the
+  controller is pointed at it automatically.
+* **`demoKafka.enabled`** — *bring two clusters to back up from and restore
+  into.* PLAINTEXT, emptyDir, one broker each. The demo's transport, not a
+  recommendation.
+* **`ui.enabled`** — *serve the page from the cluster.* Read *The UI's
+  authority* before turning it on.
+
+## The five-minute path
+
+```bash
+helm install logweir charts/logweir -n logweir-system --create-namespace \
+  -f charts/logweir/examples/demo.values.yaml --wait --timeout 10m
+cargo build -p logweir                # the walk mints the approval with the shipped CLI
+bash scripts/helm-demo.sh             # or: just helm-demo
+```
+
+`--wait` returns when both brokers, MinIO, the UI and the controller are
+Ready and the two seed Jobs have succeeded (they are Helm hooks; a succeeded
+one is deleted, a failed one stays for `kubectl logs`). The walk then mints two
+keypairs, creates the five Secrets in a demo namespace, applies the
+`TrustRoster`, probes two `KafkaCluster`s to `reachable: true`, fires a
+`BackupSchedule`, restores from its `Backup` with an approval minted on the
+host, verifies the scorecard with both readers, fetches the page through a
+port-forward, and tears everything down — the cluster ends with no
+`logweir-*` namespace. Every step prints its exit codes.
+
+On a cluster that holds images you built yourself (`just image && just
+image-weirkeeper`), add `examples/author-only.values.yaml` — and read its
+header: **an author-only install is not evidence of publication.**
+
+## Pointing a real install at a real archive
+
+[`examples/minimal.values.yaml`](examples/minimal.values.yaml) is the operator
+alone at the shipped digests with the three values a stranger sets:
+`archive.url`, `archive.s3.endpoint` (empty for Amazon S3 proper) and
+`archive.s3.region`. Then, **before any custom resource**, the five Secrets of
+`docs/install.md` step 3 — the chart creates none of them on this path — the
+two keypairs, the cluster-scoped `TrustRoster` named `default`, and the runner
+ServiceAccount in every namespace that runs Jobs. `just check-secrets
+<namespace>` says whether the five are there.
+
+The controller's read-only evidence credential is the `logweir-evidence-ro`
+Secret in the release namespace. It is `optional: true` on the Deployment: the
+controller starts without it and every verification reads `NotAttempted`,
+which is a choice and not a bad document.
+
+**The shipped digests are locally built measurements** — `blocked: images not
+published` (Global Constraint 37) until `release.yml` has run on a pushed tag.
+On a cluster with no access to `ghcr.io/logweir/…` the controller pod sits in
+`ImagePullBackOff`, exactly as `docs/install.md` path (a) records.
+
+## The UI's authority
+
+With `ui.enabled`, one pod runs `kubectl proxy --www=/ui --www-prefix=/ui/
+--address=0.0.0.0 --port=8001 --accept-hosts='.*'
+--accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'` from a kubectl image
+pinned by digest, with the fourteen UI files mounted from a ConfigMap. The
+proxy attaches the pod's ServiceAccount credential — `<release>-ui` — to every
+request it forwards, so **anyone who can reach that Service acts with that
+ServiceAccount's authority.** The page holds no credential and asks for none
+(Global Constraint 28: no key material in the page, none in the ConfigMap).
+The ServiceAccount is bound to a ClusterRole carrying exactly the verbs the
+page issues, measured from `ui/api.js` and `ui/pages/*.js`: `get`/`list` on
+the five namespaced kinds, `create` on approvals, kafkaclusters,
+backupschedules and restores, `patch` on backupschedules, and `list` on the
+cluster-scoped trustrosters — never `watch`, never `delete`, never the shipped
+`logweir-operator`'s `update`. The path filter admits only `/ui/` and
+`/apis/logweir.dev/v1alpha1/`; the core API, pod exec and attach are refused
+by the proxy before RBAC is consulted. There is no Ingress. Reach it with
+
+```bash
+kubectl port-forward -n logweir-system svc/logweir-ui 8001:8001
+```
+
+and open `http://127.0.0.1:8001/ui/`. The chart binds the page's role in the
+release namespace and in each namespace listed under `ui.namespaces`; for any
+other namespace, one command:
+
+```bash
+kubectl create rolebinding logweir-ui --clusterrole=logweir-ui \
+  --serviceaccount=logweir-system:logweir-ui -n <namespace>
+```
+
+The laptop path — `kubectl proxy --www=./ui` under your own kubeconfig, with
+the page holding *your* authority — is unchanged and documented in
+`docs/install.md`, *Serving the UI*.
+
+## Upgrading the CRDs by hand
+
+Helm installs `crds/` once and, by its own rule, never upgrades or deletes it.
+When a release changes a CRD, apply the new definitions yourself before
+`helm upgrade`:
+
+```bash
+kubectl apply --server-side -f charts/logweir/crds/
+helm upgrade logweir charts/logweir -n logweir-system
+```
+
+`charts/logweir/crds/*.yaml` is byte-identical to `config/crd/*.yaml`
+(`scripts/check-chart.sh` compares them with `cmp`), so applying either
+directory is the same act.
+
+## Uninstall, and what it leaves behind
+
+```bash
+helm uninstall logweir -n logweir-system
+```
+
+removes everything the release created **except**: the six CRDs (Helm never
+deletes `crds/`; `kubectl delete crd <name>` removes each and every custom
+resource stored under it), the MinIO `PersistentVolumeClaim` when
+`minio.persistence.enabled` (delete it yourself, or keep the archive), the
+namespace `--create-namespace` made, the cluster-scoped `TrustRoster`, and any
+RoleBinding you created by hand. And, as with `kubectl delete -f
+logweir.yaml`: no archive object and no evidence object is ever deleted by
+Logweir — Global Constraint 6.
+
+## The checks that hold the chart to the tree
+
+* `scripts/check-chart.sh` (`just chart-check`, in `just gate`): CRDs and UI
+  byte-identical to the tree; `helm lint` for the defaults and every example;
+  `helm template` regenerated into `rendered/` with no drift; every rendered
+  image a digest (the author-only render exempt by name — its whole premise is
+  a locally built tag); the schema refusing `--set demoKafka.enabled=yes`;
+  `values.yaml` carrying the tree's own pins.
+* `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
+  `logweir.yaml`; nothing optional renders under defaults; each flag renders
+  its named objects; the UI ConfigMap is the tree's bytes and no key material.
+* `scripts/helm-demo.sh` (`just helm-demo`; `.github/workflows/helm-demo.yml`
+  on `kind`): the walk above, on a real cluster.
+
+Documentation is licensed [CC-BY-4.0](../../docs/LICENSE-docs).
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.

@@ -115,10 +115,16 @@ rows read `blocked: images not published`). If a check is not in `just gate` or 
 `crates/logweir/tests/gate_lint.rs` fails when a new `scripts/check-*.sh` is in
 neither.
 
-Seven recipes are deliberately **outside** `just gate` — `e2e`, `smoke`,
-`smoke-weirkeeper`, `mvp-demo`, `k8s-demo`, `laptop-demo`, `pitr` — because each
-needs the compose stack, a Kubernetes cluster or a Docker build. They are in
-`docs/gates.md`'s table with what each proves. Run the one your change touches.
+Eight recipes are deliberately **outside** `just gate` — `e2e`, `smoke`,
+`smoke-weirkeeper`, `mvp-demo`, `k8s-demo`, `laptop-demo`, `pitr`, `helm-demo` —
+because each needs the compose stack, a Kubernetes cluster or a Docker build.
+They are in `docs/gates.md`'s table with what each proves. Run the one your
+change touches.
+
+A change under `charts/logweir/`, `config/crd/` or `ui/` is checked by
+`just chart-check` (one line of `just gate`; it needs `helm` >= 4): the chart's
+CRDs and UI files must stay byte-identical to the tree, and the regenerated
+`charts/logweir/rendered/` must be committed with the change.
 
 ## Before you open a pull request
 

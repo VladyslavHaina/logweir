@@ -1,0 +1,62 @@
+{{- /*
+The three human roles — `config/rbac/{viewer,operator,approver}_role.yaml`,
+rule for rule, SHIPPED UNBOUND exactly as `logweir.yaml` ships them. Who may
+view, operate or approve in which namespace is your decision:
+
+    kubectl create rolebinding logweir-approver \
+      --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
+
+`logweir-approver` is `create` on `approvals` and nothing else; bind it to
+somebody who is not the operator (`self_attested: false` means only "two
+different keys"). `logweir-operator`'s `update` on `backupschedules` is plain
+because the `suspend`-only restriction is the CRD's own CEL rule, applied to
+every subject, cluster-admin included.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-viewer
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - restores
+      - trustrosters
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-operator
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - restores
+    verbs: ["create"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupschedules"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-approver
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["approvals"]
+    verbs: ["create"]

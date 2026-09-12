@@ -1,0 +1,22 @@
+{{- /*
+Binds the `weirkeeper` ClusterRole to the `weirkeeper` ServiceAccount —
+`config/rbac/role_binding.yaml`. A ClusterRoleBinding and not a RoleBinding
+because `TrustRoster` is cluster-scoped and the controller reads it with
+`Api::all`; the subject's namespace is the release namespace, which is the one
+place the source manifest's fixed `logweir-system` becomes a parameter.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: weirkeeper
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ .Release.Namespace }}

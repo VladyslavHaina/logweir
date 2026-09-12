@@ -1,0 +1,35 @@
+# demo.values.yaml — everything on: the chart's own MinIO, two throwaway Kafka
+# clusters and the UI, with the archive pointed at the chart's MinIO. The
+# five-minute path:
+#
+#     helm install logweir charts/logweir -n logweir-system --create-namespace \
+#       -f charts/logweir/examples/demo.values.yaml --wait --timeout 10m
+#     bash scripts/helm-demo.sh
+#
+# (`--wait` returns only when both brokers and MinIO are Ready and the two
+# seed Jobs have succeeded — they are Helm hooks.) Combine with
+# author-only.values.yaml on a cluster that holds your own built images:
+#
+#     helm install … -f charts/logweir/examples/author-only.values.yaml \
+#       --set demoKafka.enabled=true --set minio.enabled=true --set ui.enabled=true
+#
+# THE TWO KafkaCluster OBJECTS the demo creates name these bootstrap servers
+# (the ClusterIP Service each broker advertises; substitute your release name
+# and namespace):
+#
+#     source: logweir-kafka-source.logweir-system.svc.cluster.local:9092
+#     target: logweir-kafka-target.logweir-system.svc.cluster.local:9092
+#
+# `archive.*` is left empty on purpose: with minio.enabled it defaults to
+# s3://kafka-backups/<release> at http://<release>-minio.<namespace>.svc:9000,
+# us-east-1, allowHttp, path-style — the chart's own backend.
+minio:
+  enabled: true
+  persistence:
+    # emptyDir — a demo's archive vanishes with the pod, and so does its
+    # evidence. Flip to true for anything that should outlive a restart.
+    enabled: false
+demoKafka:
+  enabled: true
+ui:
+  enabled: true

@@ -1,0 +1,209 @@
+{{/*
+`minio.enabled` — THE BACKEND. An in-cluster MinIO for the archive and the
+evidence: a Deployment, a Service on 9000 (and the console on 9001), a
+PersistentVolumeClaim or an emptyDir, the root credential Secret, and the
+`logweir-s3` Secret the runner Jobs read — in the release namespace, minted
+from the root pair (demo-only; a production install brings its own archive and
+its own Secret and leaves `minio.enabled` false). The images are the compose
+stack's, pinned by digest at quay.io. Nothing in this file renders unless the
+flag is on.
+*/}}
+{{- if .Values.minio.enabled }}
+{{- $name := printf "%s-minio" .Release.Name }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}-root
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: {{ .Values.minio.rootUser | quote }}
+  MINIO_ROOT_PASSWORD: {{ .Values.minio.rootPassword | quote }}
+---
+{{/*
+THE RUNNER'S ARCHIVE CREDENTIAL. The name `logweir-s3` and the two data keys
+are the code's (`weirkeeper::controllers::backup::{ARCHIVE_ACCESS_KEY,
+ARCHIVE_SECRET_KEY}`); a `Backup`'s `spec.archive.secretRef` names it and the
+controller projects it into the runner Job as env. It is the root pair, so it
+can also DELETE — which no Logweir component ever does (Global Constraint 6),
+and which is one more reason this Secret is demo-only.
+*/}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logweir-s3
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+type: Opaque
+stringData:
+  access-key-id: {{ .Values.minio.rootUser | quote }}
+  secret-access-key: {{ .Values.minio.rootPassword | quote }}
+---
+{{- if .Values.minio.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.minio.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.minio.persistence.size | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: minio
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image }}
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--console-address", ":9001"]
+          envFrom:
+            - secretRef:
+                name: {{ $name }}-root
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.minio.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+{{/*
+THE SEED JOB. A Helm hook that runs after the release's objects are in place
+(`post-install,post-upgrade`), creates the two buckets `kafka-backups` and
+`logweir-evidence` — the names the runner writes under and the controller
+reads from — and exits. `before-hook-creation,hook-succeeded`: a leftover
+Job from an earlier attempt is replaced, and a succeeded one is deleted, so
+its absence after `helm install` returned 0 is the record that it ran. A
+failed one stays for `kubectl logs`.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-seed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-seed
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: minio-seed
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: mc
+          image: {{ .Values.minio.mcImage }}
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: {{ $name }}-root
+          env:
+            - name: MINIO_HOST
+              value: {{ include "logweir.minio.host" . | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@${MINIO_HOST}:9000"
+              i=0
+              while [ "$i" -lt 90 ]; do
+                if mc ready local >/dev/null 2>&1; then break; fi
+                echo "waiting for MinIO at ${MINIO_HOST}:9000 ($i/90)"
+                i=$((i + 1))
+                sleep 2
+              done
+              mc ready local
+              mc mb --ignore-existing local/kafka-backups
+              mc mb --ignore-existing local/logweir-evidence
+              echo 'buckets ready: kafka-backups logweir-evidence'
+{{- end }}

@@ -92,6 +92,41 @@ digest, and it proves nothing about publication. An install proven this way
 proves the manifests are right and the binaries run, and says nothing at all
 about whether a stranger can install Logweir.
 
+### (c) The Helm chart
+
+```bash
+helm install logweir charts/logweir -n logweir-system --create-namespace
+```
+
+[`charts/logweir`](../charts/logweir/README.md) installs the same objects
+`logweir.yaml` carries — the six CRDs (from `crds/`, once; Helm never upgrades
+them), the RBAC, the controller Deployment, the NetworkPolicy — into the
+release namespace, at the same pinned digests, with `values.yaml` documenting
+every knob and three optional components behind three flags: `minio.enabled`
+(an in-cluster archive with the two buckets and the `logweir-s3` Secret),
+`demoKafka.enabled` (two throwaway KRaft brokers, `orders` and `payments`
+seeded on the source, the marker topic on the target) and `ui.enabled` (the
+page served in-cluster by `kubectl proxy` with its **own** ServiceAccount's
+authority — the chart's README says exactly whose). `scripts/check-chart.sh`
+(`just chart-check`, in `just gate`) holds the chart's CRDs and UI files
+byte-identical to this tree and its rendered control plane to `logweir.yaml`.
+
+**The same caveat as (a) and (b) decides which world you are in.** The chart's
+defaults are the shipped digests, so on a cluster with no access to
+`ghcr.io/logweir/…` the controller pod sits in `ImagePullBackOff` exactly as
+path (a) records — `blocked: images not published` until `release.yml` has run
+on a pushed tag. `charts/logweir/examples/author-only.values.yaml` is path (b)
+as values — `weirkeeper:check`, `logweir:check`, `imagePullPolicy: Never` —
+and it is **author-only** everywhere it appears: images you built and loaded
+yourself, **never** evidence for spec §16 clause 1. The chart was walked end
+to end on the author's docker-desktop with those images on 2026-09-12
+([kubernetes.md](kubernetes.md) §19), which proves the chart's objects work
+together and proves nothing about publication.
+
+The five Secrets, the two keypairs, the `TrustRoster` and the per-namespace
+runner ServiceAccount below are the same on this path; the chart creates none
+of them except, with `minio.enabled`, the demo-only `logweir-s3`.
+
 ---
 
 ## Before any custom resource

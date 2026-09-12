@@ -1,0 +1,53 @@
+{{- /*
+Default-deny egress on runner pods, with explicit allowances —
+`config/manager/networkpolicy.yaml`, rendered into the release namespace. A
+NetworkPolicy is namespaced and runner Jobs run in the namespace of the object
+that produced them, so apply the source file into each of those too. The
+selector is the Job label because runner pods carry no label of their own.
+The mark below is the source file's and stays in the rendered output on
+purpose, with the sentence that would verify it.
+*/ -}}
+# [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a
+# deny is never observed here; only the kind+Calico probe would make this claim
+# real, and it is backlogged]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logweir-runner-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  podSelector:
+    matchExpressions:
+      - key: batch.kubernetes.io/job-name
+        operator: Exists
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: 9094
+        - protocol: TCP
+          port: 9095
+        - protocol: TCP
+          port: 9096
+        - protocol: TCP
+          port: 9097
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 9000

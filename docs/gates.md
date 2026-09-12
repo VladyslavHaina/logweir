@@ -29,7 +29,7 @@ Docker Desktop VM was running throughout, with no compose stack in it.
 | of which the release compile | **315.7 s** — line 5, 75% of the run |
 | the same gate re-run immediately, everything cached | **118.9 s** and **121.0 s** on two consecutive `just gate` runs, both rc 0 |
 | workspace compilations | **two** — one debug, one release |
-| lines | 25 |
+| lines | 26 |
 | standing threshold | **840 s** — 2× the recorded total |
 
 **The recipe contains exactly two workspace compilations, and the ordering is
@@ -89,13 +89,14 @@ Each row is one line of the `gate` recipe, in the order it runs.
 | 20 | `./scripts/render-install.sh --check` | `logweir.yaml` is what `config/` renders to, byte for byte (interface **I26**) | that it applies — X-APPLY is a cluster gate and is in the table below | 0.2 |
 | 21 | `just schema-check` | regenerating **both** schemas leaves `schemas/` byte-identical (Global Constraint 12's drift arm) | that the schemas describe anything an adopter wants — only that they still describe their types | 1.1 |
 | 22 | `just crds-check` | regenerating the six CRDs leaves `config/crd` byte-identical: a CRD change is a **format** change and must arrive as a diff | that the CRDs install — that is X-APPLY, in the table below | 0.9 |
-| 23 | `just receipt-schema-check` | the same recipe as line 21 under the name the plan's gate list uses for the backup-receipt arm. `just schema` regenerates **both** documents, so one drift check covers both; naming it twice runs the check twice rather than claiming a check the tree does not have | anything line 21 did not | 0.7 |
-| 24 | `bash scripts/gen-third-party-notices.sh > target/tpn.check && diff -u THIRD_PARTY_NOTICES.md target/tpn.check` | the checked-in third-party inventory is exactly this generator's output over the resolved graph (interface **I30**) — the attribution half of Global Constraint 15 that line 6 does not cover | that the notices are legally sufficient; it proves they are complete and current | 0.3 |
-| 25 | `just verify-py` | the auditor's Python verifier passes its own pytest suite, under the repository's interpreter-resolution order | that the Rust reader agrees — that is line 15 | 6.5 |
+| 23 | `just chart-check` | `scripts/check-chart.sh` (Task 35): `charts/logweir/crds/` and `charts/logweir/ui/` are byte-identical to `config/crd/` and the fourteen shipped UI files (`cmp`); `helm lint` passes for the defaults and every example; `helm template` regenerated into `charts/logweir/rendered/` leaves it byte-identical (the `crds-check` drift idiom); every rendered image is a digest (the author-only render exempt by name — its premise is a locally built tag); the values schema refuses `--set demoKafka.enabled=yes`; `values.yaml` carries the tree's own pins. Refuses without helm >= 4, naming it | that the chart installs — that is `just helm-demo` and `helm-demo.yml`, in the table below | 3.8 |
+| 24 | `just receipt-schema-check` | the same recipe as line 21 under the name the plan's gate list uses for the backup-receipt arm. `just schema` regenerates **both** documents, so one drift check covers both; naming it twice runs the check twice rather than claiming a check the tree does not have | anything line 21 did not | 0.7 |
+| 25 | `bash scripts/gen-third-party-notices.sh > target/tpn.check && diff -u THIRD_PARTY_NOTICES.md target/tpn.check` | the checked-in third-party inventory is exactly this generator's output over the resolved graph (interface **I30**) — the attribution half of Global Constraint 15 that line 6 does not cover | that the notices are legally sufficient; it proves they are complete and current | 0.3 |
+| 26 | `just verify-py` | the auditor's Python verifier passes its own pytest suite, under the repository's interpreter-resolution order | that the Rust reader agrees — that is line 15 | 6.5 |
 
 ## The stack/cluster table
 
-**`just gate` deliberately runs none of these seven.** Each needs the compose
+**`just gate` deliberately runs none of these eight.** Each needs the compose
 stack, a Kubernetes cluster or a Docker build — and `./scripts/time-unit-suite.sh`
 **refuses to run, exit 1, while 9092 or 9000 answers**, so a gate that started
 the stack would fail itself. They are run explicitly, one at a time, by whoever
@@ -104,8 +105,9 @@ owns the shared resource at that moment (STANDING RULE 3).
 `crates/logweir/tests/gate_lint.rs::gate_lint_every_check_is_in_the_gate`
 asserts that every `scripts/check-*.sh` in the tree is invoked by `just gate`
 **or** by a recipe named in this table, that the two sets are **disjoint**, and
-that together they are **exhaustive**. Thirteen scripts are in the gate; the two
-below are here; fifteen exist.
+that together they are **exhaustive**. Fourteen scripts are in the gate
+(thirteen named on its own lines, `check-chart.sh` through the `just
+chart-check` line); the two below are here; sixteen exist.
 
 | recipe | what it proves | what it needs | `check-*.sh` it invokes |
 |---|---|---|---|
@@ -116,10 +118,11 @@ below are here; fifteen exist.
 | `just k8s-demo` | Phase B's exit criterion: the controller reconciling real objects on docker-desktop Kubernetes, with the runner as a Job on a digest-pinned image | docker-desktop Kubernetes, both local images, and the compose stack; its step 2 runs `just lint` **with the stack down**, before taking it | none directly |
 | `just laptop-demo` | Phase C's exit criterion and install gate **X-UIWRITE**: a stranger's twelve steps from `kubectl apply` to a signed scorecard, with step 10(b) performed from the UI wizard so `managedFields` names `logweir-ui` | docker-desktop Kubernetes, both local images, the compose stack, a browser | none directly |
 | `just pitr` | **G-PITR alone**: the inclusive point-in-time boundary across three partitions, against the real stack, for the price of one restore | the compose stack up (`just e2e-up` alone is enough) | none directly |
+| `just helm-demo` | the **Helm chart** (`charts/logweir`) walked end to end on a real cluster (Task 35): with `minio.enabled`, `demoKafka.enabled` and `ui.enabled` on, `scripts/helm-demo.sh` mints the keypairs, creates the five Secrets, probes two `KafkaCluster`s to `reachable: true`, fires a `BackupSchedule`, restores from its `Backup` with an approval minted on the host, verifies the scorecard with both readers, fetches the in-cluster UI through a port-forward, and tears down to a cluster with no `logweir-*` namespace. `.github/workflows/helm-demo.yml` runs the same script on a `kind` cluster — **never yet executed** as of 2026-09-12 | a Kubernetes cluster with the release installed (`helm install … --wait`), both local images for the author-only example, `target/debug/logweir` (the recipe builds it), node, python3 with `cryptography` | none directly |
 
 ## Which workflows have executed
 
-**Three of the six, all green, all on 2026-09-12**, on
+**Three of the seven, all green, all on 2026-09-12**, on
 <https://github.com/VladyslavHaina/logweir>:
 
 | workflow | first green run | latest green run | what it is |
@@ -128,10 +131,12 @@ below are here; fifteen exist.
 | `ci.yml` | [34700428677](https://github.com/VladyslavHaina/logweir/actions/runs/34700428677), commit `9aa6bb2` | [34700987730](https://github.com/VladyslavHaina/logweir/actions/runs/34700987730), commit `a113dd2` | red on its first seven runs, each on one environment fact a laptop had hidden; jobs `build`, `e2e`, `python-verifier`, `deny`, `sync-upstream` all green |
 | `kind-demo.yml` | [34700987743](https://github.com/VladyslavHaina/logweir/actions/runs/34700987743), commit `a113dd2` | same | red on its first eight runs; the ninth ran all twelve demo steps on a `kind` cluster it created |
 
-**Three have never executed**: `release.yml`, because it fires on a pushed tag
+**Four have never executed**: `release.yml`, because it fires on a pushed tag
 and no tag has been pushed; `release-drill.yml` and `engine-matrix.yml`, because
-their schedules have not fired. **A workflow that has never run enforces
-nothing**, and this file does not describe those three as gates.
+their schedules have not fired; and `helm-demo.yml`, added by Task 35 on
+2026-09-12 after the last push — the first push that carries it is its first
+run. **A workflow that has never run enforces nothing**, and this file does not
+describe those four as gates.
 
 `ci.yml` mirrors the gate set and
 `crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate` keeps the

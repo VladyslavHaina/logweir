@@ -1,0 +1,38 @@
+# The Logweir Helm chart — ONE chart that installs the control plane and,
+# optionally, its own object-store backend, two throwaway Kafka clusters and
+# the UI. Task 35 (post-plan).
+#
+# `version` is the chart's, `appVersion` the workspace's (`Cargo.toml`), and
+# both are 0.1.0 because nothing has been released: the digests `values.yaml`
+# pins are LOCALLY BUILT measurements (Global Constraint 37,
+# `blocked: images not published`) exactly as `logweir.yaml`'s are, and a chart
+# that installs them on a cluster with no access to `ghcr.io/logweir/…` leaves
+# the controller pod in `ImagePullBackOff` — the same recorded, expected result
+# as path (a) of `docs/install.md`.
+#
+# `kubeVersion` is Global Constraint 25's floor: the six CRDs use CEL
+# validation rules, GA at 1.29.
+#
+# `crds/` holds the six CustomResourceDefinitions as BYTE-IDENTICAL copies of
+# `config/crd/*.yaml` (`scripts/check-chart.sh` compares them with `cmp`).
+# Helm installs the contents of `crds/` ONCE, on `helm install`, and NEVER
+# upgrades or deletes them (Helm's own rule for that directory) — see the
+# README for how to upgrade them by hand.
+apiVersion: v2
+name: logweir
+description: >-
+  Logweir — a Kafka backup-and-restore drill runner with a Kubernetes control
+  plane (weirkeeper), a signed scorecard, and a static UI. This chart installs
+  the control plane; optionally an in-cluster MinIO backend, two demo Kafka
+  clusters and the UI.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - kafka
+  - backup
+  - restore
+  - disaster-recovery
+sources:
+  - https://github.com/VladyslavHaina/logweir

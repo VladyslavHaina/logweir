@@ -1,0 +1,29 @@
+# minimal.values.yaml — the operator only, at the shipped digests, pointed at
+# an archive YOU already have. Every default of values.yaml stays as shipped;
+# these are the THREE values a stranger must set, and what each one is.
+#
+#     helm install logweir charts/logweir -n logweir-system --create-namespace \
+#       -f charts/logweir/examples/minimal.values.yaml
+#
+# Then, before any custom resource, the five Secrets of docs/install.md step 3
+# — this file creates none of them: `logweir-s3` (the runner's archive
+# credential) goes in every namespace that runs Jobs, and `logweir-evidence-ro`
+# (the controller's READ-ONLY evidence credential, a different principal) goes
+# in the release namespace beside the controller.
+#
+# The shipped digests are locally built measurements (`blocked: images not
+# published`): on a cluster with no access to ghcr.io/logweir/… the controller
+# pod sits in ImagePullBackOff, which is the recorded, expected result of
+# docs/install.md path (a).
+archive:
+  # (1) The bucket-and-prefix the controller's evidence handle is built over.
+  #     The runner writes receipts and scorecards under `logweir/` in this
+  #     BUCKET; the prefix names the retention report's archive.
+  url: s3://YOUR-BUCKET/logweir
+  s3:
+    # (2) An S3-compatible endpoint (MinIO, Ceph, …). Leave EMPTY for Amazon S3
+    #     proper — then AWS_ALLOW_HTTP and the path-style flag are not rendered
+    #     either.
+    endpoint: ""
+    # (3) The region. AWS_REGION on the controller, forwarded to every runner.
+    region: us-east-1

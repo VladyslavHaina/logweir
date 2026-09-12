@@ -346,7 +346,7 @@ engine:
 # http/https are never fetched (Global Constraint 17); this is a repository
 # integrity check, not a network check.
 links:
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
 
 # Task 22. The v0.1.0 definition of done, as far as it is mechanically
 # checkable without GitHub Actions or a live stack. Prints what it could NOT
@@ -441,6 +441,18 @@ crds-check:
       exit 1
     fi
     echo "crds-check: ok — config/crd came back byte-identical (six kinds)"
+
+# Task 35: THE CHART GATE. `charts/logweir` is derived from `config/` and `ui/`,
+# and this is what keeps it derived: the six CRDs and the fourteen UI files
+# byte-identical to the tree (`cmp`), `helm lint` for the defaults and every
+# example, `helm template` regenerated into `charts/logweir/rendered/` with the
+# `crds-check` drift idiom (porcelain must be empty), every rendered image a
+# digest (the author-only render exempt by name), the values schema refusing a
+# non-boolean flag, and `values.yaml` carrying the tree's own pins. Refuses
+# without helm >= 4, naming it. In `just gate`, right after `crds-check`;
+# `crates/logweir/tests/gate_lint.rs` keeps it there.
+chart-check:
+    bash scripts/check-chart.sh
 
 # Task 11, chain J slot 12. **G-PITR on its own**: the inclusive point-in-time
 # boundary, across three partitions, proved against the real stack — without
@@ -898,6 +910,21 @@ laptop-demo:
     cargo build -p logweir
     ./scripts/laptop-demo.sh
 
+# Task 35: THE CHART, WALKED END TO END ON A REAL CLUSTER. The release must be
+# installed first with all three optional components on (the README's
+# five-minute path); the walk then mints the keypairs, creates the five
+# Secrets, probes two KafkaClusters, fires a BackupSchedule, restores from its
+# Backup with an approval minted on the host, verifies the scorecard with both
+# readers, fetches the in-cluster UI through a port-forward and tears
+# everything down. Parameterised by LOGWEIR_KUBE_CONTEXT (default
+# docker-desktop), LOGWEIR_HELM_RELEASE (logweir) and LOGWEIR_HELM_NAMESPACE
+# (logweir-system). `.github/workflows/helm-demo.yml` runs the same script on
+# a kind cluster. Outside `just gate` — it needs a cluster — and in
+# docs/gates.md's stack/cluster table.
+helm-demo:
+    cargo build -p logweir
+    bash scripts/helm-demo.sh
+
 # ===========================================================================
 # Task 32, chain J slot 25. THE GATE — the one local command that runs every
 # check this repository has, in an order chosen so the total is what it is.
@@ -970,10 +997,11 @@ gate:
     ./scripts/check-invariant-corpus.sh
     ./scripts/check-deps-count.sh
     ./scripts/check-dod.sh
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
     ./scripts/render-install.sh --check
     just schema-check
     just crds-check
+    just chart-check
     just receipt-schema-check
     bash scripts/gen-third-party-notices.sh > target/tpn.check && diff -u THIRD_PARTY_NOTICES.md target/tpn.check
     just verify-py

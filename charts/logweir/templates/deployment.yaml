@@ -1,0 +1,97 @@
+{{- /*
+The `weirkeeper` Deployment — `config/manager/deployment.yaml`, with three
+things parameterised and nothing else changed: the image and its pull policy
+(`controllerImage`, `imagePullPolicy`), the runner image the controller hands
+every Job (`runnerImage`, Task 33's `LOGWEIR_RUNNER_IMAGE` — the ONE env this
+chart renders that `logweir.yaml` does not; its default is the compiled-in
+constant, so the default install creates the Jobs it always created), and the
+archive addressing env the `config/overlays/k8s-demo` patch sets
+(`archive.*`, rendered only when a value or `minio.enabled` supplies one).
+
+Everything the source manifest says about this PodSpec still holds: it is the
+ONE `automountServiceAccountToken` exemption (the only Kubernetes API client
+in the design), one replica with `Recreate` and no leader election (Global
+Constraint 30), no probes and no ports (Global Constraint 32 — no HTTP surface),
+`RUST_LOG` pinned at `info` as the floor, and the `logweir-evidence-ro` Secret
+projected `optional: true` so a cluster that has not created it still gets a
+running controller whose verifications read `NotAttempted`.
+`chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file` holds
+this copy to `logweir.yaml`: image, pull policy, args, every env name and
+value, both security contexts and the ServiceAccount.
+*/ -}}
+{{- $endpoint := include "logweir.archive.endpoint" . -}}
+{{- $region := include "logweir.archive.region" . -}}
+{{- $explicit := ne .Values.archive.s3.endpoint "" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weirkeeper
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/component: control-plane
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: weirkeeper
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: weirkeeper
+          image: {{ .Values.controllerImage }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: []
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.controller.logLevel | quote }}
+            - name: LOGWEIR_RUNNER_IMAGE
+              value: {{ .Values.runnerImage | quote }}
+            - name: LOGWEIR_ARCHIVE_URL
+              value: {{ include "logweir.archive.url" . | quote }}
+            {{- if $endpoint }}
+            - name: AWS_ENDPOINT_URL
+              value: {{ $endpoint | quote }}
+            - name: AWS_ALLOW_HTTP
+              value: {{ ternary .Values.archive.s3.allowHttp true $explicit | toString | quote }}
+            - name: AWS_VIRTUAL_HOSTED_STYLE_REQUEST
+              value: {{ ternary .Values.archive.s3.virtualHostedStyle false $explicit | toString | quote }}
+            {{- end }}
+            {{- if $region }}
+            - name: AWS_REGION
+              value: {{ $region | quote }}
+            {{- end }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: logweir-evidence-ro
+                  key: access-key-id
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: logweir-evidence-ro
+                  key: secret-access-key
+                  optional: true
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

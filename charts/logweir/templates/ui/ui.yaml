@@ -1,0 +1,244 @@
+{{/*
+`ui.enabled` — THE UI IN-CLUSTER, WITH ITS AUTHORITY STATED.
+
+One Deployment running `kubectl proxy`, which serves the fourteen shipped UI
+files from a ConfigMap (this chart's byte-identical copy of `ui/` —
+`scripts/check-chart.sh` compares them with `cmp`) AND proxies the Kubernetes
+API on the same origin, attaching the pod's ServiceAccount credential to every
+request it forwards, server side. That is the model, in one paragraph:
+ANYONE WHO CAN REACH THE SERVICE ACTS WITH THE `<release>-ui` ServiceAccount's
+AUTHORITY. The page holds no credential and asks for none (Global Constraint
+28: no key material in the page, none in the ConfigMap); the proxy's path
+filter admits only what the page uses, MEASURED from `ui/api.js` and
+`ui/pages/*.js`: `/ui/` and `/apis/logweir.dev/v1alpha1/` — the page reads
+the six kinds, creates approvals, kafkaclusters, backupschedules and restores,
+and merge-patches `spec.suspend` on a backupschedule; it touches no `/api/v1`
+path at all. The ClusterRole below carries exactly those verbs and nothing
+more; `--disable-filter` is never passed; there is no Ingress. Reach it with
+`kubectl port-forward svc/<release>-ui 8001:8001` and open
+`http://127.0.0.1:8001/ui/`.
+
+`--accept-hosts=.*`: the proxy answers whatever Host header reaches it —
+the kubelet's readiness probe, a port-forward, a Service-local client — which
+is right for a Service whose reachability IS the authorisation boundary. The
+image is a kubectl at the cluster's minor version, pinned by digest, from the
+Kubernetes project's own registry (`values.yaml` says why not Bitnami).
+Nothing in this file renders unless the flag is on.
+*/}}
+{{- if .Values.ui.enabled }}
+{{- $name := printf "%s-ui" .Release.Name }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+---
+{{/*
+THE PAGE'S ROLE, VERB FOR VERB. Not `logweir-viewer` plus `logweir-operator`:
+the page never watches, the page PATCHES a backupschedule (RBAC's `patch`,
+which `logweir-operator`'s `update` does not grant), and it creates
+approvals, which `logweir-operator` deliberately excludes. Binding the shipped
+roles would have granted `watch` and `update` the page never issues and
+refused the `patch` it does.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - restores
+    verbs: ["get", "list"]
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backupschedules
+      - kafkaclusters
+      - restores
+    verbs: ["create"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupschedules"]
+    verbs: ["patch"]
+---
+{{/*
+The cluster-scoped half: the keys page LISTS the `TrustRoster` (public key
+material, read-only, cluster-scoped), which no RoleBinding can grant.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-trustrosters
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-trustrosters
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-trustrosters
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- range $ns := prepend .Values.ui.namespaces .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+data:
+{{- $files := dict }}
+{{- range $path, $_ := .Files.Glob "ui/**" }}
+{{- $_ := set $files (include "logweir.ui.key" $path) ($.Files.Get $path) }}
+{{- end }}
+{{ toYaml $files | indent 2 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ui
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: ui
+    spec:
+      serviceAccountName: {{ $name }}
+      # THE ONE POD OF THE OPTIONAL COMPONENTS THAT NEEDS ITS TOKEN: it is the
+      # credential `kubectl proxy` attaches to every request it forwards.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: {{ .Values.ui.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - proxy
+            - --www=/ui
+            - --www-prefix=/ui/
+            - --address=0.0.0.0
+            - --port=8001
+            - '--accept-hosts=.*'
+            - '--accept-paths=^/(ui/|apis/logweir\.dev/v1alpha1/)'
+          env:
+            - name: HOME
+              value: /tmp
+            - name: KUBECACHEDIR
+              value: /tmp/kube-cache
+          ports:
+            - name: http
+              containerPort: 8001
+          readinessProbe:
+            httpGet:
+              path: /ui/
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: ui
+              mountPath: /ui
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: ui
+          configMap:
+            name: {{ $name }}
+            items:
+            {{- range $path, $_ := .Files.Glob "ui/**" }}
+              - key: {{ include "logweir.ui.key" $path }}
+                path: {{ $path | trimPrefix "ui/" }}
+            {{- end }}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

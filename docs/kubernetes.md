@@ -2804,6 +2804,271 @@ twelve on a `kind` cluster, with no tracer anywhere
 
 `bash -n` exits 0 on all three scripts.
 
+## 19. The Helm chart
+
+**One chart, `charts/logweir`, installs the control plane `logweir.yaml`
+ships and — behind three flags, all off by default — its own backend, two
+throwaway Kafka clusters and the UI.** Task 35, post-plan. The chart is
+DERIVED from `config/` and `ui/`, never the other way round, and two checks
+keep it derived: `scripts/check-chart.sh` (`just chart-check`, a line of
+`just gate`) and `crates/logweir/tests/chart_lint.rs`.
+[install.md](install.md) path (c) is the install pointer;
+[../charts/logweir/README.md](../charts/logweir/README.md) is the chart's own
+document; this section is the operational record — what the objects are, what
+the checks hold, and the transcript of the one validation that has run.
+
+### 19.1 The objects
+
+| object | when | from |
+|---|---|---|
+| the six CRDs | always, from `crds/` — installed **once**; Helm never upgrades or deletes that directory | byte-identical copies of `config/crd/*.yaml` (`cmp`) |
+| `ServiceAccount`/`ClusterRole`/`ClusterRoleBinding` `weirkeeper`, `ClusterRole`s `logweir-viewer`/`-operator`/`-approver` (unbound) | always | `config/rbac/`, rule for rule, compared as sets |
+| `Deployment` `weirkeeper` | always | `config/manager/deployment.yaml`, with `controllerImage`, `imagePullPolicy`, `runnerImage` → `LOGWEIR_RUNNER_IMAGE` (Task 33) and `archive.*` → the `k8s-demo` overlay's env |
+| `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | `config/manager/networkpolicy.yaml`, `config/rbac/backup-runner-serviceaccount.yaml` |
+| MinIO `Deployment`/`Service`/PVC, `Secret`s `<release>-minio-root` and `logweir-s3`, seed `Job` (hook `post-install,post-upgrade`) | `minio.enabled` | the compose stack's two quay.io digests, copied |
+| two KRaft `StatefulSet`s with headless + ClusterIP `Service`s, seed `Job` (hook `post-install`) | `demoKafka.enabled` | `apache/kafka:3.7.1` by manifest-list digest, resolved once (2026-09-12) |
+| UI `Deployment`/`Service`/`ConfigMap`/`ServiceAccount`/`ClusterRole`s/`RoleBinding` | `ui.enabled` | `registry.k8s.io/kubectl:v1.34.1` by digest, resolved once (2026-09-12); the fourteen UI files from the chart's byte copy |
+
+Every namespaced object renders into `.Release.Namespace`; the control plane
+keeps the names the install file uses, the optional components are
+`<release>-`-prefixed. Under the defaults the render is the install file's
+fifteen documents minus the Namespace (`--create-namespace` makes it) plus the
+runner ServiceAccount, and `chart_lint_default_render_agrees_with_the_install_file`
+holds the Deployment's image, pull policy, args, env, both security contexts
+and ServiceAccount, the four ClusterRoles' rules, the CRD specs and the
+NetworkPolicy spec to `logweir.yaml`. The one env the chart renders that the
+install file does not is `LOGWEIR_RUNNER_IMAGE`, whose default is
+`weirkeeper::job::RUNNER_IMAGE`.
+
+### 19.2 The three flags, and the UI's authority
+
+`minio.enabled` brings the archive (buckets `kafka-backups` and
+`logweir-evidence`, the `logweir-s3` Secret minted from the root pair — demo
+only, the root user is not a read-only principal) and points the controller at
+it when `archive.*` is empty. `demoKafka.enabled` brings two single-broker
+KRaft clusters — PLAINTEXT, emptyDir, the demo's transport and not a
+recommendation — each with its own cluster id, `orders` and `payments` seeded
+on the source and the marker topic `logweir.scratch` on the target.
+`ui.enabled` brings one pod running `kubectl proxy --www=/ui --www-prefix=/ui/
+--address=0.0.0.0 --port=8001 --accept-hosts='.*'
+--accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'`. **Anyone who can
+reach that Service acts with the `<release>-ui` ServiceAccount's authority**:
+the proxy attaches that account's credential to every request it forwards, the
+page holds none, the path filter admits only what the page uses (measured from
+`ui/api.js` and `ui/pages/*.js` — no `/api/v1` path at all), the account holds
+exactly the verbs the page issues (`get`/`list` on the five namespaced kinds,
+`create` on approvals, kafkaclusters, backupschedules, restores, `patch` on
+backupschedules, `list` on trustrosters), and there is no Ingress. It is
+reached with `kubectl port-forward svc/<release>-ui 8001:8001`.
+
+### 19.3 The checks
+
+* `scripts/check-chart.sh` (`just chart-check`, in `just gate` right after
+  `just crds-check`; mirrored in `ci.yml` with Helm pinned to v4.0.1):
+  `crds/` and `ui/` byte-identical to the tree (`cmp`); `helm lint` for the
+  defaults and every example; `helm template` regenerated into
+  `charts/logweir/rendered/` with the `crds-check` drift idiom (porcelain
+  empty); every rendered image a digest — `rendered/author-only.yaml` exempt
+  BY NAME, its premise being a locally built tag (E19(a)); the values schema
+  refusing `--set demoKafka.enabled=yes`; `values.yaml` carrying the tree's
+  own pins. Refuses without Helm >= 4, naming it.
+* `crates/logweir/tests/chart_lint.rs` (file-reading, Global Constraint 22):
+  the parity above; nothing optional under the defaults; each flag's named
+  objects under the demo example, the marker topic in the seed's command, the
+  two cluster ids distinct, `--accept-paths` measured and never `.*`, the
+  ConfigMap holding the fourteen files byte for byte and no key material, the
+  RoleBinding to the chart's own role and never `cluster-admin`, no Ingress.
+* `workflow_lint.rs` holds `.github/workflows/helm-demo.yml` to its shape;
+  `gate_lint.rs` holds `just chart-check` to its place and `just helm-demo`
+  to the stack/cluster table.
+
+### 19.4 Proven on the author's docker-desktop with author-only images, 2026-09-12
+
+**Author-only, and NOT evidence for spec §16 clause 1** (Global Constraint
+37): the images were `logweir:check` and `weirkeeper:check`, built on this
+host and never pulled, and no checklist row moves on this section's account.
+The transcript is `scripts/helm-demo.sh` over the release
+`examples/author-only.values.yaml` installed with all three flags on.
+
+The install, from the worktree at the commit this section lands in, with the
+local `docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0` of path (b)
+already in place (finding 2, below):
+
+```
+$ helm install logweir charts/logweir -n logweir-system --create-namespace \
+    --kube-context docker-desktop -f charts/logweir/examples/author-only.values.yaml \
+    --set demoKafka.enabled=true --set minio.enabled=true --set ui.enabled=true \
+    --wait --timeout 10m
+# started 2026-09-12T20:00:46Z; NOTES printed; helm install rc=0; returned 2026-09-12T20:02:07Z
+```
+
+Then the walk — `bash scripts/helm-demo.sh`, every exit code on its own line
+(the full 229-line log is in the task report; this is every `rc=`, every
+phase, every wall clock and every HTTP code, unedited):
+
+```
+helm-demo: kubectl context docker-desktop, release logweir in namespace logweir-system (STANDING RULE 12)
+==> 0/10 preflight: tools, the release, the brokers, MinIO, the UI, the seeds' effects
+    rc=0  (helm status logweir -n logweir-system -o json)
+    release status: deployed
+    rc=0  (kubectl rollout status deploy/weirkeeper --timeout=300s)
+    rc=0  (kubectl rollout status statefulset/logweir-kafka-source --timeout=300s)
+    rc=0  (kubectl rollout status statefulset/logweir-kafka-target --timeout=300s)
+    rc=0  (kubectl rollout status deploy/logweir-minio --timeout=300s)
+    rc=0  (kubectl rollout status deploy/logweir-ui --timeout=300s)
+    rc=0  (kubectl get jobs — a succeeded seed Job is deleted by its hook policy, so this lists leftovers only)
+    rc=0  (kafka-topics.sh --list on the source, via kubectl exec) -> orders payments
+    rc=0  (kafka-topics.sh --list on the target, via kubectl exec) -> logweir.scratch
+    rc=1  (kubectl get ns logweir-helm — must NOT exist yet: check-then-take)
+    rc=0  (kubectl get secret logweir-minio-root -o json)
+    the chart's MinIO root user: minioadmin (demo-only; the JSON it was read from is not kept)
+==> 1/10 minting the signing and approver keypairs into .demo/helm/
+    signing key id:  7e24b5fffe672660d42994c0601f0f2a2bb59eb470fc913fa9d47cea906d246b
+    approver key id: 0770cabcbe1619fadd231a5670a0bb56c9d472de14e7c1cee3b563c9ef93a553
+==> 2/10 namespace logweir-helm, the five Secrets, the runner ServiceAccount, then just check-secrets logweir-helm
+    rc=0  (kubectl create namespace logweir-helm)
+    rc=0  (secret/logweir-signing-key, data key signing.pem)
+    rc=0  (secret/logweir-approval-bundle, four keys — approval.json/.sig and the allowlist replaced at step 7)
+    rc=0  (secret/kafka-scram, data key password)
+    rc=0  (kubectl get secret logweir-s3 -n logweir-system — the chart's)
+    rc=0  (secret/logweir-s3 in logweir-helm — the chart's data, copied)
+    rc=0  (secret/logweir-evidence-ro, in logweir-system)
+    rc=0  (kubectl rollout restart deploy/weirkeeper — env is fixed at container start)
+    rc=0  (kubectl rollout status deploy/weirkeeper, after the evidence Secret)
+    rc=0  (kubectl apply -f config/rbac/backup-runner-serviceaccount.yaml -n logweir-helm)
+    rc=0  (kubectl create rolebinding logweir-ui --clusterrole=logweir-ui --serviceaccount=logweir-system:logweir-ui -n logweir-helm)
+    rc=0  (just check-secrets logweir-helm)
+==> 3/10 TrustRoster default — the approver key id and the signing key MATERIAL
+    rc=0  (kubectl apply -f trustroster.yaml — cluster-scoped, name 'default')
+==> 4/10 KafkaCluster source (logweir-kafka-source.logweir-system.svc.cluster.local:9092) and target (logweir-kafka-target.logweir-system.svc.cluster.local:9092) -> status.reachable
+    rc=0  (kubectl apply -f kafkaclusters.yaml — source and target, PLAINTEXT: the demo's transport, not a recommendation)
+    rc=0  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/source --timeout=300s)
+    rc=0  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/target --timeout=300s)
+    rc=0  source status.clusterId: EdaYkCkyT2ONrlUc3uKpSw
+    rc=0  target status.clusterId: tQmDMMCERvy6yIB-vuOZCQ
+    two clusters, two ids: source EdaYkCkyT2ONrlUc3uKpSw, target tQmDMMCERvy6yIB-vuOZCQ
+==> 5/10 BackupSchedule */2 * * * * over orders and payments into s3://kafka-backups/helm-demo, and the Backup it fires
+    rc=0  (kubectl apply -f backupschedule.yaml, schedule */2 * * * *)
+    rc=0  (kubectl get backups -o name)
+    the schedule fired: Backup/logweir-backup-helm-20260912-200200
+    rc=0  (kubectl get backup logweir-backup-helm-20260912-200200 -o jsonpath={.status.phase}, polled up to 5 min)
+    phase: Succeeded   wall clock from the schedule's apply: 21 s
+    rc=0  status.exitCode: 0
+    rc=0  status.evidence.receiptKey: logweir/backups/01f6003c-7d6e-4a69-a2e7-c57f5527da55-20260912-200200/01M2BKE24MSTD4GW084CC5DP9J.receipt.json
+    rc=0  status.backupId: 01f6003c-7d6e-4a69-a2e7-c57f5527da55-20260912-200200
+    rc=0  (kubectl get backup logweir-backup-helm-20260912-200200 -o jsonpath={.status.evidence.verification.result})
+    rc=0  (kubectl patch backupschedule helm spec.suspend=true — the ONE mutable field)
+==> 6/10 the Restore: the page's own emitter renders the plan bytes; kubectl create -f the body
+    recovery point: 2026-09-12T20:03:03Z   sample window from: 2026-09-11T20:02:59Z (the seed ran at install time)
+    rc=0  (node ui/tests/emit-restore-body.js --out .demo/helm/)
+plan-hash=sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
+restore-name=restore-d77ed61d
+approval-name=approval-d77ed61d
+    rc=0  (kubectl create -f restore-body.json — Restore/restore-d77ed61d, approvalRef -> approval-d77ed61d, which does not exist yet)
+==> 7/10 logweir drill approve on the HOST, the real approval bundle, then the Approval object
+    rc=0  (logweir drill approve --subject-kind Restore --out .demo/helm/approval.json)
+  plan_hash  sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
+    plan_hash from the CLI : sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
+    plan-hash from the page: sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
+    rc=0  (kubectl delete secret logweir-approval-bundle — the placeholder)
+    rc=0  (secret/logweir-approval-bundle, the real four keys; allowlist = [tQmDMMCERvy6yIB-vuOZCQ], source EdaYkCkyT2ONrlUc3uKpSw)
+    rc=0  (kubectl create -f approval-object.yaml — Approval/approval-d77ed61d over Restore/restore-d77ed61d)
+    rc=0  (kubectl wait --for=jsonpath={.status.verified}=true approval/approval-d77ed61d)
+    rc=0  status.matchedKeyId: 0770cabcbe1619fadd231a5670a0bb56c9d472de14e7c1cee3b563c9ef93a553
+==> 8/10 the Restore's terminal status (outcome pass), then BOTH readers over the scorecard
+    rc=0  (kubectl get restore restore-d77ed61d -o jsonpath={.status.phase}, polled up to 10 min)
+    phase: Succeeded   wall clock from the Restore's create: 56 s
+    rc=0  status.exitCode: 0
+    rc=0  status.outcome: pass
+    rc=0  status.integrity.level: byte-fingerprint
+    rc=0  status.evidence.scorecardKey: logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.json
+    rc=0  status.evidence.sidecarKey: logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.sig
+    rc=0  (kubectl get restore restore-d77ed61d -o jsonpath={.status.evidence.verification.result}) -> Valid
+    rc=0  (kubectl run mc-cat-5501 --image=<the chart's mc digest> -- mc cat kafka-backups/logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.json)
+    phase=Succeeded  (kubectl get pod mc-cat-5501 -o jsonpath={.status.phase}, polled up to 120 s)
+    rc=0  (container exit 0)
+    rc=0  (kubectl logs mc-cat-5501 > .demo/helm/scorecard.json)
+    rc=0  (kubectl delete pod mc-cat-5501)
+    rc=0  (kubectl run mc-cat-11838 --image=<the chart's mc digest> -- mc cat kafka-backups/logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.sig)
+    phase=Succeeded  (kubectl get pod mc-cat-11838 -o jsonpath={.status.phase}, polled up to 120 s)
+    rc=0  (container exit 0)
+    rc=0  (kubectl logs mc-cat-11838 > .demo/helm/scorecard.sig)
+    rc=0  (kubectl delete pod mc-cat-11838)
+    rc=0  (logweir drill verify --payload-type scorecard)
+    rc=0  (python3 docs/verify_scorecard.py --payload-type scorecard)
+==> 9/10 the UI: kubectl port-forward svc/logweir-ui 8001:8001, then three fetches
+    rc=0  (kubectl port-forward svc/logweir-ui 8001:8001, backgrounded; pid 62185 — killed by the trap)
+    rc=0  (curl http://127.0.0.1:8001/ui/ — the readiness poll, up to 30 s)
+    WHOSE AUTHORITY: the page is served by kubectl proxy in the logweir-ui pod, and the proxy
+    attaches THAT ServiceAccount's credential to every request it forwards — anyone who can
+    reach the Service acts with logweir-ui's authority. The page holds no credential.
+    rc=0  HTTP 200  the page itself
+    rc=0  HTTP 200  the router
+    served ui/app.js sha256 ad2291d755895f42e803a2865916a51e4eb8a70cff7b29bfe2364d4ac577d739
+    tree   ui/app.js sha256 ad2291d755895f42e803a2865916a51e4eb8a70cff7b29bfe2364d4ac577d739
+    rc=0  HTTP 200  the API, same origin, the logweir-ui ServiceAccount's authority
+    the Backup list names logweir-backup-helm-20260912-200200
+    rc=0  HTTP 403  a Pod exec path — refused by the proxy's path filter
+    rc=0  HTTP 403  the core API — refused by the proxy's path filter
+==> HELM DEMO EXIT CRITERION MET
+                          receiptKey=logweir/backups/01f6003c-7d6e-4a69-a2e7-c57f5527da55-20260912-200200/01M2BKE24MSTD4GW084CC5DP9J.receipt.json   wall clock 21 s from the schedule's apply
+                          scorecardKey=logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.json
+                          verification=Valid   wall clock 56 s from the create
+==> 10/10 teardown
+    stopped the kubectl port-forward (pid 62185)
+    rc=0  (kubectl delete trustroster default)
+    rc=0  (kubectl delete ns logweir-helm)
+    rc=0  (helm uninstall logweir -n logweir-system)
+    rc=0  (kubectl delete ns logweir-system)
+    rc=0  (kubectl delete crd <the six logweir.dev kinds>)
+    removed .demo/helm/*.pem (both keypairs this run minted)
+    rc=0  (kubectl get ns -o name) -> logweir-* namespaces left: 0
+helm-demo rc=0
+helm-demo rc=0
+2026-09-12T20:04:24Z
+```
+
+And the cluster after it, read back separately: `kubectl --context
+docker-desktop get ns -o name` → rc 0, `logweir-*` namespaces **0**;
+`get crd` → `logweir.dev` CRDs **0**; `get clusterrole,clusterrolebinding`
+naming `logweir`/`weirkeeper` **0**; `helm list -A` → **0** releases; no
+`port-forward` process left.
+
+**What it proved**: the runner reached both brokers by their advertised
+Service names (`status.reachable: true` on both, two distinct cluster ids);
+the scheduled `Backup` reached `Succeeded` with `exitCode: 0` **21 s** after
+the schedule was applied and its receipt verified `Valid` against the chart's
+MinIO through the controller's read-only handle; the `Restore` — plan bytes
+from the page's own emitter, a scratch drill onto the target with the seed's
+marker topic, approved on the host with `logweir drill approve` — reached
+`Succeeded` with `outcome: pass` and `integrity: byte-fingerprint` **56 s**
+after its create, its scorecard verified `Valid` by the controller and then by
+BOTH readers (`logweir drill verify` rc 0, `docs/verify_scorecard.py` rc 0)
+over bytes fetched out of the chart's MinIO; the in-cluster UI answered **200**
+for the page, served `ui/app.js` at the tree's own sha256, **200** for the
+`Backup` list under the `logweir-ui` ServiceAccount's authority naming the
+Backup, and **403** for a Pod exec path and for the core API — refused by the
+proxy's path filter; and the teardown left no `logweir-*` namespace.
+
+**Two things the walk found by running, both fixed in the chart before the
+run above.** (1) The apache/kafka image's default `CLUSTER_ID`
+(`/etc/kafka/docker/configureDefaults`: `5L6g3nShT-eMCtK--X86sw`) is ONE
+fixed value for every broker started without one — the compose stack's
+single broker never exposed it — so two brokers reported the same cluster id
+and the walk's own rail refused before phase 0 would have; the chart now
+hands each broker a minted id (`demoKafka.clusterIds`) and refuses equal
+ones. (2) The local `weirkeeper:check` at the tree's pin (`6ab14111…`, built
+2026-09-11) predates Task 33's `LOGWEIR_RUNNER_IMAGE`, so its runner Jobs
+named the compiled-in digest and sat in `ErrImageNeverPull`; the brief forbade
+a rebuild, and the remedy was path (b)'s own author-only step, `docker tag
+logweir:check ghcr.io/logweir/logweir:v0.1.0` (E19(b), §14.3), made on the
+host before the run. A controller built from the current source — every CI
+run — honours the override and needs no tag.
+
+`.github/workflows/helm-demo.yml` runs the same script on a `kind` cluster it
+creates, with no compose stack at all. **It has not yet executed** (added
+2026-09-12, after the last push); its first run is the controller's to push.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

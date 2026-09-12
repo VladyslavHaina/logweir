@@ -1,0 +1,7 @@
+# `rendered/` is the checked-in `helm template` output `scripts/check-chart.sh`
+# regenerates for the drift check; it is not part of the chart. `examples/`
+# stays in the package so `helm show values` readers can find them.
+rendered/
+.DS_Store
+*.swp
+*~

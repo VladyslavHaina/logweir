@@ -1,0 +1,50 @@
+Logweir {{ .Chart.AppVersion }} — release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+INSTALLED (the control plane, the same objects logweir.yaml ships):
+  * the six CustomResourceDefinitions under logweir.dev/v1alpha1 — installed
+    ONCE from crds/ and never upgraded by Helm; the README says how to upgrade
+    them by hand
+  * ServiceAccount, ClusterRole and ClusterRoleBinding "weirkeeper"
+  * Deployment "weirkeeper", image {{ .Values.controllerImage }}
+    (imagePullPolicy {{ .Values.imagePullPolicy }}); every runner Job it creates
+    will use {{ .Values.runnerImage }}
+  * NetworkPolicy "logweir-runner-egress" and ServiceAccount "logweir-runner",
+    both in this namespace only — apply them into each namespace that will run
+    Backups, Restores or KafkaClusters (docs/install.md steps 4 and after)
+  * ClusterRoles logweir-viewer, logweir-operator, logweir-approver — UNBOUND;
+    who may act in which namespace is your decision:
+      kubectl create rolebinding logweir-approver --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
+
+OPTIONAL COMPONENTS:
+  * minio.enabled={{ .Values.minio.enabled }}{{ if .Values.minio.enabled }} — MinIO at {{ include "logweir.minio.host" . }}:9000, buckets kafka-backups and logweir-evidence, Secret logweir-s3 in this namespace (demo-only root credential){{ else }} — off (bring your own archive; docs/install.md step 3){{ end }}
+  * demoKafka.enabled={{ .Values.demoKafka.enabled }}{{ if .Values.demoKafka.enabled }} — brokers {{ .Release.Name }}-kafka-source and {{ .Release.Name }}-kafka-target on 9092 (PLAINTEXT; the demo's transport, not a recommendation), orders and payments seeded on the source, logweir.scratch on the target{{ else }} — off{{ end }}
+  * ui.enabled={{ .Values.ui.enabled }}{{ if .Values.ui.enabled }} — see below{{ else }} — off (the UI can also be served from a laptop: docs/install.md, "Serving the UI"){{ end }}
+{{- if .Values.ui.enabled }}
+
+THE UI, AND WHOSE AUTHORITY IT ACTS WITH:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ .Release.Name }}-ui 8001:8001
+  then open http://127.0.0.1:8001/ui/
+
+  The page is served by kubectl proxy from a pod whose ServiceAccount is
+  "{{ .Release.Name }}-ui", and the proxy attaches THAT ServiceAccount's
+  credential to every request it forwards: anyone who can reach the Service
+  acts with that ServiceAccount's authority. The page holds no credential of
+  its own. The proxy admits only /ui/ and /apis/logweir.dev/v1alpha1/, the
+  ServiceAccount holds only the verbs the page issues (get/list on the five
+  namespaced kinds, create on approvals/kafkaclusters/backupschedules/restores,
+  patch on backupschedules, list on trustrosters), and there is no Ingress.
+  It is bound in this namespace{{ with .Values.ui.namespaces }} and in {{ join ", " . }}{{ end }};
+  to let the page see another namespace's objects:
+      kubectl create rolebinding {{ .Release.Name }}-ui --clusterrole={{ .Release.Name }}-ui --serviceaccount={{ .Release.Namespace }}:{{ .Release.Name }}-ui -n <namespace>
+{{- end }}
+
+BEFORE ANY CUSTOM RESOURCE — the five Secrets, the two keypairs, the
+cluster-scoped TrustRoster named "default" and the per-namespace runner
+ServiceAccount: docs/install.md. Then `just check-secrets <namespace>`.
+
+The digests this chart pins are LOCALLY BUILT measurements (Global Constraint
+37, `blocked: images not published`): a cluster with no access to
+ghcr.io/logweir/… leaves the controller pod in ImagePullBackOff, exactly as
+docs/install.md path (a) records. An author-only install (images you built and
+loaded yourself) is examples/author-only.values.yaml, and it is not evidence
+that anything was published.

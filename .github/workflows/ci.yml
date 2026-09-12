@@ -24,8 +24,10 @@
 #     artefact this workflow would publish, reads `blocked: no release run`.
 #   * release-drill.yml and engine-matrix.yml — scheduled, and no schedule has
 #     fired.
+#   * helm-demo.yml — added on 2026-09-12 by Task 35, after the last push; the
+#     first push that carries it is its first run.
 #
-# Nothing here may describe those three as checks that run.
+# Nothing here may describe those four as checks that run.
 #
 # THE ENFORCEMENT POINT IS STILL `just gate` (Task 32), which runs the same set
 # in one order on a laptop, BEFORE a push rather than after one. The steps below
@@ -143,9 +145,18 @@ jobs:
       - name: the artifact-directory ceiling (STANDING RULE 6)
         run: ./scripts/check-deps-count.sh
       - name: relative markdown link integrity (never fetches http/https)
-        run: ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/
+        run: ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
       - name: the install file has no drift (interface I26)
         run: ./scripts/render-install.sh --check
+      # Task 35: the chart gate — `just chart-check` in `just gate`. Helm is
+      # pinned to the major the checked-in rendered files were produced with
+      # (`scripts/check-chart.sh` refuses an older one by name), so a drift
+      # here is a template change and never a serialiser difference.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.0.1
+      - name: the Helm chart is what the tree says it is (charts/logweir, Task 35)
+        run: ./scripts/check-chart.sh
       - name: the third-party inventory matches the resolved graph (interface I30)
         run: |
           bash scripts/gen-third-party-notices.sh > /tmp/tpn.check

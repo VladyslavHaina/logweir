@@ -1,0 +1,372 @@
+/* style.css -- the shell's stylesheet.
+ *
+ * NO EXTERNAL RESOURCE. No web font is declared and none is fetched; the stack
+ * below is the reader's own system font. No stylesheet is pulled in from
+ * anywhere, no image is referenced, and there is no build step, so the bytes
+ * served are the bytes checked in. `scripts/check-ui-offline.sh` fails the lint
+ * gate on any line here that names an external resource. */
+
+:root {
+  --ink: #16191d;
+  --ink-soft: #55606b;
+  --rule: #d7dce1;
+  --paper: #ffffff;
+  --paper-soft: #f5f7f9;
+  --accent: #1f5f8b;
+  --warn-ink: #6b3a00;
+  --warn-paper: #fff6e6;
+  --warn-rule: #e5c48a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 1.5rem 3rem;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+  background: var(--paper-soft);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+}
+
+.masthead {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.75rem 0 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  letter-spacing: 0.01em;
+}
+
+.tagline {
+  margin: 0.4rem 0 1rem;
+  max-width: 48rem;
+  color: var(--ink-soft);
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.1rem;
+  padding-bottom: 0.75rem;
+}
+
+.nav-link {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.2rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.nav-link:hover,
+.nav-link:focus {
+  text-decoration: underline;
+}
+
+.nav-link-current {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding-top: 1.5rem;
+}
+
+main h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.15rem;
+}
+
+.blurb {
+  margin: 0 0 1rem;
+  color: var(--ink-soft);
+}
+
+.pending {
+  margin: 0 0 1.5rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--warn-paper);
+  border: 1px solid var(--warn-rule);
+  border-left-width: 4px;
+  border-radius: 3px;
+  color: var(--warn-ink);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: 0.4rem 1rem;
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--ink-soft);
+}
+
+.facts dd {
+  margin: 0;
+}
+
+.error {
+  margin: 1rem 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--accent);
+  background: var(--paper-soft);
+  border-radius: 3px;
+}
+
+.error-status {
+  font-weight: 600;
+}
+
+.error-message {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+}
+
+.colophon {
+  max-width: 60rem;
+  margin: 3rem auto 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-soft);
+  font-size: 0.9em;
+}
+
+.colophon p {
+  margin: 0 0 0.5rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * The four read-and-create pages (Task 26).
+ *
+ * THE GREEN BADGE IS NOT ONLY GREEN. Colour is the least of what a verdict
+ * has to carry: the green badge's caption names the instant weirkeeper
+ * verified and the key id it matched, and the other badge carries the single
+ * word `unverified`. A reader who cannot tell the two hues apart still reads
+ * two different sentences, and a screenshot pasted into a ticket still says
+ * which one it was. Nothing here is a colour-only distinction.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --ok-ink: #14532d;
+  --ok-paper: #e8f5ec;
+  --ok-rule: #8fc7a4;
+  --flat-ink: #3d4650;
+  --flat-paper: #eef1f4;
+  --flat-rule: #c6ced6;
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.grid th,
+.grid td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+.grid thead th {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  border-bottom-width: 2px;
+}
+
+.grid td.empty {
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--flat-rule);
+  background: var(--flat-paper);
+  color: var(--flat-ink);
+  font-size: 0.85em;
+}
+
+.badge-green {
+  border-color: var(--ok-rule);
+  background: var(--ok-paper);
+  color: var(--ok-ink);
+  font-weight: 600;
+}
+
+.badge-unverified,
+.badge-flat {
+  border-style: dashed;
+}
+
+.badge-ok {
+  border-color: var(--ok-rule);
+  background: var(--ok-paper);
+  color: var(--ok-ink);
+}
+
+.list-footer {
+  margin: 0 0 1.5rem;
+  color: var(--ink-soft);
+  font-size: 0.92em;
+}
+
+.copy {
+  margin: 0.4rem 0 0.9rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--paper-soft);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.covered,
+.immutable,
+.engine-subreport {
+  margin: 0.4rem 0;
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.86rem;
+}
+
+.evidence,
+.retention,
+.create,
+.schedule {
+  margin: 1.25rem 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+.evidence h3,
+.retention h3,
+.create h3,
+.schedule h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.retention h4 {
+  margin: 0.9rem 0 0.3rem;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+.sets {
+  margin: 0.2rem 0;
+  padding-left: 1.2rem;
+}
+
+.never-deletes {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--warn-paper);
+  border: 1px solid var(--warn-rule);
+  border-left-width: 4px;
+  border-radius: 3px;
+  color: var(--warn-ink);
+  font-weight: 600;
+}
+
+.note {
+  margin: 0.4rem 0;
+  color: var(--ink-soft);
+  max-width: 46rem;
+}
+
+.create form,
+.suspend {
+  display: grid;
+  gap: 0.3rem 0.8rem;
+  max-width: 34rem;
+  margin: 0.5rem 0;
+}
+
+.create label {
+  color: var(--ink-soft);
+  font-size: 0.9em;
+}
+
+.create label.inline {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.create input,
+.create select {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font: inherit;
+}
+
+.create button,
+.suspend button,
+.ns-form button {
+  justify-self: start;
+  padding: 0.3rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.nav-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.ns-form {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding-bottom: 0.75rem;
+  color: var(--ink-soft);
+  font-size: 0.9em;
+}
+
+.ns-form input {
+  width: 12rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font: inherit;
+}

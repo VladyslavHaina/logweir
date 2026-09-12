@@ -1,0 +1,396 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: restores.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Restore
+    plural: restores
+    shortNames: []
+    singular: restore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: scratch is a drill
+      jsonPath: .spec.target.mode
+      name: MODE
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: 0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed
+      jsonPath: .status.exitCode
+      name: EXIT
+      type: integer
+    - description: the terminal or current condition reason - ApprovalNotVerified, PlanHashMismatch, GuardRefused, Ok, ...; NOT exitReason, which is `operational` for every admission refusal
+      jsonPath: .status.reason
+      name: REASON
+      type: string
+    - jsonPath: .status.outcome
+      name: OUTCOME
+      type: string
+    - jsonPath: .status.integrity.result
+      name: INTEGRITY
+      type: string
+    - jsonPath: .status.measured.rtoSeconds
+      name: RTO
+      type: integer
+    - description: green needs this Valid AND outcome pass
+      jsonPath: .status.evidence.verification.result
+      name: SIGNED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'One restore run, executed as a Job. A drill is a Restore with `spec.target.mode: scratch`; there is no separate Drill kind. A Restore only ever writes a NEW topic, so it is non-destructive by construction. `spec` is immutable — the approval binds these exact bytes.'
+        properties:
+          spec:
+            description: '`Restore.spec`.'
+            properties:
+              approvalRef:
+                description: The `Approval` that authorises this restore, in this namespace. The approval's `planHash` must equal the sha256 of `planBytes` above, and its `subjectRef` must name this object.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              backupSetRef:
+                description: The backup set inside `sourceArchive` — a `backupId`.
+                type: string
+              deadlineSeconds:
+                description: The Job's `activeDeadlineSeconds`.
+                format: int64
+                type: integer
+              planBytes:
+                description: |-
+                  The restore plan, as the exact bytes the approver signed.
+
+                  AN OPAQUE STRING, NEVER A MODELLED SCHEMA. `planHash` binds exact spec bytes, the API server normalises YAML, and a typed round-trip would silently invalidate every approval. The UI produces these bytes client-side and shows their sha256 before submitting; the controller hashes exactly what is here.
+                type: string
+              pointInTime:
+                description: The point in time to restore to. Records after it are not restored.
+                format: date-time
+                type: string
+              sourceArchive:
+                description: The archive to restore from.
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              target:
+                description: Where the restore writes, and in which mode.
+                properties:
+                  clusterRef:
+                    description: The `KafkaCluster` to write to, in this namespace.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  mode:
+                    description: '`scratch` for a drill, `newTopic` for a real restore.'
+                    enum:
+                    - scratch
+                    - newTopic
+                    type: string
+                  topicNaming:
+                    description: How the new topics are named.
+                    properties:
+                      prefix:
+                        description: 'Prepended to each source topic name to form the new topic''s name. The result is what `status.newTopics` records, and — for `mode: scratch` — what phase 9 tears down.'
+                        type: string
+                    required:
+                    - prefix
+                    type: object
+                required:
+                - clusterRef
+                - mode
+                - topicNaming
+                type: object
+            required:
+            - approvalRef
+            - backupSetRef
+            - deadlineSeconds
+            - planBytes
+            - pointInTime
+            - sourceArchive
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Restore.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: The condition set.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              evidence:
+                description: The signed scorecard, the offset report, and the controller's verification.
+                nullable: true
+                properties:
+                  offsetReportKey:
+                    description: The object key of the offset report. Tag 1 renders the report and applies nothing (Global Constraint 35).
+                    nullable: true
+                    type: string
+                  offsetReportSha256:
+                    description: 'The sha256 of the offset report, as `sha256:<lowercase hex>`. **COPIED from the signed scorecard''s own `evidence.offset_report_sha256`**, never recomputed: the report''s digest is inside the bytes the signature covers, so recomputing it would fetch a second object to answer a question the first one already answers — and would report a mismatch as agreement.'
+                    nullable: true
+                    type: string
+                  scorecardKey:
+                    description: The object key of the signed scorecard.
+                    nullable: true
+                    type: string
+                  scorecardSha256:
+                    description: 'The sha256 of the scorecard at `scorecardKey`, as `sha256:<lowercase hex>` — the one digest spelling this corpus uses everywhere (`logweir_core::ids::sha256_prefixed`), so a value read off this field and a value read out of a signed document compare as strings. **COMPUTED by the controller over the bytes it fetched**, not copied: a document cannot carry its own digest.'
+                    nullable: true
+                    type: string
+                  sidecarKey:
+                    description: The object key of the scorecard's detached DSSE sidecar.
+                    nullable: true
+                    type: string
+                  verification:
+                    description: What `weirkeeper` recorded when it verified the scorecard.
+                    nullable: true
+                    properties:
+                      detail:
+                        description: |-
+                          Why the verdict is what it is: the verification error's own message on `Invalid`, and the reason nothing was attempted on `NotAttempted` — no evidence credential, an unreadable object, or a `TrustRoster` carrying no signing key material. Absent on `Valid`: there is nothing to explain about an answer that came out yes.
+
+                          NEVER KEY MATERIAL AND NEVER A CREDENTIAL. It is an error's `Display` and a fixed sentence, both of which name objects and key IDs only.
+                        nullable: true
+                        type: string
+                      matchedKeyId:
+                        description: The `keyId` of the `TrustRoster` signing key whose public key verified the signature.
+                        nullable: true
+                        type: string
+                      payloadType:
+                        description: The DSSE `payloadType` that was verified.
+                        nullable: true
+                        type: string
+                      result:
+                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
+                        nullable: true
+                        type: string
+                      verifiedAt:
+                        description: |-
+                          When the controller performed the verification.
+
+                          **WHEN THIS VERDICT WAS REACHED, not when it was last re-confirmed.** A reconciler's own status patch is what wakes it (plan erratum **E11(d)**), so a field carrying a fresh clock read on every pass would make every pass a write and every write a wake-up. A change in `result`, `matchedKeyId`, `payloadType` or `detail` is a new verdict and takes a new instant; anything else keeps the stored one, and the second status patch is then a no-op that is never sent.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
+              exitCode:
+                description: 'The runner''s exit code (Global Constraint 11). `2` is the most valuable result the tool produces: the drill ran, it was measured, and the backup did not meet its objective — a scorecard WAS written and signed.'
+                format: int32
+                nullable: true
+                type: integer
+              exitReason:
+                description: 'The terminal state that refused the run, for exit 3 — `Expired`, `WindowNotCovered`, `ApprovalNotReceived`, `OrphanedScorecard`, `DisruptedMidDrill`, `PodUnschedulable`, `TargetTopicConfigRefused`, `CredentialNotRenderable`. Read off the pod log''s final line, which carries `refusal-reason=<TerminalState>`: the pod log API has no stream selector, so nothing on stderr is distinguishable by a controller.'
+                nullable: true
+                type: string
+              integrity:
+                description: How thoroughly the restore was checked, what that found, and — when the result is `partial` — why (interface **I34**).
+                nullable: true
+                properties:
+                  level:
+                    description: '`byte-fingerprint`, `consume-only` or `not-attempted`. The scorecard''s own kebab-case spellings, carried through unchanged so the badge the UI renders and the document an auditor reads say the same word.'
+                    nullable: true
+                    type: string
+                  partialReason:
+                    description: 'INTERFACE **I34**, second half. Why the integrity result is `partial`, naming itself: an archive returning zero or short fingerprints for a selection; a (topic, partition, window) the manifest claims exists but no segment matches; a pre-0.21 segment carrying no sha256; a consume-only selection whose target partition gave back less than the manifest claims. Produced by Task 20 from the scorecard''s `integrity.partial_reason`. Spec §8 requires the UI to render it — a `partial` with no reason is a badge an auditor cannot act on.'
+                    nullable: true
+                    type: string
+                  result:
+                    description: '`pass`, `partial` or `fail`. `partial` is a selection whose evidence was inconclusive — something in the sample was not examined — and is NOT a pass.'
+                    nullable: true
+                    type: string
+                type: object
+              jobRef:
+                description: The Job that ran, or is running, this restore.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              lastPhaseCompleted:
+                description: The last phase slot that completed, `-1` through `9`.
+                format: int32
+                nullable: true
+                type: integer
+              measured:
+                description: What the run achieved.
+                nullable: true
+                properties:
+                  rpoSeconds:
+                    description: The measured archive-coverage gap, seconds. Non-negative.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  rtoSeconds:
+                    description: Wall-clock seconds from the start of the restore to a verified target.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              newTopics:
+                description: 'The topics this run CREATED. For `mode: scratch`, exactly what phase 9 tears down.'
+                items:
+                  type: string
+                nullable: true
+                type: array
+              objectives:
+                description: What was asked for, and whether it was met (interface **I34**).
+                nullable: true
+                properties:
+                  met:
+                    description: The aggregate verdict over whichever objectives above are non-null. `true` — every non-null objective was met. `false` — at least one was missed. Absent — a `passRate` objective was requested but the MEASURED rate could not be computed, so the aggregate is unmeasurable rather than satisfied.
+                    nullable: true
+                    type: boolean
+                  passRate:
+                    description: The requested record match rate, 0.0 to 1.0.
+                    format: double
+                    nullable: true
+                    type: number
+                  rpoSeconds:
+                    description: 'The requested maximum archive-coverage gap, seconds. Never negative: a negative allowed gap is not a stricter objective, it is an unsatisfiable one.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  rtoSeconds:
+                    description: The requested maximum recovery time, seconds.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              oldTopics:
+                description: 'The source topics the new ones were restored from. Nothing here was written to, in any tag: retiring an old topic is tag 2''s `Switchover` and is validated against this list.'
+                items:
+                  type: string
+                nullable: true
+                type: array
+              outcome:
+                description: '`pass`, `fail-objective`, `fail-integrity` or `preflight-failed`. Spec §8''s green badge for a `Restore` needs `evidence.verification.result == Valid` **and** `outcome == pass`.'
+                nullable: true
+                type: string
+              phase:
+                description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. Task 20 owns the phase vocabulary.'
+                nullable: true
+                type: string
+              reason:
+                description: |-
+                  The reason of the condition that describes this run RIGHT NOW — `ApprovalNotVerified`, `ApprovalNotReceived`, `PlanHashMismatch`, `ClusterNotReachable`, `NameTooLong`, `JobCreated`, `Ok`, `GuardRefused`, `DrillNotPass`, `SigningOrLock`, `Operational`, … — and the field the `REASON` printer column reads.
+
+                  # Why this exists beside `exitReason`, which looks like it says the same thing
+
+                  IT DOES NOT SAY THE SAME THING, AND FOR THE FOUR STATES AN OPERATOR MOST NEEDS IT SAID NOTHING AT ALL. `exitReason` is Global Constraint 11's vocabulary about a RUN: it is written from an exit code, and a refusal this controller makes ITSELF — before any `POST`, so with no run and no code — can only spell it `operational`, which is GC11's "could not be attempted". All four admission refusals (`ApprovalNotReceived`, `ApprovalNotVerified`, `PlanHashMismatch`, `ClusterNotReachable`) and `NameTooLong` therefore printed the SAME `operational` in the `REASON` column, and the specific state existed only inside `status.conditions` — measured live at the Task 20 review (finding M2) on two objects that both printed `operational`.
+
+                  So this field is the CONDITION's answer, promoted to a scalar. It is not a third vocabulary: it is always **verbatim** the `reason` of the condition this patch writes about the run's current or terminal state, which makes it CamelCase everywhere by errata **E5b**, and `every_status_write_sets_the_scalar_reason` asserts the equality for every patch builder plus, by source scan, that a patch which writes `conditions` and no `reason` cannot be added.
+
+                  `exitReason` is UNCHANGED and still the honest home of GC11's wire string and of the runner's own `refusal-reason=` terminal state, which is the more specific answer whenever a pod actually ran. Two fields, two questions: *what did the run exit with* and *what state is this object in*.
+                nullable: true
+                type: string
+              topicPreflight:
+                description: |-
+                  What phase 0 found out about the target topics (guard **G-TS**).
+
+                  **IT HAS A PRODUCER SINCE TASK 24, AND THE GAP THAT MADE IT ABSENT IS CLOSED** (plan erratum **E10(c)**). The observation is returned by phase 0 inside the runner (`RestoreOutcome::topic_preflight`) and, by Global Constraint 12 as amended, is deliberately NOT a scorecard field — so for two slots nothing carried it out of the pod and this field declared its own absence rather than being fabricated. Closing it took exactly what that note said it would: a fourth machine-read stdout line. `logweir restore run` now prints `topic-preflight=<one-line JSON object>` (`logweir::drill::phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX`) on a successful run, and `weirkeeper::controllers::restore::topic_preflight` scans it out of the same bounded tail as the evidence keys, BY KEY NAME (erratum E4).
+
+                  **STILL ABSENT ON EVERY RUN THAT DID NOT COMPLETE PHASE 0**, and that absence is still the truthful answer rather than a zero: the line is printed only at exit 0, because `RestoreOutcome` is what carries the observation and every other path returns an error instead. A run refused at phase 0 never read the target's config, so there is nothing to report about it.
+
+                  THE THREE FIELDS ARE THE CONTRACT. The runner emits exactly `timestampType`, `retentionMs` and `timestampBound` — this struct's own camelCase spellings — and the controller filters the line to those three, so a fourth key on either side is dropped rather than misfiled into a property the structural schema then prunes. `retentionMs` is a STRING on the runner's side (that is what DescribeConfigs returns) and an `i64` here, and a value that will not parse is OMITTED from the line rather than flattened to `0`.
+                nullable: true
+                properties:
+                  retentionMs:
+                    description: The target topic's `retention.ms`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  timestampBound:
+                    description: The oldest timestamp the target will accept without rejecting or rewriting the record, derived from `retentionMs`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  timestampType:
+                    description: The target topic's `message.timestamp.type` — `CreateTime` or `LogAppendTime`. `LogAppendTime` rewrites every restored record's timestamp to the moment of the restore, which makes a point-in-time claim unverifiable.
+                    nullable: true
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        title: Restore
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

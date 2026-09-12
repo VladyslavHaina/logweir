@@ -10,8 +10,11 @@
 //!
 //! # The enumeration, and why it is a union rather than a single set
 //!
-//! The tree holds **fifteen** `scripts/check-*.sh`. Thirteen of them run in
-//! `just gate`. The other two — `check-image.sh` and `check-image-weirkeeper.sh`
+//! The tree holds **sixteen** `scripts/check-*.sh`. Fourteen of them run in
+//! `just gate` — thirteen named on its own lines and one, `check-chart.sh`,
+//! through the `just chart-check` line (Task 35; [`checks_in_gate`] follows a
+//! `just <recipe>` line of the gate one level into that recipe's body, and
+//! nothing further). The other two — `check-image.sh` and `check-image-weirkeeper.sh`
 //! — need a **Docker daemon** and cost a `docker run` per check, and `just gate`
 //! must stay runnable on a machine that has neither a daemon nor a cluster. A
 //! test that asserted "every `check-*.sh` is invoked by `just gate`" could
@@ -123,6 +126,30 @@ fn recipe_body(just: &str, name: &str) -> Vec<String> {
 /// `just gate`'s executed lines, in order.
 fn gate_lines() -> Vec<String> {
     recipe_body(&justfile(), "gate")
+}
+
+/// The `check-*.sh` the gate runs: those named on its own executed lines, plus
+/// those named in the body of any `just <recipe>` line it runs — ONE level, the
+/// recipe's own executed lines and nothing it in turn invokes. Task 35 put
+/// `check-chart.sh` behind `just chart-check`, beside `just crds-check` and
+/// `just schema-check`; before that every check the gate ran was named on a
+/// gate line, and a reader of `checks_named_in(gate_lines())` was complete by
+/// accident. A `just <recipe>` line IS a gate line — `just` runs the recipe
+/// and reads its status — so the scripts that recipe names are the gate's.
+fn checks_in_gate() -> BTreeSet<String> {
+    let just = justfile();
+    let lines = gate_lines();
+    let mut out = checks_named_in(&lines.join("\n"));
+    for line in &lines {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("just") {
+            continue;
+        }
+        if let Some(name) = words.next() {
+            out.extend(checks_named_in(&recipe_body(&just, name).join("\n")));
+        }
+    }
+    out
 }
 
 /// Every `scripts/check-*.sh` that exists in the tree.
@@ -282,7 +309,7 @@ fn gate_lint_every_check_is_in_the_gate() {
     let just = justfile();
     let all = every_check_script();
 
-    let in_gate = checks_named_in(&gate_lines().join("\n"));
+    let in_gate = checks_in_gate();
 
     let mut in_table: BTreeSet<String> = BTreeSet::new();
     for recipe in stack_table_recipes() {
@@ -452,8 +479,9 @@ fn gate_lint_ci_mirrors_the_gate() {
         .collect::<Vec<&str>>()
         .join("\n");
 
-    // 1. Every check script the gate runs appears on an executed line of ci.yml.
-    let in_gate = checks_named_in(&gate_lines().join("\n"));
+    // 1. Every check script the gate runs appears on an executed line of ci.yml
+    //    — the ones behind a `just <recipe>` gate line included (Task 35).
+    let in_gate = checks_in_gate();
     let missing: Vec<&String> = in_gate
         .iter()
         .filter(|s| !executed.contains(&format!("scripts/{s}")))
@@ -562,10 +590,11 @@ fn gate_lint_ci_mirrors_the_gate() {
 /// The workflow files this repository ships. Longest first is not needed — no
 /// name is a substring of another — but the set is what makes an "entry"
 /// bounded.
-const WORKFLOW_FILES: [&str; 6] = [
+const WORKFLOW_FILES: [&str; 7] = [
     "ci.yml",
     "no-oso.yml",
     "kind-demo.yml",
+    "helm-demo.yml",
     "release.yml",
     "release-drill.yml",
     "engine-matrix.yml",
@@ -603,15 +632,16 @@ fn run_ids(line: &str) -> Vec<String> {
     out
 }
 
-/// **The seven stack/cluster recipes are out of the gate, and all seven are in
+/// **The eight stack/cluster recipes are out of the gate, and all eight are in
 /// the table.**
 ///
 /// Each needs the compose stack, a cluster or a Docker build, and
 /// `scripts/time-unit-suite.sh` REFUSES to run, exit 1, while 9092 or 9000
-/// answers — so a gate that started the stack would fail itself.
+/// answers — so a gate that started the stack would fail itself. `helm-demo`
+/// (Task 35) needs a cluster with the chart installed.
 #[test]
 fn gate_lint_the_stack_recipes_are_out_of_the_gate() {
-    const STACK: [&str; 7] = [
+    const STACK: [&str; 8] = [
         "e2e",
         "smoke",
         "smoke-weirkeeper",
@@ -619,6 +649,7 @@ fn gate_lint_the_stack_recipes_are_out_of_the_gate() {
         "k8s-demo",
         "laptop-demo",
         "pitr",
+        "helm-demo",
     ];
     let just = justfile();
     let gate = gate_lines();
@@ -645,13 +676,13 @@ fn gate_lint_the_stack_recipes_are_out_of_the_gate() {
         );
     }
 
-    // All seven, and only those seven, are in the table.
+    // All eight, and only those eight, are in the table.
     let table = stack_table_recipes();
     let want: BTreeSet<String> = STACK.iter().map(|s| s.to_string()).collect();
     let got: BTreeSet<String> = table.iter().cloned().collect();
     assert_eq!(
         got, want,
-        "docs/gates.md's stack/cluster table must name exactly these seven recipes"
+        "docs/gates.md's stack/cluster table must name exactly these eight recipes"
     );
 
     // Each row says what it proves — a row that is only a name teaches nobody
@@ -670,6 +701,50 @@ fn gate_lint_the_stack_recipes_are_out_of_the_gate() {
             cells[1].len()
         );
     }
+}
+
+/// **`just chart-check` is in the gate, immediately after `just crds-check`,
+/// and it is `scripts/check-chart.sh`.** Task 35.
+///
+/// The position is the ruling's: the chart is derived from `config/` the way
+/// the CRDs are derived from the emitter, so its drift check sits beside the
+/// CRD drift check. The recipe's body is asserted too — a `chart-check` whose
+/// body ran something else would satisfy the enumeration test through
+/// [`checks_in_gate`] while running no chart check at all.
+///
+/// KILLS: removing `just chart-check` from the gate (this AND
+/// `gate_lint_every_check_is_in_the_gate`, which then finds `check-chart.sh`
+/// orphaned); moving it above `just crds-check`; pointing the recipe at some
+/// other script.
+#[test]
+fn gate_lint_chart_check_follows_crds_check() {
+    let gate = gate_lines();
+    let at = |line: &str| -> usize {
+        gate.iter()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("`just gate` has no line `{line}`:\n  {gate:#?}"))
+    };
+    let crds = at("just crds-check");
+    let chart = at("just chart-check");
+    assert_eq!(
+        chart,
+        crds + 1,
+        "`just chart-check` (line {}) must come IMMEDIATELY after `just crds-check` (line {}): \
+         the chart's CRDs are byte copies of config/crd, so the chart drift check follows the \
+         CRD drift check",
+        chart + 1,
+        crds + 1
+    );
+    let body = recipe_body(&justfile(), "chart-check");
+    assert_eq!(
+        body,
+        vec!["bash scripts/check-chart.sh".to_string()],
+        "the `chart-check` recipe runs `bash scripts/check-chart.sh` and nothing else"
+    );
+    assert!(
+        checks_in_gate().contains("check-chart.sh"),
+        "check-chart.sh must be counted as in the gate through the `just chart-check` line"
+    );
 }
 
 /// **I32 is verified here, never rewritten** (Task 1's to close; Task 32 only

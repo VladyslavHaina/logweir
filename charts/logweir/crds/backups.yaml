@@ -1,0 +1,285 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backups.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Backup
+    plural: backups
+    shortNames: []
+    singular: backup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: 0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed
+      jsonPath: .status.exitCode
+      name: EXIT
+      type: integer
+    - jsonPath: .status.records
+      name: RECORDS
+      type: integer
+    - description: green needs this Valid AND exitCode 0
+      jsonPath: .status.evidence.verification.result
+      name: SIGNED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: One archive run, executed as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets AlreadyExists rather than a second partial archive. `spec` is immutable.
+        properties:
+          spec:
+            description: '`Backup.spec`.'
+            properties:
+              archive:
+                description: Where the archive is written.
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              deadlineSeconds:
+                description: The Job's `activeDeadlineSeconds`.
+                format: int64
+                type: integer
+              scheduleRef:
+                description: The `BackupSchedule` that created this object, when one did.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              slot:
+                description: The schedule slot this run is for, `yyyymmdd-hhmmss` in UTC. Part of this object's name and of `status.backupId`; guard **G-SLOT**.
+                nullable: true
+                type: string
+              sourceRef:
+                description: The `KafkaCluster` to read from, in this namespace.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              topics:
+                description: NAMED topics, never patterns — guard **G-GLOB**, as on `BackupSchedule`.
+                items:
+                  type: string
+                type: array
+              triggeredBy:
+                description: What caused this run — `schedule` or `manual`. Recorded rather than inferred from the presence of `scheduleRef`, because the receipt carries it and an auditor reads the receipt.
+                type: string
+            required:
+            - archive
+            - deadlineSeconds
+            - sourceRef
+            - topics
+            - triggeredBy
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Backup.status`.'
+            nullable: true
+            properties:
+              auth:
+                description: The identity the run presented. `mode` and `username`, never a password.
+                nullable: true
+                properties:
+                  mode:
+                    description: '`plaintext` or `scramSha512`, as resolved from the source `KafkaCluster`.'
+                    nullable: true
+                    type: string
+                  username:
+                    description: The SASL principal the run authenticated as, when there was one. Logweir cannot observe the principal the broker authenticated — Kafka exposes no such call — so this is the username Logweir PRESENTED.
+                    nullable: true
+                    type: string
+                type: object
+              backupId:
+                description: The archive's backup id, derived from this object's UID and `spec.slot`.
+                nullable: true
+                type: string
+              conditions:
+                description: The condition set. Spec §8's green badge for a `Backup` needs `evidence.verification.result == Valid` **and** `exitCode == 0` — a `Backup` carries no `outcome`, so the badge rule here is not the `Restore` rule.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              evidence:
+                description: The signed receipt, and the controller's verification of it.
+                nullable: true
+                properties:
+                  receiptKey:
+                    description: The object key of the signed backup receipt.
+                    nullable: true
+                    type: string
+                  receiptSha256:
+                    description: |-
+                      The sha256 of the receipt at `receiptKey`, as `sha256:<lowercase hex>` — the one digest spelling this corpus uses everywhere (`logweir_core::ids::sha256_prefixed`). **COMPUTED by the controller over the bytes it fetched**, not copied: a document cannot carry its own digest.
+
+                      WHY IT IS HERE AT ALL, AND IT IS NOT DECORATION (Task 24). It is the value `verification` is checked against on a LATER pass: the controller re-fetches the receipt with its read-only evidence credential and compares this recorded digest against the bytes in the bucket right now. Without it, `verify_evidence` could only check the signature — and a genuinely-signed OLDER receipt put in this one's place would verify. `Restore` has carried the same field for the scorecard since Task 20 (`restore::RestoreEvidence::scorecard_sha256`).
+                    nullable: true
+                    type: string
+                  sidecarKey:
+                    description: The object key of the receipt's detached DSSE sidecar.
+                    nullable: true
+                    type: string
+                  verification:
+                    description: What `weirkeeper` recorded when it verified the pair above.
+                    nullable: true
+                    properties:
+                      detail:
+                        description: |-
+                          Why the verdict is what it is: the verification error's own message on `Invalid`, and the reason nothing was attempted on `NotAttempted` — no evidence credential, an unreadable object, or a `TrustRoster` carrying no signing key material. Absent on `Valid`: there is nothing to explain about an answer that came out yes.
+
+                          NEVER KEY MATERIAL AND NEVER A CREDENTIAL. It is an error's `Display` and a fixed sentence, both of which name objects and key IDs only.
+                        nullable: true
+                        type: string
+                      matchedKeyId:
+                        description: The `keyId` of the `TrustRoster` signing key whose public key verified the signature.
+                        nullable: true
+                        type: string
+                      payloadType:
+                        description: The DSSE `payloadType` that was verified.
+                        nullable: true
+                        type: string
+                      result:
+                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
+                        nullable: true
+                        type: string
+                      verifiedAt:
+                        description: |-
+                          When the controller performed the verification.
+
+                          **WHEN THIS VERDICT WAS REACHED, not when it was last re-confirmed.** A reconciler's own status patch is what wakes it (plan erratum **E11(d)**), so a field carrying a fresh clock read on every pass would make every pass a write and every write a wake-up. A change in `result`, `matchedKeyId`, `payloadType` or `detail` is a new verdict and takes a new instant; anything else keeps the stored one, and the second status patch is then a no-op that is never sent.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
+              exitCode:
+                description: 'The runner''s exit code, lifted from `pod.status.containerStatuses[].state.terminated.exitCode` — the one path in Kubernetes that carries it. `0` pass · `1` operational, no artifact · `2` a result that is not a pass, document written and signed · `3` refused by a guard · `4` signing or lock proof failed (Global Constraint 11). Spec §8''s green badge for a `Backup` requires `evidence.verification.result == Valid` AND `exitCode == 0` — green requires verification Valid and exitCode 0, and a `Backup` carries no `outcome` for the badge to read instead. ABSENT is a real value: a Job that finished with no terminated state for the `runner` container has no recoverable code, and the controller records the absence rather than fabricating a `0` or a `1`.'
+                format: int32
+                nullable: true
+                type: integer
+              exitReason:
+                description: |-
+                  Why the run ended, as one of Global Constraint 11's wire reasons — `ok`, `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock` — or, when the run reached a **terminal state** more specific than its code, that state: the `refusal-reason=` line the runner printed for exit 3, or `OrphanedScorecard` for an exit-4 run whose payload exists without its sidecar.
+
+                  `operational` for the crashed-Job case, where `exitCode` is absent: a run whose code is unrecoverable produced no artifact either, and the SUB-CASE (`DisruptedMidDrill`, `PodUnschedulable`, `NoExitCode`) is the condition's `reason`.
+                nullable: true
+                type: string
+              jobRef:
+                description: The Job that ran, or is running, this backup.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              manifestKey:
+                description: The object key of the manifest this run wrote.
+                nullable: true
+                type: string
+              manifestSha256:
+                description: The sha256 of the manifest at `manifestKey`, lowercase hex.
+                nullable: true
+                type: string
+              phase:
+                description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it.'
+                nullable: true
+                type: string
+              records:
+                description: How many records the run archived.
+                format: int64
+                nullable: true
+                type: integer
+              windowCovered:
+                description: The window the archive covers, in epoch milliseconds — interface **I22**.
+                nullable: true
+                properties:
+                  fromMs:
+                    description: Inclusive start of the covered window, epoch milliseconds.
+                    format: int64
+                    type: integer
+                  toMs:
+                    description: Exclusive end of the covered window, epoch milliseconds.
+                    format: int64
+                    type: integer
+                required:
+                - fromMs
+                - toMs
+                type: object
+            type: object
+        required:
+        - spec
+        title: Backup
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

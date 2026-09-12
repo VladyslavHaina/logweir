@@ -39,6 +39,16 @@ ServiceAccount, and the uninstall with what it leaves behind.
 `docs/install.md` is the **single** install document. Nothing else in this tree
 carries install steps.
 
+**Or with Helm** — the same control plane as one chart, with an optional
+backend, two demo Kafka clusters and the UI behind three flags
+([charts/logweir/README.md](charts/logweir/README.md); `docs/install.md` path (c)):
+
+```bash
+helm install logweir charts/logweir -n logweir-system --create-namespace \
+  -f charts/logweir/examples/demo.values.yaml --wait --timeout 10m
+cargo build -p logweir && bash scripts/helm-demo.sh   # the walk, end to end, then a clean teardown
+```
+
 ## What it looks like
 
 This is `logweir drill show` over the scorecard `scripts/demo.sh` produced on a

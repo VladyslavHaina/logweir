@@ -1,0 +1,155 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: approvals.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Approval
+    plural: approvals
+    shortNames: []
+    singular: approval
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.subjectRef.name
+      name: SUBJECT
+      type: string
+    - jsonPath: .status.verified
+      name: VERIFIED
+      type: string
+    - jsonPath: .status.approver
+      name: APPROVER
+      type: string
+    - jsonPath: .status.matchedKeyId
+      name: KEY-ID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable.'
+        properties:
+          spec:
+            description: '`Approval.spec` — **four fields, all required**.'
+            properties:
+              approvalBytes:
+                description: |-
+                  The approval document, as **the UTF-8 document text, verbatim, never base64**.
+
+                  The UI pastes exactly what `logweir drill approve` wrote and the controller hashes exactly those bytes. Base64 would insert an encoding step between the approver's file and the hashed bytes, which is the class of transformation `planBytes` exists to forbid. This field therefore declares no `format: byte`.
+                type: string
+              planHash:
+                description: The sha256 of the subject's `planBytes`, lowercase hex. Supplied by the create form for the operator to compare, and RECOMPUTED by the controller from the referent's own bytes regardless — a mismatch is a refusal.
+                type: string
+              sidecarBytes:
+                description: |-
+                  The detached DSSE sidecar for `approvalBytes`, as **the UTF-8 document text, verbatim, never base64**.
+
+                  Same reason as `approvalBytes`: the bytes the approver's tool wrote are the bytes the controller verifies, with no encoding step in between. This field declares no `format: byte`.
+                type: string
+              subjectRef:
+                description: The object this approval is about. Comes from the route the wizard navigated to; it is part of the bytes the approval binds, so an `Approval` whose `planHash` matches a `Restore` is never accepted for anything else.
+                properties:
+                  kind:
+                    description: '`Restore` or `Backup`. Comes from the route the wizard navigated to.'
+                    enum:
+                    - Restore
+                    - Backup
+                    type: string
+                  name:
+                    description: The subject's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+            required:
+            - approvalBytes
+            - planHash
+            - sidecarBytes
+            - subjectRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Approval.status`.'
+            nullable: true
+            properties:
+              approver:
+                description: The approver's subject, read from the matched roster entry.
+                nullable: true
+                type: string
+              conditions:
+                description: '`Verified`, and whatever else the controller reports.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              matchedKeyId:
+                description: The `TrustRoster.spec.approverKeys[].keyId` that verified it.
+                nullable: true
+                type: string
+              selfAttestedRisk:
+                description: Whether the approver and the requester are the same principal — `false` means only that the two matched key ids differ.
+                nullable: true
+                type: boolean
+              ticket:
+                description: The change ticket the approval document names, when it names one.
+                nullable: true
+                type: string
+              verified:
+                description: Whether the DSSE signature over `approvalBytes` verified against a `TrustRoster` approver key, and the recomputed plan hash matched.
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: Approval
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,234 @@
+# Default values for the Logweir chart. EVERY value is documented in place, and
+# the defaults are THE SHIPPED INSTALL: `helm template charts/logweir` with
+# nothing overridden renders the same control plane `logweir.yaml` carries —
+# the same controller digest, the same pull policy, the same env, the same
+# security context, the same ClusterRole rules — and
+# `crates/logweir/tests/chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file`
+# holds the two together. Nothing optional is on by default.
+
+# ---------------------------------------------------------------------------
+# THE TWO IMAGES, BY DIGEST (Global Constraint 7), AND WHAT THE DIGESTS ARE
+# ---------------------------------------------------------------------------
+# `controllerImage` is the value `config/manager/deployment.yaml` carries and
+# `runnerImage` is `weirkeeper::job::RUNNER_IMAGE` (`crates/weirkeeper/src/job.rs`).
+# Both are LOCALLY BUILT measurements — `blocked: images not published`
+# (Global Constraint 37) until `release.yml` has run on a pushed tag — so a
+# cluster with no access to `ghcr.io/logweir/…` leaves the controller pod in
+# `ImagePullBackOff`, exactly as `docs/install.md` path (a) records. A re-pin
+# of either digest in the tree must be repeated here;
+# `chart_lint_values_pin_the_shipped_digests` fails when they disagree.
+#
+# The controller image. Rendered into the `weirkeeper` Deployment.
+controllerImage: ghcr.io/logweir/weirkeeper@sha256:6ab1411110731d3092fca3d1d08deded1487b227c25057107f206377da1ea60a
+# The runner image — Task 33's `LOGWEIR_RUNNER_IMAGE` override, set as an env
+# on the Deployment so every Job the controller creates names THIS reference.
+# The default is the compiled-in constant, so the default install creates the
+# Jobs it always created. For an author-only install (images you built and
+# `kind load`ed / `docker tag`ged yourself) set it to the loaded tag; the pull
+# policy of runner Jobs stays `Never` (the constant is not overridable), which
+# is right for an image LOADED onto the node.
+runnerImage: ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229
+# The CONTROLLER container's pull policy. `IfNotPresent` is the shipped value;
+# `Never` is the author-only overlay's (`config/overlays/local-images`), for a
+# tag that exists only in the node's image store. The optional components
+# below pull their own digests with `IfNotPresent` regardless of this value —
+# they are public images, and `Never` would refuse them on a fresh node.
+imagePullPolicy: IfNotPresent
+
+controller:
+  # `RUST_LOG`. `info` is the floor, not a preference: below it the per-object
+  # lines — exit code, evidence keys, verification verdict — are lost
+  # (`config/manager/deployment.yaml` says why). Raise to `debug` to see more.
+  logLevel: info
+  # The shipped requests/limits, verbatim.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# THE ARCHIVE THE CONTROLLER READS EVIDENCE FROM, AND FORWARDS TO EVERY RUNNER
+# ---------------------------------------------------------------------------
+# These become the env `config/overlays/k8s-demo/deployment-env-patch.yaml`
+# sets: `LOGWEIR_ARCHIVE_URL`, `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP`
+# and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`. The controller FORWARDS the four
+# addressing variables to every runner Job it creates
+# (`weirkeeper::controllers::backup::ARCHIVE_ADDRESSING_ENV`), so the endpoint
+# is configured once. The controller's READ-ONLY credential is the
+# `logweir-evidence-ro` Secret in the release namespace — yours to create, and
+# `optional: true` on the Deployment so the controller starts without it (every
+# verification then reads `NotAttempted`, never `Invalid`).
+#
+# Empty means the shipped default: no archive handle, no retention report,
+# and no addressing env at all. With `minio.enabled: true` and these left
+# empty, they default to the chart's own MinIO:
+#   url        s3://kafka-backups/<release>
+#   endpoint   http://<release>-minio.<namespace>.svc:9000
+#   region     us-east-1
+#   allowHttp  true, virtualHostedStyle false (path-style)
+archive:
+  # The bucket-and-prefix the controller's evidence handle is built over,
+  # e.g. `s3://kafka-backups/logweir`. Evidence keys are bucket-relative, so
+  # the BUCKET is what matters; the prefix is the retention report's.
+  url: ""
+  s3:
+    # `AWS_ENDPOINT_URL` — an S3-compatible endpoint (MinIO, Ceph). Empty for
+    # Amazon S3 proper.
+    endpoint: ""
+    # `AWS_REGION`.
+    region: ""
+    # `AWS_ALLOW_HTTP` — rendered only when `endpoint` is set.
+    allowHttp: false
+    # `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` — rendered only when `endpoint` is
+    # set; `false` is path-style, which MinIO wants.
+    virtualHostedStyle: false
+
+# ---------------------------------------------------------------------------
+# minio.enabled — THE BACKEND (default false)
+# ---------------------------------------------------------------------------
+# An in-cluster MinIO: a Deployment, a Service `<release>-minio:9000`, a
+# PersistentVolumeClaim (or an emptyDir), a seed Job (Helm hook
+# `post-install,post-upgrade`) that creates the two buckets `kafka-backups`
+# and `logweir-evidence` and exits, and the `logweir-s3` Secret the runner
+# Jobs read — created in the RELEASE namespace with the root credential
+# below. A production install brings its own archive and its own Secret and
+# leaves this `false`.
+minio:
+  enabled: false
+  # BOTH IMAGES ARE THE ONES `e2e/compose/docker-compose.yml` PINS, byte for
+  # byte: quay.io, by digest, because Docker Hub refuses anonymous pulls of
+  # `minio/minio` (plan erratum E30(a)). Copied from that file, not resolved
+  # again.
+  image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  mcImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+  # THE ROOT CREDENTIAL — DEMO-ONLY. MinIO's root user can do anything to any
+  # bucket, so it is NOT a read-only principal and the chart does not pretend
+  # it is: `logweir-s3` (the runner's archive credential) is minted from it,
+  # and `logweir-evidence-ro` (the controller's read-only one) is left to you,
+  # as `docs/install.md` step 3 describes. `scripts/helm-demo.sh` creates the
+  # latter from the same root pair and says what that proves (the projection,
+  # not the IAM policy).
+  rootUser: minioadmin
+  rootPassword: minioadmin
+  persistence:
+    # `false` uses an emptyDir: the archive and the evidence vanish with the
+    # pod. Fine for a demo, wrong for anything else.
+    enabled: true
+    size: 5Gi
+    # Empty means the cluster's default StorageClass.
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# demoKafka.enabled — TWO THROWAWAY KAFKA CLUSTERS (default false)
+# ---------------------------------------------------------------------------
+# Two single-broker KRaft clusters, `<release>-kafka-source` and
+# `<release>-kafka-target`, each a one-replica StatefulSet with a headless
+# Service and a ClusterIP Service on 9092, PLAINTEXT inside the cluster
+# network, advertising the ClusterIP Service's DNS name so a pod anywhere in
+# the cluster can follow the broker's metadata, each with its own KRaft
+# cluster id (`clusterIds` below — the image's default is one fixed id, and two
+# brokers sharing it are one cluster to phase 0). Storage is an emptyDir: the
+# records vanish with the pod, which is what "demo" means here. A seed Job
+# (Helm hook `post-install`) waits for both brokers, creates `orders` and
+# `payments` on the source with `seed.recordsPerTopic` records each, and
+# creates the marker topic `logweir.scratch` on the target — the scratch
+# segregation proof phase 0 requires (`docs/kubernetes.md` §8).
+#
+# PLAINTEXT is the demo's transport and NOT a recommendation: the two
+# `KafkaCluster` objects `scripts/helm-demo.sh` creates say
+# `auth.mode: plaintext, tls: false` because these brokers exist for a walk
+# through the product, not because a real cluster should.
+demoKafka:
+  enabled: false
+  # `apache/kafka:3.7.1` — the compose stack's broker image — pinned by its
+  # MANIFEST-LIST digest (linux/amd64 and linux/arm64 inside it, so the same
+  # reference resolves on an amd64 CI runner and on an arm64 development
+  # host). RESOLVED ONCE, on 2026-09-12, with:
+  #
+  #     docker buildx imagetools inspect apache/kafka:3.7.1
+  #     -> Digest: sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68
+  #
+  # (the `kindest/node` provenance idiom of `e2e/k8s/kind-config.yaml`).
+  image: apache/kafka@sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68
+  # THE TWO KRaft CLUSTER IDS, DISTINCT ON PURPOSE. The image's own default,
+  # used whenever `CLUSTER_ID` is unset, is ONE fixed value
+  # (`/etc/kafka/docker/configureDefaults`: `5L6g3nShT-eMCtK--X86sw` — the
+  # compose stack's single broker carries it too), so two brokers started
+  # without these would report the SAME id and phase 0's `target != source`
+  # rail would refuse every scratch restore — measured on 2026-09-12, on the
+  # second walk of scripts/helm-demo.sh. MINTED ONCE, on 2026-09-12, with the
+  # pinned image's own tool:
+  #
+  #     docker run --rm --entrypoint /opt/kafka/bin/kafka-storage.sh \
+  #       apache/kafka@sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68 random-uuid
+  #
+  # A base64url-encoded 16-byte UUID, 22 characters, which is what
+  # `kafka-storage.sh format` accepts. Change them if you must; keep them
+  # different from each other — the template refuses equal ids.
+  clusterIds:
+    source: EdaYkCkyT2ONrlUc3uKpSw
+    target: tQmDMMCERvy6yIB-vuOZCQ
+  seed:
+    # Records produced into EACH of `orders` and `payments` on the source, with
+    # `kafka-console-producer.sh` from the same image, keyed `<topic>-<n>`.
+    recordsPerTopic: 200
+  # Per broker. The JVM heap is capped by `KAFKA_HEAP_OPTS` in the template
+  # (512 MiB) so two brokers fit beside MinIO and the controller on a laptop
+  # or a GitHub runner.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+# ---------------------------------------------------------------------------
+# ui.enabled — THE UI IN-CLUSTER, WITH ITS AUTHORITY STATED (default false)
+# ---------------------------------------------------------------------------
+# One Deployment `<release>-ui` running `kubectl proxy --www=/ui …` with the
+# fourteen shipped UI files mounted from a ConfigMap (built from this chart's
+# byte-identical copy of `ui/`), a ServiceAccount `<release>-ui` bound to a
+# ClusterRole carrying EXACTLY the verbs the page issues (measured from
+# `ui/api.js` and `ui/pages/*.js`: get/list on the five namespaced kinds,
+# create on approvals/kafkaclusters/backupschedules/restores, patch on
+# backupschedules, list on the cluster-scoped trustrosters), a ClusterIP
+# Service on 8001 and NO Ingress.
+#
+# THE MODEL, IN ONE PARAGRAPH. `kubectl proxy` attaches the pod's
+# ServiceAccount credential to every request it forwards, so ANYONE WHO CAN
+# REACH THAT SERVICE ACTS WITH THAT ServiceAccount's AUTHORITY — the page
+# holds no credential of its own and asks for none. The proxy's path filter
+# admits only `/ui/` and `/apis/logweir.dev/v1alpha1/`; nothing else on the
+# API is reachable through it. Reach it with
+# `kubectl port-forward svc/<release>-ui 8001:8001` and open
+# `http://127.0.0.1:8001/ui/`. Global Constraint 28 holds: no key material in
+# the page, none in the ConfigMap.
+ui:
+  enabled: false
+  # A kubectl image at the cluster's minor version, pinned by its manifest-list
+  # digest (linux/amd64 and linux/arm64). RESOLVED ONCE, on 2026-09-12, with:
+  #
+  #     docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1
+  #     -> Digest: sha256:59bafa07ff3a6d4b417e7633ddb9d79a9606ca98bf64bac080b3e65748669250
+  #
+  # `registry.k8s.io` is the Kubernetes project's own registry. The brief named
+  # `bitnami/kubectl`; on 2026-09-12 `docker buildx imagetools inspect
+  # bitnami/kubectl:1.34.1` (and `:1.34`) answered `not found` — Bitnami's
+  # Docker Hub catalogue no longer publishes versioned tags, and `:latest` is a
+  # tag, which Global Constraint 7 forbids. `kubectl proxy` is a reverse proxy
+  # and a file server; the client/server skew rules do not touch it, which is
+  # why the same digest serves a 1.29 `kind` node in CI.
+  image: registry.k8s.io/kubectl@sha256:59bafa07ff3a6d4b417e7633ddb9d79a9606ca98bf64bac080b3e65748669250
+  # Namespaces, BESIDES the release namespace, in which the chart creates a
+  # RoleBinding of the page's ClusterRole to `<release>-ui` — the namespaces
+  # whose Backups, Restores and KafkaClusters the page should see and write.
+  # Each must already exist at install time. The same binding can be made by
+  # hand afterwards (NOTES.txt prints the one-line command), which is what
+  # `scripts/helm-demo.sh` does for its own demo namespace.
+  namespaces: []

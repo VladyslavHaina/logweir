@@ -1971,3 +1971,260 @@ fn x_uiwrite_in_ci_is_labelled_mechanical_only() {
          isn't one"
     );
 }
+
+// ===========================================================================
+// TASK 35 — `helm-demo.yml`: the chart on a `kind` cluster the workflow creates.
+// ===========================================================================
+//
+// THIS PROVES THE WORKFLOW SAYS THE RIGHT THING, NOT THAT IT DOES: the file
+// has never executed (its header says so, with the date), and the controller's
+// push is its first run. The helpers are the ones above — `workflow_path`,
+// `raw_of`, `parsed`, `jobs`, `run`, `uses`, `condition`, `words`,
+// `strip_gha_expressions`, `strip_shell_comments` — extended, never forked.
+
+/// `helm-demo.yml`: the chart installed with `helm install … --wait` on a
+/// `kind` cluster, then `scripts/helm-demo.sh` (Task 35).
+const HELM_DEMO_YML: &str = "helm-demo.yml";
+
+/// THE STEPS OF `helm-demo.yml`'s one job, in file order — the shape
+/// `kind_demo_steps` asserts for its own file, for the same reason: the
+/// cluster, the images and the walk all live in one machine's state.
+fn helm_demo_steps(doc: &Value) -> &[Value] {
+    let all = jobs(doc);
+    assert_eq!(
+        1,
+        all.len(),
+        "helm-demo.yml has {} jobs; the whole walk is one job on one runner. Jobs found: {:?}",
+        all.len(),
+        all.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    let steps = all[0].1;
+    assert!(!steps.is_empty(), "helm-demo.yml's job has no steps");
+    steps
+}
+
+/// **The header says the workflow has not executed, and dates the claim.**
+/// A workflow that has never run enforces nothing, and the file must say so
+/// in those words until the run that changes it has happened.
+#[test]
+fn helm_demo_workflow_says_it_has_not_yet_executed() {
+    let raw = raw_of(HELM_DEMO_YML);
+    let header: String = raw
+        .lines()
+        .take_while(|l| l.starts_with('#') || l.starts_with("name:"))
+        .collect::<Vec<&str>>()
+        .join("\n");
+    assert!(
+        header.contains("NOT YET EXECUTED"),
+        "helm-demo.yml's header must say `NOT YET EXECUTED` in those words until its first run"
+    );
+    assert!(
+        header.contains("2026-09-12"),
+        "helm-demo.yml's header must date the claim (the day the file was added)"
+    );
+    assert!(
+        header.contains("NO COMPOSE STACK AT ALL"),
+        "helm-demo.yml's header must say the chart brings its own backend and there is no compose stack"
+    );
+}
+
+/// **The cluster is created by this workflow and deleted by it, whatever
+/// happened — and it is never the laptop's.** The `kind-demo.yml` property,
+/// asserted over this file.
+#[test]
+fn helm_demo_workflow_creates_and_deletes_its_cluster() {
+    let doc = parsed(HELM_DEMO_YML);
+    let steps = helm_demo_steps(&doc);
+    let create: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| run(s).contains("kind create cluster"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        1,
+        create.len(),
+        "helm-demo.yml must have exactly one `kind create cluster` step; found {create:?}"
+    );
+    assert!(
+        run(&steps[create[0]]).contains("--config e2e/k8s/kind-config.yaml"),
+        "the cluster comes from the pinned e2e/k8s/kind-config.yaml"
+    );
+    let delete: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| run(s).contains("kind delete cluster"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        1,
+        delete.len(),
+        "helm-demo.yml must have exactly one `kind delete cluster` step; found {delete:?}"
+    );
+    assert!(create[0] < delete[0]);
+    assert_eq!(
+        "always()",
+        condition(&steps[delete[0]]).trim(),
+        "the `kind delete cluster` step must carry `if: always()`"
+    );
+    let laptop_context = concat!("docker-", "desktop");
+    for (i, step) in steps.iter().enumerate() {
+        let text = serde_yaml::to_string(step).expect("a step re-serialises");
+        assert!(
+            !text.contains(laptop_context),
+            "step {i} of helm-demo.yml names the developer's own cluster context:\n{text}"
+        );
+    }
+}
+
+/// **The install is `helm install … --wait` of the author-only example with
+/// all three flags on, named as author-only, and the walk follows it with the
+/// CI context set.**
+#[test]
+fn helm_demo_workflow_installs_with_helm_and_walks_the_script() {
+    let doc = parsed(HELM_DEMO_YML);
+    let steps = helm_demo_steps(&doc);
+    let (install_at, install) = steps
+        .iter()
+        .enumerate()
+        .find(|(_, s)| words(run(s)).contains(&"helm") && run(s).contains("install"))
+        .expect("helm-demo.yml runs `helm install`");
+    let block = run(install);
+    for needle in [
+        "helm install logweir charts/logweir",
+        "-n logweir-system",
+        "--create-namespace",
+        "--kube-context kind-logweir",
+        "-f charts/logweir/examples/author-only.values.yaml",
+        "--set demoKafka.enabled=true",
+        "--set minio.enabled=true",
+        "--set ui.enabled=true",
+        "--wait",
+        "--timeout 10m",
+    ] {
+        assert!(
+            block.contains(needle),
+            "the helm install line must carry `{needle}`:\n{block}"
+        );
+    }
+    let name = step_name(install);
+    assert!(
+        name.contains("author-only images; NOT evidence"),
+        "the install step is named `{name}`; it must say it installed author-only images and is not evidence for clause 1"
+    );
+    let (walk_at, walk) = steps
+        .iter()
+        .enumerate()
+        .find(|(_, s)| run(s).contains("scripts/helm-demo.sh"))
+        .expect("helm-demo.yml runs scripts/helm-demo.sh");
+    assert!(walk_at > install_at, "the walk runs after the install");
+    assert_eq!(
+        Some("kind-logweir"),
+        walk["env"]["LOGWEIR_KUBE_CONTEXT"].as_str(),
+        "the walk is handed LOGWEIR_KUBE_CONTEXT=kind-logweir in its env"
+    );
+    let load = steps
+        .iter()
+        .enumerate()
+        .find(|(_, s)| run(s).contains("kind load docker-image"))
+        .expect("the two author-only tags are kind loaded");
+    assert!(
+        load.0 < install_at,
+        "the tags are loaded before the install"
+    );
+    assert!(
+        run(load.1).contains("logweir:check") && run(load.1).contains("weirkeeper:check"),
+        "both tags are loaded"
+    );
+    let build = steps
+        .iter()
+        .find(|s| words(run(s)).contains(&"cargo") && run(s).contains("build -p logweir"))
+        .expect("the demo binary is built (the walk mints the approval with it)");
+    assert!(!run(build).is_empty());
+}
+
+/// **The controller image is built natively by the one named producer, and no
+/// `docker build` or `docker compose` appears anywhere.**
+#[test]
+fn helm_demo_workflow_builds_natively_and_brings_no_compose_stack() {
+    let doc = parsed(HELM_DEMO_YML);
+    let steps = helm_demo_steps(&doc);
+    let build = steps
+        .iter()
+        .find(|s| words(run(s)).contains(&"image-weirkeeper"))
+        .expect("helm-demo.yml must run `just image-weirkeeper`");
+    assert_eq!(
+        "linux/amd64",
+        build["env"]["LOGWEIR_IMAGE_PLATFORM"]
+            .as_str()
+            .unwrap_or("")
+            .trim(),
+        "the `just image-weirkeeper` step must carry `LOGWEIR_IMAGE_PLATFORM: linux/amd64`"
+    );
+    assert!(
+        steps.iter().any(|s| words(run(s)) == vec!["just", "image"]),
+        "helm-demo.yml must run `just image`"
+    );
+    let text = strip_shell_comments(&strip_gha_expressions(&raw_of(HELM_DEMO_YML)));
+    for (n, line) in text.lines().enumerate() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for (i, t) in toks.iter().enumerate() {
+            if *t != "docker" {
+                continue;
+            }
+            let next = toks.get(i + 1).copied().unwrap_or("");
+            assert!(
+                next != "build" && next != "buildx",
+                "helm-demo.yml line {} open-codes `docker {next}`; the producers are `just image` and `just image-weirkeeper`",
+                n + 1
+            );
+            assert!(
+                next != "compose",
+                "helm-demo.yml line {} runs `docker compose`; the chart brings its own backend and there is no compose stack",
+                n + 1
+            );
+        }
+    }
+    let executed: String = raw_of(HELM_DEMO_YML)
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<&str>>()
+        .join("\n");
+    assert!(
+        !executed.contains("docker compose") && !executed.contains("e2e/compose"),
+        "no executed line of helm-demo.yml touches the compose stack"
+    );
+}
+
+/// **Diagnostics are uploaded and the cluster deleted whatever happened.**
+#[test]
+fn helm_demo_workflow_uploads_diagnostics_on_failure() {
+    let doc = parsed(HELM_DEMO_YML);
+    let steps = helm_demo_steps(&doc);
+    let uploads: Vec<(usize, &Value)> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| uses(s).contains("upload-artifact"))
+        .collect();
+    assert!(
+        uploads.len() >= 2,
+        "helm-demo.yml uploads {} artefact(s); two are required (the cluster's state, the logs)",
+        uploads.len()
+    );
+    for (i, step) in &uploads {
+        assert_eq!(
+            "always()",
+            condition(step).trim(),
+            "the artefact upload at step {i} must carry `if: always()`"
+        );
+    }
+    let collect = steps
+        .iter()
+        .find(|s| run(s).contains("mkdir -p diagnostics"))
+        .expect("a diagnostics step");
+    assert_eq!("always()", condition(collect).trim());
+    assert!(
+        run(collect).contains("rm -f diagnostics/walk/*.pem"),
+        "the walk's minted keys are removed before the walk's logs are uploaded"
+    );
+}

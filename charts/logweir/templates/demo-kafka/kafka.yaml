@@ -1,0 +1,254 @@
+{{- /*
+`demoKafka.enabled` — TWO THROWAWAY KAFKA CLUSTERS. `<release>-kafka-source`
+and `<release>-kafka-target`: each a one-replica KRaft StatefulSet (combined
+controller+broker, `KAFKA_PROCESS_ROLES: controller,broker`, the shape the
+compose stack's broker uses) with a headless Service for the StatefulSet and
+a ClusterIP Service on 9092 that the broker ADVERTISES, so a pod anywhere in
+the cluster can follow the broker's metadata to it. PLAINTEXT inside the
+cluster network — the demo's transport, not a recommendation. Storage is an
+emptyDir. Each broker is handed its OWN KRaft cluster id
+(`demoKafka.clusterIds`): the image's default is one fixed id for every
+broker started without one, and two brokers sharing it are one cluster to
+phase 0's `target != source` rail — measured, not assumed (values.yaml).
+
+The seed Job is a `post-install` hook: it waits for both brokers, creates
+`orders` and `payments` on the source with `seed.recordsPerTopic` records
+each, produced with `kafka-console-producer.sh` from the same image, and
+creates the marker topic `logweir.scratch` on the TARGET — the scratch
+segregation proof phase 0 requires, in the exact form
+`e2e/compose/docker-compose.yml`'s topic-setup uses (one partition,
+replication factor 1). Nothing in this file renders unless the flag is on.
+*/ -}}
+{{- if .Values.demoKafka.enabled }}
+{{- if eq .Values.demoKafka.clusterIds.source .Values.demoKafka.clusterIds.target }}
+{{- fail "demoKafka.clusterIds.source and .target must differ: two brokers with one KRaft cluster id are one cluster to phase 0's target != source rail" }}
+{{- end }}
+{{- range $role := list "source" "target" }}
+{{- $name := printf "%s-kafka-%s" $.Release.Name $role }}
+{{- $host := include "logweir.kafka.host" (dict "release" $.Release.Name "namespace" $.Release.Namespace "role" $role) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: demo-kafka
+    logweir.dev/kafka-role: {{ $role }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: demo-kafka
+    logweir.dev/kafka-role: {{ $role }}
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: demo-kafka
+    logweir.dev/kafka-role: {{ $role }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: demo-kafka
+    logweir.dev/kafka-role: {{ $role }}
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: demo-kafka
+    logweir.dev/kafka-role: {{ $role }}
+spec:
+  serviceName: {{ $name }}-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: demo-kafka
+      logweir.dev/kafka-role: {{ $role }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: demo-kafka
+        logweir.dev/kafka-role: {{ $role }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: kafka
+          image: {{ $.Values.demoKafka.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            # THE CLUSTER ID, per role and DISTINCT — values.yaml says why the
+            # image's own default cannot be left to stand for two brokers.
+            - name: CLUSTER_ID
+              value: {{ index $.Values.demoKafka.clusterIds $role | quote }}
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: controller,broker
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+            # THE ADVERTISED LISTENER IS THE ClusterIP SERVICE'S DNS NAME. A
+            # Kafka client is redirected to the advertised listener by the
+            # broker's metadata whatever address it bootstrapped at, so this
+            # is the name that has to resolve from every pod — and it does.
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://{{ $host }}:9092
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@localhost:9093
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_LOG_DIRS
+              value: /var/lib/kafka/data
+            # MUST carry the KAFKA_ prefix: the apache/kafka entrypoint translates
+            # only KAFKA_*-prefixed variables into server.properties.
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: KAFKA_HEAP_OPTS
+              value: -Xmx512M -Xms256M
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          # A port probe, because the broker binds its data-plane listener
+          # only once startup has completed; the seed Job's own retry loop is
+          # what proves a client round trip.
+          startupProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.demoKafka.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-kafka-seed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: demo-kafka-seed
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: demo-kafka-seed
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: seed
+          image: {{ .Values.demoKafka.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SOURCE
+              value: {{ include "logweir.kafka.host" (dict "release" .Release.Name "namespace" .Release.Namespace "role" "source") }}:9092
+            - name: TARGET
+              value: {{ include "logweir.kafka.host" (dict "release" .Release.Name "namespace" .Release.Namespace "role" "target") }}:9092
+            - name: RECORDS
+              value: {{ .Values.demoKafka.seed.recordsPerTopic | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              KT=/opt/kafka/bin/kafka-topics.sh
+              OFFSETS=/opt/kafka/bin/kafka-get-offsets.sh
+              PRODUCER=/opt/kafka/bin/kafka-console-producer.sh
+              wait_for() {
+                i=0
+                while [ "$i" -lt 90 ]; do
+                  if "$KT" --bootstrap-server "$1" --list >/dev/null 2>&1; then
+                    echo "broker $1 answers"
+                    return 0
+                  fi
+                  echo "waiting for broker $1 ($i/90)"
+                  i=$((i + 1))
+                  sleep 5
+                done
+                echo "broker $1 never answered a metadata request"
+                return 1
+              }
+              records_on() {
+                "$OFFSETS" --bootstrap-server "$SOURCE" --topic "$1" | awk -F: '{ s += $3 } END { print s+0 }'
+              }
+              wait_for "$SOURCE"
+              wait_for "$TARGET"
+              "$KT" --bootstrap-server "$SOURCE" --create --if-not-exists --partitions 3 --replication-factor 1 --topic orders
+              "$KT" --bootstrap-server "$SOURCE" --create --if-not-exists --partitions 3 --replication-factor 1 --topic payments
+              # THE MARKER TOPIC, ON THE TARGET ONLY: the scratch segregation
+              # proof phase 0 requires (docs/kubernetes.md section 8).
+              "$KT" --bootstrap-server "$TARGET" --create --if-not-exists --partitions 1 --replication-factor 1 --topic logweir.scratch
+              for topic in orders payments; do
+                existing=$(records_on "$topic")
+                if [ "$existing" -gt 0 ]; then
+                  echo "$topic already holds $existing records on the source; not producing again"
+                  continue
+                fi
+                awk -v t="$topic" -v n="$RECORDS" 'BEGIN { for (i = 1; i <= n; i++) printf "%s-%06d:{\"id\":%d,\"topic\":\"%s\"}\n", t, i, i, t }' \
+                  | "$PRODUCER" --bootstrap-server "$SOURCE" --topic "$topic" --property parse.key=true --property key.separator=:
+                after=$(records_on "$topic")
+                if [ "$after" -lt "$RECORDS" ]; then
+                  echo "$topic holds $after records after producing $RECORDS; the archive would be short"
+                  exit 1
+                fi
+                echo "$topic: $after records on the source"
+              done
+              echo "READY: orders and payments seeded on $SOURCE; logweir.scratch present on $TARGET"
+{{- end }}

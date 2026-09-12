@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Logweir chart values",
+  "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "controller", "archive", "minio", "demoKafka", "ui"],
+  "properties": {
+    "controllerImage": {
+      "type": "string",
+      "description": "The weirkeeper image, `<repository>@sha256:<64 hex>` — the value config/manager/deployment.yaml pins.",
+      "minLength": 1
+    },
+    "runnerImage": {
+      "type": "string",
+      "description": "The runner image, rendered as LOGWEIR_RUNNER_IMAGE on the Deployment (Task 33). Default: weirkeeper::job::RUNNER_IMAGE.",
+      "minLength": 1
+    },
+    "imagePullPolicy": {
+      "type": "string",
+      "description": "The CONTROLLER container's pull policy.",
+      "enum": ["IfNotPresent", "Never", "Always"]
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logLevel": { "type": "string", "minLength": 1 },
+        "resources": { "type": "object" }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "s3": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": { "type": "string" },
+            "region": { "type": "string" },
+            "allowHttp": { "type": "boolean" },
+            "virtualHostedStyle": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "minio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "mcImage": { "type": "string", "minLength": 1 },
+        "rootUser": { "type": "string", "minLength": 3 },
+        "rootPassword": { "type": "string", "minLength": 8 },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "minLength": 1 },
+            "storageClassName": { "type": "string" }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    },
+    "demoKafka": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "clusterIds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "target"],
+          "properties": {
+            "source": { "type": "string", "minLength": 22, "maxLength": 22 },
+            "target": { "type": "string", "minLength": 22, "maxLength": 22 }
+          }
+        },
+        "seed": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "recordsPerTopic": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "namespaces": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
