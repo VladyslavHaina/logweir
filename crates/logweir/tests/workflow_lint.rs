@@ -2003,11 +2003,17 @@ fn helm_demo_steps(doc: &Value) -> &[Value] {
     steps
 }
 
-/// **The header says the workflow has not executed, and dates the claim.**
-/// A workflow that has never run enforces nothing, and the file must say so
-/// in those words until the run that changes it has happened.
+/// **The header records the first green run, and says what it does not prove.**
+/// Until 2026-09-12 this test held the header to `NOT YET EXECUTED` (a
+/// workflow that has never run enforces nothing, and the file had to say so);
+/// the first push that carried the file was its first run, green — run
+/// 34718123956, commit `1f77f79` — and the header now names that run, its URL,
+/// the date, and the author-only limit: both images were built by the run and
+/// loaded onto the node, so the run is not evidence for checklist clause 1.
+/// Renamed from `helm_demo_workflow_says_it_has_not_yet_executed` (plan
+/// erratum E31; STANDING RULE 19).
 #[test]
-fn helm_demo_workflow_says_it_has_not_yet_executed() {
+fn helm_demo_workflow_records_its_first_green_run() {
     let raw = raw_of(HELM_DEMO_YML);
     let header: String = raw
         .lines()
@@ -2015,12 +2021,24 @@ fn helm_demo_workflow_says_it_has_not_yet_executed() {
         .collect::<Vec<&str>>()
         .join("\n");
     assert!(
-        header.contains("NOT YET EXECUTED"),
-        "helm-demo.yml's header must say `NOT YET EXECUTED` in those words until its first run"
+        !header.contains("NOT YET EXECUTED"),
+        "helm-demo.yml's header still says `NOT YET EXECUTED` after its first green run"
+    );
+    assert!(
+        header.contains("EXECUTED, AND GREEN"),
+        "helm-demo.yml's header must say `EXECUTED, AND GREEN` in those words"
+    );
+    assert!(
+        header.contains("https://github.com/VladyslavHaina/logweir/actions/runs/34718123956"),
+        "helm-demo.yml's header must name the first green run's URL"
+    );
+    assert!(
+        header.contains("NOT evidence for clause 1"),
+        "helm-demo.yml's header must say the author-only run is NOT evidence for clause 1"
     );
     assert!(
         header.contains("2026-09-12"),
-        "helm-demo.yml's header must date the claim (the day the file was added)"
+        "helm-demo.yml's header must date the run"
     );
     assert!(
         header.contains("NO COMPOSE STACK AT ALL"),

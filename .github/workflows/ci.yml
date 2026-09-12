@@ -16,6 +16,10 @@
 #     images were built by the run and loaded onto the kind node, never pulled.
 #     It closes clause 2 and it is NOT evidence for clause 1 (Global Constraint
 #     37 — the images are still not published).
+#   * helm-demo.yml — GREEN on its first run, 34718123956, commit 1f77f79,
+#     2026-09-12: the Helm chart installed on a kind cluster the run created,
+#     with both images built by the run (author-only values), the whole walk of
+#     scripts/helm-demo.sh green. NOT evidence for clause 1 either.
 #
 # NEVER EXECUTED, not once, on any commit:
 #
@@ -24,10 +28,8 @@
 #     artefact this workflow would publish, reads `blocked: no release run`.
 #   * release-drill.yml and engine-matrix.yml — scheduled, and no schedule has
 #     fired.
-#   * helm-demo.yml — added on 2026-09-12 by Task 35, after the last push; the
-#     first push that carries it is its first run.
 #
-# Nothing here may describe those four as checks that run.
+# Nothing here may describe those three as checks that run.
 #
 # THE ENFORCEMENT POINT IS STILL `just gate` (Task 32), which runs the same set
 # in one order on a laptop, BEFORE a push rather than after one. The steps below

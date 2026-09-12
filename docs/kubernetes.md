@@ -3071,8 +3071,23 @@ host before the run. A controller built from the current source — every CI
 run — honours the override and needs no tag.
 
 `.github/workflows/helm-demo.yml` runs the same script on a `kind` cluster it
-creates, with no compose stack at all. **It has not yet executed** (added
-2026-09-12, after the last push); its first run is the controller's to push.
+creates, with no compose stack at all. **It executed green on its first run** —
+[34718123956](https://github.com/VladyslavHaina/logweir/actions/runs/34718123956), commit `1f77f79`, 2026-09-12, 19 minutes end to end: both
+images built by the run, the chart installed with all three flags on, the
+`Backup` at `Succeeded` 10 s after the schedule's apply, the `Restore` at
+`Succeeded` with `status.outcome: pass` 41 s after its create, both readers
+`VALID`, the UI 200/200/200 on its own paths and 403/403 on a Pod exec path
+and the core API, no `logweir-*` namespace left before `kind delete cluster`.
+Author-only images, built by the run and never pulled — so, like the kind
+demo's run, it is not evidence for clause 1.
+
+After the chart landed, the controller image was rebuilt from the tree that
+carries Task 33 (§14.7, the fifth instance) and this walk was run again on
+docker-desktop with the rebuilt controller and **without** the host tag:
+`helm install` 48 s, the walk 113 s with every step `rc=0`, the `Backup` at
+`Succeeded` 10 s after the apply, the `Restore` at `Succeeded` with outcome
+`pass` 51 s after its create, both readers `VALID`, the same five HTTP codes,
+teardown clean. The override is what the runner Jobs used; the tag is gone.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

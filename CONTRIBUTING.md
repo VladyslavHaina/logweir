@@ -103,10 +103,11 @@ debug and one release. `docs/gates.md` carries the per-line seconds, what each
 gate proves, and what each gate does **not** prove; read it before adding a
 check, and add the row in the same commit as the check.
 
-**Please do not treat `.github/workflows/` as the gate.** Three workflows have
+**Please do not treat `.github/workflows/` as the gate.** Four workflows have
 now executed — `ci.yml` (run 34700987730), `no-oso.yml` (run 34700987811) and
-`kind-demo.yml` (run 34700987743), all green on commit `a113dd2`, 2026-09-12 —
-and `ci.yml` still mirrors the gate set as documentation rather than replacing
+`kind-demo.yml` (run 34700987743), all green on commit `a113dd2`, and
+`helm-demo.yml` (run 34718123956), green on its first run, commit `1f77f79`, all on
+2026-09-12 — and `ci.yml` still mirrors the gate set as documentation rather than replacing
 it: `just gate` is the enforcement point, it is what a laptop can run before a
 push, and `release.yml` has never run at all (no tag has been pushed, so
 `docs/tag1-checklist.md` clause 4 reads `blocked: no tag pushed` and the digest

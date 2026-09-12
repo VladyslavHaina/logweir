@@ -30,8 +30,8 @@ is only half of it: there are **two supported paths** — the published image
 digests, and an **author-only** local build — and until the release workflow
 has run on a pushed tag the digest rows read **`blocked: images not published`**
 and the first path is documented rather than exercised. (No tag has been pushed:
-`release.yml` has never run. What **has** run is `ci.yml`, `no-oso.yml` and
-`kind-demo.yml`, green on 2026-09-12.) `docs/install.md` also carries
+`release.yml` has never run. What **has** run is `ci.yml`, `no-oso.yml`,
+`kind-demo.yml` and `helm-demo.yml`, green on 2026-09-12.) `docs/install.md` also carries
 the five Secrets you must create **before** the first custom resource, the two
 keypairs, the cluster-scoped `TrustRoster`, the per-namespace runner
 ServiceAccount, and the uninstall with what it leaves behind.

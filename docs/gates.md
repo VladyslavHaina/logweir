@@ -118,25 +118,24 @@ chart-check` line); the two below are here; sixteen exist.
 | `just k8s-demo` | Phase B's exit criterion: the controller reconciling real objects on docker-desktop Kubernetes, with the runner as a Job on a digest-pinned image | docker-desktop Kubernetes, both local images, and the compose stack; its step 2 runs `just lint` **with the stack down**, before taking it | none directly |
 | `just laptop-demo` | Phase C's exit criterion and install gate **X-UIWRITE**: a stranger's twelve steps from `kubectl apply` to a signed scorecard, with step 10(b) performed from the UI wizard so `managedFields` names `logweir-ui` | docker-desktop Kubernetes, both local images, the compose stack, a browser | none directly |
 | `just pitr` | **G-PITR alone**: the inclusive point-in-time boundary across three partitions, against the real stack, for the price of one restore | the compose stack up (`just e2e-up` alone is enough) | none directly |
-| `just helm-demo` | the **Helm chart** (`charts/logweir`) walked end to end on a real cluster (Task 35): with `minio.enabled`, `demoKafka.enabled` and `ui.enabled` on, `scripts/helm-demo.sh` mints the keypairs, creates the five Secrets, probes two `KafkaCluster`s to `reachable: true`, fires a `BackupSchedule`, restores from its `Backup` with an approval minted on the host, verifies the scorecard with both readers, fetches the in-cluster UI through a port-forward, and tears down to a cluster with no `logweir-*` namespace. `.github/workflows/helm-demo.yml` runs the same script on a `kind` cluster — **never yet executed** as of 2026-09-12 | a Kubernetes cluster with the release installed (`helm install … --wait`), both local images for the author-only example, `target/debug/logweir` (the recipe builds it), node, python3 with `cryptography` | none directly |
+| `just helm-demo` | the **Helm chart** (`charts/logweir`) walked end to end on a real cluster (Task 35): with `minio.enabled`, `demoKafka.enabled` and `ui.enabled` on, `scripts/helm-demo.sh` mints the keypairs, creates the five Secrets, probes two `KafkaCluster`s to `reachable: true`, fires a `BackupSchedule`, restores from its `Backup` with an approval minted on the host, verifies the scorecard with both readers, fetches the in-cluster UI through a port-forward, and tears down to a cluster with no `logweir-*` namespace. `.github/workflows/helm-demo.yml` runs the same script on a `kind` cluster — **executed, green on its first run** ([34718123956](https://github.com/VladyslavHaina/logweir/actions/runs/34718123956), commit `1f77f79`, 2026-09-12; author-only images built by the run) | a Kubernetes cluster with the release installed (`helm install … --wait`), both local images for the author-only example, `target/debug/logweir` (the recipe builds it), node, python3 with `cryptography` | none directly |
 
 ## Which workflows have executed
 
-**Three of the seven, all green, all on 2026-09-12**, on
+**Four of the seven, all green, all on 2026-09-12**, on
 <https://github.com/VladyslavHaina/logweir>:
 
 | workflow | first green run | latest green run | what it is |
 |---|---|---|---|
 | `no-oso.yml` | [34692903300](https://github.com/VladyslavHaina/logweir/actions/runs/34692903300), commit `5ea1c73` | [34700987811](https://github.com/VladyslavHaina/logweir/actions/runs/34700987811), commit `a113dd2` | green on every run it has ever had |
 | `ci.yml` | [34700428677](https://github.com/VladyslavHaina/logweir/actions/runs/34700428677), commit `9aa6bb2` | [34700987730](https://github.com/VladyslavHaina/logweir/actions/runs/34700987730), commit `a113dd2` | red on its first seven runs, each on one environment fact a laptop had hidden; jobs `build`, `e2e`, `python-verifier`, `deny`, `sync-upstream` all green |
-| `kind-demo.yml` | [34700987743](https://github.com/VladyslavHaina/logweir/actions/runs/34700987743), commit `a113dd2` | same | red on its first eight runs; the ninth ran all twelve demo steps on a `kind` cluster it created |
+| `kind-demo.yml` | [34700987743](https://github.com/VladyslavHaina/logweir/actions/runs/34700987743), commit `a113dd2` | [34718123943](https://github.com/VladyslavHaina/logweir/actions/runs/34718123943), commit `1f77f79` | red on its first eight runs; the ninth ran all twelve demo steps on a `kind` cluster it created |
+| `helm-demo.yml` | [34718123956](https://github.com/VladyslavHaina/logweir/actions/runs/34718123956), commit `1f77f79` | same | green on its first run: the Helm chart on a `kind` cluster it created, author-only images built by the run, the whole walk of `scripts/helm-demo.sh` (19 min) |
 
-**Four have never executed**: `release.yml`, because it fires on a pushed tag
+**Three have never executed**: `release.yml`, because it fires on a pushed tag
 and no tag has been pushed; `release-drill.yml` and `engine-matrix.yml`, because
-their schedules have not fired; and `helm-demo.yml`, added by Task 35 on
-2026-09-12 after the last push — the first push that carries it is its first
-run. **A workflow that has never run enforces nothing**, and this file does not
-describe those four as gates.
+their schedules have not fired. **A workflow that has never run enforces
+nothing**, and this file does not describe those three as gates.
 
 `ci.yml` mirrors the gate set and
 `crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate` keeps the

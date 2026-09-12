@@ -2,14 +2,29 @@ name: helm-demo
 # **The Helm chart, installed on a `kind` cluster this workflow creates, and
 # walked end to end.** Task 35 (post-plan).
 #
-# NOT YET EXECUTED. This workflow was added on 2026-09-12 after the last push
-# to `main`; it has never run on any commit, and the first push that carries
-# it is its first run. Until that run is green, nothing here is evidence of
-# anything — the shape of the file is held by
-# `crates/logweir/tests/workflow_lint.rs`, and the walk it runs was proven on
-# the author's docker-desktop with author-only images on 2026-09-12
-# (`docs/kubernetes.md` §19), which is a different cluster and a different
-# claim.
+# EXECUTED, AND GREEN ON ITS FIRST RUN — run 34718123956, commit 1f77f79,
+# 2026-09-12: https://github.com/VladyslavHaina/logweir/actions/runs/34718123956
+#
+# That run (19 min) built both images natively on the amd64 runner, created a
+# `kind` cluster from the pinned `e2e/k8s/kind-config.yaml`, loaded the two
+# author-only tags, installed the chart with `minio.enabled`,
+# `demoKafka.enabled` and `ui.enabled` on, and ran every step of
+# `scripts/helm-demo.sh`: both `KafkaCluster`s reachable with distinct cluster
+# ids, the `Backup` at `phase: Succeeded` 10 s after the schedule's apply, the
+# `Restore` at `phase: Succeeded` with `status.outcome: pass` 41 s after its
+# create, both readers over the scorecard (`VALID`), the in-cluster UI
+# answering HTTP 200 on its page, its router and its API and 403 on a Pod exec
+# path and on the core API, and a teardown that left no `logweir-*` namespace
+# before `kind delete cluster`. The same walk had been proven on the author's
+# docker-desktop with author-only images the same day (`docs/kubernetes.md`
+# §19), which is a different cluster and a different claim. The shape of this
+# file is held by `crates/logweir/tests/workflow_lint.rs`.
+#
+# IT TOOK THE AUTHOR-ONLY VALUES, AND THAT IS THE WHOLE LIMIT OF WHAT IT
+# PROVES. Both images were built by that run and `kind load`ed onto the node;
+# nothing was pulled from a registry. So this run is NOT evidence for clause 1
+# of `docs/tag1-checklist.md` (Global Constraint 37: the images are still not
+# published), and no checklist row moves on it.
 #
 # NO COMPOSE STACK AT ALL. `kind-demo.yml` reaches a broker on the runner's
 # host over a published listener and patches CoreDNS to make the name resolve
