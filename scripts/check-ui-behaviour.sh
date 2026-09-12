@@ -150,7 +150,7 @@ golden="ui/tests/fixtures/plan.golden.yaml"
 the UI emits, the one serde_yaml deserialises into RestoreSpec in ui_lint.rs, and the \
 one this gate regenerates and diffs." >&2; exit 1; }
 
-tmp="$(mktemp -t logweir-plan-golden)"
+tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-plan-golden.XXXXXX")"
 set +e
 node ui/tests/emit-plan.js > "$tmp"
 emit_rc=$?
