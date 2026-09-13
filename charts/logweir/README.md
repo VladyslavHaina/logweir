@@ -1,5 +1,34 @@
 # The Logweir Helm chart
 
+## Copy this directory and install it
+
+`charts/logweir/` is self-contained. Copy the whole directory into your own
+repository, write a short values file, and install:
+
+```bash
+helm upgrade --install logweir . -n <namespace> --create-namespace -f my-values.yaml
+```
+
+That is the whole command. Nothing is fetched at install time: the chart's
+`crds/` and `ui/` are byte copies carried inside it, and there is no
+subchart and no dependency lock. The only things you must supply are
+
+1. **the two images** — `controllerImage` and `runnerImage`, because nothing
+   is published yet (see *Bring your own registry* in
+   [`docs/install.md`](../../docs/install.md));
+2. **an archive** — `archive.url` and, for anything S3-compatible,
+   `archive.s3.endpoint` and `archive.s3.region`; or `minio.enabled: true` to
+   get one in the cluster;
+3. **the `kafka:` block** — the cluster Logweir backs up, and optionally the
+   scratch cluster it restores into.
+
+Everything else has a default.
+[`examples/msk.values.yaml`](examples/msk.values.yaml) is a complete one for a
+real cluster: Amazon MSK over SASL/SCRAM, a tainted nodepool, a private
+registry. [`values.yaml`](values.yaml) lists **every** option with its default,
+one line each — it is deliberately short, and every explanation lives in this
+file.
+
 One chart that installs Logweir's control plane — the same objects
 [`logweir.yaml`](../../logweir.yaml) ships — and, optionally, its own
 object-store backend, two throwaway Kafka clusters and the UI. It is
@@ -138,6 +167,171 @@ helm install logweir charts/logweir -n logweir-system --create-namespace \
   --set imagePullPolicy=IfNotPresent \
   --set runnerImagePullPolicy=IfNotPresent
 ```
+
+## The four third-party images, and where their digests came from
+
+None of them is part of the `latest` ruling: MinIO, `mc`, `apache/kafka` and
+`kubectl` are pinned by digest under Global Constraint 7, and this is the
+provenance of each, so nobody has to trust a bare hash.
+
+* **`minio.image` and `minio.mcImage`** are the references
+  `e2e/compose/docker-compose.yml` pins, copied byte for byte and never
+  resolved again. They are **quay.io**, not Docker Hub, because Docker Hub
+  refuses anonymous pulls of `minio/minio` (plan erratum E30(a)).
+* **`demoKafka.image`** — `apache/kafka:3.7.1`, the compose stack's broker,
+  pinned by its **manifest-list** digest so the same reference resolves on an
+  amd64 CI runner and on an arm64 development host. Resolved once, on
+  **2026-09-12**, with the `kindest/node` provenance idiom:
+
+  ```bash
+  docker buildx imagetools inspect apache/kafka:3.7.1
+  ```
+
+* **`ui.image`** — a kubectl image at the cluster's minor version, also a
+  manifest-list digest, resolved once on 2026-09-12 with:
+
+  ```bash
+  docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1
+  ```
+
+  `registry.k8s.io` is the Kubernetes project's own registry. The brief named
+  `bitnami/kubectl`; on 2026-09-12 `docker buildx imagetools inspect
+  bitnami/kubectl:1.34.1` (and `:1.34`) answered `not found` — Bitnami's Docker
+  Hub catalogue no longer publishes versioned tags, and `:latest` is a tag,
+  which Global Constraint 7 forbids. `kubectl proxy` is a reverse proxy and a
+  file server, so the client/server skew rules do not touch it; that is why the
+  same digest serves a 1.29 `kind` node in CI.
+
+`demoKafka.clusterIds` are not images but were minted the same way and on the
+same day: the image's own `kafka-storage.sh random-uuid`, twice, because the
+image's built-in default is **one fixed id** and two brokers reporting the same
+id are one cluster to phase 0 — measured on 2026-09-12, on the second walk of
+`scripts/helm-demo.sh`. Keep them different from each other; the template
+refuses equal ids.
+
+## `kafka:` — pointing the chart at a real cluster
+
+A Kafka connection is not a chart value in Logweir's design: it is a
+`KafkaCluster` custom resource the controller reconciles, probes, and reports
+`status.clusterId` for. `kafka.enabled: true` makes the chart render those
+objects from a flat block, so a stranger writes addresses and a Secret name
+rather than a custom resource:
+
+```yaml
+kafka:
+  enabled: true
+  bootstrapServers: "b-1.example…:9096,b-2.example…:9096"   # or a YAML list
+  security: { protocol: SASL_SSL, mechanism: SCRAM-SHA-512 }
+  username: kafbat
+  secretRef: my-scram-secret
+  target:                       # optional — a restore needs one, a backup does not
+    bootstrapServers: "b-1.scratch…:9096"
+    security: { protocol: SASL_SSL, mechanism: SCRAM-SHA-512 }
+    username: kafbat
+    secretRef: my-scratch-secret
+```
+
+**The protocol/mechanism mapping is the chart's job, and it refuses what it
+cannot speak.** The CRD's `auth.mode` enum is `plaintext | scramSha512` and the
+client speaks SCRAM-SHA-512 only, so:
+
+| `security.protocol` | `security.mechanism` | renders |
+|---|---|---|
+| `PLAINTEXT` | (any) | `mode: plaintext`, `tls: false` |
+| `SASL_SSL` | `SCRAM-SHA-512` | `mode: scramSha512`, `tls: true` |
+| `SASL_PLAINTEXT` | `SCRAM-SHA-512` | `mode: scramSha512`, `tls: false` |
+| anything else | | **`helm` fails at render time**, naming the supported set |
+
+A silently rendered `PLAIN` or `SCRAM-SHA-256` would be a chart that installs
+and cannot authenticate, which is why it is a refusal and not a warning.
+`kafka.enabled` and `demoKafka.enabled` together are a refusal too — `demoKafka`
+brings its own two brokers and its own cluster objects — with a message saying
+which one to turn off.
+
+**The Secret is yours, and Logweir never reads it.** `secretRef` names a Secret
+**in the release namespace** holding the SASL password under the key
+`secretKey`. That key is `password` and can be nothing else: the operator
+projects exactly one name into the probe
+(`weirkeeper::controllers::restore::TARGET_PASSWORD_SECRET_KEY`), so the chart
+refuses any other value rather than render a `KafkaCluster` whose probe cannot
+read its credential. The password reaches the probe pod as a
+`valueFrom.secretKeyRef` and never enters a status field, a log line or a
+rendered document.
+
+The rendered objects go in the release namespace with the chart's labels, and
+the probe Job runs under the `logweir-runner` ServiceAccount the chart already
+creates there.
+
+## Node placement, and where it does not reach
+
+`kubernetes.nodeSelector`, `kubernetes.tolerations` and `kubernetes.affinity`
+apply to **every pod this chart renders** — the controller, MinIO and its seed
+Job, both demo brokers and their seed Job, and the UI. Each optional component
+may override all three with its own block (`minio.nodeSelector`,
+`demoKafka.tolerations`, `controller.affinity`, …); an override replaces the
+top-level value for that component's pods rather than merging with it.
+
+**Runner Jobs are the operator's objects, not the chart's**, and the gap is
+named rather than silent:
+
+* `imagePullSecrets` **do** reach them — through the `logweir-runner`
+  ServiceAccount, because a pod inherits its ServiceAccount's pull secrets.
+* Node placement **does not**. There is no `nodeSelector`, toleration or
+  affinity path to a runner Job today. On a cluster whose only Kafka-adjacent
+  nodes are tainted, a runner Job will not schedule there. Implementing it is
+  an operator change and is out of this chart's scope.
+
+`kubernetes.namespace` does **not** move the install. `helm -n` / `--namespace`
+decides that, and every object carries `Release.Namespace`; the key exists for
+the one place the chart needs a namespace *name* it cannot derive — the UI's
+`RoleBinding` list, where it supplies `ui.namespaces` when that is empty.
+
+## `imagePullSecrets`, and what Docker Hub does differently
+
+`imagePullSecrets: [{name: regcred}]` is rendered on the controller
+ServiceAccount, on the **runner** ServiceAccount (so every runner Job inherits
+it) and on the optional components' pods. It is how a private registry is
+pulled from — an ECR, or a Docker Hub repository that is not public.
+
+Three Docker Hub properties decide whether a pull works, and two of them are
+the opposite of GHCR's:
+
+* A Docker Hub repository **created by a push is public by default**; a GHCR
+  package starts **private**.
+* That default is the account's setting, and an auto-created repository takes
+  it. A private one answers an anonymous pull with `failed to fetch anonymous
+  token: … 403 Forbidden`. Make it public, or set `imagePullSecrets`.
+* Anonymous Docker Hub pulls are **rate-limited per source IP**, shared by
+  every node behind one NAT — so a pull secret carrying a Docker Hub login is
+  useful on a *public* image too.
+
+## `environment:`
+
+A label, and nothing else: `logweir.dev/environment: <value>` on every object
+the chart renders (the six CRDs excepted — Helm copies `crds/` verbatim and
+never templates it). It switches no behaviour, changes no name and gates
+nothing. A key that silently did something would be worse than no key.
+
+## Amazon MSK
+
+[`examples/msk.values.yaml`](examples/msk.values.yaml) is the shape; these are
+the facts it does not have room for, measured 2026-09-12:
+
+* SASL/SCRAM on MSK is port **9096** (not 9092), `SASL_SSL` +
+  `SCRAM-SHA-512` — which is exactly the one SASL combination Logweir speaks.
+* The SCRAM credential lives in **AWS Secrets Manager**, associated with the
+  cluster. Kubernetes cannot read it directly: sync it into a Kubernetes Secret
+  in the release namespace (External Secrets Operator, the Secrets Store CSI
+  driver, or by hand) under the key `password`, and name that Secret in
+  `kafka.secretRef`.
+* **A password containing `"`, `'`, `$`, CR or LF is refused by the runner** —
+  `logweir_core::guard::UNRENDERABLE_CREDENTIAL_CHARACTERS`. Mint one without
+  them; a refusal at drill time is worse than a refusal at creation time.
+* The IAM/ACL principal needs **Describe and Read on the source topics plus
+  DescribeCluster**, and **Describe, Create and Write on a target**. Logweir
+  never deletes (Global Constraint 6), so no delete action is required.
+* **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
+  refusal in the operator, not an oversight — SASL/SCRAM is the path.
 
 ## The UI's authority
 

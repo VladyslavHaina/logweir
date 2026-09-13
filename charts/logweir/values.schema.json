@@ -1,11 +1,79 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Logweir chart values",
-  "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders.",
+  "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_helpers.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "controller", "archive", "minio", "demoKafka", "ui"],
+  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "ui"],
+  "definitions": {
+    "nodeSelector": {
+      "type": "object",
+      "description": "A node label selector. Empty means no constraint.",
+      "additionalProperties": { "type": "string" }
+    },
+    "tolerations": {
+      "type": "array",
+      "description": "Pod tolerations, verbatim as Kubernetes spells them.",
+      "items": { "type": "object" }
+    },
+    "affinity": {
+      "type": "object",
+      "description": "A pod affinity/anti-affinity block, verbatim as Kubernetes spells it."
+    },
+    "kafkaCluster": {
+      "type": "object",
+      "description": "One KafkaCluster, in the flat shape an adopter writes. The chart maps `security` onto the CRD's `auth: {mode, tls}` and refuses any combination it cannot speak.",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "bootstrapServers": {
+          "description": "`host:port,host:port` as the AWS console prints it, or a YAML list. Both are split into the CRD's list.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          ]
+        },
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": { "type": "string" },
+            "mechanism": { "type": "string" }
+          }
+        },
+        "username": { "type": "string" },
+        "secretRef": { "type": "string" },
+        "secretKey": { "type": "string" },
+        "markerTopic": { "type": "string" }
+      }
+    }
+  },
   "properties": {
+    "environment": {
+      "type": "string",
+      "description": "A LABEL — `logweir.dev/environment` on every object this chart renders. It switches nothing else; a key that silently did something would be worse than no key."
+    },
+    "kubernetes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Node placement for every pod the chart renders, and the one namespace name the chart cannot derive. `namespace` does NOT move the install — `helm -n` / `--namespace` does that, and Release.Namespace is what every object carries; it only supplies `ui.namespaces` when that is empty.",
+      "properties": {
+        "namespace": { "type": "string" },
+        "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
+        "tolerations": { "$ref": "#/definitions/tolerations" },
+        "affinity": { "$ref": "#/definitions/affinity" }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "description": "Pull secrets, rendered on the controller ServiceAccount, the runner ServiceAccount (so every runner Job inherits them) and every optional component's pods.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1 } }
+      }
+    },
     "controllerImage": {
       "type": "string",
       "description": "The weirkeeper image. The default is the repository config/manager/deployment.yaml pins, at the `latest` TAG (the owner's decision of 2026-09-12); `<repository>@sha256:<64 hex>` is accepted and is how you pin it back.",
@@ -31,7 +99,10 @@
       "additionalProperties": false,
       "properties": {
         "logLevel": { "type": "string", "minLength": 1 },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
+        "tolerations": { "$ref": "#/definitions/tolerations" },
+        "affinity": { "$ref": "#/definitions/affinity" }
       }
     },
     "archive": {
@@ -49,6 +120,35 @@
             "virtualHostedStyle": { "type": "boolean" }
           }
         }
+      }
+    },
+    "kafka": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "description": "The SOURCE cluster's keys inline, plus `enabled` and an optional `target:` carrying the same keys. `enabled: false` (the default) renders no KafkaCluster at all, which is what every example does today.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "target": { "$ref": "#/definitions/kafkaCluster" },
+        "name": { "type": "string", "minLength": 1 },
+        "bootstrapServers": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          ]
+        },
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": { "type": "string" },
+            "mechanism": { "type": "string" }
+          }
+        },
+        "username": { "type": "string" },
+        "secretRef": { "type": "string" },
+        "secretKey": { "type": "string" },
+        "markerTopic": { "type": "string" }
       }
     },
     "minio": {
@@ -70,7 +170,10 @@
             "storageClassName": { "type": "string" }
           }
         },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
+        "tolerations": { "$ref": "#/definitions/tolerations" },
+        "affinity": { "$ref": "#/definitions/affinity" }
       }
     },
     "demoKafka": {
@@ -96,7 +199,10 @@
             "recordsPerTopic": { "type": "integer", "minimum": 1 }
           }
         },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
+        "tolerations": { "$ref": "#/definitions/tolerations" },
+        "affinity": { "$ref": "#/definitions/affinity" }
       }
     },
     "ui": {
@@ -109,7 +215,10 @@
         "namespaces": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
-        }
+        },
+        "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
+        "tolerations": { "$ref": "#/definitions/tolerations" },
+        "affinity": { "$ref": "#/definitions/affinity" }
       }
     }
   }

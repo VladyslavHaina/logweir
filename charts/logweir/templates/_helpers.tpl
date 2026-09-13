@@ -106,10 +106,10 @@ and node placement for them is not implemented — `README.md` says so by name.
 same way. Empty renders nothing.
 */ -}}
 {{- define "logweir.imagePullSecrets" -}}
-{{- with .Values.imagePullSecrets }}
+{{- with .Values.imagePullSecrets -}}
 imagePullSecrets:
-{{- toYaml . | nindent 0 }}
-{{- end }}
+{{ toYaml . }}
+{{- end -}}
 {{- end -}}
 
 {{- /*

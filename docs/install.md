@@ -117,10 +117,12 @@ this chart.** That is the owner's decision of 2026-09-12: `controllerImage` and
 by `:latest`, while `config/manager/deployment.yaml`, `logweir.yaml` and the
 operator's compiled-in `weirkeeper::job::RUNNER_IMAGE` are untouched and still
 pin **digests** (Global Constraint 7), as do the chart's four third-party images.
-`charts/logweir/values.yaml`'s header carries the whole trade-off — what a
-mutable tag gives up, and the `docker buildx imagetools inspect` recipe that
-pins the two back to digests together with `--set imagePullPolicy=IfNotPresent
---set runnerImagePullPolicy=IfNotPresent`. Because the reference is a tag, the
+[`charts/logweir/README.md`](../charts/logweir/README.md) carries the whole
+trade-off — what a mutable tag gives up, and the `docker buildx imagetools
+inspect` recipe that pins the two back to digests together with `--set
+imagePullPolicy=IfNotPresent --set runnerImagePullPolicy=IfNotPresent`.
+(`values.yaml` itself is deliberately short: one line per knob, every knob
+visible, the prose in the README.) Because the reference is a tag, the
 chart's pull policies default to `Always` (Kubernetes' own default for
 `:latest`), and `runnerImagePullPolicy` is a second value that reaches the runner
 Jobs through the controller.
@@ -143,6 +145,55 @@ the chart's objects work together and proves nothing about publication.
 The five Secrets, the two keypairs, the `TrustRoster` and the per-namespace
 runner ServiceAccount below are the same on this path; the chart creates none
 of them except, with `minio.enabled`, the demo-only `logweir-s3`.
+
+### (d) Bring your own registry
+
+Two facts make this the path that works today. **Nothing is published** —
+`blocked: images not published`, because `release.yml` has never run — so
+paths (a) and (c) pull references that resolve nowhere; and **the controller
+image cannot be cross-compiled**, because `Dockerfile.weirkeeper` builds
+`aws-lc-sys`, which reads the build host's own headers (plan erratum E19(c)),
+so an `amd64` cluster needs an `amd64` builder and an `arm64` cluster an
+`arm64` one — build on a machine of the cluster's architecture, or on a
+same-architecture CI runner, never under emulation. With those two understood,
+build the two images yourself, push them to any registry the cluster can pull
+from — Amazon ECR below, because that is where a cluster on EKS already has a
+credential — and point the chart at them:
+
+```bash
+aws ecr create-repository --repository-name logweir/weirkeeper   # once, per image
+aws ecr create-repository --repository-name logweir/logweir
+aws ecr get-login-password --region "$REGION" \
+  | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
+just image && just image-weirkeeper                              # on a builder of the cluster's arch
+docker tag weirkeeper:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
+docker tag logweir:check    "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
+helm upgrade --install logweir charts/logweir -n logweir-system --create-namespace \
+  --set controllerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0" \
+  --set runnerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
+  --set imagePullPolicy=IfNotPresent \
+  --set imagePullSecrets[0].name=my-regcred
+```
+
+`imagePullSecrets` is rendered onto the controller ServiceAccount **and the
+runner ServiceAccount**, so the runner Jobs the operator creates inherit it
+without an operator change. On ECR with the node role already granted
+`ecr:GetAuthorizationToken` you can leave it off entirely.
+
+**When the release workflow does run, the registry is Docker Hub**, and three
+of its properties differ from GHCR's in ways that decide whether a pull works:
+
+* A Docker Hub repository **created by a push is public by default** — GHCR's
+  packages start private, which is the opposite default.
+* That default is the *account's* setting, and a repository auto-created by a
+  push takes it. A private one answers an anonymous pull with
+  `failed to fetch anonymous token: … 403 Forbidden` — the exact error this
+  task was raised for. Make the repository public, or set `imagePullSecrets`.
+* Anonymous Docker Hub pulls are **rate-limited per source IP**, and every node
+  behind one NAT shares that IP. So `imagePullSecrets` carrying a Docker Hub
+  login is useful on a public image too, not only on a private one.
 
 ---
 

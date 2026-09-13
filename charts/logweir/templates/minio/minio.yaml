@@ -110,6 +110,12 @@ spec:
         app.kubernetes.io/component: minio
     spec:
       automountServiceAccountToken: false
+      {{- with (include "logweir.placement" (dict "root" $ "over" .Values.minio)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with (include "logweir.imagePullSecrets" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: minio
           image: {{ .Values.minio.image }}
@@ -180,6 +186,12 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      {{- with (include "logweir.placement" (dict "root" $ "over" .Values.minio)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with (include "logweir.imagePullSecrets" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: mc
           image: {{ .Values.minio.mcImage }}

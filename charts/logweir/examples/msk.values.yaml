@@ -1,0 +1,32 @@
+# msk.values.yaml — a real cluster: Amazon MSK over SASL/SCRAM, a tainted
+# nodepool, a private registry. What MSK needs beyond this file — the port, the
+# Secrets Manager sync, the IAM actions, the password characters the runner
+# refuses, and the IAM-auth gap — is in README.md, "Amazon MSK".
+#
+#     helm upgrade --install logweir charts/logweir -n kafka -f my-values.yaml
+environment: dev
+kubernetes:
+  namespace: kafka              # only feeds ui.namespaces; `-n kafka` decides the install
+  nodeSelector: { workload: kafka, nodepool: kafka }
+  tolerations:
+    - { key: kafka, value: "true", effect: NoSchedule }
+imagePullSecrets:
+  - name: regcred               # also reaches runner Jobs, via the runner ServiceAccount
+kafka:
+  enabled: true
+  bootstrapServers: "b-1.example.kafka.us-west-2.amazonaws.com:9096,b-2.example.kafka.us-west-2.amazonaws.com:9096"
+  security: { protocol: SASL_SSL, mechanism: SCRAM-SHA-512 }
+  username: kafbat
+  secretRef: kafbat-ui-msk-credentials   # a Secret in namespace kafka, key `password`
+  target:                                # optional; a scratch cluster to restore INTO
+    bootstrapServers: "b-1.scratch.kafka.us-west-2.amazonaws.com:9096"
+    security: { protocol: SASL_SSL, mechanism: SCRAM-SHA-512 }
+    username: kafbat
+    secretRef: kafbat-scratch-credentials
+archive:
+  url: "s3://kafka-backups/logweir"
+  s3: { endpoint: "http://logweir-minio.kafka.svc:9000", region: us-east-1, allowHttp: true }
+minio:
+  enabled: true                 # drop this for a real S3 bucket and clear archive.s3.endpoint
+ui:
+  enabled: true

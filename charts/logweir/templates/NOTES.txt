@@ -34,7 +34,7 @@ THE UI, AND WHOSE AUTHORITY IT ACTS WITH:
   ServiceAccount holds only the verbs the page issues (get/list on the five
   namespaced kinds, create on approvals/kafkaclusters/backupschedules/restores,
   patch on backupschedules, list on trustrosters), and there is no Ingress.
-  It is bound in this namespace{{ with .Values.ui.namespaces }} and in {{ join ", " . }}{{ end }};
+  It is bound in {{ include "logweir.ui.namespaces" . | fromJsonArray | join ", " }};
   to let the page see another namespace's objects:
       kubectl create rolebinding {{ .Release.Name }}-ui --clusterrole={{ .Release.Name }}-ui --serviceaccount={{ .Release.Namespace }}:{{ .Release.Name }}-ui -n <namespace>
 {{- end }}

@@ -10,6 +10,11 @@ policy the controller hands every Job (`runnerImage`, `runnerImagePullPolicy`
 start), and the archive addressing env the `config/overlays/k8s-demo` patch
 sets (`archive.*`, rendered only when a value or `minio.enabled` supplies one).
 
+Task 38 adds node placement (`kubernetes.nodeSelector`/`tolerations`/`affinity`,
+overridable by `controller.*`) — which renders NOTHING when nothing is set, so
+the shipped default render is byte-identical to what it was. The controller's
+pull secrets are on its ServiceAccount, not here.
+
 Everything the source manifest says about this PodSpec still holds: it is the
 ONE `automountServiceAccountToken` exemption (the only Kubernetes API client
 in the design), one replica with `Recreate` and no leader election (Global
@@ -52,6 +57,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       serviceAccountName: weirkeeper
+      {{- with (include "logweir.placement" (dict "root" $ "over" .Values.controller)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

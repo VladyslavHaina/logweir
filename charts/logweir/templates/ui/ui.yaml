@@ -35,6 +35,9 @@ metadata:
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: ui
+{{- with (include "logweir.imagePullSecrets" .) }}
+{{ . }}
+{{- end }}
 ---
 {{/*
 THE PAGE'S ROLE, VERB FOR VERB. Not `logweir-viewer` plus `logweir-operator`:
@@ -102,7 +105,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
-{{- range $ns := prepend .Values.ui.namespaces .Release.Namespace }}
+{{- range $ns := (include "logweir.ui.namespaces" . | fromJsonArray) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -179,6 +182,9 @@ spec:
         app.kubernetes.io/component: ui
     spec:
       serviceAccountName: {{ $name }}
+      {{- with (include "logweir.placement" (dict "root" $ "over" .Values.ui)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       # THE ONE POD OF THE OPTIONAL COMPONENTS THAT NEEDS ITS TOKEN: it is the
       # credential `kubectl proxy` attaches to every request it forwards.
       automountServiceAccountToken: true

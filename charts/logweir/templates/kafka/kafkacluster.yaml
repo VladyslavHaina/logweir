@@ -36,12 +36,17 @@ spec:
     {{- include "logweir.kafka.auth" (dict "cluster" $source) | nindent 4 }}
 {{- with .Values.kafka.target }}
 {{- if .bootstrapServers }}
----
 {{- /*
 THE TARGET IS OPTIONAL AND IS RENDERED ONLY WHEN IT HAS AN ADDRESS. A restore
 needs one; a backup does not. `markerTopic` is what proves a target is a scratch
 cluster — absent, a `mode: scratch` restore against it is refused.
-*/ -}}
+
+The `---` below is on its own line and the comment above it does NOT chomp
+forward — a closing dash here would pull `apiVersion:` up onto the separator and
+produce `---apiVersion: …`, which `helm template` tolerates and `helm lint`
+refuses by name.
+*/}}
+---
 apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
 metadata:

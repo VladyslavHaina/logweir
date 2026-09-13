@@ -647,29 +647,45 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         );
     }
     // The two digests the chart resolved itself carry the command and the date.
-    let text = read("charts/logweir/values.yaml");
+    //
+    // MOVED, NOT DELETED (Task 38, ruling 15): these four assertions read
+    // `charts/logweir/values.yaml` until 2026-09-12, when the owner asked for a
+    // values file a reader can take in at a glance — one short line per key and
+    // no prose. The PROSE moved to `charts/logweir/README.md` and so did the
+    // assertions, unchanged in substance: a third-party digest whose provenance
+    // nobody wrote down is still the defect they were added for.
+    let text = read("charts/logweir/README.md");
     for command in [
         "docker buildx imagetools inspect apache/kafka:3.7.1",
         "docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1",
     ] {
         assert!(
             text.contains(command),
-            "values.yaml must record the resolution command `{command}` beside the THIRD-PARTY \
-             digest (the kindest/node idiom)"
+            "charts/logweir/README.md must record the resolution command `{command}` beside the \
+             THIRD-PARTY digest (the kindest/node idiom). It moved here from values.yaml under \
+             ruling 15; do not drop it"
         );
     }
     assert!(
         text.contains("2026-09-12"),
-        "values.yaml must record the date the third-party digests were resolved — and the date \
-         the owner decided the two Logweir images are named by tag"
+        "charts/logweir/README.md must record the date the third-party digests were resolved — \
+         and the date the owner decided the two Logweir images are named by tag"
     );
     // And the way back to a digest is written down, because a default whose
     // cost is real must say how to undo it.
     assert!(
         text.contains("docker buildx imagetools inspect")
             && text.contains("--set runnerImagePullPolicy="),
-        "values.yaml must carry the pinning recipe: how to resolve a tag to a digest, and the \
-         four --set values that pin it back"
+        "charts/logweir/README.md must carry the pinning recipe: how to resolve a tag to a \
+         digest, and the four --set values that pin it back (moved here from values.yaml under \
+         ruling 15)"
+    );
+    // AND values.yaml POINTS AT THE FILE THE PROSE MOVED TO. A short values file
+    // that does not say where the explanations went is a file that lost them.
+    assert!(
+        read("charts/logweir/values.yaml").contains("charts/logweir/README.md"),
+        "values.yaml is short by ruling 15, so it must name `charts/logweir/README.md` once as \
+         the place every explanation lives"
     );
     // The defaults are the shipped install: nothing optional on.
     for flag in ["minio", "demoKafka", "ui"] {

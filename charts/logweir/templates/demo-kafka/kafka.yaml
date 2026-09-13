@@ -95,6 +95,12 @@ spec:
         logweir.dev/kafka-role: {{ $role }}
     spec:
       automountServiceAccountToken: false
+      {{- with (include "logweir.placement" (dict "root" $ "over" $.Values.demoKafka)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with (include "logweir.imagePullSecrets" $) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: kafka
           image: {{ $.Values.demoKafka.image }}
@@ -193,6 +199,12 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      {{- with (include "logweir.placement" (dict "root" $ "over" .Values.demoKafka)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with (include "logweir.imagePullSecrets" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: seed
           image: {{ .Values.demoKafka.image }}

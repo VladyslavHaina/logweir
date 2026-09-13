@@ -23,6 +23,20 @@
 # `archive.*` is left empty on purpose: with minio.enabled it defaults to
 # s3://kafka-backups/<release> at http://<release>-minio.<namespace>.svc:9000,
 # us-east-1, allowHttp, path-style — the chart's own backend.
+#
+# THE `kubernetes:` BLOCK BELOW IS DELIBERATELY SCHEDULABLE ANYWHERE (Task 38).
+# `kubernetes.io/os: linux` is a label the kubelet sets on every Linux node, so
+# it constrains nothing on kind or docker-desktop, and a toleration for a taint
+# nobody applies permits without restricting. It is here so the DEMO render —
+# the only one that carries demo brokers — shows placement reaching a broker
+# pod and a seed Job, which `chart_lint.rs` reads. Replace both with your own
+# on a real cluster; `examples/msk.values.yaml` shows what that looks like.
+kubernetes:
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: demo.logweir.dev/example
+      operator: Exists
 minio:
   enabled: true
   persistence:
