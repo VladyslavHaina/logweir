@@ -1,5 +1,13 @@
 # Phase C's exit criterion — `just laptop-demo`, run and recorded, with X-UIWRITE from the page
 
+> **2026-09-12 — THE REGISTRY NAMESPACE MOVED AFTER THIS TRANSCRIPT WAS RECORDED, AND NOTHING
+> BELOW IS EDITED.** A record is not a config file. The image references in the steps below are
+> the ones that actually ran on the day; the SHIPPED references are now
+> `docker.io/vladyslavhaina/logweir` (runner) and `docker.io/vladyslavhaina/weirkeeper`
+> (controller), on Docker Hub. Why they moved, and what a node has to hold before either resolves:
+> `../docs/kubernetes.md` §14.
+
+
 The walk spec §1 calls **the whole acceptance surface**: a stranger clones, applies one file to
 docker-desktop Kubernetes and gets CRDs, RBAC and the controller; the UI is static files served by
 `kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1`; against a

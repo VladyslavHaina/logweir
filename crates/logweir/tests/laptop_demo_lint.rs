@@ -1568,7 +1568,7 @@ fn step_03_hands_the_cluster_its_own_images_between_x_apply_and_the_rollout() {
     // which Global Constraint 7 forbids under `crates/` outright.
     let default_assignment = format!(
         "DEFAULT_RUNNER_IMAGE_REF={}{}",
-        "ghcr.io/logweir/", "logweir:v0.1.0"
+        "docker.io/vladyslavhaina/", "logweir:v0.1.0"
     );
     assert_eq!(
         src.matches(default_assignment.as_str()).count(),

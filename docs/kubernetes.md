@@ -1791,7 +1791,7 @@ kubectl --context docker-desktop -n logweir-t23 get pod xdigest-local-name \
 
 kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
   -o jsonpath='{.status.containerStatuses[*].state}'
-# {"waiting":{"message":"Container image \"ghcr.io/logweir/logweir@sha256:3e9828d4…\" is not
+# {"waiting":{"message":"Container image \"docker.io/vladyslavhaina/logweir@sha256:3e9828d4…\" is not
 #   present with pull policy of Never","reason":"ErrImageNeverPull"}}
 ```
 
@@ -1800,9 +1800,9 @@ digest under a different repository name is `ErrImageNeverPull`. One local
 `docker tag` fixes it, and the same pod then starts:
 
 ```bash
-docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
-docker inspect --format '{{json .RepoDigests}}' ghcr.io/logweir/logweir:v0.1.0
-# ["logweir@sha256:3e9828d4…","ghcr.io/logweir/logweir@sha256:3e9828d4…"]
+docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
+docker inspect --format '{{json .RepoDigests}}' docker.io/vladyslavhaina/logweir:v0.1.0
+# ["logweir@sha256:3e9828d4…","docker.io/vladyslavhaina/logweir@sha256:3e9828d4…"]
 
 kubectl --context docker-desktop apply -f xdigest-shipped-name.yaml   # recreated
 kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
@@ -1810,7 +1810,7 @@ kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
 # {"terminated":{"exitCode":0,"reason":"Completed",...}}
 ```
 
-So the **shipped** reference `ghcr.io/logweir/logweir@sha256:…` —
+So the **shipped** reference `docker.io/vladyslavhaina/logweir@sha256:…` —
 `weirkeeper::job::RUNNER_IMAGE` — does start a pod on this cluster, under
 `imagePullPolicy: Never`, after that one `docker tag`. That command is the
 author-only step, and it is the reason
@@ -1819,7 +1819,7 @@ its header.
 
 ### 14.4 The control plane starts for the first time
 
-`logweir.yaml` now references `ghcr.io/logweir/weirkeeper@sha256:…` with
+`logweir.yaml` now references `docker.io/vladyslavhaina/weirkeeper@sha256:…` with
 `imagePullPolicy: IfNotPresent`. Applied with **no** local image under that
 repository name, the pod does exactly what Task 21 recorded and spec §16 clause
 1 predicts:
@@ -1830,7 +1830,7 @@ kubectl --context docker-desktop apply --server-side -f logweir.yaml; echo "rc=$
 # rc=0
 kubectl --context docker-desktop -n logweir-system get pods
 # weirkeeper-5996dbffc-kc6jk   0/1   ImagePullBackOff   0   25s
-#   message: Back-off pulling image "ghcr.io/logweir/weirkeeper@sha256:eab22ebf…":
+#   message: Back-off pulling image "docker.io/vladyslavhaina/weirkeeper@sha256:eab22ebf…":
 #            ErrImagePull: error from registry: denied
 ```
 
@@ -1838,7 +1838,7 @@ kubectl --context docker-desktop -n logweir-system get pods
 **first `weirkeeper` pod ever to run in a cluster**:
 
 ```bash
-docker tag weirkeeper:check ghcr.io/logweir/weirkeeper:v0.1.0
+docker tag weirkeeper:check docker.io/vladyslavhaina/weirkeeper:v0.1.0
 kubectl --context docker-desktop -n logweir-system delete pod --all
 kubectl --context docker-desktop -n logweir-system get pods
 # weirkeeper-5996dbffc-nzb5j   1/1   Running   0   31s
@@ -1896,7 +1896,8 @@ pulled back from it (spec §16 clause 1, Task 30b).
 **And on a cluster that did not build the pins, neither reference resolves at
 all — so the demo hands the controller the images that cluster HAS** (Task 33).
 A GitHub runner builds both images minutes before the walk, at digests nothing
-in the tree names, and `ghcr.io/logweir/…` is not pullable; the fourth run of
+in the tree names, and nothing has been pushed to `docker.io/vladyslavhaina/…`
+yet, so it is not pullable; the fourth run of
 `.github/workflows/kind-demo.yml` (2026-09-12) therefore reached step 3, applied
 the shipped `logweir.yaml`, and then watched `rollout status deploy/weirkeeper`
 exit 1 — the Deployment was pointing at the laptop's pinned controller digest,
@@ -1962,7 +1963,7 @@ kubectl --context docker-desktop -n logweir-system get pods
 # weirkeeper-7c6d5dccbd-9hnpw   1/1   Running   0   35s
 kubectl --context docker-desktop -n logweir-system get pod weirkeeper-7c6d5dccbd-9hnpw \
   -o jsonpath='{.spec.containers[*].image}'
-# ghcr.io/logweir/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
+# docker.io/vladyslavhaina/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
 # ... imageID: docker-pullable://weirkeeper@sha256:767e3af2…   restartCount: 0 at 65 s
 ```
 
@@ -2489,7 +2490,7 @@ never executed, and both demos became drivers:
 
 Three variables parameterise the steps and nothing else does:
 `LOGWEIR_KUBE_CONTEXT` (default `docker-desktop`), `LOGWEIR_DEMO_IMAGE_REF`
-(default `ghcr.io/logweir/logweir:v0.1.0`) and `LOGWEIR_DEMO_PULL_POLICY`
+(default `docker.io/vladyslavhaina/logweir:v0.1.0`) and `LOGWEIR_DEMO_PULL_POLICY`
 (default `Never`). Every `kubectl` line in both files reads
 `kubectl --context "$LOGWEIR_KUBE_CONTEXT" …` — STANDING RULE 12 is satisfied by
 the context always being passed, never by the literal being spelt out — and each
@@ -2565,7 +2566,7 @@ step names are the record of which:
   proves the code path and proves nothing about publication.
 * **`install (published digests, pulled by the cluster)`** — once a remote
   exists and `release.yml` has pushed. No `kind load` at all: the cluster
-  **pulls** `ghcr.io/logweir/logweir@sha256:…`, and the
+  **pulls** `docker.io/vladyslavhaina/logweir@sha256:…`, and the
   `rollout status deploy/weirkeeper --timeout=180s` that follows is the
   assertion X-APPLY cannot make — a pod pulled the shipped digest from a
   registry the author does not control and reached Ready. With `release.yml`'s
@@ -2644,12 +2645,12 @@ $ kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
 Set kubectl context to "kind-logweir"
 kind create cluster  14.65s total
 rc=0
-$ docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
+$ docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
 rc=0
-$ kind load docker-image logweir:check weirkeeper:check ghcr.io/logweir/logweir:v0.1.0 --name logweir
+$ kind load docker-image logweir:check weirkeeper:check docker.io/vladyslavhaina/logweir:v0.1.0 --name logweir
 Image: "logweir:check" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
 Image: "weirkeeper:check" with ID "sha256:6ab14111…" not yet present on node "logweir-control-plane", loading...
-Image: "ghcr.io/logweir/logweir:v0.1.0" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
+Image: "docker.io/vladyslavhaina/logweir:v0.1.0" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
 rc=0
 $ bash scripts/render-install.sh --check
 render-install: logweir.yaml is what config/ renders to (no drift).
@@ -2747,8 +2748,8 @@ the digests the tree pins — but containerd's CRI image service does not surfac
 an image whose platform is not the node's, so the kubelet cannot see it. This is
 not emulation being slow; it is the image being invisible, and no wall clock was
 measurable for it. **One thing that follows is unproven here**: whether a kind
-node resolves `ghcr.io/logweir/logweir@sha256:…` when it holds that digest under
-the tag `ghcr.io/logweir/logweir:v0.1.0` (plan erratum E19b, transposed to a kind
+node resolves `docker.io/vladyslavhaina/logweir@sha256:…` when it holds that digest under
+the tag `docker.io/vladyslavhaina/logweir:v0.1.0` (plan erratum E19b, transposed to a kind
 node) — an arm64 node cannot surface the amd64 image at all, so the question was
 untestable on this host, and the amd64 runner's own green run of
 `.github/workflows/kind-demo.yml` is what would answer it. Setting the node's
@@ -2918,7 +2919,7 @@ The transcript is `scripts/helm-demo.sh` over the release
 `examples/author-only.values.yaml` installed with all three flags on.
 
 The install, from the worktree at the commit this section lands in, with the
-local `docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0` of path (b)
+local `docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0` of path (b)
 already in place (finding 2, below):
 
 ```
@@ -3088,7 +3089,7 @@ ones. (2) The local `weirkeeper:check` at the tree's pin (`6ab14111…`, built
 2026-09-11) predates Task 33's `LOGWEIR_RUNNER_IMAGE`, so its runner Jobs
 named the compiled-in digest and sat in `ErrImageNeverPull`; the brief forbade
 a rebuild, and the remedy was path (b)'s own author-only step, `docker tag
-logweir:check ghcr.io/logweir/logweir:v0.1.0` (E19(b), §14.3), made on the
+logweir:check docker.io/vladyslavhaina/logweir:v0.1.0` (E19(b), §14.3), made on the
 host before the run. A controller built from the current source — every CI
 run — honours the override and needs no tag.
 
@@ -3115,8 +3116,8 @@ teardown clean. The override is what the runner Jobs used; the tag is gone.
 
 **The owner decided, 2026-09-12, that the chart's defaults name the two Logweir
 images by the `latest` tag instead of a digest** (Task 37):
-`controllerImage: ghcr.io/logweir/weirkeeper:latest`,
-`runnerImage: ghcr.io/logweir/logweir:latest`. Both repositories are the
+`controllerImage: docker.io/vladyslavhaina/weirkeeper:latest`,
+`runnerImage: docker.io/vladyslavhaina/logweir:latest`. Both repositories are the
 TREE's — `check-chart.sh` and `chart_lint.rs` derive them from
 `config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE` rather than
 spelling them — so a namespace change in the tree moves the chart with it.
@@ -3176,7 +3177,7 @@ resolved locally and **nothing was pulled**.
 
 **What was NOT proven, and is not claimed.** The DEFAULT path — `:latest` under
 `Always` — cannot be exercised on any cluster today, because
-`ghcr.io/logweir/weirkeeper:latest` and `ghcr.io/logweir/logweir:latest` exist
+`docker.io/vladyslavhaina/weirkeeper:latest` and `docker.io/vladyslavhaina/logweir:latest` exist
 in no registry: `release.yml` has never run, `blocked: images not published`,
 exactly as install path (a)'s digests could not be pulled either. A cluster
 given the chart's defaults today leaves the controller pod in

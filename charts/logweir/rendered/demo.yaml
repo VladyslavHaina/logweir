@@ -7460,14 +7460,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: weirkeeper
-          image: ghcr.io/logweir/weirkeeper:latest
+          image: docker.io/vladyslavhaina/weirkeeper:latest
           imagePullPolicy: Always
           args: []
           env:
             - name: RUST_LOG
               value: "info"
             - name: LOGWEIR_RUNNER_IMAGE
-              value: "ghcr.io/logweir/logweir:latest"
+              value: "docker.io/vladyslavhaina/logweir:latest"
             - name: LOGWEIR_RUNNER_PULL_POLICY
               value: "Always"
             - name: LOGWEIR_ARCHIVE_URL

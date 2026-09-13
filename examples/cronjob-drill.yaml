@@ -90,7 +90,7 @@ spec:
               # node that has not built it this pod fails as `ErrImageNeverPull`
               # naming the whole reference. `docs/kubernetes.md` §14 carries the
               # measurement and the one `docker tag` an author needs.
-              image: ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229
+              image: docker.io/vladyslavhaina/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229
               # docs/kubernetes.md §2: on an arm64 node the engine layer is
               # linux/amd64 and MUST be pre-pulled host-side with
               # `docker pull --platform linux/amd64 <digest>`. `Never` makes a

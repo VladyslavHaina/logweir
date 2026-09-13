@@ -4,7 +4,12 @@
 //! assertion here is about the shape of the file.
 //!
 //! The property the file exists for is one sentence: the bytes
-//! `scripts/check-image.sh` interrogated are the bytes that reach `ghcr.io`.
+//! `scripts/check-image.sh` interrogated are the bytes that reach the
+//! registry — Docker Hub since 2026-09-12, and this file NEVER SPELLS THE
+//! HOST OR THE NAMESPACE: both are read out of the tree's own pin
+//! (`crates/weirkeeper/src/job.rs`'s `RUNNER_IMAGE`) by `pinned_registry`
+//! below, so moving the registry again is a change to that constant and to
+//! the workflow, never to this file.
 //! Before T0-17 the job built the image twice — a local tag every assertion ran
 //! against, and a second, independent `docker/build-push-action` with
 //! `push: true` whose bytes nothing had ever looked at — so the published image
@@ -293,7 +298,7 @@ fn builds_the_controller_image(step: &Value) -> bool {
 
 /// The architecture tokens `text` names, out of the two this project publishes.
 /// `linux/arm64`, `weirkeeper:check-arm64`, `weirkeeper-arm64.tar` and
-/// `ghcr.io/logweir/weirkeeper:-arm64` (a tag whose `${{ … }}` half has been
+/// `docker.io/vladyslavhaina/weirkeeper:-arm64` (a tag whose `${{ … }}` half has been
 /// stripped) all yield `arm64`.
 ///
 /// THE SET IS CLOSED AT TWO ON PURPOSE. `linux/s390x` is not a platform this
@@ -473,16 +478,102 @@ fn resolve(arg: &str, assigned: &[(String, String)]) -> String {
     }
 }
 
-/// Every `ghcr.io/…` reference in `text`, REDUCED TO ITS REPOSITORY PART —
-/// everything before the first `:` or `@` after the host. A `${{ … }}`
-/// expression inside the reference is kept verbatim (and terminates nothing),
-/// so a reference computed from `${{ github.repository }}` is reported as the
-/// string it is rather than silently collapsing to `ghcr.io/`.
-fn ghcr_repositories(text: &str) -> Vec<String> {
-    const HOST: &str = "ghcr.io";
+/// **The registry host and namespace THE TREE PINS**, read out of
+/// `crates/weirkeeper/src/job.rs`'s `RUNNER_IMAGE` — the host before the first
+/// `/`, and everything before the last `/`, whatever that constant says.
+///
+/// DERIVED AND NEVER SPELT, for two reasons that point the same way. Interface
+/// **I15** allows the runner reference exactly one occurrence under `crates/`
+/// (`crd_shape.rs::the_runner_image_is_named_once`), so a literal here would
+/// be the second one; and a lint that hard-coded the registry would keep
+/// passing after the tree moved to another one, which is the drift this file
+/// exists to catch.
+fn pinned_registry() -> (String, String) {
+    let path = repo_root().join("crates/weirkeeper/src/job.rs");
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let marker = "pub const RUNNER_IMAGE: &str =";
+    let after = src
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("{} must declare `{marker}`", path.display()))
+        .1;
+    let open = after.find('"').expect("RUNNER_IMAGE is a string literal");
+    let rest = &after[open + 1..];
+    let close = rest.find('"').expect("RUNNER_IMAGE's literal is closed");
+    let reference = &rest[..close];
+    let repository = reference
+        .split_once('@')
+        .map(|(repo, _)| repo)
+        .unwrap_or(reference);
+    let (host, _) = repository
+        .split_once('/')
+        .unwrap_or_else(|| panic!("RUNNER_IMAGE `{reference}` names no registry host"));
+    let namespace = repository
+        .rsplit_once('/')
+        .map(|(ns, _)| ns.to_string())
+        .unwrap_or_else(|| panic!("RUNNER_IMAGE `{reference}` names no namespace"));
+    assert!(
+        host.contains('.'),
+        "RUNNER_IMAGE `{reference}` must name a registry HOST before its namespace; got `{host}`"
+    );
+    (host.to_string(), namespace)
+}
+
+/// `text` with the workflow's namespace variable resolved to the value its own
+/// declaration defaults to — `$NS`, `${NS}` and `${{ env.NS }}` all become
+/// `namespace`. The workflow reads the namespace once per job as
+/// `${{ vars.DOCKERHUB_NAMESPACE || '<default>' }}`, so a lint that compared
+/// the raw text would be comparing against the expression rather than against
+/// what the expression means on a repository that sets no variable.
+fn expand_namespace(text: &str, namespace: &str) -> String {
+    text.replace("${{ env.NS }}", namespace)
+        .replace("${NS}", namespace)
+        .replace("$NS", namespace)
+}
+
+/// **The namespace every job's `env.NS` defaults to**, as ONE value: the
+/// `'…'` fallback of `${{ vars.… || '…' }}`. Panics when two jobs disagree —
+/// two namespaces in one workflow is a release that pushes half its images
+/// somewhere nobody is told to look.
+fn workflow_namespace(doc: &Value) -> String {
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let map = doc["jobs"].as_mapping().expect("a jobs: mapping");
+    for (_name, body) in map {
+        let Some(expression) = body["env"]["NS"].as_str() else {
+            continue;
+        };
+        let fallback = expression
+            .rsplit_once("||")
+            .map(|(_, rest)| rest.trim().trim_end_matches("}}").trim())
+            .map(|rest| rest.trim_matches('\'').trim())
+            .unwrap_or(expression)
+            .trim_matches('\'');
+        found.insert(fallback.to_string());
+    }
+    assert_eq!(
+        1,
+        found.len(),
+        "every job that names the registry namespace must default to ONE value; found {found:?}"
+    );
+    found.into_iter().next().expect("one value")
+}
+
+/// Every `<host>/…` reference in `text` under the host the tree pins, REDUCED
+/// TO ITS REPOSITORY PART — everything before the first `:` or `@` after the
+/// host. A `${{ … }}` expression inside the reference is kept verbatim (and
+/// terminates nothing), so a reference computed from `${{ github.repository }}`
+/// is reported as the string it is rather than silently collapsing to the bare
+/// host.
+///
+/// RENAMED FROM `ghcr_repositories` (Task 38): the host was a literal
+/// `ghcr.io` in this file, which is exactly the hard-coding that survived the
+/// move to Docker Hub. It now comes from `pinned_registry`.
+fn registry_repositories(text: &str) -> Vec<String> {
+    let host = pinned_registry().0;
+    let host: &str = &host;
     let mut out = Vec::new();
     let mut from = 0usize;
-    while let Some(rel) = text[from..].find(HOST) {
+    while let Some(rel) = text[from..].find(host) {
         let start = from + rel;
         let mut reference = String::new();
         let mut rest = &text[start..];
@@ -512,7 +603,7 @@ fn ghcr_repositories(text: &str) -> Vec<String> {
             }
         }
         out.push(reference);
-        from = start + HOST.len();
+        from = start + host.len();
     }
     out
 }
@@ -1033,14 +1124,14 @@ fn workflow_lint_version_tag_is_pushed_before_latest() {
 /// H5. WHAT IS PUSHED IS WHAT SHIPS — pushed ⊆ shipped, one way.
 ///
 /// Global Constraint 24 fixes the namespace as the LITERAL
-/// `ghcr.io/logweir/<name>` — `logweir` (the runner) and `weirkeeper` (the
+/// `docker.io/vladyslavhaina/<name>` — `logweir` (the runner) and `weirkeeper` (the
 /// controller). The literal runner reference is NOT spelled in this file:
 /// interface I15 (`crates/weirkeeper/tests/crd_shape.rs`'s
 /// `the_runner_image_is_named_once`) allows it exactly one occurrence under
 /// `crates/`, in `job.rs`, so that a digest bump cannot update one call site
 /// and miss another. This test reads it from `release.yml` and compares it
 /// against that one occurrence, which is the stronger arrangement anyway.
-/// `ghcr.io/${{ github.repository }}` is `<owner>/<repo>`: it equals the
+/// `docker.io/${{ github.repository }}` is `<owner>/<repo>`: it equals the
 /// required string only if this repository is literally `logweir/logweir`, and
 /// one repository can never produce the TWO names this project publishes.
 /// Nothing asserted, before this test, that the reference pushed is the
@@ -1049,13 +1140,13 @@ fn workflow_lint_version_tag_is_pushed_before_latest() {
 /// THE SHIPPED SET IS TWO FILES, AND THE SECOND IS A DEVIATION FROM THIS TASK'S
 /// BRIEF, RECORDED RATHER THAN HIDDEN. The brief asks for `logweir.yaml` alone,
 /// but the runner image is not a manifest field: `logweir.yaml` carries only
-/// `ghcr.io/logweir/weirkeeper` (the controller Deployment), while the runner
+/// `docker.io/vladyslavhaina/weirkeeper` (the controller Deployment), while the runner
 /// image an operator actually pulls is the Rust constant
 /// `crates/weirkeeper/src/job.rs`'s `RUNNER_IMAGE` — unreachable by kustomize,
 /// as `config/overlays/local-images/kustomization.yaml` says in full. Asserting
 /// against `logweir.yaml` alone would fail on a correct tree, and widening the
-/// reduction to `ghcr.io/logweir` would pass a mutant that pushed
-/// `ghcr.io/logweir/anything`. So the shipped set is both files: between them
+/// reduction to the NAMESPACE alone would pass a mutant that pushed
+/// `<namespace>/anything`. So the shipped set is both files: between them
 /// they hold every image reference the shipped control plane uses.
 ///
 /// The assertion runs ONE WAY, at repository-part granularity, so it passes
@@ -1066,6 +1157,10 @@ fn workflow_lint_version_tag_is_pushed_before_latest() {
 fn workflow_lint_pushed_references_match_the_shipped_manifest() {
     let doc = workflow();
     let root = repo_root();
+    // The workflow reads its namespace once per job as
+    // `${{ vars.DOCKERHUB_NAMESPACE || '<default>' }}`; the references below
+    // are compared against what that expression means with no variable set.
+    let namespace = workflow_namespace(&doc);
 
     let sources = [
         root.join("logweir.yaml"),
@@ -1091,10 +1186,11 @@ fn workflow_lint_pushed_references_match_the_shipped_manifest() {
             // reference computed from `${{ github.repository }}` is reported as
             // the string it is.
             let code = strip_shell_comments(block);
-            let refs = ghcr_repositories(&code);
+            let refs = registry_repositories(&expand_namespace(&code, &namespace));
             assert!(
                 !refs.is_empty(),
-                "job `{job}`: the push step names no ghcr.io reference at all"
+                "job `{job}`: the push step names no reference under the registry the tree \
+                 pins at all"
             );
             for r in refs {
                 checked += 1;
@@ -1102,11 +1198,10 @@ fn workflow_lint_pushed_references_match_the_shipped_manifest() {
                 assert!(
                     found,
                     "job `{job}` pushes `{r}`, which the shipped control plane never references. \
-                     Global Constraint 24 fixes the namespace as the literal \
-                     ghcr.io/logweir/<name>, and the shipped \
-                     references live in {} and {}. `${{{{ github.repository }}}}` is \
-                     <owner>/<repo> and is never one of them.",
-                    shipped[0].0, shipped[1].0
+                     Global Constraint 24 fixes the namespace as a literal — `{}/<name>`, read \
+                     from the tree's own pin — and the shipped references live in {} and {}. \
+                     `${{{{ github.repository }}}}` is <owner>/<repo> and is never one of them.",
+                    namespace, shipped[0].0, shipped[1].0
                 );
             }
         }
@@ -1115,6 +1210,93 @@ fn workflow_lint_pushed_references_match_the_shipped_manifest() {
     assert!(
         checked > 0,
         "no pushed reference was examined; this lint would be vacuous"
+    );
+}
+
+// ------------------------------------------------------------------- 10bis
+
+/// **Task 38. EVERY REFERENCE THIS WORKFLOW PUSHES IS UNDER THE NAMESPACE THE
+/// TREE PINS** — `crates/weirkeeper/src/job.rs`'s `RUNNER_IMAGE`, reduced to
+/// everything before its last `/`.
+///
+/// # Why this exists beside test 10
+///
+/// Test 10 asserts pushed ⊆ shipped by SUBSTRING, over two files. That catches
+/// a reference nothing ships, but it says nothing about the registry itself:
+/// the two halves could have moved together to a namespace the workflow's
+/// credentials cannot reach, or apart, and the drift would read as a green
+/// build. It had already happened once — the namespace named a GitHub
+/// organisation that does not exist, measured 2026-09-12 — which is what this
+/// task is.
+///
+/// # What it reads
+///
+/// Every line of every pushing step's `run:` block, comments stripped, with
+/// the workflow's own `$NS` resolved to the value its `env:` declaration
+/// defaults to. A token shaped `<host with a dot>/<path>` is a registry
+/// reference; each must begin with `<pinned namespace>/`. The FAILURE NAMES
+/// THE LINE, because a namespace mismatch is one word in one line and a
+/// message that only said "a reference is wrong" would send a reader through
+/// six hundred lines of workflow.
+///
+/// KILLS: changing one pushed reference back to another registry or another
+/// namespace (the mutant); moving the tree's pin without moving the workflow;
+/// moving the workflow without moving the tree's pin.
+#[test]
+fn workflow_lint_pushed_references_share_the_pinned_namespace() {
+    let (_host, namespace) = pinned_registry();
+    let doc = workflow();
+    let resolved = workflow_namespace(&doc);
+    let prefix = format!("{namespace}/");
+
+    let mut checked = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for (job, steps) in jobs(&doc) {
+        for step in steps.iter().filter(|s| is_pushing_step(s)) {
+            let block = run(step);
+            if block.is_empty() {
+                continue;
+            }
+            for (i, line) in strip_shell_comments(block).lines().enumerate() {
+                for token in line.split(|c: char| {
+                    c.is_ascii_whitespace() || c == '"' || c == '\'' || c == '=' || c == ';'
+                }) {
+                    let Some((host, path)) = token.split_once('/') else {
+                        continue;
+                    };
+                    // A REGISTRY HOST, not a relative path: it carries a dot,
+                    // it is not a `$var`, and it is not a URL scheme. This is
+                    // what keeps `scripts/check-image.sh` and
+                    // `e2e/compose/…` out of the set.
+                    if !host.contains('.')
+                        || host.starts_with('$')
+                        || host.ends_with(':')
+                        || path.is_empty()
+                    {
+                        continue;
+                    }
+                    checked += 1;
+                    if !expand_namespace(token, &resolved).starts_with(&prefix) {
+                        offenders.push(format!(
+                            "job `{job}`, run: line {}: {}",
+                            i + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no pushed reference was examined at all; this lint would be vacuous"
+    );
+    assert!(
+        offenders.is_empty(),
+        "{} pushed reference(s) are not under `{prefix}`, the namespace          `crates/weirkeeper/src/job.rs`'s RUNNER_IMAGE pins. A workflow that pushes somewhere          the tree does not name publishes images nobody is told to pull — and a namespace the          credentials cannot reach fails the push outright:\n{}",
+        offenders.len(),
+        offenders.join("\n")
     );
 }
 
@@ -1533,9 +1715,15 @@ fn the_release_artefact_ships_the_auditors_reader() {
     // occurrence and fail that test, which is exactly what happened while this
     // test was being written. The same `format!` idiom is used there, for the
     // same reason.
-    let text = raw();
+    // THE NAMESPACE IS DERIVED, AND THE NOTES' OWN VARIABLE IS RESOLVED. The
+    // notes name the images as `docker.io/${{ env.NS }}/<name>@…` (Task 38),
+    // so the raw text is expanded through the workflow's own default before it
+    // is searched, and the namespace searched for is the tree's pin — not a
+    // string this file spells.
+    let text = expand_namespace(&raw(), &workflow_namespace(&workflow()));
+    let pinned_namespace = pinned_registry().1;
     for name in ["logweir", "weirkeeper"] {
-        let literal = format!("{}{name}@", "ghcr.io/logweir/");
+        let literal = format!("{pinned_namespace}/{name}@");
         assert!(
             text.contains(&literal),
             "the release notes must name `{literal}<digest>`: a release that publishes images and \

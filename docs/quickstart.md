@@ -181,7 +181,7 @@ author-only image tags, the proxy, **both keypairs**, and the compose stack —
 each with its own `rc`.
 
 **Two of its steps are author-only and say so.** Step 1 tags the local images
-with the shipped `ghcr.io/logweir/…` names, because the kubelet keys on the
+with the shipped `docker.io/vladyslavhaina/…` names, because the kubelet keys on the
 whole reference and a matching digest under a different name is
 `ErrImageNeverPull`; step 3 patches the controller's environment to point at
 this laptop's MinIO. Neither changes what "published" means: a pull from a

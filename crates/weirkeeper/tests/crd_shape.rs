@@ -1513,7 +1513,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
 /// nothing has been published, so no published digest exists to pin).
 #[test]
 fn the_runner_image_is_named_once() {
-    let needle = format!("{}{}", "ghcr.io/logweir/", "logweir");
+    let needle = format!("{}{}", "docker.io/vladyslavhaina/", "logweir");
     let root = repo_root();
     let expected = root.join("crates/weirkeeper/src/job.rs");
 
@@ -1538,7 +1538,7 @@ fn the_runner_image_is_named_once() {
     );
     assert!(
         weirkeeper::job::RUNNER_IMAGE.starts_with(&needle),
-        "RUNNER_IMAGE is under the literal ghcr.io/logweir namespace (Global Constraint 24), \
+        "RUNNER_IMAGE is under the literal docker.io/vladyslavhaina namespace (Global Constraint 24), \
          never a `<org>` placeholder: a shipped logweir.yaml carrying one is not applyable. \
          Got {}",
         weirkeeper::job::RUNNER_IMAGE

@@ -1964,8 +1964,8 @@ fn the_fingerprint_is_not_read_at_runtime() {
 /// file is under `crates/`, so a literal would be its own second occurrence.
 #[test]
 fn the_runner_image_lives_in_exactly_one_place() {
-    let digest_form = format!("{}{}@sha256:", "ghcr.io/logweir/", "logweir");
-    let tag_form = format!("{}{}:v", "ghcr.io/logweir/", "logweir");
+    let digest_form = format!("{}{}@sha256:", "docker.io/vladyslavhaina/", "logweir");
+    let tag_form = format!("{}{}:v", "docker.io/vladyslavhaina/", "logweir");
 
     let mut total = 0usize;
     let mut where_: Vec<String> = Vec::new();

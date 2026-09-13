@@ -28,7 +28,7 @@ kubectl --context docker-desktop apply --server-side -f logweir.yaml
 
 using the `@sha256:` references the file carries.
 
-**This path requires that those digests have been pulled back from `ghcr.io`
+**This path requires that those digests have been pulled back from `docker.io`
 on a host that did not build them.** Until the release workflow has run, every
 digest row in this document, in `logweir.yaml`'s own header comment and in
 `docs/tag1-checklist.md` reads **`blocked: images not published`**, and this path is
@@ -36,8 +36,8 @@ digest row in this document, in `logweir.yaml`'s own header comment and in
 
 | image | reference lives in | status |
 |---|---|---|
-| `ghcr.io/logweir/weirkeeper` (controller) | `config/manager/deployment.yaml`, rendered into `logweir.yaml` | `blocked: images not published` |
-| `ghcr.io/logweir/logweir` (runner) | `crates/weirkeeper/src/job.rs`, the constant `RUNNER_IMAGE` | `blocked: images not published` |
+| `docker.io/vladyslavhaina/weirkeeper` (controller) | `config/manager/deployment.yaml`, rendered into `logweir.yaml` | `blocked: images not published` |
+| `docker.io/vladyslavhaina/logweir` (runner) | `crates/weirkeeper/src/job.rs`, the constant `RUNNER_IMAGE` | `blocked: images not published` |
 
 **No digest value is written into this document, on purpose.** A locally built
 image's digest changes on **every build** — three builds of the same source
@@ -78,8 +78,8 @@ constant compiled into the controller, so kustomize cannot rewrite it — tag
 the locally built image with the shipped name so the reference resolves:
 
 ```bash
-docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
-docker inspect --format '{{json .RepoDigests}}' ghcr.io/logweir/logweir:v0.1.0
+docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
+docker inspect --format '{{json .RepoDigests}}' docker.io/vladyslavhaina/logweir:v0.1.0
 ```
 
 That was measured, both ways, in [kubernetes.md](kubernetes.md) §14.
@@ -126,7 +126,7 @@ chart's pull policies default to `Always` (Kubernetes' own default for
 Jobs through the controller.
 
 **The same caveat as (a) and (b) still decides which world you are in.** Nothing
-has been pushed to `ghcr.io/logweir/…` — `blocked: images not published` until
+has been pushed to `docker.io/vladyslavhaina/…` — `blocked: images not published` until
 `release.yml` has run on a pushed tag, and it never has — so `:latest` resolves
 in no registry and on a cluster with no access to that namespace the controller
 pod sits in `ImagePullBackOff` exactly as path (a) records. The tag changed the

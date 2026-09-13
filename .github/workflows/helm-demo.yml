@@ -116,7 +116,7 @@ jobs:
         run: kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
       # THE TWO AUTHOR-ONLY TAGS, loaded onto the node. `runnerImage` in the
       # author-only example is `logweir:check` and reaches the controller as
-      # LOGWEIR_RUNNER_IMAGE (Task 33), so no `docker tag` of the ghcr name is
+      # LOGWEIR_RUNNER_IMAGE (Task 33), so no `docker tag` of the Docker Hub name is
       # needed here — the kubelet is asked for the name the node holds.
       - name: kind load the two author-only tags
         run: kind load docker-image logweir:check weirkeeper:check --name logweir

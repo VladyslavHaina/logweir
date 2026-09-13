@@ -67,7 +67,7 @@ header() {
 # digest rows: blocked: images not published — the images below are referenced by digest (Global Constraint 7, Task 23) and the digest is a LOCALLY BUILT one until release.yml has run on a pushed tag (no tag has been pushed, so it never has); a locally built or locally loaded image is author-only and never satisfies spec §16 clause 1
 #
 # Consequence, stated plainly: applying this file on a cluster with no access to
-# `ghcr.io/logweir/weirkeeper` leaves the Deployment's pod in `ImagePullBackOff`.
+# `docker.io/vladyslavhaina/weirkeeper` leaves the Deployment's pod in `ImagePullBackOff`.
 # X-APPLY proves `kubectl apply` exits 0; it does not start a pod. For an
 # author-only local run, `kubectl --context docker-desktop apply --server-side
 # -k config/overlays/local-images` rewrites the image to a locally loaded tag.

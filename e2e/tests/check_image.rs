@@ -49,7 +49,7 @@ fn repo_root() -> PathBuf {
 }
 
 /// The image under test. `LOGWEIR_SMOKE_IMAGE` exists so a later task can point
-/// these same tests at a digest reference (`ghcr.io/<owner>/logweir@sha256:…`)
+/// these same tests at a digest reference (`docker.io/<namespace>/logweir@sha256:…`)
 /// rather than at the local tag `just image` produces.
 fn base_image() -> String {
     std::env::var("LOGWEIR_SMOKE_IMAGE").unwrap_or_else(|_| "logweir:check".to_string())

@@ -1721,7 +1721,7 @@ fn the_demo_says_it_is_author_only() {
     assert!(
         doc.contains("author-only") && doc.contains("docker tag"),
         "the transcript records the author-only `docker tag` step by name — the kubelet keys on \
-         the WHOLE reference, so the shipped `ghcr.io/logweir/…@sha256:…` references start on \
+         the WHOLE reference, so the shipped `docker.io/vladyslavhaina/…@sha256:…` references start on \
          this node only after the local images are tagged with them (plan erratum E19(b))"
     );
 }

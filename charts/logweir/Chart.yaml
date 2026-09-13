@@ -6,7 +6,7 @@
 # both are 0.1.0 because nothing has been released: the digests `values.yaml`
 # pins are LOCALLY BUILT measurements (Global Constraint 37,
 # `blocked: images not published`) exactly as `logweir.yaml`'s are, and a chart
-# that installs them on a cluster with no access to `ghcr.io/logweir/…` leaves
+# that installs them on a cluster with no access to `docker.io/vladyslavhaina/…` leaves
 # the controller pod in `ImagePullBackOff` — the same recorded, expected result
 # as path (a) of `docs/install.md`.
 #

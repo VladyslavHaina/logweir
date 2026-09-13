@@ -44,7 +44,7 @@
 #
 # AND `latest` EXISTS IN NO REGISTRY TODAY. `blocked: images not published`
 # (Global Constraint 37) is UNCHANGED by this ruling: `release.yml` has never
-# run, nothing has been pushed, and `ghcr.io/logweir/…:latest` resolves
+# run, nothing has been pushed, and `docker.io/vladyslavhaina/…:latest` resolves
 # nowhere. A cluster with no access to that namespace leaves the controller pod
 # in `ImagePullBackOff`, exactly as `docs/install.md` path (a) records — the
 # same outcome the digests produced, for the same reason.
@@ -52,14 +52,14 @@
 # HOW TO PIN, if you want the digest guarantee back. Resolve each tag to the
 # bytes it names right now — a MANIFEST read, not a pull:
 #
-#     docker buildx imagetools inspect ghcr.io/logweir/weirkeeper:latest
-#     docker buildx imagetools inspect ghcr.io/logweir/logweir:latest
+#     docker buildx imagetools inspect docker.io/vladyslavhaina/weirkeeper:latest
+#     docker buildx imagetools inspect docker.io/vladyslavhaina/logweir:latest
 #
 # then install with all four values set together:
 #
 #     helm install logweir charts/logweir -n logweir-system --create-namespace \
-#       --set controllerImage=ghcr.io/logweir/weirkeeper@sha256:… \
-#       --set runnerImage=ghcr.io/logweir/logweir@sha256:… \
+#       --set controllerImage=docker.io/vladyslavhaina/weirkeeper@sha256:… \
+#       --set runnerImage=docker.io/vladyslavhaina/logweir@sha256:… \
 #       --set imagePullPolicy=IfNotPresent \
 #       --set runnerImagePullPolicy=IfNotPresent
 #
@@ -67,14 +67,14 @@
 # change, so re-pulling them on every pod start buys nothing.
 #
 # The controller image. Rendered into the `weirkeeper` Deployment.
-controllerImage: ghcr.io/logweir/weirkeeper:latest
+controllerImage: docker.io/vladyslavhaina/weirkeeper:latest
 # The runner image — Task 33's `LOGWEIR_RUNNER_IMAGE` override, set as an env
 # on the Deployment so every Job the controller creates names THIS reference.
 # For an author-only install (images you built and `kind load`ed /
 # `docker tag`ged yourself) set it to the loaded tag AND set
 # `runnerImagePullPolicy: Never` beside it — see
 # `examples/author-only.values.yaml`.
-runnerImage: ghcr.io/logweir/logweir:latest
+runnerImage: docker.io/vladyslavhaina/logweir:latest
 # The CONTROLLER container's pull policy. `Always` is the shipped value, and it
 # follows from the tag above: it is Kubernetes' own default for a `:latest`
 # reference, and `IfNotPresent` under a mutable tag is a pod that keeps running

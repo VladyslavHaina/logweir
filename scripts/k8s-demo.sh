@@ -13,7 +13,7 @@
 # Two of its steps only work on the machine the images were built on:
 #
 #   * the `docker tag` step, which makes the SHIPPED
-#     `ghcr.io/logweir/<name>@sha256:…` references resolvable on this node.
+#     `docker.io/vladyslavhaina/<name>@sha256:…` references resolvable on this node.
 #     The kubelet keys on the WHOLE reference, so a matching digest under a
 #     different repository name is `ErrImageNeverPull` (plan erratum E19(b),
 #     `docs/kubernetes.md` §14.3). The tags this script adds it removes again.
@@ -97,8 +97,8 @@ S3_ENDPOINT=http://host.docker.internal:9000
 S3_REGION=us-east-1
 S3_ALLOW_HTTP=true
 TOPIC=k8sdemo
-RUNNER_IMAGE_TAG=ghcr.io/logweir/logweir:v0.1.0
-CONTROLLER_IMAGE_TAG=ghcr.io/logweir/weirkeeper:v0.1.0
+RUNNER_IMAGE_TAG=docker.io/vladyslavhaina/logweir:v0.1.0
+CONTROLLER_IMAGE_TAG=docker.io/vladyslavhaina/weirkeeper:v0.1.0
 
 mkdir -p "$OUT"
 die() { echo; echo "k8s-demo: $*" >&2; exit 1; }
@@ -302,7 +302,7 @@ echo "    WARNING: both were minted on this machine, minutes ago, and are attest
 step "7/12 tagging the local images with the SHIPPED repository names (author-only)"
 
 # `docs/kubernetes.md` §14.3, measured: the kubelet keys on the WHOLE
-# reference, so `ghcr.io/logweir/logweir@sha256:<d>` is `ErrImageNeverPull` on
+# reference, so `docker.io/vladyslavhaina/logweir@sha256:<d>` is `ErrImageNeverPull` on
 # a node that holds the same digest under the local name `logweir:check`. One
 # `docker tag` makes the shipped reference resolve. THE TAGS ARE REMOVED AT THE
 # END, by `cleanup`, so this script leaves the registry as it found it.

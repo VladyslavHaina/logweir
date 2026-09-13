@@ -72,7 +72,7 @@ name: kind-demo
 #     registry. This proves the code path and says nothing about publication.
 #   * `install (published digests, pulled by the cluster)` — once a remote
 #     exists and `release.yml` has pushed. No `kind load` at all: the cluster
-#     PULLS `ghcr.io/logweir/logweir@sha256:…`, and the `rollout status` that
+#     PULLS `docker.io/vladyslavhaina/logweir@sha256:…`, and the `rollout status` that
 #     follows is the assertion X-APPLY cannot make — a pod pulled the shipped
 #     digest from a registry the author does not control and reached Ready.
 #     Together with `release.yml`'s `pullback:` job that is what moves clause 1
@@ -85,7 +85,7 @@ name: kind-demo
 #   3. `author-only`, the default, which is the state today.
 # On the published branch, `vars.LOGWEIR_PUBLISHED_RUNNER_REF` carries the
 # runner image reference the probe and the demo use — the full
-# `ghcr.io/logweir/logweir@sha256:…`, never a tag (Global Constraint 7).
+# `docker.io/vladyslavhaina/logweir@sha256:…`, never a tag (Global Constraint 7).
 #
 # ===========================================================================
 # BOTH BRANCHES HAND THE DEMO A REFERENCE THAT IS NOT THE DEFAULT, AND THAT IS
@@ -221,7 +221,7 @@ jobs:
       # ---------------------------------------------------------------------
       # PLAN ERRATUM E19b, TRANSPOSED TO `kind`. The kubelet keys images on the
       # WHOLE reference, so `weirkeeper::job::RUNNER_IMAGE` —
-      # `ghcr.io/logweir/logweir@sha256:…`, a Rust constant kustomize cannot
+      # `docker.io/vladyslavhaina/logweir@sha256:…`, a Rust constant kustomize cannot
       # reach — is `ErrImageNeverPull` on a node holding the same digest under
       # the local name. On the laptop one `docker tag` fixes it because the
       # daemon and the kubelet share an image store; a kind node has an image
@@ -235,8 +235,8 @@ jobs:
       - name: install (author-only images; NOT evidence for §16 clause 1)
         if: env.LOGWEIR_INSTALL_PATH != 'published'
         run: |
-          docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
-          kind load docker-image logweir:check weirkeeper:check ghcr.io/logweir/logweir:v0.1.0 --name logweir
+          docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
+          kind load docker-image logweir:check weirkeeper:check docker.io/vladyslavhaina/logweir:v0.1.0 --name logweir
           ./scripts/render-install.sh --check
           kubectl --context kind-logweir apply --server-side -k config/overlays/local-images
       - name: install (published digests, pulled by the cluster)

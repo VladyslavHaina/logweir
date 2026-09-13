@@ -31,12 +31,12 @@
 #                            line so a transcript says which cluster it is
 #                            about.
 #   LOGWEIR_DEMO_IMAGE_REF   the RUNNER image reference this run is about.
-#                            Default `ghcr.io/logweir/logweir:v0.1.0` — the
+#                            Default `docker.io/vladyslavhaina/logweir:v0.1.0` — the
 #                            author-only tag step 1 creates (plan erratum
 #                            E19b: the kubelet keys on the WHOLE reference).
 #                            Task 31's author-only CI branch sets
 #                            `logweir:check`; its published branch sets the
-#                            `ghcr.io/logweir/logweir@sha256:…` digest.
+#                            `docker.io/vladyslavhaina/logweir@sha256:…` digest.
 #                            TASK 33: A REFERENCE THAT IS NOT THE DEFAULT IS
 #                            ALSO THE SIGNAL THAT THIS CLUSTER DID NOT BUILD
 #                            THE PINS. Step 3 then hands it to the controller
@@ -109,7 +109,7 @@
 # environment variable, it is not exported, and nothing sets it — it is the
 # one place the default is spelt, so `LOGWEIR_DEMO_IMAGE_REF` defaults to it
 # AND step 3 can ask whether this run was handed something else (Task 33).
-DEFAULT_RUNNER_IMAGE_REF=ghcr.io/logweir/logweir:v0.1.0
+DEFAULT_RUNNER_IMAGE_REF=docker.io/vladyslavhaina/logweir:v0.1.0
 LOGWEIR_KUBE_CONTEXT="${LOGWEIR_KUBE_CONTEXT:-docker-desktop}"
 LOGWEIR_DEMO_IMAGE_REF="${LOGWEIR_DEMO_IMAGE_REF:-$DEFAULT_RUNNER_IMAGE_REF}"
 LOGWEIR_DEMO_PULL_POLICY="${LOGWEIR_DEMO_PULL_POLICY:-Never}"
@@ -136,7 +136,7 @@ TOPIC=laptopdemo
 PROXY_BASE=http://127.0.0.1:8001
 API_BASE="$PROXY_BASE/apis/logweir.dev/v1alpha1/namespaces/$NS"
 RUNNER_IMAGE_TAG="${LOGWEIR_DEMO_IMAGE_REF:-$DEFAULT_RUNNER_IMAGE_REF}"
-CONTROLLER_IMAGE_TAG=ghcr.io/logweir/weirkeeper:v0.1.0
+CONTROLLER_IMAGE_TAG=docker.io/vladyslavhaina/weirkeeper:v0.1.0
 ONLY_STEP="${LOGWEIR_DEMO_ONLY_STEP:-}"
 PROXY_PID=""
 
@@ -208,7 +208,7 @@ teardown() {
   # BUILT, and a blind `docker rmi` of it would delete an image whose digest is
   # pinned in `weirkeeper::job::RUNNER_IMAGE` and cannot be rebuilt to the same
   # value (plan erratum E19a). The default reference is the author-only
-  # `ghcr.io/logweir/logweir:v0.1.0`, which this run made and this run removes.
+  # `docker.io/vladyslavhaina/logweir:v0.1.0`, which this run made and this run removes.
   rmi_tags="$CONTROLLER_IMAGE_TAG"
   if [ "$RUNNER_IMAGE_TAG" != "$BUILT_RUNNER_TAG" ]; then
     rmi_tags="$RUNNER_IMAGE_TAG $rmi_tags"
@@ -425,7 +425,7 @@ step_01() {
   fi
 
   # THE AUTHOR-ONLY TAG STEP (plan erratum E19b). The kubelet keys on the WHOLE
-  # reference, so `ghcr.io/logweir/logweir@sha256:<d>` is `ErrImageNeverPull` on
+  # reference, so `docker.io/vladyslavhaina/logweir@sha256:<d>` is `ErrImageNeverPull` on
   # a node that holds the same digest under the local name `logweir:check`. The
   # teardown removes the tags this run created.
   #
@@ -520,7 +520,7 @@ step_03() {
   # ==========================================================================
   # WHAT BROKE. `logweir.yaml` is applied UNEDITED by X-APPLY (Global
   # Constraint 37: a stranger must be able to apply it), and it names the two
-  # images the LAPTOP built: `ghcr.io/logweir/weirkeeper@sha256:…` on the
+  # images the LAPTOP built: `docker.io/vladyslavhaina/weirkeeper@sha256:…` on the
   # Deployment, and — compiled into the controller, where no manifest can
   # reach it — `weirkeeper::job::RUNNER_IMAGE` on every runner Job. On
   # docker-desktop both resolve, because the laptop's own build IS those bytes
@@ -529,7 +529,8 @@ step_03() {
   # fourth CI run of `.github/workflows/kind-demo.yml` (2026-09-12) got this
   # far and then `rollout status` exited 1, because the runner had built both
   # images minutes earlier at digests nothing in the tree names and
-  # `ghcr.io/logweir/…` is not pullable (there is no such namespace yet).
+  # `docker.io/vladyslavhaina/…` is not pullable (the namespace exists and the
+  # owner can push to it; nothing has been pushed there yet).
   #
   # AND THE OVERLAY'S ANSWER IS GONE BY NOW. `config/overlays/local-images`
   # installs `weirkeeper:check` with `imagePullPolicy: Never`, but X-APPLY's

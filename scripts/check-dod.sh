@@ -119,16 +119,16 @@ fi
 echo "== Global Constraint 7 (Task 23): both images are referenced by digest, never by tag =="
 img=0
 # The runner image, in the one place under crates/ that names it.
-grep -q 'ghcr\.io/logweir/logweir@sha256:[0-9a-f]\{64\}' crates/weirkeeper/src/job.rs || img=1
-grep -q 'ghcr\.io/logweir/logweir:' crates/weirkeeper/src/job.rs && img=1
+grep -q 'docker\\.io/logweir/logweir@sha256:[0-9a-f]\{64\}' crates/weirkeeper/src/job.rs || img=1
+grep -q 'docker\\.io/logweir/logweir:' crates/weirkeeper/src/job.rs && img=1
 [ "$img" -eq 0 ] \
   && ok "the runner image (job.rs RUNNER_IMAGE) is a digest" \
   || bad "crates/weirkeeper/src/job.rs does not pin the runner image by digest"
 img=0
 # The controller image, in the source manifest and in the rendered install file.
 for f in config/manager/deployment.yaml logweir.yaml; do
-  grep -q 'image: ghcr\.io/logweir/weirkeeper@sha256:[0-9a-f]\{64\}' "$f" || { echo "      $f"; img=1; }
-  grep -q 'image: ghcr\.io/logweir/weirkeeper:' "$f" && { echo "      $f (tag)"; img=1; }
+  grep -q 'image: docker\\.io/logweir/weirkeeper@sha256:[0-9a-f]\{64\}' "$f" || { echo "      $f"; img=1; }
+  grep -q 'image: docker\\.io/logweir/weirkeeper:' "$f" && { echo "      $f (tag)"; img=1; }
 done
 # The shipped CronJob example.
 grep -q 'image: .*@sha256:[0-9a-f]\{64\}' examples/cronjob-drill.yaml || { echo "      examples/cronjob-drill.yaml"; img=1; }

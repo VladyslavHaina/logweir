@@ -16,10 +16,17 @@
 /// from the task that finally pins the digest: a second occurrence is how a
 /// digest bump comes to update one call site and miss another.
 ///
-/// THE NAMESPACE IS THE LITERAL `ghcr.io/logweir/…`, NOT A PLACEHOLDER
-/// (Global Constraint 24). A shipped `logweir.yaml` carrying `ghcr.io/<org>/…`
-/// is not applyable, which would make spec §16's first clause unsatisfiable. A
-/// trademark answer changes one string, here.
+/// THE NAMESPACE IS THE LITERAL `docker.io/vladyslavhaina/…`, NOT A PLACEHOLDER
+/// (Global Constraint 24). A shipped `logweir.yaml` carrying
+/// `docker.io/<namespace>/…` is not applyable, which would make spec §16's
+/// first clause unsatisfiable. A trademark answer changes one string, here.
+///
+/// IT IS DOCKER HUB, AND IT IS THE OWNER'S PERSONAL NAMESPACE — measured
+/// 2026-09-12: the GitHub organisation `logweir` does not exist and the Docker
+/// Hub user `logweir` is unclaimed, so neither is a namespace any workflow can
+/// push to. `docker.io/vladyslavhaina/…` is one the release workflow's
+/// credentials reach. It is still `blocked: images not published`: the rename
+/// makes a push possible and does not perform one.
 ///
 /// A DIGEST, NOT A TAG — Global Constraint 7, pinned by Task 23. The value below
 /// is the manifest-list digest `docker inspect --format
@@ -52,7 +59,7 @@
 ///     pushed to a real registry and the digest comes back from there
 ///     (Task 30b). No tag has been pushed, so that workflow has never run.
 pub const RUNNER_IMAGE: &str =
-    "ghcr.io/logweir/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229";
+    "docker.io/vladyslavhaina/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229";
 
 /// The environment variable that overrides [`RUNNER_IMAGE`] for the Jobs one
 /// running controller creates — Task 33.

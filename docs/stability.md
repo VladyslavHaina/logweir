@@ -119,7 +119,7 @@ pre-release ruling by accident.**
   produces the runtime image a single time, into the runner's own daemon
   (`docker/build-push-action` with `load: true`, `push: false`, tagged
   `logweir:check`); runs `scripts/check-image.sh logweir:check` against it; and
-  only then tags and pushes those same bytes to `ghcr.io`. Nothing is
+  only then tags and pushes those same bytes to Docker Hub. Nothing is
   recompiled between the assertion and the upload, so the bytes the gate
   interrogated are the bytes an operator pulls. The repository digest is read
   back from the daemon after the upload and republished in the release notes,
@@ -309,7 +309,7 @@ produce them.** **2026-09-12: the remote exists now** —
 pushed tag, no tag has been pushed, so no such summary exists. Everything below
 is the shape of a file and the measurement of a laptop.
 
-**What the workflow now says.** `ghcr.io/logweir/weirkeeper` is published as a
+**What the workflow now says.** `docker.io/vladyslavhaina/weirkeeper` is published as a
 manifest list carrying `linux/amd64` and `linux/arm64`. Each variant is compiled
 by a job of its own, on a runner **of that architecture**
 (`build-weirkeeper-amd64` on `ubuntu-24.04`, `build-weirkeeper-arm64` on

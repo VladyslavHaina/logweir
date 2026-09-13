@@ -14,7 +14,7 @@
 #
 # THE CHART'S IMAGE DEFAULTS NAME THE `latest` TAG, not a digest — the owner's
 # decision of 2026-09-12, with the trade-off written out in values.yaml's own
-# header. Nothing has been pushed to ghcr.io/logweir/… (`blocked: images not
+# header. Nothing has been pushed to docker.io/vladyslavhaina/… (`blocked: images not
 # published`; release.yml has never run), so on a cluster with no access to
 # that namespace the controller pod sits in ImagePullBackOff, which is the
 # recorded, expected result of docs/install.md path (a) — the same outcome the

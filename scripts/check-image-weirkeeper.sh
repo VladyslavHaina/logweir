@@ -150,7 +150,7 @@ fi
 if [ "$#" -ne 1 ]; then
   fail "usage: check-image-weirkeeper.sh [--no-exec] <image-ref>" \
        "  <image-ref> is a local tag (weirkeeper:check) or a digest reference" \
-       "  (ghcr.io/logweir/weirkeeper@sha256:...). Exactly one, never zero and" \
+       "  (docker.io/vladyslavhaina/weirkeeper@sha256:...). Exactly one, never zero and" \
        "  never two. Build the local tag with \`just image-weirkeeper\`." \
        "  --no-exec asserts a variant this host cannot run: architecture," \
        "  licences and the org-root anchor, executing nothing from the image."

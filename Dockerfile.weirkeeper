@@ -1,9 +1,9 @@
 # The `weirkeeper` control-plane image — Task 23.
 #
 # IT IS NOT THE RUNNER IMAGE AND IT IS NOT A VARIANT OF IT. `Dockerfile` builds
-# `ghcr.io/logweir/logweir`: two binaries, the extracted OSO engine, the MIT
+# `docker.io/vladyslavhaina/logweir`: two binaries, the extracted OSO engine, the MIT
 # notice that redistribution owes, three runtime libraries and an amd64-only
-# ELF. This file builds `ghcr.io/logweir/weirkeeper`: ONE binary, no OSO code,
+# ELF. This file builds `docker.io/vladyslavhaina/weirkeeper`: ONE binary, no OSO code,
 # no MIT notice, `ca-certificates` and nothing else, on whatever architecture
 # it is asked for. The two images share a fingerprint file and two licence
 # lines, and nothing else — which is why `scripts/check-image-weirkeeper.sh` is

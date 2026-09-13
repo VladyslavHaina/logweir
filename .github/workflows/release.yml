@@ -61,14 +61,46 @@ name: release
 #
 # The runner image keeps its existing single-platform shape (`linux/amd64`
 # only — the engine binary has no arm64 manifest, Global Constraint 10).
+#
+# ===========================================================================
+# THE REGISTRY IS DOCKER HUB, UNDER `docker.io/vladyslavhaina/...`
+# ===========================================================================
+# MEASURED 2026-09-12, and the reason the namespace moved: the GitHub
+# organisation `logweir` does not exist (`gh api orgs/logweir` -> 404), so a
+# `GITHUB_TOKEN` could only ever have pushed to `ghcr.io/vladyslavhaina/...`;
+# and `logweir` is unclaimed on Docker Hub too
+# (`hub.docker.com/v2/users/logweir/` -> 404). What DOES exist is the owner's
+# personal Docker Hub namespace: `vladyslavhaina/logweir` is public with zero
+# pulls, and `vladyslavhaina/weirkeeper` is created by the first push here,
+# taking its visibility from the account's default-privacy setting.
+#
+# THE NAMESPACE IS A REPOSITORY VARIABLE, READ ONCE PER JOB as
+# `${{ vars.DOCKERHUB_NAMESPACE || 'vladyslavhaina' }}` and used as `$NS`
+# (`${{ env.NS }}` where a `with:` value needs it, because that is an
+# expression and not a shell). Moving to a project-owned namespace later —
+# once `logweir` is claimed — is setting that variable and re-pinning the two
+# digests, not patching this file.
+#
+# DOCKER HUB HAS NO AMBIENT TOKEN. Both `docker/login-action` steps therefore
+# carry `username: ${{ secrets.DOCKERHUB_USERNAME }}` and
+# `password: ${{ secrets.DOCKERHUB_TOKEN }}` and NO `registry:` key at all
+# (the action defaults to Docker Hub). Both secrets exist on this repository
+# as of 2026-09-13T01:50Z. Both steps stay tag-gated, in every job.
+#
+# NOTHING IS PUBLISHED YET. This workflow has still never run; Global
+# Constraint 37 and every `blocked: images not published` row are unchanged by
+# the rename. What the rename buys is that a tagged run CAN now succeed.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+# `contents: write` is the release step's (it creates the GitHub Release and
+# attaches the bundle). `packages: write` is GONE: it granted the GITHUB_TOKEN
+# write access to GHCR, and nothing in this workflow talks to GHCR any more —
+# Docker Hub is reached with the two repository secrets instead.
 permissions:
   contents: write
-  packages: write
 
 jobs:
   plan:
@@ -241,6 +273,11 @@ jobs:
 
   image:
     runs-on: ubuntu-24.04
+    # THE DOCKER HUB NAMESPACE, READ ONCE FOR THIS JOB. Every reference below
+    # is `docker.io/$NS/<name>`; the default is what works today and the
+    # variable is how a move to a project-owned namespace happens later.
+    env:
+      NS: ${{ vars.DOCKERHUB_NAMESPACE || 'vladyslavhaina' }}
     # BOTH ARCHITECTURES MUST HAVE BEEN BUILT AND ASSERTED BEFORE THIS JOB
     # STARTS. `needs` is the only thing that makes "the manifest list is
     # assembled from bytes two native runners already asserted" true rather
@@ -325,7 +362,7 @@ jobs:
       - uses: docker/login-action@v3
         # TAG-GATED, like the push below. `on:` carries `workflow_dispatch`
         # (`:28`), so without this condition a dispatch from a branch logs in
-        # with `packages: write` and the step after it publishes `:<branch>` —
+        # with the Docker Hub token and the step after it publishes `:<branch>` —
         # and moves `:latest` — from a ref no tag ever named. The condition is
         # on BOTH steps because logging in without pushing is still an
         # unnecessary credential exchange, and because a future editor who
@@ -333,10 +370,12 @@ jobs:
         # `workflow_lint_login_and_push_are_tag_gated` asserts both, in every
         # job.
         if: startsWith(github.ref, 'refs/tags/')
+        # NO `registry:` KEY: docker/login-action defaults to Docker Hub, and
+        # Docker Hub has no ambient token, so the credential is the pair of
+        # repository secrets the owner set on 2026-09-13.
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - id: push
         name: Push the image that was just asserted, and capture its digest
         if: startsWith(github.ref, 'refs/tags/')
@@ -344,7 +383,7 @@ jobs:
         # Linux is `bash -e {0}` WITHOUT pipefail, and this shell is
         # `bash --noprofile --norc -eo pipefail {0}`.
         shell: bash
-        # ghcr.io under the LITERAL `logweir/` namespace. Global Constraint 14:
+        # Docker Hub, under the namespace `$NS` names. Global Constraint 14:
         # Logweir never publishes under `osodevops/`, `kafkabackup.com` or
         # `oso.sh`. Pulling upstream's image to extract the engine is a
         # different act and is permitted (global ruling GR6).
@@ -352,19 +391,19 @@ jobs:
         # NOTHING IS REBUILT HERE. `docker tag` renames the bytes the step above
         # asserted; `docker push` uploads those exact bytes.
         run: |
-          # THE LITERAL TARGET (Global Constraint 24), never
-          # `github.repository`. That expression is `<owner>/<repo>`: it equals
-          # the required string only when the repository is literally
-          # `logweir/logweir`, and one repository can never produce the TWO
-          # names this project publishes (`logweir`, the runner, here; and
-          # `weirkeeper`, the controller, from the same job in Task 30b). The
+          # THE TARGET IS `$NS` AND NEVER `github.repository`. That expression
+          # is `<owner>/<repo>`: it names ONE repository, and one repository
+          # can never produce the TWO names this project publishes (`logweir`,
+          # the runner, here; and `weirkeeper`, the controller, from the same
+          # job in Task 30b). `$NS` is this job's `env:`, defaulting to the
+          # namespace the tree's own digests are pinned under. The
           # shipped control plane names these same repositories —
           # `logweir.yaml`'s Deployment and `crates/weirkeeper/src/job.rs`'s
           # `RUNNER_IMAGE` — and
           # `workflow_lint_pushed_references_match_the_shipped_manifest`
           # asserts that what is pushed here is a subset of what ships there.
-          ver="ghcr.io/logweir/logweir:${{ github.ref_name }}"
-          latest="ghcr.io/logweir/logweir:latest"
+          ver="docker.io/$NS/logweir:${{ github.ref_name }}"
+          latest="docker.io/$NS/logweir:latest"
           # `$ver` FIRST, `:latest` SECOND, and the ORDER IS THE POINT: a failed
           # `$ver` push must not leave `:latest` already moved onto bytes that
           # no immutable reference names. (The comment that stood here
@@ -389,8 +428,9 @@ jobs:
           # image once `containerd-snapshotter` is on) the same image carries
           # one RepoDigests entry PER repository name it has ever been tagged
           # with, and index 0 was MEASURED here to be `logweir@sha256:...` — the
-          # throwaway local tag — not the ghcr one. Publishing "the digest of
-          # `ghcr.io/<repo>`" from an entry that names a different repository is
+          # throwaway local tag — not the Docker Hub one. Publishing "the digest
+          # of `docker.io/$NS/<name>`" from an entry that names a different
+          # repository is
           # the same class of mistake as asserting one image and pushing
           # another, even on the days the two digests happen to agree.
           rd=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ver")
@@ -431,18 +471,18 @@ jobs:
         # `workflow_lint_every_platform_is_asserted_before_the_manifest_push`
         # asserts that each platform named here was loaded and asserted first.
         run: |
-          # THE LITERAL TARGET (Global Constraint 24), never
-          # `github.repository` — one repository can never produce the two
-          # names this project publishes.
+          # THE TARGET IS `$NS` (this job's `env:`), never `github.repository`
+          # — one repository can never produce the two names this project
+          # publishes.
           #
           # TWO IMMUTABLE PER-ARCHITECTURE TAGS AND THEN THE LIST. The
           # per-architecture references are not decoration: `docker manifest
           # create` assembles a list out of references that already exist in
           # the registry, and an operator debugging a pull needs to be able to
           # name one variant.
-          amd="ghcr.io/logweir/weirkeeper:${{ github.ref_name }}-amd64"
-          arm="ghcr.io/logweir/weirkeeper:${{ github.ref_name }}-arm64"
-          list="ghcr.io/logweir/weirkeeper:${{ github.ref_name }}"
+          amd="docker.io/$NS/weirkeeper:${{ github.ref_name }}-amd64"
+          arm="docker.io/$NS/weirkeeper:${{ github.ref_name }}-arm64"
+          list="docker.io/$NS/weirkeeper:${{ github.ref_name }}"
           docker tag weirkeeper:check-amd64 "$amd"
           docker push "$amd"
           docker tag weirkeeper:check-arm64 "$arm"
@@ -470,7 +510,7 @@ jobs:
           # name then.
           docker manifest create "$list" "${amd%:*}@$amd_digest" "${arm%:*}@$arm_digest"
           # `docker manifest push` prints the LIST's own repository digest — the
-          # digest a `docker pull ghcr.io/logweir/weirkeeper@…` resolves on any
+          # digest a `docker pull docker.io/$NS/weirkeeper@…` resolves on any
           # architecture. No pipe: the command's exit status is the assignment's.
           list_digest="$(docker manifest push "$list")"
           case "$list_digest" in
@@ -504,6 +544,9 @@ jobs:
   pullback:
     needs: [image]
     runs-on: ubuntu-24.04
+    # The same namespace the `image:` job pushed to, read the same way.
+    env:
+      NS: ${{ vars.DOCKERHUB_NAMESPACE || 'vladyslavhaina' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -512,15 +555,16 @@ jobs:
         # in every job, so that a future editor who loosens the job condition
         # fails a test rather than a release.
         if: startsWith(github.ref, 'refs/tags/')
+        # Docker Hub, with the same two repository secrets the `image:` job
+        # uses and no `registry:` key — see that job's login step.
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Pull the runner image by digest and re-assert it
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          runner="ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}"
+          runner="docker.io/$NS/logweir@${{ needs.image.outputs.digest }}"
           docker pull "$runner"
           bash scripts/check-image.sh "$runner"
           {
@@ -544,7 +588,7 @@ jobs:
         # arm64 pull replaces it, and the arm64 variant is then asserted with
         # `--no-exec` — this runner is amd64 and will not emulate.
         run: |
-          controller="ghcr.io/logweir/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}"
+          controller="docker.io/$NS/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}"
           docker pull --platform linux/amd64 "$controller"
           bash scripts/check-image-weirkeeper.sh "$controller"
           docker pull --platform linux/arm64 "$controller"
@@ -569,13 +613,18 @@ jobs:
             echo
             echo "| image | digest | pulled back on |"
             echo "|---|---|---|"
-            echo "| ghcr.io/logweir/logweir | ${{ needs.image.outputs.digest }} | ${{ github.run_id }} |"
-            echo "| ghcr.io/logweir/weirkeeper | ${{ needs.image.outputs.weirkeeper_digest }} | ${{ github.run_id }} |"
+            echo "| docker.io/$NS/logweir | ${{ needs.image.outputs.digest }} | ${{ github.run_id }} |"
+            echo "| docker.io/$NS/weirkeeper | ${{ needs.image.outputs.weirkeeper_digest }} | ${{ github.run_id }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     needs: [plan, build, image, pullback]
     runs-on: ubuntu-24.04
+    # The release notes name what an operator pulls, so they read the same
+    # namespace the push used — as `${{ env.NS }}`, because a `with:` value is
+    # an expression and not a shell.
+    env:
+      NS: ${{ vars.DOCKERHUB_NAMESPACE || 'vladyslavhaina' }}
     steps:
       - uses: actions/checkout@v4
       # THE DOWNLOAD IS BY PATTERN, NOT "EVERYTHING", and that is a correction
@@ -586,7 +635,7 @@ jobs:
       # megabytes of container image to a release whose assets are supposed to
       # be binaries. The image artifacts are a transport between jobs
       # (`retention-days: 1`) and are deliberately not release assets: what an
-      # operator pulls is `ghcr.io/logweir/weirkeeper@…`, named below.
+      # operator pulls is `docker.io/${{ env.NS }}/weirkeeper@…`, named below.
       - uses: actions/download-artifact@v4
         with: { pattern: binary-*, path: artifacts, merge-multiple: true }
       - uses: actions/download-artifact@v4
@@ -645,9 +694,9 @@ jobs:
             pulled back afterwards by the `pullback:` job of this run, on a
             machine that did not build them:
 
-            - runner: `ghcr.io/logweir/logweir@${{ needs.image.outputs.digest }}`
+            - runner: `docker.io/${{ env.NS }}/logweir@${{ needs.image.outputs.digest }}`
               (linux/amd64 only — the engine binary has no arm64 manifest)
-            - controller: `ghcr.io/logweir/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}`
+            - controller: `docker.io/${{ env.NS }}/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}`
               (a manifest list: linux/amd64 and linux/arm64, each compiled on a
               native runner of its own architecture)
 

@@ -279,7 +279,8 @@ likelihood-of-confusion** for a compound in software classes. No test, script or
 transcript in this repository can substitute for that.
 
 The cost of the answer is already bounded, which is why the clause is a blocker
-and not a stop-work: the registry namespace is the literal `ghcr.io/logweir/…`
+and not a stop-work: the registry namespace is the literal `docker.io/vladyslavhaina/…`
+on Docker Hub
 (Global Constraint 24), fixed now under the working name, so a trademark answer
 changes one string and not the install path. `TRADEMARKS.md` states the
 clearance act and the announcement gate, and

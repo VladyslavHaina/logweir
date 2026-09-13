@@ -115,7 +115,7 @@ server would otherwise reject every runner Job it created.
 
 **`latest` exists in no registry today.** `blocked: images not published`
 (Global Constraint 37) is unchanged by this: `release.yml` has never run,
-nothing has been pushed, and `ghcr.io/logweir/…:latest` resolves nowhere. On a
+nothing has been pushed, and `docker.io/vladyslavhaina/…:latest` resolves nowhere. On a
 cluster with no access to that namespace the controller pod sits in
 `ImagePullBackOff`, exactly as `docs/install.md` path (a) records — the same
 outcome the digests produced, for the same reason. So the DEFAULT path cannot

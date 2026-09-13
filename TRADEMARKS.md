@@ -41,11 +41,19 @@ mark — is a use in commerce and **is gated on the clearance opinion above**.
 
 ## The registry namespace is fixed as a literal, so clearing changes one string
 
-Images publish to `ghcr.io/logweir/logweir` (the runner) and
-`ghcr.io/logweir/weirkeeper` (the controller). **Both are literals, not
-placeholders.** A shipped `logweir.yaml` carrying `ghcr.io/<org>/logweir@sha256:…`
-is not applyable, and the one clause that says a stranger can install Logweir
-would fail on exactly the condition a placeholder was meant to protect against.
+Images publish to Docker Hub: `docker.io/vladyslavhaina/logweir` (the runner)
+and `docker.io/vladyslavhaina/weirkeeper` (the controller). **Both are literals,
+not placeholders.** A shipped `logweir.yaml` carrying
+`docker.io/<namespace>/logweir@sha256:…` is not applyable, and the one clause
+that says a stranger can install Logweir would fail on exactly the condition a
+placeholder was meant to protect against.
+
+The namespace is the owner's personal Docker Hub account, measured 2026-09-12:
+the GitHub organisation `logweir` does not exist and the Docker Hub user
+`logweir` is unclaimed, so neither could be pushed to. Moving to a
+project-owned namespace later is a repository variable
+(`vars.DOCKERHUB_NAMESPACE` in `.github/workflows/release.yml`) and a re-pin of
+the two digests.
 
 Fixing the literal now is what makes the trademark question cheap to answer
 later: **clearing it, or failing to clear it, changes one string** — the

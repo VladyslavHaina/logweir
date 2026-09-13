@@ -47,7 +47,7 @@ THE TWO LOGWEIR IMAGES ABOVE ARE NAMED BY THE `latest` TAG by default — the
 owner's decision of 2026-09-12; values.yaml's header carries the trade-off and
 the command that pins them back to digests. `latest` exists in NO registry
 today (Global Constraint 37, `blocked: images not published`: release.yml has
-never run), so a cluster with no access to ghcr.io/logweir/… leaves the
+never run), so a cluster with no access to docker.io/vladyslavhaina/… leaves the
 controller pod in ImagePullBackOff, exactly as docs/install.md path (a)
 records. An author-only install (images you built and loaded yourself) is
 examples/author-only.values.yaml — with runnerImagePullPolicy: Never beside

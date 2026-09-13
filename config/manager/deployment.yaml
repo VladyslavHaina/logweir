@@ -47,7 +47,7 @@
 # manifest-list digest `docker inspect --format '{{index .RepoDigests 0}}'
 # weirkeeper:check` reported for the image `just image-weirkeeper` built on
 # 2026-09-11. A TAG here would have made the whole control plane replaceable by
-# a `docker build -t ghcr.io/logweir/weirkeeper:v0.1.0` on the node, without
+# a `docker build -t docker.io/vladyslavhaina/weirkeeper:v0.1.0` on the node, without
 # touching a single Kubernetes object — the same defect
 # `examples/cronjob-drill.yaml:78` had for the runner image.
 #
@@ -102,7 +102,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: weirkeeper
-          image: ghcr.io/logweir/weirkeeper@sha256:fa0060bdfc6902be32ee28367a08f647cf64505063e1f1f447c6c4c73ee716ea
+          image: docker.io/vladyslavhaina/weirkeeper@sha256:fa0060bdfc6902be32ee28367a08f647cf64505063e1f1f447c6c4c73ee716ea
           imagePullPolicy: IfNotPresent
           # NO ARGUMENTS. `weirkeeper` takes `--version`, `--help`, or nothing
           # at all, and anything else exits 1 naming what it got

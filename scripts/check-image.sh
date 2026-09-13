@@ -15,7 +15,7 @@
 # image that was asserted was not the image that was pushed. Taking the
 # reference as an argument is what lets the release job assert the exact
 # reference it pushes — a local tag (`logweir:check`) or a digest reference
-# (`ghcr.io/<owner>/logweir@sha256:…`) — so the job becomes
+# (`docker.io/<namespace>/logweir@sha256:…`) — so the job becomes
 # build-once → assert → push-THAT-digest.
 #
 # TWO CALLERS, ONE IMPLEMENTATION:
@@ -95,7 +95,7 @@ fail() {
 if [ "$#" -ne 1 ]; then
   fail "usage: check-image.sh <image-ref>" \
        "  <image-ref> is a local tag (logweir:check) or a digest reference" \
-       "  (ghcr.io/<owner>/logweir@sha256:...). Exactly one, never zero and" \
+       "  (docker.io/<namespace>/logweir@sha256:...). Exactly one, never zero and" \
        "  never two. Build the local tag with \`just image\`."
 fi
 ref="$1"

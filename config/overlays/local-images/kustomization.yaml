@@ -27,8 +27,8 @@
 # ---------------------------------------------------------------------------
 # ONE OF THE TWO IMAGE REFERENCES IS NOT IN ANY MANIFEST, AND IS NOT REWRITTEN
 # ---------------------------------------------------------------------------
-# `ghcr.io/logweir/weirkeeper` is `config/manager/deployment.yaml`'s and this
-# overlay rewrites it. `ghcr.io/logweir/logweir` — the RUNNER image — is a Rust
+# `docker.io/vladyslavhaina/weirkeeper` is `config/manager/deployment.yaml`'s and this
+# overlay rewrites it. `docker.io/vladyslavhaina/logweir` — the RUNNER image — is a Rust
 # constant, `weirkeeper::job::RUNNER_IMAGE`, compiled into the controller and
 # written into every Job the controller creates at runtime. **kustomize cannot
 # reach it**, so the second `images:` entry below is a declaration of intent
@@ -41,7 +41,7 @@
 # repository name AND at that exact digest:
 #
 #     just image
-#     docker tag logweir:check ghcr.io/logweir/logweir:v0.1.0
+#     docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
 #
 # MEASURED (X-DIGEST, `docs/kubernetes.md` §14): the `docker tag` is what makes
 # the shipped digest reference resolve — the kubelet keys on the WHOLE
@@ -55,7 +55,7 @@
 # ---------------------------------------------------------------------------
 # WHY THIS OVERLAY REWRITES TO A TAG WHEN THE BASE IS NOW A DIGEST
 # ---------------------------------------------------------------------------
-# The base reference is `ghcr.io/logweir/weirkeeper@sha256:…` after Task 23, and
+# The base reference is `docker.io/vladyslavhaina/weirkeeper@sha256:…` after Task 23, and
 # `images:` below replaces it with `weirkeeper:check` — a TAG. That is not a
 # relaxation of Global Constraint 7: GC7 governs what is SHIPPED, and this
 # overlay is the author-only path (Global Constraint 37) whose whole premise is
@@ -89,11 +89,11 @@ resources:
   - ../../rbac
 images:
   # The controller. Rewritten in `config/manager/deployment.yaml`.
-  - name: ghcr.io/logweir/weirkeeper
+  - name: docker.io/vladyslavhaina/weirkeeper
     newName: weirkeeper
     newTag: check
   # The runner. Declared, and transforms nothing today — see the header.
-  - name: ghcr.io/logweir/logweir
+  - name: docker.io/vladyslavhaina/logweir
     newName: logweir
     newTag: check
 patches:

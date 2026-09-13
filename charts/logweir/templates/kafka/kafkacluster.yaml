@@ -1,0 +1,65 @@
+{{- /*
+`kafka.enabled` — THE CONNECTION TO A REAL CLUSTER, as `KafkaCluster` custom
+resources. Task 38, ruling 10.
+
+A Kafka connection is not a chart value in this design: it is an object the
+operator reconciles, probes and reports `status.clusterId` for. This file is the
+bridge between the flat shape an adopter writes (`bootstrapServers`,
+`security.protocol`, `security.mechanism`, `username`, `secretRef`) and the
+shape the CRD declares (`auth: {mode, tls, username, secretRef}`). The mapping
+and its refusals live in `_helpers.tpl`'s `logweir.kafka.auth`; the README says
+what the Secret must hold and that Logweir never reads it into a status field,
+a log line or a rendered document.
+
+Nothing renders unless the flag is on, so every existing example renders exactly
+as it did.
+*/ -}}
+{{- if .Values.kafka.enabled }}
+{{- if .Values.demoKafka.enabled }}
+{{- fail "kafka.enabled and demoKafka.enabled are both true. demoKafka brings its own two throwaway brokers and their own KafkaCluster objects (scripts/helm-demo.sh creates them); kafka: points Logweir at a cluster you already run. Turn one off — demoKafka.enabled: false to use your own cluster, kafka.enabled: false to walk the demo." }}
+{{- end }}
+{{- $source := .Values.kafka }}
+apiVersion: logweir.dev/v1alpha1
+kind: KafkaCluster
+metadata:
+  name: {{ $source.name | default "source" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+    logweir.dev/kafka-role: source
+spec:
+  role: source
+  bootstrapServers:
+    {{- include "logweir.kafka.bootstrapServers" (dict "servers" $source.bootstrapServers) | nindent 4 }}
+  auth:
+    {{- include "logweir.kafka.auth" (dict "cluster" $source) | nindent 4 }}
+{{- with .Values.kafka.target }}
+{{- if .bootstrapServers }}
+---
+{{- /*
+THE TARGET IS OPTIONAL AND IS RENDERED ONLY WHEN IT HAS AN ADDRESS. A restore
+needs one; a backup does not. `markerTopic` is what proves a target is a scratch
+cluster — absent, a `mode: scratch` restore against it is refused.
+*/ -}}
+apiVersion: logweir.dev/v1alpha1
+kind: KafkaCluster
+metadata:
+  name: {{ .name | default "target" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: kafka
+    logweir.dev/kafka-role: target
+spec:
+  role: target
+  bootstrapServers:
+    {{- include "logweir.kafka.bootstrapServers" (dict "servers" .bootstrapServers) | nindent 4 }}
+  auth:
+    {{- include "logweir.kafka.auth" (dict "cluster" .) | nindent 4 }}
+  {{- with .markerTopic }}
+  markerTopic: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

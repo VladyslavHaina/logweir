@@ -1,5 +1,12 @@
 # Phase B's exit criterion — `just k8s-demo`, run and recorded
 
+> **2026-09-12 — THE REGISTRY NAMESPACE MOVED AFTER THIS TRANSCRIPT WAS RECORDED, AND NOTHING
+> BELOW IS EDITED.** A record is not a config file. The image references below are the ones that
+> actually ran on the day; the SHIPPED references are now `docker.io/vladyslavhaina/logweir`
+> (runner) and `docker.io/vladyslavhaina/weirkeeper` (controller), on Docker Hub. Why they moved,
+> and what a node has to hold before either resolves: `../docs/kubernetes.md` §14.
+
+
 **Task 24.** `weirkeeper` verifies the evidence the UI renders, in a real
 cluster, with a read-only credential it was given as environment — and the two
 objects it verified carry the verdict on their own status.

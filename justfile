@@ -730,7 +730,7 @@ smoke-weirkeeper: image-weirkeeper
 # It takes both references as parameters so a pushed digest can be checked the
 # same way the local tags are:
 #
-#     just check-org-root ghcr.io/logweir/logweir@sha256:... ghcr.io/logweir/weirkeeper@sha256:...
+#     just check-org-root docker.io/vladyslavhaina/logweir@sha256:... docker.io/vladyslavhaina/weirkeeper@sha256:...
 #
 # EVERY EXIT CODE IS READ ON ITS OWN LINE (STANDING RULE 20). `docker run`'s
 # status is read from `$?` on the next line and `diff`'s from `$?` on the line
@@ -791,7 +791,7 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
 #
 # IT IS AUTHOR-ONLY (Global Constraint 37) and says so in its own header. Two
 # steps work only on the machine the images were built on: the `docker tag`
-# that makes the SHIPPED `ghcr.io/logweir/<name>@sha256:…` references resolve
+# that makes the SHIPPED `docker.io/vladyslavhaina/<name>@sha256:…` references resolve
 # on this node (the kubelet keys on the WHOLE reference — plan erratum E19b),
 # and `config/overlays/k8s-demo/deployment-env-patch.yaml`, which points the
 # controller at this laptop's compose stack. "Published" still means a PULL

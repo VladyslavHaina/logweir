@@ -1148,7 +1148,7 @@ fn install_md_states_the_unpublished_image_caveat() {
     // for it), and a literal here would be its own violation.
     let tag_step = format!(
         "docker tag logweir:check {}{}:{}",
-        "ghcr.io/logweir/", "logweir", "v0.1.0"
+        "docker.io/vladyslavhaina/", "logweir", "v0.1.0"
     );
     assert!(
         install.contains(&tag_step),
@@ -1452,7 +1452,7 @@ fn trademarks_states_the_clearance_act_and_the_announcement_gate() {
     // `crd_shape.rs::the_runner_image_is_named_once` scans every file under
     // `crates/` for the whole string. A literal here would be the second
     // occurrence and would fail that guard, which is the point of it.
-    let runner_repository = format!("{}{}", "ghcr.io/logweir/", "logweir");
+    let runner_repository = format!("{}{}", "docker.io/vladyslavhaina/", "logweir");
     let prose = trademarks.replace('\n', " ");
     assert!(
         prose.contains(&runner_repository) && prose.contains("not placeholders"),
