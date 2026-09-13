@@ -2840,7 +2840,7 @@ the checks hold, and the transcript of the one validation that has run.
 |---|---|---|
 | the six CRDs | always, from `crds/` — installed **once**; Helm never upgrades or deletes that directory | byte-identical copies of `config/crd/*.yaml` (`cmp`) |
 | `ServiceAccount`/`ClusterRole`/`ClusterRoleBinding` `weirkeeper`, `ClusterRole`s `logweir-viewer`/`-operator`/`-approver` (unbound) | always | `config/rbac/`, rule for rule, compared as sets |
-| `Deployment` `weirkeeper` | always | `config/manager/deployment.yaml`, with `controllerImage`, `imagePullPolicy`, `runnerImage` → `LOGWEIR_RUNNER_IMAGE` (Task 33) and `archive.*` → the `k8s-demo` overlay's env |
+| `Deployment` `weirkeeper` | always | `config/manager/deployment.yaml`, with `controllerImage`, `imagePullPolicy`, `runnerImage` → `LOGWEIR_RUNNER_IMAGE` (Task 33), `runnerImagePullPolicy` → `LOGWEIR_RUNNER_PULL_POLICY` (Task 37) and `archive.*` → the `k8s-demo` overlay's env |
 | `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | `config/manager/networkpolicy.yaml`, `config/rbac/backup-runner-serviceaccount.yaml` |
 | MinIO `Deployment`/`Service`/PVC, `Secret`s `<release>-minio-root` and `logweir-s3`, seed `Job` (hook `post-install,post-upgrade`) | `minio.enabled` | the compose stack's two quay.io digests, copied |
 | two KRaft `StatefulSet`s with headless + ClusterIP `Service`s, seed `Job` (hook `post-install`) | `demoKafka.enabled` | `apache/kafka:3.7.1` by manifest-list digest, resolved once (2026-09-12) |
@@ -2851,11 +2851,16 @@ keeps the names the install file uses, the optional components are
 `<release>-`-prefixed. Under the defaults the render is the install file's
 fifteen documents minus the Namespace (`--create-namespace` makes it) plus the
 runner ServiceAccount, and `chart_lint_default_render_agrees_with_the_install_file`
-holds the Deployment's image, pull policy, args, env, both security contexts
-and ServiceAccount, the four ClusterRoles' rules, the CRD specs and the
-NetworkPolicy spec to `logweir.yaml`. The one env the chart renders that the
-install file does not is `LOGWEIR_RUNNER_IMAGE`, whose default is
-`weirkeeper::job::RUNNER_IMAGE`.
+holds the Deployment's args, env, both security contexts and ServiceAccount, the
+four ClusterRoles' rules, the CRD specs and the NetworkPolicy spec to
+`logweir.yaml`. Since Task 37 that test permits **exactly four** differences,
+each asserted rather than waved through: the controller image (the SAME
+repository, `:latest` here against the install file's digest — which the test
+also asserts is still a digest), `imagePullPolicy` (`Always` here,
+`IfNotPresent` there), and the two envs the chart renders that the install file
+does not — `LOGWEIR_RUNNER_IMAGE`, whose default is the `runnerImage`
+repository at `:latest`, and `LOGWEIR_RUNNER_PULL_POLICY`, whose default is
+`Always`. §19.5 says why.
 
 ### 19.2 The three flags, and the UI's authority
 
@@ -2885,10 +2890,15 @@ reached with `kubectl port-forward svc/<release>-ui 8001:8001`.
   `crds/` and `ui/` byte-identical to the tree (`cmp`); `helm lint` for the
   defaults and every example; `helm template` regenerated into
   `charts/logweir/rendered/` with the `crds-check` drift idiom (porcelain
-  empty); every rendered image a digest — `rendered/author-only.yaml` exempt
-  BY NAME, its premise being a locally built tag (E19(a)); the values schema
-  refusing `--set demoKafka.enabled=yes`; `values.yaml` carrying the tree's
-  own pins. Refuses without Helm >= 4, naming it.
+  empty); every rendered image a digest EXCEPT the two Logweir images, which
+  must be exactly `<repository>:latest` (Task 37) — `rendered/author-only.yaml`
+  exempt BY NAME, its premise being a locally built tag (E19(a)), and `:latest`
+  on any OTHER image still refused; the values schema refusing
+  `--set demoKafka.enabled=yes`; `values.yaml` naming the tree's own
+  REPOSITORIES at `:latest`, derived from `config/manager/deployment.yaml` and
+  `weirkeeper::job::RUNNER_IMAGE` and never spelt in the script, so a namespace
+  change in the tree propagates instead of drifting. Refuses without Helm >= 4,
+  naming it.
 * `crates/logweir/tests/chart_lint.rs` (file-reading, Global Constraint 22):
   the parity above; nothing optional under the defaults; each flag's named
   objects under the demo example, the marker topic in the seed's command, the
@@ -3100,6 +3110,84 @@ docker-desktop with the rebuilt controller and **without** the host tag:
 `Succeeded` 10 s after the apply, the `Restore` at `Succeeded` with outcome
 `pass` 51 s after its create, both readers `VALID`, the same five HTTP codes,
 teardown clean. The override is what the runner Jobs used; the tag is gone.
+
+### 19.5 The two Logweir images are named by `latest`, and the pull policies follow — walked twice, 2026-09-12
+
+**The owner decided, 2026-09-12, that the chart's defaults name the two Logweir
+images by the `latest` tag instead of a digest** (Task 37):
+`controllerImage: ghcr.io/logweir/weirkeeper:latest`,
+`runnerImage: ghcr.io/logweir/logweir:latest`. Both repositories are the
+TREE's — `check-chart.sh` and `chart_lint.rs` derive them from
+`config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE` rather than
+spelling them — so a namespace change in the tree moves the chart with it.
+Nothing else in the tree moved: `config/`, `logweir.yaml`,
+`weirkeeper::job::RUNNER_IMAGE` and the chart's four third-party images
+(apache/kafka, MinIO, mc, kubectl) are all still pinned by digest.
+
+**What that forces.** A mutable tag under a pull policy that never pulls is a
+chart that cannot work, so both policies follow the tag. The controller's
+default `imagePullPolicy` becomes `Always` — Kubernetes' own default for
+`:latest`, and the only policy under which a moving tag ever moves. The runner
+Jobs get their own knob, because they are created by the operator and not by
+Helm: a new value `runnerImagePullPolicy` (schema enum
+`Never`/`IfNotPresent`/`Always`, required, default `Always`) renders on the
+Deployment as `LOGWEIR_RUNNER_PULL_POLICY`, beside `LOGWEIR_RUNNER_IMAGE`;
+`main` reads it ONCE through the pure predicate
+`job::configured_runner_pull_policy` and logs ONE line naming the policy and
+its source; an unset or blank variable leaves the compiled-in
+`job::IMAGE_PULL_POLICY` (`Never`) in place, which is why the laptop demo,
+`kind` and every unit test are untouched; and a value outside the three makes
+the controller **refuse to start** rather than create Jobs the API server would
+reject one at a time. `examples/author-only.values.yaml` sets `Never` for both.
+`charts/logweir/values.yaml`'s header carries the trade-off and the command
+that pins the pair back to digests.
+
+**Walked twice on docker-desktop, author-only both times** (Global Constraint
+37 — `logweir:check` and `weirkeeper:check`, built and loaded on this host,
+never pulled; **no checklist row moves**), against a controller image rebuilt
+from this branch because the previously pinned one predated the variable
+(§14.7, the sixth instance):
+
+| | (i) `runnerImagePullPolicy: Never` | (ii) `--set imagePullPolicy=IfNotPresent --set runnerImagePullPolicy=IfNotPresent` |
+|---|---|---|
+| `helm install … --wait --timeout 10m` | rc=0, **29 s** | rc=0, **28 s** |
+| `bash scripts/helm-demo.sh` | rc=0, **85 s** | rc=0, **86 s** |
+| `rc=` lines | **75**, one of them rc=1 — the intended `get ns logweir-helm … check-then-take` refusal | **75**, the same single rc=1 |
+| `Backup` | `Succeeded`, exitCode 0, verification `Valid`, **10 s** from the schedule's apply | the same, **10 s** |
+| `Restore` | `Succeeded`, exitCode 0, outcome `pass`, integrity `byte-fingerprint`, **41 s** from its create | the same, **41 s** |
+| both readers | `logweir drill verify` rc 0, `docs/verify_scorecard.py` rc 0 | rc 0, rc 0 |
+| the UI's five codes | **200, 200, 200, 403, 403** | **200, 200, 200, 403, 403** |
+| teardown | six rc=0, `logweir-*` namespaces left **0** | six rc=0, left **0** |
+
+A line-by-line diff of the two transcripts' `rc=` lines differs only in
+run-specific names — the Backup's timestamp, the Restore and Approval ids, the
+ULIDs, the `mc-cat-*` pod names and the port-forward's pid.
+
+**That the policy reaches the Jobs** was read three ways in each walk: from the
+render (`LOGWEIR_RUNNER_PULL_POLICY: "Never"` / `"IfNotPresent"`); from the
+controller's own log, one line and only one —
+`"the runner pull policy every Job this controller creates will carry",
+runner_pull_policy: "Never" | "IfNotPresent", source: "LOGWEIR_RUNNER_PULL_POLICY"`;
+and from a **live Job the operator created**, whose
+`spec.template.spec.containers[0].imagePullPolicy` read `Never` in walk (i) and
+`IfNotPresent` in walk (ii). In walk (ii) every `reason=Pulled` event in the
+namespace said "already present on machine" for all seven images — the policy
+resolved locally and **nothing was pulled**.
+
+**What was NOT proven, and is not claimed.** The DEFAULT path — `:latest` under
+`Always` — cannot be exercised on any cluster today, because
+`ghcr.io/logweir/weirkeeper:latest` and `ghcr.io/logweir/logweir:latest` exist
+in no registry: `release.yml` has never run, `blocked: images not published`,
+exactly as install path (a)'s digests could not be pulled either. A cluster
+given the chart's defaults today leaves the controller pod in
+`ImagePullBackOff`. And no runner Job inside the walk's own `logweir-helm`
+namespace was read: `helm-demo.sh` is one foreground command whose teardown
+deletes that namespace, and reading a Job there would have needed a poll running
+beside the walk. The live readings above were taken in a throwaway namespace
+outside the `logweir-*` glob, from the same operator process, on a Job built by
+one of the only three lines in the tree that set the field —
+`kafka_cluster.rs`, `restore.rs` and `backup.rs`, identical to one another and
+all feeding the single `job::build`.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
