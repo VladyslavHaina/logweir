@@ -112,10 +112,17 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: taiki-e/install-action@v2
+        # THE BINARY IS `dist`, NOT `cargo dist`, AND THAT WAS MEASURED. The
+        # tool kept its crate name and renamed its executable; a cargo
+        # subcommand is found only as `cargo-<name>` on PATH, so `cargo dist`
+        # exits 101 with `no such command: dist` — which is exactly how the
+        # first tagged run of this workflow died (run 34864252945, v0.1.1,
+        # 2026-09-14). The images were unaffected: `image` does not depend on
+        # this job.
         with: { tool: cargo-dist@0.28.0 }
       - id: plan
         run: |
-          cargo dist plan --output-format=json > dist-manifest.json
+          dist plan --output-format=json > dist-manifest.json
           echo "manifest<<EOF" >> "$GITHUB_OUTPUT"
           cat dist-manifest.json >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -151,7 +158,8 @@ jobs:
         run: brew install cmake
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-dist@0.28.0 }
-      - run: cargo dist build --target=${{ matrix.target }} --output-format=json > dist.json
+      # `dist`, not `cargo dist` — see the plan job's comment.
+      - run: dist build --target=${{ matrix.target }} --output-format=json > dist.json
       - name: The binary must carry no engine
         # Global Constraint 10, asserted rather than assumed. If a future change
         # ever embeds the engine, this fails the release rather than shipping a
