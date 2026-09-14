@@ -130,6 +130,21 @@ targets = [
     "aarch64-apple-darwin",
 ]
 pr-run-mode = "plan"
+
+# THE PROFILE `dist build` COMPILES WITH, AND IT HAS TO EXIST HERE.
+#
+# Measured in run 34884416808 (v0.1.3, 2026-09-14): all three binary targets
+# failed with `error: profile `dist` is not defined`, then `failed to find bin
+# logweir`, exit 255. `dist` invokes `cargo build --profile dist`; that profile
+# is normally written by `dist init`, which this workspace never ran — the
+# `[workspace.metadata.dist]` block above was written by hand when the release
+# was designed, and nothing executed the tool until this week.
+#
+# `inherits = "release"` and nothing else: the release profile is what every
+# other build in this repository uses, and a binary built differently from the
+# one the gates measured would be a different artefact under the same name.
+[profile.dist]
+inherits = "release"
 # release.yml is hand-extended with the debian:bookworm-slim image job and the
 # non-blocking musl attempt, so `cargo dist generate --check` must tolerate a
 # workflow that is not byte-identical to the generated one.
