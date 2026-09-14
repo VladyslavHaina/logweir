@@ -36,13 +36,13 @@ name: helm-demo
 #
 # THE SAME RUNNER PREPARATION AS `kind-demo.yml`, step for step: free the disk
 # (MinIO refuses writes below its free-space floor), the Dockerfile's package
-# list, `just image` and `just image-weirkeeper` with
+# list, `just image`, `just image-ui` and `just image-weirkeeper` with
 # `LOGWEIR_IMAGE_PLATFORM: linux/amd64` so the controller image is compiled
 # NATIVELY on the amd64 runner (STANDING RULE 10 forbids emulating that
 # compile), `kind create cluster` from the pinned `e2e/k8s/kind-config.yaml`,
-# and `kind load` of the two author-only tags. There is no `docker build` line
-# here: the producers of the two tags are `just image` and
-# `just image-weirkeeper`, and the workflow lint refuses a second.
+# and `kind load` of the three author-only tags. There is no `docker build`
+# line here: the producers of the three tags are `just image`, `just image-ui`
+# and `just image-weirkeeper`, and the workflow lint refuses a second.
 #
 # AUTHOR-ONLY, AND NOT EVIDENCE FOR SPEC §16 CLAUSE 1 (Global Constraint 37).
 # The install below uses `charts/logweir/examples/author-only.values.yaml` —
@@ -108,6 +108,8 @@ jobs:
         run: cargo build -p logweir
       - name: just image (the runner image; amd64, Global Constraint 10)
         run: just image
+      - name: just image-ui (the page's image — the chart no longer carries the files)
+        run: just image-ui
       - name: just image-weirkeeper (the controller image, built NATIVELY for this runner)
         env:
           LOGWEIR_IMAGE_PLATFORM: linux/amd64
@@ -118,8 +120,8 @@ jobs:
       # author-only example is `logweir:check` and reaches the controller as
       # LOGWEIR_RUNNER_IMAGE (Task 33), so no `docker tag` of the Docker Hub name is
       # needed here — the kubelet is asked for the name the node holds.
-      - name: kind load the two author-only tags
-        run: kind load docker-image logweir:check weirkeeper:check --name logweir
+      - name: kind load the three author-only tags
+        run: kind load docker-image logweir:check weirkeeper:check logweir-ui:check --name logweir
       # ---------------------------------------------------------------------
       # THE INSTALL — author-only images, all three optional components on.
       # ---------------------------------------------------------------------

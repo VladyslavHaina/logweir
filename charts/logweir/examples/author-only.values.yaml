@@ -34,3 +34,9 @@ imagePullPolicy: Never
 # naming a registry. Set it beside `runnerImage`, always: the image and its pull
 # policy are two halves of one decision.
 runnerImagePullPolicy: Never
+# AND THE PAGE'S IMAGE, for the same reason (Task 39 moved the page out of a
+# ConfigMap and into `logweir-ui`). `just image-ui` builds and loads this tag;
+# without it the chart's default names a repository this branch cannot pull,
+# and `helm install --wait` times out on a Deployment that never becomes Ready.
+ui:
+  image: logweir-ui:check
