@@ -129,23 +129,29 @@ targets = [
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ]
-pr-run-mode = "plan"
+pr-run-mode = "plan"# release.yml is hand-extended with the debian:bookworm-slim image job and the
+# non-blocking musl attempt, so `cargo dist generate --check` must tolerate a
+# workflow that is not byte-identical to the generated one.
+allow-dirty = ["ci"]
 
-# THE PROFILE `dist build` COMPILES WITH, AND IT HAS TO EXIST HERE.
+# THE PROFILE `dist build` COMPILES WITH, AND IT LIVES AT THE END OF THIS FILE.
 #
 # Measured in run 34884416808 (v0.1.3, 2026-09-14): all three binary targets
 # failed with `error: profile `dist` is not defined`, then `failed to find bin
 # logweir`, exit 255. `dist` invokes `cargo build --profile dist`; that profile
-# is normally written by `dist init`, which this workspace never ran — the
-# `[workspace.metadata.dist]` block above was written by hand when the release
-# was designed, and nothing executed the tool until this week.
+# is normally written by `dist init`, which this workspace never ran.
 #
-# `inherits = "release"` and nothing else: the release profile is what every
-# other build in this repository uses, and a binary built differently from the
+# AND IT IS AT THE END FOR A REASON PAID FOR ONCE. Adding it directly after
+# `pr-run-mode` put a new TABLE HEADER in the middle of
+# `[workspace.metadata.dist]`'s keys, so the `allow-dirty = ["ci"]` below it
+# stopped belonging to that table and became a key of `[profile.dist]`. `dist`
+# then believed it owned `.github/workflows/release.yml` and refused the whole
+# release in run 34888302314 (v0.1.4) with a 1138-line diff that would have
+# replaced three image builds, their pull-back and the `tests` gate with its
+# own template. A table header ends the table above it; a key after one belongs
+# to it.
+#
+# `inherits = "release"` and nothing else: a binary built differently from the
 # one the gates measured would be a different artefact under the same name.
 [profile.dist]
 inherits = "release"
-# release.yml is hand-extended with the debian:bookworm-slim image job and the
-# non-blocking musl attempt, so `cargo dist generate --check` must tolerate a
-# workflow that is not byte-identical to the generated one.
-allow-dirty = ["ci"]
