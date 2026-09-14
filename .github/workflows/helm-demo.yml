@@ -171,6 +171,13 @@ jobs:
               kubectl --context kind-logweir -n "$ns" describe "$pod" \
                 > "diagnostics/$ns-$name.describe.txt" 2>&1
               echo "rc=$? (describe $ns/$name)"
+              # AND INTO THE JOB LOG ITSELF, not only into a file. Run
+              # 34877467118 collected all of this and uploaded none of it,
+              # because the upload step named three files; the job log is the
+              # one place output cannot be lost between a step and an artifact.
+              echo "--- $ns/$name (last 40 lines, current then previous) ---"
+              tail -40 "diagnostics/$ns-$name.log"
+              tail -40 "diagnostics/$ns-$name.previous.log"
             done
           done
           cp -r .demo/helm diagnostics/walk 2>/dev/null
@@ -187,14 +194,18 @@ jobs:
             diagnostics/cluster.yaml
             diagnostics/events.txt
             diagnostics/helm-status.txt
+            diagnostics/*.describe.txt
       - name: upload the controller logs and the walk's logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: helm-demo-logs
-          path: |
-            diagnostics/weirkeeper.log
-            diagnostics/walk
+          # THE WHOLE DIRECTORY, not a list of names. Run 34877467118 collected
+          # every pod's log, its previous log and its describe — and uploaded
+          # none of them, because this step names three files and the new ones
+          # were not among them. A diagnostics step whose output never leaves
+          # the runner is a diagnostics step that does not exist.
+          path: diagnostics/
       - name: kind delete cluster
         if: always()
         run: kind delete cluster --name logweir
