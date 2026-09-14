@@ -994,6 +994,14 @@ jobs:
           ui="docker.io/$NS/logweir-ui@${{ needs.image.outputs.ui_digest }}"
           docker pull --platform linux/amd64 "$ui"
           bash scripts/check-image-ui.sh "$ui"
+          # AND THE LOCAL REFERENCE GOES, exactly as the controller's pull-back
+          # above does it. A digest reference names one stored image, so the
+          # arm64 pull cannot land on top of the amd64 one: this step inherited
+          # the controller's two-platform shape from before that was known and
+          # failed with `cannot overwrite digest sha256:1df42242…`, exit 1, in
+          # run 34884416808 (v0.1.3) — after the controller's own pull-back had
+          # passed with the fix. The comment travelled; the line did not.
+          docker image rm "$ui"
           docker pull --platform linux/arm64 "$ui"
           bash scripts/check-image-ui.sh --no-exec "$ui"
           {
