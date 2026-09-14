@@ -441,12 +441,24 @@ jobs:
           # repository is
           # the same class of mistake as asserting one image and pushing
           # another, even on the days the two digests happen to agree.
+          #
+          # AND THE REPOSITORY IS MATCHED IN BOTH SPELLINGS, WHICH THE FIRST
+          # TAGGED RUN MEASURED. Docker normalises a Docker Hub reference by
+          # dropping the default registry, so after pushing
+          # `docker.io/<ns>/logweir:<tag>` the daemon reports the entry as
+          # `<ns>/logweir@sha256:…` with no `docker.io/` in front. Matching only
+          # the long form found nothing and this step exited 1 AFTER a
+          # successful push — run 34864252945 (v0.1.1, 2026-09-14), which left
+          # the runner image published and the controller image unpushed,
+          # because the step after this one never ran. ghcr.io never showed it:
+          # that host is not the default, so its entries keep their prefix.
           rd=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ver")
           repo="${ver%:*}"
+          repo_short="${repo#docker.io/}"
           digest=""
           for entry in $rd; do
             case "$entry" in
-              "$repo"@sha256:*) digest="${entry##*@}" ;;
+              "$repo"@sha256:*|"$repo_short"@sha256:*) digest="${entry##*@}" ;;
             esac
           done
           case "$digest" in
@@ -503,9 +515,12 @@ jobs:
           digest_of() {
             rd=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1")
             repo="${1%:*}"
+            # Both spellings: Docker Hub entries carry no `docker.io/` prefix.
+            # See the runner push above for the run that measured it.
+            repo_short="${repo#docker.io/}"
             for entry in $rd; do
               case "$entry" in
-                "$repo"@sha256:*) printf '%s' "${entry##*@}"; return 0 ;;
+                "$repo"@sha256:*|"$repo_short"@sha256:*) printf '%s' "${entry##*@}"; return 0 ;;
               esac
             done
             echo "no repository digest for $1 after push: '$rd'" >&2
