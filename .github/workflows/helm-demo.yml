@@ -153,6 +153,26 @@ jobs:
           echo "rc=$? (kubectl get events -A)"
           helm --kube-context kind-logweir -n logweir-system status logweir > diagnostics/helm-status.txt 2>&1
           echo "rc=$? (helm status logweir)"
+          # EVERY POD'S OWN LOG, CURRENT AND PREVIOUS. The controller's log
+          # alone was not enough on run 34874941519: the UI container exited
+          # 255 immediately and restarted six times, and nothing here said why,
+          # because only `deploy/weirkeeper` was collected. A crash loop is
+          # exactly the case where the previous container's output is the
+          # evidence and the current one has none.
+          for ns in logweir-system logweir-helm; do
+            for pod in $(kubectl --context kind-logweir -n "$ns" get pods -o name 2>/dev/null); do
+              name="${pod#pod/}"
+              kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --tail=2000 \
+                > "diagnostics/$ns-$name.log" 2>&1
+              echo "rc=$? (logs $ns/$name)"
+              kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --previous --tail=2000 \
+                > "diagnostics/$ns-$name.previous.log" 2>&1
+              echo "rc=$? (logs $ns/$name --previous)"
+              kubectl --context kind-logweir -n "$ns" describe "$pod" \
+                > "diagnostics/$ns-$name.describe.txt" 2>&1
+              echo "rc=$? (describe $ns/$name)"
+            done
+          done
           cp -r .demo/helm diagnostics/walk 2>/dev/null
           rm -f diagnostics/walk/*.pem
           echo "rc=$? (the walk's own logs, keys removed)"
