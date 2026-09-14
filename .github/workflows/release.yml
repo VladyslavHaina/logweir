@@ -614,6 +614,17 @@ jobs:
           controller="docker.io/$NS/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}"
           docker pull --platform linux/amd64 "$controller"
           bash scripts/check-image-weirkeeper.sh "$controller"
+          # A DIGEST REFERENCE NAMES ONE STORED IMAGE, so the second platform
+          # cannot land on top of the first: measured in run 34867336611
+          # (v0.1.2, 2026-09-14), the arm64 pull downloaded every layer and then
+          # refused with `cannot overwrite digest sha256:d1f11a87…`, exit 1,
+          # after the amd64 half had already been asserted. Dropping the local
+          # reference between the two pulls is what lets the SAME digest be
+          # resolved twice, once per platform, which is the proof this step
+          # exists to produce. (The classic image store keys on the reference;
+          # a containerd-backed daemon would hold both, so this is belt for the
+          # store the runner actually has.)
+          docker image rm "$controller"
           docker pull --platform linux/arm64 "$controller"
           bash scripts/check-image-weirkeeper.sh --no-exec "$controller"
           {
