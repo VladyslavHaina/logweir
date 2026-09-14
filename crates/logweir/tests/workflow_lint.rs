@@ -1294,7 +1294,10 @@ fn workflow_lint_pushed_references_share_the_pinned_namespace() {
     );
     assert!(
         offenders.is_empty(),
-        "{} pushed reference(s) are not under `{prefix}`, the namespace          `crates/weirkeeper/src/job.rs`'s RUNNER_IMAGE pins. A workflow that pushes somewhere          the tree does not name publishes images nobody is told to pull — and a namespace the          credentials cannot reach fails the push outright:\n{}",
+        "{} pushed reference(s) are not under `{prefix}`, the namespace \
+         `crates/weirkeeper/src/job.rs`'s RUNNER_IMAGE pins. A workflow that pushes somewhere \
+         the tree does not name publishes images nobody is told to pull — and a namespace the \
+         credentials cannot reach fails the push outright:\n{}",
         offenders.len(),
         offenders.join("\n")
     );
