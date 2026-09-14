@@ -751,6 +751,7 @@ jobs:
           amd="docker.io/$NS/weirkeeper:${{ github.ref_name }}-amd64"
           arm="docker.io/$NS/weirkeeper:${{ github.ref_name }}-arm64"
           list="docker.io/$NS/weirkeeper:${{ github.ref_name }}"
+          latest="docker.io/$NS/weirkeeper:latest"
           docker tag weirkeeper:check-amd64 "$amd"
           docker push "$amd"
           docker tag weirkeeper:check-arm64 "$arm"
@@ -788,8 +789,22 @@ jobs:
             sha256:*) ;;
             *) echo "docker manifest push printed no digest for $list: '$list_digest'" >&2; exit 1 ;;
           esac
+          # AND ONLY THEN `:latest`, from the same two member digests — the same
+          # shape the runner and the UI images use, and for a reason this
+          # workflow learned late: the CHART's `controllerImage` default is
+          # `<ns>/weirkeeper:latest`, so a release that published only the
+          # version tag left every default `helm install` pulling a tag that
+          # had never existed. Measured after v0.1.2, which pushed
+          # `weirkeeper:v0.1.2` and no `:latest` while the runner and the UI
+          # both moved theirs.
+          docker manifest create "$latest" "${amd%:*}@$amd_digest" "${arm%:*}@$arm_digest"
+          latest_digest="$(docker manifest push "$latest")"
+          case "$latest_digest" in
+            sha256:*) ;;
+            *) echo "docker manifest push printed no digest for $latest: '$latest_digest'" >&2; exit 1 ;;
+          esac
           echo "weirkeeper_digest=$list_digest" >> "$GITHUB_OUTPUT"
-          echo "pushed $list at $list_digest (members $amd_digest, $arm_digest)"
+          echo "pushed $list at $list_digest and $latest at $latest_digest (members $amd_digest, $arm_digest)"
 
       - id: push-ui
         name: Push the two asserted UI variants, then the manifest list and :latest
