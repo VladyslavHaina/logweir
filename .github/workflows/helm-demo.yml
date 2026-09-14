@@ -36,10 +36,12 @@ name: helm-demo
 #
 # THE SAME RUNNER PREPARATION AS `kind-demo.yml`, step for step: free the disk
 # (MinIO refuses writes below its free-space floor), the Dockerfile's package
-# list, `just image`, `just image-ui` and `just image-weirkeeper` with
-# `LOGWEIR_IMAGE_PLATFORM: linux/amd64` so the controller image is compiled
+# list, `just image`, and `just image-ui` and `just image-weirkeeper` EACH with
+# `LOGWEIR_IMAGE_PLATFORM: linux/amd64` — both recipes default to the author's
+# `linux/arm64`, so both need it here: the controller so it is compiled
 # NATIVELY on the amd64 runner (STANDING RULE 10 forbids emulating that
-# compile), `kind create cluster` from the pinned `e2e/k8s/kind-config.yaml`,
+# compile), and the page so its kubectl can execute at all. `kind create
+# cluster` from the pinned `e2e/k8s/kind-config.yaml`,
 # and `kind load` of the three author-only tags. There is no `docker build`
 # line here: the producers of the three tags are `just image`, `just image-ui`
 # and `just image-weirkeeper`, and the workflow lint refuses a second.
@@ -109,6 +111,16 @@ jobs:
       - name: just image (the runner image; amd64, Global Constraint 10)
         run: just image
       - name: just image-ui (the page's image — the chart no longer carries the files)
+        env:
+          # THE RUNNER'S OWN ARCHITECTURE, AND IT WAS MEASURED. `just image-ui`
+          # defaults to `linux/arm64` — the author's laptop — exactly as
+          # `just image-weirkeeper` does. Without this the amd64 runner built
+          # an arm64 page image, `kind load` put it on the node, and the
+          # container died instantly with `exec /bin/kubectl: exec format
+          # error`, six restarts and a ten-minute install timeout (runs
+          # 34874941519 and 34879820280). The base is a manifest list carrying
+          # both, so this picks the right variant of kubectl.
+          LOGWEIR_IMAGE_PLATFORM: linux/amd64
         run: just image-ui
       - name: just image-weirkeeper (the controller image, built NATIVELY for this runner)
         env:
