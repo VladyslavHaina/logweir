@@ -300,10 +300,27 @@ fn shipped_ui_files() -> Vec<String> {
     files
 }
 
-/// A UI file's ConfigMap key — the template's `logweir.ui.key`: the path under
-/// `ui/` with `/` spelt `__`.
-fn ui_key(rel: &str) -> String {
-    rel.trim_start_matches("ui/").replace('/', "__")
+/// **The UI image's repository, DERIVED** — the namespace of
+/// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-ui`, which is what
+/// `Dockerfile.ui` builds and what `release.yml` publishes.
+///
+/// It is derived rather than spelt for the reason `scripts/check-chart.sh`'s
+/// arm 7 gives: the UI image has no digest pin in the tree to read a repository
+/// off — this chart is its only reference — so what must not drift is the
+/// NAMESPACE, and taking it from the runner pin is what makes a namespace move
+/// carry all three images at once.
+///
+/// `ui_key` — a UI file's ConfigMap key (`ui/pages/approvals.js` ->
+/// `pages__approvals.js`) — lived here until Task 39 and is DELETED with the
+/// ConfigMap it keyed and with the `logweir.ui.key` template helper. A test
+/// helper for an object nothing renders is a helper the next reader has to
+/// prove is dead, and `cargo clippy -- -D warnings` refuses it anyway.
+fn ui_repository() -> String {
+    let runner = repository_of(&runner_image_constant());
+    let (namespace, _) = runner
+        .rsplit_once('/')
+        .unwrap_or_else(|| panic!("RUNNER_IMAGE's repository `{runner}` names no namespace"));
+    format!("{namespace}/logweir-ui")
 }
 
 // ============================================================== the copies
@@ -335,26 +352,78 @@ fn chart_lint_crds_are_byte_identical_copies() {
     }
 }
 
-/// **The chart's `ui/` is a byte-identical copy of the fourteen shipped UI
-/// files and holds nothing else** — no `tests/` (which carries a throwaway
-/// keypair), no README.
+/// **The chart carries NO copy of the UI and mounts no ConfigMap into the
+/// proxy.** Task 39: the page ships as the `logweir-ui` IMAGE.
+///
+/// RENAMED FROM `chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else`
+/// (STANDING RULE 19), and the rename is the whole change of substance. That
+/// test asserted that `charts/logweir/ui/` — fourteen duplicated files — was
+/// byte-identical to `ui/`. Both the directory and the ConfigMap built from it
+/// are gone, so the assertion it made is not weakened here, it MOVED, to
+/// `scripts/check-image-ui.sh` check 1: that gate computes the sha256 of every
+/// file inside the image that `kubectl proxy --www=/ui` will serve and of every
+/// file under `ui/`, and compares them. A copy in a chart can be right while
+/// the artefact a browser loads is wrong; the image gate reads the artefact.
+///
+/// WHAT THIS TEST CAN STILL SAY, and does: the chart holds no second copy of
+/// the page, renders no ConfigMap for it, and mounts no ConfigMap into the
+/// proxy pod. Each of the three is how the old shape would come back — a merge
+/// that resurrected the directory, a template that rebuilt the object, a volume
+/// that re-mounted it — and each would be a source of served bytes that nothing
+/// hashes.
 #[test]
-fn chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else() {
+fn chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap() {
+    // The fourteen are still fourteen, in the tree, where the image gate hashes
+    // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
+    // comparing against the wrong set.
     let shipped = shipped_ui_files();
-    let copy: BTreeSet<String> = files_under("charts/logweir/ui")
+    assert_eq!(14, shipped.len());
+
+    let under_chart: Vec<String> = files_under("charts/logweir")
         .into_iter()
-        .map(|p| p.trim_start_matches("charts/logweir/").to_string())
+        .filter(|p| p.starts_with("charts/logweir/ui/"))
         .collect();
-    let want: BTreeSet<String> = shipped.iter().cloned().collect();
-    assert_eq!(
-        want, copy,
-        "charts/logweir/ui must hold exactly the fourteen shipped files"
+    assert!(
+        under_chart.is_empty(),
+        "charts/logweir/ui/ is back: {under_chart:?}. Task 39 deleted it — the page is \
+         delivered by `ui.image` (Dockerfile.ui, docker.io/<ns>/logweir-ui), and \
+         scripts/check-image-ui.sh hashes what the image serves against ui/. A copy under the \
+         chart is a second source of the page that nothing hashes."
     );
-    for rel in &shipped {
-        assert_eq!(
-            read_bytes(rel),
-            read_bytes(&format!("charts/logweir/{rel}")),
-            "charts/logweir/{rel} is not byte-identical to {rel}; copy it"
+
+    // NO ConfigMap FOR THE PAGE IN ANY RENDER, and no ConfigMap VOLUME in the
+    // proxy pod. The demo render is the one with `ui.enabled: true`.
+    let docs = rendered("demo");
+    let ui_configmaps: Vec<String> = docs
+        .iter()
+        .filter(|d| d.kind == "ConfigMap" && d.name().contains("-ui"))
+        .map(|d| d.name())
+        .collect();
+    assert!(
+        ui_configmaps.is_empty(),
+        "the chart renders a ConfigMap for the page: {ui_configmaps:?}. The fourteen files are \
+         in the image; a ConfigMap is a MUTABLE API object, so a page served from one is \
+         whatever the last holder of `patch configmaps` wrote."
+    );
+    let ui = find(&docs, "Deployment", "logweir-ui");
+    let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
+    for v in volumes {
+        assert!(
+            !v["configMap"].is_mapping(),
+            "the proxy pod mounts a ConfigMap volume: {v:?}. `/ui` is part of the image's own \
+             read-only filesystem now."
+        );
+    }
+    let mounts = container(ui)["volumeMounts"]
+        .as_sequence()
+        .expect("volumeMounts");
+    for m in mounts {
+        assert_ne!(
+            Some("/ui"),
+            m["mountPath"].as_str(),
+            "something is still mounted at /ui: {m:?}. Whatever it is would shadow the fourteen \
+             files the image carries, and scripts/check-image-ui.sh would be hashing bytes \
+             nobody serves."
         );
     }
 }
@@ -599,9 +668,21 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         "values.yaml runnerImage must be weirkeeper::job::RUNNER_IMAGE's REPOSITORY at \
          `:{LOGWEIR_TAG}`"
     );
+    // TASK 39'S THIRD LOGWEIR IMAGE. `ui.image` stopped being a third-party
+    // kubectl digest and became Logweir's own `logweir-ui`, under the namespace
+    // the runner pin names — derived, never spelt, so a namespace move carries
+    // all three. `scripts/check-chart.sh` arm 7 says the same in shell.
+    assert_eq!(
+        Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
+        values["ui"]["image"].as_str(),
+        "values.yaml ui.image must be `<the runner pin's namespace>/logweir-ui:{LOGWEIR_TAG}` — \
+         the image Dockerfile.ui builds and release.yml publishes. A `registry.k8s.io/kubectl` \
+         digest here is the page back in a ConfigMap"
+    );
     for (path, v) in [
         ("controllerImage", &values["controllerImage"]),
         ("runnerImage", &values["runnerImage"]),
+        ("ui.image", &values["ui"]["image"]),
     ] {
         let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
         assert!(
@@ -622,12 +703,16 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         is_digest_reference(&runner_image_constant()),
         "weirkeeper::job::RUNNER_IMAGE is still a digest (GC7)"
     );
-    // The four third-party images, still digests, still with provenance.
+    // The THREE third-party images left, still digests, still with provenance.
+    // There were four until Task 39: `ui.image` was a `registry.k8s.io/kubectl`
+    // digest, and that digest did not disappear — it moved to `Dockerfile.ui`'s
+    // `FROM`, where it is still pinned under Global Constraint 7 and where
+    // `scripts/check-image-ui.sh` check 3 holds the image's own label and its
+    // baked inventory to it.
     for (path, v) in [
         ("minio.image", &values["minio"]["image"]),
         ("minio.mcImage", &values["minio"]["mcImage"]),
         ("demoKafka.image", &values["demoKafka"]["image"]),
-        ("ui.image", &values["ui"]["image"]),
     ] {
         let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
         assert!(
@@ -636,6 +721,16 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
              `latest` ruling"
         );
     }
+    // AND THE UI IMAGE'S BASE IS STILL THE PINNED KUBECTL, in Dockerfile.ui.
+    // Without this the digest would simply have vanished from every assertion
+    // in this file when it left values.yaml.
+    let dockerfile_ui = read("Dockerfile.ui");
+    assert!(
+        dockerfile_ui.contains("FROM registry.k8s.io/kubectl@sha256:"),
+        "Dockerfile.ui must build FROM a DIGEST-pinned registry.k8s.io/kubectl (Global \
+         Constraint 7). That pin moved here from values.yaml's ui.image in Task 39; a tag there \
+         would let the base change under a build nobody re-ran"
+    );
     // The two MinIO images are the compose stack's, byte for byte.
     let compose = read("e2e/compose/docker-compose.yml");
     for path in ["minio.image", "minio.mcImage"] {
@@ -655,6 +750,10 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
     // assertions, unchanged in substance: a third-party digest whose provenance
     // nobody wrote down is still the defect they were added for.
     let text = read("charts/logweir/README.md");
+    // `registry.k8s.io/kubectl:v1.34.1` IS STILL HERE AFTER TASK 39 and that is
+    // deliberate: the digest moved from `ui.image` to `Dockerfile.ui`'s `FROM`,
+    // but it is still a third-party image this project redistributes, and the
+    // command and date that resolved it are still what a reader needs.
     for command in [
         "docker buildx imagetools inspect apache/kafka:3.7.1",
         "docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1",
@@ -975,10 +1074,28 @@ fn chart_lint_minio_renders_the_backend_and_the_archive_secret() {
 /// page addresses `/apis/logweir.dev/v1alpha1/…` and nothing on `/api/v1`.
 const ACCEPT_PATHS: &str = "--accept-paths=^/(ui/|apis/logweir\\.dev/v1alpha1/)";
 
-/// **`ui.enabled` renders the proxy with its measured paths, the ConfigMap
-/// holding exactly the fourteen UI files' bytes and no key material, the
-/// ServiceAccount, the RoleBinding to the chart's own role (never
-/// `cluster-admin`), the Service on 8001 — and no Ingress.**
+/// **`ui.enabled` renders the proxy with its measured paths, the ServiceAccount,
+/// the RoleBinding to the chart's own role (never `cluster-admin`), the Service
+/// on 8001 — and no Ingress.**
+///
+/// EDITED BY TASK 39, NOT RENAMED: every arm this test had about the args, the
+/// roles, the binding, the Service and the absent Ingress is byte-for-byte what
+/// it was, and they are the arms the name is about. What is gone is the arm
+/// that read the ConfigMap — the fourteen keys, their bytes, the volume `items`
+/// mapping each key back to a path, and the private-key-PEM scan over the
+/// ConfigMap's data. That object no longer renders, so those assertions could
+/// not "stay green unedited": they would panic looking for it. They moved, and
+/// each of them got stronger on the way:
+///
+///   * the fourteen files' BYTES -> `scripts/check-image-ui.sh` check 1, which
+///     hashes what the image serves against `ui/` rather than what a template
+///     inlined;
+///   * "and nothing else" -> the same check, which fails naming every extra
+///     file (measured: an image built with `COPY ui /ui` reported 53 files and
+///     listed `tests/fixtures/approver.pub.pem`);
+///   * Global Constraint 28's no-key-material scan -> the same check, over the
+///     served set, plus `chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap`
+///     which holds the ConfigMap and its volume absent.
 #[test]
 fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     let docs = rendered("demo");
@@ -991,7 +1108,15 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     assert_eq!(
         values["ui"]["image"].as_str(),
         c["image"].as_str(),
-        "the pinned kubectl image"
+        "the Deployment's image is values.yaml's ui.image"
+    );
+    assert_eq!(
+        Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
+        c["image"].as_str(),
+        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the fourteen \
+         shipped files copied in at /ui — under the namespace the runner pin names, at \
+         `:{LOGWEIR_TAG}` like the other two Logweir images. A bare kubectl digest here is the \
+         page back in a ConfigMap."
     );
     let args: Vec<&str> = c["args"]
         .as_sequence()
@@ -1031,67 +1156,22 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
         pod_spec(ui)["automountServiceAccountToken"].as_bool(),
         "the proxy pod needs its token: it is the credential the proxy attaches"
     );
+    // THE ONE VOLUME LEFT is `tmp`, for `HOME` and `KUBECACHEDIR` under
+    // `readOnlyRootFilesystem: true`. The page is not a volume any more, and
+    // `chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap`
+    // is what holds the ConfigMap and its mount absent.
     let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
-    let cm_volume = volumes
-        .iter()
-        .find(|v| v["configMap"].is_mapping())
-        .expect("a configMap volume");
-    let items: BTreeMap<String, String> = cm_volume["configMap"]["items"]
-        .as_sequence()
-        .expect("items")
-        .iter()
-        .map(|i| {
-            (
-                i["key"].as_str().unwrap().to_string(),
-                i["path"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-
-    // The ConfigMap: exactly the fourteen files, byte for byte, mapped back to
-    // their paths, and no key material.
-    let cm = find(&docs, "ConfigMap", "logweir-ui");
-    let data = cm.value["data"].as_mapping().expect("data");
-    let shipped = shipped_ui_files();
     assert_eq!(
-        shipped.len(),
-        data.len(),
-        "the ConfigMap holds exactly the fourteen files"
+        1,
+        volumes.len(),
+        "the proxy pod carries exactly one volume — `tmp` — now that the page is in the image: \
+         {volumes:?}"
     );
-    assert_eq!(
-        shipped.len(),
-        items.len(),
-        "every key is mapped into the volume"
+    assert!(
+        volumes[0]["emptyDir"].is_mapping(),
+        "the one volume is an emptyDir for /tmp: {:?}",
+        volumes[0]
     );
-    for rel in &shipped {
-        let key = ui_key(rel);
-        let got = data
-            .get(Value::String(key.clone()))
-            .unwrap_or_else(|| panic!("the ConfigMap has no key {key} for {rel}"))
-            .as_str()
-            .unwrap_or_else(|| panic!("{key} is a string"));
-        assert_eq!(
-            read(rel),
-            got,
-            "the ConfigMap's {key} is not the tree's {rel} byte for byte"
-        );
-        assert_eq!(
-            Some(rel.trim_start_matches("ui/").to_string()).as_deref(),
-            items.get(&key).map(String::as_str),
-            "{key} must be mounted at its path under /ui"
-        );
-    }
-    for (k, v) in data {
-        let text = v.as_str().unwrap_or("");
-        for line in text.lines() {
-            let t = line.trim();
-            assert!(
-                !(t.starts_with("-----BEGIN") && t.contains("PRIVATE KEY-----")),
-                "Global Constraint 28: {} carries a private-key PEM header",
-                k.as_str().unwrap_or("?")
-            );
-        }
-    }
 
     // The ServiceAccount, the roles, the binding.
     find(&docs, "ServiceAccount", "logweir-ui");
@@ -1220,11 +1300,16 @@ fn chart_lint_only_the_proxy_and_the_controller_hold_a_token() {
 /// The third-party images — MinIO, mc, apache/kafka, kubectl — are untouched by
 /// the ruling and are still digests, in every render including this one.
 #[test]
-fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and_the_author_only_example(
+fn chart_lint_every_rendered_image_is_a_digest_except_the_three_logweir_images_and_the_author_only_example(
 ) {
+    // RENAMED FROM
+    // `chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and_the_author_only_example`
+    // (Task 39, STANDING RULE 19): there are three Logweir images now, and the
+    // number is in the name because the number is the assertion.
     let logweir_repos = [
         repository_of(&controller_image_pin()),
         repository_of(&runner_image_constant()),
+        ui_repository(),
     ];
     let mut total = 0usize;
     let mut tagged = 0usize;
@@ -1253,8 +1338,8 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and
                 assert_eq!(
                     format!("{repo}:{LOGWEIR_TAG}"),
                     image,
-                    "{name}: {}/{} names a Logweir image as {image}; this chart names both by \
-                     `<repository>:{LOGWEIR_TAG}`",
+                    "{name}: {}/{} names a Logweir image as {image}; this chart names all three \
+                     by `<repository>:{LOGWEIR_TAG}`",
                     d.kind,
                     d.name()
                 );
@@ -1262,7 +1347,7 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and
             }
             assert!(
                 is_digest_reference(&image),
-                "{name}: {}/{} references {image} by tag — only the two Logweir images may",
+                "{name}: {}/{} references {image} by tag — only the three Logweir images may",
                 d.kind,
                 d.name()
             );
@@ -1362,7 +1447,14 @@ fn chart_lint_the_gate_script_carries_every_arm() {
     let script = read("scripts/check-chart.sh");
     for needle in [
         "cmp -s \"$src\" \"$CHART/crds/$base\"",
-        "cmp -s \"$src\" \"$CHART/ui/$rel\"",
+        // TASK 39. Arm 2 was `cmp -s "$src" "$CHART/ui/$rel"` — the byte-copy
+        // loop over the chart's duplicate of `ui/`. The directory is gone, the
+        // loop with it, and what the arm asserts now is that the copy has not
+        // come back. The needle below is the REPLACEMENT NAMED IN THE SCRIPT'S
+        // OWN HEADER, so a future editor who deletes arm 2 outright fails here
+        // rather than quietly losing both halves.
+        "scripts/check-image-ui.sh",
+        "if [ -e \"$CHART/ui\" ]; then",
         "helm lint \"$CHART\"",
         "helm template \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --include-crds",
         "git status --porcelain -- \"$RENDERED\"",
@@ -1379,6 +1471,11 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "runner_repo=\"${tree_runner%@sha256:*}\"",
         "$controller_repo:$LOGWEIR_TAG",
         "$runner_repo:$LOGWEIR_TAG",
+        // Task 39: the third repository, its namespace DERIVED from the runner
+        // pin and only its name spelt.
+        "UI_IMAGE_NAME=\"logweir-ui\"",
+        "ui_repo=\"${runner_repo%/*}/$UI_IMAGE_NAME\"",
+        "$ui_repo:$LOGWEIR_TAG",
     ] {
         assert!(
             script.contains(needle),

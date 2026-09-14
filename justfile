@@ -1005,3 +1005,61 @@ gate:
     just receipt-schema-check
     bash scripts/gen-third-party-notices.sh > target/tpn.check && diff -u THIRD_PARTY_NOTICES.md target/tpn.check
     just verify-py
+
+# Task 39, appended at the END of this file as STANDING RULE 17 requires of
+# every editor of it. THE UI IMAGE — the third image this project publishes,
+# and the one that replaced the chart's ConfigMap copy of the page.
+
+# THE NAMED PRODUCER of the local `logweir-ui:check` tag — the sibling of
+# `image` and `image-weirkeeper` above. Three images, three Dockerfiles, three
+# producers, three gates: `scripts/check-image.sh` asserts the runner,
+# `scripts/check-image-weirkeeper.sh` the controller and
+# `scripts/check-image-ui.sh` this one, because each of the other two is
+# written around binaries this image does not carry.
+#
+# SECONDS, NOT MINUTES, AND THAT IS WHY THIS RECIPE IS DIFFERENT FROM ITS TWO
+# SIBLINGS. `Dockerfile.ui` compiles nothing: it is two `COPY`s of ~90 KB over
+# a kubectl the Kubernetes project publishes. There is no builder stage, no
+# `aws-lc-sys`, no cross-compile refusal — so unlike `image-weirkeeper` this
+# recipe has no architecture it cannot build, and unlike `image` it is not
+# pinned to linux/amd64 (no engine ELF is involved).
+#
+# `${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}` IS THE SAME VARIABLE `image-weirkeeper`
+# READS, and for the same reason: the developer default is this host's own
+# architecture, and a CI runner sets its own. The base
+# (`registry.k8s.io/kubectl@sha256:59bafa07…`) is a MANIFEST LIST carrying
+# linux/amd64 and linux/arm64, so either value resolves to that architecture's
+# own variant — measured 2026-09-14.
+#
+# SINGLE-PLATFORM AND LOADED, exactly as its two siblings: the local image
+# store holds single-platform images only, so a multi-platform build could not
+# `--load` and would have to `--push`. Nothing in this tree pushes (Global
+# Constraint 17); multi-arch is `release.yml`'s image job and nothing else, and
+# there is deliberately no `image-ui-release` recipe here.
+#
+# DELIBERATELY NOT PART OF `lint`, `test`, `default`, `e2e` OR `gate`: it needs
+# a Docker daemon, and `just gate` must stay runnable on a machine that has
+# none. It is a row in `docs/gates.md`'s stack/cluster table instead.
+image-ui:
+    docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.ui -t logweir-ui:check .
+
+# THE UI IMAGE'S GATE — `just smoke`'s and `just smoke-weirkeeper`'s sibling,
+# and the recipe that gives `scripts/check-image-ui.sh` a caller.
+#
+# IT IS WHAT REPLACED `scripts/check-chart.sh`'s byte-copy arm. That arm
+# compared two directories in this repository; this one computes the sha256 of
+# every file the image will serve and of every file under `ui/`, and compares
+# them — a statement about the bytes a browser receives.
+#
+# DELIBERATELY NOT IN `just gate`, for the same reason `smoke` and
+# `smoke-weirkeeper` are not: it builds an image and needs a Docker daemon.
+# `crates/logweir/tests/gate_lint.rs::gate_lint_every_check_is_in_the_gate`
+# asserts that every `scripts/check-*.sh` is reached by `just gate` OR by a
+# recipe named in `docs/gates.md`'s stack/cluster table, that the two sets are
+# disjoint and that together they are exhaustive — so this recipe and that
+# table row are what keep `check-image-ui.sh` inside the enumeration rather
+# than orphaned.
+#
+#     just smoke-ui; echo "rc=$?"
+smoke-ui: image-ui
+    bash scripts/check-image-ui.sh logweir-ui:check

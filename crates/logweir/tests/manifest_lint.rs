@@ -2146,7 +2146,7 @@ fn the_controller_image_owes_no_mit_notice() {
     // THREE FILES, NOT TWO (Task 29). Task 23 landed this line naming LICENSE
     // and NOTICE, because `THIRD_PARTY_NOTICES.md` did not exist yet. The
     // exhaustive, COPY-parsing form of this assertion is
-    // `crates/logweir/tests/doc_lint.rs::both_images_copy_the_licence_and_the_notice`,
+    // `crates/logweir/tests/doc_lint.rs::every_image_copies_the_licence_and_the_notice`,
     // which checks both images; this stays as the literal-prefix backstop.
     assert!(
         instructions.iter().any(|l| l.starts_with(

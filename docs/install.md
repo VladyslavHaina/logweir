@@ -107,16 +107,21 @@ components behind three flags: `minio.enabled`
 `demoKafka.enabled` (two throwaway KRaft brokers, `orders` and `payments`
 seeded on the source, the marker topic on the target) and `ui.enabled` (the
 page served in-cluster by `kubectl proxy` with its **own** ServiceAccount's
-authority — the chart's README says exactly whose). `scripts/check-chart.sh`
-(`just chart-check`, in `just gate`) holds the chart's CRDs and UI files
-byte-identical to this tree and its rendered control plane to `logweir.yaml`.
+authority — the chart's README says exactly whose; since Task 39 the page's
+fourteen files arrive in the **`logweir-ui` image**, not in a ConfigMap).
+`scripts/check-chart.sh` (`just chart-check`, in `just gate`) holds the chart's
+CRDs byte-identical to this tree and its rendered control plane to
+`logweir.yaml`; `scripts/check-image-ui.sh` (`just smoke-ui`) holds the page's
+bytes to `ui/` inside the image that serves them.
 
-**The chart's two Logweir images are named by the `latest` TAG, and only in
-this chart.** That is the owner's decision of 2026-09-12: `controllerImage` and
-`runnerImage` default to the repository half of the tree's own two pins followed
-by `:latest`, while `config/manager/deployment.yaml`, `logweir.yaml` and the
+**The chart's three Logweir images are named by the `latest` TAG, and only in
+this chart.** That is the owner's decision of 2026-09-12: `controllerImage`,
+`runnerImage` and `ui.image` default to a Logweir repository followed by
+`:latest`, while `config/manager/deployment.yaml`, `logweir.yaml` and the
 operator's compiled-in `weirkeeper::job::RUNNER_IMAGE` are untouched and still
-pin **digests** (Global Constraint 7), as do the chart's four third-party images.
+pin **digests** (Global Constraint 7), as do the chart's three third-party
+images and the `registry.k8s.io/kubectl` base `Dockerfile.ui` builds the UI
+image on.
 [`charts/logweir/README.md`](../charts/logweir/README.md) carries the whole
 trade-off — what a mutable tag gives up, and the `docker buildx imagetools
 inspect` recipe that pins the two back to digests together with `--set
@@ -165,17 +170,27 @@ aws ecr create-repository --repository-name logweir/weirkeeper   # once, per ima
 aws ecr create-repository --repository-name logweir/logweir
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
-just image && just image-weirkeeper                              # on a builder of the cluster's arch
+aws ecr create-repository --repository-name logweir/logweir-ui           # only with ui.enabled
+just image && just image-weirkeeper && just image-ui             # on a builder of the cluster's arch
 docker tag weirkeeper:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
 docker tag logweir:check    "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
+docker tag logweir-ui:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
 helm upgrade --install logweir charts/logweir -n logweir-system --create-namespace \
   --set controllerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0" \
   --set runnerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
+  --set ui.image="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0" \
   --set imagePullPolicy=IfNotPresent \
   --set imagePullSecrets[0].name=my-regcred
 ```
+
+**The UI image is the one of the three that cross-builds freely**, because
+`Dockerfile.ui` compiles nothing — it copies fourteen static files over the
+pinned kubectl base — so `LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-ui` on
+an arm64 laptop is a normal build and not the emulated compile STANDING RULE 10
+forbids. Only `ui.enabled` installs need it.
 
 `imagePullSecrets` is rendered onto the controller ServiceAccount **and the
 runner ServiceAccount**, so the runner Jobs the operator creates inherit it
@@ -194,6 +209,48 @@ of its properties differ from GHCR's in ways that decide whether a pull works:
 * Anonymous Docker Hub pulls are **rate-limited per source IP**, and every node
   behind one NAT shares that IP. So `imagePullSecrets` carrying a Docker Hub
   login is useful on a public image too, not only on a private one.
+
+---
+
+## Which images a cluster pulls, and which ones Logweir does not republish
+
+**With `minio.enabled: false` and a real S3 endpoint — the shipped default and
+every production install — every image the chart pulls is one of Logweir's
+three:**
+
+| image | when | what it is |
+|---|---|---|
+| `docker.io/vladyslavhaina/weirkeeper` | always | the control plane, `controllerImage` |
+| `docker.io/vladyslavhaina/logweir` | on every drill | the runner Job, `runnerImage` |
+| `docker.io/vladyslavhaina/logweir-ui` | `ui.enabled` | the page: kubectl with the fourteen UI files at `/ui`, `ui.image` |
+
+`minio.enabled` and `demoKafka.enabled` are **optional demo extras**, and only
+they pull anything else: `quay.io/minio/minio`, `quay.io/minio/mc` and
+`apache/kafka`, each pinned upstream **by digest** in `values.yaml`. The
+`registry.k8s.io/kubectl` the UI image is built on is a fourth third-party
+image, but it is not a fourth pull: it is inside `logweir-ui`, pinned by digest
+in `Dockerfile.ui`.
+
+**Those third-party images are NOT mirrored into Logweir's namespace, and the
+reason is not convenience.** Re-publishing someone else's image under
+`docker.io/vladyslavhaina/…` is a redistribution with obligations attached:
+MinIO is AGPL-3.0, and Apache Kafka® and Kubernetes® carry marks their projects
+own. Global Constraint 14 already forbids Logweir publishing under anyone
+else's name, and the same principle points the other way here — Logweir
+publishes what Logweir builds, and pins everything else where its publisher put
+it.
+
+**An adopter whose cluster has no public egress mirrors what they need into
+their own registry themselves.** That is the three Logweir images (path (d)
+above) and, if they turn the demo flags on, the three upstream ones — and the
+chart already takes each as a value:
+
+```bash
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --set minio.image=registry.example.com/minio@sha256:<digest> \
+  --set minio.mcImage=registry.example.com/mc@sha256:<digest> \
+  --set demoKafka.image=registry.example.com/kafka@sha256:<digest>
+```
 
 ---
 
@@ -437,8 +494,16 @@ kubectl --context docker-desktop -n <namespace> \
 ## Serving the UI
 
 The UI is a directory of static files — `ui/` in this repository — and a
-Kubernetes API client. Nothing is installed onto the cluster: tag 1 ships no
-server-side UI component, no image, no sidecar and no HTTP surface of its own.
+Kubernetes API client. **On the path below nothing is installed onto the
+cluster:** you serve the files from your own machine with your own kubectl, and
+there is no sidecar and no HTTP surface of Logweir's own.
+
+The other path is the Helm chart's `ui.enabled`, which runs the same fourteen
+files **in** the cluster out of the `logweir-ui` image, behind a
+`kubectl proxy` whose authority is a ServiceAccount's rather than yours —
+[`charts/logweir/README.md`](../charts/logweir/README.md) says exactly whose,
+and the two paths differ in that one respect and in no other: the bytes are the
+same bytes, and `scripts/check-image-ui.sh` is what says so.
 
 ```bash
 kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1

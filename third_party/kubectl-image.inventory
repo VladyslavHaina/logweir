@@ -1,0 +1,38 @@
+Third-party contents of the `logweir-ui` image
+==============================================
+
+This image is built by `Dockerfile.ui` and carries exactly two things: the
+fourteen static files of Logweir's page (Logweir's own code, Apache-2.0 —
+/usr/share/licenses/logweir/LICENSE and NOTICE), and the base image below,
+which it REDISTRIBUTES in full.
+
+base image
+  registry.k8s.io/kubectl@sha256:59bafa07ff3a6d4b417e7633ddb9d79a9606ca98bf64bac080b3e65748669250
+  resolved from registry.k8s.io/kubectl:v1.34.1 on 2026-09-12
+  (`docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1`;
+   charts/logweir/README.md records the command and the date)
+
+what it contains
+  /bin/kubectl — the Kubernetes command-line tool, and a distroless root
+  filesystem. It is the process this image runs: `kubectl proxy --www=/ui …`,
+  with every argument supplied by the Helm chart and none by this image.
+
+licence
+  Apache License, Version 2.0
+  Copyright The Kubernetes Authors.
+  Text: /usr/share/licenses/kubectl/LICENSE in this image (an unmodified copy
+  of the Apache-2.0 text — the same licence Logweir's own code carries, which
+  is why one file in the tree serves both paths). Upstream:
+  https://github.com/kubernetes/kubernetes/blob/master/LICENSE
+
+what this image does NOT carry, stated because an absent notice is a claim too
+  * no `kafka-backup` binary and no OSO code — so no MIT notice, and
+    /usr/share/licenses/kafka-backup/ is absent (`scripts/check-image-ui.sh`
+    asserts it stays absent);
+  * no Rust binary and no crate from Logweir's dependency graph — so no
+    THIRD_PARTY_NOTICES.md, which is that graph's inventory and would claim a
+    redistribution this image does not make.
+
+Kubernetes® is a registered trademark of The Linux Foundation. Apache Kafka®
+and Kafka® are registered trademarks of the Apache Software Foundation.
+Logweir is not affiliated with or endorsed by either.

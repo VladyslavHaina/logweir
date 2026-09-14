@@ -8,12 +8,21 @@
 #      (`cmp`, exit 1 naming the file otherwise) — Helm installs `crds/` once
 #      and never upgrades it, so a CRD that drifted from the emitter's output
 #      would be a CRD nobody regenerates.
-#   2. `charts/logweir/ui/**` is a byte-identical copy of the fourteen shipped
-#      UI files (`ui/*.html`, `ui/*.js`, `ui/*.css`, `ui/pages/*`) — the bytes
-#      `kubectl proxy --www=/ui` serves in-cluster are the bytes
-#      `scripts/check-ui-offline.sh` scanned; and the copy holds NOTHING else
-#      (no `tests/`, no README): Global Constraint 28, no key material in the
-#      ConfigMap.
+#   2. DELETED BY TASK 39, AND REPLACED BY SOMETHING STRICTLY STRONGER.
+#      Until Task 39 this arm `cmp`'d `charts/logweir/ui/**` against the
+#      fourteen shipped UI files, because the chart carried its own copy of
+#      `ui/` and rendered it into a ConfigMap. The page now ships as the
+#      `logweir-ui` IMAGE (`Dockerfile.ui`, `ui.image`), the chart carries no
+#      `ui/` directory at all, and the assertion moved to
+#      **`scripts/check-image-ui.sh`**, which computes the sha256 of every file
+#      INSIDE THE IMAGE that `kubectl proxy --www=/ui` will serve and of every
+#      file under `ui/`, and compares them. That is a statement about the bytes
+#      a browser receives; this arm could only ever compare two directories in
+#      this repository. `just smoke-ui` runs it and `docs/gates.md`'s
+#      stack/cluster table carries its row (it needs a Docker daemon, so it is
+#      not in `just gate` and must not be). What arm 2 asserts NOW is the one
+#      thing a chart gate can still say about the page: that the chart carries
+#      no copy of it.
 #   3. `helm lint` passes for the default values and for EVERY file under
 #      `charts/logweir/examples/`.
 #   4. `helm template` renders each into `charts/logweir/rendered/<name>.yaml`
@@ -23,7 +32,7 @@
 #   5. Every container image reference in the rendered files is
 #      `<name>@sha256:<64 hex>` (Global Constraint 7) — with TWO exceptions,
 #      and nothing else:
-#        * THE TWO LOGWEIR REPOSITORIES, which must be exactly
+#        * THE THREE LOGWEIR REPOSITORIES, which must be exactly
 #          `<repository>:latest` (the owner's decision of 2026-09-12; arm 7
 #          derives the repositories). A digest there, or any other tag, is a
 #          red; so is `:latest` on ANY OTHER image, which is still refused.
@@ -35,13 +44,22 @@
 #      demoKafka.enabled=yes` (and `minio.`/`ui.`) must exit non-zero.
 #   7. `values.yaml` names THE TREE'S OWN REPOSITORIES AT `latest`:
 #      `controllerImage` is the repository half of the image
-#      `config/manager/deployment.yaml` carries and `runnerImage` is the
-#      repository half of `weirkeeper::job::RUNNER_IMAGE`, each followed by
-#      `:latest`. The repositories are DERIVED, never spelt here, so a
-#      namespace change in the tree propagates; the TAG is this chart's ruling
-#      (the owner's decision of 2026-09-12) and `config/`, `logweir.yaml` and
-#      that Rust constant keep their digests under Global Constraint 7. A
-#      digest written back into either value is a red.
+#      `config/manager/deployment.yaml` carries, `runnerImage` is the
+#      repository half of `weirkeeper::job::RUNNER_IMAGE`, and `ui.image` is
+#      `logweir-ui` UNDER THE NAMESPACE THOSE TWO SHARE (Task 39) — each
+#      followed by `:latest`. The repositories are DERIVED, never spelt here,
+#      so a namespace change in the tree propagates; the TAG is this chart's
+#      ruling (the owner's decision of 2026-09-12) and `config/`,
+#      `logweir.yaml` and that Rust constant keep their digests under Global
+#      Constraint 7. A digest written back into any of the three is a red.
+#
+#      THE UI REPOSITORY HAS NO DIGEST PIN IN THE TREE TO DERIVE FROM, and that
+#      is not an omission: `logweir-ui` is referenced by exactly one thing this
+#      project ships — this chart — so there is no second call site for a
+#      digest to drift against. What must not drift is the NAMESPACE, which is
+#      why it is taken from the runner pin rather than written here. The
+#      image's own base IS pinned by digest, in `Dockerfile.ui`, and
+#      `scripts/check-image-ui.sh` check 3 holds it there.
 #
 # WHAT IT DOES NOT PROVE: that the chart installs. That is a cluster gate —
 # `just helm-demo` on docker-desktop, `.github/workflows/helm-demo.yml` on
@@ -130,42 +148,26 @@ done
 [ "$fail" -eq 0 ] && echo "   ok: $crd_count CRDs, byte for byte"
 
 # ---------------------------------------------------------------- 2. the UI
-echo "== 2. ui/ is a byte-identical copy of the fourteen shipped UI files =="
-ui_files=()
-while IFS= read -r -d '' f; do
-  ui_files+=("$f")
-done < <(find ui -type f ! -name '*.md' ! -path 'ui/tests/*' -print0)
-ui_fail=0
-for src in "${ui_files[@]}"; do
-  rel="${src#ui/}"
-  if [ ! -f "$CHART/ui/$rel" ]; then
-    echo "FAIL: $CHART/ui/$rel is missing ($src exists)" >&2
-    ui_fail=1
-    continue
-  fi
-  cmp -s "$src" "$CHART/ui/$rel"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "FAIL: $CHART/ui/$rel is not byte-identical to $src (cmp rc=$rc). Copy it:" >&2
-    echo "      cp $src $CHART/ui/$rel" >&2
-    ui_fail=1
-  fi
-done
-chart_ui_count=0
-while IFS= read -r -d '' f; do
-  chart_ui_count=$((chart_ui_count + 1))
-  rel="${f#"$CHART"/ui/}"
-  if [ ! -f "ui/$rel" ]; then
-    echo "FAIL: $CHART/ui/$rel has no counterpart under ui/ — the chart's copy carries the shipped page and nothing else" >&2
-    ui_fail=1
-  fi
-done < <(find "$CHART/ui" -type f -print0)
-[ "${#ui_files[@]}" -eq 14 ] || { echo "FAIL: expected fourteen shipped UI files under ui/, found ${#ui_files[@]}" >&2; ui_fail=1; }
-[ "$chart_ui_count" -eq "${#ui_files[@]}" ] || { echo "FAIL: $CHART/ui holds $chart_ui_count file(s), ui/ holds ${#ui_files[@]}" >&2; ui_fail=1; }
-if [ "$ui_fail" -eq 0 ]; then
-  echo "   ok: ${#ui_files[@]} files, byte for byte, and nothing else"
-else
+# THE ARM IS GONE AND SO IS WHAT IT GUARDED. Task 39 moved the page into the
+# `logweir-ui` image; `charts/logweir/ui/` no longer exists, so there is no copy
+# to `cmp`. Its replacement is `scripts/check-image-ui.sh`, which hashes the
+# files INSIDE THE IMAGE against `ui/` — see this file's header, item 2.
+#
+# WHAT IS ASSERTED HERE INSTEAD is the one thing a chart gate still can say
+# about the page: that the chart carries NO copy of it. A directory that came
+# back — a merge that resurrected it, a `cp -r` someone found convenient —
+# would be a second source of the page that nothing hashes, and the ConfigMap
+# would follow it.
+echo "== 2. the chart carries NO copy of ui/ (the page is the logweir-ui image) =="
+if [ -e "$CHART/ui" ]; then
+  echo "FAIL: $CHART/ui exists. Task 39 deleted it: the page ships as the logweir-ui" >&2
+  echo "      image (Dockerfile.ui, values.yaml's ui.image), asserted by" >&2
+  echo "      scripts/check-image-ui.sh against the bytes a browser receives — run it" >&2
+  echo "      with \`just smoke-ui\`. A copy under the chart is a second source of the" >&2
+  echo "      page that nothing hashes." >&2
   fail=1
+else
+  echo "   ok: no $CHART/ui — the page is delivered by ui.image, not by a ConfigMap"
 fi
 
 # ---------------------------------------------------------------- 7. the pins
@@ -174,6 +176,12 @@ fi
 echo "== 7. values.yaml names the tree's own repositories at $LOGWEIR_TAG =="
 values_controller="$(sed -n 's/^controllerImage:[[:space:]]*//p' "$CHART/values.yaml")"
 values_runner="$(sed -n 's/^runnerImage:[[:space:]]*//p' "$CHART/values.yaml")"
+# `ui.image` IS INDENTED AND CARRIES A TRAILING COMMENT (ruling 15's short
+# style), so it is read with its own expression rather than with the two above:
+# two leading spaces, the key, the value up to the first whitespace. `tail -1`
+# because `minio:` and `demoKafka:` carry an `image:` at the same indent and
+# `ui:` is the last block in the file.
+values_ui="$(sed -n 's/^[[:space:]]\{2\}image:[[:space:]]*\([^[:space:]]*\).*$/\1/p' "$CHART/values.yaml" | tail -1)"
 # THE TREE'S REFERENCES, WHOLE — each still a digest under Global Constraint 7.
 tree_controller="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' config/manager/deployment.yaml)"
 tree_runner="$(grep -A1 '^pub const RUNNER_IMAGE: &str =' crates/weirkeeper/src/job.rs | sed -n 's/^[[:space:]]*"\(.*\)";$/\1/p')"
@@ -187,8 +195,20 @@ if [ -z "$controller_repo" ] || [ -z "$runner_repo" ] ||
   echo "      config/manager/deployment.yaml and crates/weirkeeper/src/job.rs must each pin <repository>@sha256:<64 hex>" >&2
   fail=1
 fi
+# THE THIRD REPOSITORY, TASK 39. The UI image has no digest pin in the tree to
+# strip a digest off — it is referenced by this chart alone — so its NAMESPACE
+# is taken from the runner's and only the NAME is this chart's. A namespace
+# move therefore carries all three, which is the property arm 7 exists for.
+UI_IMAGE_NAME="logweir-ui"
+ui_repo="${runner_repo%/*}/$UI_IMAGE_NAME"
+if [ "${runner_repo%/*}" = "$runner_repo" ]; then
+  echo "FAIL: could not derive the UI repository's namespace from the runner pin '$tree_runner'" >&2
+  echo "      crates/weirkeeper/src/job.rs's RUNNER_IMAGE must name <host>/<namespace>/<name>@sha256:<64 hex>" >&2
+  fail=1
+fi
 want_controller="$controller_repo:$LOGWEIR_TAG"
 want_runner="$runner_repo:$LOGWEIR_TAG"
+want_ui="$ui_repo:$LOGWEIR_TAG"
 if [ "$values_controller" != "$want_controller" ]; then
   echo "FAIL: values.yaml controllerImage is '$values_controller'; it must be exactly '$want_controller'" >&2
   echo "      (arm 7: the repository is config/manager/deployment.yaml's, the tag is this chart's ruling of 2026-09-12)" >&2
@@ -199,7 +219,16 @@ if [ "$values_runner" != "$want_runner" ]; then
   echo "      (arm 7: the repository is crates/weirkeeper/src/job.rs's RUNNER_IMAGE, the tag is this chart's ruling of 2026-09-12)" >&2
   fail=1
 fi
-[ "$values_controller" = "$want_controller" ] && [ "$values_runner" = "$want_runner" ] && echo "   ok: controllerImage and runnerImage are the tree's repositories at $LOGWEIR_TAG"
+if [ "$values_ui" != "$want_ui" ]; then
+  echo "FAIL: values.yaml ui.image is '$values_ui'; it must be exactly '$want_ui'" >&2
+  echo "      (arm 7, Task 39: the namespace is the runner pin's, the name is logweir-ui — the" >&2
+  echo "      image Dockerfile.ui builds and release.yml publishes — and the tag is this chart's" >&2
+  echo "      ruling of 2026-09-12. A kubectl digest here is the page back in a ConfigMap.)" >&2
+  fail=1
+fi
+[ "$values_controller" = "$want_controller" ] && [ "$values_runner" = "$want_runner" ] &&
+  [ "$values_ui" = "$want_ui" ] &&
+  echo "   ok: controllerImage, runnerImage and ui.image are the tree's repositories at $LOGWEIR_TAG"
 
 # ---------------------------------------------------------------- 3 + 4. lint and render
 echo "== 3. helm lint, default values and every example =="
@@ -272,7 +301,7 @@ fi
 # The two Logweir repositories come from arm 7 above, which is why that arm runs
 # first. They are the ONLY references allowed to be a tag here, and the only tag
 # allowed is $LOGWEIR_TAG — exactly.
-echo "== 5. every rendered image is a digest, except the two Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
+echo "== 5. every rendered image is a digest, except the three Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
 images=0
 logweir_tagged=0
 for f in "$RENDERED"/*.yaml; do
@@ -288,14 +317,22 @@ for f in "$RENDERED"/*.yaml; do
     ref="${ref//\'/}"
     ref="$(printf '%s' "$ref" | tr -d '[:space:]')"
     images=$((images + 1))
-    # THE TWO LOGWEIR IMAGES, BY REPOSITORY. Each must be exactly
+    # THE THREE LOGWEIR IMAGES, BY REPOSITORY. Each must be exactly
     # `<repository>:$LOGWEIR_TAG` — a digest there is this chart's ruling
     # reverted, and any other tag is a value nobody chose.
+    #
+    # `logweir-ui` IS NOT MATCHED BY THE RUNNER'S PATTERN, which is worth
+    # stating because the names share a prefix: `$runner_repo:*` requires the
+    # colon immediately after `.../logweir`, and `.../logweir-ui:latest` has
+    # `-ui` there. Before Task 39 added the third arm, the UI reference fell
+    # through to the digest arm below and was reported as an un-digested tag.
     case "$ref" in
-      "$controller_repo":*|"$runner_repo":*|"$controller_repo"@*|"$runner_repo"@*)
+      "$controller_repo":*|"$runner_repo":*|"$ui_repo":*|"$controller_repo"@*|"$runner_repo"@*|"$ui_repo"@*)
         logweir_tagged=$((logweir_tagged + 1))
-        if [ "$ref" != "$controller_repo:$LOGWEIR_TAG" ] && [ "$ref" != "$runner_repo:$LOGWEIR_TAG" ]; then
-          echo "FAIL: $base references a Logweir image as '$ref'; this chart names both by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
+        if [ "$ref" != "$controller_repo:$LOGWEIR_TAG" ] &&
+           [ "$ref" != "$runner_repo:$LOGWEIR_TAG" ] &&
+           [ "$ref" != "$ui_repo:$LOGWEIR_TAG" ]; then
+          echo "FAIL: $base references a Logweir image as '$ref'; this chart names all three by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
           fail=1
         fi
         continue
@@ -310,7 +347,7 @@ for f in "$RENDERED"/*.yaml; do
         ;;
     esac
     case "$ref" in
-      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the two Logweir images may carry a tag here" >&2; fail=1 ;;
+      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the three Logweir images may carry a tag here" >&2; fail=1 ;;
     esac
   done < <(grep -E '^[[:space:]]+(- )?image:[[:space:]]' "$f")
 done
@@ -342,8 +379,8 @@ if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
   exit 1
 fi
-echo "ok: charts/logweir — CRDs and UI byte-identical, helm lint clean, rendered files current,"
-echo "    every image a digest except the two Logweir images at :$LOGWEIR_TAG (author-only exempt by"
-echo "    name), the schema refuses a non-boolean flag, and values.yaml names the tree's own"
-echo "    repositories at :$LOGWEIR_TAG."
+echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is the logweir-ui image),"
+echo "    helm lint clean, rendered files current, every image a digest except the three Logweir"
+echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
+echo "    flag, and values.yaml names the tree's own repositories at :$LOGWEIR_TAG."
 exit 0

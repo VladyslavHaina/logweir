@@ -3,12 +3,23 @@
 A Kubernetes API client, served as static files, and nothing else.
 
 There is no API server of its own between this page and `kube-apiserver`, no
-database, and no server-side component of any kind -- tag 1 ships no UI image,
-no sidecar and no HTTP surface. There is also **no build step**: plain ES
-modules, no bundler, no framework, no `package.json`, no `node_modules`, no
-minifier and no source maps. The shipped assets *are* the sources, so there is
-no build output that could differ from the bytes the gates scan, and there is
-nothing to fetch.
+database, and no server-side component of any kind -- no sidecar and no HTTP
+surface. There is also **no build step**: plain ES modules, no bundler, no
+framework, no `package.json`, no `node_modules`, no minifier and no source
+maps. The shipped assets *are* the sources, so there is no build output that
+could differ from the bytes the gates scan, and there is nothing to fetch.
+
+**There IS now an image, and it changes none of the above** (Task 39).
+`Dockerfile.ui` copies these fourteen files into `/ui` over the pinned
+`registry.k8s.io/kubectl`, and the Helm chart's `ui.enabled` runs it -- so an
+in-cluster install can pull the page instead of the chart carrying a copy of
+it in a ConfigMap. The image is a **delivery mechanism and nothing more**: it
+adds no server, no bundler and no build step, `kubectl proxy` is still exactly
+what serves these files, and every one of that proxy's arguments still lives in
+the chart rather than in the image. `scripts/check-image-ui.sh` (`just
+smoke-ui`) computes the sha256 of every file the image serves and of every file
+here, and compares them -- so the bytes an in-cluster browser receives are the
+bytes in this directory, asserted rather than assumed.
 
 ## Serving it
 

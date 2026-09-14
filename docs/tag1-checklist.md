@@ -213,8 +213,8 @@ the default test set —
 sentence in every Markdown file under `docs/` and at the repository root, with a
 CC-BY-4.0 link that has to **resolve** on disk),
 `contributing_requires_a_dco_signoff_and_no_cla`,
-`both_images_copy_the_licence_and_the_notice` (the `COPY` instructions in both
-Dockerfiles), and
+`every_image_copies_the_licence_and_the_notice` (the `COPY` instructions in all
+three Dockerfiles), and
 `the_notice_names_every_librdkafka_component_in_licenses_txt`.
 `scripts/check-dod.sh` is the fifth: it requires each release file to be present
 and non-empty, and its attribution arm walks **every** Markdown file in the tree

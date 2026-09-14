@@ -2845,7 +2845,7 @@ the checks hold, and the transcript of the one validation that has run.
 | `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | `config/manager/networkpolicy.yaml`, `config/rbac/backup-runner-serviceaccount.yaml` |
 | MinIO `Deployment`/`Service`/PVC, `Secret`s `<release>-minio-root` and `logweir-s3`, seed `Job` (hook `post-install,post-upgrade`) | `minio.enabled` | the compose stack's two quay.io digests, copied |
 | two KRaft `StatefulSet`s with headless + ClusterIP `Service`s, seed `Job` (hook `post-install`) | `demoKafka.enabled` | `apache/kafka:3.7.1` by manifest-list digest, resolved once (2026-09-12) |
-| UI `Deployment`/`Service`/`ConfigMap`/`ServiceAccount`/`ClusterRole`s/`RoleBinding` | `ui.enabled` | `registry.k8s.io/kubectl:v1.34.1` by digest, resolved once (2026-09-12); the fourteen UI files from the chart's byte copy |
+| UI `Deployment`/`Service`/`ServiceAccount`/`ClusterRole`s/`RoleBinding` | `ui.enabled` | `docker.io/vladyslavhaina/logweir-ui:latest` — Logweir's own image (Task 39): `registry.k8s.io/kubectl:v1.34.1` by digest, resolved once (2026-09-12), with the fourteen UI files copied in at `/ui`. **No ConfigMap**: the chart carries no copy of `ui/` any more |
 
 Every namespaced object renders into `.Release.Namespace`; the control plane
 keeps the names the install file uses, the optional components are
@@ -2903,9 +2903,11 @@ reached with `kubectl port-forward svc/<release>-ui 8001:8001`.
 * `crates/logweir/tests/chart_lint.rs` (file-reading, Global Constraint 22):
   the parity above; nothing optional under the defaults; each flag's named
   objects under the demo example, the marker topic in the seed's command, the
-  two cluster ids distinct, `--accept-paths` measured and never `.*`, the
-  ConfigMap holding the fourteen files byte for byte and no key material, the
-  RoleBinding to the chart's own role and never `cluster-admin`, no Ingress.
+  two cluster ids distinct, `--accept-paths` measured and never `.*`, no copy
+  of `ui/` under the chart and no ConfigMap mounted into the proxy (Task 39 —
+  the fourteen files' bytes are asserted against the IMAGE instead, by
+  `scripts/check-image-ui.sh`), the RoleBinding to the chart's own role and
+  never `cluster-admin`, no Ingress.
 * `workflow_lint.rs` holds `.github/workflows/helm-demo.yml` to its shape;
   `gate_lint.rs` holds `just chart-check` to its place and `just helm-demo`
   to the stack/cluster table.
@@ -3189,6 +3191,66 @@ outside the `logweir-*` glob, from the same operator process, on a Job built by
 one of the only three lines in the tree that set the field —
 `kafka_cluster.rs`, `restore.rs` and `backup.rs`, identical to one another and
 all feeding the single `job::build`.
+
+### 19.6 The page became an image, and the chart stopped carrying it — walked 2026-09-14
+
+**Task 39.** Until this section the chart carried its own byte-identical copy of
+`ui/` — fourteen files, ~86 KB — rendered it into a ConfigMap through
+`.Files.Glob "ui/**"` and mounted that into the proxy pod. It now runs
+`ui.image`, which defaults to `docker.io/vladyslavhaina/logweir-ui:latest`:
+`Dockerfile.ui` copies those same fourteen files into `/ui` over the SAME pinned
+`registry.k8s.io/kubectl` digest the chart used before, and nothing else. **The
+entrypoint is `kubectl` and every `kubectl proxy` argument is still the
+chart's** — `--accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'` is the
+authorisation boundary and it stays where `helm template` shows it and where
+three tests in `chart_lint.rs` assert it.
+
+**What the chart stopped carrying, and what replaced it.** `charts/logweir/ui/`
+(fourteen duplicated files) and the ConfigMap, its volume and its mount are all
+gone; the rendered demo and MSK examples lost **5,505** and **5,506** lines
+each. `scripts/check-chart.sh`'s byte-copy arm is deleted and
+`scripts/check-image-ui.sh` (`just smoke-ui`) replaced it: that gate computes
+the sha256 of every file the image will serve and of every file under `ui/` and
+compares them — a statement about the bytes a browser receives, where the old
+arm could only compare two directories in the Logweir repository. The image
+also carries Logweir's `LICENSE` and `NOTICE` and, under
+`/usr/share/licenses/kubectl/`, kubectl's Apache-2.0 text and an inventory
+naming the base digest; it deliberately carries neither `THIRD_PARTY_NOTICES.md`
+(the Rust graph's inventory — this image links no Rust binary) nor an MIT
+notice, and the gate asserts both absences.
+
+**Walked on the author's docker-desktop, 2026-09-14**, with the same author-only
+values §19.4 used plus `--set ui.image=logweir-ui:check`, all three flags on,
+`helm install … --wait` **rc=0 in 42 s**. The pod's `spec.template.spec.volumes`
+is `[{"emptyDir":{},"name":"tmp"}]` — one volume, no ConfigMap volume — and the
+only ConfigMap in `logweir-system` is `kube-root-ca.crt`. `bash
+scripts/helm-demo.sh` then ran end to end: 75 `rc=` lines, exactly one non-zero
+and it is the check-then-take assertion that `logweir-helm` must NOT exist yet.
+**Backup `Succeeded`, wall clock 10 s** from the schedule's apply,
+`verification=Valid`; **Restore `Succeeded`, wall clock 41 s** from the create,
+`outcome=pass`, `integrity=byte-fingerprint`; both readers agreed, each exit
+code read directly (`logweir drill verify` 0, `docs/verify_scorecard.py` 0).
+
+**The UI's five HTTP codes through the port-forward are what they were when the
+page came from a ConfigMap** — 200 the page, 200 the router, 200 the Backup
+list, 403 a Pod exec path, 403 the core API — and the line that matters most is
+the one in between:
+
+```
+    served ui/app.js sha256 70e4306d518fa883f3e9b7e13f9cedac8ed952a627a7c637ee7a54c9ad47ae1f
+    tree   ui/app.js sha256 70e4306d518fa883f3e9b7e13f9cedac8ed952a627a7c637ee7a54c9ad47ae1f
+```
+
+Those bytes came out of the image, through `kubectl proxy`, over a port-forward,
+into `curl` — and they are the tree's. Teardown left **0** `logweir-*`
+namespaces and no `logweir.dev` CRD.
+
+**Author-only, and NOT evidence for spec §16 clause 1** (Global Constraint 37),
+exactly as §19.4: `logweir-ui:check` was built on this host by `just image-ui`
+and never pulled. **`docker.io/vladyslavhaina/logweir-ui` does not exist yet** —
+the owner creates the repository and a tagged `release.yml` run publishes into
+it. What this section proves is that the chart, the image and the gate work
+together; it proves nothing about publication.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

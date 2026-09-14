@@ -33,7 +33,9 @@ One chart that installs Logweir's control plane — the same objects
 [`logweir.yaml`](../../logweir.yaml) ships — and, optionally, its own
 object-store backend, two throwaway Kafka clusters and the UI. It is
 **derived from `config/`**, never the other way round: `scripts/check-chart.sh`
-holds the chart's CRDs and UI files byte-identical to the tree, and
+holds the chart's CRDs byte-identical to the tree (and the page's bytes are
+held to it by `scripts/check-image-ui.sh`, against the image that serves
+them), and
 `crates/logweir/tests/chart_lint.rs` holds the rendered control plane to the
 install file. [`docs/install.md`](../../docs/install.md) is still the single
 install document; this README is the chart's own.
@@ -49,7 +51,7 @@ install document; this README is the chart's own.
 | `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | apply both into every other namespace that runs Jobs (`docs/install.md` steps 4 and 6) |
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
-| `Deployment`, `Service`, `ConfigMap`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the fourteen UI files and the API on one origin, with its own authority (below) |
+| `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the fourteen UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 
 Nothing optional is on by default, and the defaults are the shipped install:
 `helm template charts/logweir` with nothing overridden renders the same
@@ -337,12 +339,49 @@ the facts it does not have room for, measured 2026-09-12:
 
 With `ui.enabled`, one pod runs `kubectl proxy --www=/ui --www-prefix=/ui/
 --address=0.0.0.0 --port=8001 --accept-hosts='.*'
---accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'` from a kubectl image
-pinned by digest, with the fourteen UI files mounted from a ConfigMap. The
+--accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'` from **`ui.image`**. The
 proxy attaches the pod's ServiceAccount credential — `<release>-ui` — to every
 request it forwards, so **anyone who can reach that Service acts with that
 ServiceAccount's authority.** The page holds no credential and asks for none
-(Global Constraint 28: no key material in the page, none in the ConfigMap).
+(Global Constraint 28: no key material in the page, none in the image that
+serves it).
+
+### The page is an image, not a ConfigMap
+
+`ui.image` defaults to `docker.io/vladyslavhaina/logweir-ui:latest`. **What is
+in it:** the pinned `registry.k8s.io/kubectl` (v1.34.1, resolved by digest on
+2026-09-12 — the command is below) with the **fourteen shipped UI files copied
+in at `/ui`** and nothing else: no `README.md`, no `ui/tests/` (which carries a
+throwaway keypair), no key material of any kind. It also carries Logweir's
+`LICENSE` and `NOTICE` and, under `/usr/share/licenses/kubectl/`, kubectl's
+Apache-2.0 licence and an inventory naming the base digest.
+
+**The arguments are NOT in the image.** Its entrypoint is `kubectl` and it
+declares no `CMD`; every flag above — `--accept-paths` above all, which is the
+authorisation boundary — is the chart's, where `helm template` shows it to you
+and three tests assert it.
+
+**Until Task 39 the page arrived as a ConfigMap** the chart built from its own
+byte-identical copy of `ui/`. Both the copy and the ConfigMap are gone. An
+image is pinned, immutable once pushed and resolvable by digest; a ConfigMap is
+a mutable API object, so the page a browser loaded was whatever the last holder
+of `patch configmaps` had written. The guarantee got stronger, not weaker:
+`scripts/check-image-ui.sh` (`just smoke-ui`) computes the sha256 of every file
+the image serves and of every file under `ui/` and compares them, which is a
+statement about the bytes your browser receives; the chart's old `cmp` loop
+could only compare two directories in the Logweir repository.
+
+**To override it** — an air-gapped cluster, or your own registry:
+
+```bash
+helm install logweir charts/logweir -n logweir-system \
+  --set ui.enabled=true \
+  --set ui.image=registry.example.com/logweir-ui@sha256:<digest>
+```
+
+Mirror it the same way you mirror the other two Logweir images
+(`docs/install.md`). Its own `docker pull` is the only network access the UI
+pod needs.
 The ServiceAccount is bound to a ClusterRole carrying exactly the verbs the
 page issues, measured from `ui/api.js` and `ui/pages/*.js`: `get`/`list` on
 the five namespaced kinds, `create` on approvals, kafkaclusters,
@@ -401,17 +440,26 @@ Logweir — Global Constraint 6.
 
 ## The checks that hold the chart to the tree
 
-* `scripts/check-chart.sh` (`just chart-check`, in `just gate`): CRDs and UI
-  byte-identical to the tree; `helm lint` for the defaults and every example;
+* `scripts/check-chart.sh` (`just chart-check`, in `just gate`): CRDs
+  byte-identical to the tree and no copy of `ui/` under the chart at all;
+  `helm lint` for the defaults and every example;
   `helm template` regenerated into `rendered/` with no drift; every rendered
-  image a digest EXCEPT the two Logweir images, which must be exactly
+  image a digest EXCEPT the three Logweir images, which must be exactly
   `<repository>:latest` (and `:latest` on any other image is still refused),
   with the author-only render exempt by name — its whole premise is a locally
   built tag; the schema refusing `--set demoKafka.enabled=yes`; `values.yaml`
-  naming the tree's own repositories at `:latest`.
+  naming the tree's own repositories at `:latest` — `ui.image` among them, its
+  namespace derived from the runner pin.
+* `scripts/check-image-ui.sh` (`just smoke-ui`; needs a Docker daemon, so it is
+  in `docs/gates.md`'s stack/cluster table rather than in `just gate`): the
+  fourteen files the `logweir-ui` image serves, sha256 for sha256 against
+  `ui/`, and nothing else under `/ui`. This is what replaced the chart's
+  byte-copy arm.
 * `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
   `logweir.yaml`; nothing optional renders under defaults; each flag renders
-  its named objects; the UI ConfigMap is the tree's bytes and no key material.
+  its named objects; the chart carries no copy of `ui/` and mounts no ConfigMap
+  into the proxy — the page's bytes are asserted against the image instead, by
+  `scripts/check-image-ui.sh`.
 * `scripts/helm-demo.sh` (`just helm-demo`; `.github/workflows/helm-demo.yml`
   on `kind`): the walk above, on a real cluster.
 

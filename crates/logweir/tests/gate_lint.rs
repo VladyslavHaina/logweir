@@ -632,8 +632,13 @@ fn run_ids(line: &str) -> Vec<String> {
     out
 }
 
-/// **The eight stack/cluster recipes are out of the gate, and all eight are in
+/// **The nine stack/cluster recipes are out of the gate, and all nine are in
 /// the table.**
+///
+/// `smoke-ui` joined them in Task 39: it builds the `logweir-ui` image and runs
+/// `scripts/check-image-ui.sh` against it, so it needs a Docker daemon exactly
+/// as its two siblings do and must not be in a gate that is specified to run
+/// without one.
 ///
 /// Each needs the compose stack, a cluster or a Docker build, and
 /// `scripts/time-unit-suite.sh` REFUSES to run, exit 1, while 9092 or 9000
@@ -641,10 +646,11 @@ fn run_ids(line: &str) -> Vec<String> {
 /// (Task 35) needs a cluster with the chart installed.
 #[test]
 fn gate_lint_the_stack_recipes_are_out_of_the_gate() {
-    const STACK: [&str; 8] = [
+    const STACK: [&str; 9] = [
         "e2e",
         "smoke",
         "smoke-weirkeeper",
+        "smoke-ui",
         "mvp-demo",
         "k8s-demo",
         "laptop-demo",
@@ -676,13 +682,13 @@ fn gate_lint_the_stack_recipes_are_out_of_the_gate() {
         );
     }
 
-    // All eight, and only those eight, are in the table.
+    // All nine, and only those nine, are in the table.
     let table = stack_table_recipes();
     let want: BTreeSet<String> = STACK.iter().map(|s| s.to_string()).collect();
     let got: BTreeSet<String> = table.iter().cloned().collect();
     assert_eq!(
         got, want,
-        "docs/gates.md's stack/cluster table must name exactly these eight recipes"
+        "docs/gates.md's stack/cluster table must name exactly these nine recipes"
     );
 
     // Each row says what it proves — a row that is only a name teaches nobody

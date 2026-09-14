@@ -819,24 +819,48 @@ fn copy_instructions(dockerfile: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// **Both images `COPY` LICENSE, NOTICE and THIRD_PARTY_NOTICES.md into
-/// `/usr/share/licenses/logweir/`; only the runner carries the MIT notice.**
+/// **Every image `COPY`s Logweir's LICENSE and NOTICE into
+/// `/usr/share/licenses/logweir/`; each carries the third-party notices it owes
+/// and none it does not.**
 ///
-/// The controller links no OSO code and redistributes no MIT-licensed binary,
-/// so an MIT notice in its image would be a **false attribution** — a licence
-/// notice is a statement about what is inside, not decoration. That absence is
-/// asserted here and by `scripts/check-image-weirkeeper.sh` check 3.
+/// RENAMED FROM `both_images_copy_the_licence_and_the_notice` (Task 39,
+/// STANDING RULE 19): there are three images now — the runner, the controller
+/// and `logweir-ui` — and "both" was the half of the name that had gone stale.
+/// The three occurrences of the old name in the tree
+/// (`crates/logweir/tests/manifest_lint.rs`, `docs/tag1-checklist.md`, the
+/// definition) move with it.
 ///
-/// This parses `COPY` instructions rather than grepping the file, because
-/// `Dockerfile.weirkeeper`'s comments explain the absence at length and a grep
-/// for `kafka-backup` would report the explanation as the violation.
+/// WHAT EACH IMAGE OWES, AND ONLY WHAT IT OWES. A licence notice is a statement
+/// about what is inside, not decoration, so a notice for something an image
+/// does not carry is a FALSE ATTRIBUTION:
+///
+/// * all three redistribute Logweir's own Apache-2.0 code, so all three carry
+///   `LICENSE` and `NOTICE`;
+/// * the runner and the controller each ship a statically linked Rust binary,
+///   so both carry `THIRD_PARTY_NOTICES.md`, the inventory of that graph. The
+///   UI image ships fourteen static files over a kubectl and links no Rust at
+///   all, so it must NOT — asserted below, and by
+///   `scripts/check-image-ui.sh` check 2;
+/// * only the runner redistributes the MIT-licensed `kafka-backup`, so only it
+///   carries `/usr/share/licenses/kafka-backup/`. Asserted absent from the
+///   other two here, and from the built images by
+///   `scripts/check-image-weirkeeper.sh` check 3 and `check-image-ui.sh`
+///   check 2;
+/// * only the UI image redistributes kubectl, so only it carries
+///   `/usr/share/licenses/kubectl/` — its Apache-2.0 text and an inventory
+///   naming the base digest.
+///
+/// This parses `COPY` instructions rather than grepping the file, because the
+/// Dockerfiles' comments explain the absences at length and a grep for
+/// `kafka-backup` would report the explanation as the violation.
 #[test]
-fn both_images_copy_the_licence_and_the_notice() {
+fn every_image_copies_the_licence_and_the_notice() {
     const LOGWEIR_LICENCES: &str = "/usr/share/licenses/logweir/";
 
     for (name, path) in [
         ("runner", "Dockerfile"),
         ("controller", "Dockerfile.weirkeeper"),
+        ("UI", "Dockerfile.ui"),
     ] {
         let dockerfile = read(path);
         let copies = copy_instructions(&dockerfile);
@@ -845,7 +869,14 @@ fn both_images_copy_the_licence_and_the_notice() {
             "{path} has no COPY instruction; the parse is wrong, not the file"
         );
 
-        for required in ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"] {
+        // THE RUST INVENTORY IS OWED BY THE TWO IMAGES THAT SHIP A RUST
+        // BINARY, and by neither the third nor anything else.
+        let required: &[&str] = if path == "Dockerfile.ui" {
+            &["LICENSE", "NOTICE"]
+        } else {
+            &["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+        };
+        for required in required.iter().copied() {
             let carried = copies.iter().any(|operands| {
                 operands.last().is_some_and(|dest| {
                     dest == LOGWEIR_LICENCES || dest == LOGWEIR_LICENCES.trim_end_matches('/')
@@ -880,18 +911,61 @@ fn both_images_copy_the_licence_and_the_notice() {
          it. COPY instructions found: {runner:?}"
     );
 
-    // The controller redistributes none of it, and must not claim to.
-    let controller = copy_instructions(&read("Dockerfile.weirkeeper"));
-    for operands in &controller {
+    // The other two redistribute none of it, and must not claim to.
+    for (name, path, gate) in [
+        (
+            "controller",
+            "Dockerfile.weirkeeper",
+            "scripts/check-image-weirkeeper.sh check 3",
+        ),
+        ("UI", "Dockerfile.ui", "scripts/check-image-ui.sh check 2"),
+    ] {
+        for operands in &copy_instructions(&read(path)) {
+            for token in operands {
+                assert!(
+                    !token.contains("kafka-backup"),
+                    "{path} COPYs a `kafka-backup` path (`{token}`). The {name} image links no \
+                     OSO code and redistributes no MIT-licensed binary, so that notice would be \
+                     a FALSE ATTRIBUTION — a claim to redistribute something the image does not \
+                     contain. `{gate}` asserts the same absence from the built image."
+                );
+            }
+        }
+    }
+
+    // AND THE UI IMAGE CARRIES KUBECTL'S, because it redistributes the whole
+    // kubectl base — the same obligation, the same shape, a different upstream.
+    let ui = copy_instructions(&read("Dockerfile.ui"));
+    for (dest, what) in [
+        (
+            "/usr/share/licenses/kubectl/INVENTORY",
+            "the inventory naming the base image by digest and its licence",
+        ),
+        (
+            "/usr/share/licenses/kubectl/LICENSE",
+            "the Apache-2.0 text kubectl is licensed under",
+        ),
+    ] {
+        assert!(
+            ui.iter()
+                .any(|operands| operands.last().is_some_and(|d| d == dest)),
+            "Dockerfile.ui must COPY {what} to {dest}: this image redistributes the whole \
+             registry.k8s.io/kubectl base, binary included, exactly as the runner image \
+             redistributes kafka-backup. COPY instructions found: {ui:?}"
+        );
+    }
+    // AND NOT THE RUST GRAPH'S INVENTORY, which would claim a redistribution it
+    // does not make. The loop above requires it of the other two and skips it
+    // here; this asserts the skip is an ABSENCE rather than an omission.
+    for operands in &ui {
         for token in operands {
             assert!(
-                !token.contains("kafka-backup"),
-                "Dockerfile.weirkeeper COPYs a `kafka-backup` path (`{token}`). The \
-                 controller links no OSO code and redistributes no MIT-licensed \
-                 binary, so that notice would be a FALSE ATTRIBUTION — a claim to \
-                 redistribute something the image does not contain. \
-                 `scripts/check-image-weirkeeper.sh` check 3 asserts the same absence \
-                 from the built image."
+                !token.contains("THIRD_PARTY_NOTICES.md"),
+                "Dockerfile.ui COPYs `{token}`. THIRD_PARTY_NOTICES.md is the inventory of \
+                 Logweir's RUST dependency graph, generated from Cargo.lock; this image links no \
+                 Rust binary and redistributes no crate, so shipping it would claim a \
+                 redistribution that does not happen. `scripts/check-image-ui.sh` check 2 \
+                 asserts the same absence from the built image."
             );
         }
     }

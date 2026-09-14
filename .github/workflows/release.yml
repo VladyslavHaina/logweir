@@ -87,9 +87,44 @@ name: release
 # (the action defaults to Docker Hub). Both secrets exist on this repository
 # as of 2026-09-13T01:50Z. Both steps stay tag-gated, in every job.
 #
-# NOTHING IS PUBLISHED YET. This workflow has still never run; Global
-# Constraint 37 and every `blocked: images not published` row are unchanged by
-# the rename. What the rename buys is that a tagged run CAN now succeed.
+# ===========================================================================
+# NO IMAGE REACHES A REGISTRY FROM A COMMIT WHOSE SUITE IS RED
+# ===========================================================================
+# The owner's condition of 2026-09-12 19:45, and Task 39's ruling 9: "the image
+# needs to be pushed only once the all test are passed and only then need to be
+# publish to docker hub from the cicd."
+#
+# MEASURED ON THE TREE THIS WAS WRITTEN AGAINST: this workflow ran NO TESTS AT
+# ALL. Its jobs were `plan`, `build`, `musl`, the two `build-weirkeeper-*`,
+# `image` (which pushes), `pullback` and `publish`, and the only assertions
+# before a push were the images' own execution checks. A tagged run published
+# images from a commit whose suite had never run here — and `ci.yml` does not
+# fire on a tag push, so "it was green on main" was a hope about a different
+# ref.
+#
+# `tests:` IS NOW THE HEAD OF THE GRAPH. `build`, `musl`,
+# `build-weirkeeper-amd64`, `build-weirkeeper-arm64`, `build-ui-amd64` and
+# `build-ui-arm64` each `needs: [tests]`, and `image`, `pullback` and `publish`
+# inherit it transitively — so a red suite cannot reach Docker Hub.
+# `crates/logweir/tests/workflow_lint.rs::workflow_lint_no_image_is_pushed_from_an_untested_commit`
+# holds the graph to that, over the transitive closure and not over one edge.
+#
+# ===========================================================================
+# THE THIRD IMAGE: `logweir-ui` — TASK 39
+# ===========================================================================
+# The page used to reach the cluster as a ConfigMap the Helm chart built from
+# its own copy of `ui/`. It is now an image — `Dockerfile.ui`, fourteen static
+# files `COPY`ed over the pinned `registry.k8s.io/kubectl` base — so this
+# workflow publishes THREE images, not two, and pulls three back.
+#
+# IT IS BUILT ON BOTH RUNNERS, EXACTLY AS THE CONTROLLER IMAGE IS, and for a
+# different reason: `Dockerfile.weirkeeper` is built natively because it CANNOT
+# cross-compile (E19(c)); `Dockerfile.ui` compiles nothing at all, so either
+# runner could produce either variant. It is built natively anyway because the
+# EXECUTION check (`kubectl version --client`) is only real on a runner of the
+# image's own architecture, and an unasserted variant inside a manifest list is
+# exactly the defect `workflow_lint.rs` exists to prevent. The build is two
+# `COPY`s and takes seconds (measured 2026-09-14: 2.4 s locally).
 on:
   push:
     tags: ["v*"]
@@ -103,6 +138,102 @@ permissions:
   contents: write
 
 jobs:
+  # ===========================================================================
+  # THE SUITE, BEFORE ANYTHING IS BUILT — RULING 9
+  # ===========================================================================
+  # THIS JOB MIRRORS `ci.yml`'s `build` JOB, STEP FOR STEP, and the mirror is
+  # machine-checked: `workflow_lint_the_tests_job_mirrors_ci` asserts that every
+  # non-image `scripts/check-*.sh` this job runs is one `ci.yml` runs and the
+  # other way round, so the two cannot drift. It is a MIRROR and not a
+  # `workflow_call` of `ci.yml` because ruling 9 asks for a job on
+  # `ubuntu-24.04` running a named set, and because `ci.yml`'s other four jobs
+  # (`e2e`, `python-verifier`, `deny`, `sync-upstream`) are not that set — two
+  # of them need a compose stack and an upstream checkout, and a release
+  # blocked by `sync-upstream` would be blocked by something that is not a test
+  # of this commit.
+  #
+  # IT RUNS `ci.yml`'s TWO PYTHON-SIDE GUARDS TOO — `check-verifier-parity.sh`
+  # and `check-invariant-corpus.sh` — which live in that workflow's
+  # `python-verifier` job rather than its `build` job. Ruling 9 says EVERY
+  # non-image `scripts/check-*.sh`, and a release that published without the
+  # two-reader parity check would be publishing the artefact those checks are
+  # about.
+  #
+  # THE THREE IMAGE GATES ARE DELIBERATELY NOT HERE. `check-image.sh`,
+  # `check-image-weirkeeper.sh` and `check-image-ui.sh` assert a BUILT IMAGE;
+  # they run in the jobs that build one, against the bytes that job is about to
+  # hand on. Running them here would mean building the images twice, and the
+  # second build would be the one nobody asserted.
+  #
+  # EVERY EXIT CODE IS READ ON ITS OWN LINE. Each check is its own step, so a
+  # red names itself in the job graph rather than hiding behind one `just gate`.
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The Dockerfile's build-stage package list, verbatim — `ci.yml`'s own
+      # line: a bare runner lacks libsasl2 (sasl2-sys) and curl's headers
+      # (librdkafka's cmake build).
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - name: Extract the pinned engine
+        # `cargo test --workspace` needs `.engine/`; the drill tests refuse
+        # rather than skip without it.
+        run: ./scripts/extract-engine.sh
+      # `cargo fetch --locked`: `linkage.rs` runs `cargo metadata --offline` in
+      # a copy of the workspace and needs EVERY locked package's manifest,
+      # platform-only ones included.
+      - run: cargo fetch --locked
+      # `two_reader_parity.rs` PANICS rather than skipping when `cryptography`
+      # is missing, and so do `check-verifier-parity.sh` and
+      # `check-invariant-corpus.sh` below.
+      - run: pip install cryptography
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.0.1
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features e2e -- -D warnings
+      - run: cargo test --workspace
+      # `check-ui-behaviour.sh` refuses without `target/release/logweir`
+      # (STANDING RULE 5's fourth prerequisite) and
+      # `check-verifier-parity.sh` without `target/debug/logweir`.
+      - run: cargo build -p logweir
+      - run: cargo build --release -p logweir
+      - name: pure-layer linkage guard (Global Constraint 2)
+        run: ./scripts/check-no-oso.sh
+      - name: pure-layer purity guard (Global Constraint 1)
+        run: ./scripts/check-pure-core.sh
+      - name: single-signer linkage gate (G2')
+        run: ./scripts/check-one-signer.sh
+      - name: the withdrawn signing claim stays withdrawn (G-SIGN, half two)
+        run: ./scripts/check-withdrawn-claim.sh
+      - name: no archive-write capability outside the runner (Global Constraint 6)
+        run: ./scripts/check-no-archive-write.sh
+      - name: the UI loads no remote asset (spec 8)
+        run: ./scripts/check-ui-offline.sh
+      - name: the UI behaviour suite (interface I24)
+        run: ./scripts/check-ui-behaviour.sh
+      - name: two-verifier parity over the signed fixture corpus (T0-1)
+        run: ./scripts/check-verifier-parity.sh
+      - name: the invariant corpus, auditor's reader only (T0-6 / T0-3)
+        run: ./scripts/check-invariant-corpus.sh
+      - name: every mark in the shipped docs is labelled (spec 16 clause 9)
+        run: ./scripts/check-unverified-labels.sh
+      - name: the artifact-directory ceiling (STANDING RULE 6)
+        run: ./scripts/check-deps-count.sh
+      - name: definition of done (attribution, GC14 namespaces, link integrity)
+        run: ./scripts/check-dod.sh
+      - name: relative markdown link integrity (never fetches http/https)
+        run: ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
+      - name: the Helm chart is what the tree says it is (charts/logweir)
+        run: ./scripts/check-chart.sh
+      - name: the install file has no drift (interface I26)
+        run: ./scripts/render-install.sh --check
+
   plan:
     runs-on: ubuntu-24.04
     outputs:
@@ -130,7 +261,10 @@ jobs:
         with: { name: dist-manifest, path: dist-manifest.json }
 
   build:
-    needs: plan
+    # `tests` AS WELL AS `plan` — ruling 9. `plan` is what this job reads its
+    # target list from; `tests` is what makes a red suite stop the release
+    # before a single artefact exists.
+    needs: [plan, tests]
     strategy:
       fail-fast: false
       matrix:
@@ -180,6 +314,7 @@ jobs:
   # build does not cooperate, the release ships without musl and
   # docs/stability.md records the omission.
   musl:
+    needs: [tests]
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
@@ -210,6 +345,7 @@ jobs:
   # the "pushes nothing" half; `workflow_lint_exactly_one_job_pushes` is what it
   # protects.
   build-weirkeeper-amd64:
+    needs: [tests]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -252,6 +388,7 @@ jobs:
   # self-hosted arm64 label. There is no third option that keeps STANDING
   # RULE 10: the alternative is emulating a Rust compile, measured at 33x.
   build-weirkeeper-arm64:
+    needs: [tests]
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -279,6 +416,89 @@ jobs:
           path: image-out/weirkeeper-arm64.tar
           retention-days: 1
 
+  # THE UI IMAGE, amd64 AND arm64, EACH ON A RUNNER OF ITS OWN ARCHITECTURE.
+  #
+  # The two jobs below are the controller jobs' shape with one file name and one
+  # gate changed, and the repetition is deliberate rather than factored into a
+  # matrix: `workflow_lint_the_build_step_does_not_push` allows exactly ONE
+  # `build-push-action` per job and reads its `tags:` against the reference the
+  # gate in that job is handed, which is what makes "the bytes that were checked
+  # are the bytes that ship" readable per job.
+  #
+  # WHY NATIVELY, when `Dockerfile.ui` compiles nothing and either runner could
+  # produce either variant: `scripts/check-image-ui.sh`'s execution check runs
+  # `kubectl version --client` INSIDE the image, and that is only real on a
+  # runner of the image's own architecture. STANDING RULE 10 forbids the
+  # emulated alternative. The `image:` job asserts the amd64 variant by
+  # execution a second time and the arm64 one with `--no-exec`, exactly as it
+  # does for the controller.
+  #
+  # NEITHER JOB PUSHES ANYTHING. They hand their bytes on as tarballs.
+  build-ui-amd64:
+    needs: [tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: ui-amd64
+        name: Copy the page over the pinned kubectl, into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ui
+          load: true
+          push: false
+          # ONE PLATFORM, AND IT IS THIS RUNNER'S OWN. A two-platform build
+          # cannot `load:` into the daemon, which is what leaves a variant
+          # nobody asserted. The base is a manifest list carrying both, so this
+          # resolves to the amd64 variant of kubectl.
+          platforms: linux/amd64
+          tags: logweir-ui:check-amd64
+      - name: The UI image must serve the tree's fourteen files and nothing else
+        # ALL FIVE CHECKS, THE LAST ONE BY EXECUTION. A single command whose
+        # exit code the runner reads directly: no pipe, no `|| true`, no
+        # `set +e`.
+        run: bash scripts/check-image-ui.sh logweir-ui:check-amd64
+      - name: Hand the ASSERTED bytes on as a tarball
+        shell: bash
+        run: |
+          mkdir -p image-out
+          docker save logweir-ui:check-amd64 -o image-out/logweir-ui-amd64.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logweir-ui-image-amd64
+          path: image-out/logweir-ui-amd64.tar
+          retention-days: 1
+
+  build-ui-arm64:
+    needs: [tests]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: ui-arm64
+        name: Copy the page over the pinned kubectl, into the local daemon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ui
+          load: true
+          push: false
+          platforms: linux/arm64
+          tags: logweir-ui:check-arm64
+      - name: The UI image must serve the tree's fourteen files and nothing else
+        run: bash scripts/check-image-ui.sh logweir-ui:check-arm64
+      - name: Hand the ASSERTED bytes on as a tarball
+        shell: bash
+        run: |
+          mkdir -p image-out
+          docker save logweir-ui:check-arm64 -o image-out/logweir-ui-arm64.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logweir-ui-image-arm64
+          path: image-out/logweir-ui-arm64.tar
+          retention-days: 1
+
   image:
     runs-on: ubuntu-24.04
     # THE DOCKER HUB NAMESPACE, READ ONCE FOR THIS JOB. Every reference below
@@ -292,7 +512,7 @@ jobs:
     # than hopeful, and
     # `workflow_lint_every_platform_is_asserted_before_the_manifest_push`
     # asserts this list.
-    needs: [build-weirkeeper-amd64, build-weirkeeper-arm64]
+    needs: [build-weirkeeper-amd64, build-weirkeeper-arm64, build-ui-amd64, build-ui-arm64]
     # THE DIGESTS OF THE BYTES THIS JOB ASSERTED. Each is captured in its own
     # push step and nowhere else, because that is the only place a REPOSITORY
     # digest exists: a `load: true, push: false` build has no registry exporter,
@@ -302,6 +522,7 @@ jobs:
     outputs:
       digest: ${{ steps.push.outputs.digest }}
       weirkeeper_digest: ${{ steps.push-weirkeeper.outputs.weirkeeper_digest }}
+      ui_digest: ${{ steps.push-ui.outputs.ui_digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Extract the pinned engine
@@ -367,6 +588,33 @@ jobs:
         # `build-weirkeeper-arm64` on the same bytes, which is why that job
         # exists.
         run: bash scripts/check-image-weirkeeper.sh --no-exec weirkeeper:check-arm64
+      # ---------------------------------------------------------------------
+      # AND THE UI IMAGE, THE SAME WAY — TASK 39.
+      # ---------------------------------------------------------------------
+      # Nothing is rebuilt here either. Both variants arrive as the tarballs the
+      # two native jobs asserted, are loaded into the daemon that is about to
+      # push them, and are asserted a SECOND time here — the amd64 one by
+      # execution (this runner is amd64) and the arm64 one with `--no-exec`,
+      # which reads the files with `docker create` + `docker cp` and runs
+      # nothing.
+      #
+      # EVERY ASSERT STEP IN THIS JOB IS BEFORE THE FIRST PUSH STEP, and that
+      # ordering is what `workflow_lint_every_image_is_asserted_before_push` and
+      # `workflow_lint_every_platform_is_asserted_before_the_manifest_push`
+      # read: both look for the load and the assertion at an index lower than
+      # the job's first push.
+      - uses: actions/download-artifact@v4
+        with: { name: logweir-ui-image-amd64, path: incoming }
+      - uses: actions/download-artifact@v4
+        with: { name: logweir-ui-image-arm64, path: incoming }
+      - name: Load the amd64 UI image into this daemon
+        run: docker load --input incoming/logweir-ui-amd64.tar
+      - name: The amd64 UI image, asserted BY EXECUTION on an amd64 runner
+        run: bash scripts/check-image-ui.sh logweir-ui:check-amd64
+      - name: Load the arm64 UI image into this daemon
+        run: docker load --input incoming/logweir-ui-arm64.tar
+      - name: The arm64 UI image, asserted WITHOUT executing it
+        run: bash scripts/check-image-ui.sh --no-exec logweir-ui:check-arm64
       - uses: docker/login-action@v3
         # TAG-GATED, like the push below. `on:` carries `workflow_dispatch`
         # (`:28`), so without this condition a dispatch from a branch logs in
@@ -543,6 +791,83 @@ jobs:
           echo "weirkeeper_digest=$list_digest" >> "$GITHUB_OUTPUT"
           echo "pushed $list at $list_digest (members $amd_digest, $arm_digest)"
 
+      - id: push-ui
+        name: Push the two asserted UI variants, then the manifest list and :latest
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          # See the controller push above: kept only for a CLI older than 20.10,
+          # where it is harmless. `imagetools create` cannot be used here —
+          # `workflow_lint_no_docker_build_shellout` bans the two-word shell
+          # compile spelling over this whole file and `buildx` written after
+          # `docker ` contains it as a substring.
+          DOCKER_CLI_EXPERIMENTAL: enabled
+        # NOTHING IS COMPILED HERE. `docker tag` renames the bytes the two
+        # assert steps above looked at; `docker push` uploads those exact bytes;
+        # `docker manifest create` assembles a list out of the two repository
+        # digests those uploads produced.
+        #
+        # THIS IMAGE GETS `:latest` AND THE CONTROLLER DOES NOT, which is a
+        # difference the chart forces rather than a preference: `values.yaml`'s
+        # `ui.image` defaults to `<ns>/logweir-ui:latest` (Task 37's tag
+        # ruling), so a chart installed from the defaults resolves that tag on
+        # every pull. The versioned list is created and pushed FIRST for the
+        # reason the runner push states: a failed version push must not leave
+        # `:latest` already moved onto bytes no immutable reference names.
+        run: |
+          amd="docker.io/$NS/logweir-ui:${{ github.ref_name }}-amd64"
+          arm="docker.io/$NS/logweir-ui:${{ github.ref_name }}-arm64"
+          list="docker.io/$NS/logweir-ui:${{ github.ref_name }}"
+          latest="docker.io/$NS/logweir-ui:latest"
+          docker tag logweir-ui:check-amd64 "$amd"
+          docker push "$amd"
+          docker tag logweir-ui:check-arm64 "$arm"
+          docker push "$arm"
+          # THE REPOSITORY DIGEST, SELECTED BY REPOSITORY AND NOT BY POSITION,
+          # AND MATCHED IN BOTH SPELLINGS. This is the helper the controller
+          # push above uses, copied rather than re-derived: on a daemon backed
+          # by the containerd image store an image carries one RepoDigests entry
+          # per repository name it has ever been tagged with (index 0 was
+          # MEASURED to be the throwaway local tag), and Docker normalises a
+          # Docker Hub reference by dropping the default registry, so the entry
+          # comes back as `<ns>/logweir-ui@sha256:…` with no `docker.io/` in
+          # front. Matching only the long form exited 1 AFTER a successful push
+          # in run 34864252945 (v0.1.1, 2026-09-14) and left the step after it
+          # unrun.
+          digest_of() {
+            rd=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1")
+            repo="${1%:*}"
+            repo_short="${repo#docker.io/}"
+            for entry in $rd; do
+              case "$entry" in
+                "$repo"@sha256:*|"$repo_short"@sha256:*) printf '%s' "${entry##*@}"; return 0 ;;
+              esac
+            done
+            echo "no repository digest for $1 after push: '$rd'" >&2
+            return 1
+          }
+          amd_digest="$(digest_of "$amd")"
+          arm_digest="$(digest_of "$arm")"
+          # BY DIGEST, NOT BY TAG (Global Constraint 7).
+          docker manifest create "$list" "${amd%:*}@$amd_digest" "${arm%:*}@$arm_digest"
+          list_digest="$(docker manifest push "$list")"
+          case "$list_digest" in
+            sha256:*) ;;
+            *) echo "docker manifest push printed no digest for $list: '$list_digest'" >&2; exit 1 ;;
+          esac
+          # AND ONLY THEN `:latest`, from the same two digests. A second list
+          # rather than a re-tag: `docker manifest` has no rename, and a list
+          # assembled from the same member digests is the same bytes under a
+          # second name.
+          docker manifest create "$latest" "${amd%:*}@$amd_digest" "${arm%:*}@$arm_digest"
+          latest_digest="$(docker manifest push "$latest")"
+          case "$latest_digest" in
+            sha256:*) ;;
+            *) echo "docker manifest push printed no digest for $latest: '$latest_digest'" >&2; exit 1 ;;
+          esac
+          echo "ui_digest=$list_digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $list at $list_digest and $latest at $latest_digest (members $amd_digest, $arm_digest)"
+
   # ===========================================================================
   # THE PULL-BACK — the only step in this plan that can satisfy Global
   # Constraint 37, and the only artefact that moves tag-1 checklist clause 1.
@@ -636,7 +961,36 @@ jobs:
             echo "scripts/check-image-weirkeeper.sh --no-exec $controller   -> ok"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Record both published digests in the job summary
+      - name: Pull BOTH UI variants from the manifest list and re-assert them
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        # THE THIRD IMAGE, PULLED BACK IN THE SAME JOB AS THE OTHER TWO — Task
+        # 39. The same two-`--platform` shape and the same ordering argument as
+        # the controller above: a digest reference resolves to whichever variant
+        # was pulled last, so the amd64 variant is asserted BY EXECUTION before
+        # the arm64 pull replaces it, and the arm64 variant is then asserted
+        # with `--no-exec` — this runner is amd64 and will not emulate.
+        #
+        # WHAT THE EXECUTION CHECK PROVES HERE that it cannot prove anywhere
+        # else: `scripts/check-image-ui.sh` check 1 hashes every file the pulled
+        # image will serve against this repository's `ui/`. On a stranger's
+        # machine, from bytes that travelled through the registry.
+        run: |
+          ui="docker.io/$NS/logweir-ui@${{ needs.image.outputs.ui_digest }}"
+          docker pull --platform linux/amd64 "$ui"
+          bash scripts/check-image-ui.sh "$ui"
+          docker pull --platform linux/arm64 "$ui"
+          bash scripts/check-image-ui.sh --no-exec "$ui"
+          {
+            echo
+            echo '```'
+            echo "docker pull --platform linux/amd64 $ui   -> ok"
+            echo "scripts/check-image-ui.sh $ui   -> ok (by execution)"
+            echo "docker pull --platform linux/arm64 $ui   -> ok"
+            echo "scripts/check-image-ui.sh --no-exec $ui   -> ok"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record all three published digests in the job summary
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         # THIS SUMMARY IS THE ARTEFACT. `docs/tag1-checklist.md` clause 1 moves
@@ -649,6 +1003,7 @@ jobs:
             echo "|---|---|---|"
             echo "| docker.io/$NS/logweir | ${{ needs.image.outputs.digest }} | ${{ github.run_id }} |"
             echo "| docker.io/$NS/weirkeeper | ${{ needs.image.outputs.weirkeeper_digest }} | ${{ github.run_id }} |"
+            echo "| docker.io/$NS/logweir-ui | ${{ needs.image.outputs.ui_digest }} | ${{ github.run_id }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
@@ -724,15 +1079,23 @@ jobs:
             images carry what each of them needs.
 
             Container images — pull by digest, never by tag (Global
-            Constraint 7). Both were asserted before they were pushed and
+            Constraint 7). All three were asserted before they were pushed and
             pulled back afterwards by the `pullback:` job of this run, on a
-            machine that did not build them:
+            machine that did not build them, and none of them was built at all
+            until the `tests:` job at the head of this run was green:
 
             - runner: `docker.io/${{ env.NS }}/logweir@${{ needs.image.outputs.digest }}`
               (linux/amd64 only — the engine binary has no arm64 manifest)
             - controller: `docker.io/${{ env.NS }}/weirkeeper@${{ needs.image.outputs.weirkeeper_digest }}`
               (a manifest list: linux/amd64 and linux/arm64, each compiled on a
               native runner of its own architecture)
+            - UI: `docker.io/${{ env.NS }}/logweir-ui@${{ needs.image.outputs.ui_digest }}`
+              (a manifest list: linux/amd64 and linux/arm64. It is the pinned
+              `registry.k8s.io/kubectl` with the fourteen static files of the
+              page copied in at `/ui` and nothing else; the Helm chart runs it
+              as `kubectl proxy --www=/ui …` and supplies every argument. The
+              sha256 list below is what `scripts/check-image-ui.sh` compares the
+              image's `/ui` against.)
 
             `logweir-${{ github.ref_name }}-install.tar.gz` carries
             `logweir.yaml`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, the

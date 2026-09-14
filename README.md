@@ -232,7 +232,7 @@ jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
 | **It does not write to the source cluster, on any path.** | Not a topic, not an offset commit, not a config. A drill restores into a *scratch* cluster, proved segregated by a marker topic before anything runs; a restore writes only into topics that did not exist. |
 | **It does not consume OSO CRDs.** | No `KafkaRestore`, no `KafkaBackup`, no operator objects read or written. Logweir shells out to the engine binary and nothing else. |
 | **It deletes nothing but the scratch topics it created.** | Retention **reports** and prints the commands; no Logweir component holds any object-store delete capability. Restore-in-place into a live topic is a **never**, not a later. |
-| **It ships no HTTP surface and no UI image.** | The UI is a directory of static files served by `kubectl proxy --www=`; there is no server-side UI component, no sidecar, no `/metrics`, no `/healthz`. Metrics are a Prometheus textfile at `--metrics-file`. |
+| **It ships no HTTP surface of its own.** | The UI is a directory of static files served by `kubectl proxy --www=` — from your machine, or in-cluster from the `logweir-ui` image, which is those same files copied over a pinned kubectl and nothing more. There is no server-side UI component, no sidecar, no `/metrics`, no `/healthz`. Metrics are a Prometheus textfile at `--metrics-file`. |
 | **It reads no cluster metadata.** | No ACLs, no client quotas, no broker configs. Metadata snapshot and diff are a later tag. |
 
 ## Relationship to `osodevops/kafka-backup`

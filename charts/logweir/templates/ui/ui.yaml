@@ -2,13 +2,24 @@
 `ui.enabled` — THE UI IN-CLUSTER, WITH ITS AUTHORITY STATED.
 
 One Deployment running `kubectl proxy`, which serves the fourteen shipped UI
-files from a ConfigMap (this chart's byte-identical copy of `ui/` —
-`scripts/check-chart.sh` compares them with `cmp`) AND proxies the Kubernetes
-API on the same origin, attaching the pod's ServiceAccount credential to every
-request it forwards, server side. That is the model, in one paragraph:
+files out of the `logweir-ui` IMAGE at `/ui` (Task 39: `ui.image`, built by
+`Dockerfile.ui`, whose served bytes `scripts/check-image-ui.sh` hashes against
+the tree's `ui/`) AND proxies the Kubernetes API on the same origin, attaching
+the pod's ServiceAccount credential to every request it forwards, server side.
+
+THE PAGE USED TO BE A ConfigMap this chart built from its own copy of `ui/`,
+and both are gone: `charts/logweir/ui/` (fourteen duplicated files) and the
+ConfigMap, its volume and its mount. What replaced the `cmp` loop that kept the
+copy honest is stronger than it was — the image gate compares the bytes the
+BROWSER receives with the bytes in `ui/`, where the chart gate could only
+compare two directories in this repository. Nothing else in this file changed:
+the args, the ServiceAccount, both ClusterRoles, the bindings and the Service
+are what they were.
+
+That is the model, in one paragraph:
 ANYONE WHO CAN REACH THE SERVICE ACTS WITH THE `<release>-ui` ServiceAccount's
 AUTHORITY. The page holds no credential and asks for none (Global Constraint
-28: no key material in the page, none in the ConfigMap); the proxy's path
+28: no key material in the page, none in the image that serves it); the path
 filter admits only what the page uses, MEASURED from `ui/api.js` and
 `ui/pages/*.js`: `/ui/` and `/apis/logweir.dev/v1alpha1/` — the page reads
 the six kinds, creates approvals, kafkaclusters, backupschedules and restores,
@@ -21,9 +32,11 @@ more; `--disable-filter` is never passed; there is no Ingress. Reach it with
 `--accept-hosts=.*`: the proxy answers whatever Host header reaches it —
 the kubelet's readiness probe, a port-forward, a Service-local client — which
 is right for a Service whose reachability IS the authorisation boundary. The
-image is a kubectl at the cluster's minor version, pinned by digest, from the
-Kubernetes project's own registry (`values.yaml` says why not Bitnami).
-Nothing in this file renders unless the flag is on.
+image is Logweir's own `logweir-ui` at `:latest` (Task 37's tag ruling, the
+same shape the controller and runner images carry here); it is kubectl at the
+cluster's minor version — from the Kubernetes project's own registry, pinned by
+digest in `Dockerfile.ui` — with the fourteen shipped files copied in at `/ui`
+and nothing else. Nothing in this file renders unless the flag is on.
 */}}
 {{- if .Values.ui.enabled }}
 {{- $name := printf "%s-ui" .Release.Name }}
@@ -126,21 +139,6 @@ subjects:
 {{- end }}
 ---
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "logweir.labels" . | nindent 4 }}
-    app.kubernetes.io/component: ui
-data:
-{{- $files := dict }}
-{{- range $path, $_ := .Files.Glob "ui/**" }}
-{{- $_ := set $files (include "logweir.ui.key" $path) ($.Files.Get $path) }}
-{{- end }}
-{{ toYaml $files | indent 2 }}
----
-apiVersion: v1
 kind: Service
 metadata:
   name: {{ $name }}
@@ -230,21 +228,18 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # NO `ui` VOLUME. `/ui` is a read-only part of the image's own
+          # filesystem now, under `readOnlyRootFilesystem: true` above — which
+          # is a stronger statement than the ConfigMap mount it replaced: a
+          # ConfigMap is a mutable API object, so the page the browser loaded
+          # was whatever anyone with `patch configmaps` had last written.
           volumeMounts:
-            - name: ui
-              mountPath: /ui
-              readOnly: true
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: ui
-          configMap:
-            name: {{ $name }}
-            items:
-            {{- range $path, $_ := .Files.Glob "ui/**" }}
-              - key: {{ include "logweir.ui.key" $path }}
-                path: {{ $path | trimPrefix "ui/" }}
-            {{- end }}
+        # `tmp` AND NOTHING ELSE. `HOME=/tmp` and `KUBECACHEDIR=/tmp/kube-cache`
+        # above need a writable path under `readOnlyRootFilesystem: true`; the
+        # page does not, because it is in the image.
         - name: tmp
           emptyDir: {}
 {{- end }}
