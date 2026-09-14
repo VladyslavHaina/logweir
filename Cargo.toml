@@ -71,7 +71,13 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
-repository = "https://github.com/logweir/logweir"
+# The repository this workspace actually lives in. `dist` REQUIRES it for its
+# GitHub CI support and refuses the release without it, naming the crates that
+# lack it — measured in run 34867336611 (v0.1.2, 2026-09-14), where the two
+# packaged crates did not inherit this key. The URL was also wrong: there is no
+# GitHub organisation `logweir` (`gh api orgs/logweir` → 404), which is the same
+# fact that moved the images to a namespace the owner can push to.
+repository = "https://github.com/VladyslavHaina/logweir"
 
 [workspace.dependencies]
 anyhow = "1"

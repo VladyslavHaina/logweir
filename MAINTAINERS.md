@@ -2,7 +2,7 @@
 
 | Name | GitHub | Company | Areas |
 |---|---|---|---|
-| Vladyslav | the owner of `github.com/logweir/logweir` | independent | everything |
+| Vladyslav | the owner of `github.com/VladyslavHaina/logweir` | independent | everything |
 
 The GitHub column names the repository owner declared in `Cargo.toml`'s
 `repository` field rather than a personal handle, because this clone has no
