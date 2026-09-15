@@ -90,9 +90,11 @@ pre-release ruling by accident.**
   v0.1 has ([ADR 0004](architecture.md#adr-0004-kafka-client)). This is not contradicted by
   the `Dockerfile` cross-compiling to `x86_64-unknown-linux-gnu`: that target
   has a one-package Debian toolchain and multiarch `:amd64` copies of every
-  C library librdkafka wants, and musl has neither. `release.yml` *attempts* the
-  build in a `continue-on-error` job and the release does not block on it, so a
-  musl binary may or may not be attached to a given release. Do not assume one.
+  C library librdkafka wants, and musl has neither. `release.yml` does not
+  attempt a musl build. Earlier tags carried a non-blocking attempt; it failed
+  in `openssl-sys`, which finds no musl OpenSSL on the runner, on every tagged
+  run (v0.1.1 through v0.1.5), so it was removed rather than kept as a
+  permanently failing job. No release ships a musl binary. Do not assume one.
 
 - **Release execution remains an evidence requirement.** The checked-in
   [release checklist](tag1-checklist.md) records which release obligations are

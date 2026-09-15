@@ -123,15 +123,17 @@ ci = ["github"]
 installers = []
 # The three triples step 6 requires. The binary carries NO engine (Global
 # Constraint 10 — the engine is dynamically linked and ships in the
-# debian:bookworm-slim image only).
+# debian:bookworm-slim image only); `scripts/check-no-engine-in-binary.sh`
+# asserts it on each `logweir` archive `release.yml` builds.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ]
-pr-run-mode = "plan"# release.yml is hand-extended with the debian:bookworm-slim image job and the
-# non-blocking musl attempt, so `cargo dist generate --check` must tolerate a
-# workflow that is not byte-identical to the generated one.
+pr-run-mode = "plan"
+# release.yml is written by hand: it reuses ci.yml as its test gate, drills the
+# packaged binary and builds the images before it publishes. `dist` must
+# tolerate a workflow that is not byte-identical to the one it would generate.
 allow-dirty = ["ci"]
 
 # THE PROFILE `dist build` COMPILES WITH, AND IT LIVES AT THE END OF THIS FILE.
