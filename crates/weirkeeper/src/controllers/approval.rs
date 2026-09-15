@@ -217,7 +217,9 @@ impl fmt::Display for ApprovalRefusal {
             Self::PlanHashMismatch { got, want } => write!(
                 f,
                 "the approval names plan hash {got} but the referent's spec.planBytes hash to \
-                 {want}; re-approve the exact plan you intend to run"
+                 {want}; the hash inside the signed document AND the spec.planHash beside it must \
+                 both be the plan this approval authorises, so re-approve the exact plan you \
+                 intend to run and record it with that hash"
             ),
             Self::SubjectKindMismatch {
                 approval_says,
@@ -844,6 +846,33 @@ pub async fn decide(
             plan_bytes.as_bytes(),
         ) {
             Ok(mut verified) => {
+                // ---- THE UNSIGNED CLAIM MUST AGREE WITH THE SIGNED ONE -----
+                //
+                // `spec.planHash` is a plain CRD field beside the documents: a
+                // create form fills it in so an operator can compare it, and
+                // `kubectl get approval -o yaml`, `kubectl get approval` and
+                // the UI all SHOW it. Checks 1-8 never read it -- check 7
+                // recomputes the hash and compares it with the one INSIDE the
+                // signed bytes, which is what authorisation must rest on. So
+                // without this an `Approval` could be `Verified=True` while
+                // displaying a plan hash that is not the plan it authorises,
+                // and the one thing this field exists for -- letting a reader
+                // compare -- would be the one thing it could not be trusted
+                // for. The CRD has always said a wrong `planHash` is a refusal
+                // (`crds/approval.rs`); this is where that becomes true.
+                //
+                // THE VERDICT IS CHECK 7's, because the FACT is check 7's: this
+                // approval names a plan the referent does not carry. The
+                // message names both hashes and says both places must agree.
+                let want = sha256_prefixed(plan_bytes.as_bytes());
+                if approval.spec.plan_hash != want {
+                    return Ok(ApprovalOutcome::Refused(
+                        ApprovalRefusal::PlanHashMismatch {
+                            got: approval.spec.plan_hash.clone(),
+                            want,
+                        },
+                    ));
+                }
                 verified.verified_subject_ref = verified_subject_ref;
                 ApprovalOutcome::Verified(verified)
             }

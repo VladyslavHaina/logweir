@@ -276,6 +276,7 @@ signature alike.
 | 6 | The matched entry's `notAfter` is in the future | `KeyIdExpired` |
 | 7 | The document's `plan_hash` equals the sha256 of the referent's `spec.planBytes`, **recomputed** | `PlanHashMismatch` |
 | 8 | The document's `subject_kind` equals the referent's kind | `SubjectKindMismatch` |
+| 9 | The object's own `spec.planHash` -- the unsigned field beside the documents -- equals that same recomputed hash | `PlanHashMismatch` |
 
 Two more `reason`s reach the same `Verified` condition without being checks on
 a signature at all. They are properties of the **referent** — the object
@@ -317,6 +318,28 @@ verifies under exactly one of them, and only that one appears in
 by a controller and is not part of anything anyone signed, so it could never
 rescue an approval that binds a different plan. `Restore.status` carries no
 plan hash at all.
+
+**Check 9 is about what a reader SEES, and it carries check 7's reason because
+it is check 7's fact.** `spec.planHash` is a plain CRD field beside the two
+documents: nothing authorises anything on it -- checks 1-8 read the hash INSIDE
+the signed bytes and recompute the referent's -- but it is the value
+`kubectl get approval -o yaml` prints and the UI shows, and the field exists so
+an operator can compare. Without check 9 an `Approval` could be `Verified=True`
+while displaying a plan hash that is not the plan it authorises, which is the
+one thing that field must never be able to do. The refusal names both hashes
+and says both places must agree.
+
+*Upgrade and rollback.* A controller carrying check 9 refuses an `Approval`
+whose `spec.planHash` disagrees with the plan it signed; every producer in this
+repository -- the UI, `scripts/demo-steps.sh`, `scripts/helm-demo.sh`,
+`scripts/k8s-demo.sh` -- writes the `sha256:<hex>` the CLI printed, so a
+correctly recorded approval is unaffected. An existing `Approval` that
+disagreed and was verified by an older controller flips to `Verified=False`
+with `PlanHashMismatch` on its next reconcile, and the `Restore` it names
+HOLDS at `Pending`/`ApprovalNotVerified` rather than starting: fail-closed, and
+no in-flight Job is touched, because a Restore's approval is re-read only
+before its Job is created. Rolling the controller back restores the older
+behaviour with no conversion, because nothing on the object changed.
 
 **Check 8 exists because without it the second approval degenerates.** An
 `Approval` whose `planHash` matched a `Restore` would be accepted for a
@@ -1626,11 +1649,18 @@ not, you signed different bytes.
 **4. Record it.** The approvals page takes the two files as text and does one
 `create` on `approvals` with them **verbatim** -- never base64, and never parsed.
 It refuses a file whose name ends `.pem` or `.key`, or whose content carries a
-private-key header, with the message *this page never accepts a private key*. The
-object it posts carries all four spec fields: `subjectRef{kind,name}` and
-`planHash` come from the route the wizard navigated to, because the page is
-forbidden from parsing the two documents and so cannot lift the hash out of
-`approval.json` either.
+private-key header, with the message *this page never accepts a private key*,
+and clears the refused text from the field. The object it posts carries all four
+spec fields, and **every one of them is read from the `Restore` itself**: the
+page GETs the Restore the route names, takes `metadata.name`, `metadata.uid` and
+`spec.approvalRef.name` off it and computes the sha256 of its own
+`spec.planBytes` in the browser, shows all of them read-only, and at submission
+checks both that what it SHOWS is what it would SEND and that the Restore is
+still the object it read. The route only says WHICH Restore; a link whose
+`hash` or `name` disagrees with that Restore is refused and no form is offered
+from it. The page is still forbidden from parsing the two documents, so no value
+is ever lifted out of `approval.json` -- and the controller recomputes the hash
+from the referent's own bytes regardless (checks 7 and 9).
 
 **5. The controller decides.** It recomputes the plan hash from the referent's
 own bytes, resolves the signing key id out of the signature (the **matched** key

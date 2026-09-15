@@ -742,6 +742,88 @@ async fn a_correct_status_plan_hash_does_not_rescue_a_mutated_plan() {
     );
 }
 
+/// **The unsigned `spec.planHash` must name the plan that was signed.**
+///
+/// `spec.planHash` is a plain CRD field beside the two documents: nothing in
+/// checks 1-8 reads it, because authorisation rests on the hash INSIDE the
+/// signed bytes. But it is the value `kubectl get approval -o yaml`, the
+/// `SUBJECT` view and the UI all SHOW, and the CRD has always said a wrong one
+/// is a refusal. Without the comparison in `decide`, an `Approval` could be
+/// `Verified=True` while displaying a plan hash that is not the plan it
+/// authorises — so the one thing this field exists for, letting a reader
+/// compare, would be the one thing it could not be trusted for.
+///
+/// Kills the mutant *drop the `spec.planHash` comparison*. The POSITIVE
+/// CONTROL runs first, over the same fixtures and the same routes, so this row
+/// can only pass because the comparison exists — never because the fixture
+/// stopped verifying at all.
+#[tokio::test]
+async fn a_forged_spec_plan_hash_is_refused_even_when_the_signed_document_matches() {
+    let control = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    assert_eq!(
+        control.spec.plan_hash, PLAN_HASH,
+        "the control names the signed plan"
+    );
+    let (client, _) =
+        mock_client_recording(approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH))));
+    match approval::reconcile_approval(&control, &client)
+        .await
+        .expect("the reconcile completes")
+    {
+        ApprovalOutcome::Verified(_) => {}
+        other => panic!("the control must verify, or this test proves nothing; got {other:?}"),
+    }
+
+    // The ONE change: the unsigned field beside the documents names another
+    // plan. The signature still verifies and the document's own `plan_hash`
+    // still equals the referent's bytes.
+    let mut forged = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let claimed = sha256_prefixed(b"a plan nobody signed");
+    forged.spec.plan_hash.clone_from(&claimed);
+    let (forged_client, recorder) =
+        mock_client_recording(approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH))));
+    let outcome = approval::reconcile_approval(&forged, &forged_client)
+        .await
+        .expect("the reconcile completes");
+    match &outcome {
+        ApprovalOutcome::Refused(ApprovalRefusal::PlanHashMismatch { got, want }) => {
+            assert_eq!(
+                got, &claimed,
+                "the refusal names the value the object DISPLAYS"
+            );
+            assert_eq!(want, PLAN_HASH, "and the hash of the referent's own bytes");
+        }
+        other => panic!("a forged spec.planHash must not verify; got {other:?}"),
+    }
+    assert_eq!(
+        outcome.reason(),
+        "PlanHashMismatch",
+        "the fact is check 7's — this approval names a plan the referent does not carry — so the \
+         closed set of reasons does not grow a tenth member"
+    );
+    assert!(
+        outcome.message().contains(&claimed) && outcome.message().contains(PLAN_HASH),
+        "the message names both hashes: {}",
+        outcome.message()
+    );
+    let status = approval::status_for(&forged, &outcome, now());
+    assert_eq!(status.verified, Some(false));
+    assert!(
+        status.matched_key_id.is_none(),
+        "a refused approval reports no key id"
+    );
+    assert!(
+        status.verified_subject_ref.is_none(),
+        "and binds no subject: a refusal is not provenance"
+    );
+    assert!(
+        seen(&recorder)
+            .iter()
+            .any(|(m, p)| m == "PATCH" && p.ends_with("/approvals/a1/status")),
+        "the refusal is recorded on /status, where every reader of this object sees it"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Check 8 — the subject kind, from inside the signed bytes
 // ---------------------------------------------------------------------------
