@@ -26,13 +26,16 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use kube::CustomResourceExt as _;
+use weirkeeper::backup_execution::{
+    execution_identity, runner_argv, ExecutionTrigger, ALLOWED_CLUSTERS_PATH, OUT_PATH,
+    RECEIPT_OUT_PATH, RUNNER_ARGV_ANNOTATION, SIGNING_KEY_PATH, SPEC_PATH, TRIGGER_SCHEDULE,
+};
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
-    decide, reconcile_schedule, refine_against_last_fire, runner_argv, scheduled_backup,
-    status_patch, ScheduleOutcome, SlotDecision, ALLOWED_CLUSTERS_PATH, MISSED_SLOT_HORIZON,
-    OUT_PATH, REASON_CONCURRENCY_BLOCKED, REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED,
-    RECEIPT_OUT_PATH, REQUEUE_SECS, RUNNER_ARGV_ANNOTATION, SCHEDULE_LABEL, SIGNING_KEY_PATH,
-    SLOT_LABEL, SPEC_PATH, TRIGGERED_BY_SCHEDULE,
+    decide, reconcile_schedule, refine_against_last_fire, scheduled_backup, status_patch,
+    ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, REASON_CONCURRENCY_BLOCKED,
+    REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED, REQUEUE_SECS, SCHEDULE_LABEL,
+    SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
 };
 use weirkeeper::crds::backup_schedule::{
     BackupSchedule, BackupScheduleStatus, ConcurrencyPolicy, SUSPEND_ONLY_RULE,
@@ -1560,27 +1563,38 @@ fn backup_id_includes_the_schedule_uid() {
     assert!(a.contains(UID) && b.contains(OTHER_UID));
 
     // And through the whole object, which is where it actually reaches the
-    // archive: the same name, the same slot, two namespaces.
+    // archive: the same name, the same slot, two namespaces. The Backup
+    // reconciler derives the run identity from the object this reconciler
+    // creates — with the UID the API server gives it — and never from an
+    // annotation, so the property is asserted over that derivation.
     let one = schedule("nightly", UID, "17 3 * * 1", false);
     let two = schedule("nightly", OTHER_UID, "17 3 * * 1", false);
     let name = scheduled_backup_name("nightly", &slot).unwrap();
-    let argv_of = |s: &BackupSchedule, uid: &str| {
-        scheduled_backup(s, uid, &slot, &name)
-            .metadata
-            .annotations
-            .expect("the created Backup carries the runner argv")[RUNNER_ARGV_ANNOTATION]
-            .clone()
+    let id_of = |s: &BackupSchedule, uid: &str| {
+        let mut created = scheduled_backup(s, uid, &slot, &name);
+        created.metadata.uid = Some(format!("api-server-assigned-{uid}"));
+        execution_identity(&created)
+            .expect("a Backup the schedule creates states a scheduled run identity")
+            .id
     };
-    assert_ne!(argv_of(&one, UID), argv_of(&two, OTHER_UID));
+    assert_eq!(id_of(&one, UID), a);
+    assert_eq!(id_of(&two, OTHER_UID), b);
+    assert_ne!(id_of(&one, UID), id_of(&two, OTHER_UID));
 }
 
-/// The `--backup-id-override` flag is PASSED here, not defined here.
+/// The `--backup-id-override` flag is PASSED by this crate, not defined here —
+/// and since PLAT-06.1 it is passed by the `Backup` reconciler's derived argv,
+/// never by an annotation the schedule writes.
 ///
 /// INTERFACE **I10** IS TASK 4'S. The flag lives on `logweir backup run`; this
-/// task writes it into the runner argv it puts on the `Backup` it creates, and
-/// adds no file under `crates/logweir/` at all (critique B H10(c): the first
-/// draft mandated a new CLI flag from a task whose Files block names no
-/// `crates/logweir/` file, on a chain it does not own).
+/// crate writes it into the runner argv `backup_execution::runner_argv`
+/// derives, and adds no file under `crates/logweir/` at all (critique B
+/// H10(c): the first draft mandated a new CLI flag from a task whose Files
+/// block names no `crates/logweir/` file, on a chain it does not own).
+///
+/// KILLS: re-adding the `logweir.dev/runner-argv` annotation to the scheduled
+/// Backup; deriving the scheduled backup id from anything but the schedule UID
+/// and the slot; a second code-line spelling of the flag anywhere in the crate.
 #[test]
 fn the_backup_id_override_is_passed_not_defined() {
     let slot = slot_name(utc(2026, 9, 7, 14, 5));
@@ -1588,13 +1602,27 @@ fn the_backup_id_override_is_passed_not_defined() {
     let schedule = schedule("nightly", UID, "5 14 * * *", false);
     let backup = scheduled_backup(&schedule, UID, &slot, &name);
 
-    let annotations = backup
-        .metadata
-        .annotations
-        .clone()
-        .expect("the created Backup carries annotations");
-    let argv: Vec<String> = serde_json::from_str(&annotations[RUNNER_ARGV_ANNOTATION])
-        .expect("the runner argv annotation is a JSON array of argv tokens");
+    assert!(
+        backup
+            .metadata
+            .annotations
+            .as_ref()
+            .is_none_or(|annotations| !annotations.contains_key(RUNNER_ARGV_ANNOTATION)),
+        "a scheduled Backup carries NO `{RUNNER_ARGV_ANNOTATION}` annotation: the Backup \
+         reconciler derives the argv from the typed spec and the server-generated run identity, \
+         and an annotation is never executable input. Got {:?}",
+        backup.metadata.annotations
+    );
+
+    // The identity the Backup reconciler derives from exactly this object, with
+    // the UID the API server would give it.
+    let mut stored = backup.clone();
+    stored.metadata.uid = Some("7d1b5b6e-0000-4000-8000-00000000b001".to_string());
+    let identity = execution_identity(&stored)
+        .expect("the object this reconciler creates states a complete scheduled run identity");
+    assert_eq!(identity.trigger, ExecutionTrigger::Schedule);
+    assert_eq!(identity.id, backup_id_for(UID, &slot));
+    let argv = runner_argv(identity.trigger, &identity.id);
 
     let flag = argv
         .iter()
@@ -1606,17 +1634,21 @@ fn the_backup_id_override_is_passed_not_defined() {
         "the flag's value is `backup_id_for(<schedule uid>, <slot>)`, so the CLI does not have \
          to know that schedules exist"
     );
-    assert_eq!(argv, runner_argv(&backup_id_for(UID, &slot)));
+    assert_eq!(
+        argv,
+        runner_argv(ExecutionTrigger::Schedule, &backup_id_for(UID, &slot))
+    );
     assert_eq!(
         argv[0], "backup",
         "the argv's first token names the `logweir` subcommand `backup`, which Global \
          Constraint 3 as revised by Task 1 admits"
     );
 
-    // The rest of the object Task 17 reads by name.
+    // The rest of the object the Backup reconciler reads by name.
     assert_eq!(backup.metadata.name.as_deref(), Some(name.as_str()));
     assert_eq!(backup.spec.slot.as_deref(), Some(slot.as_str()));
     assert_eq!(backup.spec.triggered_by, TRIGGERED_BY_SCHEDULE);
+    assert_eq!(TRIGGERED_BY_SCHEDULE, TRIGGER_SCHEDULE);
     assert_eq!(
         backup.spec.schedule_ref.as_ref().map(|r| r.name.as_str()),
         Some("nightly")
@@ -1701,10 +1733,13 @@ fn the_backup_id_override_is_passed_not_defined() {
     );
 
     // 3. AND THE FLAG IS NAMED IN EXACTLY ONE PLACE IN THIS CRATE'S CODE —
-    //    `runner_argv`'s token array. Counted over CODE lines only, the way
-    //    `the_name_never_reads_a_reconcile_clock_or_a_status` counts clock
-    //    reads: this module's documentation names the flag three times, to say
-    //    whose it is, and a count including prose would be a count of comments.
+    //    `backup_execution::runner_argv`'s token array. Counted over CODE
+    //    lines only, the way `the_name_never_reads_a_reconcile_clock_or_a_status`
+    //    counts clock reads: documentation names the flag to say whose it is,
+    //    and a count including prose would be a count of comments. A second
+    //    code line — an annotation writer, a message quoting the token, a
+    //    second argv builder — is a second place the executed identity could
+    //    come from.
     for (path, text) in &sources {
         let code = text
             .lines()
@@ -1713,24 +1748,34 @@ fn the_backup_id_override_is_passed_not_defined() {
                 !t.starts_with("//") && t.contains(&flag)
             })
             .count();
-        let expected = usize::from(path == "controllers/backup_schedule.rs");
+        let expected = usize::from(path == "backup_execution.rs");
         assert_eq!(
             code, expected,
             "crates/weirkeeper/src/{path} names {flag} on {code} code line(s); expected \
              {expected}. The one permitted occurrence is the token in `runner_argv`"
         );
     }
-    let src = source_of("src/controllers/backup_schedule.rs");
+    let src = source_of("src/backup_execution.rs");
     assert!(
         fn_body(&src, "pub fn runner_argv(").contains(&flag),
         "that one occurrence is inside `runner_argv`, where it is an argv TOKEN"
     );
 
-    // 4. And the reconciler reaches the CLI through that argv string, never
-    //    through a Rust path.
+    // 4. And neither reconciler reaches the CLI through a Rust path: the
+    //    runner is another binary, reached through an argv string.
+    for file in [
+        "src/backup_execution.rs",
+        "src/controllers/backup_schedule.rs",
+    ] {
+        let text = source_of(file);
+        assert!(
+            !text.contains("logweir::backup"),
+            "{file} reaches the CLI through an argv string and never through a Rust path"
+        );
+    }
     assert!(
-        !src.contains("logweir::backup") && !src.contains("crate::backup"),
-        "the reconciler reaches the CLI through an argv string and never through a Rust path"
+        !source_of("src/controllers/backup_schedule.rs").contains(RUNNER_ARGV_ANNOTATION),
+        "the schedule reconciler writes no runner-argv annotation, and does not even name one"
     );
 }
 
@@ -1756,7 +1801,7 @@ fn the_backup_id_override_is_passed_not_defined() {
 /// KILLS: re-adding `--out` beside `--receipt-out`, in either order.
 #[test]
 fn the_runner_argv_names_at_most_one_output_path() {
-    let argv = runner_argv("b1");
+    let argv = runner_argv(ExecutionTrigger::Schedule, "b1");
     let out = argv.iter().filter(|a| *a == "--out").count();
     let receipt = argv.iter().filter(|a| *a == "--receipt-out").count();
     assert_eq!(
@@ -1941,7 +1986,7 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
     )
     .expect("a valid PKCS#8 signer is copied into the scratch mount path");
 
-    let emitted = runner_argv("b1");
+    let emitted = runner_argv(ExecutionTrigger::Schedule, "b1");
     let argv = argv_against(&dir, &emitted);
     let root = dir.display().to_string();
     let unmapped: Vec<&String> = argv

@@ -622,27 +622,21 @@ const RECEIPT_SIDECAR_KEY: &str = "logweir/backups/b1/r1.receipt.sig";
 const RECEIPT_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000001";
 
+/// The inputs digest the fixture Backup's `status.execution` records and the
+/// fixture Job carries: a Backup whose Job this controller created from frozen
+/// inputs (PLAT-06.1). A label, not a real digest — the Job-observing path
+/// compares the two strings.
+const FIXTURE_INPUTS_SHA256: &str =
+    "sha256:f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+
+/// A manual `Backup` whose inputs this controller froze and whose Job it
+/// created: typed spec, server UID, `status.execution`, and no annotation.
 fn backup_json() -> String {
-    let argv = serde_json::to_string(&[
-        "backup",
-        "run",
-        "--spec",
-        "/plan/backup.yaml",
-        "--signing-key",
-        "/signing/key.pem",
-        "--receipt-out",
-        "/work/receipt.json",
-        "--triggered-by",
-        "manual",
-    ])
-    .expect("the argv serialises");
-    let argv = serde_json::to_string(&argv).expect("the annotation value is a JSON string");
     format!(
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
   "metadata": {{
-    "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}", "generation": 3,
-    "annotations": {{ "logweir.dev/runner-argv": {argv} }}
+    "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}", "generation": 3
   }},
   "spec": {{
     "sourceRef": {{ "name": "prod" }},
@@ -650,6 +644,13 @@ fn backup_json() -> String {
     "archive": {{ "url": "s3://kafka-backups/k8s-demo", "secretRef": {{ "name": "logweir-s3" }} }},
     "triggeredBy": "manual",
     "deadlineSeconds": 3600
+  }},
+  "status": {{
+    "execution": {{
+      "id": "{UID}",
+      "inputsRef": {{ "name": "{NAME}-plan" }},
+      "inputsSha256": "{FIXTURE_INPUTS_SHA256}"
+    }}
   }}
 }}"#
     )
@@ -662,7 +663,9 @@ fn backup() -> Backup {
 fn job_body() -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1"}},
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1",
+    "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Backup","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}],
+    "annotations":{{"logweir.dev/execution-inputs-sha256":"{FIXTURE_INPUTS_SHA256}"}}}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never","serviceAccountName":"{RUNNER_SERVICE_ACCOUNT}"}}}}}},
   "status":{{"conditions":[{{"type":"Complete","status":"True",
      "lastProbeTime":"2026-11-09T03:20:00Z","lastTransitionTime":"2026-11-09T03:20:00Z"}}]}}}}"#
@@ -1114,7 +1117,11 @@ async fn settled_verified_backup() -> Backup {
     )
     .await
     .expect("the first reconcile succeeds");
-    let mut status = json!({});
+    // Onto the status the object already had (`status.execution`), exactly as
+    // the API server merges the two patches.
+    let mut status = serde_json::from_str::<Value>(&backup_json()).expect("the fixture is JSON")
+        ["status"]
+        .clone();
     for p in seen
         .lock()
         .expect("readable")

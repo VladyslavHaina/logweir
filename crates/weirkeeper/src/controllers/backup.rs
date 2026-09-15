@@ -67,7 +67,6 @@ use futures::future::BoxFuture;
 use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::api::{Api, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
@@ -76,26 +75,34 @@ use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use super::Context;
+use crate::backup_execution::{
+    self, annotate_runner_job, compatible_backup_job, derived_runner_argv, execution_identity,
+    has_exact_backup_owner, inputs_config_map, job_provenance, resolve_inputs,
+    runner_argv_annotation, verify_frozen_config_map, ExecutionRefusal, FrozenInputs,
+    JobProvenance, RunnerArgvAnnotation, INPUTS_SHA256_ANNOTATION, RUNNER_ARGV_ANNOTATION,
+};
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
-    CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED, CONDITION_JOB_CREATED,
-    CONDITION_REASON_GUARD_REFUSED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
-    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL,
-    TERMINAL_STATE_ARCHIVE_URL_UNREADABLE, TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
+    CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
+    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
+    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
+    REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
+    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
-    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
-    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_UNSCHEDULABLE,
-    TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
+    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
 };
 use crate::crds::backup::Backup;
-use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
+use crate::crds::kafka_cluster::KafkaCluster;
+use crate::crds::Condition;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
 use crate::verification::{
     backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerifyOracle,
 };
 use logweir_core::ids::sha256_prefixed;
-use logweir_core::spec::AuthSpec;
 use logweir_store::Store;
 
 /// `ttlSecondsAfterFinished`, **patched on after the status write** and never
@@ -284,44 +291,59 @@ pub const PLAN_SPEC_KEY: &str = "backup.yaml";
 /// points `--allowed-clusters` at.
 pub const PLAN_ALLOWED_CLUSTERS_KEY: &str = "allowed-clusters.json";
 
-/// The `backup_id` the rendered document names.
+/// The `backup_id` a run of this `Backup` reports.
 ///
-/// `<owner uid>-<slot>` for a scheduled `Backup`, which is byte-identical to
-/// the value Task 18 wrote into the runner argv's override flag
-/// (`slot::backup_id_for(<schedule uid>, <slot>)`, and the controller owner
-/// reference on a scheduled `Backup` IS the schedule) — asserted by
-/// `the_rendered_plan_parses_back_as_a_backup_spec`, which reads the flag's
-/// value out of the argv. The flag is not named in this file: this crate's own
-/// guard (`tests/schedule_controller.rs::the_backup_id_override_is_passed_not_defined`)
-/// permits the token on code lines in `backup_schedule.rs` alone, and a test
-/// is not a code line under `src/`.
+/// `status.execution.id` once the controller has frozen this object's inputs —
+/// the identity the runner was actually handed. Before that, and for a Job an
+/// older controller created, it is
+/// [`backup_execution::legacy_backup_id`]: the first controller owner's UID
+/// plus `spec.slot` (a scheduled `Backup`'s owner IS its schedule, so this is
+/// `slot::backup_id_for(<schedule uid>, <slot>)`), else this object's own UID.
+/// For every `Backup` [`execution_identity`] accepts, the two values are equal.
 ///
-/// THE VALUE IS OVERRIDDEN AT RUN TIME ANYWAY. `logweir backup run` takes
-/// `args.backup_id_override` in preference to `spec.backup_id` (interface
-/// **I10**, `crates/logweir/src/backup/mod.rs:333-337`), so the field this
-/// renders is load-bearing only for a `Backup` whose argv carries no override
-/// — a hand-written one. Deriving it rather than defaulting it keeps the two
-/// halves from disagreeing about which archive prefix a run writes under,
-/// which is the colliding-`backup_id` case that leaves a partial archive
-/// behind.
+/// NOT FROM `metadata.name`, which the archive prefix is not, and never from an
+/// annotation.
 #[must_use]
 pub fn plan_backup_id(backup: &Backup) -> String {
-    let owner = backup
-        .owner_references()
-        .iter()
-        .find(|o| o.controller == Some(true))
-        .map(|o| o.uid.clone());
-    match (owner, backup.spec.slot.as_deref()) {
-        (Some(uid), Some(slot)) => crate::slot::backup_id_for(&uid, slot),
-        // A `Backup` with no controller owner or no slot is a hand-written
-        // one. Its own UID is unique per object per cluster, which is the
-        // whole argument `slot::backup_id_for` makes for using a UID.
-        _ => backup.uid().unwrap_or_else(|| backup.name_any()),
-    }
+    backup
+        .status
+        .as_ref()
+        .and_then(|status| status.execution.as_ref())
+        .map_or_else(
+            || backup_execution::legacy_backup_id(backup),
+            |execution| execution.id.clone(),
+        )
+}
+
+/// A terminal refusal from the execution contract, as this reconciler's error.
+fn refused(refusal: ExecutionRefusal) -> BackupError {
+    BackupError::Refused(refusal.state, refusal.message)
+}
+
+/// The inputs a run of `backup` against `cluster` would freeze NOW: the derived
+/// identity, resolved from the typed spec, the referent and this controller's
+/// forwarded archive addressing, in canonical form.
+///
+/// PURE apart from the environment read of the addressing variables, which is
+/// the same read [`archive_addressing_env`] and
+/// [`crate::retention::storage_url_for`] have always made.
+///
+/// # Errors
+///
+/// [`BackupError::Refused`] with the terminal state
+/// [`backup_execution::resolve_inputs`] or [`execution_identity`] names.
+pub fn desired_execution_inputs(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+) -> Result<FrozenInputs, BackupError> {
+    let identity = execution_identity(backup).map_err(refused)?;
+    let inputs =
+        resolve_inputs(backup, identity, cluster, &archive_addressing_env()).map_err(refused)?;
+    FrozenInputs::freeze(inputs).map_err(refused)
 }
 
 /// The typed `BackupSpec` the runner's `--spec` file carries, rendered from
-/// `Backup.spec` and the source `KafkaCluster`.
+/// the resolved execution inputs.
 ///
 /// **TYPED, AND THAT IS THE POINT.** The document is built as
 /// `logweir_core::spec::BackupSpec` and serialised, never assembled as text:
@@ -334,79 +356,34 @@ pub fn plan_backup_id(backup: &Backup) -> String {
 /// `the_rendered_plan_parses_back_as_a_backup_spec` read the ConfigMap body
 /// back with `serde_yaml::from_str::<BackupSpec>` and compare field by field.
 ///
-/// `weirkeeper` may link `logweir-core`: it is the PURE layer, it declares no
-/// `logweir-evidence` edge, and `check-one-signer.sh` / `check-pure-core.sh`
-/// are unchanged by the edge (which Task 16 already took).
-///
 /// # What each field comes from
 ///
 /// * `source.bootstrap_servers`, `source.auth` — the `KafkaCluster`
 ///   `spec.sourceRef` names. **Never from `Backup.spec`**, which carries
-///   neither: the address is the referent's, and `sourceRef` is CEL-immutable,
-///   so the pair cannot drift after an approval binds them.
+///   neither.
 /// * `source.topics` — `Backup.spec.topics` **verbatim**, behind
-///   [`logweir_core::guard::reject_glob_metacharacters`]. See
-///   [`reconcile_backup`] step 0 for why the rail refuses before any `POST`
-///   rather than here.
+///   [`logweir_core::guard::reject_glob_metacharacters`] in
+///   [`reconcile_backup`] step 0.
 /// * `storage` — `Backup.spec.archive.url`, through
 ///   [`crate::retention::storage_url_for`], the same parser the controller's
-///   own read-only handle is built with, so the runner and the controller
-///   cannot disagree about where the archive is.
-/// * `backup_id` — [`plan_backup_id`].
-/// * `backup` — `BackupSettings::default()`. `Backup.spec` has no tunables and
-///   inventing CRD fields for them is Task 15b's decision, not this one's; the
-///   defaults are `logweir-core`'s single source for them.
+///   own read-only handle is built with.
+/// * `backup_id` — the server-derived run identity
+///   ([`execution_identity`]).
+/// * `backup` — `BackupSettings::default()`. `Backup.spec` has no tunables.
+///
+/// The document is a projection of [`FrozenInputs`]; see
+/// [`FrozenInputs::backup_spec`].
 ///
 /// # Errors
 ///
-/// [`BackupError::Refused`] with a terminal state, for the two things that can
-/// be wrong with a spec that will never change: an unreadable `archive.url`
-/// and a `scramSha512` cluster with no username.
+/// [`BackupError::Refused`] for a spec that states no runnable identity, an
+/// unreadable `archive.url`, or a `scramSha512` cluster with no username or
+/// Secret reference.
 pub fn plan_backup_spec(
     backup: &Backup,
     cluster: &KafkaCluster,
 ) -> Result<logweir_core::spec::BackupSpec, BackupError> {
-    let name = backup.name_any();
-    let auth = match cluster.spec.auth.mode {
-        AuthMode::Plaintext => AuthSpec::Plaintext,
-        AuthMode::ScramSha512 => {
-            let username = cluster
-                .spec
-                .auth
-                .username
-                .clone()
-                .filter(|u| !u.is_empty())
-                .ok_or_else(|| {
-                    BackupError::Refused(
-                        TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
-                        format!(
-                            "the KafkaCluster {} names auth mode scramSha512 and no auth.username, so the plan document cannot name the identity the run will present",
-                            cluster.name_any()
-                        ),
-                    )
-                })?;
-            AuthSpec::ScramSha512 {
-                username,
-                tls: cluster.spec.auth.tls,
-            }
-        }
-    };
-    let storage = crate::retention::storage_url_for(&backup.spec.archive.url).map_err(|e| {
-        BackupError::Refused(
-            TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
-            format!("the archive URL on {name} is not an object-store location: {e}"),
-        )
-    })?;
-    Ok(logweir_core::spec::BackupSpec {
-        source: logweir_core::spec::BackupSourceSpec {
-            bootstrap_servers: cluster.spec.bootstrap_servers.clone(),
-            auth,
-            topics: backup.spec.topics.clone(),
-        },
-        storage,
-        backup_id: plan_backup_id(backup),
-        backup: logweir_core::spec::BackupSettings::default(),
-    })
+    Ok(desired_execution_inputs(backup, cluster)?.backup_spec())
 }
 
 /// The cluster allowlist the runner's `--allowed-clusters` file carries.
@@ -440,6 +417,9 @@ pub fn plan_backup_spec(
 /// the drill path's allowlist into the `logweir-approval-bundle` Secret
 /// because there it authorises a restore TARGET, which is the opposite
 /// direction. `docs/kubernetes.md` §10 carries this reason in prose.
+///
+/// [`FrozenInputs::allowed_clusters`] renders the same document from frozen
+/// inputs; for inputs resolved from `cluster` the two are equal.
 #[must_use]
 pub fn plan_allowed_clusters(cluster: &KafkaCluster) -> logweir_core::spec::AllowedClusters {
     logweir_core::spec::AllowedClusters {
@@ -452,7 +432,10 @@ pub fn plan_allowed_clusters(cluster: &KafkaCluster) -> logweir_core::spec::Allo
     }
 }
 
-/// The plan ConfigMap object, with exactly two keys.
+/// The plan ConfigMap object: create-only, `immutable: true`, owned by exactly
+/// this `Backup`, carrying the canonical input snapshot
+/// ([`backup_execution::INPUTS_KEY`]) and the two runner documents rendered
+/// from it, and annotated with the run identity and the snapshot digest.
 ///
 /// PURE, so the object a test builds is byte-identical to the one the
 /// reconciler `POST`s.
@@ -463,81 +446,18 @@ pub fn plan_allowed_clusters(cluster: &KafkaCluster) -> logweir_core::spec::Allo
 /// what makes the 409 case decidable — see
 /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`].
 ///
-/// NO CREDENTIAL IN EITHER KEY. `AuthSpec` carries a username and never a
-/// password at any variant, and the object-store credential reaches the runner
-/// as `secretKeyRef` env, so a ConfigMap — an object with no encryption at
-/// rest and a much wider read surface than a Secret — carries nothing but the
-/// two documents.
+/// NO CREDENTIAL IN ANY KEY, AND NO SECRET NAME. `AuthSpec` carries a username
+/// and never a password at any variant; the SCRAM password and the
+/// object-store credential reach the runner as `secretKeyRef` env built from
+/// the pinned `KafkaCluster` and the immutable `Backup.spec`, so a ConfigMap —
+/// an object with no encryption at rest and a much wider read surface than a
+/// Secret — carries nothing but the snapshot and the two documents.
 ///
 /// # Errors
 ///
-/// Whatever [`plan_backup_spec`] refuses, plus a `BackupError` for an object
-/// with no namespace or UID (both unreachable from the API server, both named
-/// rather than unwrapped).
+/// Whatever [`desired_execution_inputs`] refuses.
 pub fn plan_config_map(backup: &Backup, cluster: &KafkaCluster) -> Result<ConfigMap, BackupError> {
-    let name = backup.name_any();
-    let namespace = backup
-        .namespace()
-        .ok_or_else(|| BackupError::NoNamespace(name.clone()))?;
-    let uid = backup
-        .uid()
-        .ok_or_else(|| BackupError::NoUid(name.clone()))?;
-
-    let spec_yaml = serde_yaml::to_string(&plan_backup_spec(backup, cluster)?).map_err(|e| {
-        BackupError::Refused(
-            TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
-            format!("the rendered backup spec for {name} does not serialise: {e}"),
-        )
-    })?;
-    let allowed_json =
-        serde_json::to_string_pretty(&plan_allowed_clusters(cluster)).map_err(|e| {
-            BackupError::Refused(
-                TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
-                format!("the rendered cluster allowlist for {name} does not serialise: {e}"),
-            )
-        })?;
-
-    Ok(ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(plan_config_map_name(&name)),
-            namespace: Some(namespace),
-            owner_references: Some(vec![OwnerReference {
-                api_version: Backup::api_version(&()).to_string(),
-                kind: Backup::kind(&()).to_string(),
-                name,
-                uid,
-                controller: Some(true),
-                block_owner_deletion: Some(true),
-            }]),
-            ..ObjectMeta::default()
-        },
-        data: Some(
-            [
-                (PLAN_SPEC_KEY.to_string(), spec_yaml),
-                (PLAN_ALLOWED_CLUSTERS_KEY.to_string(), allowed_json),
-            ]
-            .into_iter()
-            .collect(),
-        ),
-        ..ConfigMap::default()
-    })
-}
-
-/// Whether `existing` is owned by the `Backup` with this UID.
-///
-/// The 409 discriminator. `controller: true` and the UID, not the name: a
-/// `Backup` deleted and recreated under the same name is a DIFFERENT object,
-/// and its plan is rendered from a spec that may name a different source
-/// cluster.
-#[must_use]
-pub fn is_owned_by(existing: &ConfigMap, backup_uid: &str) -> bool {
-    existing
-        .metadata
-        .owner_references
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .any(|o| o.controller == Some(true) && o.uid == backup_uid)
+    inputs_config_map(backup, &desired_execution_inputs(backup, cluster)?).map_err(refused)
 }
 
 /// The two evidence keys, as read off the log.
@@ -890,44 +810,43 @@ pub fn orphan_state(exit_code: i32, presence: Option<EvidencePresence>) -> Optio
     }
 }
 
-/// The runner argv for `backup`, **read off the annotation and passed through
-/// unchanged**.
-///
-/// # It is not rebuilt here, and that is the point
-///
-/// `Backup.spec` carries no argv — the field set is Task 15b's and the spec is
-/// sealed by a CEL rule — so the argv travels on
-/// `controllers::backup_schedule::RUNNER_ARGV_ANNOTATION` as a JSON array.
-/// Building one here instead would silently drop `--backup-id-override`
-/// (interface **I10**), which is the flag that makes a re-run for a slot reuse
-/// the slot's own backup id rather than mint a second one — so a dropped flag
-/// is a second, partial archive rather than a visible error. Task 18's review
-/// made this ruling; `the_argv_is_the_annotation_verbatim` asserts it.
-///
-/// `None` for an absent or unparseable annotation. A `Backup` created by hand
-/// with no annotation is a spec error to report, never an argv to invent.
-#[must_use]
-pub fn runner_argv(backup: &Backup) -> Option<Vec<String>> {
-    let raw = backup
-        .annotations()
-        .get(super::backup_schedule::RUNNER_ARGV_ANNOTATION)?;
-    serde_json::from_str::<Vec<String>>(raw).ok()
-}
-
-/// The [`RunnerJobSpec`] one `Backup` and its referenced source cluster produce.
+/// The [`RunnerJobSpec`] one `Backup` and its referenced source cluster produce,
+/// from the inputs that would be frozen now.
 ///
 /// PURE, so the Job a test builds is byte-identical to the one the reconciler
 /// `POST`s and an assertion over this function is an assertion over the
-/// request.
+/// request. The argv is [`backup_execution::runner_argv`] of the derived run
+/// identity; no annotation is read.
+///
+/// # Errors
+///
+/// Whatever [`desired_execution_inputs`] refuses, or
+/// [`runner_job_spec_from_inputs`].
+pub fn runner_job_spec(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+) -> Result<RunnerJobSpec, BackupError> {
+    runner_job_spec_from_inputs(backup, cluster, &desired_execution_inputs(backup, cluster)?)
+}
+
+/// The [`RunnerJobSpec`] for FROZEN inputs.
+///
+/// Everything the container executes — argv, deadline, archive addressing
+/// environment, the plan mount — comes from `frozen`. The two Secret key
+/// references come from `cluster` and `Backup.spec.archive.secretRef`, which
+/// the snapshot pins by the cluster's UID and the CEL-immutable specs; the
+/// snapshot deliberately names no Secret. A `cluster` whose UID is not the
+/// frozen one is refused rather than combined.
 ///
 /// # Errors
 ///
 /// [`BackupError`] when the object carries no namespace or UID (both
-/// unreachable from the API server, both named rather than unwrapped) or no
-/// usable runner argv, or a SCRAM source has no usable Secret reference.
-pub fn runner_job_spec(
+/// unreachable from the API server), when `cluster` is not the frozen
+/// referent, or when a SCRAM source has no usable Secret reference.
+pub fn runner_job_spec_from_inputs(
     backup: &Backup,
     cluster: &KafkaCluster,
+    frozen: &FrozenInputs,
 ) -> Result<RunnerJobSpec, BackupError> {
     let name = backup.name_any();
     let namespace = backup
@@ -936,7 +855,20 @@ pub fn runner_job_spec(
     let uid = backup
         .uid()
         .ok_or_else(|| BackupError::NoUid(name.clone()))?;
-    let args = runner_argv(backup).ok_or_else(|| BackupError::NoRunnerArgv(name.clone()))?;
+    let inputs = &frozen.inputs;
+    if cluster.uid().as_deref() != Some(inputs.source.cluster.uid.as_str()) {
+        return Err(BackupError::Refused(
+            TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+            format!(
+                "the frozen execution inputs pin KafkaCluster {} with UID {}, and the referent \
+                 read now has UID {}; its credential reference cannot be combined with those \
+                 inputs",
+                inputs.source.cluster.name,
+                inputs.source.cluster.uid,
+                cluster.uid().unwrap_or_default()
+            ),
+        ));
+    }
 
     let mut secret_mounts = vec![SecretMount {
         volume: SIGNING_VOLUME.to_string(),
@@ -954,7 +886,10 @@ pub fn runner_job_spec(
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = Vec::new();
-    if matches!(cluster.spec.auth.mode, AuthMode::ScramSha512) {
+    if matches!(
+        inputs.source.auth,
+        logweir_core::spec::AuthSpec::ScramSha512 { .. }
+    ) {
         let credential = super::kafka_cluster::source_password_env(cluster).ok_or_else(|| {
             BackupError::Refused(
                 TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
@@ -991,8 +926,8 @@ pub fn runner_job_spec(
             name,
             uid,
         },
-        args,
-        deadline_seconds: backup.spec.deadline_seconds,
+        args: inputs.runner.args.clone(),
+        deadline_seconds: inputs.runner.deadline_seconds,
         service_account_name: RUNNER_SERVICE_ACCOUNT.to_string(),
         secret_mounts,
         config_map_mounts: Vec::new(),
@@ -1000,10 +935,18 @@ pub fn runner_job_spec(
         // `RUST_LOG` is pinned rather than inherited: below `info` the run id
         // and the exit-code meaning line are lost, and those two are how a
         // pod is correlated with the archive it read
-        // (`docs/kubernetes.md` §1b).
+        // (`docs/kubernetes.md` §1b). The addressing variables are the FROZEN
+        // ones, so a Job recreated after a controller restart addresses the
+        // store its plan document names.
         env_literal: {
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
-            env.extend(archive_addressing_env());
+            env.extend(
+                inputs
+                    .archive
+                    .addressing_env
+                    .iter()
+                    .map(|v| (v.name.clone(), v.value.clone())),
+            );
             env
         },
         plan_config_map: Some(plan_config_map_name(&backup.name_any())),
@@ -1017,6 +960,31 @@ pub fn runner_job_spec(
         // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
         image_pull_policy: None,
     })
+}
+
+/// The runner Job for frozen inputs, exactly as the reconciler `POST`s it: the
+/// [`runner_job_spec_from_inputs`] shape with this process's image overrides,
+/// and the Job and its pod template annotated with the run identity and the
+/// inputs digest ([`annotate_runner_job`]).
+///
+/// # Errors
+///
+/// Whatever [`runner_job_spec_from_inputs`] refuses.
+pub fn runner_job(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+    frozen: &FrozenInputs,
+    runner: &job::RunnerImage,
+) -> Result<Job, BackupError> {
+    let mut spec = runner_job_spec_from_inputs(backup, cluster, frozen)?;
+    // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
+    // policy). `None` in either leaves the compiled-in constant in place,
+    // which is what every test that does not pass one sees.
+    spec.image = runner.image.clone();
+    spec.image_pull_policy = runner.image_pull_policy.clone();
+    let mut built = job::build(&spec);
+    annotate_runner_job(&mut built, frozen);
+    Ok(built)
 }
 
 /// Whether a Job has reached a terminal condition.
@@ -1090,6 +1058,30 @@ fn condition(
     ))
 }
 
+/// `backup` with a `/status` merge patch applied in memory, exactly as the API
+/// server applies it ([`crate::conditions::apply_merge_patch`]).
+///
+/// Used after a write succeeds within one pass, so a later builder in the same
+/// pass carries what that write stored and a later change check compares
+/// against it. An unreadable result keeps the object as it was.
+#[must_use]
+pub fn with_status_patch(backup: &Backup, patch: &Value) -> Backup {
+    let Some(fragment) = patch.get("status") else {
+        return backup.clone();
+    };
+    let mut status = backup
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok())
+        .unwrap_or(Value::Null);
+    crate::conditions::apply_merge_patch(&mut status, fragment);
+    let mut projected = backup.clone();
+    if let Ok(next) = serde_json::from_value(status) {
+        projected.status = Some(next);
+    }
+    projected
+}
+
 /// Patch `/status` — unless the patch would change nothing.
 ///
 /// THE THIRD RULE OF THE STATUS-WRITE CONTRACT, at this kind's five patch
@@ -1130,22 +1122,239 @@ async fn patch_status_if_changed(
 /// `None`, so an absent key means "leave it alone" — which is exactly what a
 /// running reconcile wants for the fields a finished one will write, and which
 /// a serialised struct could not express.
+///
+/// The condition array CARRIES the execution-contract conditions and
+/// `Verified` ([`carry_conditions`]): a merge patch replaces arrays, and this
+/// builder owns only `JobCreated`.
 #[must_use]
 pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>) -> Value {
+    let conditions = carry_conditions(
+        backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            backup,
+            CONDITION_JOB_CREATED,
+            "True",
+            CONDITION_JOB_CREATED,
+            &format!("the runner Job {job_name} exists and has not finished"),
+            now,
+        )],
+    );
     json!({
         "status": {
             "phase": PHASE_RUNNING,
             "jobRef": { "name": job_name },
-            "conditions": [condition(
-                backup,
-                CONDITION_JOB_CREATED,
-                "True",
-                CONDITION_JOB_CREATED,
-                &format!("the runner Job {job_name} exists and has not finished"),
-                now,
-            )],
+            "conditions": conditions,
         }
     })
+}
+
+/// The condition types a `Backup` patch builder carries without owning them:
+/// the execution-contract observations
+/// ([`CONDITION_EXECUTION_INPUTS_UNVERIFIED`],
+/// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]) and, last,
+/// [`crate::conditions::CONDITION_VERIFIED`].
+///
+/// A MERGE PATCH REPLACES ARRAYS, so a builder that writes `conditions` owes
+/// the parts it does not own — the hot loop `verification::carry_verified`
+/// documents is the same one a dropped observation would start. The order is
+/// fixed (the builder's own, then the two observations, then `Verified`) so a
+/// steady object computes the same array on every pass and sends nothing.
+#[must_use]
+pub fn carry_conditions(
+    existing: Option<&Vec<Condition>>,
+    mut conditions: Vec<Value>,
+) -> Vec<Value> {
+    for r#type in [
+        CONDITION_EXECUTION_INPUTS_UNVERIFIED,
+        CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
+    ] {
+        if conditions
+            .iter()
+            .any(|c| c.get("type") == Some(&json!(r#type)))
+        {
+            continue;
+        }
+        if let Some(c) = current_condition(existing, r#type) {
+            conditions.push(json!(c));
+        }
+    }
+    crate::verification::carry_verified(existing, conditions)
+}
+
+/// The `/status` merge patch that records frozen inputs: `status.execution`,
+/// and nothing else.
+///
+/// SENT BEFORE THE JOB IS CREATED, and a merge of one object key: it replaces
+/// no array and so cannot drop a condition another writer owns.
+#[must_use]
+pub fn execution_status_patch(frozen: &FrozenInputs) -> Value {
+    json!({ "status": { "execution": frozen.status() } })
+}
+
+/// Whether, and how, this pass observed the runner Job.
+#[derive(Clone, Copy, Debug)]
+pub enum JobObservation<'a> {
+    /// The Job is absent: a Job from frozen inputs is about to be created, so
+    /// no earlier provenance finding still describes anything.
+    Absent,
+    /// The Job exists and is controlled by this `Backup`.
+    Present(&'a Job),
+    /// The pass ended before the Job was classified (a refusal): earlier
+    /// provenance findings are kept as they are.
+    NotObserved,
+}
+
+/// The legacy runner-argv annotation condition for `backup`, when it carries
+/// the annotation.
+///
+/// The message names the annotation's size and digest and whether it equals
+/// the argv this controller derives — never its content, which is
+/// client-controlled text.
+#[must_use]
+pub fn runner_argv_annotation_condition(backup: &Backup, now: DateTime<Utc>) -> Option<Condition> {
+    let observed = runner_argv_annotation(backup)?;
+    let derived = derived_runner_argv(backup);
+    let (reason, message) = match observed {
+        RunnerArgvAnnotation::Malformed { bytes, sha256 } => (
+            REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
+            format!(
+                "the legacy {RUNNER_ARGV_ANNOTATION} annotation ({bytes} bytes, {sha256}) is not a \
+                 JSON array of strings and is not executed; the runner argv is derived from \
+                 spec.triggeredBy and the server-generated execution identity"
+            ),
+        ),
+        RunnerArgvAnnotation::Parsed {
+            bytes,
+            sha256,
+            argv,
+        } => {
+            let comparison = match derived {
+                Some(derived) if derived == argv => {
+                    "it equals the argv derived from spec.triggeredBy and the server-generated \
+                     execution identity, which is the argv that runs"
+                }
+                Some(_) => {
+                    "it DIFFERS from the argv derived from spec.triggeredBy and the \
+                     server-generated execution identity, and only the derived argv runs"
+                }
+                None => "this Backup states no runnable execution identity, so nothing runs",
+            };
+            (
+                REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
+                format!(
+                    "the legacy {RUNNER_ARGV_ANNOTATION} annotation ({bytes} bytes, {sha256}) is \
+                     not executed; {comparison}"
+                ),
+            )
+        }
+    };
+    Some(crate::crds::Condition {
+        r#type: CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED.to_string(),
+        status: "True".to_string(),
+        observed_generation: backup.meta().generation,
+        last_transition_time: Some(now),
+        reason: Some(reason.to_string()),
+        message: Some(message),
+    })
+}
+
+/// The [`CONDITION_EXECUTION_INPUTS_UNVERIFIED`] condition for an existing Job,
+/// when that Job is not known to run this `Backup`'s frozen inputs.
+#[must_use]
+pub fn execution_inputs_unverified_condition(
+    backup: &Backup,
+    job: &Job,
+    now: DateTime<Utc>,
+) -> Option<Condition> {
+    let recorded = backup.status.as_ref().and_then(|s| s.execution.as_ref());
+    let job_name = job.name_any();
+    let (reason, message) = match job_provenance(job, recorded) {
+        JobProvenance::Frozen => return None,
+        JobProvenance::Legacy => (
+            REASON_LEGACY_EXECUTION,
+            format!(
+                "runner Job {job_name} carries no {INPUTS_SHA256_ANNOTATION} annotation and this \
+                 Backup records no status.execution: a controller that predates frozen execution \
+                 inputs created it, possibly from the legacy {RUNNER_ARGV_ANNOTATION} annotation. \
+                 It is observed to completion and never changed, re-derived or re-executed; create \
+                 a new Backup to run with frozen inputs"
+            ),
+        ),
+        JobProvenance::Mismatch { job, recorded } => (
+            REASON_JOB_INPUTS_MISMATCH,
+            format!(
+                "runner Job {job_name} carries execution-inputs digest {} and status.execution \
+                 records {}: the Job was not created from this Backup's frozen inputs (for example \
+                 by an older controller after a rollback). It is observed to completion and never \
+                 changed; create a new Backup to run with verified inputs",
+                job.as_deref().unwrap_or("<none>"),
+                recorded.as_deref().unwrap_or("<none>")
+            ),
+        ),
+    };
+    Some(crate::crds::Condition {
+        r#type: CONDITION_EXECUTION_INPUTS_UNVERIFIED.to_string(),
+        status: "True".to_string(),
+        observed_generation: backup.meta().generation,
+        last_transition_time: Some(now),
+        reason: Some(reason.to_string()),
+        message: Some(message),
+    })
+}
+
+/// `backup` as this pass observes it: its stored status with the two
+/// execution-contract conditions replaced by what this pass computed.
+///
+/// IN MEMORY ONLY. Patch builders read it so the observation reaches the API
+/// server inside the patch the pass sends anyway; whether a patch is sent at
+/// all is still decided against the STORED status. `lastTransitionTime` moves
+/// only on a transition ([`merge_condition`]), so a steady observation adds no
+/// write.
+///
+/// An existing Job that an older controller created (or that does not match
+/// `status.execution`) is described by `ExecutionInputsUnverified` alone: this
+/// controller did not derive or ignore anything for that Job, so the
+/// annotation condition is not asserted beside it.
+#[must_use]
+pub fn observed_view(backup: &Backup, job: JobObservation<'_>, now: DateTime<Utc>) -> Backup {
+    let unverified = match job {
+        JobObservation::NotObserved => None,
+        JobObservation::Absent => Some(None),
+        JobObservation::Present(job) => {
+            Some(execution_inputs_unverified_condition(backup, job, now))
+        }
+    };
+    let foreign_provenance = matches!(unverified, Some(Some(_)));
+    let annotation = if foreign_provenance {
+        None
+    } else {
+        runner_argv_annotation_condition(backup, now)
+    };
+
+    let stored = backup.status.as_ref().and_then(|s| s.conditions.as_ref());
+    let mut conditions: Vec<Condition> = stored.cloned().unwrap_or_default();
+    let mut upsert = |r#type: &str, next: Option<Condition>| {
+        let merged = next.map(|next| merge_condition(current_condition(stored, r#type), next));
+        match (conditions.iter().position(|c| c.r#type == r#type), merged) {
+            (Some(at), Some(merged)) => conditions[at] = merged,
+            (Some(at), None) => {
+                conditions.remove(at);
+            }
+            (None, Some(merged)) => conditions.push(merged),
+            (None, None) => {}
+        }
+    };
+    if let Some(next) = unverified {
+        upsert(CONDITION_EXECUTION_INPUTS_UNVERIFIED, next);
+    }
+    upsert(CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, annotation);
+
+    if stored.map_or(conditions.is_empty(), |stored| *stored == conditions) {
+        return backup.clone();
+    }
+    let mut view = backup.clone();
+    view.status.get_or_insert_with(Default::default).conditions = Some(conditions);
+    view
 }
 
 /// The `/status` merge patch for a finished Job whose `runner` container
@@ -1291,7 +1500,7 @@ pub fn finished_status_patch(
     // one would delete the condition the SECOND patch adds, which would re-add
     // it, which would wake this reconciler again. Measured at 20 reconciles
     // per second on the Phase B run. See `verification::carry_verified`.
-    let conditions = crate::verification::carry_verified(
+    let conditions = carry_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         conditions,
     );
@@ -1332,7 +1541,7 @@ pub fn crashed_status_patch(
     job_name: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    let conditions = crate::verification::carry_verified(
+    let conditions = carry_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
             backup,
@@ -1381,7 +1590,7 @@ pub fn refused_status_patch(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    let conditions = crate::verification::carry_verified(
+    let conditions = carry_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
             backup,
@@ -1453,11 +1662,11 @@ pub enum BackupError {
     NoNamespace(String),
     /// No `metadata.uid`, so no owner reference can be built.
     NoUid(String),
-    /// No usable `logweir.dev/runner-argv` annotation. **Never an invented
-    /// argv** — see [`runner_argv`].
-    NoRunnerArgv(String),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
+    /// A race the next pass resolves — an object answered `409` to a create
+    /// and `404` to the read that followed. Requeue; writes nothing.
+    Transient(String),
     /// A TERMINAL REFUSAL THIS CONTROLLER DECIDED BY ITSELF, carrying the
     /// terminal state and the message its condition names.
     ///
@@ -1477,21 +1686,8 @@ impl fmt::Display for BackupError {
                 write!(f, "the object {name} carries no metadata.namespace")
             }
             Self::NoUid(name) => write!(f, "the object {name} carries no metadata.uid"),
-            Self::NoRunnerArgv(name) => write!(
-                f,
-                // The flag is named in PROSE and not as its literal token:
-                // `tests/schedule_controller.rs::the_backup_id_override_is_passed_not_defined`
-                // counts the token on CODE lines and permits exactly one
-                // occurrence in this crate, in `backup_schedule::runner_argv`.
-                // A second literal here would make that guard's count wrong
-                // for a message string, which is the worst kind of guard
-                // failure — true, and about nothing.
-                "the object {name} carries no parseable `{}` annotation, so there is no runner \
-                 argv; one is never invented here, because a rebuilt argv silently drops the \
-                 backup id override flag (interface I10)",
-                super::backup_schedule::RUNNER_ARGV_ANNOTATION
-            ),
             Self::Api(e) => write!(f, "kubernetes API error: {e}"),
+            Self::Transient(message) => write!(f, "transient: {message}"),
             Self::Refused(state, message) => write!(f, "{state}: {message}"),
         }
     }
@@ -1500,9 +1696,7 @@ impl fmt::Display for BackupError {
 impl std::error::Error for BackupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoNamespace(_) | Self::NoUid(_) | Self::NoRunnerArgv(_) | Self::Refused(..) => {
-                None
-            }
+            Self::NoNamespace(_) | Self::NoUid(_) | Self::Transient(_) | Self::Refused(..) => None,
             Self::Api(e) => Some(e),
         }
     }
@@ -1550,40 +1744,21 @@ async fn plan_source_cluster(
         })
 }
 
-/// Compare executable plan data, allowing only the probe's informational
-/// source cluster ID to change. Backup admission observes that ID directly
-/// from Kafka and never reads `allowed.source_cluster_id`.
-fn compatible_plan_data(existing: &ConfigMap, desired: &ConfigMap) -> bool {
-    let (Some(mut existing), Some(mut desired)) = (existing.data.clone(), desired.data.clone())
-    else {
-        return false;
-    };
-    let (Some(existing_allowed), Some(desired_allowed)) = (
-        existing.remove(PLAN_ALLOWED_CLUSTERS_KEY),
-        desired.remove(PLAN_ALLOWED_CLUSTERS_KEY),
-    ) else {
-        return false;
-    };
-    if existing != desired {
-        return false;
-    }
-    let (Ok(existing_allowed), Ok(desired_allowed)) = (
-        serde_json::from_str::<logweir_core::spec::AllowedClusters>(&existing_allowed),
-        serde_json::from_str::<logweir_core::spec::AllowedClusters>(&desired_allowed),
-    ) else {
-        return false;
-    };
-    existing_allowed.allowed_cluster_ids == desired_allowed.allowed_cluster_ids
-}
-
-/// `POST` the plan ConfigMap, and decide the 409.
+/// Freeze this run's inputs in the plan ConfigMap, or admit the frozen inputs
+/// already there — and return the inputs the Job must be built from.
 ///
-/// A 409 succeeds only when the existing object is ours and its data matches
-/// the desired executable plan. A referenced cluster can be deleted and recreated between
-/// retries even though its spec is immutable. Reusing old plan bytes with the
-/// current cluster's credential would connect with mismatched configuration.
-/// Refuse conflicting data rather than overwrite a plan another reconcile may
-/// already have mounted. Foreign ownership is also a terminal conflict.
+/// CREATE-ONLY. The desired object is `POST`ed; a `409` is decided by reading
+/// the existing object and admitting it only through
+/// [`verify_frozen_config_map`], which compares it against `desired` — a
+/// resolution made NOW from the spec, the referent and this controller's
+/// addressing — and against `status.execution` when that is recorded. When
+/// `status.execution` is recorded the existing object is read FIRST: the inputs
+/// were frozen by an earlier pass, and a ConfigMap that has since disappeared
+/// is re-created only when the fresh resolution digests to exactly the recorded
+/// value.
+///
+/// Nothing here patches, replaces or deletes a ConfigMap: a plan another pass
+/// may already have mounted is never rewritten.
 ///
 /// THE CONFIGMAP WRITE IS A KUBERNETES API WRITE, NOT AN ARCHIVE WRITE.
 /// `scripts/check-no-archive-write.sh` is unaffected: its control-plane token
@@ -1593,77 +1768,134 @@ fn compatible_plan_data(existing: &ConfigMap, desired: &ConfigMap) -> bool {
 ///
 /// # Errors
 ///
-/// Whatever [`plan_config_map`] refuses;
-/// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] for foreign ownership or differing data;
-/// [`BackupError::Api`] for anything transient.
-async fn write_plan_config_map(
+/// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] for any existing object that is
+/// not this run's frozen inputs, or a missing one whose inputs changed;
+/// [`BackupError::Transient`] for a `409` followed by a `404`;
+/// [`BackupError::Api`] for anything else transient.
+async fn freeze_execution_inputs(
     backup: &Backup,
     client: &kube::Client,
     namespace: &str,
-    cluster: &KafkaCluster,
-) -> Result<(), BackupError> {
+    desired: &FrozenInputs,
+) -> Result<FrozenInputs, BackupError> {
     let name = backup.name_any();
     let cm_name = plan_config_map_name(&name);
     let uid = backup
         .uid()
         .ok_or_else(|| BackupError::NoUid(name.clone()))?;
-    let desired = plan_config_map(backup, cluster)?;
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+    let recorded = backup.status.as_ref().and_then(|s| s.execution.as_ref());
 
-    match maps.create(&PostParams::default(), &desired).await {
-        Ok(_) => {
+    if let Some(recorded) = recorded {
+        if let Some(existing) = maps.get_opt(&cm_name).await.map_err(BackupError::Api)? {
+            let frozen = verify_frozen_config_map(&existing, backup, desired, Some(recorded))
+                .map_err(refused)?;
+            debug!(
+                backup = %name,
+                namespace = %namespace,
+                config_map = %cm_name,
+                inputs_sha256 = %frozen.sha256,
+                "the recorded frozen execution inputs verified against a fresh resolution"
+            );
+            return Ok(frozen);
+        }
+        if recorded.inputs_sha256 != desired.sha256 {
+            return Err(BackupError::Refused(
+                TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+                format!(
+                    "status.execution records inputs {} in ConfigMap {cm_name}, which no longer \
+                     exists, and the inputs resolved now digest to {}; the frozen inputs are not \
+                     re-created from a different resolution. Delete this Backup and create a new \
+                     one",
+                    recorded.inputs_sha256, desired.sha256
+                ),
+            ));
+        }
+    }
+
+    let body = inputs_config_map(backup, desired).map_err(refused)?;
+    match maps.create(&PostParams::default(), &body).await {
+        Ok(created) if has_exact_backup_owner(&created.metadata, &name, &uid) => {
             info!(
                 backup = %name,
                 namespace = %namespace,
                 config_map = %cm_name,
-                source_cluster = %cluster.name_any(),
-                "rendered the plan ConfigMap the runner Job mounts at /plan"
+                execution_id = %desired.inputs.execution.id,
+                inputs_sha256 = %desired.sha256,
+                "froze the execution inputs in the immutable plan ConfigMap the runner Job mounts \
+                 at /plan"
             );
-            Ok(())
+            Ok(desired.clone())
         }
+        Ok(_) => Err(BackupError::Refused(
+            TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+            format!(
+                "the API create response for ConfigMap {cm_name} did not retain the exact single \
+                 owner reference for Backup {name} UID {uid}"
+            ),
+        )),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             let existing = maps
                 .get_opt(&cm_name)
                 .await
                 .map_err(BackupError::Api)?
                 .ok_or_else(|| {
-                    // A 409 followed by a 404 is a race with a deletion, and a
-                    // race IS transient: requeue rather than refuse.
-                    BackupError::Refused(
-                        TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-                        format!(
-                            "the ConfigMap {cm_name} answered 409 to a create and 404 to the \
-                             read that followed it"
-                        ),
-                    )
+                    BackupError::Transient(format!(
+                        "the ConfigMap {cm_name} answered 409 to a create and 404 to the read \
+                         that followed; it was deleted concurrently and will be retried"
+                    ))
                 })?;
-            if is_owned_by(&existing, &uid) {
-                if !compatible_plan_data(&existing, &desired) {
-                    return Err(BackupError::Refused(
-                        TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-                        format!(
-                            "the ConfigMap {cm_name} belongs to this Backup but its data differs \
-                             from the current source configuration; refusing to combine a stale \
-                             plan with current credentials. Start a new Backup after checking \
-                             the referenced KafkaCluster"
-                        ),
-                    ));
-                }
-                debug!(
-                    backup = %name,
-                    namespace = %namespace,
-                    config_map = %cm_name,
-                    "the existing plan ConfigMap is owned by this Backup and matches the desired data"
-                );
-                Ok(())
+            verify_frozen_config_map(&existing, backup, desired, recorded).map_err(refused)
+        }
+        Err(e) => Err(BackupError::Api(e)),
+    }
+}
+
+/// `POST` the runner Job, admitting a concurrent winner only when it is
+/// controlled by exactly this `Backup`. Returns whether this call created it.
+///
+/// # Errors
+///
+/// [`TERMINAL_STATE_JOB_NAME_CONFLICT`] for a create response or a `409` winner
+/// without the exact single owner reference; [`BackupError::Transient`] for a
+/// `409` followed by a `404`; [`BackupError::Api`] otherwise.
+async fn create_runner_job(
+    jobs: &Api<Job>,
+    backup: &Backup,
+    desired: &Job,
+) -> Result<bool, BackupError> {
+    let name = backup.name_any();
+    let namespace = backup.namespace().unwrap_or_default();
+    match jobs.create(&PostParams::default(), desired).await {
+        Ok(created) if compatible_backup_job(&created, backup) => Ok(true),
+        Ok(_) => Err(BackupError::Refused(
+            TERMINAL_STATE_JOB_NAME_CONFLICT,
+            format!(
+                "the API create response for Job {namespace}/{name} did not retain the exact \
+                 single owner reference for Backup {namespace}/{name} UID {}",
+                backup.uid().unwrap_or_default()
+            ),
+        )),
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            let raced = jobs
+                .get_opt(&name)
+                .await
+                .map_err(BackupError::Api)?
+                .ok_or_else(|| {
+                    BackupError::Transient(format!(
+                        "Job {namespace}/{name} answered 409 to a create and 404 to the read that \
+                         followed; it was deleted concurrently and will be retried"
+                    ))
+                })?;
+            if compatible_backup_job(&raced, backup) {
+                Ok(false)
             } else {
                 Err(BackupError::Refused(
-                    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+                    TERMINAL_STATE_JOB_NAME_CONFLICT,
                     format!(
-                        "the ConfigMap {cm_name} already exists and carries no controller owner \
-                         reference with this Backup's UID; the runner Job would mount a plan \
-                         document this object did not render, in the pod that holds the signing \
-                         key"
+                        "Job {namespace}/{name} won a concurrent create but is not controlled by \
+                         this Backup's UID {}; it was not adopted",
+                        backup.uid().unwrap_or_default()
                     ),
                 ))
             }
@@ -1672,18 +1904,49 @@ async fn write_plan_config_map(
     }
 }
 
+/// The pod a Job with UID `job_uid` produced, out of a label-selected list.
+///
+/// A `Backup`'s Job is named after the `Backup`, so a Job deleted and
+/// re-created from the same frozen inputs leaves the job-name label selector
+/// matching BOTH the new Job's pod and, until garbage collection finishes, the
+/// deleted Job's. A pod owned by some OTHER Job is therefore never read: its
+/// exit code belongs to a run this Job is not. A pod naming no Job owner at
+/// all (a shape the job controller does not produce) is the fallback.
+#[must_use]
+pub fn select_job_pod(pods: Vec<Pod>, job_uid: Option<&str>) -> Option<Pod> {
+    let job_owners = |pod: &Pod| -> Vec<String> {
+        pod.metadata
+            .owner_references
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|owner| owner.kind == "Job")
+            .map(|owner| owner.uid.clone())
+            .collect()
+    };
+    if let Some(uid) = job_uid {
+        if let Some(at) = pods
+            .iter()
+            .position(|pod| job_owners(pod).iter().any(|owner| owner == uid))
+        {
+            return pods.into_iter().nth(at);
+        }
+    }
+    pods.into_iter().find(|pod| job_owners(pod).is_empty())
+}
+
 /// Find the pod the exit code is read from.
 ///
 /// The prefixed selector first, the legacy one as a fallback — see
-/// [`JOB_NAME_LABEL_LEGACY`]. Returns the FIRST pod: `backoffLimit: 0` plus
-/// `restartPolicy: Never` yields exactly one (verified live), so a second pod
-/// would mean the Job shape had changed under the controller, and taking the
-/// first is then no worse than any other arbitrary choice — while looping over
-/// several and merging their codes into one field would be.
+/// [`JOB_NAME_LABEL_LEGACY`]. Of the pods a selector returns, the one
+/// [`select_job_pod`] attributes to THIS Job's UID: `backoffLimit: 0` plus
+/// `restartPolicy: Never` yields exactly one per Job (verified live), and a Job
+/// re-created under the same name must not read its predecessor's pod.
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
+    job_uid: Option<&str>,
 ) -> Result<Option<Pod>, BackupError> {
     let api: Api<Pod> = Api::namespaced(client.clone(), namespace);
     for selector in pod_selectors(job_name) {
@@ -1691,13 +1954,13 @@ async fn find_pod(
             .list(&ListParams::default().labels(&selector))
             .await
             .map_err(BackupError::Api)?;
-        if let Some(pod) = list.items.into_iter().next() {
+        if let Some(pod) = select_job_pod(list.items, job_uid) {
             return Ok(Some(pod));
         }
         debug!(
             job = %job_name,
             selector = %selector,
-            "no pod matched this selector; trying the next"
+            "no pod of this Job matched this selector; trying the next"
         );
     }
     Ok(None)
@@ -1713,10 +1976,20 @@ async fn find_pod(
 ///    any `POST`, because the Job the API server would refuse is a Job whose
 ///    pods could never be labelled, and a requeue on a refusal that can never
 ///    succeed leaves the CR with NO STATUS AT ALL (review MEDIUM-1).
-/// 1. **No Job and no terminal status** → build and `POST` the Job. Status
-///    `phase: Running`, condition `JobCreated`.
-/// 2. **Job exists, not finished** → `phase: Running`, `jobRef` set. Nothing
-///    else.
+/// 1. **No Job and no terminal status** → derive the run identity
+///    ([`execution_identity`]), resolve the inputs against the referenced
+///    `KafkaCluster`, FREEZE them in the immutable plan ConfigMap (or verify the
+///    frozen inputs already there), record `status.execution`, and only then
+///    build the Job from the frozen inputs and `POST` it. Status
+///    `phase: Running`, condition `JobCreated`. The same path re-creates a Job
+///    that disappeared from a nonterminal `Backup`, from the same frozen inputs.
+///    No annotation is read: a legacy `logweir.dev/runner-argv` annotation
+///    only raises `RunnerArgvAnnotationIgnored`.
+/// 2. **Job exists, not finished** → the Job must be controlled by exactly
+///    this `Backup` (else [`TERMINAL_STATE_JOB_NAME_CONFLICT`], never adopted);
+///    `phase: Running`, `jobRef` set, and `ExecutionInputsUnverified` when the
+///    Job was not created from this object's frozen inputs (an older
+///    controller's Job is observed unchanged).
 /// 3. **Job finished, `runner` terminated** → read `exitCode` from that
 ///    container's `state.terminated.exitCode`; set `status.exitCode`,
 ///    `status.phase`, and a `Complete`/`Failed` condition whose reason is the
@@ -1799,16 +2072,20 @@ pub async fn reconcile_backup_with_runner_image(
                 namespace = %namespace,
                 terminal_state = state,
                 reason = %message,
-                "refusing this Backup terminally: nothing was created, and a requeue over an \
+                "refusing this Backup terminally: no runner Job runs for it, and a requeue over an \
                  immutable spec would never succeed"
             );
             if !status_is_terminal(backup) {
                 let backups: Api<Backup> = Api::namespaced(client.clone(), &namespace);
+                // The annotation observation rides on the refusal too: a
+                // hostile annotation on a refused Backup is surfaced, and it
+                // is not what refused it.
+                let view = observed_view(backup, JobObservation::NotObserved, now);
                 patch_status_if_changed(
                     &backups,
                     backup,
                     &name,
-                    refused_status_patch(backup, state, &message, now),
+                    refused_status_patch(&view, state, &message, now),
                 )
                 .await?;
             }
@@ -1888,7 +2165,35 @@ async fn reconcile_backup_inner(
 
     let existing = jobs.get_opt(&job_name).await.map_err(BackupError::Api)?;
 
-    // STEP 1. Nothing running and nothing terminal: create.
+    // STEP 0c. A JOB THIS BACKUP DOES NOT CONTROL IS NEVER OBSERVED. The Job is
+    // named after the `Backup`, so a name alone proves nothing: a Job with no
+    // owner, a different `Backup` UID or a second owner could otherwise lift a
+    // stranger's exit code and evidence keys onto this object.
+    if let Some(job) = existing.as_ref() {
+        if !compatible_backup_job(job, backup) {
+            if status_is_terminal(backup) {
+                return Ok(BackupOutcome {
+                    job_name,
+                    created: false,
+                    exit_code: backup.status.as_ref().and_then(|s| s.exit_code),
+                    terminal_state: None,
+                    keys: EvidenceKeys::default(),
+                    ttl_patched: false,
+                });
+            }
+            return Err(BackupError::Refused(
+                TERMINAL_STATE_JOB_NAME_CONFLICT,
+                format!(
+                    "Job {namespace}/{job_name} already exists but is not controlled by exactly \
+                     Backup {namespace}/{name} with UID {}; it was neither observed nor adopted. \
+                     Remove the foreign Job and create a new Backup",
+                    backup.uid().unwrap_or_default()
+                ),
+            ));
+        }
+    }
+
+    // STEP 1. Nothing running and nothing terminal: freeze, record, create.
     let Some(job) = existing else {
         if status_is_terminal(backup) {
             // A finished run whose Job has been garbage-collected. Re-creating
@@ -1908,44 +2213,74 @@ async fn reconcile_backup_inner(
                 ttl_patched: false,
             });
         }
+        let view = observed_view(backup, JobObservation::Absent, now);
+
+        // THE RUN IDENTITY, FROM THE TYPED SPEC AND SERVER METADATA ONLY — no
+        // annotation, before any referent is read.
+        let identity = execution_identity(backup).map_err(refused)?;
+
         // Resolve once: the plan and credential must describe the same
         // KafkaCluster used by the connection probe, including its Secret.
         let cluster = plan_source_cluster(backup, client, &namespace).await?;
-        let mut spec = runner_job_spec(backup, &cluster)?;
-        // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
-        // policy). `None` in either leaves the compiled-in constant in place,
-        // which is what every test that does not pass one sees.
-        spec.image = runner.image.clone();
-        spec.image_pull_policy = runner.image_pull_policy.clone();
+        let desired = FrozenInputs::freeze(
+            resolve_inputs(backup, identity, &cluster, &archive_addressing_env())
+                .map_err(refused)?,
+        )
+        .map_err(refused)?;
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
-        // (errata E5a). The Job mounts `<name>-plan` at `/plan`, so a Job
-        // created first is a pod that stalls in `ContainerCreating` until its
-        // deadline fires — measured live, and the reason this task's review
-        // found every scheduled backup failing as an unexplained `NoExitCode`.
-        // `the_plan_config_map_is_posted_before_the_job` asserts the order
-        // over the recorded route table.
-        write_plan_config_map(backup, client, &namespace, &cluster).await?;
+        // (errata E5a) — and now the freeze boundary. The Job mounts
+        // `<name>-plan` at `/plan`, so a Job created first is a pod that stalls
+        // in `ContainerCreating` until its deadline fires — measured live.
+        // `the_plan_config_map_is_posted_before_the_job` asserts the order.
+        let frozen = freeze_execution_inputs(backup, client, &namespace, &desired).await?;
 
-        jobs.create(&PostParams::default(), &job::build(&spec))
-            .await
-            .map_err(BackupError::Api)?;
+        // RECORDED BEFORE ANY JOB EXISTS. A pass that stops after this write
+        // and before the Job resumes from the same record: the next pass reads
+        // the ConfigMap first and verifies it against this digest.
+        let recorded = execution_status_patch(&frozen);
+        patch_status_if_changed(&backups, backup, &name, recorded.clone()).await?;
+        let stored = with_status_patch(backup, &recorded);
+        let view = with_status_patch(&view, &recorded);
+
+        if let Some(annotation) = runner_argv_annotation(backup) {
+            let (bytes, sha256) = match &annotation {
+                RunnerArgvAnnotation::Malformed { bytes, sha256 }
+                | RunnerArgvAnnotation::Parsed { bytes, sha256, .. } => (*bytes, sha256.clone()),
+            };
+            warn!(
+                backup = %name,
+                namespace = %namespace,
+                annotation = RUNNER_ARGV_ANNOTATION,
+                annotation_bytes = bytes,
+                annotation_sha256 = %sha256,
+                "the legacy runner-argv annotation is ignored; the Job runs the argv derived from \
+                 the typed spec and the server-generated execution identity"
+            );
+        }
+
+        let desired_job = runner_job(backup, &cluster, &frozen, runner)?;
+        let created = create_runner_job(&jobs, backup, &desired_job).await?;
         info!(
             backup = %name,
             namespace = %namespace,
             job = %job_name,
-            "created the runner Job"
+            created,
+            execution_id = %frozen.inputs.execution.id,
+            trigger = frozen.inputs.execution.trigger.as_str(),
+            inputs_sha256 = %frozen.sha256,
+            "the runner Job runs the frozen execution inputs"
         );
         patch_status_if_changed(
             &backups,
-            backup,
+            &stored,
             &name,
-            running_status_patch(backup, &job_name, now),
+            running_status_patch(&view, &job_name, now),
         )
         .await?;
         return Ok(BackupOutcome {
             job_name,
-            created: true,
+            created,
             exit_code: None,
             terminal_state: None,
             keys: EvidenceKeys::default(),
@@ -1953,13 +2288,15 @@ async fn reconcile_backup_inner(
         });
     };
 
+    let view = observed_view(backup, JobObservation::Present(&job), now);
+
     // STEP 2. Running.
     if !job_finished(&job) {
         patch_status_if_changed(
             &backups,
             backup,
             &name,
-            running_status_patch(backup, &job_name, now),
+            running_status_patch(&view, &job_name, now),
         )
         .await?;
         return Ok(BackupOutcome {
@@ -2018,7 +2355,8 @@ async fn reconcile_backup_inner(
         });
     }
 
-    let pod = find_pod(client, &namespace, &job_name).await?;
+    let job_uid = job.uid();
+    let pod = find_pod(client, &namespace, &job_name, job_uid.as_deref()).await?;
     let exit_code = pod.as_ref().and_then(terminated_exit_code);
 
     // STEP 4. The crashed-Job case, before the happy path, because the happy
@@ -2037,7 +2375,7 @@ async fn reconcile_backup_inner(
             &backups,
             backup,
             &name,
-            crashed_status_patch(backup, terminal_state, &job_name, now),
+            crashed_status_patch(&view, terminal_state, &job_name, now),
         )
         .await?;
         return Ok(BackupOutcome {
@@ -2111,7 +2449,7 @@ async fn reconcile_backup_inner(
     // PATCH returns, the in-memory `backup` is stale and no longer says what
     // the object says. See `verification::second_patch`.
     let terminal = finished_status_patch(
-        backup,
+        &view,
         exit_code,
         &keys,
         refusal.as_deref(),

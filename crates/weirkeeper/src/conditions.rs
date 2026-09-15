@@ -169,7 +169,19 @@ pub const TERMINAL_STATES: &[&str] = &[
     "ArchiveUrlUnreadable",
     "PlanHashMismatch",
     "ClusterNotReachable",
+    TERMINAL_STATE_EXECUTION_SPEC_INVALID,
 ];
+
+/// The typed `Backup.spec` cannot produce a runner execution: `triggeredBy` is
+/// not `manual` or `schedule`, a `schedule` trigger lacks the complete
+/// `BackupSchedule` controller identity (owner reference, `scheduleRef`,
+/// `slot` and the deterministic object name), a `manual` Backup names a
+/// schedule `slot`, or `deadlineSeconds` is not positive — PLAT-06.1.
+///
+/// TERMINAL, because `spec` is CEL-immutable and the run identity is derived
+/// from it and from server-generated metadata, never from an annotation. The
+/// condition message names the field.
+pub const TERMINAL_STATE_EXECUTION_SPEC_INVALID: &str = "ExecutionSpecInvalid";
 
 /// A `scramSha512` `KafkaCluster` carries no `auth.username`, so the plan
 /// document cannot name the identity the run will present.
@@ -459,6 +471,43 @@ pub const REASON_EXIT_CODE_NOT_ZERO: &str = "ExitCodeNotZero";
 /// its `outcome` is not `pass`. The `Restore` half of interface **I21**.
 pub const REASON_OUTCOME_NOT_PASS: &str = "OutcomeNotPass";
 
+/// A `Backup` whose runner Job is NOT known to execute this object's frozen
+/// execution inputs — PLAT-06.1. `True` is the problem being present, as with
+/// [`CONDITION_FAILED`]; a Job created from frozen inputs raises no condition,
+/// because `status.execution` is the positive record.
+///
+/// The Job is observed to completion and never changed, deleted or re-derived:
+/// a Job that already exists is the compatibility boundary.
+pub const CONDITION_EXECUTION_INPUTS_UNVERIFIED: &str = "ExecutionInputsUnverified";
+
+/// [`CONDITION_EXECUTION_INPUTS_UNVERIFIED`]'s reason for a Job created by a
+/// controller that predates frozen execution inputs: the Job carries no inputs
+/// digest and the `Backup` has no `status.execution`. Its argv may have come
+/// from the legacy `logweir.dev/runner-argv` annotation.
+pub const REASON_LEGACY_EXECUTION: &str = "LegacyExecution";
+
+/// [`CONDITION_EXECUTION_INPUTS_UNVERIFIED`]'s reason for a Job whose inputs
+/// digest annotation does not equal `status.execution.inputsSha256` (either
+/// side may be absent) — for example a Job an older controller created after a
+/// rollback, from a `Backup` a newer controller had already frozen.
+pub const REASON_JOB_INPUTS_MISMATCH: &str = "JobInputsMismatch";
+
+/// A `Backup` carrying the legacy `logweir.dev/runner-argv` annotation, which
+/// this controller never executes — PLAT-06.1. `True` while the annotation is
+/// present on an object whose run this controller derives or refuses; absent
+/// when there is no annotation. The message names the annotation's size and
+/// digest and never its content.
+pub const CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED: &str = "RunnerArgvAnnotationIgnored";
+
+/// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]'s reason for an annotation that
+/// is a JSON array of strings. Whether it equals the derived argv is stated in
+/// the message; it is not executed either way.
+pub const REASON_RUNNER_ARGV_ANNOTATION_IGNORED: &str = "AnnotationIgnored";
+
+/// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]'s reason for an annotation that
+/// is not a JSON array of strings.
+pub const REASON_RUNNER_ARGV_ANNOTATION_MALFORMED: &str = "AnnotationMalformed";
+
 /// Every condition `reason` this crate writes that is NOT one of
 /// [`TERMINAL_STATES`], in one list.
 ///
@@ -484,6 +533,10 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_VERIFICATION_NOT_ATTEMPTED,
     REASON_EXIT_CODE_NOT_ZERO,
     REASON_OUTCOME_NOT_PASS,
+    REASON_LEGACY_EXECUTION,
+    REASON_JOB_INPUTS_MISMATCH,
+    REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
+    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
 ];
 
 /// The condition TYPES a `Backup` can carry, in one list.
@@ -499,6 +552,8 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_EVIDENCE_RECORDED,
     CONDITION_ADMITTED,
     CONDITION_VERIFIED,
+    CONDITION_EXECUTION_INPUTS_UNVERIFIED,
+    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
 ];
 
 /// `phase` for a `Restore` whose admission has not passed yet — **interface

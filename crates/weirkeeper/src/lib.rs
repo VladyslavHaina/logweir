@@ -96,6 +96,7 @@
 //! `ttlSecondsAfterFinished`, so the API server collects the finished Job and
 //! the next reconcile finds none.
 
+pub mod backup_execution;
 pub mod conditions;
 pub mod controllers;
 pub mod crds;

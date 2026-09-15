@@ -96,7 +96,7 @@ use crate::crds::backup_schedule::{
 };
 use crate::crds::{Condition, LocalRef};
 use crate::retention::RetentionReport;
-use crate::slot::{backup_id_for, scheduled_backup_name, slot_name, Cron, CronError, SlotError};
+use crate::slot::{scheduled_backup_name, slot_name, Cron, CronError, SlotError};
 
 /// The condition type this reconciler owns.
 pub const CONDITION_READY: &str = "Ready";
@@ -128,8 +128,10 @@ pub const REASON_NAME_TOO_LONG: &str = "NameTooLong";
 /// `spec.triggeredBy` on every `Backup` this reconciler creates.
 ///
 /// RECORDED RATHER THAN INFERRED from the presence of `scheduleRef`, because
-/// the signed receipt carries it and an auditor reads the receipt.
-pub const TRIGGERED_BY_SCHEDULE: &str = "schedule";
+/// the signed receipt carries it and an auditor reads the receipt. It is the
+/// execution contract's own spelling ([`crate::backup_execution::TRIGGER_SCHEDULE`]),
+/// because the `Backup` reconciler derives the scheduled run identity from it.
+pub const TRIGGERED_BY_SCHEDULE: &str = crate::backup_execution::TRIGGER_SCHEDULE;
 
 /// The label carrying the `BackupSchedule` that created a `Backup`.
 ///
@@ -143,43 +145,12 @@ pub const SCHEDULE_LABEL: &str = "logweir.dev/schedule";
 /// The label carrying the slot a `Backup` is for.
 pub const SLOT_LABEL: &str = "logweir.dev/slot";
 
-/// The annotation carrying the runner argv for a scheduled `Backup`.
-///
-/// WHY AN ANNOTATION AND NOT A SPEC FIELD. `Backup.spec` is sealed by a CEL
-/// rule and its field set is Task 15b's; this task adds none. The argv is not
-/// part of the object's identity or of anything anyone signed — it is a
-/// producer-to-consumer handoff between this reconciler and Task 17's
-/// `job::build`, which is exactly what an annotation is for.
-///
-/// WHAT IT CARRIES, AND WHOSE DECISION EACH PART IS. A JSON array of argv
-/// tokens for `logweir backup run` (Task 4's flag set). Interface **I10**'s
-/// `--backup-id-override` is **passed** here and defined there: this task adds
-/// no file under `crates/logweir/` at all. The container-side paths are Task
-/// 17's to change — it owns `job::build`'s mounts — and are spelled here to
-/// match the convention the plan already fixes for the restore runner
-/// (`/plan/…`, `/signing/key.pem`, `/work/…`).
-pub const RUNNER_ARGV_ANNOTATION: &str = "logweir.dev/runner-argv";
-
-/// Where the rendered `backup.yaml` is mounted in the runner pod.
-pub const SPEC_PATH: &str = "/plan/backup.yaml";
-/// Where the restore-target allowlist is mounted in the runner pod.
-pub const ALLOWED_CLUSTERS_PATH: &str = "/plan/allowed-clusters.json";
-/// Where the receipt signing key is projected in the runner pod.
-pub const SIGNING_KEY_PATH: &str = "/signing/key.pem";
-/// Where the runner writes its backup document.
-/// **NOT IN THE RUNNER ARGV, AND THE REASON IS A MEASUREMENT.** `logweir
-/// backup run` writes exactly one document and `--receipt-out` takes
-/// precedence over `--out`, so passing both at DIFFERENT paths is refused with
-/// exit 1 before the engine is spawned, by `refuse_two_receipt_paths` in
-/// the CLI's own `backup/phase_minus1_admit.rs`. This
-/// argv passed both until Task 24 measured it on a live cluster, which means
-/// every scheduled `Backup` in the shipped tree failed that way and archived
-/// nothing. The constant is kept because `job::WORK_VOLUME`'s doc comment and
-/// `docs/kubernetes.md` name the path a runner's scratch volume has to make
-/// writable, and that is still true; nothing passes it as a flag.
-pub const OUT_PATH: &str = "/work/backup.json";
-/// Where the runner writes the signed receipt.
-pub const RECEIPT_OUT_PATH: &str = "/work/receipt.json";
+// NO RUNNER ARGV, AND NO ANNOTATION CARRYING ONE (PLAT-06.1). This reconciler
+// used to write the runner-argv annotation onto every Backup it created, and
+// the Backup reconciler executed it. The Backup reconciler now derives the argv
+// from the typed spec and the server-generated run identity
+// (`crate::backup_execution`), so the object this reconciler creates carries
+// only its spec, its two labels and its controller owner reference.
 
 /// `spec.deadlineSeconds` on every `Backup` this reconciler creates.
 ///
@@ -528,69 +499,18 @@ pub fn refine_against_last_fire(
     }
 }
 
-/// The runner argv for one scheduled `Backup`.
-///
-/// INTERFACE **I10** IS PASSED HERE, NOT DEFINED HERE.
-/// `--backup-id-override` is Task 4's flag, on Task 4's `logweir backup run`;
-/// this function writes it into the argv so the CLI does not have to know that
-/// schedules exist. This task adds no file under `crates/logweir/` at all, and
-/// `the_backup_id_override_is_passed_not_defined` asserts that.
-///
-/// The leading `"backup"` token names the **`logweir`** subcommand, not the
-/// engine's. `scripts/check-no-oso.sh`'s check A scans only the balanced
-/// expressions around `run_engine(` and a direct engine spawn, so it does not
-/// see this array at all — and `backup` is inside GC3's revised contract
-/// (`ENGINE_RUNTIME_ALLOWLIST="backup restore validate-restore validation"`,
-/// interface **I32**) either way.
-#[must_use]
-pub fn runner_argv(backup_id: &str) -> Vec<String> {
-    [
-        "backup",
-        "run",
-        "--spec",
-        SPEC_PATH,
-        "--allowed-clusters",
-        ALLOWED_CLUSTERS_PATH,
-        "--signing-key",
-        SIGNING_KEY_PATH,
-        // `--receipt-out` AND NOT `--out`, AND THE PAIR WAS FATAL.
-        //
-        // MEASURED on the first Phase B run (Task 24): `logweir backup run`
-        // writes exactly ONE document — the signed receipt — and
-        // `refuse_two_receipt_paths` (in the CLI's own
-        // `backup/phase_minus1_admit.rs`) refuses two flags
-        // naming DIFFERENT paths with exit **1**, before the engine is spawned
-        // and before any broker client exists. This argv emitted
-        // `--out /work/backup.json --receipt-out /work/receipt.json`, so
-        // **every scheduled `Backup` in the shipped tree exited 1** with
-        // `operational: --receipt-out … and --out … name DIFFERENT paths`, and
-        // nothing was ever archived. The runner's refusal is correct and its
-        // message is exact; the caller was wrong.
-        //
-        // `--receipt-out` is the one kept because it is the one that WINS
-        // (the CLI's own `receipt_out_path`): the receipt is the signed
-        // artefact, and `--out` would have named a file nothing writes. The
-        // local file is discarded with the pod's `emptyDir` either way — the
-        // controller reads `receipt-key=` and `sidecar-key=` off the pod log
-        // (interface I7) and fetches the objects from the archive.
-        "--receipt-out",
-        RECEIPT_OUT_PATH,
-        "--triggered-by",
-        TRIGGERED_BY_SCHEDULE,
-        "--backup-id-override",
-        backup_id,
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect()
-}
-
 /// The `Backup` object one due slot produces.
 ///
 /// PURE, AND THAT IS WHY THE OWNER UID IS AN ARGUMENT. Everything here is a
 /// function of `(schedule, schedule_uid, slot, name)`: the object a test builds
 /// is byte-identical to the one the reconciler `POST`s, so an assertion over
 /// this function is an assertion over the request.
+///
+/// NO ANNOTATION. The run identity the `Backup` reconciler derives from this
+/// object is `backup_id_for(schedule_uid, slot)`: `spec.triggeredBy: schedule`,
+/// `spec.scheduleRef`, `spec.slot`, the controller owner reference below and
+/// the deterministic `name` are exactly the facts
+/// [`crate::backup_execution::execution_identity`] requires.
 ///
 /// `ownerReferences` WITH `controller: true` AND `blockOwnerDeletion: true`, so
 /// deleting the schedule garbage-collects its backups and a half-deleted
@@ -605,8 +525,6 @@ pub fn scheduled_backup(
     name: &str,
 ) -> Backup {
     let schedule_name = schedule.name_any();
-    let backup_id = backup_id_for(schedule_uid, slot);
-    let argv = runner_argv(&backup_id);
     Backup {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -616,14 +534,6 @@ pub fn scheduled_backup(
                     (SCHEDULE_LABEL.to_string(), schedule_name.clone()),
                     (SLOT_LABEL.to_string(), slot.to_string()),
                 ]
-                .into_iter()
-                .collect(),
-            ),
-            annotations: Some(
-                [(
-                    RUNNER_ARGV_ANNOTATION.to_string(),
-                    serde_json::to_string(&argv).unwrap_or_default(),
-                )]
                 .into_iter()
                 .collect(),
             ),
@@ -957,7 +867,7 @@ pub enum ScheduleError {
     /// The object carries no `metadata.uid`, so no `backup_id` and no owner
     /// reference can be built. Also unreachable from the API server, and also
     /// named: a `backup_id` built from a name instead would reintroduce the
-    /// cross-namespace collision [`backup_id_for`] exists to prevent.
+    /// cross-namespace collision [`crate::slot::backup_id_for`] exists to prevent.
     NoUid(String),
     /// A status admission or finalization needs the API server's
     /// optimistic-concurrency token.

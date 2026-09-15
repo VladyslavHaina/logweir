@@ -18,6 +18,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use futures::future::BoxFuture;
 use logweir_store::Store;
 use serde_json::Value;
+use weirkeeper::backup_execution::{runner_argv, ExecutionTrigger, INPUTS_SHA256_ANNOTATION};
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     reason_for_exit, wire_reason_for_exit, CONDITION_REASONS, CONDITION_TYPES,
@@ -27,12 +28,12 @@ use weirkeeper::conditions::{
 use weirkeeper::controllers::backup::{
     covered_from_receipt, crash_terminal_state, crashed_status_patch, evidence_keys,
     observe_archive, orphan_state, plan_backup_id, plan_config_map_name, pod_selectors,
-    reconcile_backup, refusal_state, runner_argv, runner_job_spec, terminated_exit_code,
-    unobserved_archive, ArchiveObservation, EvidenceKeys, EvidencePresence, JOB_NAME_LABEL,
-    JOB_NAME_LABEL_LEGACY, RUNNER_SERVICE_ACCOUNT, SIGNING_KEY_SECRET, TTL_SECONDS_AFTER_FINISHED,
+    reconcile_backup, refusal_state, runner_job_spec, terminated_exit_code, unobserved_archive,
+    ArchiveObservation, EvidenceKeys, EvidencePresence, JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY,
+    RUNNER_SERVICE_ACCOUNT, SIGNING_KEY_SECRET, TTL_SECONDS_AFTER_FINISHED,
 };
-use weirkeeper::controllers::backup_schedule::RUNNER_ARGV_ANNOTATION;
-use weirkeeper::crds::backup::{Backup, BackupStatus};
+use weirkeeper::crds::backup::{Backup, BackupExecution, BackupStatus};
+use weirkeeper::crds::LocalRef;
 use weirkeeper::job::{self, ENGINE_DIGEST, ENGINE_VERSION, RUNNER_IMAGE};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
@@ -68,33 +69,16 @@ const SCHEDULE_UID: &str = "9c4d2e6f-0000-4000-8000-0000000000d1";
 const RECEIPT_KEY: &str = "logweir/backups/b1/r1.receipt.json";
 const SIDECAR_KEY: &str = "logweir/backups/b1/r1.receipt.sig";
 
-/// A `Backup` as the API server would hand it over, with Task 18's runner
-/// argv on its annotation.
+/// A MANUAL `Backup` as the API server would hand it over: typed spec, the
+/// server-generated UID, and NO annotation. PLAT-06.1: this is the whole
+/// contract a person or a client has to meet — the run identity is the UID and
+/// the argv is derived.
+///
+/// The name keeps the shape Task 18's `scheduled_backup_name` produces —
+/// `logweir-backup-<schedule>-<slot>` — because the Job is named after this
+/// object VERBATIM and the 63-character `batch.kubernetes.io/job-name` cap is
+/// the whole reason that ruling exists; a manual Backup may carry any name.
 fn backup_json() -> String {
-    let argv = serde_json::to_string(&[
-        "backup",
-        "run",
-        "--spec",
-        "/plan/backup.yaml",
-        "--allowed-clusters",
-        "/plan/allowed-clusters.json",
-        "--signing-key",
-        "/signing/key.pem",
-        "--out",
-        "/work/backup.json",
-        "--receipt-out",
-        "/work/receipt.json",
-        "--triggered-by",
-        "schedule",
-        "--backup-id-override",
-        "b1",
-    ])
-    .expect("the argv serialises");
-    // DOUBLE-ENCODED ON PURPOSE: an annotation VALUE is a string, and Task 18
-    // writes `serde_json::to_string(&argv)` into it. A fixture carrying a raw
-    // JSON array would be a shape the API server cannot store and would make
-    // every assertion below true about something the cluster never holds.
-    let argv = serde_json::to_string(&argv).expect("the annotation value is a JSON string");
     format!(
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
@@ -103,15 +87,13 @@ fn backup_json() -> String {
     "name": "{NAME}",
     "namespace": "{NS}",
     "uid": "{UID}",
-    "generation": 3,
-    "annotations": {{ "{RUNNER_ARGV_ANNOTATION}": {argv} }}
+    "generation": 3
   }},
   "spec": {{
     "sourceRef": {{ "name": "prod" }},
     "topics": ["orders", "payments"],
     "archive": {{ "url": "s3://kafka-backups/logweir", "secretRef": {{ "name": "logweir-s3" }} }},
-    "slot": "20261109-031700",
-    "triggeredBy": "schedule",
+    "triggeredBy": "manual",
     "deadlineSeconds": 3600
   }}
 }}"#
@@ -123,23 +105,16 @@ fn backup() -> Backup {
 }
 
 /// A `Backup` as **Task 18's reconciler** creates it: owned by its
-/// `BackupSchedule` with `controller: true`, and carrying the argv override
-/// Task 18 computes from that owner's UID and the slot.
+/// `BackupSchedule` with `controller: true`, naming that schedule and the slot,
+/// and `triggeredBy: schedule` — the complete scheduled identity, and still no
+/// annotation.
 ///
 /// A SECOND FIXTURE RATHER THAN AN EDIT TO THE FIRST. [`backup_json`] has no
 /// owner reference, which is the shape of a `Backup` created by hand or by
-/// Task 26's page, and both arms of `plan_backup_id` are worth asserting.
-/// Built by MUTATING the parsed fixture rather than by re-templating its text,
-/// so the two cannot drift.
+/// Task 26's page, and both identities are worth asserting. Built by MUTATING
+/// the parsed fixture rather than by re-templating its text, so the two cannot
+/// drift.
 fn scheduled_backup() -> Backup {
-    let backup_id = weirkeeper::slot::backup_id_for(SCHEDULE_UID, "20261109-031700");
-    let mut argv = runner_argv(&backup()).expect("the fixture carries a runner argv");
-    let at = argv
-        .iter()
-        .position(|a| a == "--backup-id-override")
-        .expect("the argv carries the override flag");
-    argv[at + 1] = backup_id;
-
     let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
     value["metadata"]["ownerReferences"] = serde_json::json!([{
         "apiVersion": "logweir.dev/v1alpha1",
@@ -149,9 +124,41 @@ fn scheduled_backup() -> Backup {
         "controller": true,
         "blockOwnerDeletion": true,
     }]);
-    value["metadata"]["annotations"][RUNNER_ARGV_ANNOTATION] =
-        serde_json::json!(serde_json::to_string(&argv).expect("the argv serialises"));
+    value["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly" });
+    value["spec"]["slot"] = serde_json::json!("20261109-031700");
+    value["spec"]["triggeredBy"] = serde_json::json!("schedule");
     serde_json::from_value(value).expect("the mutated fixture is a Backup")
+}
+
+/// The inputs digest [`frozen_backup`]'s `status.execution` records and the
+/// fixture Jobs carry. A label for "the same frozen inputs", not a real digest:
+/// the Job-observing paths compare the two strings and never recompute them.
+const FIXTURE_INPUTS_SHA256: &str =
+    "sha256:f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+
+/// [`backup`] after this controller froze its inputs and created its Job:
+/// `status.execution` recorded, matching the digest the fixture Jobs carry.
+/// The shape every Job-observing row starts from.
+fn frozen_backup() -> Backup {
+    let mut b = backup();
+    b.status = Some(BackupStatus {
+        execution: Some(BackupExecution {
+            id: UID.to_string(),
+            inputs_ref: LocalRef {
+                name: plan_config_map_name(NAME),
+            },
+            inputs_sha256: FIXTURE_INPUTS_SHA256.to_string(),
+        }),
+        ..BackupStatus::default()
+    });
+    b
+}
+
+/// The exact single owner reference a Job this controller created carries.
+fn job_owner_json() -> String {
+    format!(
+        r#"[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Backup","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]"#
+    )
 }
 
 /// A UTC instant, spelled as five integers so a test reads like a calendar.
@@ -255,22 +262,30 @@ fn not_found_body(kind: &str, name: &str) -> String {
     )
 }
 
-/// A finished Job, `Complete` or `Failed`.
+/// A finished Job, `Complete` or `Failed`, controlled by exactly this `Backup`
+/// and carrying the frozen inputs digest [`frozen_backup`] records.
 fn job_body(condition: &str) -> String {
+    let owners = job_owner_json();
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1"}},
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1",
+    "ownerReferences":{owners},
+    "annotations":{{"{INPUTS_SHA256_ANNOTATION}":"{FIXTURE_INPUTS_SHA256}"}}}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"conditions":[{{"type":"{condition}","status":"True",
      "lastProbeTime":"2026-11-09T03:20:00Z","lastTransitionTime":"2026-11-09T03:20:00Z"}}]}}}}"#
     )
 }
 
-/// A Job that exists and has not finished.
+/// A Job that exists and has not finished, controlled by exactly this
+/// `Backup` and carrying the frozen inputs digest.
 fn running_job_body() -> String {
+    let owners = job_owner_json();
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1"}},
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1",
+    "ownerReferences":{owners},
+    "annotations":{{"{INPUTS_SHA256_ANNOTATION}":"{FIXTURE_INPUTS_SHA256}"}}}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"active":1}}}}"#
     )
@@ -1031,33 +1046,58 @@ fn the_job_name_is_the_cr_name() {
     );
 }
 
-/// The argv is the annotation's, verbatim — `--backup-id-override` included.
+/// The argv is DERIVED — PLAT-06.1 — from `spec.triggeredBy` and the
+/// server-generated run identity, and no annotation contributes to it: not a
+/// missing one, not a malformed one, and not a hostile one naming another
+/// subcommand, spec path, signing key or backup id.
+///
+/// KILLS: reading `logweir.dev/runner-argv` again (any arm); deriving the
+/// manual identity from anything but the object's UID; deriving the scheduled
+/// identity from anything but the schedule UID and the slot; dropping the
+/// backup id override flag, which is what makes a re-created Job reuse its
+/// run's backup id.
 #[test]
-fn the_argv_is_the_annotation_verbatim() {
-    let b = backup();
-    let from_annotation = runner_argv(&b).expect("the fixture carries a parseable argv");
-    let spec = runner_job_spec(&b, &serde_json::from_str(&kafka_cluster_json()).unwrap())
-        .expect("the fixture yields a spec");
+fn the_argv_is_derived_and_no_annotation_contributes_to_it() {
+    let cluster = serde_json::from_str(&kafka_cluster_json()).unwrap();
+
+    // MANUAL: the object's own UID, triggered by `manual`.
+    let manual = runner_job_spec(&backup(), &cluster).expect("a manual Backup yields a spec");
     assert_eq!(
-        spec.args, from_annotation,
-        "the argv is READ from `logweir.dev/runner-argv` and PASSED THROUGH. Rebuilding one here \
-         silently drops `--backup-id-override` (interface I10), which is the flag that makes a \
-         re-run reuse its slot's backup id rather than mint a second one — so a dropped flag is \
-         a second, PARTIAL archive rather than a visible error (Task 18's review ruling)"
+        manual.args,
+        runner_argv(ExecutionTrigger::Manual, UID),
+        "a manual Backup with NO annotation runs: its argv is derived, not read"
     );
-    assert!(
-        spec.args.iter().any(|a| a == "--backup-id-override"),
-        "the fixture's argv carries the flag whose loss this test is about; got {:?}",
-        spec.args
-    );
+    let at = manual
+        .args
+        .iter()
+        .position(|a| a == "--backup-id-override")
+        .expect("the derived argv states the executed identity");
+    assert_eq!(manual.args[at + 1], UID, "a manual run IS its UID");
+    let at = manual
+        .args
+        .iter()
+        .position(|a| a == "--triggered-by")
+        .expect("the derived argv names the trigger");
+    assert_eq!(manual.args[at + 1], "manual");
     assert_eq!(
-        spec.args.first().map(String::as_str),
+        manual.args.first().map(String::as_str),
         Some("backup"),
-        "the leading token names the `logweir` subcommand, not the engine's; Global Constraint 3 \
-         as revised by Task 1 admits it either way"
+        "the leading token names the `logweir` subcommand, not the engine's"
     );
 
-    let job = job::build(&spec);
+    // SCHEDULED: the schedule UID and the slot, triggered by `schedule`.
+    let scheduled =
+        runner_job_spec(&scheduled_backup(), &cluster).expect("a scheduled Backup yields a spec");
+    assert_eq!(
+        scheduled.args,
+        runner_argv(
+            ExecutionTrigger::Schedule,
+            &weirkeeper::slot::backup_id_for(SCHEDULE_UID, "20261109-031700")
+        )
+    );
+
+    // `job::build` puts the derived argv on the container unchanged.
+    let job = job::build(&manual);
     let args = job.spec.as_ref().and_then(|s| {
         s.template
             .spec
@@ -1065,22 +1105,43 @@ fn the_argv_is_the_annotation_verbatim() {
             .and_then(|p| p.containers.first())
             .and_then(|c| c.args.clone())
     });
-    assert_eq!(
-        args.as_ref(),
-        Some(&from_annotation),
-        "`job::build` puts the argv on the container unchanged"
-    );
+    assert_eq!(args.as_ref(), Some(&manual.args));
 
-    let mut without = backup();
-    without.metadata.annotations = None;
-    assert!(
-        runner_job_spec(
-            &without,
-            &serde_json::from_str(&kafka_cluster_json()).unwrap()
-        )
-        .is_err(),
-        "a `Backup` with no runner argv is an error to REPORT, never an argv to invent"
-    );
+    // AND NO ANNOTATION CHANGES ANY OF IT.
+    for hostile in [
+        "not json at all",
+        r#"{"argv":"backup"}"#,
+        r#"["restore","run","--spec","/plan/restore.yaml"]"#,
+        r#"["backup","run","--spec","/tmp/attacker.yaml","--allowed-clusters","/plan/allowed-clusters.json","--signing-key","/signing/key.pem","--receipt-out","/work/receipt.json","--triggered-by","manual","--backup-id-override","attacker"]"#,
+        r#"["backup","run","--spec","/plan/backup.yaml","--allowed-clusters","/plan/allowed-clusters.json","--signing-key","/tmp/other-key.pem","--receipt-out","/work/receipt.json","--triggered-by","schedule","--backup-id-override","9c4d2e6f-0000-4000-8000-0000000000d1-20261109-031700"]"#,
+    ] {
+        for (label, base, expected) in [
+            ("manual", backup(), &manual.args),
+            ("scheduled", scheduled_backup(), &scheduled.args),
+        ] {
+            let mut annotated = base;
+            annotated
+                .metadata
+                .annotations
+                .get_or_insert_with(Default::default)
+                .insert(
+                    weirkeeper::backup_execution::RUNNER_ARGV_ANNOTATION.to_string(),
+                    hostile.to_string(),
+                );
+            let spec = runner_job_spec(&annotated, &cluster)
+                .expect("an annotation never makes a runnable Backup unrunnable");
+            assert_eq!(
+                &spec.args, expected,
+                "{label}: the annotation {hostile:?} changed the executed argv"
+            );
+            assert!(
+                !spec.args.iter().any(|a| hostile.contains(a.as_str())
+                    && ["/tmp/attacker.yaml", "/tmp/other-key.pem", "attacker"]
+                        .contains(&a.as_str())),
+                "{label}: a token only the annotation names reached the argv"
+            );
+        }
+    }
 }
 
 /// The two mandatory engine variables are on the container, and they mirror
@@ -1245,7 +1306,7 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
     }
     let (client, seen) = mock_client_recording(routes);
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -1323,7 +1384,7 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
         "Failed",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -1375,7 +1436,7 @@ async fn the_container_is_selected_by_name() {
         mock_client_recording_bodies(routes)
     };
     let outcome = reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -1436,7 +1497,7 @@ async fn ttl_is_patched_only_after_status() {
         "Complete",
     ));
     let outcome = reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -1536,7 +1597,7 @@ async fn ttl_is_patched_only_after_status() {
         "Failed",
     ));
     let err = reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -1609,14 +1670,15 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        19,
-        "the nineteen terminal states that are NOT an exit code — the original ten, plus \
+        20,
+        "the twenty terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
          (Task 20's `Restore` admission, and note that its third admission reason \
          `ApprovalNotVerified` is deliberately NOT here — it is a thirty-second HOLD under \
-         interface I19, so it lives in `CONDITION_REASONS`); got {TERMINAL_STATES:?}"
+         interface I19, so it lives in `CONDITION_REASONS`), plus `ExecutionSpecInvalid` \
+         (PLAT-06.1: a typed spec that states no runnable identity); got {TERMINAL_STATES:?}"
     );
     for state in TERMINAL_STATES {
         assert!(
@@ -2239,15 +2301,26 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
         "in the `Backup`'s own namespace"
     );
 
-    // EXACTLY TWO KEYS. A third would be a file the runner does not read and a
-    // surface an auditor has to account for.
+    // EXACTLY THREE KEYS: the two documents the argv points `--spec` and
+    // `--allowed-clusters` at, and the canonical snapshot both are rendered
+    // from (PLAT-06.1). A fourth would be a file nothing produces from the
+    // snapshot and a surface an auditor has to account for.
     let data = cm["data"].as_object().expect("the ConfigMap carries data");
     let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["allowed-clusters.json", "backup.yaml"],
-        "EXACTLY the two keys Task 18's argv points `--spec` and `--allowed-clusters` at"
+        vec![
+            "allowed-clusters.json",
+            "backup.yaml",
+            "execution-inputs.json"
+        ],
+        "EXACTLY the two runner documents and the snapshot they are rendered from"
+    );
+    assert_eq!(
+        cm["immutable"].as_bool(),
+        Some(true),
+        "the plan is frozen: `immutable: true`, create-only, never patched"
     );
 
     // ---- backup.yaml, parsed with the CLI's own call --------------------
@@ -2336,7 +2409,12 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
     // (`tests/schedule_controller.rs::the_backup_id_override_is_passed_not_defined`)
     // permits the token on code lines in `backup_schedule.rs` alone.
     let scheduled = scheduled_backup();
-    let argv = runner_argv(&scheduled).expect("the fixture carries a runner argv");
+    let argv = runner_job_spec(
+        &scheduled,
+        &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+    )
+    .expect("the scheduled fixture yields a spec")
+    .args;
     let at = argv
         .iter()
         .position(|a| a == "--backup-id-override")
@@ -2426,7 +2504,7 @@ async fn the_finished_status_patch_carries_the_backup_id() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -2467,7 +2545,7 @@ async fn the_finished_status_patch_carries_the_backup_id() {
     // before the run had written one would be a promise, not a record.
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -2562,7 +2640,7 @@ async fn the_status_backup_id_is_the_plan_document_id() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3069,7 +3147,7 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3104,7 +3182,7 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3134,7 +3212,7 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3339,13 +3417,22 @@ async fn a_backup_whose_name_is_too_long_is_refused_before_any_post() {
             method: "POST",
             path_suffix: "/configmaps",
             status: 201,
-            body: existing_plan_config_map(UID),
+            // The API server answers a create with the object it stored: this
+            // Backup's own plan, owned by the 63-character name.
+            body: serde_json::to_string(
+                &weirkeeper::controllers::backup::plan_config_map(
+                    &b,
+                    &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+                )
+                .expect("the 63-character Backup renders its plan"),
+            )
+            .unwrap(),
         },
         Route {
             method: "POST",
             path_suffix: "/jobs",
             status: 201,
-            body: running_job_body(),
+            body: running_job_body().replace(NAME, &ok_name),
         },
         Route {
             method: "PATCH",
@@ -3395,7 +3482,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
         "Failed",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3445,7 +3532,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3480,7 +3567,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3514,7 +3601,7 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
             "Failed",
         ));
         reconcile_backup(
-            &backup(),
+            &frozen_backup(),
             &client,
             &unobserved_archive,
             &unverified_evidence,
@@ -3589,7 +3676,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &oracle,
         &unverified_evidence,
@@ -3632,7 +3719,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
         "Complete",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -3861,7 +3948,7 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
         ];
         let (client, seen, bodies) = mock_client_recording_bodies(routes);
         let outcome = reconcile_backup(
-            &backup(),
+            &frozen_backup(),
             &client,
             &unobserved_archive,
             &unverified_evidence,
@@ -4000,7 +4087,7 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
         "Failed",
     ));
     let outcome = reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &payload_without_sidecar,
         &unverified_evidence,
@@ -4105,7 +4192,7 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
         "Failed",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -4129,7 +4216,7 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
         "Failed",
     ));
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -4171,7 +4258,7 @@ async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
     ];
     let (client, seen, bodies) = mock_client_recording_bodies(routes);
     let outcome = reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -4557,7 +4644,7 @@ fn status_patch_count(bodies: &[SeenBody]) -> usize {
 async fn a_steady_backup_issues_no_second_status_patch() {
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
     reconcile_backup(
-        &backup(),
+        &frozen_backup(),
         &client,
         &unobserved_archive,
         &unverified_evidence,
@@ -4575,9 +4662,11 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         "the first pass records the running Job: {first:?}"
     );
 
-    let mut stored = Value::Null;
+    // Onto the status the object ALREADY had — `status.execution` included —
+    // exactly as the API server merges it.
+    let mut stored = serde_json::to_value(frozen_backup().status).expect("the status serialises");
     apply_merge_patch(&mut stored, &patched_statuses(&first)[0]);
-    let mut steady = backup();
+    let mut steady = frozen_backup();
     steady.status = Some(
         serde_json::from_value::<BackupStatus>(stored)
             .expect("the patched status is a BackupStatus — the API server stores it"),
@@ -4604,4 +4693,1423 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         "the second pass over an unchanged object writes NOTHING. At REQUEUE_SECS = 15 that is \
          5,760 API writes a day per running Backup this reconciler no longer makes: {second:?}"
     );
+}
+
+// ===========================================================================
+// PLAT-06.1 — the execution contract: derived identity, frozen inputs, no
+// annotation ever executed
+// ===========================================================================
+
+use weirkeeper::backup_execution::{
+    canonical_inputs, execution_identity, BackupExecutionInputs, FrozenInputs,
+    EXECUTION_ID_ANNOTATION, INPUTS_KEY, INPUTS_VERSION, RUNNER_ARGV_ANNOTATION,
+};
+use weirkeeper::conditions::{
+    CONDITION_EXECUTION_INPUTS_UNVERIFIED, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
+    REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
+    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+};
+use weirkeeper::controllers::backup::{
+    desired_execution_inputs, plan_config_map, runner_job, running_status_patch, select_job_pod,
+    with_status_patch,
+};
+use weirkeeper::crds::kafka_cluster::KafkaCluster;
+
+/// The source `KafkaCluster` fixture, typed.
+fn prod_cluster() -> KafkaCluster {
+    serde_json::from_str(&kafka_cluster_json()).expect("the fixture is a KafkaCluster")
+}
+
+/// What this controller would freeze for `b` against [`prod_cluster`].
+fn desired_for(b: &Backup) -> FrozenInputs {
+    desired_execution_inputs(b, &prod_cluster()).expect("the fixture resolves")
+}
+
+/// `b` as a previous pass left it: inputs frozen and recorded, its Job created
+/// and reported running. The state a controller restart, or a deleted Job,
+/// starts from.
+fn running_after_freeze(b: &Backup) -> Backup {
+    let frozen = desired_for(b);
+    let mut recorded = with_status_patch(
+        b,
+        &serde_json::json!({ "status": { "execution": frozen.status() } }),
+    );
+    let running = running_status_patch(&recorded, NAME, utc(2026, 11, 9, 3, 17));
+    recorded = with_status_patch(&recorded, &running);
+    recorded
+}
+
+/// The plan ConfigMap this controller freezes for `b`, as JSON.
+fn frozen_config_map(b: &Backup) -> Value {
+    serde_json::to_value(plan_config_map(b, &prod_cluster()).expect("the plan renders"))
+        .expect("a ConfigMap serialises")
+}
+
+/// Every recorded request as `(METHOD, path)`.
+fn calls(seen: &[SeenBody]) -> Vec<(String, String)> {
+    seen.iter()
+        .map(|r| (r.method.clone(), path(&r.uri).to_string()))
+        .collect()
+}
+
+/// Whether any request wrote to a ConfigMap other than by `POST` to the
+/// collection — a patch, a replace or a delete of an existing plan.
+fn rewrote_a_config_map(seen: &[SeenBody]) -> bool {
+    seen.iter().any(|r| {
+        ["PATCH", "PUT", "DELETE"].contains(&r.method.as_str())
+            && path(&r.uri).contains("/configmaps")
+    })
+}
+
+/// The first `POST …/jobs` body, as JSON.
+fn posted_job(seen: &[SeenBody]) -> Option<Value> {
+    seen.iter()
+        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))
+}
+
+/// A condition of `type` on a status value, as `(status, reason, message)`.
+fn condition_named(status: &Value, r#type: &str) -> Option<(String, String, String)> {
+    status["conditions"].as_array()?.iter().find_map(|c| {
+        (c["type"] == r#type).then(|| {
+            (
+                c["status"].as_str().unwrap_or_default().to_string(),
+                c["reason"].as_str().unwrap_or_default().to_string(),
+                c["message"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+    })
+}
+
+/// One sequenced route: `(method, path suffix, the answers in order)`.
+type SequencedRoute = (&'static str, &'static str, Vec<(u16, String)>);
+
+/// A double whose answer to each `(method, path suffix)` is the next entry of
+/// that route's list, the last one repeating. For the rows whose property is
+/// an ORDER of answers on one path — a Job that is absent, then present.
+fn sequenced_client(
+    routes: Vec<SequencedRoute>,
+) -> (
+    kube::Client,
+    std::sync::Arc<std::sync::Mutex<Vec<SeenBody>>>,
+) {
+    use http_body_util::BodyExt as _;
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<SeenBody>>> = Arc::new(Mutex::new(Vec::new()));
+    let counters: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![0; routes.len()]));
+    let routes = Arc::new(routes);
+    let svc = {
+        let seen = Arc::clone(&seen);
+        tower::util::service_fn(move |req: http::Request<kube::client::Body>| {
+            let seen = Arc::clone(&seen);
+            let counters = Arc::clone(&counters);
+            let routes = Arc::clone(&routes);
+            async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let body = req
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+                    .unwrap_or_default();
+                seen.lock().expect("readable").push(SeenBody {
+                    method: method.clone(),
+                    uri: uri.clone(),
+                    body,
+                });
+                let p = uri.split('?').next().unwrap_or(&uri).to_string();
+                let at = routes
+                    .iter()
+                    .position(|(m, suffix, _)| {
+                        m.eq_ignore_ascii_case(&method) && p.ends_with(suffix)
+                    })
+                    .unwrap_or_else(|| panic!("sequenced double: no route for {method} {p}"));
+                let answers = &routes[at].2;
+                let n = {
+                    let mut counters = counters.lock().expect("readable");
+                    let n = counters[at];
+                    counters[at] += 1;
+                    n
+                };
+                let (status, payload) = answers[n.min(answers.len() - 1)].clone();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .body(kube::client::Body::from(payload.into_bytes()))
+                        .expect("a response builds"),
+                )
+            }
+        })
+    };
+    (kube::Client::new(svc, "default"), seen)
+}
+
+/// **A MANUAL BACKUP WITH NO ANNOTATION RUNS**, and the order is the contract:
+/// the inputs are frozen in the immutable plan ConfigMap, `status.execution`
+/// records them, and only then does a Job exist — built from those inputs and
+/// stamped with their digest.
+///
+/// KILLS: requiring the runner-argv annotation again; creating the Job before
+/// `status.execution` is recorded; a mutable plan; a Job whose digest is not the
+/// recorded one; a snapshot that names a Secret.
+#[tokio::test]
+async fn a_manual_backup_without_an_annotation_freezes_its_inputs_then_runs_them() {
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+    let outcome = reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("a manual Backup with no annotation reconciles");
+    assert!(outcome.created, "the Job is created: {outcome:?}");
+    assert_eq!(outcome.terminal_state, None);
+    let bodies = bodies.lock().expect("readable").clone();
+    let order = calls(&bodies);
+
+    // THE ORDER: ConfigMap POST < status.execution PATCH < Job POST < running PATCH.
+    let at = |method: &str, suffix: &str, nth: usize| {
+        order
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, p))| m == method && p.ends_with(suffix))
+            .nth(nth)
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| panic!("no {method} …{suffix} #{nth} in {order:?}"))
+    };
+    let cm_post = at("POST", "/configmaps", 0);
+    let recorded = at("PATCH", "/status", 0);
+    let job_post = at("POST", "/jobs", 0);
+    let running = at("PATCH", "/status", 1);
+    assert!(
+        cm_post < recorded && recorded < job_post && job_post < running,
+        "freeze, record, THEN create: {order:?}"
+    );
+    assert!(!rewrote_a_config_map(&bodies));
+
+    // THE CONFIGMAP: immutable, three keys, digest and identity annotated.
+    let cm = posted_config_map(&bodies);
+    assert_eq!(cm["immutable"], true, "the plan is frozen: {cm}");
+    let snapshot_text = cm["data"][INPUTS_KEY].as_str().expect("the snapshot key");
+    let digest = logweir_core::ids::sha256_prefixed(snapshot_text.as_bytes());
+    assert_eq!(
+        cm["metadata"]["annotations"][INPUTS_SHA256_ANNOTATION],
+        digest
+    );
+    assert_eq!(cm["metadata"]["annotations"][EXECUTION_ID_ANNOTATION], UID);
+    let snapshot: Value = serde_json::from_str(snapshot_text).expect("the snapshot is JSON");
+    assert_eq!(snapshot["version"], INPUTS_VERSION);
+    assert_eq!(snapshot["execution"]["id"], UID, "a manual run IS its UID");
+    assert_eq!(snapshot["execution"]["trigger"], "manual");
+    assert_eq!(
+        snapshot["execution"]["backup"],
+        serde_json::json!({"namespace": NS, "name": NAME, "uid": UID})
+    );
+    assert!(snapshot["execution"].get("schedule").is_none());
+    assert_eq!(snapshot["source"]["cluster"]["uid"], CLUSTER_UID);
+    assert_eq!(
+        snapshot["runner"]["args"],
+        serde_json::json!(runner_argv(ExecutionTrigger::Manual, UID))
+    );
+    for forbidden in [
+        "prod-sasl",
+        "logweir-s3",
+        "password",
+        "secret-access-key",
+        "access-key-id",
+    ] {
+        assert!(
+            !cm.to_string().contains(forbidden),
+            "the frozen plan names no Secret and no credential key: `{forbidden}` in {cm}"
+        );
+    }
+
+    // STATUS.EXECUTION, exactly, and in a patch of its own that replaces no array.
+    let statuses = patched_statuses(&bodies);
+    assert_eq!(
+        statuses[0],
+        serde_json::json!({
+            "execution": {
+                "id": UID,
+                "inputsRef": { "name": plan_config_map_name(NAME) },
+                "inputsSha256": digest,
+            }
+        }),
+        "the first status write records the frozen inputs and nothing else"
+    );
+
+    // THE JOB: the frozen argv, stamped with the recorded digest and identity.
+    let job = posted_job(&bodies).expect("the Job was POSTed");
+    assert_eq!(
+        job["spec"]["template"]["spec"]["containers"][0]["args"],
+        snapshot["runner"]["args"]
+    );
+    for annotations in [
+        &job["metadata"]["annotations"],
+        &job["spec"]["template"]["metadata"]["annotations"],
+    ] {
+        assert_eq!(annotations[INPUTS_SHA256_ANNOTATION], digest, "{job}");
+        assert_eq!(annotations[EXECUTION_ID_ANNOTATION], UID, "{job}");
+    }
+    // …and the POSTed Job is exactly the pure builder's Job for those inputs.
+    let frozen = desired_for(&backup());
+    assert_eq!(frozen.sha256, digest);
+    assert_eq!(
+        job,
+        serde_json::to_value(
+            runner_job(
+                &backup(),
+                &prod_cluster(),
+                &frozen,
+                &job::RunnerImage::default()
+            )
+            .unwrap()
+        )
+        .unwrap()
+    );
+
+    // NO ANNOTATION, NO ANNOTATION CONDITION.
+    assert_eq!(
+        condition_named(&statuses[1], CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED),
+        None,
+        "a Backup with no annotation is surfaced as nothing: {}",
+        statuses[1]
+    );
+}
+
+/// **A SCHEDULED BACKUP KEEPS ITS DETERMINISTIC IDENTITY** — the schedule UID
+/// and the slot — in the snapshot, the plan document and the argv, with no
+/// annotation.
+///
+/// KILLS: taking a scheduled run's identity from its own UID; losing the slot
+/// from the snapshot; a plan document whose `backup_id` is not the argv's.
+#[tokio::test]
+async fn a_scheduled_backup_freezes_its_slot_identity() {
+    let scheduled = scheduled_backup();
+    let expected_id = weirkeeper::slot::backup_id_for(SCHEDULE_UID, "20261109-031700");
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+    let outcome = reconcile_backup(
+        &scheduled,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("the scheduled Backup reconciles");
+    assert!(outcome.created);
+    let bodies = bodies.lock().expect("readable").clone();
+    let cm = posted_config_map(&bodies);
+    let snapshot: Value =
+        serde_json::from_str(cm["data"][INPUTS_KEY].as_str().unwrap()).expect("JSON");
+    assert_eq!(snapshot["execution"]["id"], expected_id);
+    assert_eq!(snapshot["execution"]["trigger"], "schedule");
+    assert_eq!(
+        snapshot["execution"]["schedule"],
+        serde_json::json!({"name": "nightly", "uid": SCHEDULE_UID, "slot": "20261109-031700"})
+    );
+    let plan: logweir_core::spec::BackupSpec =
+        serde_yaml::from_str(cm["data"]["backup.yaml"].as_str().unwrap()).unwrap();
+    assert_eq!(plan.backup_id, expected_id);
+    let job = posted_job(&bodies).expect("the Job was POSTed");
+    assert_eq!(
+        job["spec"]["template"]["spec"]["containers"][0]["args"],
+        serde_json::json!(runner_argv(ExecutionTrigger::Schedule, &expected_id))
+    );
+    assert_eq!(
+        patched_statuses(&bodies)[0]["execution"]["id"],
+        expected_id,
+        "status.execution.id is the scheduled identity"
+    );
+}
+
+/// **SNAPSHOT EQUALITY.** The same resolved inputs are the same canonical bytes
+/// and the same digest; a manual and a scheduled run of the same spec differ
+/// ONLY in the identity and the argv that carries it; an informational probe
+/// observation changes the bytes but not the executable inputs; a real input
+/// change changes both.
+///
+/// KILLS: a non-deterministic encoding (a map in hash order, a clock read);
+/// an identity leaking into another field; comparing restarts by digest alone,
+/// which would refuse every retry after a probe.
+#[test]
+fn identical_resolved_inputs_are_identical_bytes_and_only_identity_separates_triggers() {
+    let one = desired_for(&backup());
+    let two = desired_for(&backup());
+    assert_eq!(one.canonical, two.canonical);
+    assert_eq!(one.sha256, two.sha256);
+    assert_eq!(
+        one.sha256,
+        logweir_core::ids::sha256_prefixed(one.canonical.as_bytes())
+    );
+    let reparsed: BackupExecutionInputs = serde_json::from_str(&one.canonical).unwrap();
+    assert_eq!(
+        canonical_inputs(&reparsed).unwrap(),
+        one.canonical,
+        "the encoding round-trips"
+    );
+
+    // Manual vs scheduled: mask the identity and the argv; nothing else differs.
+    let scheduled = desired_for(&scheduled_backup());
+    let masked = |f: &FrozenInputs| {
+        let mut v: Value = serde_json::from_str(&f.canonical).unwrap();
+        v["execution"] = Value::Null;
+        v["runner"]["args"] = Value::Null;
+        v
+    };
+    assert_ne!(one.sha256, scheduled.sha256);
+    assert_eq!(
+        masked(&one),
+        masked(&scheduled),
+        "a manual and a scheduled run of one spec differ only in identity and trigger"
+    );
+    assert_ne!(one.inputs.execution, scheduled.inputs.execution);
+
+    // An informational observation: different bytes, same executable inputs.
+    let mut probed = prod_cluster();
+    probed.status.as_mut().unwrap().cluster_id = Some("ANOTHER-OBSERVATION".to_string());
+    let observed = desired_execution_inputs(&backup(), &probed).unwrap();
+    assert_ne!(observed.sha256, one.sha256);
+    assert_eq!(observed.inputs.executable(), one.inputs.executable());
+
+    // A real change: the bootstrap addresses.
+    let mut moved = prod_cluster();
+    moved.spec.bootstrap_servers = vec!["elsewhere:9093".to_string()];
+    let changed = desired_execution_inputs(&backup(), &moved).unwrap();
+    assert_ne!(changed.inputs.executable(), one.inputs.executable());
+}
+
+/// **HOSTILE AND MALFORMED ANNOTATIONS ARE IGNORED AND SURFACED.** Whatever the
+/// annotation says — another subcommand, another spec path, another signing
+/// key, another backup id, or nothing parseable — the frozen inputs and the Job
+/// are byte-identical to an un-annotated Backup's, and a
+/// `RunnerArgvAnnotationIgnored` condition names the annotation by size and
+/// digest and never by content.
+///
+/// KILLS: executing any part of the annotation; echoing its content into the
+/// status; failing to surface it; surfacing a matching legacy argv as a
+/// difference.
+#[tokio::test]
+async fn hostile_and_malformed_runner_argv_annotations_are_ignored_and_surfaced() {
+    let clean = desired_for(&backup());
+    let matching = serde_json::to_string(&runner_argv(ExecutionTrigger::Manual, UID)).unwrap();
+    for (value, reason, comparison) in [
+        (
+            r#"["restore","run","--spec","/tmp/attacker.yaml","--signing-key","/tmp/attacker-key.pem","--backup-id-override","attacker-id"]"#.to_string(),
+            REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
+            "DIFFERS",
+        ),
+        ("{not an argv".to_string(), REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, "not a JSON array"),
+        (matching, REASON_RUNNER_ARGV_ANNOTATION_IGNORED, "equals"),
+    ] {
+        let mut annotated = backup();
+        annotated
+            .metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(RUNNER_ARGV_ANNOTATION.to_string(), value.clone());
+        let (client, _seen, bodies) =
+            mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+        let outcome = reconcile_backup(
+            &annotated,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("an annotated Backup reconciles");
+        assert!(outcome.created, "{value}: the run proceeds from the typed spec");
+        let bodies = bodies.lock().expect("readable").clone();
+
+        let cm = posted_config_map(&bodies);
+        assert_eq!(
+            cm["data"],
+            serde_json::to_value(clean.documents().unwrap()).unwrap(),
+            "{value}: the frozen inputs are the un-annotated Backup's, byte for byte"
+        );
+        let job = posted_job(&bodies).expect("the Job was POSTed");
+        assert_eq!(
+            job["spec"]["template"]["spec"]["containers"][0]["args"],
+            serde_json::json!(clean.inputs.runner.args),
+            "{value}: the executed argv is the derived one"
+        );
+        for token in ["attacker", "/tmp/", "restore"] {
+            assert!(
+                !job.to_string().contains(token) && !cm.to_string().contains(token),
+                "{value}: `{token}` reached the Job or the plan"
+            );
+        }
+
+        let statuses = patched_statuses(&bodies);
+        let running = statuses.last().expect("a running status was written");
+        let (status, got_reason, message) =
+            condition_named(running, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED)
+                .unwrap_or_else(|| panic!("{value}: the annotation is surfaced: {running}"));
+        assert_eq!(status, "True");
+        assert_eq!(got_reason, reason, "{value}");
+        assert!(
+            message.contains(&logweir_core::ids::sha256_prefixed(value.as_bytes()))
+                && message.contains(&format!("{} bytes", value.len()))
+                && message.contains(comparison),
+            "{value}: the message names size, digest and the comparison: {message}"
+        );
+        assert!(
+            !message.contains("attacker") && !message.contains("/tmp/"),
+            "{value}: the annotation's content is never echoed: {message}"
+        );
+        assert_no_duplicate_condition_types(running, "the annotated running status");
+    }
+}
+
+/// **A RESTART, OR A DELETED JOB, RE-CREATES THE JOB FROM THE SAME FROZEN
+/// INPUTS** and writes nothing else: the recorded ConfigMap is read first and
+/// verified, no ConfigMap is created or rewritten, the Job is exactly the Job
+/// those inputs build, and a status that already says all of it is not
+/// patched.
+///
+/// KILLS: re-rendering the plan on a retry; creating a second ConfigMap;
+/// building the recreated Job from anything but the frozen inputs; a status
+/// write per retry.
+#[tokio::test]
+async fn a_nonterminal_backup_whose_job_is_gone_recreates_it_from_the_frozen_inputs() {
+    for base in [backup(), scheduled_backup()] {
+        let stored = running_after_freeze(&base);
+        let frozen = desired_for(&base);
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
+                status: 404,
+                body: not_found_body("jobs.batch", NAME),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/kafkaclusters/prod",
+                status: 200,
+                body: kafka_cluster_json(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/configmaps/logweir-backup-nightly-20261109-031700-plan",
+                status: 200,
+                body: frozen_config_map(&base).to_string(),
+            },
+            // ROUTED SO THAT "NO SECOND CONFIGMAP" IS AN ASSERTION.
+            Route {
+                method: "POST",
+                path_suffix: "/configmaps",
+                status: 201,
+                body: frozen_config_map(&base).to_string(),
+            },
+            Route {
+                method: "POST",
+                path_suffix: "/jobs",
+                status: 201,
+                body: running_job_body(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/status",
+                status: 200,
+                body: backup_json(),
+            },
+        ];
+        let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &stored,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 30),
+        )
+        .await
+        .expect("the retry reconciles");
+        let bodies = bodies.lock().expect("readable").clone();
+        assert!(
+            outcome.created,
+            "the missing Job is re-created: {:?}",
+            calls(&bodies)
+        );
+        assert!(
+            !bodies
+                .iter()
+                .any(|b| b.method == "POST" && path(&b.uri).ends_with("/configmaps")),
+            "no second plan is created: {:?}",
+            calls(&bodies)
+        );
+        assert!(!rewrote_a_config_map(&bodies));
+        assert_eq!(
+            posted_job(&bodies).expect("the Job was POSTed"),
+            serde_json::to_value(
+                runner_job(
+                    &base,
+                    &prod_cluster(),
+                    &frozen,
+                    &job::RunnerImage::default()
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            "the re-created Job is exactly the Job the frozen inputs build"
+        );
+        assert_eq!(
+            status_patch_count(&bodies),
+            0,
+            "status.execution, the phase, the jobRef and JobCreated already say all of it: {:?}",
+            calls(&bodies)
+        );
+    }
+}
+
+/// One mutation of a frozen plan: `(what it is, how to make it, whether the
+/// recorded digest is the thing that differs, the cause the refusal must name)`.
+type PlanCase = (&'static str, Box<dyn Fn(&mut Value)>, bool, &'static str);
+
+/// One mutation of a `Backup` spec: `(what it is, how to make it)`.
+type SpecCase = (&'static str, Box<dyn Fn(&mut Value)>);
+
+/// **AN EXISTING PLAN THAT IS NOT EXACTLY THIS BACKUP'S FROZEN INPUTS IS REFUSED
+/// AND NEVER REWRITTEN** — on a `409` retry and on a restart that recorded
+/// `status.execution` alike, before any Job exists.
+///
+/// KILLS: accepting ownership without content; accepting content without
+/// exact ownership; adopting a legacy mutable plan; trusting a digest
+/// annotation without recomputing it; trusting documents without re-rendering
+/// them; combining a frozen plan with a changed connection; ignoring the
+/// recorded digest.
+#[tokio::test]
+async fn an_existing_plan_that_is_not_this_backups_frozen_inputs_is_refused() {
+    let good = frozen_config_map(&backup());
+    let frozen = desired_for(&backup());
+    let reencode = |cm: &mut Value, inputs: &BackupExecutionInputs| {
+        let refrozen = FrozenInputs::freeze(inputs.clone()).unwrap();
+        cm["data"] = serde_json::to_value(refrozen.documents().unwrap()).unwrap();
+        cm["metadata"]["annotations"][INPUTS_SHA256_ANNOTATION] = refrozen.sha256.clone().into();
+    };
+    let cases: Vec<PlanCase> = vec![
+        (
+            "foreign owner UID",
+            Box::new(|cm| {
+                cm["metadata"]["ownerReferences"][0]["uid"] =
+                    "00000000-dead-4000-8000-00000000beef".into();
+            }),
+            false,
+            "a foreign or ownerless object",
+        ),
+        (
+            "an extra owner",
+            Box::new(|cm| {
+                let extra = cm["metadata"]["ownerReferences"][0].clone();
+                let mut extra = extra;
+                extra["uid"] = "11111111-0000-4000-8000-000000000011".into();
+                extra["controller"] = false.into();
+                cm["metadata"]["ownerReferences"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(extra);
+            }),
+            false,
+            "exactly one, this Backup, is required",
+        ),
+        (
+            "an owner without blockOwnerDeletion",
+            Box::new(|cm| {
+                cm["metadata"]["ownerReferences"][0]["blockOwnerDeletion"] = Value::Null;
+            }),
+            false,
+            "complete controller reference",
+        ),
+        (
+            "a mutable object",
+            Box::new(|cm| {
+                cm["immutable"] = false.into();
+            }),
+            false,
+            "it is not immutable",
+        ),
+        (
+            "a legacy mutable plan",
+            Box::new(|cm| {
+                cm["data"].as_object_mut().unwrap().remove(INPUTS_KEY);
+                cm.as_object_mut().unwrap().remove("immutable");
+                cm["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("annotations");
+            }),
+            false,
+            "written by a controller that predates frozen execution inputs",
+        ),
+        (
+            "a tampered snapshot under the old digest",
+            Box::new(|cm| {
+                let text = cm["data"][INPUTS_KEY]
+                    .as_str()
+                    .unwrap()
+                    .replace("broker-0.prod", "evil-0.prod");
+                cm["data"][INPUTS_KEY] = text.into();
+            }),
+            false,
+            "annotation is not the digest",
+        ),
+        (
+            "a tampered runner document",
+            Box::new(|cm| {
+                let text = cm["data"]["backup.yaml"]
+                    .as_str()
+                    .unwrap()
+                    .replace("broker-0.prod", "evil-0.prod");
+                cm["data"]["backup.yaml"] = text.into();
+            }),
+            false,
+            "runner documents are not the documents rendered",
+        ),
+        (
+            "binaryData",
+            Box::new(|cm| {
+                cm["binaryData"] = serde_json::json!({"extra": "AAAA"});
+            }),
+            false,
+            "binaryData",
+        ),
+        (
+            "a fourth key",
+            Box::new(|cm| {
+                cm["data"]["extra.json"] = "{}".into();
+            }),
+            false,
+            "its keys are",
+        ),
+        (
+            "a non-canonical snapshot with its own digest",
+            Box::new(|cm| {
+                let compact: Value =
+                    serde_json::from_str(cm["data"][INPUTS_KEY].as_str().unwrap()).unwrap();
+                let compact = compact.to_string();
+                cm["metadata"]["annotations"][INPUTS_SHA256_ANNOTATION] =
+                    logweir_core::ids::sha256_prefixed(compact.as_bytes()).into();
+                cm["data"][INPUTS_KEY] = compact.into();
+            }),
+            false,
+            "canonical encoding",
+        ),
+        (
+            "another grammar version",
+            Box::new(|cm| {
+                let text = cm["data"][INPUTS_KEY]
+                    .as_str()
+                    .unwrap()
+                    .replace(INPUTS_VERSION, "logweir.dev/backup-execution-inputs/v9");
+                cm["data"][INPUTS_KEY] = text.into();
+            }),
+            false,
+            "names grammar",
+        ),
+        (
+            "the wrong execution id annotation",
+            Box::new(|cm| {
+                cm["metadata"]["annotations"][EXECUTION_ID_ANNOTATION] = "someone-else".into();
+            }),
+            false,
+            "annotation is not the snapshot's execution id",
+        ),
+        (
+            "the recorded digest differs",
+            Box::new(|_| {}),
+            true,
+            "status.execution records",
+        ),
+    ];
+    for (label, mutate, record_other_digest, cause) in cases {
+        for recorded in [false, true] {
+            if record_other_digest && !recorded {
+                continue;
+            }
+            let mut existing = good.clone();
+            mutate(&mut existing);
+            let mut b = backup();
+            if recorded {
+                let mut execution = frozen.status();
+                if record_other_digest {
+                    execution.inputs_sha256 = "sha256:0000".to_string();
+                }
+                b = with_status_patch(&b, &serde_json::json!({"status": {"execution": execution}}));
+            }
+            let (client, _seen, bodies) =
+                mock_client_recording_bodies(create_routes(409, existing.to_string()));
+            let outcome = reconcile_backup(
+                &b,
+                &client,
+                &unobserved_archive,
+                &unverified_evidence,
+                utc(2026, 11, 9, 3, 17),
+            )
+            .await
+            .expect("a refusal is an outcome");
+            let bodies = bodies.lock().expect("readable").clone();
+            assert_eq!(
+                outcome.terminal_state.as_deref(),
+                Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT),
+                "{label} (recorded={recorded}) is refused: {:?}",
+                calls(&bodies)
+            );
+            assert!(posted_job(&bodies).is_none(), "{label}: ZERO Job POSTs");
+            assert!(!rewrote_a_config_map(&bodies), "{label}: never rewritten");
+            let statuses = patched_statuses(&bodies);
+            let last = statuses.last().expect("the refusal is written");
+            assert_eq!(last["phase"], "Failed", "{label}");
+            let (_, reason, message) = condition_named(last, "Failed").expect("a Failed condition");
+            assert_eq!(reason, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, "{label}");
+            assert!(
+                message.contains(cause),
+                "{label} (recorded={recorded}): the refusal names its cause `{cause}`: {message}"
+            );
+        }
+    }
+
+    // AND A PLAN THAT IS CONSISTENT WITH ITSELF BUT FROZE A DIFFERENT
+    // CONNECTION: snapshot, documents and digest all re-rendered for another
+    // bootstrap address. Owned, immutable, canonical — and still refused.
+    let mut stale = good.clone();
+    let mut moved = frozen.inputs.clone();
+    moved.source.bootstrap_servers = vec!["previous-cluster:9093".to_string()];
+    reencode(&mut stale, &moved);
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(create_routes(409, stale.to_string()));
+    let outcome = reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT)
+    );
+    assert!(posted_job(&bodies.lock().unwrap()).is_none());
+}
+
+/// A plan that disappeared before its Job existed is re-created only when the
+/// fresh resolution digests to exactly the recorded value.
+///
+/// KILLS: re-freezing different inputs under a recorded execution.
+#[tokio::test]
+async fn a_missing_frozen_plan_is_recreated_only_from_identical_inputs() {
+    let frozen = desired_for(&backup());
+    for (recorded_digest, expect_created) in [
+        (frozen.sha256.clone(), true),
+        ("sha256:0000".to_string(), false),
+    ] {
+        let mut execution = frozen.status();
+        execution.inputs_sha256 = recorded_digest.clone();
+        let b = with_status_patch(
+            &backup(),
+            &serde_json::json!({"status": {"execution": execution}}),
+        );
+        let mut routes = create_routes(201, existing_plan_config_map(UID));
+        for r in &mut routes {
+            if r.method == "GET" && r.path_suffix.ends_with("-plan") {
+                r.status = 404;
+                r.body = not_found_body("configmaps", &plan_config_map_name(NAME));
+            }
+        }
+        let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &b,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .unwrap();
+        let bodies = bodies.lock().unwrap().clone();
+        let cm_posts = bodies
+            .iter()
+            .filter(|r| r.method == "POST" && path(&r.uri).ends_with("/configmaps"))
+            .count();
+        if expect_created {
+            assert!(outcome.created, "{:?}", calls(&bodies));
+            assert_eq!(cm_posts, 1, "the identical plan is re-created once");
+        } else {
+            assert_eq!(
+                outcome.terminal_state.as_deref(),
+                Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT)
+            );
+            assert_eq!(
+                cm_posts, 0,
+                "different inputs are never frozen under this record"
+            );
+            assert!(posted_job(&bodies).is_none());
+        }
+    }
+}
+
+/// **DUPLICATE CREATION.** A `409` on the Job create is admitted only when the
+/// winner is controlled by exactly this `Backup`, and then nothing is created
+/// twice; a foreign winner is refused, not adopted.
+///
+/// KILLS: treating every `409` as success; treating an owned winner as a
+/// failure.
+#[tokio::test]
+async fn a_concurrent_job_create_is_admitted_only_for_this_backups_job() {
+    let foreign = running_job_body().replace(UID, "00000000-dead-4000-8000-00000000beef");
+    for (winner, created, refusal) in [
+        (running_job_body(), false, None),
+        (foreign, false, Some(TERMINAL_STATE_JOB_NAME_CONFLICT)),
+    ] {
+        let conflict = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"AlreadyExists","code":409}"#.to_string();
+        let (client, seen) = sequenced_client(vec![
+            (
+                "GET",
+                "/jobs/logweir-backup-nightly-20261109-031700",
+                vec![
+                    (404, not_found_body("jobs.batch", NAME)),
+                    (200, winner.clone()),
+                ],
+            ),
+            (
+                "GET",
+                "/kafkaclusters/prod",
+                vec![(200, kafka_cluster_json())],
+            ),
+            (
+                "POST",
+                "/configmaps",
+                vec![(201, existing_plan_config_map(UID))],
+            ),
+            ("POST", "/jobs", vec![(409, conflict)]),
+            ("PATCH", "/status", vec![(200, backup_json())]),
+        ]);
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("an outcome");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(outcome.created, created, "{:?}", calls(&seen));
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            refusal,
+            "{:?}",
+            calls(&seen)
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|r| r.method == "POST" && path(&r.uri).ends_with("/jobs"))
+                .count(),
+            1,
+            "one create attempt, never a second"
+        );
+    }
+}
+
+/// **A JOB THIS BACKUP DOES NOT CONTROL IS NEVER OBSERVED OR ADOPTED** — no
+/// owner, another `Backup` UID, a second owner, or `controller: false`. Its pod
+/// is not listed and its log is not read, so a stranger's exit code and
+/// evidence keys cannot reach this object.
+///
+/// KILLS: selecting the Job by name alone; lifting a foreign pod's exit code.
+#[tokio::test]
+async fn an_existing_job_this_backup_does_not_control_is_refused_not_observed() {
+    let owned = job_body("Complete");
+    let variants = [
+        ("no owner", {
+            let mut v: Value = serde_json::from_str(&owned).unwrap();
+            v["metadata"]
+                .as_object_mut()
+                .unwrap()
+                .remove("ownerReferences");
+            v.to_string()
+        }),
+        (
+            "another Backup UID",
+            owned.replace(UID, "00000000-dead-4000-8000-00000000beef"),
+        ),
+        ("a second owner", {
+            let mut v: Value = serde_json::from_str(&owned).unwrap();
+            let mut extra = v["metadata"]["ownerReferences"][0].clone();
+            extra["uid"] = "22222222-0000-4000-8000-000000000022".into();
+            extra["controller"] = false.into();
+            v["metadata"]["ownerReferences"]
+                .as_array_mut()
+                .unwrap()
+                .push(extra);
+            v.to_string()
+        }),
+        ("controller: false", {
+            let mut v: Value = serde_json::from_str(&owned).unwrap();
+            v["metadata"]["ownerReferences"][0]["controller"] = false.into();
+            v.to_string()
+        }),
+    ];
+    for (label, body) in variants {
+        let mut routes = finished_routes(
+            &pod_list_terminated(0),
+            log_body(&i7_tail()),
+            200,
+            "Complete",
+        );
+        routes[0].body = body;
+        let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &frozen_backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        let bodies = bodies.lock().unwrap().clone();
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_JOB_NAME_CONFLICT),
+            "{label}"
+        );
+        assert_eq!(outcome.exit_code, None, "{label}: no exit code is lifted");
+        assert!(
+            !bodies
+                .iter()
+                .any(|r| path(&r.uri).ends_with("/pods") || path(&r.uri).ends_with("/log")),
+            "{label}: the foreign Job's pod is never read: {:?}",
+            calls(&bodies)
+        );
+        assert!(
+            !bodies
+                .iter()
+                .any(|r| path(&r.uri).contains("/jobs") && r.method != "GET"),
+            "{label}: the foreign Job is never created, patched or deleted"
+        );
+        let statuses = patched_statuses(&bodies);
+        assert_eq!(statuses.len(), 1, "{label}");
+        assert_eq!(
+            condition_named(&statuses[0], "Failed").map(|c| c.1),
+            Some(TERMINAL_STATE_JOB_NAME_CONFLICT.to_string())
+        );
+    }
+}
+
+/// **AN IN-FLIGHT LEGACY BACKUP IS OBSERVED UNCHANGED.** A Job an older
+/// controller created from the runner-argv annotation — no inputs digest, no
+/// `status.execution` — keeps running and finishing exactly as before: no plan
+/// is read, created or rewritten, the Job is not re-created or changed (only
+/// the TTL after the terminal status, as always), the status reports
+/// `ExecutionInputsUnverified=True LegacyExecution`, and the terminal backup id
+/// is the one the older controller would have reported.
+///
+/// KILLS: re-deriving or re-freezing a legacy run in flight; re-executing its
+/// annotation; hiding that its inputs were never frozen; changing its reported
+/// backup id.
+#[tokio::test]
+async fn an_in_flight_legacy_job_is_observed_unchanged_and_reported() {
+    let legacy_argv = r#"["backup","run","--spec","/plan/backup.yaml","--allowed-clusters","/plan/allowed-clusters.json","--signing-key","/signing/key.pem","--receipt-out","/work/receipt.json","--triggered-by","manual"]"#;
+    let mut legacy = backup();
+    legacy
+        .metadata
+        .annotations
+        .get_or_insert_with(Default::default)
+        .insert(RUNNER_ARGV_ANNOTATION.to_string(), legacy_argv.to_string());
+    let legacy_job = |condition: Option<&str>| {
+        let mut v: Value = serde_json::from_str(&match condition {
+            Some(c) => job_body(c),
+            None => running_job_body(),
+        })
+        .unwrap();
+        v["metadata"].as_object_mut().unwrap().remove("annotations");
+        v.to_string()
+    };
+
+    // RUNNING.
+    let mut routes = running_routes();
+    routes[0].body = legacy_job(None);
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+    reconcile_backup(
+        &legacy,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("a legacy running Job reconciles");
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(
+        calls(&bodies)
+            .iter()
+            .map(|(m, _)| m.as_str())
+            .collect::<Vec<_>>(),
+        vec!["GET", "PATCH"],
+        "the Job is read and the status patched, and NOTHING else — no plan, no Job write: {:?}",
+        calls(&bodies)
+    );
+    let running = &patched_statuses(&bodies)[0];
+    let (status, reason, message) =
+        condition_named(running, CONDITION_EXECUTION_INPUTS_UNVERIFIED).expect("reported");
+    assert_eq!(
+        (status.as_str(), reason.as_str()),
+        ("True", REASON_LEGACY_EXECUTION)
+    );
+    assert!(message.contains("never changed"), "{message}");
+    assert_eq!(
+        condition_named(running, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED),
+        None,
+        "this controller did not ignore or execute anything for a Job it did not create"
+    );
+    assert!(
+        running.get("execution").is_none(),
+        "nothing is re-frozen for a Job in flight"
+    );
+
+    // FINISHED.
+    let mut routes = finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    );
+    routes[0].body = legacy_job(Some("Complete"));
+    let (client, seen) = mock_client_recording(routes);
+    let outcome = reconcile_backup(
+        &legacy,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("a legacy finished Job reconciles");
+    assert_eq!(outcome.exit_code, Some(0));
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|r| path(&r.uri).contains("/configmaps")),
+        "no plan is touched: {seen:?}"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|r| path(&r.uri).contains("/jobs/") && r.method == "PATCH")
+            .count(),
+        1,
+        "the legacy Job gets exactly the TTL patch it always got"
+    );
+    assert!(!seen
+        .iter()
+        .any(|r| r.method == "POST" || r.method == "DELETE"));
+    let terminal = weirkeeper::controllers::backup::finished_status_patch(
+        &legacy,
+        0,
+        &evidence_keys(&log_body(&i7_tail())),
+        None,
+        None,
+        None,
+        None,
+        utc(2026, 11, 9, 3, 25),
+    );
+    assert_eq!(
+        terminal["status"]["backupId"],
+        weirkeeper::backup_execution::legacy_backup_id(&legacy),
+        "the legacy run reports the id the older controller would have"
+    );
+}
+
+/// A Job whose digest does not match `status.execution` — for example one an
+/// older controller created after a rollback — is reported and left alone.
+///
+/// KILLS: accepting any annotated Job as frozen; accepting a missing digest.
+#[tokio::test]
+async fn a_job_that_does_not_carry_the_recorded_inputs_is_reported() {
+    for job in [
+        {
+            let mut v: Value = serde_json::from_str(&running_job_body()).unwrap();
+            v["metadata"].as_object_mut().unwrap().remove("annotations");
+            v.to_string()
+        },
+        running_job_body().replace(FIXTURE_INPUTS_SHA256, "sha256:another"),
+    ] {
+        let mut routes = running_routes();
+        routes[0].body = job;
+        let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+        reconcile_backup(
+            &frozen_backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await
+        .unwrap();
+        let bodies = bodies.lock().unwrap().clone();
+        let running = &patched_statuses(&bodies)[0];
+        assert_eq!(
+            condition_named(running, CONDITION_EXECUTION_INPUTS_UNVERIFIED).map(|c| c.1),
+            Some(REASON_JOB_INPUTS_MISMATCH.to_string()),
+            "{running}"
+        );
+        assert!(!bodies
+            .iter()
+            .any(|r| r.method == "POST" || r.method == "DELETE"));
+    }
+}
+
+/// **THE TYPED SPEC STATES THE IDENTITY, OR NOTHING RUNS.** A hand-written
+/// Backup that claims a schedule it is not owned by, a manual Backup naming a
+/// slot, an unknown trigger, a scheduled object under the wrong name, and a
+/// non-positive deadline are refused before anything is created — and a
+/// hostile annotation on such a Backup is still surfaced.
+///
+/// KILLS: silently running a false `schedule` claim as manual (its receipt
+/// would say `schedule`); a scheduled identity from a non-schedule owner.
+#[tokio::test]
+async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
+    let mutations: Vec<SpecCase> = vec![
+        (
+            "schedule trigger without an owner",
+            Box::new(|v| {
+                v["spec"]["triggeredBy"] = "schedule".into();
+                v["spec"]["scheduleRef"] = serde_json::json!({"name": "nightly"});
+                v["spec"]["slot"] = "20261109-031700".into();
+            }),
+        ),
+        (
+            "schedule owner of another kind",
+            Box::new(|v| {
+                v["spec"]["triggeredBy"] = "schedule".into();
+                v["spec"]["scheduleRef"] = serde_json::json!({"name": "nightly"});
+                v["spec"]["slot"] = "20261109-031700".into();
+                v["metadata"]["ownerReferences"] = serde_json::json!([{
+                    "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore", "name": "nightly",
+                    "uid": SCHEDULE_UID, "controller": true
+                }]);
+            }),
+        ),
+        (
+            "schedule under another name",
+            Box::new(|v| {
+                v["spec"]["triggeredBy"] = "schedule".into();
+                v["spec"]["scheduleRef"] = serde_json::json!({"name": "hourly"});
+                v["spec"]["slot"] = "20261109-031700".into();
+                v["metadata"]["ownerReferences"] = serde_json::json!([{
+                    "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupSchedule", "name": "hourly",
+                    "uid": SCHEDULE_UID, "controller": true
+                }]);
+            }),
+        ),
+        (
+            "schedule with a malformed slot",
+            Box::new(|v| {
+                v["spec"]["triggeredBy"] = "schedule".into();
+                v["spec"]["scheduleRef"] = serde_json::json!({"name": "nightly"});
+                v["spec"]["slot"] = "20261309-031700".into();
+                v["metadata"]["ownerReferences"] = serde_json::json!([{
+                    "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupSchedule", "name": "nightly",
+                    "uid": SCHEDULE_UID, "controller": true
+                }]);
+            }),
+        ),
+        (
+            "manual with a slot",
+            Box::new(|v| {
+                v["spec"]["slot"] = "20261109-031700".into();
+            }),
+        ),
+        (
+            "an unknown trigger",
+            Box::new(|v| {
+                v["spec"]["triggeredBy"] = "--spec".into();
+            }),
+        ),
+        (
+            "a zero deadline",
+            Box::new(|v| {
+                v["spec"]["deadlineSeconds"] = 0.into();
+            }),
+        ),
+    ];
+    for (label, mutate) in mutations {
+        let mut v: Value = serde_json::from_str(&backup_json()).unwrap();
+        mutate(&mut v);
+        v["metadata"]["annotations"] =
+            serde_json::json!({ RUNNER_ARGV_ANNOTATION: "[\"backup\"]" });
+        let b: Backup = serde_json::from_value(v).unwrap();
+        assert!(
+            label == "a zero deadline" || execution_identity(&b).is_err(),
+            "{label}: no identity is derived"
+        );
+        let (client, _seen, bodies) =
+            mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+        let outcome = reconcile_backup(
+            &b,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        let bodies = bodies.lock().unwrap().clone();
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+            "{label}: {:?}",
+            calls(&bodies)
+        );
+        assert!(
+            !bodies.iter().any(|r| r.method == "POST"),
+            "{label}: nothing is created"
+        );
+        let refused = patched_statuses(&bodies)
+            .pop()
+            .expect("the refusal is written");
+        assert_eq!(refused["phase"], "Failed");
+        assert_eq!(
+            condition_named(&refused, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED).map(|c| c.0),
+            Some("True".to_string()),
+            "{label}: the annotation on a refused Backup is surfaced too: {refused}"
+        );
+        assert_no_duplicate_condition_types(&refused, label);
+    }
+}
+
+/// **THE MANUAL CONTRACT PLAT-06.2 BUILDS ON.** A manual run IS its object's
+/// UID: the same object always derives the same identity (so re-creating a
+/// name that exists is the API server's `AlreadyExists` and no second run),
+/// a deliberately new name — or a deleted-and-recreated name — is a new UID and
+/// therefore a new run.
+#[test]
+fn a_manual_identity_is_the_object_uid_and_nothing_else() {
+    let first = execution_identity(&backup()).unwrap();
+    assert_eq!(first, execution_identity(&backup()).unwrap());
+    assert_eq!(first.id, UID);
+
+    let renamed: Backup = serde_json::from_str(
+        &backup_json()
+            .replace(NAME, "backup-now-2")
+            .replace(UID, "5b0c0d0e-0000-4000-8000-0000000000e2"),
+    )
+    .unwrap();
+    let recreated: Backup =
+        serde_json::from_str(&backup_json().replace(UID, "5b0c0d0e-0000-4000-8000-0000000000e3"))
+            .unwrap();
+    for other in [renamed, recreated] {
+        let identity = execution_identity(&other).unwrap();
+        assert_ne!(identity.id, first.id, "a new object is a new run");
+        assert_eq!(identity.id, other.metadata.uid.clone().unwrap());
+    }
+
+    // Annotations, labels and generation are not identity.
+    let mut decorated = backup();
+    decorated.metadata.labels = Some(
+        [("team".to_string(), "x".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    decorated.metadata.generation = Some(99);
+    decorated
+        .metadata
+        .annotations
+        .get_or_insert_with(Default::default)
+        .insert(
+            RUNNER_ARGV_ANNOTATION.to_string(),
+            "[\"--backup-id-override\",\"x\"]".to_string(),
+        );
+    assert_eq!(execution_identity(&decorated).unwrap(), first);
+}
+
+/// A re-created Job must not read its predecessor's pod: the label selector
+/// matches both until garbage collection finishes.
+///
+/// KILLS: taking the first pod the selector returns.
+#[test]
+fn a_recreated_job_reads_only_its_own_pod() {
+    let pod = |name: &str, job_uid: Option<&str>| -> k8s_openapi::api::core::v1::Pod {
+        let mut v = serde_json::json!({"metadata": {"name": name}});
+        if let Some(uid) = job_uid {
+            v["metadata"]["ownerReferences"] = serde_json::json!([{
+                "apiVersion": "batch/v1", "kind": "Job", "name": NAME, "uid": uid, "controller": true
+            }]);
+        }
+        serde_json::from_value(v).unwrap()
+    };
+    let old = pod("old", Some("old-job-uid"));
+    let new = pod("new", Some("new-job-uid"));
+    let picked = select_job_pod(vec![old.clone(), new.clone()], Some("new-job-uid"));
+    assert_eq!(
+        picked.and_then(|p| p.metadata.name),
+        Some("new".to_string())
+    );
+    assert_eq!(
+        select_job_pod(vec![old.clone()], Some("new-job-uid")),
+        None,
+        "the deleted Job's pod is nobody's evidence for the new Job"
+    );
+    assert_eq!(
+        select_job_pod(vec![pod("ownerless", None)], Some("new-job-uid"))
+            .and_then(|p| p.metadata.name),
+        Some("ownerless".to_string())
+    );
+}
+
+/// A hostile annotation on a RUNNING typed Backup is surfaced once, and a steady
+/// pass over that object writes nothing.
+///
+/// KILLS: a `lastTransitionTime` that moves on every pass; dropping the
+/// condition from the running patch.
+#[tokio::test]
+async fn a_surfaced_annotation_on_a_running_backup_is_steady() {
+    let mut annotated = frozen_backup();
+    annotated
+        .metadata
+        .annotations
+        .get_or_insert_with(Default::default)
+        .insert(
+            RUNNER_ARGV_ANNOTATION.to_string(),
+            "[\"restore\"]".to_string(),
+        );
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &annotated,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .unwrap();
+    let first = bodies.lock().unwrap().clone();
+    let patch = serde_json::from_str::<Value>(
+        &first
+            .iter()
+            .find(|b| b.method == "PATCH")
+            .expect("the first pass surfaces the annotation")
+            .body,
+    )
+    .unwrap();
+    assert!(condition_named(&patch["status"], CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED).is_some());
+    let steady = with_status_patch(&annotated, &patch);
+
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &steady,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 21),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_patch_count(&bodies.lock().unwrap()), 0);
 }

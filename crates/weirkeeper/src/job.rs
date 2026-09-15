@@ -187,7 +187,7 @@ pub const SECRET_DEFAULT_MODE: i32 = 0o440;
 /// WHY `build` ALWAYS ADDS IT. The container runs with
 /// `readOnlyRootFilesystem: true`, and `logweir backup run` writes its
 /// document and its receipt under
-/// [`crate::controllers::backup_schedule::OUT_PATH`] /
+/// [`crate::backup_execution::OUT_PATH`] /
 /// `RECEIPT_OUT_PATH` — both under `/work`. A Job with no writable `/work`
 /// fails at the first write with a read-only filesystem error, which looks
 /// nothing like the contract it breaks. The volume is `build`'s because the
@@ -494,12 +494,12 @@ pub struct RunnerJobSpec {
     pub owner: RunnerOwner,
     /// The container argv, **passed through unchanged**.
     ///
-    /// NEVER REBUILT HERE. For a scheduled `Backup` this is the JSON array on
-    /// the `logweir.dev/runner-argv` annotation
-    /// (`controllers::backup_schedule::RUNNER_ARGV_ANNOTATION`), which carries
-    /// `--backup-id-override`. A `job::build` that composed its own argv would
-    /// silently drop that flag and the run would mint a second backup id for
-    /// a slot that already had one.
+    /// NEVER REBUILT HERE. For a `Backup` this is the argv
+    /// `crate::backup_execution::runner_argv` derived from the typed spec and
+    /// the server-generated run identity and froze in the plan ConfigMap —
+    /// never an annotation's content. A `job::build` that composed its own
+    /// argv would drop the backup id override that makes a re-created Job
+    /// reuse its run's backup id rather than mint a second one.
     pub args: Vec<String>,
     /// `spec.activeDeadlineSeconds`, from `Backup.spec.deadlineSeconds`.
     pub deadline_seconds: i64,
