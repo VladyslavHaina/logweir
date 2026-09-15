@@ -579,10 +579,12 @@ fn the_two_ureq_token_lists_agree() {
 ///   `agent.post(&url)` -> `ureq::Agent::new().post(&url)` restored the
 ///   unbounded wait and survived the first version of this test.
 ///
-/// And `AgentBuilder::new()` must occur EXACTLY ONCE under
-/// `crates/logweir/src/` — inside `notify_agent_with`, the one place the two
-/// constants meet ureq. A second builder anywhere is a second, unreviewed
-/// timeout policy, which is how the first one went missing.
+/// And `AgentBuilder::new()` must occur EXACTLY ONCE per reviewed timeout
+/// policy under `crates/logweir/src/`: inside `notify_agent_with`, the one
+/// place the two notification constants meet ureq, and inside `identity.rs`'s
+/// `kubernetes_agent`, the identity bootstrap's Kubernetes API client, which
+/// must bound connect, read and write. A builder anywhere else is a second,
+/// unreviewed timeout policy, which is how the first one went missing.
 ///
 /// This is the discipline `crates/logweir/tests/engine_resolution.rs`'s
 /// `the_engine_is_resolved_in_exactly_one_module` already uses in this crate:
@@ -591,10 +593,19 @@ fn the_two_ureq_token_lists_agree() {
 #[test]
 fn every_notification_post_goes_through_the_bounded_agent() {
     const BUILDER: &str = "AgentBuilder::new()";
+    // One builder per reviewed timeout policy, each confined to the function
+    // named beside its file. The Kubernetes API client is not a notification
+    // sink, so it is its own policy; its bounds are asserted below because no
+    // behavioural row in this file exercises them.
+    const SANCTIONED: [(&str, &str); 2] = [
+        ("drill/phase7_verify.rs", "fn notify_agent_with("),
+        ("identity.rs", "fn kubernetes_agent("),
+    ];
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut offenders = Vec::new();
-    let mut builders = Vec::new();
+    let mut builders: Vec<String> = Vec::new();
+    let mut sources = std::collections::BTreeMap::new();
     let mut visited = 0usize;
     let mut stack = vec![src.clone()];
     while let Some(d) = stack.pop() {
@@ -610,9 +621,15 @@ fn every_notification_post_goes_through_the_bounded_agent() {
                         offenders.push(format!("{}: {needle}", p.display()));
                     }
                 }
+                let rel = p
+                    .strip_prefix(&src)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 for _ in t.matches(BUILDER) {
-                    builders.push(p.display().to_string());
+                    builders.push(rel.clone());
                 }
+                sources.insert(rel, t);
             }
         }
     }
@@ -632,15 +649,58 @@ fn every_notification_post_goes_through_the_bounded_agent() {
          Every notification POST must go through `notify_agent()`.\n  {}",
         offenders.join("\n  ")
     );
+    let mut found = builders.clone();
+    found.sort();
+    let expected: Vec<String> = SANCTIONED
+        .iter()
+        .map(|(file, _)| file.to_string())
+        .collect();
     assert_eq!(
-        builders.len(),
-        1,
-        "`{BUILDER}` must appear EXACTLY ONCE under {} — in `notify_agent_with`, the \
-         single place the two timeout constants meet ureq. Found {}: {:?}",
-        src.display(),
-        builders.len(),
-        builders
+        found,
+        expected,
+        "`{BUILDER}` must appear EXACTLY ONCE in each reviewed timeout policy under {} — \
+         `notify_agent_with` for notifications, `kubernetes_agent` for the identity \
+         bootstrap's Kubernetes API client — and nowhere else. Found: {builders:?}",
+        src.display()
     );
+    for (file, function) in SANCTIONED {
+        let body = fn_body(&sources[file], function)
+            .unwrap_or_else(|| panic!("{file} no longer defines `{function}`"));
+        assert!(
+            body.contains(BUILDER),
+            "{file}'s `{BUILDER}` moved out of `{function}`, the one place its policy is reviewed"
+        );
+    }
+    let kubernetes = fn_body(&sources["identity.rs"], "fn kubernetes_agent(").unwrap();
+    for bound in [".timeout_connect(", ".timeout_read(", ".timeout_write("] {
+        assert!(
+            kubernetes.contains(bound),
+            "`kubernetes_agent` must call `{bound}`: without it a Kubernetes API server that \
+             accepts and never replies hangs the identity bootstrap"
+        );
+    }
+}
+
+/// The brace-counted body of the `fn` at the first occurrence of `signature`.
+/// Each sanctioned signature occurs once in its file, and neither body carries
+/// a brace in a string or a comment.
+fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
+    let start = src.find(signature)?;
+    let open = start + src[start..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open..=open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 // ------------------------------------------------------------------ T0-15

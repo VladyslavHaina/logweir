@@ -460,6 +460,23 @@ fn public_material(key: &SigningKey) -> Result<PublicMaterial, String> {
     })
 }
 
+/// The one ureq agent this module builds, for the Kubernetes API: connect, read
+/// and write are bounded, and redirects are not followed. `tests/notify.rs`
+/// sanctions exactly this builder as the second reviewed timeout policy beside
+/// `notify_agent_with`. The unit tests pass no TLS and keep the same bounds.
+fn kubernetes_agent(tls: Option<Arc<rustls::ClientConfig>>) -> ureq::Agent {
+    let builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(20))
+        .timeout_write(Duration::from_secs(20))
+        .redirects(0);
+    match tls {
+        Some(tls) => builder.tls_config(tls),
+        None => builder,
+    }
+    .build()
+}
+
 struct KubernetesStore {
     agent: ureq::Agent,
     base_url: String,
@@ -518,13 +535,7 @@ impl KubernetesStore {
             .map_err(|e| format!("could not configure Kubernetes TLS: {e}"))?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let agent = ureq::AgentBuilder::new()
-            .tls_config(Arc::new(tls))
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(20))
-            .timeout_write(Duration::from_secs(20))
-            .redirects(0)
-            .build();
+        let agent = kubernetes_agent(Some(Arc::new(tls)));
         Ok(Self {
             agent,
             base_url: format!("https://{host}:{port}"),
@@ -1114,7 +1125,7 @@ mod tests {
 
     fn store_for_http(base_url: String) -> KubernetesStore {
         KubernetesStore {
-            agent: ureq::AgentBuilder::new().redirects(0).build(),
+            agent: kubernetes_agent(None),
             base_url,
             token: "test-token".into(),
             namespace: "logweir-system".into(),
