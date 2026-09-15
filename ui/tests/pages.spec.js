@@ -79,8 +79,13 @@ import {
 } from "../pages/restore-wizard.js";
 import {
   approvalRouteParams,
+  approvalState,
   refuseKeyMaterial,
+  renderApprovalForm,
+  renderApprovalSubject,
   renderApprovalsPage,
+  routeMismatches,
+  subjectOf,
   submitApproval,
 } from "../pages/approvals.js";
 import { mountKeys, renderKeysPage } from "../pages/keys.js";
@@ -725,7 +730,13 @@ test("the_wizard_never_reserialises_the_plan_bytes", async () => {
 test("the_wizard_mints_both_names_before_either_create", async () => {
   const state = wizardState();
   const api = recordingApi();
-  const route = await submitRestore(state, api);
+  const submitted = await submitRestore(state, api);
+  // THE GUIDED SUBMIT RETURNS WHERE IT GOES NEXT. No Approval authorises the
+  // new Restore, so that is its approval page -- Awaiting approval -- whose
+  // route carries the reviewed identity for the page to check.
+  const route = submitted.route;
+  assert.equal(submitted.outcome, "created");
+  assert.ok(route.startsWith("#/approvals?subject="), "approval required: " + route);
 
   const bytes = (await preparePlan(state)).bytes;
   // An INDEPENDENT digest: node's own hash implementation, not the one the
@@ -786,21 +797,47 @@ test("the_wizard_mints_both_names_before_either_create", async () => {
   });
 });
 
-test("the_approval_form_builds_all_four_spec_fields", async () => {
-  const route = {
-    ns: "logweir-t27",
-    subject: "restore-1a2b3c4d",
-    hash: "sha256:" + "ab12cd34".repeat(8),
-    name: "approval-1a2b3c4d",
+/** A Restore as the API server returns it, over `bytes`, and the subject an
+ *  approval for it names -- derived exactly the way the approvals page derives
+ *  it: from the object, never from a route. */
+async function approvalSubjectFor(bytes, ns) {
+  const names = await mintNames(bytes);
+  const restore = {
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: "Restore",
+    metadata: { name: names.restoreName, namespace: ns, uid: "0f0e0d0c-0000-4000-8000-00000000a001" },
+    spec: { planBytes: bytes, approvalRef: { name: names.approvalName } },
   };
-  assert.match(route.hash, /^sha256:[0-9a-f]{64}$/);
+  return { restore: restore, subject: subjectOf(restore, await planHash(bytes), ns) };
+}
+
+/** The recording api, answering a read of that one Restore and a 404 for
+ *  anything else. */
+function approvalApi(restore) {
   const api = recordingApi();
-  const refusal = await submitApproval(
-    route,
+  api.get = async (ns, plural, name) => {
+    if (plural === "restores" && name === restore.metadata.name) {
+      return restore;
+    }
+    const missing = new Error(plural + " \"" + name + "\" not found");
+    missing.status = 404;
+    missing.reason = "NotFound";
+    throw missing;
+  };
+  return api;
+}
+
+test("the_approval_form_builds_all_four_spec_fields", async () => {
+  const bytes = renderPlanBytes(fixture("plan-fields.json"));
+  const { restore, subject } = await approvalSubjectFor(bytes, "logweir-t27");
+  assert.match(subject.planHash, /^sha256:[0-9a-f]{64}$/);
+  const api = approvalApi(restore);
+  const result = await submitApproval(
+    subject,
     { approvalBytes: "{\"approver\": \"ui-test\"}\n", sidecarBytes: "{\"signatures\": []}\n" },
     api,
   );
-  assert.equal(refusal, null, "nothing about this submission is key material");
+  assert.equal(result.outcome, "created", "nothing about this submission is key material");
   assert.equal(api.calls.length, 1);
   assert.equal(api.calls[0].plural, "approvals");
 
@@ -812,46 +849,48 @@ test("the_approval_form_builds_all_four_spec_fields", async () => {
   assert.deepEqual(
     Object.keys(body.spec).sort(),
     ["approvalBytes", "planHash", "sidecarBytes", "subjectRef"],
-    "FOUR spec fields. subjectRef and planHash cannot be derived here: the page is forbidden " +
-      "from parsing the two documents, so the hash cannot be lifted out of approval.json " +
-      "either. Both come from the route the wizard navigated to.",
+    "FOUR spec fields. subjectRef and planHash cannot be derived from the documents: the page " +
+      "is forbidden from parsing them. Both come from the Restore the page read.",
   );
-  assert.equal(body.metadata.name, "approval-1a2b3c4d", "metadata.name comes from the route");
+  assert.equal(
+    body.metadata.name,
+    restore.spec.approvalRef.name,
+    "metadata.name is the name the Restore's own spec.approvalRef names",
+  );
   assert.equal(body.spec.subjectRef.kind, "Restore");
-  assert.equal(body.spec.subjectRef.name, "restore-1a2b3c4d");
+  assert.equal(body.spec.subjectRef.name, restore.metadata.name, "the subject is the Restore that was read");
   assert.equal(
     body.spec.planHash,
-    route.hash,
-    "planHash comes from the ROUTE. This page is forbidden from parsing the two documents, " +
-      "so it cannot be lifted out of approval.json either -- and the controller recomputes " +
-      "it from the referent's own bytes regardless (Task 16 check 5).",
+    "sha256:" + createHash("sha256").update(bytes, "utf8").digest("hex"),
+    "planHash is the sha256 of the Restore's OWN planBytes -- computed here independently, " +
+      "with node's hash -- and the controller recomputes it from the same bytes regardless",
   );
   assert.ok(body.spec.approvalBytes.length > 0);
   assert.ok(body.spec.sidecarBytes.length > 0);
 });
 
 test("the_approval_form_refuses_a_private_key", async () => {
-  const route = {
-    ns: "logweir-t27",
-    subject: "restore-1a2b3c4d",
-    hash: "sha256:" + "ab12cd34".repeat(8),
-    name: "approval-1a2b3c4d",
-  };
+  const { subject } = await approvalSubjectFor(renderPlanBytes(fixture("plan-fields.json")), "logweir-t27");
   const cases = [
-    ["a file named approver.pem", { approvalFileName: "approver.pem", approvalBytes: "x" }],
-    ["a pasted PKCS#8 body", { approvalBytes: "-----BEGIN PRIVATE KEY-----\nMIG…\n" }],
-    ["a file named x.key", { sidecarFileName: "x.key", sidecarBytes: "y" }],
+    ["a file named approver.pem", { approvalFileName: "approver.pem", approvalBytes: "x", sidecarBytes: "y" }],
+    ["a pasted PKCS#8 body", { approvalBytes: "-----BEGIN PRIVATE KEY-----\nMIG…\n", sidecarBytes: "y" }],
+    ["a file named x.key", { sidecarFileName: "x.key", sidecarBytes: "y", approvalBytes: "x" }],
   ];
   for (const [label, documents] of cases) {
-    const refusal = await submitApproval(route, documents, throwingApi());
-    assert.equal(
-      refusal,
-      "this page never accepts a private key",
-      label + ": refused with the exact message. v0.1 has no key lifecycle, and a page that " +
-        "filled that gap would be inventing the most consequential missing subsystem in " +
-        "this product inside a browser.",
-    );
-    assert.equal(refusal, PRIVATE_KEY_REFUSAL, label + ": and it is the shared constant");
+    // `throwingApi` has no reader and throws on any write: a refusal that ran
+    // after the subject was re-read, or not at all, fails with another error.
+    await assert.rejects(submitApproval(subject, documents, throwingApi()), (error) => {
+      assert.equal(
+        error.message,
+        "this page never accepts a private key",
+        label + ": refused with the exact message. v0.1 has no key lifecycle, and a page that " +
+          "filled that gap would be inventing the most consequential missing subsystem in " +
+          "this product inside a browser.",
+      );
+      assert.equal(error.message, PRIVATE_KEY_REFUSAL, label + ": and it is the shared constant");
+      assert.equal(error.kind, "refused", label + ": a refusal this page made before sending anything");
+      return true;
+    });
   }
   // The refusal is a pure function, so the same three shapes are refusable
   // before a file is ever read.
@@ -864,14 +903,9 @@ test("the_approval_bytes_are_submitted_verbatim", async () => {
   // Trailing whitespace and a BOM-free UTF-8 non-ASCII approver name.
   const document =
     "{\n  \"approver\": \"Zoë Ramírez\",\n  \"ticket\": \"INC-4471\"\n}   \n";
-  const route = {
-    ns: "logweir-t27",
-    subject: "restore-1a2b3c4d",
-    hash: "sha256:" + "ab12cd34".repeat(8),
-    name: "approval-1a2b3c4d",
-  };
-  const api = recordingApi();
-  await submitApproval(route, { approvalBytes: document, sidecarBytes: "{}\n" }, api);
+  const { restore, subject } = await approvalSubjectFor(renderPlanBytes(fixture("plan-fields.json")), "logweir-t27");
+  const api = approvalApi(restore);
+  await submitApproval(subject, { approvalBytes: document, sidecarBytes: "{}\n" }, api);
 
   const submitted = api.calls[0].body.spec.approvalBytes;
   const left = bytesOf(submitted);
@@ -917,7 +951,7 @@ test("self_attested_risk_is_explained_not_asserted", () => {
   assert.ok(SELF_ATTESTED_TRUE.endsWith(SELF_ATTESTED_FALSE));
 });
 
-test("the_approvals_list_renders_the_five_columns", () => {
+test("the_approvals_list_renders_the_five_columns", async () => {
   const route = { ns: "logweir-t27", subject: "restore-1a2b3c4d", hash: "sha256:x", name: "approval-1a2b3c4d" };
   const object = fixture("approvals-selfattested.json");
   const out = renderApprovalsPage(object, route, Date.parse("2026-09-11T13:41:00Z"));
@@ -932,12 +966,24 @@ test("the_approvals_list_renders_the_five_columns", () => {
     false,
     "this page holds no key and verified nothing",
   );
-  // The four inputs are all there, and the hash one is read-only.
-  const text = decode(out);
-  assert.ok(text.includes("SUBJECT KIND"));
-  assert.ok(text.includes("SUBJECT NAME"));
-  assert.ok(text.includes("PLAN HASH"));
-  assert.ok(out.includes("id=\"plan-hash\" name=\"planHash\" readonly"));
+  assert.equal(
+    out.indexOf("id=\"approval-form\""),
+    -1,
+    "THE LIST CARRIES NO FORM. An approval is recorded on one Restore's own page, for the " +
+      "subject read from that Restore; a form beside a list would have to assume one",
+  );
+
+  // The form, on that page: the five subject values all read-only, and the two
+  // documents.
+  const { subject } = await approvalSubjectFor(renderPlanBytes(fixture("plan-fields.json")), "logweir-t27");
+  const form = renderApprovalForm(subject, {});
+  const text = decode(form);
+  for (const caption of ["SUBJECT KIND", "SUBJECT NAME", "SUBJECT UID", "PLAN HASH", "APPROVAL NAME"]) {
+    assert.ok(text.includes(caption), caption);
+  }
+  for (const id of ["subject-kind", "subject-name", "subject-uid", "plan-hash", "approval-name"]) {
+    assert.match(form, new RegExp("id=\"" + id + "\" name=\"[A-Za-z]+\" readonly value=\""), id + " is read-only");
+  }
   assert.ok(text.includes("approval.json") && text.includes("approval.sig"));
 });
 
@@ -1187,26 +1233,23 @@ test("the_plan_step_shows_the_hash_the_names_the_caveat_and_the_command", async 
   assert.ok(route.indexOf("ns=logweir-t27") !== -1);
 });
 
-test("the_approvals_route_values_reach_the_form_in_their_own_positions", () => {
-  // THE HOP FROM THE HASH TO THE FORM, WHICH NOTHING USED TO WATCH. These three
-  // values are `Approval.spec.subjectRef.name`, `spec.planHash` and
-  // `metadata.name`. The page is forbidden from parsing the two approval
-  // documents, so not one of them can be recovered from the bytes if the hop
-  // delivers them swapped or blank -- and the router that performs it cannot be
-  // imported here at all in earlier revisions, so the extraction is
-  // `approvalRouteParams`, exported by the page module itself, and this row is
-  // the guard the hop did not have.
+test("the_approvals_route_values_reach_the_form_in_their_own_positions", async () => {
+  // THE HOP FROM THE HASH TO THE PAGE. `subject` names which Restore; `hash`
+  // and `name` are what the linking page reviewed. The extraction is
+  // `approvalRouteParams`, exported by the page module itself because the
+  // router cannot be imported here, and this row is the guard the hop did not
+  // have.
   const digest = "sha256:" + "ab12cd34".repeat(8);
   const hash =
     "#/approvals?subject=restore-1a2b3c4d&hash=" + digest + "&name=approval-1a2b3c4d";
   assert.match(digest, /^sha256:[0-9a-f]{64}$/);
 
-  const route = approvalRouteParams(hash);
+  const parsed = approvalRouteParams(hash);
   // DEEP EQUALITY, NOT THREE CONTAINMENTS. A swap of `subject` and `name` keeps
   // every value present and only moves it, so the assertion has to name which
   // key holds which string.
   assert.deepEqual(
-    route,
+    parsed,
     {
       ns: "",
       subject: "restore-1a2b3c4d",
@@ -1217,37 +1260,55 @@ test("the_approvals_route_values_reach_the_form_in_their_own_positions", () => {
     "namespace carries no implicit default",
   );
 
-  // AND THE FORM PUTS EACH ONE WHERE IT BELONGS. The route object above is
-  // exactly what `app.js` hands `mountApprovals`, so rendering the page from it
-  // is the rest of the same hop.
-  const html = renderApprovalsPage({ items: [] }, route, 0);
+  // AND THE PAGE PUTS EACH VALUE WHERE IT BELONGS -- read from the Restore, and
+  // shown only when the route agrees with it.
+  const bytes = renderPlanBytes(fixture("plan-fields.json"));
+  const { restore, subject } = await approvalSubjectFor(bytes, "logweir-t27");
+  const agreeing = { ns: "logweir-t27", subject: subject.name, hash: subject.planHash, name: subject.approvalName };
+  const view = {
+    ns: "logweir-t27",
+    route: agreeing,
+    restore: restore,
+    subject: subject,
+    approval: null,
+    found: approvalState(null, subject),
+    mismatches: routeMismatches(agreeing, subject),
+  };
+  assert.deepEqual(view.mismatches, [], "a route that names exactly the Restore's identity agrees");
+  const html = renderApprovalSubject(view, 0);
   assert.ok(
-    html.includes(
-      "<input id=\"subject-name\" name=\"subjectName\" value=\"restore-1a2b3c4d\">",
-    ),
-    "SUBJECT NAME carries the RESTORE's name -- the subject of the approval, not the " +
-      "approval's own name; the rendered form was:\n" + html,
+    html.includes("<input id=\"subject-name\" name=\"subjectName\" readonly value=\"" + subject.name + "\">"),
+    "SUBJECT NAME carries the RESTORE's name, read-only -- the subject of the approval, not the " +
+      "approval's own name; the rendered page was:\n" + html,
   );
   assert.ok(
-    html.includes(
-      "<input id=\"plan-hash\" name=\"planHash\" readonly value=\"" + digest + "\">",
-    ),
-    "PLAN HASH carries the route's digest and is READ-ONLY: the value that matters is the " +
-      "one the wizard showed beside the bytes, and the controller recomputes it from the " +
-      "referent's own bytes; the rendered form was:\n" + html,
+    html.includes("<input id=\"plan-hash\" name=\"planHash\" readonly value=\"" + subject.planHash + "\">"),
+    "PLAN HASH carries the hash of the Restore's own bytes and is READ-ONLY",
   );
   assert.ok(
-    html.includes("metadata.name is approval-1a2b3c4d,"),
-    "and metadata.name is the minted APPROVAL name; the rendered form was:\n" + html,
+    html.includes("<input id=\"approval-name\" name=\"approvalName\" readonly value=\"" + subject.approvalName + "\">"),
+    "and APPROVAL NAME is the name the Restore's approvalRef names",
   );
-  // The two names are distinguishable, so the three assertions above really do
+  // The two names are distinguishable, so the assertions above really do
   // separate the positions rather than agreeing on one string.
-  assert.notEqual(route.subject, route.name);
+  assert.notEqual(subject.name, subject.approvalName);
+
+  // A SWAPPED OR FOREIGN ROUTE VALUE IS A MISMATCH, AND NO FORM IS OFFERED.
+  const swapped = Object.assign({}, agreeing, { hash: digest, name: subject.name });
+  const mismatches = routeMismatches(swapped, subject);
+  assert.deepEqual(
+    mismatches.map((m) => m.field),
+    ["plan hash", "Approval name"],
+    "both disagreeing values are named",
+  );
+  const refused = renderApprovalSubject(Object.assign({}, view, { route: swapped, mismatches: mismatches }), 0);
+  assert.equal(refused.indexOf("id=\"approval-form\""), -1, "a disagreeing route gets no form");
+  assert.ok(decode(refused).includes("This link does not match Restore " + subject.name));
 
   // The namespace travels in the same hash and nowhere else.
   assert.equal(approvalRouteParams(hash + "&ns=logweir-t27").ns, "logweir-t27");
   // A hash with no parameters at all is four empty-ish values and never
-  // `undefined`, so the form renders empty controls rather than the word.
+  // `undefined`: the standalone page, which assumes no subject.
   assert.deepEqual(approvalRouteParams("#/approvals"), {
     ns: "",
     subject: "",

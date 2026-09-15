@@ -90,12 +90,14 @@ export function createRouteLifecycle(AbortControllerClass) {
 /** The `#/route?ns=name` a hash carries: the route half, the namespace, and
  *  every other parameter the hash names.
  *
- *  `params` exists for the approvals route, which the restore wizard navigates
- *  to as `#/approvals?subject=<restore>&hash=<planHash>&name=<approval>`. Those
- *  three values are where `Approval.spec.subjectRef` and `planHash` come from:
- *  the page is forbidden from parsing the two approval documents, so the hash
- *  cannot be lifted out of `approval.json` either, and the create form reads
- *  the ROUTE and never the bytes.
+ *  `params` exists for the approvals route, which the restore wizard's guided
+ *  submit navigates to as
+ *  `#/approvals?subject=<restore>&hash=<planHash>&name=<approval>`. `subject`
+ *  names WHICH Restore; the approvals page reads that Restore and derives the
+ *  subject, UID, plan hash and Approval name it would submit from the object
+ *  itself, and treats `hash` and `name` only as the identity the wizard
+ *  reviewed -- a route that disagrees with the Restore is refused, never
+ *  submitted. A visit with no `subject` is the standalone page.
  *
  *  THAT HAND-OFF IS NOT MADE HERE. `pages/approvals.js` exports
  *  `approvalRouteParams(hash)` and the approvals branch below calls it, because
@@ -303,7 +305,8 @@ function render(lifecycle, context) {
     } else if (current.route === true && typeof current.mount === "function") {
       // The approvals page reads `subject`, `hash` and `name` off the hash the
       // wizard navigated to. They are route parameters and never values parsed
-      // out of the two approval documents.
+      // out of the two approval documents -- and the page checks them against
+      // the Restore `subject` names before it offers any form.
       //
       // THE EXTRACTION IS THE PAGE MODULE'S OWN, and deliberately not written
       // out here. This file touches `window` at module scope and so cannot be

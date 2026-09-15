@@ -24,6 +24,14 @@
 //   `objectives` -- what was ASKED FOR. `measured` alone says what happened
 //   without saying whether it was enough.
 
+//
+// THE RESTORE DETAIL IS THE DURABLE OPERATION VIEW (PLAT-12.1). The restore
+// wizard's guided submit ends here when an Approval already authorises the
+// Restore it created, so the view opens with where that operation stands --
+// its recorded progress, the plan hash of its own bytes, and its Approval's
+// state -- read from the objects themselves and never remembered by the page.
+// A refresh reads them again and creates nothing.
+
 import { get, list } from "../api.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
@@ -43,11 +51,22 @@ import {
   replace,
   table,
 } from "../render.js";
+import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
 import { backupBadge, greenLabel, validVerification } from "./backups.js";
+import {
+  approvalState,
+  approvalSubjectRoute,
+  renderApprovalState,
+  restoreProgressSentence,
+  subjectOf,
+} from "./approvals.js";
 
 const PLURAL = "restores";
 const BACKUPS = "backups";
+const APPROVALS = "approvals";
+
+const API = { get: get, list: list };
 
 /** The sentence the history table carries when the namespace holds no run. */
 export const NO_HISTORY_SENTENCE =
@@ -151,8 +170,39 @@ export function renderHistoryList(input, second, ns) {
   );
 }
 
-/** One Restore, in full. */
-export function renderRestoreDetail(object) {
+/** Where one Restore's operation stands: its progress as weirkeeper recorded
+ *  it, the hash of its own plan bytes, and its Approval's state -- with the way
+ *  to its approval page while it is not approved. `operation` is what
+ *  `loadRestoreOperation` read: `{ns, subject, approval, found, approvalError}`. */
+export function renderRestoreOperation(object, operation) {
+  const o = operation || {};
+  const s = o.subject || {};
+  const approval = o.approvalError
+    ? "<p class=\"complaint\">Approval " + esc(s.approvalName) + " could not be read, so its " +
+      "state is unknown: " + esc(o.approvalError.status ? String(o.approvalError.status) + " " +
+        String(o.approvalError.reason || "") : "error") + " " + esc(o.approvalError.message) + "</p>"
+    : renderApprovalState(o.found, s, s.approvalName);
+  const verified = ((o.found || {}).state) === "verified";
+  return (
+    "<section class=\"operation\" id=\"restore-operation\"><h3>Operation</h3>" +
+    facts([
+      ["progress", restoreProgressSentence(object)],
+      ["uid", "<code>" + esc(s.uid) + "</code>"],
+      ["plan hash", "<code>" + esc(s.planHash) + "</code>"],
+      ["Approval", "<code>" + esc(s.approvalName) + "</code>"],
+    ]) +
+    approval +
+    (verified || !s.name
+      ? ""
+      : "<p class=\"note\"><a href=\"" + esc(approvalSubjectRoute(o.ns, s.name)) + "\">Open " +
+        "the approval page for Restore " + esc(s.name) + "</a></p>") +
+    "</section>"
+  );
+}
+
+/** One Restore, in full. With `operation`, the view opens with where the
+ *  operation stands (see [`renderRestoreOperation`]). */
+export function renderRestoreDetail(object, operation) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const evidence = status.evidence || {};
@@ -167,6 +217,7 @@ export function renderRestoreDetail(object) {
   return (
     "<h2>Restore " + nameOf(object) + "</h2>" +
     restoreBadge(status) +
+    (operation ? renderRestoreOperation(object, operation) : "") +
     facts([
       ["phase", phaseBadge(status.phase)],
       ["exit code", cell(status.exitCode)],
@@ -240,11 +291,45 @@ export async function mountHistory(node, ns, parse, lifecycle) {
   }
 }
 
-export async function mountRestoreDetail(node, ns, name, parse, lifecycle) {
+/** Reads what the operation view needs beside the Restore: the hash of its own
+ *  plan bytes and the Approval its `spec.approvalRef` names. A missing
+ *  Approval is a state; an unreadable one is reported, not guessed. */
+export async function loadRestoreOperation(api, ns, restore, lifecycle) {
+  const hash = await planHash((((restore || {}).spec) || {}).planBytes || "");
+  const subject = subjectOf(restore, hash, ns);
+  let approval = null;
+  let approvalError = null;
+  if (subject.approvalName.length > 0) {
+    try {
+      approval = await api.get(ns, APPROVALS, subject.approvalName, readOptions(lifecycle));
+    } catch (error) {
+      if (cancelled(error, lifecycle)) {
+        throw error;
+      }
+      if (!(error !== null && typeof error === "object" && error.status === 404)) {
+        approvalError = error;
+      }
+    }
+  }
+  return {
+    ns: ns,
+    subject: subject,
+    approval: approval,
+    found: approvalError === null ? approvalState(approval, subject) : null,
+    approvalError: approvalError,
+  };
+}
+
+export async function mountRestoreDetail(node, ns, name, parse, lifecycle, deps) {
+  const api = deps || API;
   try {
-    const object = await get(ns, PLURAL, name, readOptions(lifecycle));
+    const object = await api.get(ns, PLURAL, name, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return;
+    }
+    const operation = await loadRestoreOperation(api, ns, object, lifecycle);
     if (active(lifecycle)) {
-      replace(node, parse(renderRestoreDetail(object)));
+      replace(node, parse(renderRestoreDetail(object, operation)));
     }
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {

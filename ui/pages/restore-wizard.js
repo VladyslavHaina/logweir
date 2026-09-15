@@ -31,9 +31,35 @@
 // EDITING IS CREATING. `Restore.spec` is immutable, so there is no in-place
 // edit: "edit" prefills a NEW draft, whose bytes hash differently, and the
 // page says so above the form.
+//
+// ONE GUIDED SUBMIT (PLAT-12.1). "Create the Restore" is the only action, and
+// it does the whole journey in order: check that the plan about to be sent is
+// the plan on screen, create the Restore idempotently -- its name is minted
+// from those bytes, so the same plan submitted twice, or retried after a lost
+// response, resolves to the Restore the first request made -- and then open
+// what it needs next. Under today's approval semantics every Restore waits for
+// a verified Approval: when one already authorises this exact Restore, that is
+// the Restore's operation view; otherwise it is the Restore's approval page,
+// Awaiting approval. There is no second button that navigates without
+// creating, and no create that forgets where it was going.
 
-import { create, list } from "../api.js";
-import { active, cancelled, listen, readOptions } from "../lifecycle.js";
+import { create, get, list } from "../api.js";
+import {
+  active,
+  cancelled,
+  dropDraft,
+  fieldErrors,
+  formKey,
+  invalidInput,
+  keepDraft,
+  listen,
+  mutationFor,
+  readDraft,
+  readOptions,
+  refusal,
+  resolveExisting,
+  watchMutation,
+} from "../lifecycle.js";
 import {
   CONVENIENCE_SENTENCE,
   COPY_CAVEAT,
@@ -45,6 +71,9 @@ import {
   errorBox,
   esc,
   facts,
+  fieldErrorLine,
+  invalidAttributes,
+  mutationStatus,
   prefixOf,
   preflightSentence,
   replace,
@@ -53,11 +82,45 @@ import {
   windowMessage,
 } from "../render.js";
 import { defaultTopicPrefix, TARGET_MODES, mintNames, planHash, renderPlanBytes } from "../plan.js";
-import { itemsOf } from "./clusters.js";
+import { isObjectName, itemsOf } from "./clusters.js";
+import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
 const PLURAL = "restores";
 const CLUSTERS = "kafkaclusters";
 const BACKUPS = "backups";
+const APPROVALS = "approvals";
+
+/** The wizard's identity in the draft and mutation registries. */
+export const WIZARD_FORM = "restore-wizard";
+
+/** The wizard fields a draft keeps: the values a person can change in steps
+ *  1, 3 and 4. None is a credential -- the archive credential is a Secret's
+ *  NAME -- and the plan bytes themselves are never kept: they are rendered
+ *  again, and hashed again, from these. */
+export const WIZARD_DRAFT_FIELDS = Object.freeze([
+  "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "endpoint", "region",
+  "pathStyle", "evidenceBucket", "archiveSecret",
+]);
+
+/** The API server's field paths, mapped to the wizard's inputs. `archive` and
+ *  `backupSet` are not inputs: they were read from a Backup, and their
+ *  messages are shown beside the submit button. */
+export const WIZARD_FIELD_PATHS = Object.freeze([
+  ["spec.pointInTime", "pointInTime"],
+  ["spec.target.topicNaming", "topicPrefix"],
+  ["spec.target.clusterRef", "targetCluster"],
+  ["spec.target.mode", "mode"],
+  ["spec.sourceArchive.secretRef", "archiveSecret"],
+  ["spec.sourceArchive", "archive"],
+  ["spec.backupSetRef", "backupSet"],
+]);
+
+/** The fields of `WIZARD_FIELD_PATHS` with no input of their own. */
+const NOT_INPUTS = Object.freeze(["archive", "backupSet"]);
+
+/** `Restore.spec` has no server default and no field that may change, so the
+ *  comparison with an existing Restore is exact. */
+const RESTORE_SPEC_RULES = Object.freeze({});
 
 /** The evidence prefix, and it is NOT a field an operator sets. Global
  *  Constraint 6: `logweir` writes only under `logweir/`, and
@@ -71,7 +134,7 @@ const EVIDENCE_PREFIX = "logweir/";
  *  one; there is no DOM and no network under `node --test`, and a page whose
  *  write half could only be exercised in a browser is a page whose write half
  *  is exercised nowhere. */
-const API = { create: create, list: list };
+const API = { create: create, get: get, list: list };
 
 // ---------------------------------------------------------------- the steps
 
@@ -129,11 +192,14 @@ export function renderArchiveStep(state) {
 export function renderArchiveCredentialField(state) {
   const s = state || {};
   const name = typeof s.archiveSecretName === "string" ? s.archiveSecretName : "";
+  const errors = errorsOf(s);
   return (
     "<h4>The credential that reaches that archive</h4>" +
     "<div class=\"field\">" +
     "<label for=\"archive-secret\">ARCHIVE CREDENTIAL (Secret name)</label>" +
-    "<input id=\"archive-secret\" name=\"archiveSecret\" value=\"" + esc(name) + "\">" +
+    "<input id=\"archive-secret\" name=\"archiveSecret\" value=\"" + esc(name) + "\"" +
+    invalidAttributes("archive-secret", errors.archiveSecret) + ">" +
+    fieldErrorLine("archive-secret", errors.archiveSecret) +
     "<p class=\"note\">The runner reads the archive with this credential: weirkeeper mounts " +
     "the named Secret's keys into the runner Job as its object-store credential, and does so " +
     "only when spec.sourceArchive.secretRef is set. A Restore created without it is " +
@@ -175,7 +241,9 @@ export function renderStoreFields(state) {
     (store.pathStyle === true ? " checked" : "") + "> path_style addressing</label>" +
     "<div class=\"field\"><label for=\"evidence-bucket\">evidence bucket</label>" +
     "<input id=\"evidence-bucket\" name=\"evidenceBucket\" value=\"" +
-    esc(((s.fields || {}).evidence || {}).bucket) + "\">" +
+    esc(((s.fields || {}).evidence || {}).bucket) + "\"" +
+    invalidAttributes("evidence-bucket", errorsOf(s).evidenceBucket) + ">" +
+    fieldErrorLine("evidence-bucket", errorsOf(s).evidenceBucket) +
     "<p class=\"note\">The evidence prefix is fixed at " + esc(EVIDENCE_PREFIX) + " by Global " +
     "Constraint 6 and is not an input: a plan naming another one is refused at phase 0, " +
     "after the approver has already signed it.</p></div>"
@@ -297,6 +365,7 @@ export function renderPointInTimeStep(state) {
       ? s.fields.pointInTime
       : rfc3339(covered.toMs);
   const complaint = windowComplaint(value, covered);
+  const errors = errorsOf(s);
   return (
     "<section class=\"step\" id=\"step-point-in-time\" tabindex=\"-1\"><h3>3. Point in time</h3>" +
     "<p class=\"blurb\">An RFC 3339 instant. The window is closed at both ends: a record " +
@@ -305,7 +374,9 @@ export function renderPointInTimeStep(state) {
     "field of this plan.</p>" +
     "<div class=\"field\">" +
     "<label for=\"point-in-time\">point in time</label>" +
-    "<input id=\"point-in-time\" name=\"pointInTime\" value=\"" + esc(value) + "\">" +
+    "<input id=\"point-in-time\" name=\"pointInTime\" value=\"" + esc(value) + "\"" +
+    invalidAttributes("point-in-time", errors.pointInTime) + ">" +
+    fieldErrorLine("point-in-time", errors.pointInTime) +
     "<p class=\"window\">" + windowMessage(covered.fromMs, covered.toMs) + "</p>" +
     "</div>" +
     (complaint === null ? "" : "<p class=\"complaint\">" + complaint + "</p>") +
@@ -390,6 +461,7 @@ export function renderTargetStep(state) {
     target.mode === "scratch" && typeof ((chosen || {}).spec || {}).markerTopic !== "string"
       ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
       : "";
+  const errors = errorsOf(s);
   return (
     "<section class=\"step\" id=\"step-target\" tabindex=\"-1\"><h3>4. Target and naming</h3>" +
     "<p class=\"blurb\">Where the restored records are written. Nothing that already " +
@@ -397,16 +469,21 @@ export function renderTargetStep(state) {
     "refuses outright if a mapped target topic is already there.</p>" +
     "<div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"target-cluster\">target cluster</label>" +
-    "<select id=\"target-cluster\" name=\"targetCluster\">" + clusterOptions + "</select></div>" +
+    "<select id=\"target-cluster\" name=\"targetCluster\"" +
+    invalidAttributes("target-cluster", errors.targetCluster) + ">" + clusterOptions + "</select>" +
+    fieldErrorLine("target-cluster", errors.targetCluster) + "</div>" +
     "<div class=\"field\"><label for=\"target-mode\">mode</label>" +
-    "<select id=\"target-mode\" name=\"mode\">" + options + "</select>" +
+    "<select id=\"target-mode\" name=\"mode\"" + invalidAttributes("target-mode", errors.mode) + ">" +
+    options + "</select>" +
     "<p class=\"help\">newTopic writes beside what is there; scratch needs a target that " +
-    "proves it is scratch.</p></div>" +
+    "proves it is scratch.</p>" + fieldErrorLine("target-mode", errors.mode) + "</div>" +
     "</div>" +
     (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
     markerWarning +
     "<div class=\"field\"><label for=\"topic-prefix\">topicNaming.prefix</label>" +
-    "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\">" +
+    "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\"" +
+    invalidAttributes("topic-prefix", errors.topicPrefix) + ">" +
+    fieldErrorLine("topic-prefix", errors.topicPrefix) +
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
     "recovered to. It is editable.</p></div>" +
@@ -442,27 +519,45 @@ export function renderPreflightStep(state) {
   );
 }
 
-/** Step 6 -- the rendered plan, its hash, and the two minted names. */
+/** Step 6 -- the rendered plan, its hash, the two minted names, and the one
+ *  guided submit.
+ *
+ *  `prepared.problem` is set instead of the bytes when the fields do not make
+ *  a document the runner's grammar accepts; then there is no hash to show and
+ *  nothing to submit, and the step says why. `state.submission` is the
+ *  wizard's mutation record: while it is pending the button is disabled, and
+ *  its outcome is shown beside the button in the words every form uses. */
 export function renderPlanStep(prepared, state) {
   const p = prepared || {};
   const s = state || {};
+  const submission = s.submission || {};
+  const pending = submission.phase === "pending";
+  const errors = errorsOf(s);
+  const beside = (s.errorsUnmatched || []).concat(
+    NOT_INPUTS.reduce((all, name) => all.concat(errors[name] || []), []),
+  );
+  const renderable = typeof p.problem !== "string";
+  const plan = renderable
+    ? "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>"
+    : "<p class=\"complaint\" id=\"plan-problem\">The plan cannot be rendered from these values, " +
+      "so there is no hash and nothing to submit: " + esc(p.problem) + "</p>";
   return (
     "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
     "<p class=\"blurb\">The document an approver signs, exactly as it will be sent, with " +
     "its sha256 and the two names minted from it.</p>" +
-    "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>" +
+    plan +
     facts([
-      ["plan hash", "<code>" + esc(p.hash) + "</code>"],
-      ["Restore metadata.name", "<code>" + esc(p.restoreName) + "</code>"],
-      ["Approval metadata.name", "<code>" + esc(p.approvalName) + "</code>"],
+      ["plan hash", renderable ? "<code id=\"plan-hash-value\">" + esc(p.hash) + "</code>" : cell(null)],
+      ["Restore metadata.name", renderable ? "<code>" + esc(p.restoreName) + "</code>" : cell(null)],
+      ["Approval metadata.name", renderable ? "<code>" + esc(p.approvalName) + "</code>" : cell(null)],
     ]) +
     "<p class=\"note\">Both names are minted from the plan bytes before either object " +
     "exists. The Restore is created first, naming an Approval that is not there yet; the " +
     "reconciler requeues every 30 s until it arrives. Neither name is ever edited, because " +
     "neither spec can be.</p>" +
     "<div class=\"actions\">" +
-    "<button type=\"button\" id=\"copy-plan\">Copy plan</button>" +
-    "<button type=\"button\" id=\"download-plan\">Download plan</button>" +
+    "<button type=\"button\" id=\"copy-plan\"" + (renderable ? "" : " disabled") + ">Copy plan</button>" +
+    "<button type=\"button\" id=\"download-plan\"" + (renderable ? "" : " disabled") + ">Download plan</button>" +
     "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
     "<h4>Approve it out of band</h4>" +
@@ -470,11 +565,45 @@ export function renderPlanStep(prepared, state) {
     "page never sees it.</p>" +
     copyBlock([APPROVE_COMMAND]) +
     "<div class=\"actions actions-final\">" +
-    "<button type=\"button\" id=\"create-restore\" class=\"primary\">Create the Restore</button>" +
-    "<button type=\"button\" id=\"request-approval\">Request approval</button>" +
+    "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
+    (pending || !renderable ? " disabled" : "") + (pending ? " aria-busy=\"true\"" : "") +
+    ">Create the Restore</button>" +
+    "</div>" +
+    "<p class=\"note\">" + GUIDED_SUBMIT_SENTENCE + "</p>" +
+    "<div class=\"form-status\" id=\"restore-submit-status\" tabindex=\"-1\">" +
+    submissionStatus(submission, p, beside) +
     "</div>" +
     "</section>"
   );
+}
+
+/** What the one submit button does, said beside it. */
+export const GUIDED_SUBMIT_SENTENCE =
+  "Create the Restore sends exactly the plan above, then opens what the Restore needs next: its " +
+  "approval page while it waits for a verified Approval, or its operation view once one " +
+  "authorises it. Submitting this plan again -- a second click, a retry after a lost response, " +
+  "or the same plan after a reload -- never creates a second Restore, because its name is minted " +
+  "from these bytes.";
+
+function submissionStatus(submission, prepared, beside) {
+  const s = submission || {};
+  if (s.phase === "succeeded") {
+    const result = s.result || {};
+    const meta = ((result.object || {}).metadata) || {};
+    const route = typeof result.route === "string" ? result.route : "";
+    return (
+      mutationStatus(s, { kind: "Restore", name: meta.name }) +
+      (route.length > 0
+        ? "<p class=\"note\"><a href=\"" + esc(route) + "\">Open Restore " + esc(meta.name) + "</a></p>"
+        : "")
+    );
+  }
+  return mutationStatus(s, { kind: "Restore", name: (prepared || {}).restoreName }, beside);
+}
+
+/** The field messages the wizard state carries, by input. */
+function errorsOf(state) {
+  return (((state || {}).errors) || {});
 }
 
 /** The exact command an approver runs, verbatim.
@@ -618,15 +747,25 @@ export function renderStepper(state) {
 
 /** The whole wizard, all six steps, over one state. */
 export async function renderRestoreWizard(state) {
-  const prepared = await preparePlan(state);
+  return renderPreparedWizard(state, await preparePlanOrProblem(state));
+}
+
+/** The same wizard over a plan already prepared -- so the mount half knows the
+ *  exact hash it put on screen, and can refuse to submit any other. */
+export function renderPreparedWizard(state, prepared) {
+  const s = state || {};
   return (
     "<h2>Restore wizard</h2>" +
     "<p class=\"blurb\">Six steps, all on this page: the archive, the backup set, the " +
     "point in time, the target, the preflight, and the plan whose bytes the Restore " +
     "carries. Every value was read from this namespace's own objects or is editable " +
     "below.</p>" +
-    ((state || {}).editing
+    (s.editing
       ? "<p class=\"immutable-note\">" + RESTORE_IMMUTABLE_SENTENCE + "</p>"
+      : "") +
+    (s.draftRestored === true
+      ? "<div class=\"draft-note\"><p class=\"note\">" + DRAFT_RESTORED_SENTENCE + "</p>" +
+        "<div class=\"actions\"><button type=\"button\" id=\"discard-draft\">Discard these edits</button></div></div>"
       : "") +
     renderStepper(state) +
     renderArchiveStep(state) +
@@ -636,6 +775,125 @@ export async function renderRestoreWizard(state) {
     renderPreflightStep(state) +
     renderPlanStep(prepared, state)
   );
+}
+
+/** Said when the wizard reopens with edits made earlier in this page's life. */
+export const DRAFT_RESTORED_SENTENCE =
+  "Your unsubmitted edits to this plan, made earlier on this page for the same backup set, are " +
+  "back. They lived in this page's memory only: a reload would have started the wizard afresh.";
+
+/** [`preparePlan`], or `{problem}` naming the field the runner's grammar
+ *  needs when the values do not make a document. Never throws for that. */
+export async function preparePlanOrProblem(state) {
+  try {
+    return await preparePlan(state);
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) {
+      return { problem: String(error.message) };
+    }
+    throw error;
+  }
+}
+
+/** The page's own checks on the values a Restore is created from, by input.
+ *  A point OUTSIDE the covered window is not here: that check is a convenience
+ *  and never the gate (see `CONVENIENCE_SENTENCE`). A point that is not an
+ *  instant at all is, because the API server refuses it (`format: date-time`). */
+export function validateRestore(state) {
+  const s = state || {};
+  const fields = s.fields || {};
+  const target = fields.target || {};
+  const problems = {};
+  if (epochMs(fields.pointInTime) === null) {
+    problems.pointInTime = "an RFC 3339 instant, such as 2026-09-07T14:05:00Z";
+  }
+  if (TARGET_MODES.indexOf(target.mode) === -1) {
+    problems.mode = "one of " + TARGET_MODES.join(", ");
+  }
+  if (typeof target.topicPrefix !== "string" || target.topicPrefix.length === 0) {
+    problems.topicPrefix = "the prefix every restored topic's name starts with";
+  }
+  if (targetCluster(s) === null) {
+    problems.targetCluster = "choose the KafkaCluster the restore writes to";
+  }
+  if (typeof ((fields.evidence || {}).bucket) !== "string" || fields.evidence.bucket.length === 0) {
+    problems.evidenceBucket = "the bucket the signed evidence is written to";
+  }
+  if (typeof s.archiveSecretName === "string" && s.archiveSecretName.length > 0 &&
+    !isObjectName(s.archiveSecretName)) {
+    problems.archiveSecret = "a Secret name is lowercase letters, digits, '-' and '.'";
+  }
+  if (typeof s.archiveUrl !== "string" || s.archiveUrl.length === 0) {
+    problems.archive = "no archive URL was read from a Backup in this namespace";
+  }
+  if (typeof fields.backupSetRef !== "string" || fields.backupSetRef.length === 0) {
+    problems.backupSet = "no completed backup set is chosen";
+  }
+  return problems;
+}
+
+/** The wizard's editable values, as a draft keeps them. */
+export function wizardDraftValues(state) {
+  const s = state || {};
+  const f = s.fields || {};
+  const target = f.target || {};
+  const source = f.source || {};
+  return {
+    backupSetRef: f.backupSetRef,
+    pointInTime: f.pointInTime,
+    mode: target.mode,
+    topicPrefix: target.topicPrefix,
+    targetCluster: s.targetClusterName,
+    endpoint: source.endpoint,
+    region: source.region,
+    pathStyle: source.pathStyle === true,
+    evidenceBucket: (f.evidence || {}).bucket,
+    archiveSecret: s.archiveSecretName,
+  };
+}
+
+/** Puts a kept draft back into a freshly built state -- only when the draft
+ *  was made for the backup set this state chose, because a point in time and
+ *  a prefix chosen for one set are not edits to another. Returns whether it
+ *  applied. */
+export function applyWizardDraft(state, draft) {
+  const d = draft || {};
+  if (typeof d.backupSetRef !== "string" || d.backupSetRef !== ((state || {}).fields || {}).backupSetRef) {
+    return false;
+  }
+  if (typeof d.pointInTime === "string") {
+    state.fields.pointInTime = d.pointInTime;
+  }
+  if (typeof d.mode === "string") {
+    state.fields.target.mode = d.mode;
+  }
+  if (typeof d.targetCluster === "string" &&
+    itemsOf(state.clusters).some((c) => ((c || {}).metadata || {}).name === d.targetCluster)) {
+    selectTarget(state, d.targetCluster);
+  }
+  if (typeof d.topicPrefix === "string") {
+    state.fields.target.topicPrefix = d.topicPrefix;
+  }
+  for (const block of [state.fields.source, state.fields.evidence]) {
+    if (typeof d.endpoint === "string") {
+      block.endpoint = d.endpoint;
+    }
+    if (typeof d.region === "string") {
+      block.region = d.region;
+    }
+    if (typeof d.pathStyle === "boolean") {
+      block.pathStyle = d.pathStyle;
+      block.allowHttp = d.pathStyle;
+    }
+  }
+  if (typeof d.evidenceBucket === "string") {
+    state.fields.evidence.bucket = d.evidenceBucket;
+    state.evidenceBucket = d.evidenceBucket;
+  }
+  if (typeof d.archiveSecret === "string") {
+    state.archiveSecretName = d.archiveSecret;
+  }
+  return true;
 }
 
 /** The prefill an "edit" produces: a NEW draft, never a patch.
@@ -772,12 +1030,33 @@ export function approvalRoute(state, prepared) {
   );
 }
 
-/** Creates the `Restore` -- the FIRST of the two creates, with a dangling
- *  `approvalRef` -- and returns the approvals route the next action navigates
- *  to. Both names are minted before this function issues anything. */
-export async function submitRestore(state, deps, lifecycle) {
+/** THE GUIDED SUBMIT: creates the `Restore` -- the FIRST of the two creates,
+ *  with a dangling `approvalRef` -- and says where the journey goes next.
+ *
+ *  In order, and nothing is sent until the first three pass:
+ *   1. the page's own checks on the values (`validateRestore`);
+ *   2. the plan is prepared -- rendered, hashed and named -- and when a route
+ *      token is given and has left meanwhile, nothing is sent (`null`);
+ *   3. when `options.reviewedHash` is given, the prepared hash must be it: the
+ *      bytes a click sends are the bytes that were on screen when it was
+ *      clicked, and a field changed in between is a refusal, not a surprise;
+ *   4. one create, WITHOUT a route signal. Its name is minted from the bytes,
+ *      so `409 AlreadyExists` is this plan submitted before: an existing
+ *      Restore with exactly this spec is this operation, and any other is a
+ *      conflict (`resolveExisting`);
+ *   5. the destination: the Restore's operation view when an Approval already
+ *      authorises exactly this Restore, else its approval page.
+ *
+ *  Returns `{outcome, object, route, prepared}`, or `null` when step 2 found
+ *  the route gone. */
+export async function submitRestore(state, deps, lifecycle, options) {
   const api = deps || API;
-  const prepared = await preparePlan(state);
+  const s = state || {};
+  const problems = validateRestore(s);
+  if (Object.keys(problems).length > 0) {
+    throw invalidInput(problems);
+  }
+  const prepared = await preparePlan(s);
   // Hashing and minting are client-side preparation, not a submitted durable
   // operation. Navigation while they run therefore disarms the pending
   // action; once `create` starts, deliberately pass no route signal so an
@@ -785,9 +1064,46 @@ export async function submitRestore(state, deps, lifecycle) {
   if (!active(lifecycle)) {
     return null;
   }
-  const body = restoreBody(state, prepared);
-  await api.create((state || {}).ns, PLURAL, body);
-  return approvalRoute(state, prepared);
+  const reviewed = (options || {}).reviewedHash;
+  if (typeof reviewed === "string" && reviewed !== prepared.hash) {
+    throw refusal(
+      "the plan changed after it was displayed (the page showed " + reviewed + ", the current " +
+        "values hash to " + prepared.hash + "); review the plan shown now and submit again",
+      { reviewedHash: reviewed, preparedHash: prepared.hash },
+    );
+  }
+  const body = restoreBody(s, prepared);
+  let created;
+  try {
+    created = { outcome: "created", object: await api.create(s.ns, PLURAL, body) };
+  } catch (error) {
+    created = await resolveExisting(api, s.ns, PLURAL, body, RESTORE_SPEC_RULES, error);
+  }
+  const route = await restoreDestination(api, s, prepared, created.object);
+  return { outcome: created.outcome, object: created.object, route: route, prepared: prepared };
+}
+
+/** Where a submitted Restore goes next, under today's approval semantics:
+ *  every Restore waits for a verified Approval. The operation view when the
+ *  Approval its `spec.approvalRef` names already authorises exactly this
+ *  Restore -- this name, this namespace, this UID, this plan -- and its
+ *  approval page otherwise. A read that fails is not an authorisation, so it
+ *  lands on the approval page, which reads the state again for itself. */
+export async function restoreDestination(api, state, prepared, restore) {
+  const s = state || {};
+  const p = prepared || {};
+  const meta = (restore || {}).metadata || {};
+  const approvalName = (((restore || {}).spec || {}).approvalRef || {}).name || p.approvalName;
+  let approval = null;
+  try {
+    approval = await api.get(s.ns, APPROVALS, approvalName);
+  } catch (unread) {
+    approval = null;
+  }
+  if (approval !== null && approvalAuthorizes(approval, restore, p.hash)) {
+    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
+  }
+  return approvalRoute(s, p);
 }
 
 // SUBMIT-REGION-END
@@ -929,7 +1245,9 @@ function targetCluster(state) {
 /** The default prefix for an instant, or the empty string when there is no
  *  instant to derive one from. */
 function prefixFor(pointInTime) {
-  if (typeof pointInTime !== "string" || pointInTime.length === 0) {
+  // An input that is not (yet) an instant has no default prefix; it is the
+  // point-in-time field's message that says so, not a thrown render.
+  if (typeof pointInTime !== "string" || epochMs(pointInTime) === null) {
     return "";
   }
   return defaultTopicPrefix(pointInTime);
@@ -970,17 +1288,47 @@ export async function mountRestoreWizard(node, ns, parse, deps, lifecycle) {
       return;
     }
     const state = initialState(ns, clusters, backups);
-    const rendered = await renderRestoreWizard(state);
-    if (!active(lifecycle)) {
-      return;
+    const key = formKey(ns, WIZARD_FORM);
+    const record = mutationFor(key);
+    if (record.state.phase === "succeeded") {
+      dropDraft(key);
     }
-    replace(node, parse(rendered));
-    wire(node, state, parse, api, lifecycle);
+    const draft = readDraft(key);
+    if (draft !== null) {
+      if (applyWizardDraft(state, draft)) {
+        state.draftRestored = true;
+      } else {
+        dropDraft(key);
+      }
+    }
+    await renderAndWire(node, state, parse, api, lifecycle);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
     }
   }
+}
+
+/** Renders the wizard over `state` -- with its mutation record and its field
+ *  messages -- and wires what was rendered to the plan it shows. */
+async function renderAndWire(node, state, parse, api, lifecycle) {
+  const record = mutationFor(formKey(state.ns, WIZARD_FORM));
+  state.submission = record.state;
+  if (record.state.phase === "failed") {
+    const found = fieldErrors(record.state.error, WIZARD_FIELD_PATHS);
+    state.errors = found.fields;
+    state.errorsUnmatched = found.unmatched;
+  } else {
+    state.errors = null;
+    state.errorsUnmatched = [];
+  }
+  const prepared = await preparePlanOrProblem(state);
+  if (!active(lifecycle)) {
+    return false;
+  }
+  replace(node, parse(renderPreparedWizard(state, prepared)));
+  wire(node, state, parse, api, lifecycle, prepared);
+  return true;
 }
 
 /** The state the six steps read: the two collections, the chosen archive and
@@ -1106,7 +1454,9 @@ function firstTarget(clusters) {
   return all.length > 0 ? all[0] : null;
 }
 
-function wire(node, state, parse, api, lifecycle) {
+function wire(node, state, parse, api, lifecycle, prepared) {
+  const key = formKey(state.ns, WIZARD_FORM);
+  const record = mutationFor(key);
   const point = node.querySelector("#point-in-time");
   const prefix = node.querySelector("#topic-prefix");
   const mode = node.querySelector("#target-mode");
@@ -1127,7 +1477,9 @@ function wire(node, state, parse, api, lifecycle) {
       state.fields.target.mode = valueOf(mode);
     }
     if (prefix !== null) {
-      state.fields.target.topicPrefix = valueOf(prefix);
+      // An emptied prefix is the default prefix again: the field SHOWS the
+      // default when the value is empty, and the plan must be what it shows.
+      state.fields.target.topicPrefix = valueOf(prefix) || prefixFor(state.fields.pointInTime);
     }
     if (cluster !== null) {
       selectTarget(state, valueOf(cluster));
@@ -1162,11 +1514,11 @@ function wire(node, state, parse, api, lifecycle) {
     if (!active(lifecycle)) {
       return;
     }
-    const rendered = await renderRestoreWizard(state);
-    if (active(lifecycle)) {
-      replace(node, parse(rendered));
-      wire(node, state, parse, api, lifecycle);
-    }
+    // THE EDIT IS KEPT BEFORE ANYTHING ELSE, and a settled outcome about the
+    // previous plan is cleared: it described bytes that are no longer these.
+    keepDraft(key, wizardDraftValues(state), WIZARD_DRAFT_FIELDS);
+    record.clear();
+    await renderAndWire(node, state, parse, api, lifecycle);
   };
   for (const field of [
     point,
@@ -1230,32 +1582,68 @@ function wire(node, state, parse, api, lifecycle) {
     }, lifecycle);
   }
 
-  const submit = node.querySelector("#create-restore");
-  if (submit !== null) {
-    listen(submit, "click", async () => {
-      if (!active(lifecycle)) {
+  const discard = node.querySelector("#discard-draft");
+  if (discard !== null) {
+    listen(discard, "click", () => {
+      if (!active(lifecycle) || record.pending()) {
         return;
       }
-      try {
-        await submitRestore(state, api, lifecycle);
-      } catch (error) {
-        if (active(lifecycle)) {
-          replace(node, errorBox(error));
-        }
-      }
+      dropDraft(key);
+      record.clear();
+      mountRestoreWizard(node, state.ns, parse, api, lifecycle);
     }, lifecycle);
   }
 
-  const request = node.querySelector("#request-approval");
-  if (request !== null) {
-    listen(request, "click", async () => {
-      if (!active(lifecycle)) {
+  // THE ONE RECORD FOR THIS NAMESPACE'S WIZARD. Pending disables the button in
+  // place; a failure re-renders the wizard with its messages and keeps every
+  // value; success opens the destination the submit chose -- while this route
+  // is still the current one. A route left in between keeps the outcome in the
+  // record, and the next mount of the wizard shows it with a link.
+  watchMutation(node, key, record, (settled) => {
+    if (settled.phase === "succeeded") {
+      dropDraft(key);
+      const route = ((settled.result || {}).route);
+      if (typeof route === "string" && route.length > 0 && typeof window !== "undefined") {
+        window.location.hash = route;
         return;
       }
-      const prepared = await preparePlan(state);
-      if (active(lifecycle)) {
-        window.location.hash = approvalRoute(state, prepared);
+    }
+    if (settled.phase === "pending") {
+      const button = node.querySelector("#create-restore");
+      if (button !== null) {
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
       }
+      const status = node.querySelector("#restore-submit-status");
+      if (status !== null) {
+        replace(status, parse(submissionStatus(settled, prepared, [])));
+      }
+      return;
+    }
+    renderAndWire(node, state, parse, api, lifecycle).then((rendered) => {
+      if (rendered && settled.phase === "failed") {
+        const target = node.querySelector("[aria-invalid=\"true\"]") ||
+          node.querySelector("#restore-submit-status");
+        if (target !== null && typeof target.focus === "function") {
+          target.focus();
+        }
+      }
+    });
+  }, lifecycle);
+
+  const submit = node.querySelector("#create-restore");
+  if (submit !== null) {
+    listen(submit, "click", () => {
+      if (!active(lifecycle) || record.pending()) {
+        return;
+      }
+      const reviewed = typeof (prepared || {}).hash === "string" ? prepared.hash : undefined;
+      // The record turns pending BEFORE the first await inside it, so a second
+      // click in the same instant finds it pending and sends nothing.
+      record.run(async () => {
+        const result = await submitRestore(state, api, lifecycle, { reviewedHash: reviewed });
+        return result === null ? { outcome: "abandoned" } : result;
+      });
     }, lifecycle);
   }
 }

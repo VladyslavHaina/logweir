@@ -169,14 +169,16 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `api.js` | the **only** module that issues a network request. |
 | `render.js` | DOM helpers. Sets text, never `innerHTML`. |
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
-| `pages/restore-wizard.js` | the six wizard steps, the plan bytes, and the create that names an Approval which does not exist yet. |
-| `pages/approvals.js` | the Approval list and the four-input create form. Refuses a private key and never parses the two documents. |
+| `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
+| `pages/restore-wizard.js` | the six wizard steps, the plan bytes, and the ONE guided submit that creates the Restore and opens what it needs next. |
+| `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key and never parses the two documents. |
 | `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
 | `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
 | `tests/api.spec.js` | the behaviour arm of the two mechanical claims, under `node --test`. |
 | `tests/pages.spec.js` | the behaviour suite over the page modules: the badge rules, the wizard, the approval form, the roster. |
 | `tests/design.spec.js` | the design system's guarantees: the token layer, both schemes, reduced motion, the focus ring, badges with words, the stepper. |
+| `tests/mutation.spec.js` | drafts, one mutation state, idempotent creates, the guided submit and the approval subject -- driven through the real mount halves over a fake node and an in-memory API. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is written from
@@ -211,6 +213,68 @@ listing for any subdirectory that has no `index.html`. An empty index is the
 whole guard. `tests/` is the one directory a local `just ui` will list, and the
 release artefact excludes it, so no test harness and no fixture is ever
 published over HTTP.
+
+## What a form keeps, and what one click can do
+
+**Drafts live in this page's memory, and nowhere else.** What you type into a
+form is kept by `lifecycle.js` in a per-namespace, per-form record, so a
+validation refusal, the API server's own 422 or 403, a network failure, a
+timeout and a trip to another route all leave every value where it was. Nothing
+is written to browser storage: rule 2 of `scripts/check-ui-offline.sh` forbids
+both storage writes and the cookie accessor, and `mutation.spec.js` asserts a
+whole form journey while reading either one throws. So the persistence contract
+is exactly this, and it is the same in every form:
+
+* **survives** a refused field, an API refusal, a lost response, a timeout, and
+  navigation between routes of the loaded page;
+* **does not survive** a reload, a new tab or a closed tab -- a reload starts
+  the form empty;
+* **is never kept at all** for a value carrying private-key text, whichever
+  field it was pasted into, and for any field a form does not name in its own
+  allowlist. The forms have no field a password goes in: a credential is always
+  a **Secret's name**.
+
+**One click makes one object.** Every create the page issues names its object:
+a name you typed, or a name minted from the plan bytes. So a second click, a
+retry after a timeout and a resubmission after a reload all send the SAME name,
+and the API server answers the second one `409 AlreadyExists` instead of
+creating a second object. The page then reads the stored object back and
+compares its spec with the draft's:
+
+* the same content is the same operation, reported as *already existed with
+  exactly this content*, with the UID of the object that exists;
+* different content is a **conflict**, named field by field, and nothing is
+  overwritten -- this page has no update to overwrite with;
+* a submission that is still pending disables its own button, so a double click
+  cannot start a second request at all.
+
+**A failure says what is known.** A refusal says nothing was created. An
+**unknown** outcome -- no answer, a timeout, a 5xx -- says exactly that: the
+object may or may not exist, the request was not cancelled, and submitting
+again is safe for the reason above. The API server's own status, reason and
+message are shown verbatim beside it, and a 422's `causes[]` are put beside the
+fields they name.
+
+**The restore wizard has one action.** *Create the Restore* checks that the
+plan about to be sent is the plan on screen -- a field changed after the bytes
+were rendered is refused, not silently substituted -- creates the Restore, and
+then opens what it needs next: its **approval page** while it waits for a
+verified `Approval`, or its **operation view** once one authorises exactly that
+Restore (this name, this namespace, this UID, this plan). There is no second
+button that navigates without creating.
+
+**The approvals page never assumes a subject.** A visit with no subject lists
+the Restores waiting for an approval, or says there are none. A visit for one
+Restore reads that Restore and derives everything it will submit from the
+object itself -- the subject name, its UID, the `Approval` name its
+`spec.approvalRef` names, and the sha256 of its own `spec.planBytes`, computed
+on the page -- shows them read-only, and at submission checks that what is
+SHOWN is what it would SEND and that the Restore is still the one it read. A
+link whose `hash` or `name` disagrees with that Restore is refused and offers no
+form; an `Approval` bound to another subject, another execution (another UID) or
+another plan is shown as such and never offered for reuse. `pending`,
+`refused` and `expired` are read from `Approval.status` and its `Verified`
+condition, never derived here.
 
 ## The three rules, each with a gate
 
@@ -270,6 +334,16 @@ to refuse.
 `node ui/tests/preview-server.js` serves this directory over the JSON under `tests/fixtures/preview/`, with no cluster and no credential anywhere.
 Open `http://127.0.0.1:8011/ui/`; the namespace `default` is populated, `forbidden` answers every read with a 403, and any other name is empty.
 It is a development tool and not a test, not a proxy and not part of the product: it binds loopback only, answers every write with a 405, and the release bundle and the gates never see it.
+
+`scripts/plat13-ui-e2e.mjs` and `scripts/plat12-13-ui-e2e.mjs` are the live
+browser harnesses: the first owns the navigation-lifetime journeys, the second
+the draft, idempotency, guided-submit and approval-subject journeys. Both drive
+Chromium against a real `kubectl proxy` over real objects; the second creates
+its own `lw-ui-correct-*` namespace and deletes it afterwards:
+
+```bash
+NODE_PATH="$(npm root -g)" node scripts/plat12-13-ui-e2e.mjs
+```
 
 ## What this page does not do
 
