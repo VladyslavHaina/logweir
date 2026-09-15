@@ -1,0 +1,61 @@
+# A `Backup` — one archive run, as an ordinary object.
+#
+#     kubectl --context docker-desktop -n <namespace> \
+#       apply -f config/samples/backup.yaml
+#
+# ---------------------------------------------------------------------------
+# NO ANNOTATION IS REQUIRED, AND NONE IS READ (PLAT-06.1)
+# ---------------------------------------------------------------------------
+# The controller derives everything the runner executes from this typed spec
+# and from server-generated metadata: the run identity is this object's own
+# API-server UID (a scheduled `Backup` uses its schedule's UID and slot), the
+# argv is built from that identity, and both are frozen — with the resolved
+# connection, topics and archive — into an immutable, create-only ConfigMap
+# named `<name>-plan` BEFORE any Job exists. `status.execution` records the
+# identity, that ConfigMap and the sha256 of its snapshot.
+#
+# Controllers before that contract executed the JSON array on the
+# `logweir.dev/runner-argv` annotation, so a manual Backup without it could not
+# run at all. A `Backup` that still carries one keeps working: the annotation
+# is IGNORED and surfaced as a `RunnerArgvAnnotationIgnored` condition naming
+# its size and digest — never its content, and never as something to execute.
+#
+# ---------------------------------------------------------------------------
+# IDENTITY AND IDEMPOTENCE
+# ---------------------------------------------------------------------------
+# A new NAME is a new run. Re-applying this file while the object exists is the
+# API server's own `AlreadyExists` — one run, however many times it is applied.
+# Deleting and re-creating the name mints a new UID and is a new run, under a
+# new archive prefix. `spec` is sealed by a CEL rule: to change a topic list or
+# an archive, create another Backup.
+#
+# `topics` IS A NAMED ALLOWLIST WITH NO WILDCARD (GC18(c) rail 1, guard
+# **G-GLOB**). A `*` here is a refusal, not a match-all.
+#
+# `triggeredBy: manual` is the only value a hand-written Backup may use:
+# `schedule` additionally requires the `BackupSchedule` controller's own owner
+# reference, slot and deterministic name, and is refused without them —
+# a receipt must not say `schedule` about a run no schedule created.
+---
+apiVersion: logweir.dev/v1alpha1
+kind: Backup
+metadata:
+  name: manual-backup
+  labels:
+    app.kubernetes.io/name: logweir
+spec:
+  # A `KafkaCluster` in this namespace. Its bootstrap servers, SCRAM username,
+  # TLS flag and `auth.secretRef` are what the run resolves; the controller
+  # never reads the password.
+  sourceRef:
+    name: source
+  topics:
+    - orders
+    - payments
+  archive:
+    url: s3://kafka-backups/logweir
+    secretRef:
+      name: logweir-s3
+  triggeredBy: manual
+  # The runner Job's `activeDeadlineSeconds`. Must be positive.
+  deadlineSeconds: 3600

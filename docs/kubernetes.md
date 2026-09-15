@@ -611,6 +611,9 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | **4** | `Failed` | `signing-or-lock`, or `OrphanedScorecard` | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
+| *(absent)* | `Failed` | `operational` | `Failed=True`, reason `ExecutionSpecInvalid` | The typed spec states no runnable run identity (see "Manual backups" below), so **nothing was created**. |
+| *(absent)* | `Failed` | `operational` | `Failed=True`, reason `PlanConfigMapConflict` | An object already holds the plan name and is not this run's frozen inputs. Nothing was created, and it was not rewritten. |
+| *(absent)* | `Failed` | `operational` | `Failed=True`, reason `JobNameConflict` | A Job already holds this `Backup`'s name and is not controlled by it. It was neither observed nor adopted. |
 
 **TWO VOCABULARIES, AND EACH STAYS IN ITS OWN FIELD.** `exitReason`'s five wire
 values are lowercase-hyphenated (`ok`, `operational`, `drill-not-pass`,
@@ -691,41 +694,148 @@ Four things about it are worth knowing before you debug one:
   lives on the pod, so a TTL that existed earlier would be a race pod garbage
   collection can win.
 
-### The plan ConfigMap: the reconciler renders it, and it renders it first
+### Manual backups: the typed contract, and no annotation anywhere
 
-The Job mounts a ConfigMap named `<backup name>-plan` at `/plan`, and the runner
-argv points `--spec` at `/plan/backup.yaml` and `--allowed-clusters` at
-`/plan/allowed-clusters.json`. **The `Backup` reconciler renders that ConfigMap
-in the same pass that creates the Job, and the ConfigMap `POST` comes first.**
-The order is the whole point: a Job created first is a pod stuck in
+A `Backup` is an ordinary object. This is the whole of what a person, a script
+or the UI has to create for a run to happen:
+
+```yaml
+apiVersion: logweir.dev/v1alpha1
+kind: Backup
+metadata:
+  name: nightly-catchup          # any DNS-1123 name of 63 characters or fewer
+  namespace: <your namespace>
+spec:
+  sourceRef: { name: source }    # a KafkaCluster in this namespace
+  topics: [orders, payments]     # a NAMED allowlist; a wildcard is refused
+  archive:
+    url: s3://kafka-backups/logweir
+    secretRef: { name: logweir-s3 }
+  triggeredBy: manual
+  deadlineSeconds: 3600
+```
+
+`config/samples/backup.yaml` is that object. **No annotation is required and
+none is read.** Controllers before this contract executed the JSON argv array
+on `logweir.dev/runner-argv`, which meant a manual `Backup` without it could
+not run at all, and anyone who could annotate a `Backup` could change the
+subcommand, the spec path, the signing key path or the archive prefix of a run
+holding the signing key.
+
+**The run identity is the control plane's, not the client's.**
+
+| `spec.triggeredBy` | What must also be true | The run identity (`status.execution.id`, the archive `backup_id`) |
+|---|---|---|
+| `manual` | no `spec.slot` | this object's **API-server UID** |
+| `schedule` | `spec.scheduleRef`, a `spec.slot` of `yyyymmdd-hhmmss`, a controller owner reference to that `BackupSchedule`, and the deterministic name `logweir-backup-<schedule>-<slot>` | `<BackupSchedule UID>-<slot>` |
+
+Anything else — a `manual` Backup naming a slot, a `schedule` claim without the
+owner reference the `BackupSchedule` controller writes, an unknown
+`triggeredBy`, a non-positive `deadlineSeconds` — is terminal
+`ExecutionSpecInvalid`, before anything is created. A hand-written object may
+not claim `schedule`: its signed receipt would say `schedule` about a run no
+schedule created.
+
+**Idempotence, which is what PLAT-06.2's "Back up now" needs.** Creating a
+`Backup` under a **new name** is a new run. Re-creating the same name while the
+object exists is the API server's own `AlreadyExists` — one run, however many
+times the button is pressed. Deleting the object and creating the name again
+mints a new UID and is therefore a new run, under a new archive prefix.
+
+```bash
+kubectl --context docker-desktop -n <ns> apply -f config/samples/backup.yaml
+kubectl --context docker-desktop -n <ns> get backup nightly-catchup \
+  -o jsonpath='{.status.execution.id}{"\t"}{.status.phase}{"\n"}'
+```
+
+### The plan ConfigMap: frozen inputs, created before any Job exists
+
+The Job mounts a ConfigMap named `<backup name>-plan` at `/plan`, and the
+runner argv points `--spec` at `/plan/backup.yaml` and `--allowed-clusters` at
+`/plan/allowed-clusters.json`. **The `Backup` reconciler freezes that ConfigMap
+in the same pass that creates the Job, and the ConfigMap comes first.** The
+order is the whole point: a Job created first is a pod stuck in
 `ContainerCreating` on `MountVolume.SetUp failed for volume "plan": configmap
 "<name>-plan" not found` until `activeDeadlineSeconds` fires, after which the
 job controller deletes the pod and the exit code goes with it — a terminal
 `NoExitCode` that explains nothing.
 
-It has **exactly two keys**, owner-referenced to the `Backup` with
-`controller: true` and `blockOwnerDeletion: true`, so deleting the `Backup`
-collects the plan and a half-deleted `Backup` cannot orphan one:
+It is **create-only and `immutable: true`**, owner-referenced to the `Backup`
+with `controller: true` and `blockOwnerDeletion: true` (so deleting the
+`Backup` collects the plan and a half-deleted `Backup` cannot orphan one), and
+it carries **three keys**:
 
+- **`execution-inputs.json`** — the canonical typed snapshot of everything the
+  run executes: the identity and trigger above, the source `KafkaCluster`'s
+  **UID**, bootstrap addresses, SCRAM username and TLS flag, the topic
+  allowlist, the archive URL with the resolved `storage` block and the
+  object-store addressing variables this controller forwards, and the runner
+  argv, deadline and engine tunables. Its grammar is versioned
+  (`logweir.dev/backup-execution-inputs/v1`).
 - **`backup.yaml`** — the typed `BackupSpec` document `logweir backup run
-  --spec` parses. `source.bootstrapServers` and `source.auth` come from the
-  `KafkaCluster` that `spec.sourceRef` names, never from `Backup.spec`, which
-  carries neither; `source.topics` is `spec.topics` **verbatim**; `storage` is
-  `spec.archive.url` through the same parser the controller's own read-only
-  archive handle is built with. The document is built as the Rust type and
-  serialised, not assembled as text: `storage` is an internally tagged enum
-  whose variants have incompatible required fields, and a stringly-typed
-  renderer emits `backend: filesystem` beside a `bucket:` key, which fails the
-  engine's config load with a hard missing-field error.
+  --spec` parses, rendered **from that snapshot**. `source.bootstrapServers`
+  and `source.auth` come from the `KafkaCluster` that `spec.sourceRef` names,
+  never from `Backup.spec`, which carries neither; `source.topics` is
+  `spec.topics` **verbatim**; `storage` is `spec.archive.url` through the same
+  parser the controller's own read-only archive handle is built with. The
+  document is built as the Rust type and serialised, not assembled as text:
+  `storage` is an internally tagged enum whose variants have incompatible
+  required fields, and a stringly-typed renderer emits `backend: filesystem`
+  beside a `bucket:` key, which fails the engine's config load.
 - **`allowed-clusters.json`** — the cluster allowlist, in the format the CLI's
   own reader parses.
+
+Two annotations name what it holds: `logweir.dev/execution-id` and
+`logweir.dev/execution-inputs-sha256`, the `sha256:` digest of the
+`execution-inputs.json` bytes. The same two are stamped on the runner Job and
+its pod template, and the digest is recorded on the object **before the Job
+exists**:
+
+```bash
+kubectl --context docker-desktop -n <ns> get backup <name> -o jsonpath='{.status.execution}'
+# {"id":"…","inputsRef":{"name":"<name>-plan"},"inputsSha256":"sha256:…"}
+```
+
+**What a later pass does with it.** Every pass that would create a Job
+re-resolves the inputs from the spec, the referenced `KafkaCluster` and this
+controller's addressing, and admits the existing ConfigMap only when all of
+this holds: exactly one owner reference, this `Backup`'s, complete;
+`immutable: true`; exactly those three keys and no binary data; a snapshot of a
+grammar it understands, in canonical form, whose digest is the annotated one;
+runner documents that are byte-for-byte what that snapshot renders; a snapshot
+bound to this `Backup`'s namespace, name, UID and derived identity; the digest
+`status.execution` recorded; and inputs equal to the fresh resolution in
+everything executable. Anything else is terminal `PlanConfigMapConflict`,
+naming which of those failed. **Nothing is ever patched, replaced or deleted**:
+a plan another pass may already have mounted is never rewritten, a foreign,
+extra-owner or mismatched object is never adopted, and a mutable plan left by a
+controller that predates frozen inputs is refused rather than reused.
+
+One difference is informational and deliberate: a newly observed
+`KafkaCluster.status.clusterId` changes the snapshot's bytes but not its
+executable inputs, so a probe that lands between the freeze and the Job does
+not invalidate the run. Everything else — a recreated source cluster (its UID
+is pinned), different bootstrap addresses, a different topic list, a different
+archive or endpoint — does.
+
+**A Job that disappears from a nonterminal `Backup` is re-created from those
+same frozen inputs** (the ConfigMap is read and verified, never re-rendered),
+which is what makes deleting a running Job a retry of one run rather than the
+start of another. The Job keeps the `Backup`'s name, so the pod carrying the
+exit code is selected by the job-name label **and** by its owner Job's UID: a
+deleted Job's pod is never read as the new Job's evidence.
 
 The source connection is configured once on `KafkaCluster`. The probe and each
 backup reuse that object's bootstrap servers, SCRAM username, TLS setting and
 `auth.secretRef`. For SCRAM, both project the Secret's `password` key into
 `LOGWEIR_SOURCE_PASSWORD` with `valueFrom.secretKeyRef`. The controller never
-reads the password, and it is not copied into the plan ConfigMap. Archive
-credentials remain separate, under `Backup.spec.archive.secretRef`.
+reads the password, and **no Secret name and no credential key is written into
+the snapshot or the status**: the references are fixed by the pinned
+`KafkaCluster` UID and the CEL-immutable `KafkaCluster.spec` and `Backup.spec`,
+so the Job builder derives them from those objects and the ConfigMap — which
+has no encryption at rest and a much wider read surface than a Secret — names
+none of them. Archive credentials remain separate, under
+`Backup.spec.archive.secretRef`.
 
 These Jobs open separate connections: a completed probe leaves no running
 client to share with a later backup or its engine subprocess. Each new pod
@@ -734,7 +844,7 @@ without copying credentials into every Backup. A successful probe establishes
 reachability at that time; backup permissions and the engine's credential
 rendering restrictions are still checked by the backup runner.
 
-A SCRAM source with a missing or blank `auth.secretRef.name` now produces
+A SCRAM source with a missing or blank `auth.secretRef.name` produces
 `CredentialNotRenderable` before a plan or Job is created. An absent Secret or
 missing `password` key is reported by Kubernetes when it starts the pod.
 
@@ -750,35 +860,93 @@ Other refusals on this path are **terminal and never a requeue**, because
 `spec.sourceRef` naming a `KafkaCluster` that does not exist is
 `ReferentNotFound`, and a topic carrying a glob metacharacter (`*`, `?`, `[`,
 `]`, `{`, `}`) is `GuardRefused` **before anything is created** — topics are a
-mandatory named allowlist, and the rail is the same one the runner uses.
-
-A **409** on the ConfigMap `POST` is success only when the existing object
-carries a controller owner reference with **this** `Backup`'s UID and its
-executable plan and target allowlist match the current plan. A newly observed
-source cluster ID is informational on this path and does not invalidate a retry.
-Foreign ownership or conflicting plan data produces
-`PlanConfigMapConflict`, before a Job is created. A cluster may have been
-deleted and recreated between retries; this check prevents old plan bytes
-from being combined with its new credentials. The controller does not overwrite
-an existing plan that another reconcile might already have mounted.
+mandatory named allowlist, and the rail is the same one the runner uses. A Job
+that already occupies the `Backup`'s name but is not controlled by exactly this
+`Backup` is `JobNameConflict`: it is neither observed nor adopted, so a
+stranger's exit code and evidence keys cannot reach this object.
 
 **Why the allowlist needs a stronger binding on the drill path.** On that path
 `allowedClusterIds` authorises a restore *target*, so the per-Restore bundle is
 immutable and its exact bytes are pinned in the Job template and checked by
 the runner before phase 0. On the backup path the direction is
 reversed: **the allowlist is a consistency rail, not a boundary.** The address
-the run dials comes from the CEL-immutable `sourceRef` and never from this file,
-and the backup guard *refuses* a run whose broker-observed source cluster id
-appears in `allowedClusterIds` — a cluster cannot be both the source of an
-archive and a scratch cluster whose topics a drill deletes. So the rendered file
-carries an **empty** `allowedClusterIds` and the observed cluster id in
-`sourceClusterId`, which the backup path does not read; every id an attacker
-could add makes the backup **refuse**, and none widens it.
+the run dials comes from the CEL-immutable `sourceRef`, and the backup guard
+*refuses* a run whose broker-observed source cluster id appears in
+`allowedClusterIds` — a cluster cannot be both the source of an archive and a
+scratch cluster whose topics a drill deletes. So the rendered file carries an
+**empty** `allowedClusterIds` and the observed cluster id in `sourceClusterId`,
+which the backup path does not read; every id an attacker could add makes the
+backup **refuse**, and none widens it.
 
-Neither key carries a credential. The auth block has a username and no password
-at any variant, and the object-store credential reaches the runner as
-`secretKeyRef` environment — a ConfigMap has no encryption at rest and a much
-wider read surface than a Secret, and nothing in it is secret.
+**The residual, stated plainly.** The backup runner does not yet re-check the
+mounted plan against a digest of its own, the way the restore runner checks its
+approval bundle (§12). The controller's checks all happen before the Job is
+created, and `immutable: true` stops an in-place edit; a subject with
+`delete`+`create` on ConfigMaps in the namespace could still delete the frozen
+plan and re-create it under the same name in the window before the kubelet
+projects it. Such a subject can create Backups outright, so this widens no
+boundary — but a runner-side digest check (the `Restore` path's shape) is the
+remaining hardening, and it is not claimed here.
+
+### Legacy Backups, upgrade and rollback
+
+**New scheduled Backups carry no `logweir.dev/runner-argv` annotation**, and
+this controller never executes one. A `Backup` that still carries the
+annotation — created by an older controller, or copied from an old runbook —
+is handled like this:
+
+| Situation | What happens |
+|---|---|
+| The annotation is present and no Job exists yet | The run proceeds from the typed spec and the derived identity. The annotation raises `RunnerArgvAnnotationIgnored=True`, reason `AnnotationIgnored`, whose message names the annotation's **size and `sha256:` digest** and whether it equals the derived argv — never its content. |
+| The annotation is not a JSON array of strings | The same, with reason `AnnotationMalformed`. |
+| The annotation names another subcommand, spec path, signing key or backup id | The same: it is not executed, and the message says it **DIFFERS** from the derived argv. |
+| A Job already exists and predates frozen inputs (no digest annotation, no `status.execution`) | **It is observed to completion and never changed.** No plan is read or written, the Job is not re-created, and the status carries `ExecutionInputsUnverified=True`, reason `LegacyExecution`. Its terminal `status.backupId` is the value the older controller would have reported. |
+| A Job exists whose digest does not match `status.execution` (for example one an older controller created after a rollback) | The same observation, reason `JobInputsMismatch`. |
+| A mutable `<name>-plan` written by an older controller exists and no Job does | Terminal `PlanConfigMapConflict`. It cannot carry the input snapshot and it is not rewritten; delete that `Backup` and create a new one (a schedule fires its next slot normally). |
+
+**Upgrade.** `status.execution` is an additive CRD field. Apply the CRD before
+rolling out the controller that writes it, or the API server prunes the field
+and every run reports `ExecutionInputsUnverified` for its own Job:
+
+```bash
+export LOGWEIR_CONTEXT=<production-context>
+kubectl --context "$LOGWEIR_CONTEXT" apply -f config/crd/backups.yaml
+kubectl --context "$LOGWEIR_CONTEXT" wait \
+  --for=condition=Established crd/backups.logweir.dev --timeout=60s
+kubectl --context "$LOGWEIR_CONTEXT" get crd/backups.logweir.dev \
+  -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.status.properties.execution.properties.inputsSha256.type}'
+# string
+```
+
+Backups already in flight keep their Jobs (the rows above). Nothing rewrites an
+existing plan ConfigMap, so no drain is required for correctness — but a
+`Backup` caught **between** an older controller's plan write and its Job create
+becomes `PlanConfigMapConflict` and has to be re-created, so a quiet moment is
+still the kinder time to roll.
+
+**Rollback, and why it fails safe.** An older controller reads the
+`logweir.dev/runner-argv` annotation and nothing else, so after a rollback:
+
+- a **new-style Backup** (no annotation) gets no argv: the old controller
+  reports `the object … carries no parseable … annotation`, requeues, and
+  **creates nothing** — no Job, no partial archive. Nothing runs until the new
+  controller is back;
+- an **annotated legacy Backup** whose inputs this controller already froze is
+  refused by the old controller too: the immutable three-key plan does not
+  match the two-key document it renders, so it writes `PlanConfigMapConflict`
+  rather than mounting a plan it did not produce;
+- a Job that already exists keeps running under either controller, and both
+  read its exit code the same way;
+- `status.execution` on existing objects is inert for the old controller. Leave
+  the CRD in place: it is additive, and deleting the field would strip the
+  record of what a running Job was built from.
+
+Scheduled runs are unaffected by a rollback in one direction only: the old
+controller creates its Backups **with** the annotation again, so its own runs
+continue. New-style annotation-less scheduled Backups created just before the
+rollback stall until roll-forward, which is the fail-safe half of the same
+rule: this controller refuses to invent an argv, and the old one refuses to run
+without one.
 
 ### A name longer than 63 characters is refused, and the refusal is on the object
 

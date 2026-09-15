@@ -568,27 +568,19 @@ fi
 # ---------------------------------------------------------------------------
 step "11/12 a Backup, then an approved Restore"
 
-# The runner argv travels on the annotation (`weirkeeper::controllers::
-# backup_schedule::RUNNER_ARGV_ANNOTATION`) — `Backup.spec` carries none and
-# is sealed by CEL, so a hand-written Backup supplies it. No
-# `--backup-id-override`: without it the run uses the `backup_id` the
-# controller renders into the plan ConfigMap.
-#
-# IT IS `backup_schedule::runner_argv`'s ARGV, MINUS THE OVERRIDE, ON PURPOSE.
-# A demo whose argv differed from the one a scheduled Backup actually gets
-# would be demonstrating a path nothing in production takes — which is how the
-# `--out`/`--receipt-out` pair survived two slots: the shipped argv passed
-# both at DIFFERENT paths, `logweir backup run` refuses that with exit 1 before
-# the engine is spawned, and every scheduled Backup in the tree failed that
-# way. This run found it, and `backup_schedule::runner_argv` is fixed.
+# A MANUAL Backup IS AN ORDINARY OBJECT (PLAT-06.1). No annotation, no argv:
+# the controller derives the runner argv from this typed spec and the object's
+# own API-server UID, freezes it with the resolved connection and archive into
+# an immutable `<name>-plan` ConfigMap, and records the identity and that
+# snapshot's digest on `status.execution` before the Job exists. A controller
+# before that contract required a `logweir.dev/runner-argv` annotation here and
+# executed whatever it said.
 cat > "$OUT/backup.yaml" <<'YAML'
 apiVersion: logweir.dev/v1alpha1
 kind: Backup
 metadata:
   name: demo-backup
   namespace: NAMESPACE
-  annotations:
-    logweir.dev/runner-argv: '["backup","run","--spec","/plan/backup.yaml","--allowed-clusters","/plan/allowed-clusters.json","--signing-key","/signing/key.pem","--receipt-out","/work/receipt.json","--triggered-by","manual"]'
 spec:
   sourceRef:
     name: demo
