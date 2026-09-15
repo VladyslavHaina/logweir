@@ -16,6 +16,9 @@ if [[ "${CARGO_TARGET_DIR:-target}" = /* ]]; then
   export LOGWEIR_BIN="$CARGO_TARGET_DIR/debug/logweir"
 fi
 just lint
+# The release gate's engine check, on every run, so a new uncited engine string
+# fails here rather than first at a tag.
+bash scripts/check-no-engine-in-binary.sh "$LOGWEIR_BIN"
 
 # Pure libraries must remain usable without cloud, Kubernetes or engine clients.
 cargo check --locked -p logweir-core -p logweir-evidence -p logweir-kafka -p logweir-verify --no-default-features

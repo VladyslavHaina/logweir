@@ -76,6 +76,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-dist@0.28.0 }
       - run: dist build --tag "$RELEASE_TAG" --force-tag --target=${{ matrix.target }} --output-format=json > dist.json
+      - name: The shipped binary carries no engine
+        run: bash scripts/check-no-engine-in-binary.sh "target/distrib/logweir-${{ matrix.target }}.tar.xz"
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}

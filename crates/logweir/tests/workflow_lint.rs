@@ -128,6 +128,38 @@ fn releases_reuse_checks_and_test_packaged_binary_before_images() {
 }
 
 #[test]
+fn release_archives_are_checked_for_an_engine_before_upload() {
+    let release = workflow("release.yml");
+    let steps = release["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("dist build "))
+        })
+        .unwrap();
+    let check = steps
+        .iter()
+        .position(|s| {
+            s["run"]
+                == "bash scripts/check-no-engine-in-binary.sh \
+                    \"target/distrib/logweir-${{ matrix.target }}.tar.xz\""
+        })
+        .expect("the build job must check the archive it ships for an engine");
+    let upload = steps
+        .iter()
+        .position(|s| s["uses"] == "actions/upload-artifact@v4")
+        .unwrap();
+    assert!(build < check && check < upload);
+    let ci_check = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
+    assert!(
+        ci_check.contains("bash scripts/check-no-engine-in-binary.sh \"$LOGWEIR_BIN\""),
+        "CI must run the release engine check too, so it cannot first fail at a tag"
+    );
+}
+
+#[test]
 fn extended_kubernetes_checks_are_explicit() {
     let helm = workflow("helm-demo.yml");
     assert!(helm["on"]["push"].is_null());
