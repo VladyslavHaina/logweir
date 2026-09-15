@@ -1524,7 +1524,7 @@ spec:
 
 ---
 # Source: logweir/templates/networkpolicy.yaml
-# [UNVERIFIED ENFORCEMENT — Docker Desktop may accept this object without a
+# [UNVERIFIED — enforcement: Docker Desktop may accept this object without a
 # NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
 # CNI; Service ClusterIP versus post-DNAT endpoint matching is provider-specific.]
 apiVersion: networking.k8s.io/v1
