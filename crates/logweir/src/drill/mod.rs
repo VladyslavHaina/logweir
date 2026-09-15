@@ -72,10 +72,13 @@ pub enum DrillError {
     /// The drill RAN, and its result could not be signed or its lock proof
     /// could not be obtained. That is neither a pass nor an operational
     /// failure: "the result exists but is unattested" is its own outcome, and
-    /// the exit contract reserves 4 for it. Constructed in exactly two places
-    /// Signing readiness also reaches this variant before any data work. The
-    /// phase-8 and phase-9 persistence paths sign before they put, so a
-    /// document whose signing fails still leaves the bucket untouched.
+    /// the exit contract reserves 4 for it. Constructed only by the `sig`
+    /// helpers in `phase8_score` (the scorecard and its put receipt) and
+    /// `phase9_teardown` (the teardown attestation). Each of those paths signs
+    /// before it puts, so a document whose signing fails leaves the bucket
+    /// untouched. A signing key that fails the startup readiness check never
+    /// reaches this variant: that is [`Self::SigningPrerequisite`], which
+    /// shares exit 4.
     #[error("signing or lock proof failed: {0}")]
     SigningOrLock(String),
     /// Startup signing readiness failed before a client, work directory, or
@@ -103,7 +106,8 @@ impl DrillError {
             // signed — `execute_with` does that before ever constructing this
             // variant, which is what makes exit 2's promise true.
             DrillError::NotPass(_) => ExitCode::DrillNotPass, // 2
-            // The drill ran; its result is unattested.
+            // The drill ran and its result is unattested, or the signing key
+            // failed its startup readiness check before anything ran.
             DrillError::SigningOrLock(_) | DrillError::SigningPrerequisite(_) => {
                 ExitCode::SigningOrLock // 4
             }
