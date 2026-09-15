@@ -85,21 +85,22 @@ including a local `registry:2` fallback: it does not prove public pullability.
 
 ### (c) The Helm chart
 
-For a supported release, `identity.bootstrapImage` is already a reviewed,
-digest-pinned runner containing the identity CLI. The source checkout is
-currently between implementation and publication: its empty value deliberately
-stops rendering instead of granting signing-key authority to the incompatible
-published `latest` image. The release coordinator must complete the exact
-publish/smoke/pin step documented below before calling this default command
-supported:
+`identity.bootstrapImage` is pinned in `charts/logweir/values.yaml` to a
+reviewed runner digest that contains the identity CLI, so the clean default
+command needs neither a local key nor an image hash:
 
 ```bash
 helm upgrade --install logweir charts/logweir -n logweir-system \
   --create-namespace --wait --timeout 10m
 ```
 
-Development on Docker Desktop uses the explicit local-image exception; it is
-not a user installation or publication claim:
+That pinned runner, like every runner image, is amd64-only. On an arm64 node
+without amd64 emulation the bootstrap hook fails with `exec format error` and
+writes no identity; schedule the hooks on amd64-capable nodes with
+`kubernetes.nodeSelector` (runner Jobs need such nodes anyway).
+
+Development on Docker Desktop with locally built images uses the explicit
+local-image exception; it is not a user installation or publication claim:
 
 ```bash
 just image
@@ -146,8 +147,8 @@ bytes. The chart does not create an approver key. Optional MinIO creates only
 demo archive credentials. Helm installs CRDs once and does not upgrade them
 automatically.
 
-Once the release digest is pinned, this Helm command is the supported
-clean-install path for PLAT-02.1. The
+With that digest pinned, this Helm command is the supported clean-install
+path for PLAT-02.1. The
 digest-pinned `logweir.yaml` path remains a low-level/base-manifest path and
 does not run Helm hooks; when using it, provision an existing
 `logweir-signing-key` explicitly before creating workloads.
@@ -206,27 +207,26 @@ The release workflow targets Docker Hub. Ensure repositories are accessible
 to the cluster, and supply a registry Secret through `imagePullSecrets` when
 required. Repository visibility and pull quotas depend on the registry account.
 
-### Release coordinator: publish and pin bootstrap bytes
+### Release coordinator: re-pin bootstrap bytes
 
-This is a release integration step, not end-user ceremony. The existing image
+This is a release integration step, not end-user ceremony. The image
 publication path runs `scripts/check-image.sh` against the pulled candidate
-digest; that check now executes `identity bootstrap --help` before promotion.
-After a compatible candidate is public, copy the exact `runner_digest` emitted
-by the images job into `identity.bootstrapImage` in `charts/logweir/values.yaml`
-as `docker.io/<namespace>/logweir@sha256:<digest>`, leave
-`allowMutableBootstrapImageForDevelopment: false`, and rerun `just chart-check`.
-Do not pin the observed older published `latest` image: it has no `identity`
-subcommand. A final supported-release check must pull the newly pinned exact
-reference and run:
+digest, including `identity bootstrap --help`, before promotion. Whenever the
+identity CLI or the chart's hook arguments change, copy the exact
+`runner_digest` emitted by the images job into `identity.bootstrapImage` in
+`charts/logweir/values.yaml` as `docker.io/<namespace>/logweir@sha256:<digest>`,
+leave `allowMutableBootstrapImageForDevelopment: false`, and rerun
+`just chart-check`, which requires the tree's runner repository by digest and
+refuses an emptied value. Never pin a runner older than the identity CLI: it
+has no `identity` subcommand. Then pull the newly pinned exact reference and
+run:
 
 ```bash
-docker run --rm docker.io/<namespace>/logweir@sha256:<reviewed-digest> \
+docker run --rm --platform linux/amd64 docker.io/<namespace>/logweir@sha256:<reviewed-digest> \
   identity bootstrap --help
 ```
 
-Until that value is populated with reviewed published bytes, the clean default
-Helm render is intentionally release-blocked. End users of the completed
-release supply neither a key nor an image hash.
+End users supply neither a key nor an image hash.
 
 ---
 

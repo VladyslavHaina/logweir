@@ -9,10 +9,10 @@
 #     bash scripts/helm-demo.sh
 #
 # (`--wait` returns only when both brokers and MinIO are Ready and the two
-# seed Jobs have succeeded — they are Helm hooks.) Combine with
-# The current checkout is pre-publication, so its five-minute path uses
-# author-only.values.yaml. A supported release has a compatible bootstrap
-# digest pinned and does not need that extra file:
+# seed Jobs have succeeded — they are Helm hooks.) The path above uses locally
+# built images, hence author-only.values.yaml. With the published images the
+# chart's pinned bootstrap digest needs no extra file; to use local images
+# without this example file, combine them directly:
 #
 #     helm install … -f charts/logweir/examples/author-only.values.yaml \
 #       --set demoKafka.enabled=true --set minio.enabled=true --set ui.enabled=true

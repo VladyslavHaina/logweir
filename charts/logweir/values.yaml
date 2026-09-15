@@ -25,7 +25,7 @@ imagePullSecrets: []            # [{name: regcred}] — on both ServiceAccounts 
 # retained objects once. It never renders private material into a Helm manifest.
 identity:
   enabled: true
-  bootstrapImage: ""            # release must pin compatible docker.io/...@sha256:<64 hex>
+  bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:2d20f4bdb2bd8b9f2fb9fa298371740eb9a368d42cf031a7ebe1272542477e19 # rev 4956785, amd64
   bootstrapImagePullPolicy: IfNotPresent
   allowMutableBootstrapImageForDevelopment: false
   publicConfigMapName: logweir-signing-trust

@@ -1,6 +1,6 @@
 {{- if .Values.identity.enabled }}
 {{- $publicName := required "identity.publicConfigMapName must be set when identity.enabled=true" .Values.identity.publicConfigMapName }}
-{{- $bootstrapImage := required "identity.bootstrapImage is release-blocked until a reviewed runner digest containing `identity bootstrap` is published; use a digest, or the explicit local-development override" .Values.identity.bootstrapImage }}
+{{- $bootstrapImage := required "identity.bootstrapImage must name a reviewed runner digest containing `identity bootstrap` (the chart default pins one); use a digest, or the explicit local-development override" .Values.identity.bootstrapImage }}
 {{- if not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $bootstrapImage) }}
 {{- if not .Values.identity.allowMutableBootstrapImageForDevelopment }}
 {{- fail "identity.bootstrapImage must be an immutable @sha256 digest; mutable/local references require identity.allowMutableBootstrapImageForDevelopment=true and identity.bootstrapImagePullPolicy=Never" }}

@@ -1999,6 +1999,40 @@ fn chart_lint_every_example_has_a_rendered_file() {
     );
 }
 
+/// **The identity bootstrap default is a runner digest** — PLAT-02.1's clean
+/// install needs no key and no image hash, and never a mutable image.
+#[test]
+fn chart_lint_values_pin_the_identity_bootstrap_to_a_runner_digest() {
+    // The bootstrap hook can read and patch the retained signer, so the default
+    // a stranger installs must name the tree's runner repository by digest with
+    // the development override off. An empty value is a render refusal and a
+    // tag is a mutable grant of signing-key authority; both are regressions.
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    let bootstrap = values["identity"]["bootstrapImage"]
+        .as_str()
+        .expect("identity.bootstrapImage is a string");
+    assert!(
+        is_digest_reference(bootstrap),
+        "identity.bootstrapImage must ship as `<repository>@sha256:<64 hex>`, found `{bootstrap}`"
+    );
+    assert_eq!(
+        repository_of(&runner_image_constant()),
+        repository_of(bootstrap),
+        "identity.bootstrapImage must pin the tree's own runner repository"
+    );
+    assert_eq!(
+        Some(false),
+        values["identity"]["allowMutableBootstrapImageForDevelopment"].as_bool(),
+        "the shipped values must keep the mutable development override off"
+    );
+    let rendered = read("charts/logweir/rendered/default.yaml");
+    assert!(
+        rendered.contains(&format!("image: {bootstrap}")),
+        "rendered/default.yaml must carry the shipped bootstrap digest, not a test substitute"
+    );
+}
+
 /// **`values.yaml` is SHORT and shows every knob** — the owner's ruling of
 /// 2026-09-12: a reader opens it, sees every option with its default, and knows
 /// what to set in under a minute. A knob a reader cannot see does not exist, so

@@ -1361,8 +1361,9 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     assert!(
         install.contains("identity.bootstrapImage")
             && install.contains("identity bootstrap --help")
-            && install.contains("intentionally release-blocked"),
-        "install docs must state the exact compatible-image publish/pin prerequisite"
+            && install.contains("refuses an emptied value")
+            && install.contains("amd64-only"),
+        "install docs must state the pinned compatible bootstrap image, its re-pin check and its architecture limit"
     );
     assert!(
         install.contains("post-rollback")

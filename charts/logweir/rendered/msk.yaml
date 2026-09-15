@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 # Rendered by scripts/check-chart.sh (just chart-check):
-#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/msk.values.yaml --set-string identity.bootstrapImage=<unpublished-test-digest>
+#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/msk.values.yaml
 # It is checked in so a template change lands as a diff a reviewer reads; the
 # gate compares a temporary render and fails on drift.
 ---
@@ -2541,7 +2541,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: bootstrap
-          image: docker.io/vladyslavhaina/logweir@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          image: docker.io/vladyslavhaina/logweir@sha256:2d20f4bdb2bd8b9f2fb9fa298371740eb9a368d42cf031a7ebe1272542477e19
           imagePullPolicy: IfNotPresent
           args:
             - identity

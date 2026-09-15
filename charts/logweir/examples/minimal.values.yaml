@@ -13,11 +13,9 @@
 # the release namespace beside the controller.
 #
 # Controller/ordinary runner defaults use `latest`, but the privileged
-# `identity.bootstrapImage` requires a reviewed digest. This source checkout is
-# release-blocked with that value empty because the currently published latest
-# predates the identity CLI. A completed release pins compatible bytes and a
-# stranger supplies no image hash. For current local development, combine this
-# file with `author-only.values.yaml`.
+# `identity.bootstrapImage` is a reviewed digest the chart already pins, so a
+# stranger supplies no image hash. For locally built images, combine this file
+# with `author-only.values.yaml`.
 #
 # To pin all Logweir execution paths, resolve each compatible tag with
 # `docker buildx imagetools inspect <repository>:latest` (a manifest read, not

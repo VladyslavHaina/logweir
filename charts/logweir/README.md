@@ -14,9 +14,10 @@ CRDs are carried under `crds/`, while Kubernetes pulls the configured runtime
 images (including the UI image when enabled). The only things you must supply are
 
 1. **compatible published images** — `controllerImage`, `runnerImage`, and the
-   separately digest-pinned `identity.bootstrapImage`. The current source
-   checkout intentionally leaves the last one empty until reviewed bootstrap
-   bytes are published (see *Bring your own registry* in
+   separately digest-pinned `identity.bootstrapImage`. The chart already pins
+   the last one to a reviewed runner digest (see *Runtime tags and the
+   privileged bootstrap digest*); override all three together only for your own
+   registry (*Bring your own registry* in
    [`docs/install.md`](../../docs/install.md));
 2. **an archive** — `archive.url` and, for anything S3-compatible,
    `archive.s3.endpoint` and `archive.s3.region`; or `minio.enabled: true` to
@@ -24,9 +25,9 @@ images (including the UI image when enabled). The only things you must supply ar
 3. **the `kafka:` block** — the cluster Logweir backs up, and optionally the
    scratch cluster it restores into.
 
-After release publication/pinning, everything else has a default. Before that
-integration step, use the explicit `author-only.values.yaml` local override;
-the chart refuses to give a mutable or incompatible image signing-key access.
+Everything else has a default. For images you built and loaded yourself, use
+the explicit `author-only.values.yaml` local override; the chart refuses to give
+a mutable image signing-key access.
 [`examples/msk.values.yaml`](examples/msk.values.yaml) is a complete one for a
 real cluster: Amazon MSK over SASL/SCRAM, a tainted nodepool, a private
 registry. [`values.yaml`](values.yaml) lists **every** option with its default,
@@ -59,9 +60,9 @@ install document; this README is the chart's own.
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
 | `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the sixteen UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 
-Nothing optional is on by default. The release gate supplies an unpublished
-test-only digest while rendering snapshots until the compatible public digest
-is pinned; the rest of the default render matches the same
+Nothing optional is on by default. The release gate renders the snapshots with
+the pinned bootstrap digest exactly as shipped; the rest of the default render
+matches the same
 controller, env, security context and RBAC rules as `logweir.yaml`
 (`chart_lint_default_render_agrees_with_the_install_file`).
 
@@ -81,9 +82,10 @@ controller, env, security context and RBAC rules as `logweir.yaml`
 
 ## The five-minute path
 
-For this unpublished checkout, build/load all three local images and use the
-explicit development override. A completed release needs only
-`demo.values.yaml` because its reviewed bootstrap digest is already pinned.
+With published images, `demo.values.yaml` needs no image override because the
+reviewed bootstrap digest is pinned. To run images built from this checkout
+instead, build/load all three local images and add the explicit development
+override:
 
 ```bash
 just image && just image-weirkeeper && just image-ui
@@ -146,9 +148,33 @@ an immutable `@sha256` reference even while ordinary controller/runner jobs use
 tags. The only exception is
 `identity.allowMutableBootstrapImageForDevelopment: true`, paired with a local
 image and `bootstrapImagePullPolicy: Never` in `author-only.values.yaml`.
-The current checkout leaves the default empty until release publishes a runner
-whose exact digest passes `identity bootstrap --help`; rendering fails rather
-than silently borrowing the older incompatible `latest` image.
+The shipped default is the runner image main CI published for revision
+`4956785` (Actions run 35019727967): the images job pulled that exact digest
+back on its native amd64 host and ran `scripts/check-image.sh`, including
+`identity bootstrap --help`, before any public tag moved, and the image config
+carries `org.opencontainers.image.revision` for that commit. Check it yourself
+with a manifest read and one run of the pinned reference from `values.yaml`:
+
+```bash
+docker buildx imagetools inspect <identity.bootstrapImage from values.yaml>
+docker run --rm --platform linux/amd64 <identity.bootstrapImage from values.yaml> \
+  identity bootstrap --help
+```
+
+An emptied value still refuses to render rather than borrowing a tag. Re-pin
+only to a newer reviewed runner digest whose `identity bootstrap` and
+`identity distribute` arguments match these templates, then rerun
+`just chart-check`.
+
+**The bootstrap image is amd64-only, like every runner image.** The hook Jobs
+execute the runner binary, so on an arm64 node without amd64 emulation their
+container fails with `exec format error`, `helm install --wait` reports the
+failed post-install hook, and no identity is written. Docker Desktop on Apple
+silicon emulates amd64 and runs it. On a mixed-architecture cluster schedule the
+hooks with `kubernetes.nodeSelector: {kubernetes.io/arch: amd64}` (set
+`controller.nodeSelector` explicitly if the controller should run elsewhere).
+Runner Jobs have no placement path yet (*Node placement* below), so Logweir's
+data plane needs amd64-capable nodes either way.
 
 **What a mutable tag does not promise.** The bytes behind `:latest` can change
 under you: the same reference can resolve to different content tomorrow, on a
@@ -203,7 +229,7 @@ helm install logweir charts/logweir -n logweir-system --create-namespace \
 | value | default / contract |
 |---|---|
 | `identity.enabled` | `true`; set `false` only for an explicitly external/low-level identity lifecycle |
-| `identity.bootstrapImage` | release-pinned compatible runner digest; empty in this pre-publication checkout, which intentionally blocks the default render |
+| `identity.bootstrapImage` | the reviewed runner digest main CI published for `4956785` (amd64); an emptied or mutable value refuses to render unless the development override below is set |
 | `identity.bootstrapImagePullPolicy` | `IfNotPresent`; immutable bytes do not need an `Always` pull |
 | `identity.allowMutableBootstrapImageForDevelopment` | `false`; only the local Docker Desktop/kind override sets it true with pull policy `Never` |
 | `identity.publicConfigMapName` | `logweir-signing-trust`; public SPKI, key id, algorithm and trust reference only |
@@ -735,8 +761,9 @@ Logweir — Global Constraint 6.
 
 * `scripts/check-chart.sh` (`just chart-check`, in `just gate`): CRDs
   byte-identical to the tree and no copy of `ui/` under the chart at all;
-  the intentionally blocked empty bootstrap default plus `helm lint` for the
-  defaults/every example with an unpublished test-only digest;
+  `identity.bootstrapImage` pinned as `<runner repository>@sha256:<64 hex>`
+  with the development override off, an emptied value still refused, plus
+  `helm lint` for the defaults and every example as shipped;
   `helm template` regenerated into `rendered/` with no drift; every rendered
   image a digest EXCEPT the three Logweir images, which must be exactly
   `<repository>:latest` (and `:latest` on any other image is still refused),
@@ -751,8 +778,9 @@ Logweir — Global Constraint 6.
   byte-copy arm.
 * The existing image publication path runs `scripts/check-image.sh` against the
   exact pulled candidate digest and requires `identity bootstrap --help` before
-  any public tag moves. The emitted compatible runner digest is then pinned as
-  `identity.bootstrapImage`; no separate workflow or end-user hash step exists.
+  any public tag moves. The emitted compatible runner digest is what
+  `identity.bootstrapImage` pins; no separate workflow or end-user hash step
+  exists.
 * `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
   `logweir.yaml`; nothing optional renders under defaults; each flag renders
   its named objects; the chart carries no copy of `ui/` and mounts no ConfigMap
