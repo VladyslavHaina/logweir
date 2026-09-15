@@ -19,9 +19,29 @@
 // removal command for each set, in the CLI of that archive's own scheme, as a
 // string. The panel prints those strings verbatim. It runs none of them, and
 // nothing in this product runs any of them.
+//
+// BOTH WRITES SHARE ONE MUTATION STATE (PLAT-13.2). The create keeps its draft
+// through every recoverable failure and is idempotent by name; the toggle
+// refuses a second click while its patch is pending and reports a refusal in
+// the schedule's own card, leaving the rest of the page -- the create form's
+// draft included -- where it was.
 
-import { list, create, patchSuspend } from "../api.js";
-import { active, cancelled, listen, readOptions } from "../lifecycle.js";
+import { list, create, get, patchSuspend } from "../api.js";
+import {
+  active,
+  cancelled,
+  createOnce,
+  dropDraft,
+  fieldErrors,
+  formKey,
+  invalidInput,
+  keepDraft,
+  listen,
+  mutationFor,
+  readDraft,
+  readOptions,
+  watchMutation,
+} from "../lifecycle.js";
 import {
   RETENTION_SENTENCE,
   badge,
@@ -30,13 +50,51 @@ import {
   errorBox,
   esc,
   facts,
+  fieldErrorLine,
+  invalidAttributes,
   listFooter,
+  mutationStatus,
   replace,
   table,
 } from "../render.js";
-import { itemsOf } from "./clusters.js";
+import { focusFirstProblem, isObjectName, itemsOf } from "./clusters.js";
 
 const PLURAL = "backupschedules";
+
+const API = { list: list, get: get, create: create, patchSuspend: patchSuspend };
+
+/** The create form's identity in the draft and mutation registries. */
+export const SCHEDULE_FORM = "schedule-form";
+
+/** The suspend toggle's identity; each schedule has its own record. */
+export const SUSPEND_FORM = "schedule-suspend";
+
+/** The fields a draft of the create form keeps: names, a cron line, a topic
+ *  list, an archive URL, a Secret NAME and two numbers. No credential. */
+export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
+  "name", "cron", "source", "topics", "archive", "archiveSecret", "keepLast", "keepDays",
+]);
+
+/** The API server's field paths, mapped to the create form's inputs. */
+export const SCHEDULE_FIELD_PATHS = Object.freeze([
+  ["metadata.name", "name"],
+  ["spec.schedule", "cron"],
+  ["spec.sourceRef", "source"],
+  ["spec.topics", "topics"],
+  ["spec.archive.url", "archive"],
+  ["spec.archive.secretRef", "archiveSecret"],
+  ["spec.archive", "archive"],
+  ["spec.retention.keepLast", "keepLast"],
+  ["spec.retention.keepDays", "keepDays"],
+]);
+
+/** The defaults the CRD applies to an omitted field, and the ONE field that
+ *  may change after creation -- so a schedule someone suspended since is still
+ *  the schedule this draft describes. */
+const SCHEDULE_SPEC_RULES = Object.freeze({
+  defaults: { concurrencyPolicy: "Forbid", suspend: false },
+  ignore: ["suspend"],
+});
 
 function nameOf(object) {
   const meta = (object && object.metadata) || {};
@@ -93,18 +151,31 @@ export function renderScheduleList(input) {
   );
 }
 
-/** The suspend toggle's control for one schedule. */
-export function renderSuspendToggle(object) {
+/** The suspend toggle's control for one schedule, disabled while its patch is
+ *  pending. `state` is that schedule's own mutation record. */
+export function renderSuspendToggle(object, state) {
   const spec = (object && object.spec) || {};
   const name = ((object && object.metadata) || {}).name || "";
   const suspended = spec.suspend === true;
+  const pending = (state || {}).phase === "pending";
   return (
     "<form class=\"suspend\" data-name=\"" + esc(name) + "\" data-next=\"" +
-    (suspended ? "false" : "true") + "\">" +
-    "<button type=\"submit\">" +
+    (suspended ? "false" : "true") + "\"" + (pending ? " aria-busy=\"true\"" : "") + ">" +
+    "<button type=\"submit\"" + (pending ? " disabled" : "") + ">" +
     (suspended ? "Resume" : "Suspend") +
     "</button></form>"
   );
+}
+
+/** The words under a toggle: pending, or what the API server said. Success
+ *  needs no words -- the badge above changes. */
+export function renderSuspendStatus(object, state) {
+  const s = state || {};
+  const name = ((object && object.metadata) || {}).name || "";
+  if (s.phase !== "pending" && s.phase !== "failed") {
+    return "";
+  }
+  return mutationStatus(s, { kind: "BackupSchedule", name: name });
 }
 
 /** One removable set as a line an operator can read. */
@@ -185,42 +256,129 @@ export function renderRetentionPanel(object) {
   );
 }
 
-/** The create form for a BackupSchedule. */
-export function renderScheduleForm() {
+const SCHEDULE_DEFAULTS = Object.freeze({
+  name: "", cron: "0 * * * *", source: "", topics: "", archive: "", archiveSecret: "logweir-s3",
+  keepLast: "", keepDays: "",
+});
+
+/** The five glob metacharacters `logweir_core::guard::GLOB_METACHARACTERS`
+ *  refuses, plus the sixth, in one string. */
+const GLOB = "*?[]{}";
+
+const CRON_FIELD = /^[0-9*,/-]+$/;
+
+/** The scheme separator, built rather than spelled, as in `../api.js`. */
+const SCHEME_SEPARATOR = ":" + "//";
+
+/** The page's own checks for the create form, by field. A CONVENIENCE: the
+ *  controller's `Ready` condition and the runner's G-GLOB guard are the gate. */
+export function validateSchedule(values) {
+  const v = values || {};
+  const problems = {};
+  if (!isObjectName(v.name)) {
+    problems.name = "a BackupSchedule name is lowercase letters, digits, '-' and '.', starting " +
+      "and ending with a letter or digit";
+  }
+  const cron = String(v.cron || "").trim();
+  const fields = cron.split(/\s+/).filter((f) => f.length > 0);
+  const macro = cron === "@hourly" || cron === "@daily" || cron === "@weekly";
+  if (!macro && (fields.length !== 5 || fields.some((f) => !CRON_FIELD.test(f)))) {
+    problems.cron = "five cron fields (minute hour day-of-month month day-of-week), or @hourly, " +
+      "@daily or @weekly";
+  }
+  if (!isObjectName(v.source)) {
+    problems.source = "the name of a KafkaCluster in this namespace";
+  }
+  const topics = String(v.topics || "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+  if (topics.length === 0) {
+    problems.topics = "name at least one topic; an empty list is not an allowlist";
+  } else {
+    const globbed = topics.filter((t) => t.split("").some((c) => GLOB.indexOf(c) !== -1));
+    if (globbed.length > 0) {
+      problems.topics = "names, never patterns: " + globbed.join(", ") + " carries a glob metacharacter";
+    }
+  }
+  const archive = String(v.archive || "").trim();
+  if (archive.length === 0 || archive.indexOf(SCHEME_SEPARATOR) <= 0) {
+    problems.archive = "an object-store URL with its scheme, such as s3" + SCHEME_SEPARATOR + "bucket/prefix";
+  }
+  const secret = String(v.archiveSecret || "").trim();
+  if (secret.length > 0 && !isObjectName(secret)) {
+    problems.archiveSecret = "a Secret name is lowercase letters, digits, '-' and '.'";
+  }
+  for (const key of ["keepLast", "keepDays"]) {
+    const raw = v[key];
+    if (raw !== "" && raw !== undefined && raw !== null && !/^[0-9]+$/.test(String(raw).trim())) {
+      problems[key] = "a whole number of 0 or more, or blank";
+    }
+  }
+  return problems;
+}
+
+/** The create form for a BackupSchedule, rendered from its draft, its field
+ *  messages and its mutation record. Called with nothing it is the empty form. */
+export function renderScheduleForm(view) {
+  const v = view || {};
+  const d = Object.assign({}, SCHEDULE_DEFAULTS, v.draft || {});
+  const errors = ((v.errors || {}).fields) || {};
+  const state = v.state || {};
+  const pending = state.phase === "pending";
+  const field = (id, name) => invalidAttributes(id, errors[name]);
+  const line = (id, name) => fieldErrorLine(id, errors[name]);
   return (
-    "<section class=\"create\"><h3>Create a BackupSchedule</h3>" +
+    "<section class=\"create\" id=\"schedule-create\"><h3>Create a BackupSchedule</h3>" +
     "<p class=\"note\">A schedule fires a Backup of the named topics at each slot and writes " +
     "it to the archive. Every field but suspend is sealed once the object exists.</p>" +
-    "<form id=\"schedule-form\">" +
+    "<form id=\"schedule-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
+    "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
-    "<input id=\"schedule-name\" name=\"name\" required></div>" +
+    "<input id=\"schedule-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
+    field("schedule-name", "name") + ">" + line("schedule-name", "name") + "</div>" +
     "<div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"schedule-cron\">schedule, five cron fields</label>" +
-    "<input id=\"schedule-cron\" name=\"cron\" value=\"0 * * * *\" required>" +
-    "<p class=\"help\">minute hour day-of-month month day-of-week, in UTC.</p></div>" +
+    "<input id=\"schedule-cron\" name=\"cron\" value=\"" + esc(d.cron) + "\" required" +
+    field("schedule-cron", "cron") + ">" +
+    "<p class=\"help\">minute hour day-of-month month day-of-week, in UTC.</p>" +
+    line("schedule-cron", "cron") + "</div>" +
     "<div class=\"field\"><label for=\"schedule-source\">source KafkaCluster</label>" +
-    "<input id=\"schedule-source\" name=\"source\" required>" +
-    "<p class=\"help\">The name of a KafkaCluster in this namespace.</p></div>" +
+    "<input id=\"schedule-source\" name=\"source\" required value=\"" + esc(d.source) + "\"" +
+    field("schedule-source", "source") + ">" +
+    "<p class=\"help\">The name of a KafkaCluster in this namespace.</p>" +
+    line("schedule-source", "source") + "</div>" +
     "</div>" +
     "<div class=\"field\"><label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
-    "<input id=\"schedule-topics\" name=\"topics\" required>" +
-    "<p class=\"help\">An explicit allowlist. A wildcard is refused before anything runs.</p></div>" +
+    "<input id=\"schedule-topics\" name=\"topics\" required value=\"" + esc(d.topics) + "\"" +
+    field("schedule-topics", "topics") + ">" +
+    "<p class=\"help\">An explicit allowlist. A wildcard is refused before anything runs.</p>" +
+    line("schedule-topics", "topics") + "</div>" +
     "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
-    "<input id=\"schedule-archive\" name=\"archive\" required>" +
-    "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p></div>" +
+    "<input id=\"schedule-archive\" name=\"archive\" required value=\"" + esc(d.archive) + "\"" +
+    field("schedule-archive", "archive") + ">" +
+    "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p>" +
+    line("schedule-archive", "archive") + "</div>" +
     "<div class=\"field\"><label for=\"schedule-archive-secret\">archive credential (Secret name)</label>" +
-    "<input id=\"schedule-archive-secret\" name=\"archiveSecret\" value=\"logweir-s3\">" +
+    "<input id=\"schedule-archive-secret\" name=\"archiveSecret\" value=\"" + esc(d.archiveSecret) + "\"" +
+    field("schedule-archive-secret", "archiveSecret") + ">" +
     "<p class=\"help\">An existing Secret in this namespace, with access-key-id and secret-access-key. " +
-    "Only its name is sent. Leave blank only for anonymous or instance-role access.</p></div>" +
+    "Only its name is sent. Leave blank only for anonymous or instance-role access.</p>" +
+    line("schedule-archive-secret", "archiveSecret") + "</div>" +
     "<div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
-    "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\">" +
-    "<p class=\"help\">How many sets a retention evaluation keeps. It reports; it never deletes.</p></div>" +
+    "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\" value=\"" +
+    esc(d.keepLast) + "\"" + field("schedule-keeplast", "keepLast") + ">" +
+    "<p class=\"help\">How many sets a retention evaluation keeps. It reports; it never deletes.</p>" +
+    line("schedule-keeplast", "keepLast") + "</div>" +
     "<div class=\"field\"><label for=\"schedule-keepdays\">retention keepDays</label>" +
-    "<input id=\"schedule-keepdays\" name=\"keepDays\" type=\"number\" min=\"0\">" +
-    "<p class=\"help\">How many days of sets it keeps. Leave both blank for no evaluation.</p></div>" +
+    "<input id=\"schedule-keepdays\" name=\"keepDays\" type=\"number\" min=\"0\" value=\"" +
+    esc(d.keepDays) + "\"" + field("schedule-keepdays", "keepDays") + ">" +
+    "<p class=\"help\">How many days of sets it keeps. Leave both blank for no evaluation.</p>" +
+    line("schedule-keepdays", "keepDays") + "</div>" +
     "</div>" +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
+    "</fieldset>" +
+    "<div class=\"form-status\" id=\"schedule-form-status\" tabindex=\"-1\">" +
+    mutationStatus(state, { kind: "BackupSchedule", name: d.name }, ((v.errors || {}).unmatched)) +
+    "</div>" +
     "</form></section>"
   );
 }
@@ -259,30 +417,66 @@ export function scheduleBody(values) {
   };
 }
 
+/** Checks the values, then creates the schedule idempotently by name. */
+export async function submitSchedule(ns, values, deps) {
+  const problems = validateSchedule(values);
+  if (Object.keys(problems).length > 0) {
+    throw invalidInput(problems);
+  }
+  return createOnce(deps || API, ns, PLURAL, scheduleBody(values), SCHEDULE_SPEC_RULES);
+}
+
+/** What the create form renders from in namespace `ns`. */
+export function scheduleFormView(ns) {
+  const key = formKey(ns, SCHEDULE_FORM);
+  const state = mutationFor(key).state;
+  if (state.phase === "succeeded") {
+    dropDraft(key);
+  }
+  return {
+    draft: readDraft(key),
+    state: state,
+    errors: state.phase === "failed" ? fieldErrors(state.error, SCHEDULE_FIELD_PATHS) : null,
+  };
+}
+
+/** One schedule's card: its name, its toggle, the toggle's status and the
+ *  retention panel. */
+export function renderScheduleCard(ns, object) {
+  const name = ((object && object.metadata) || {}).name || "";
+  const state = mutationFor(formKey(ns, SUSPEND_FORM, name)).state;
+  return (
+    "<section class=\"schedule\" data-schedule=\"" + esc(name) + "\"><div class=\"card-head\"><h3>" +
+    nameOf(object) + "</h3>" +
+    renderSuspendToggle(object, state) +
+    "</div>" +
+    "<div class=\"form-status\" data-suspend-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
+    renderSuspendStatus(object, state) + "</div>" +
+    renderRetentionPanel(object) +
+    "</section>"
+  );
+}
+
 // --------------------------------------------------------------- mount half
 
-export async function mountSchedules(node, ns, parse, lifecycle) {
+export async function mountSchedules(node, ns, parse, lifecycle, deps) {
+  const api = deps || API;
   try {
-    const collection = await list(ns, PLURAL, readOptions(lifecycle));
+    const collection = await api.list(ns, PLURAL, readOptions(lifecycle));
     if (!active(lifecycle)) {
       return;
     }
     const objects = itemsOf(collection);
-    const panels = objects
-      .map(
-        (object) =>
-          "<section class=\"schedule\"><div class=\"card-head\"><h3>" + nameOf(object) + "</h3>" +
-          renderSuspendToggle(object) +
-          "</div>" +
-          renderRetentionPanel(object) +
-          "</section>",
-      )
-      .join("");
+    const panels = objects.map((object) => renderScheduleCard(ns, object)).join("");
     replace(
       node,
-      parse(renderScheduleList(collection) + panels + renderScheduleForm()),
+      parse(
+        renderScheduleList(collection) + panels +
+          "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
+          renderScheduleForm(scheduleFormView(ns)) + "</div>",
+      ),
     );
-    wire(node, ns, parse, lifecycle);
+    wire(node, ns, parse, lifecycle, api, objects);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -290,57 +484,107 @@ export async function mountSchedules(node, ns, parse, lifecycle) {
   }
 }
 
-function wire(node, ns, parse, lifecycle) {
-  for (const form of node.querySelectorAll("form.suspend")) {
-    listen(form, "submit", async (event) => {
-      event.preventDefault();
-      if (!active(lifecycle)) {
-        return;
-      }
-      try {
-        await patchSuspend(
-          ns,
-          form.getAttribute("data-name"),
-          form.getAttribute("data-next") === "true",
-        );
-        if (active(lifecycle)) {
-          await mountSchedules(node, ns, parse, lifecycle);
-        }
-      } catch (error) {
-        if (active(lifecycle)) {
-          replace(node, errorBox(error));
-        }
-      }
-    }, lifecycle);
+/** The create form's values, read from the DOM. */
+export function readScheduleValues(form) {
+  const e = form.elements;
+  return {
+    name: String(e.name.value).trim(),
+    cron: String(e.cron.value).trim(),
+    source: String(e.source.value).trim(),
+    topics: String(e.topics.value),
+    archive: String(e.archive.value).trim(),
+    archiveSecret: String(e.archiveSecret.value).trim(),
+    keepLast: String(e.keepLast.value),
+    keepDays: String(e.keepDays.value),
+  };
+}
+
+function wire(node, ns, parse, lifecycle, api, objects) {
+  for (const toggle of node.querySelectorAll("form.suspend")) {
+    wireToggle(node, ns, parse, lifecycle, api, objects, toggle);
   }
+  wireCreate(node, ns, parse, lifecycle, api);
+}
+
+function wireToggle(node, ns, parse, lifecycle, api, objects, toggle) {
+  const name = toggle.getAttribute("data-name");
+  const key = formKey(ns, SUSPEND_FORM, name);
+  const mutation = mutationFor(key);
+  const object = (objects || []).find((o) => ((o || {}).metadata || {}).name === name) || null;
+  watchMutation(node, key, mutation, (state) => {
+    if (state.phase === "succeeded") {
+      mutation.clear();
+      mountSchedules(node, ns, parse, lifecycle, api);
+      return;
+    }
+    const button = toggle.querySelector("button");
+    if (button !== null) {
+      button.disabled = state.phase === "pending";
+    }
+    for (const slot of node.querySelectorAll("[data-suspend-status]")) {
+      if (slot.getAttribute("data-suspend-status") === name) {
+        replace(slot, parse(renderSuspendStatus(object, state)));
+        if (state.phase === "failed" && typeof slot.focus === "function") {
+          slot.focus();
+        }
+      }
+    }
+  }, lifecycle);
+  listen(toggle, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    const next = toggle.getAttribute("data-next") === "true";
+    mutation.run(() => api.patchSuspend(ns, name, next));
+  }, lifecycle);
+}
+
+function wireCreate(node, ns, parse, lifecycle, api) {
   const form = node.querySelector("#schedule-form");
   if (form === null) {
     return;
   }
-  listen(form, "submit", async (event) => {
-    event.preventDefault();
+  const key = formKey(ns, SCHEDULE_FORM);
+  const mutation = mutationFor(key);
+  const remember = () => {
     if (!active(lifecycle)) {
       return;
     }
-    const values = {
-      name: form.elements.name.value.trim(),
-      cron: form.elements.cron.value.trim(),
-      source: form.elements.source.value.trim(),
-      topics: form.elements.topics.value,
-      archive: form.elements.archive.value.trim(),
-      archiveSecret: form.elements.archiveSecret.value.trim(),
-      keepLast: form.elements.keepLast.value,
-      keepDays: form.elements.keepDays.value,
-    };
-    try {
-      await create(ns, PLURAL, scheduleBody(values));
-      if (active(lifecycle)) {
-        await mountSchedules(node, ns, parse, lifecycle);
-      }
-    } catch (error) {
-      if (active(lifecycle)) {
-        replace(node, errorBox(error));
+    keepDraft(key, readScheduleValues(form), SCHEDULE_DRAFT_FIELDS);
+    if (mutation.state.phase === "succeeded") {
+      mutation.clear();
+      const status = node.querySelector("#schedule-form-status");
+      if (status !== null) {
+        replace(status, []);
       }
     }
+  };
+  listen(form, "input", remember, lifecycle);
+  listen(form, "change", remember, lifecycle);
+  watchMutation(node, key, mutation, (state) => {
+    if (state.phase === "succeeded") {
+      dropDraft(key);
+      mountSchedules(node, ns, parse, lifecycle, api);
+      return;
+    }
+    const slot = node.querySelector("#schedule-form-slot");
+    if (slot === null) {
+      return;
+    }
+    replace(slot, parse(renderScheduleForm(scheduleFormView(ns))));
+    wireCreate(node, ns, parse, lifecycle, api);
+    if (state.phase === "failed") {
+      focusFirstProblem(node, "#schedule-form-status");
+    }
+  }, lifecycle);
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    const values = readScheduleValues(form);
+    keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+    mutation.run(() => submitSchedule(ns, values, api));
   }, lifecycle);
 }

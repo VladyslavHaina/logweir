@@ -472,6 +472,139 @@ export function independentCheck(payloadType, bucket, documentKey, sidecarKey, d
   ]);
 }
 
+// ---------------------------------------------------------------------------
+// THE FORM HALF (PLAT-13.2): field-level errors and one mutation status that
+// every form renders the same way. Strings, like everything in this half, so
+// the behaviour suite reads exactly what a browser adopts.
+// ---------------------------------------------------------------------------
+
+/** An error from `api.js` as a string: the twin of [`errorBox`], with the API
+ *  server's own status, reason and message, escaped and nothing added.
+ *  `live` false drops `role="alert"` for an error nested inside a region that
+ *  already announces itself. */
+export function errorBlock(error, live) {
+  const status = error && error.status ? String(error.status) : "error";
+  const reason = error && error.reason ? String(error.reason) : "";
+  const message = error && error.message ? String(error.message) : String(error);
+  return (
+    "<div class=\"error\"" + (live === false ? "" : " role=\"alert\"") + ">" +
+    "<span class=\"error-status\">" + esc(reason.length > 0 ? status + " " + reason : status) +
+    "</span><p class=\"error-message\">" + esc(message) + "</p></div>"
+  );
+}
+
+/** The attributes an input carries when the page has something to say about
+ *  it: `aria-invalid` and a pointer to the message, so a screen reader reads
+ *  the message with the field. The empty string when there is nothing. */
+export function invalidAttributes(id, messages) {
+  return Array.isArray(messages) && messages.length > 0
+    ? " aria-invalid=\"true\" aria-describedby=\"" + esc(id) + "-error\""
+    : "";
+}
+
+/** The message line under a field, or the empty string. */
+export function fieldErrorLine(id, messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return "";
+  }
+  return (
+    "<p class=\"field-error\" id=\"" + esc(id) + "-error\">" +
+    messages.map((m) => esc(m)).join(" ") + "</p>"
+  );
+}
+
+/** THE ONE MUTATION STATUS every form renders: pending, succeeded or failed,
+ *  in words, for the object `subject` names (`{kind, name}`).
+ *
+ *  THE WORDS FOR A FAILURE SAY WHAT IS KNOWN. A refusal says nothing was
+ *  created and the input is kept. An UNKNOWN outcome -- no answer, a timeout,
+ *  a 5xx -- says exactly that, and says why submitting again is safe: the
+ *  retry reuses the name, and an existing object with the same content is
+ *  recognised rather than duplicated. A conflict names the object that is in
+ *  the way. `unmatched` is the API server's field causes no input claimed. */
+export function mutationStatus(state, subject, unmatched) {
+  const s = state || {};
+  const who = subject || {};
+  const kind = esc(who.kind);
+  const name = esc(who.name);
+  if (s.phase === "pending") {
+    return statusRegion(
+      "pending",
+      "<p>" + kind + " " + name + ": sent, waiting for the API server. Submitting again is " +
+        "disabled until it answers, so one click makes one request.</p>",
+    );
+  }
+  if (s.phase === "succeeded") {
+    const result = s.result || {};
+    const meta = ((result.object || {}).metadata) || {};
+    const shown = esc(typeof meta.name === "string" && meta.name.length > 0 ? meta.name : who.name);
+    const uid = esc(meta.uid);
+    return statusRegion(
+      "succeeded",
+      result.outcome === "existing"
+        ? "<p>" + kind + " " + shown + " already existed with exactly this content (uid " + uid +
+          "); nothing new was created.</p>"
+        : "<p>Created " + kind + " " + shown + " (uid " + uid + ").</p>",
+    );
+  }
+  if (s.phase !== "failed") {
+    return "";
+  }
+  const error = s.error || {};
+  const extra = Array.isArray(unmatched) && unmatched.length > 0
+    ? "<ul class=\"field-error-list\">" + unmatched.map((m) => "<li>" + esc(m) + "</li>").join("") + "</ul>"
+    : "";
+  if (s.kind === "unknown") {
+    return statusRegion(
+      "unknown",
+      "<p>" + (s.timedOut === true
+        ? "The API server did not answer in time"
+        : "No answer reached this page") +
+        ", so whether " + kind + " " + name + " was created is unknown. Your input is kept. " +
+        "Submitting again is safe: it reuses the name " + name + ", and an object that already " +
+        "exists with exactly this content is recognised instead of duplicated.</p>" +
+        errorBlock(error, false),
+    );
+  }
+  if (s.kind === "conflict") {
+    const existing = error.existing || {};
+    const differences = Array.isArray(error.differences) ? error.differences : [];
+    return statusRegion(
+      "failed",
+      "<p>" + kind + " " + esc(existing.name || who.name) + " already exists with different " +
+        "content" + (existing.uid ? " (uid " + esc(existing.uid) + ")" : "") + "; nothing was " +
+        "changed. Your input is kept." +
+        (differences.length > 0 ? " It differs at: " + differences.map((d) => esc(d)).join(", ") + "." : "") +
+        "</p>" + errorBlock(error, false),
+    );
+  }
+  if (s.kind === "invalid") {
+    return statusRegion(
+      "failed",
+      "<p>" + kind + " " + name + " was not created: fix the fields marked below. Your input is " +
+        "kept.</p>" + extra + (typeof error.status === "number" ? errorBlock(error, false) : ""),
+    );
+  }
+  if (s.kind === "refused") {
+    return statusRegion(
+      "failed",
+      "<p>Nothing was sent: " + esc(error.message) + "</p>",
+    );
+  }
+  return statusRegion(
+    "failed",
+    "<p>The API server refused " + kind + " " + name + ". Your input is kept.</p>" + extra +
+      errorBlock(error, false),
+  );
+}
+
+function statusRegion(phase, body) {
+  const role = phase === "failed" || phase === "unknown" ? "alert" : "status";
+  return (
+    "<div class=\"mutation-status mutation-" + phase + "\" role=\"" + role + "\">" + body + "</div>"
+  );
+}
+
 /** The evidence block: WHERE the signed document is, and WHAT THE CONTROLLER
  *  RECORDED about it. Nothing here re-derives a verdict.
  *

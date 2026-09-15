@@ -165,7 +165,10 @@ export async function listCluster(plural, options) {
 }
 
 /** Turns a non-2xx response into an Error carrying `{status, reason, message}`
- *  -- the API server's OWN `reason` and `message`, verbatim.
+ *  -- the API server's OWN `reason` and `message`, verbatim -- and, when the
+ *  Status names them, its `details` (the object's `name`, `kind` and the
+ *  per-field `causes[]` a 422 carries), so a form can put each cause beside the
+ *  field it is about without rewording it.
  *
  *  A 403 must read as the API server's 403, because the page's whole
  *  authorisation story is "the API server evaluated the viewer's RBAC". A
@@ -174,6 +177,7 @@ export async function listCluster(plural, options) {
 export function apiError(response, text) {
   let reason = "";
   let message = "";
+  let details = null;
   try {
     const status = JSON.parse(text);
     if (status !== null && typeof status === "object") {
@@ -182,6 +186,9 @@ export function apiError(response, text) {
       }
       if (typeof status.message === "string") {
         message = status.message;
+      }
+      if (status.details !== null && typeof status.details === "object") {
+        details = status.details;
       }
     }
   } catch (notJson) {
@@ -194,6 +201,9 @@ export function apiError(response, text) {
   const error = new Error(message);
   error.status = response.status;
   error.reason = reason;
+  if (details !== null) {
+    error.details = details;
+  }
   return error;
 }
 

@@ -982,6 +982,131 @@ button.primary:hover {
   margin: 0;
 }
 
+/* -- one mutation state for every form (PLAT-13.2) ------------------------ */
+
+.form-body {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+button:disabled,
+button[aria-busy="true"] {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+.field-error {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.field-error-list {
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+}
+
+.form-status:empty {
+  display: none;
+}
+
+.mutation-status {
+  margin: var(--space-3) 0;
+  padding: var(--space-3) var(--space-4);
+  max-width: var(--measure);
+  border: 1px solid var(--neutral-border);
+  border-left-width: 4px;
+  border-radius: var(--radius-s);
+  background: var(--neutral-bg);
+  color: var(--text);
+}
+
+.mutation-status p {
+  margin: 0;
+}
+
+.mutation-status .error {
+  margin: var(--space-3) 0 0;
+}
+
+.mutation-pending {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+}
+
+.mutation-succeeded {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+
+.mutation-unknown {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+
+.mutation-failed {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+/* -- approval subject, state and refusals (PLAT-12.2) --------------------- */
+
+.approval-state {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  margin: var(--space-3) 0;
+}
+
+.approval-state .note {
+  margin: 0;
+}
+
+.approval-subject,
+.operation {
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-raised);
+}
+
+.refusal-block {
+  margin: var(--space-4) 0;
+  padding: var(--space-3) var(--space-4);
+  max-width: var(--measure);
+  border: 1px solid var(--danger-border);
+  border-left-width: 4px;
+  border-radius: var(--radius-s);
+  background: var(--danger-bg);
+}
+
+.refusal-block code {
+  overflow-wrap: anywhere;
+}
+
+.draft-note {
+  margin: var(--space-3) 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-s);
+  background: var(--info-bg);
+}
+
+.draft-note .actions {
+  margin-bottom: 0;
+}
+
 /* -- the restore wizard's stepper ----------------------------------------- */
 
 .stepper {
