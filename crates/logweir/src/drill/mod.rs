@@ -1061,7 +1061,7 @@ pub struct Ctx {
     pub store: Store,
 }
 
-fn context_from_text(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
+fn context(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
@@ -1416,7 +1416,7 @@ fn execute_for_reporting(
             )
         }
     };
-    let outcome = match context_from_text(startup.spec_text, startup.allowed_text) {
+    let outcome = match context(startup.spec_text, startup.allowed_text) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, startup.approved),
         Err(error) => Err(error),
     };
