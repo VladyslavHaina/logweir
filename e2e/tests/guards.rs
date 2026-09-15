@@ -268,10 +268,7 @@ fn a_malformed_signing_key_exits_4_before_engine_or_upload_and_emits_safe_metric
                 .display()
                 .to_string(),
         ),
-        (
-            "LOGWEIR_ARGV_LOG".into(),
-            engine_argv.display().to_string(),
-        ),
+        ("LOGWEIR_ARGV_LOG".into(), engine_argv.display().to_string()),
     ];
     let r = run_with(opts);
     let e = r.out.stderr_utf8();
