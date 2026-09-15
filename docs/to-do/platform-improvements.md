@@ -114,9 +114,29 @@ records dispatch and next evidence, not completion.
 | PLAT-07.1 | In progress | plat07 | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2, PLAT-12.1 (immediate), PLAT-12.2 (subject slice) | In progress | ui-correct | Draft preservation, mutation state and idempotent submission; one guided restore submission; displayed approval subject equals submitted subject; node specs and real browser journeys. |
 | PLAT-17.1 (stage 1) | In progress | plat17-api | New `crates/logweir-api`: bounded `/api/v1` routes over current resources, local-admin mode only, idempotency, problem responses, cursors, static assets; mock-API tests and live smoke. OIDC/roles (PLAT-17.2), console image/chart and UI migration follow. |
-| PLAT-04.2, 05.x, 06.2, 09.2 | Proposed (contract spike) | decision D1 | Scheduling, revision, history and dynamic selection contracts with worker split. |
-| PLAT-03.x, 08.x, 09.1 | Proposed (contract spike) | decision D2 | Destination, discovery and readiness contracts with worker split. |
-| PLAT-14.x, 15.x, 16.x, 19.1 | Proposed (contract spike) | decision D3 | Status, catalog, retention and trust lifecycle contracts with worker split. |
+| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. d1w1-cadence dispatched. |
+| PLAT-03.x, 08.x, 09.1 | Contract decided | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | Contract decided | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. |
+
+### Decision records
+
+Spike outcomes are recorded under [decisions/](decisions/) and are binding on
+implementation: [D0](decisions/D0-product-api-and-identity.md) (product API,
+identity and the ordinary-versus-governed approval seam),
+[D1](decisions/D1-backup-scheduling.md), [D2](decisions/D2-destinations-discovery-readiness.md),
+[D3](decisions/D3-status-catalog-retention-trust.md), and
+[D-SEAMS](decisions/D-SEAMS.md), which resolves conflicts between them: one
+check runner rather than two, discovery results are never execution inputs, one
+completeness vocabulary, one frozen execution-inputs grammar, transport
+security is never derived, pod identity is verified by owner UID, status writes
+use conditional merge PATCH, and a new kind needs a recorded amendment.
+
+D2 and D3 add eight kinds (`BackupDestination`, `TopicDiscovery`, `Preflight`,
+`TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog`,
+`RetentionPolicy`) under new ADR 0008 amendments, each justified by an
+authorization or lifetime boundary rather than by convenience. A kind ships
+only together with its controller, RBAC and documentation; an unserved schema
+is not a delivery.
 
 ### Defects found by the 2026-09-15 contract spikes
 
