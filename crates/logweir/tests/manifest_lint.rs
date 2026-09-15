@@ -652,6 +652,185 @@ fn every_granted_verb_has_a_caller() {
     );
 }
 
+/// The OTHER direction: every **call site's** (resource, verb) is granted by
+/// the role every install actually ships.
+///
+/// # Why this exists (W0)
+///
+/// [`every_granted_verb_has_a_caller`] above walks grants and looks for
+/// callers. It is silent about the inverse — a call whose verb is granted
+/// NOWHERE — and that silence shipped a P0: the `BackupSchedule` reconciler
+/// reserved a `Forbid` slot with `Api::replace_status`, which kube issues as
+/// `PUT` and the API server authorises as the verb `update` on
+/// `backupschedules/status`. The role grants `patch` on the status
+/// subresources and, deliberately, `update` on nothing. With the default
+/// `concurrencyPolicy: Forbid` that is a 403 on every due slot of every
+/// schedule: no scheduled Backup is ever created on a shipped install, while
+/// every unit test — which answers whatever route it is asked for — stays
+/// green. This test is the one that fails on it, naming the method, the
+/// resource and the verb.
+///
+/// # What makes it more than a text match
+///
+/// It reads no needle. Both halves are DERIVED: the calls from
+/// [`api_callers`], which binds a method to the typed handle it was called on
+/// by walking each `Api<T>` declaration's own region of the source, and the
+/// grants from the parsed YAML of every shipped copy of the role. Renaming
+/// `reservation_body`, moving the reservation into another function or another
+/// module, or reaching it through a different control-flow path changes
+/// nothing here: the test sees `Api<BackupSchedule>::replace_status` wherever
+/// it is written. Adding a `Api<T>` method with no row in `needs` is a loud
+/// panic rather than a silent pass, so a new call shape cannot slip in.
+///
+/// # What it CANNOT catch
+///
+/// 1. **Untyped calls.** `Api<DynamicObject>`, `client.request(…)` and
+///    anything built from a `GroupVersionKind` at runtime carry no Rust type
+///    to bind a resource to. None exists in this crate today; the `resource_of`
+///    panic below is what a future one hits.
+/// 2. **`Api<T>` reached in a shape the scan does not read.** [`api_callers`]
+///    reads `let x: Api<T> = …` and `x: &Api<T>` parameters. A handle returned
+///    from a function (`fn api() -> Api<Job>`) and immediately used would be
+///    invisible to BOTH directions of this pair.
+/// 3. **Calls made by something that is not this crate** — a runner Job's own
+///    ServiceAccount, the UI, kubectl in a doc. Other roles, other tests.
+/// 4. **Anything RBAC decides beyond (group, resource, verb)**: namespace
+///    scope, `resourceNames`, aggregation, admission webhooks, ValidatingAdmissionPolicy.
+///    A grant this test accepts can still be refused in a cluster whose
+///    RoleBinding is namespaced differently.
+/// 5. **Verbs the API server derives from a request rather than from the
+///    method name** — a server-side apply that CREATES needs `create` as well
+///    as `patch`. This crate sends no `Patch::Apply`; the `patch` row says so.
+/// 6. It compares against the manifests in the tree, never against a live
+///    cluster. `kubectl auth can-i` is the live half, and it is a live-evidence
+///    step, not a unit test.
+#[test]
+fn every_call_site_has_a_grant() {
+    const WATCH: &str = "<controller-watch>";
+
+    // The typed handle -> the (apiGroup, resource) an RBAC rule names it by.
+    let resource_of = |ty: &str| -> (&'static str, &'static str) {
+        match ty {
+            "Approval" => ("logweir.dev", "approvals"),
+            "Backup" => ("logweir.dev", "backups"),
+            "BackupSchedule" => ("logweir.dev", "backupschedules"),
+            "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
+            "Restore" => ("logweir.dev", "restores"),
+            "TrustRoster" => ("logweir.dev", "trustrosters"),
+            "Job" => ("batch", "jobs"),
+            "ConfigMap" => ("", "configmaps"),
+            "Pod" => ("", "pods"),
+            other => panic!(
+                "crates/weirkeeper/src/ calls the Kubernetes API through `Api<{other}>`, and \
+                 this test cannot map that type to an (apiGroup, resource). Add the mapping — \
+                 a call whose resource is unknown is a call whose grant cannot be checked."
+            ),
+        }
+    };
+
+    // The `Api` method -> every (resource, verb) the API server authorises it
+    // against. A subresource is its own resource string, which is the whole
+    // point: `patch_status` is NOT satisfied by `patch` on the main resource,
+    // and `replace_status` is `update` on `<resource>/status` — the pair this
+    // test was written for.
+    let needs = |resource: &str, method: &str| -> Vec<(String, &'static str)> {
+        let status = format!("{resource}/status");
+        match method {
+            "create" => vec![(resource.to_string(), "create")],
+            "get" | "get_opt" => vec![(resource.to_string(), "get")],
+            "list" => vec![(resource.to_string(), "list")], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            "patch" => vec![(resource.to_string(), "patch")],
+            "replace" => vec![(resource.to_string(), "update")],
+            "delete" | "delete_opt" => vec![(resource.to_string(), "delete")],
+            "get_status" => vec![(status, "get")],
+            "patch_status" => vec![(status, "patch")],
+            "replace_status" => vec![(status, "update")],
+            "logs" => vec![(format!("{resource}/log"), "get")],
+            // A watcher LISTs once and then WATCHes, and needs both.
+            WATCH => vec![
+                (resource.to_string(), "list"), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+                (resource.to_string(), "watch"),
+            ],
+            other => panic!(
+                "`Api<_>::{other}` is called under crates/weirkeeper/src/ and this test does \
+                 not know which RBAC verb it needs. Add a row naming the verb — an unmodelled \
+                 call shape is exactly how `replace_status` reached a shipped release."
+            ),
+        }
+    };
+
+    let callers = api_callers();
+    assert!(
+        callers.len() >= 8,
+        "the Api<T> scan found only {} types; every assertion below would then be vacuous: {:?}",
+        callers.len(),
+        callers
+    );
+
+    // EVERY SHIPPED COPY, not just the source manifest. An operator applies
+    // `logweir.yaml` or renders the chart; a fix that lands in `config/rbac`
+    // and nowhere else is still a broken install. The Helm TEMPLATE
+    // (`charts/logweir/templates/clusterrole.yaml`) is not parseable YAML on
+    // its own — it carries `{{ include }}` lines — and is held to the install
+    // file by `chart_lint`'s render comparison, over these rendered outputs.
+    let mut files = vec![
+        "config/rbac/role.yaml".to_string(),
+        "logweir.yaml".to_string(),
+    ];
+    for path in files_under("charts/logweir/rendered") {
+        let rel = path
+            .strip_prefix(repo())
+            .expect("a path under the repository")
+            .to_string_lossy()
+            .to_string();
+        if manifests_in(&path)
+            .iter()
+            .any(|m| m.kind == "ClusterRole" && m.name() == "weirkeeper")
+        {
+            files.push(rel);
+        }
+    }
+    assert!(
+        files.len() >= 4,
+        "only {} shipped copies of the weirkeeper ClusterRole were found: {files:?}",
+        files.len()
+    );
+
+    let mut checked = 0usize;
+    for file in &files {
+        let rules = rules_of(file, "weirkeeper");
+        for (ty, methods) in &callers {
+            let (group, resource) = resource_of(ty);
+            for method in methods {
+                for (needed_resource, verb) in needs(resource, method) {
+                    let granted = rules.iter().any(|(groups, resources, verbs)| {
+                        groups.iter().any(|g| g == group || g == "*")
+                            && resources.iter().any(|r| *r == needed_resource || r == "*")
+                            && verbs.iter().any(|v| v == verb || v == "*")
+                    });
+                    assert!(
+                        granted,
+                        "crates/weirkeeper/src/ calls `Api<{ty}>::{method}`, which the API \
+                         server authorises as `{verb}` on `{needed_resource}` (apiGroup \
+                         {group:?}), and {file} grants no such verb. Every call the controller \
+                         makes must be authorised by the role the install ships, or the call \
+                         403s in production while every route-table test stays green. Change \
+                         the call to an authorised one, or widen the role deliberately and say \
+                         why in its comment."
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        checked >= 100,
+        "only {checked} (call site, grant) pairs were checked across {} files; the scan has \
+         gone quiet",
+        files.len()
+    );
+}
+
 /// The four ClusterRoles, verb for verb.
 ///
 /// A table test and not four assertions, because the property is the WHOLE rule
