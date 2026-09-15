@@ -881,6 +881,8 @@ pub struct RunOpts<'a> {
     pub signing: Option<&'a Path>,
     pub allowlist: Option<&'a Path>,
     pub approval: Approval,
+    /// Optional node-local Prometheus textfile written by the runner.
+    pub metrics: Option<&'a Path>,
     /// Topics to create AFTER `run_with`'s `delete_all_drill_topics()` and
     /// before the binary runs, as `(name, partitions)`.
     ///
@@ -920,6 +922,7 @@ impl<'a> RunOpts<'a> {
             signing: None,
             allowlist: None,
             approval: Approval::Valid,
+            metrics: None,
             pre_create: Vec::new(),
             env: Vec::new(),
             restore_run: false,
@@ -1029,6 +1032,9 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
         // container has mounted.
         .env("TMPDIR", engine_mount())
         .env("LOGWEIR_E2E_ENGINE_MOUNT", engine_mount());
+    if let Some(metrics) = o.metrics {
+        cmd.arg("--metrics-file").arg(metrics);
+    }
     // Per-row additions, LAST, so a row can override nothing above by
     // accident and everything above it deliberately. Task 7's SCRAM drill
     // rows use this for `LOGWEIR_TARGET_PASSWORD`; every other row passes an

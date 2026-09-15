@@ -32,7 +32,7 @@ kubernetes.default ClusterIP, visible endpoint IPs, and operator-supplied CIDRs.
 {{- $apiCIDRs = uniq $apiCIDRs }}
 {{- range $namespace := $namespaces }}
 ---
-# [UNVERIFIED ENFORCEMENT — Docker Desktop may accept this object without a
+# [UNVERIFIED] — ENFORCEMENT: Docker Desktop may accept this object without a
 # NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
 # CNI; Service ClusterIP versus post-DNAT endpoint matching is provider-specific.]
 apiVersion: networking.k8s.io/v1

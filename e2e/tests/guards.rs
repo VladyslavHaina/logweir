@@ -198,16 +198,10 @@ fn an_approval_signed_by_the_wrong_key_is_refused() {
 /// every put, and a put that fails retracts nothing because nothing was
 /// written.
 ///
-/// DRIVEN BY AN UNWRITABLE EVIDENCE SINK, not by the brief's unreadable signing
-/// key. Measured: an unreadable signing key exits **1**, not 4, and that is the
-/// product's own design rather than a defect — `execute_with` loads the signing
-/// key immediately after phase 0 (it needs the public half to decide
-/// `approval.self_attested`), and a key that cannot be read there means NO
-/// DRILL RAN. Exit 4's own contract, in `DrillError::SigningOrLock`'s doc
-/// comment, is "the drill RAN, and its result could not be signed"; reporting
-/// that for a mistyped `--signing-key` path would be a false claim. See the
-/// sibling test below, which pins the exit-1 behaviour so it cannot drift
-/// silently either.
+/// This row is driven by an unwritable evidence sink and validates the
+/// post-signing upload boundary. The sibling malformed-key row validates the
+/// distinct `SigningPrerequisite` path: it also exits 4, but stops before any
+/// engine data operation and permits only redacted local diagnostic metrics.
 ///
 /// An evidence bucket that does not exist reaches the genuine exit-4 path:
 /// `Store::from_url` builds without a round trip, phase 8 validates, zeroes,
@@ -242,34 +236,92 @@ fn an_unwritable_evidence_sink_exits_4_and_uploads_nothing() {
     );
 }
 
-/// The brief's `an_unreadable_signing_key_exits_4` row, asserting what the
-/// product actually does and why that is right: exit 1, no artifact, and a
-/// message naming the key. Pinned so the routing cannot change unnoticed in
-/// either direction.
+/// This fixture contains malformed key bytes; it is not an EACCES probe. The
+/// standalone `signing_startup` suite covers missing, malformed and genuinely
+/// unreadable paths. Here the live-stack row pins the reviewed shared contract:
+/// exit 4 before the engine, execution artifacts or uploads, with a redacted
+/// node-local metrics textfile allowed for diagnosis.
 #[test]
-fn an_unreadable_signing_key_exits_1_because_no_drill_ran() {
-    let bad = demo_dir().join("broken-signing-key.pem");
+fn a_malformed_signing_key_exits_4_before_engine_or_upload_and_emits_safe_metrics() {
+    const SECRET_SENTINEL: &str = "DO-NOT-ECHO-E2E-MALFORMED-KEY-MATERIAL";
+    let malformed = demo_dir().join("broken-signing-key.pem");
+    let metrics = demo_dir().join("broken-signing-key.metrics.prom");
+    let engine_argv = demo_dir().join("broken-signing-key.engine-argv");
+    for path in [&malformed, &metrics, &engine_argv] {
+        let _ = std::fs::remove_file(path);
+    }
     std::fs::write(
-        &bad,
-        b"-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n",
+        &malformed,
+        format!("-----BEGIN PRIVATE KEY-----\n{SECRET_SENTINEL}\n-----END PRIVATE KEY-----\n"),
     )
     .unwrap();
     let before = list_evidence_bucket();
-    let r = drill_run_with_signing_key(&bad);
+    let spec = spec_default();
+    let mut opts = RunOpts::new(&spec);
+    opts.signing = Some(&malformed);
+    opts.metrics = Some(&metrics);
+    opts.env = vec![
+        (
+            "LOGWEIR_ENGINE_BIN".into(),
+            root()
+                .join("e2e/fixtures/fake-engine-argv-check.sh")
+                .display()
+                .to_string(),
+        ),
+        (
+            "LOGWEIR_ARGV_LOG".into(),
+            engine_argv.display().to_string(),
+        ),
+    ];
+    let r = run_with(opts);
     let e = r.out.stderr_utf8();
     assert_eq!(
         r.out.status.code(),
-        Some(1),
-        "an unreadable signing key means no drill ran, so exit 1 (no artifact), \
-         never exit 2 (a drill result) and never exit 4 (a drill that ran but is \
-         unattested):\n{e}"
+        Some(4),
+        "a malformed signer is a signing prerequisite failure (exit 4), not an \
+         operational failure or a drill result:\n{e}"
     );
     assert!(
         e.contains("not a P-256 or Ed25519 PKCS#8 key"),
         "the failure must name the key, not something else:\n{e}"
     );
-    assert!(!r.scorecard.exists());
-    assert_eq!(before, list_evidence_bucket());
+    assert!(
+        e.contains("No engine data operation was started"),
+        "the failure must state the side-effect boundary:\n{e}"
+    );
+    assert!(
+        !e.contains(SECRET_SENTINEL),
+        "malformed private-key contents leaked into stderr:\n{e}"
+    );
+    assert!(
+        !engine_argv.exists(),
+        "the engine trap was invoked; argv was written to {}",
+        engine_argv.display()
+    );
+    assert!(!r.scorecard.exists(), "no scorecard may be created");
+    assert!(!r.sig.exists(), "no scorecard signature may be created");
+    assert_eq!(
+        before,
+        list_evidence_bucket(),
+        "a signing prerequisite failure must upload nothing"
+    );
+    let metrics_text = std::fs::read_to_string(&metrics)
+        .unwrap_or_else(|error| panic!("diagnostic metrics were not readable: {error}"));
+    assert!(
+        metrics_text.contains("logweir_drill_exit_code{cluster=\"unknown\"} 4"),
+        "prerequisite metrics must report exit 4: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains("logweir_drill_runs_total"),
+        "prerequisite metrics must not claim a completed drill: {metrics_text}"
+    );
+    assert!(
+        !metrics_text.contains(SECRET_SENTINEL),
+        "malformed private-key contents leaked into metrics: {metrics_text}"
+    );
+    for path in [&malformed, &metrics, &engine_argv] {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 // --- the schema surface ------------------------------------------------------
