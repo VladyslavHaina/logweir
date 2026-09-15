@@ -1,28 +1,17 @@
 name: release-drill
-# Runs the FULL compose drill from the RELEASED BINARY ARTIFACT, not from
-# `cargo build` and not only from the image.
-#
-# NOT YET EXECUTED — there is no GitHub remote for this repository at the time
-# of the v0.1.0 tag, so the DoD line "release-drill.yml ran the drill from the
-# binary artifact and was green" is recorded as UNVERIFIED rather than ticked.
-#
-# WHY THIS JOB EXISTS AND WHY IT IS SEPARATE FROM `ci`:
-# every other suite in this repository runs a binary that `cargo` just built in
-# the same workspace, with the workspace's own layout, its `target/` directory
-# and whatever the developer's environment happened to provide. A packaging
-# defect — a missing runtime file, a path that only resolves inside the source
-# tree, a feature enabled by workspace unification and absent from the release
-# profile — is invisible to all of them and visible to an adopter on their first
-# run. This job is the mechanical catch for that class, which is otherwise
-# caught by a stranger.
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      run_id:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       run_id:
-        description: "release.yml run id to take the binary artifact from"
-        required: false
+        description: "Successful binary-build run for this exact checkout commit"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -31,64 +20,56 @@ permissions:
 jobs:
   drill-from-artifact:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      # The engine, and ONLY the engine, comes from the repository — a released
-      # binary carries none (Global Constraint 10), which is exactly the fact
-      # this job is here to exercise.
       - name: Extract the pinned engine
         run: ./scripts/extract-engine.sh
       - run: pip install cryptography
       - run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Fetch the RELEASED binary
+      - name: Require the selected artifact to match this checkout
+        if: inputs.run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
           RUN_ID: ${{ inputs.run_id }}
         run: |
-          set -euo pipefail
-          mkdir -p released
-          if [ -n "${TAG:-}" ]; then
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir released --clobber
-          elif [ -n "${RUN_ID:-}" ]; then
-            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --dir released
-          else
-            echo "no release tag and no run_id: nothing to drill from" >&2; exit 1
-          fi
-          # Unpack whatever shape the artifact arrived in, then find the binary.
-          find released -name '*.tar.xz' -exec tar -xJf {} -C released \; || true
-          find released -name '*.tar.gz' -exec tar -xzf {} -C released \; || true
-          bin=$(find released -type f -name logweir | head -1)
-          [ -n "$bin" ] || { echo "no logweir binary in the release artifacts" >&2; exit 1; }
-          chmod +x "$bin"
-          echo "LOGWEIR_BIN=$PWD/$bin" >> "$GITHUB_ENV"
-          "$bin" --version
-
-      - name: The released binary really carries no engine
+          test "$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)" = "$GITHUB_SHA"
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-x86_64-unknown-linux-gnu
+          path: released
+          run-id: ${{ inputs.run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Extract the Linux amd64 release archive
         run: |
-          # If this ever passes, the release is shipping something other than
-          # what README and ADR 0002 describe.
-          if "$LOGWEIR_BIN" drill run --help >/dev/null 2>&1; then :; fi
-          test -x .engine/kafka-backup
-          echo "ok: the engine comes from third_party/, not from the binary"
+          cd released
+          sha256sum --check logweir-x86_64-unknown-linux-gnu.tar.xz.sha256
+          tar -xJf logweir-x86_64-unknown-linux-gnu.tar.xz --strip-components=1
+          test -x logweir
+          ./logweir --version
+          echo "LOGWEIR_BIN=$PWD/logweir" >> "$GITHUB_ENV"
 
       - run: docker compose -f e2e/compose/docker-compose.yml up -d --wait
       - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
       - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
       - run: ./scripts/e2e-seed.sh
+        env:
+          LOGWEIR_SEED_REFRESH_FIXTURES: "0"
 
       - name: A full drill, driven entirely by the released binary
         env:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_REGION: us-east-1
+          RELEASE_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           export LOGWEIR_ENGINE_BIN="$PWD/.engine/kafka-backup"
-          export LOGWEIR_ENGINE_VERSION="$("$LOGWEIR_ENGINE_BIN" --version | awk '{print $NF}')"
-          export LOGWEIR_ENGINE_DIGEST="$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest)"
+          LOGWEIR_ENGINE_VERSION="$("$LOGWEIR_ENGINE_BIN" --version | awk '{print $NF}')"
+          LOGWEIR_ENGINE_DIGEST="$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest)"
+          export LOGWEIR_ENGINE_VERSION LOGWEIR_ENGINE_DIGEST
           export TMPDIR="$PWD/.release-drill"
           mkdir -p "$TMPDIR" .rd
 
@@ -107,21 +88,12 @@ jobs:
           printf '{"allowed_cluster_ids":["%s"],"source_cluster_id":null}\n' "$cid" \
             > .rd/allowed-clusters.json
 
-          # The window is deployment-specific; bind it to the records the seed
-          # just produced, exactly as scripts/demo.sh does.
           end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           start=$(date -u -d '-1 day' +%Y-%m-%dT%H:%M:%SZ)
           sed -e "s|^\( *window_start:\).*|\1 \"$start\"|" \
               -e "s|^\( *window_end:\).*|\1   \"$end\"|" \
               examples/drill.yaml > .rd/drill.yaml
 
-          # EVERY command below is the RELEASED binary — INCLUDING the approval.
-          # It used to be minted with `jq` plus `cargo run -p logweir-evidence
-          # --example sign_approval`, which is not in the release artifact at
-          # all: this job therefore proved the tarball could RUN a drill while
-          # quietly using the source tree to produce the one mandatory input
-          # `drill run` will not start without. If `drill approve` regresses,
-          # this job must fail.
           "$LOGWEIR_BIN" drill approve --spec .rd/drill.yaml \
             --key .rd/approver.pem \
             --approver release-drill@example.com --ticket REL-1 \
@@ -134,15 +106,25 @@ jobs:
             --allowed-clusters .rd/allowed-clusters.json \
             --signing-key .rd/signer.pem \
             --out .rd/scorecard.json --metrics-file .rd/logweir.prom \
-            --triggered-by "release-drill ${{ github.ref_name }}"
+            --triggered-by "release-drill $RELEASE_REF"
           "$LOGWEIR_BIN" drill show .rd/scorecard.json
           "$LOGWEIR_BIN" drill verify --scorecard .rd/scorecard.json \
             --signature .rd/scorecard.sig --public-key .rd/signer.pub.pem
-          # And the SECOND, independent verifier.
           python3 docs/verify_scorecard.py \
             .rd/scorecard.json .rd/scorecard.sig .rd/signer.pub.pem
-          # A non-empty textfile: the dashboard reads this, not an endpoint.
           test -s .rd/logweir.prom
 
+      - name: Preserve the drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-drill-evidence
+          include-hidden-files: true
+          path: |
+            .rd/scorecard.json
+            .rd/scorecard.sig
+            .rd/signer.pub.pem
+            .rd/logweir.prom
+          if-no-files-found: ignore
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans

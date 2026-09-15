@@ -1,0 +1,163 @@
+# The `logweir-ui` image — Task 39. THE PAGE, AS AN IMAGE INSTEAD OF A ConfigMap.
+#
+# IT IS NOT A THIRD LOGWEIR BINARY AND IT COMPILES NOTHING. `Dockerfile` builds
+# the runner (two binaries, the extracted OSO engine, an amd64-only ELF);
+# `Dockerfile.weirkeeper` builds the controller (one binary, `ca-certificates`
+# and nothing else). This file builds neither: it is a `COPY` of fourteen
+# static files over a kubectl the Kubernetes project publishes, and its whole
+# build is two layers and a second or two. There is no builder stage, no
+# `rustup`, no `apt`, no `$BUILDPLATFORM` argument and no cross-compile
+# refusal, because there is nothing here to compile — which is also why this
+# image, unlike the controller's, can be built for either architecture on
+# either kind of runner.
+#
+# BUILD IT WITH THE RECIPE, NOT BY HAND:
+#
+#     just image-ui                            # this host's architecture, loaded
+#     LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-ui
+#
+# and then assert it:
+#
+#     bash scripts/check-image-ui.sh logweir-ui:check; echo "rc=$?"
+#
+# ---------------------------------------------------------------------------
+# WHY THE PAGE MOVED OUT OF THE CHART
+# ---------------------------------------------------------------------------
+# Until Task 39 `charts/logweir` carried its own byte-identical copy of `ui/`
+# (fourteen files, ~86 KB of JavaScript, HTML and CSS), rendered it into a
+# ConfigMap through `.Files.Glob "ui/**"` and mounted that into the proxy pod.
+# Three costs, all of them paid on every install:
+#
+#   * a second copy of the page in the repository, kept honest only by a `cmp`
+#     loop in `scripts/check-chart.sh` — a copy a contributor could edit on one
+#     side and a gate that could only ever say "they differ", never "these are
+#     the bytes the browser gets";
+#   * the fourteen files serialised into one API object on every `helm
+#     template`, `helm install` and `helm upgrade`, inside etcd, inside every
+#     rendered file checked into `charts/logweir/rendered/`;
+#   * a ConfigMap is a mutable object in the cluster, so "the page the browser
+#     loads" was whatever anyone with `patch configmaps` had last written.
+#
+# An image is the opposite of all three: one copy in the tree, resolved by
+# digest, immutable once pushed. And the assertion gets STRONGER rather than
+# weaker — `scripts/check-image-ui.sh` computes the sha256 of every file the
+# image will serve and of every file in `ui/`, and compares them. That is a
+# statement about the bytes an operator's browser receives; the chart's old
+# `cmp` arm was a statement about two directories in this repository.
+#
+# ---------------------------------------------------------------------------
+# WHAT IS *NOT* HERE, AND EACH ABSENCE IS A DECISION
+# ---------------------------------------------------------------------------
+# THE ARGUMENTS STAY IN THE CHART. `kubectl proxy`'s flags — and in particular
+# `--accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'` — are a SECURITY
+# PROPERTY: that regex is the authorisation boundary between a page that may
+# read the six kinds and a page that may read Secrets. Three tests in
+# `crates/logweir/tests/chart_lint.rs` assert it against the rendered
+# Deployment. Baking those flags into an `ENTRYPOINT`/`CMD` here would move the
+# boundary into a layer those tests cannot see and an operator cannot read from
+# `helm template`. So the ENTRYPOINT stays the base image's `kubectl` and the
+# chart keeps every argument.
+#
+# NO `ui/README.md` AND NO `ui/tests/`. The globs below take `*.html`, `*.js`
+# and `*.css` and the `pages/` directory; the README is documentation and
+# `ui/tests/` carries a THROWAWAY KEYPAIR and fixtures naming a developer's
+# compose stack (Global Constraint 28: no key material in the page or in
+# anything that serves it). `scripts/check-image-ui.sh` asserts `/ui` holds the
+# fourteen files and NOTHING else, so an image that gained either is a red.
+#
+# NO SHELL, NO PACKAGE MANAGER, NO `apt` LAYER. The base carries `/bin/kubectl`
+# and a distroless root filesystem — measured 2026-09-14: `docker run
+# --entrypoint /bin/sh` on it fails with `stat /bin/sh: no such file or
+# directory`. That is why `scripts/check-image-ui.sh` reads every file with
+# `docker create` + `docker cp` onto the host (the `scripts/extract-engine.sh`
+# idiom) instead of `test -s` inside the image, the way its two siblings do.
+#
+# NO `THIRD_PARTY_NOTICES.md`, and that is the same argument
+# `Dockerfile.weirkeeper` makes about the MIT notice. That file is the
+# inventory of the RUST dependency graph, generated from `Cargo.lock`; this
+# image links no Rust binary and redistributes no crate, so shipping it would
+# claim a redistribution that does not happen. `check-image-ui.sh` asserts it
+# is ABSENT. What this image DOES redistribute is kubectl, and the file it owes
+# for that is the inventory below.
+#
+# ---------------------------------------------------------------------------
+# THE BASE, PINNED BY DIGEST — GLOBAL CONSTRAINT 7
+# ---------------------------------------------------------------------------
+# `registry.k8s.io/kubectl` at the digest `charts/logweir/values.yaml` pinned
+# for `ui.image` until this task, resolved from `registry.k8s.io/kubectl:v1.34.1`
+# on 2026-09-12 (`charts/logweir/README.md` records the command and the date).
+# It is a MANIFEST LIST — linux/amd64, linux/arm64, linux/ppc64le, linux/s390x,
+# measured 2026-09-14 — so the same digest builds on either runner
+# `.github/workflows/release.yml` uses, and each build resolves to that
+# architecture's own variant.
+#
+# A DIGEST-PINNED `FROM` CANNOT SILENTLY RESOLVE TO OTHER BYTES, which is worth
+# stating because it decides what `check-image-ui.sh`'s base check has to do:
+# the only drift possible is between this line, the LABEL below and the
+# checked-in inventory, and that is exactly the three-way agreement that script
+# asserts. It does not re-download the base to compare layers, and it says so.
+FROM registry.k8s.io/kubectl@sha256:59bafa07ff3a6d4b417e7633ddb9d79a9606ca98bf64bac080b3e65748669250
+
+# THE BASE, DECLARED IN THE IMAGE'S OWN METADATA. `org.opencontainers.image.base.name`
+# is the OCI annotation for exactly this, and it is what lets an operator who
+# has the image but not this file answer "what is under my UI?" with
+# `docker image inspect`. `scripts/check-image-ui.sh` check 4 reads it back and
+# holds it to the `FROM` above.
+LABEL org.opencontainers.image.base.name="registry.k8s.io/kubectl@sha256:59bafa07ff3a6d4b417e7633ddb9d79a9606ca98bf64bac080b3e65748669250"
+LABEL org.opencontainers.image.title="logweir-ui"
+LABEL org.opencontainers.image.description="The Logweir page, served by kubectl proxy --www=/ui. Fourteen static files and nothing else."
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# ---------------------------------------------------------------------------
+# THE FOURTEEN FILES, AND NOTHING ELSE
+# ---------------------------------------------------------------------------
+# TWO INSTRUCTIONS, NOT ONE `COPY ui /ui`. A whole-directory copy would take
+# `ui/README.md` and `ui/tests/` with it — the second of which carries a
+# throwaway keypair — and would keep taking whatever lands under `ui/` next.
+# These globs take the six top-level files (`*.html`, `*.js`, `*.css`) and the
+# eight under `pages/`, which is `scripts/check-ui-offline.sh`'s scope and
+# `shipped_ui_files()`'s in `crates/logweir/tests/chart_lint.rs`.
+#
+# Docker's `*` does not cross a `/`, so `ui/*.js` is the four top-level scripts
+# and never `ui/tests/*.js`.
+COPY ui/*.html ui/*.js ui/*.css /ui/
+COPY ui/pages /ui/pages
+
+# ---------------------------------------------------------------------------
+# THE LICENCES
+# ---------------------------------------------------------------------------
+# LOGWEIR'S OWN, for the page: the fourteen files above are Logweir's code under
+# Apache-2.0, and Apache-2.0 requires the licence and the NOTICE to travel with
+# the redistribution (Global Constraint 15, spec §16 clause 5). The same path
+# both other images use, so one `docker run --entrypoint cat` idiom finds them
+# in any of the three.
+COPY LICENSE NOTICE /usr/share/licenses/logweir/
+
+# AND KUBECTL'S, because this image REDISTRIBUTES kubectl — the whole base
+# layer, binary included — the same way the runner image redistributes
+# `kafka-backup` and ships the MIT notice for it in
+# `/usr/share/licenses/kafka-backup/`.
+#
+# TWO FILES. `INVENTORY` names the base by digest, names its licence and says
+# where its text is; `LICENSE` is that text. kubectl is Apache-2.0, the same
+# licence Logweir's own code carries, so the text is one file in this tree
+# (`LICENSE` — the unmodified Apache-2.0 with the appendix's placeholders
+# intact) copied to both places rather than two identical files checked in
+# twice. The copyright holders differ and the INVENTORY is where that is
+# written down; the licence TEXT is what Apache-2.0 §4(a) requires a copy of.
+COPY third_party/kubectl-image.inventory /usr/share/licenses/kubectl/INVENTORY
+COPY LICENSE /usr/share/licenses/kubectl/LICENSE
+
+# THE SAME NON-ROOT UID AS BOTH OTHER IMAGES AND AS the chart's own PodSpec
+# (`runAsUser: 65532`, `runAsNonRoot: true`). The base declares `USER 0`; the
+# chart's `securityContext` overrides it, but an image whose default is root is
+# an image that runs as root wherever the PodSpec is forgotten. The files above
+# are copied mode 0644 owned by root and are world-readable, which is what a
+# static file server needs and all it needs.
+USER 65532:65532
+
+# THE ENTRYPOINT THE BASE ALREADY SETS, RESTATED SO THIS FILE SAYS WHAT THE
+# IMAGE RUNS. No `CMD`: every argument is the chart's (see the header), and a
+# default argument vector here would be a second place the proxy's path filter
+# could come from.
+ENTRYPOINT ["/bin/kubectl"]

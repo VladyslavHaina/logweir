@@ -4,6 +4,7 @@ Logweir backs up Apache Kafka topics, restores a sampled point-in-time window
 into new topics, reconciles records against the archive, and signs the result.
 The CLI runs independently; the `weirkeeper` Kubernetes controller schedules
 jobs and verifies their evidence, and a static UI operates the Kubernetes API.
+The UI can run locally or through the Helm chart’s `logweir-ui` image.
 
 Code is [Apache-2.0](LICENSE); documentation is
 [CC-BY-4.0](docs/LICENSE-docs). See [NOTICE](NOTICE) and
@@ -37,12 +38,12 @@ local images, or [Helm](charts/logweir/README.md). Kubernetes 1.29 or newer is
 required. Create the signing and approval keys, Secrets, runner ServiceAccount,
 and TrustRoster before creating workloads.
 
-**Release status:** the checked-in release checklist records
-`blocked: images not published` and `blocked: no tag pushed`. Consult
-[the release checklist](docs/tag1-checklist.md) for the recorded evidence;
-applying manifests or loading author-only local images does not prove a public
-release is available. Helm defaults use `latest` for the two Logweir images;
-the install guide explains how to pin images explicitly.
+Successful main CI publishes the controller, runner and optional UI images as
+`sha-<commit>`, `main` and `latest`. Version tags run the release pipeline and
+publish versioned images plus CLI archives. Check the
+[Actions runs](https://github.com/VladyslavHaina/logweir/actions) for the exact
+commit's result and image digests. Helm uses `latest` by default; the install
+guide explains how to pin a deployment for reproducibility.
 
 For a standalone CLI, install from the checkout:
 

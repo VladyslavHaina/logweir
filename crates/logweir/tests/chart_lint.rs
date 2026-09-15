@@ -300,10 +300,27 @@ fn shipped_ui_files() -> Vec<String> {
     files
 }
 
-/// A UI file's ConfigMap key — the template's `logweir.ui.key`: the path under
-/// `ui/` with `/` spelt `__`.
-fn ui_key(rel: &str) -> String {
-    rel.trim_start_matches("ui/").replace('/', "__")
+/// **The UI image's repository, DERIVED** — the namespace of
+/// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-ui`, which is what
+/// `Dockerfile.ui` builds and what `release.yml` publishes.
+///
+/// It is derived rather than spelt for the reason `scripts/check-chart.sh`'s
+/// arm 7 gives: the UI image has no digest pin in the tree to read a repository
+/// off — this chart is its only reference — so what must not drift is the
+/// NAMESPACE, and taking it from the runner pin is what makes a namespace move
+/// carry all three images at once.
+///
+/// `ui_key` — a UI file's ConfigMap key (`ui/pages/approvals.js` ->
+/// `pages__approvals.js`) — lived here until Task 39 and is DELETED with the
+/// ConfigMap it keyed and with the `logweir.ui.key` template helper. A test
+/// helper for an object nothing renders is a helper the next reader has to
+/// prove is dead, and `cargo clippy -- -D warnings` refuses it anyway.
+fn ui_repository() -> String {
+    let runner = repository_of(&runner_image_constant());
+    let (namespace, _) = runner
+        .rsplit_once('/')
+        .unwrap_or_else(|| panic!("RUNNER_IMAGE's repository `{runner}` names no namespace"));
+    format!("{namespace}/logweir-ui")
 }
 
 // ============================================================== the copies
@@ -335,26 +352,78 @@ fn chart_lint_crds_are_byte_identical_copies() {
     }
 }
 
-/// **The chart's `ui/` is a byte-identical copy of the fourteen shipped UI
-/// files and holds nothing else** — no `tests/` (which carries a throwaway
-/// keypair), no README.
+/// **The chart carries NO copy of the UI and mounts no ConfigMap into the
+/// proxy.** Task 39: the page ships as the `logweir-ui` IMAGE.
+///
+/// RENAMED FROM `chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else`
+/// (STANDING RULE 19), and the rename is the whole change of substance. That
+/// test asserted that `charts/logweir/ui/` — fourteen duplicated files — was
+/// byte-identical to `ui/`. Both the directory and the ConfigMap built from it
+/// are gone, so the assertion it made is not weakened here, it MOVED, to
+/// `scripts/check-image-ui.sh` check 1: that gate computes the sha256 of every
+/// file inside the image that `kubectl proxy --www=/ui` will serve and of every
+/// file under `ui/`, and compares them. A copy in a chart can be right while
+/// the artefact a browser loads is wrong; the image gate reads the artefact.
+///
+/// WHAT THIS TEST CAN STILL SAY, and does: the chart holds no second copy of
+/// the page, renders no ConfigMap for it, and mounts no ConfigMap into the
+/// proxy pod. Each of the three is how the old shape would come back — a merge
+/// that resurrected the directory, a template that rebuilt the object, a volume
+/// that re-mounted it — and each would be a source of served bytes that nothing
+/// hashes.
 #[test]
-fn chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else() {
+fn chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap() {
+    // The fourteen are still fourteen, in the tree, where the image gate hashes
+    // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
+    // comparing against the wrong set.
     let shipped = shipped_ui_files();
-    let copy: BTreeSet<String> = files_under("charts/logweir/ui")
+    assert_eq!(14, shipped.len());
+
+    let under_chart: Vec<String> = files_under("charts/logweir")
         .into_iter()
-        .map(|p| p.trim_start_matches("charts/logweir/").to_string())
+        .filter(|p| p.starts_with("charts/logweir/ui/"))
         .collect();
-    let want: BTreeSet<String> = shipped.iter().cloned().collect();
-    assert_eq!(
-        want, copy,
-        "charts/logweir/ui must hold exactly the fourteen shipped files"
+    assert!(
+        under_chart.is_empty(),
+        "charts/logweir/ui/ is back: {under_chart:?}. Task 39 deleted it — the page is \
+         delivered by `ui.image` (Dockerfile.ui, docker.io/<ns>/logweir-ui), and \
+         scripts/check-image-ui.sh hashes what the image serves against ui/. A copy under the \
+         chart is a second source of the page that nothing hashes."
     );
-    for rel in &shipped {
-        assert_eq!(
-            read_bytes(rel),
-            read_bytes(&format!("charts/logweir/{rel}")),
-            "charts/logweir/{rel} is not byte-identical to {rel}; copy it"
+
+    // NO ConfigMap FOR THE PAGE IN ANY RENDER, and no ConfigMap VOLUME in the
+    // proxy pod. The demo render is the one with `ui.enabled: true`.
+    let docs = rendered("demo");
+    let ui_configmaps: Vec<String> = docs
+        .iter()
+        .filter(|d| d.kind == "ConfigMap" && d.name().contains("-ui"))
+        .map(|d| d.name())
+        .collect();
+    assert!(
+        ui_configmaps.is_empty(),
+        "the chart renders a ConfigMap for the page: {ui_configmaps:?}. The fourteen files are \
+         in the image; a ConfigMap is a MUTABLE API object, so a page served from one is \
+         whatever the last holder of `patch configmaps` wrote."
+    );
+    let ui = find(&docs, "Deployment", "logweir-ui");
+    let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
+    for v in volumes {
+        assert!(
+            !v["configMap"].is_mapping(),
+            "the proxy pod mounts a ConfigMap volume: {v:?}. `/ui` is part of the image's own \
+             read-only filesystem now."
+        );
+    }
+    let mounts = container(ui)["volumeMounts"]
+        .as_sequence()
+        .expect("volumeMounts");
+    for m in mounts {
+        assert_ne!(
+            Some("/ui"),
+            m["mountPath"].as_str(),
+            "something is still mounted at /ui: {m:?}. Whatever it is would shadow the fourteen \
+             files the image carries, and scripts/check-image-ui.sh would be hashing bytes \
+             nobody serves."
         );
     }
 }
@@ -599,9 +668,21 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         "values.yaml runnerImage must be weirkeeper::job::RUNNER_IMAGE's REPOSITORY at \
          `:{LOGWEIR_TAG}`"
     );
+    // TASK 39'S THIRD LOGWEIR IMAGE. `ui.image` stopped being a third-party
+    // kubectl digest and became Logweir's own `logweir-ui`, under the namespace
+    // the runner pin names — derived, never spelt, so a namespace move carries
+    // all three. `scripts/check-chart.sh` arm 7 says the same in shell.
+    assert_eq!(
+        Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
+        values["ui"]["image"].as_str(),
+        "values.yaml ui.image must be `<the runner pin's namespace>/logweir-ui:{LOGWEIR_TAG}` — \
+         the image Dockerfile.ui builds and release.yml publishes. A `registry.k8s.io/kubectl` \
+         digest here is the page back in a ConfigMap"
+    );
     for (path, v) in [
         ("controllerImage", &values["controllerImage"]),
         ("runnerImage", &values["runnerImage"]),
+        ("ui.image", &values["ui"]["image"]),
     ] {
         let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
         assert!(
@@ -622,12 +703,16 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         is_digest_reference(&runner_image_constant()),
         "weirkeeper::job::RUNNER_IMAGE is still a digest (GC7)"
     );
-    // The four third-party images, still digests, still with provenance.
+    // The THREE third-party images left, still digests, still with provenance.
+    // There were four until Task 39: `ui.image` was a `registry.k8s.io/kubectl`
+    // digest, and that digest did not disappear — it moved to `Dockerfile.ui`'s
+    // `FROM`, where it is still pinned under Global Constraint 7 and where
+    // `scripts/check-image-ui.sh` check 3 holds the image's own label and its
+    // baked inventory to it.
     for (path, v) in [
         ("minio.image", &values["minio"]["image"]),
         ("minio.mcImage", &values["minio"]["mcImage"]),
         ("demoKafka.image", &values["demoKafka"]["image"]),
-        ("ui.image", &values["ui"]["image"]),
     ] {
         let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
         assert!(
@@ -636,6 +721,16 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
              `latest` ruling"
         );
     }
+    // AND THE UI IMAGE'S BASE IS STILL THE PINNED KUBECTL, in Dockerfile.ui.
+    // Without this the digest would simply have vanished from every assertion
+    // in this file when it left values.yaml.
+    let dockerfile_ui = read("Dockerfile.ui");
+    assert!(
+        dockerfile_ui.contains("FROM registry.k8s.io/kubectl@sha256:"),
+        "Dockerfile.ui must build FROM a DIGEST-pinned registry.k8s.io/kubectl (Global \
+         Constraint 7). That pin moved here from values.yaml's ui.image in Task 39; a tag there \
+         would let the base change under a build nobody re-ran"
+    );
     // The two MinIO images are the compose stack's, byte for byte.
     let compose = read("e2e/compose/docker-compose.yml");
     for path in ["minio.image", "minio.mcImage"] {
@@ -655,6 +750,10 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
     // assertions, unchanged in substance: a third-party digest whose provenance
     // nobody wrote down is still the defect they were added for.
     let text = read("charts/logweir/README.md");
+    // `registry.k8s.io/kubectl:v1.34.1` IS STILL HERE AFTER TASK 39 and that is
+    // deliberate: the digest moved from `ui.image` to `Dockerfile.ui`'s `FROM`,
+    // but it is still a third-party image this project redistributes, and the
+    // command and date that resolved it are still what a reader needs.
     for command in [
         "docker buildx imagetools inspect apache/kafka:3.7.1",
         "docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1",
@@ -975,10 +1074,28 @@ fn chart_lint_minio_renders_the_backend_and_the_archive_secret() {
 /// page addresses `/apis/logweir.dev/v1alpha1/…` and nothing on `/api/v1`.
 const ACCEPT_PATHS: &str = "--accept-paths=^/(ui/|apis/logweir\\.dev/v1alpha1/)";
 
-/// **`ui.enabled` renders the proxy with its measured paths, the ConfigMap
-/// holding exactly the fourteen UI files' bytes and no key material, the
-/// ServiceAccount, the RoleBinding to the chart's own role (never
-/// `cluster-admin`), the Service on 8001 — and no Ingress.**
+/// **`ui.enabled` renders the proxy with its measured paths, the ServiceAccount,
+/// the RoleBinding to the chart's own role (never `cluster-admin`), the Service
+/// on 8001 — and no Ingress.**
+///
+/// EDITED BY TASK 39, NOT RENAMED: every arm this test had about the args, the
+/// roles, the binding, the Service and the absent Ingress is byte-for-byte what
+/// it was, and they are the arms the name is about. What is gone is the arm
+/// that read the ConfigMap — the fourteen keys, their bytes, the volume `items`
+/// mapping each key back to a path, and the private-key-PEM scan over the
+/// ConfigMap's data. That object no longer renders, so those assertions could
+/// not "stay green unedited": they would panic looking for it. They moved, and
+/// each of them got stronger on the way:
+///
+///   * the fourteen files' BYTES -> `scripts/check-image-ui.sh` check 1, which
+///     hashes what the image serves against `ui/` rather than what a template
+///     inlined;
+///   * "and nothing else" -> the same check, which fails naming every extra
+///     file (measured: an image built with `COPY ui /ui` reported 53 files and
+///     listed `tests/fixtures/approver.pub.pem`);
+///   * Global Constraint 28's no-key-material scan -> the same check, over the
+///     served set, plus `chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap`
+///     which holds the ConfigMap and its volume absent.
 #[test]
 fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     let docs = rendered("demo");
@@ -991,7 +1108,15 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     assert_eq!(
         values["ui"]["image"].as_str(),
         c["image"].as_str(),
-        "the pinned kubectl image"
+        "the Deployment's image is values.yaml's ui.image"
+    );
+    assert_eq!(
+        Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
+        c["image"].as_str(),
+        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the fourteen \
+         shipped files copied in at /ui — under the namespace the runner pin names, at \
+         `:{LOGWEIR_TAG}` like the other two Logweir images. A bare kubectl digest here is the \
+         page back in a ConfigMap."
     );
     let args: Vec<&str> = c["args"]
         .as_sequence()
@@ -1031,67 +1156,22 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
         pod_spec(ui)["automountServiceAccountToken"].as_bool(),
         "the proxy pod needs its token: it is the credential the proxy attaches"
     );
+    // THE ONE VOLUME LEFT is `tmp`, for `HOME` and `KUBECACHEDIR` under
+    // `readOnlyRootFilesystem: true`. The page is not a volume any more, and
+    // `chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap`
+    // is what holds the ConfigMap and its mount absent.
     let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
-    let cm_volume = volumes
-        .iter()
-        .find(|v| v["configMap"].is_mapping())
-        .expect("a configMap volume");
-    let items: BTreeMap<String, String> = cm_volume["configMap"]["items"]
-        .as_sequence()
-        .expect("items")
-        .iter()
-        .map(|i| {
-            (
-                i["key"].as_str().unwrap().to_string(),
-                i["path"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-
-    // The ConfigMap: exactly the fourteen files, byte for byte, mapped back to
-    // their paths, and no key material.
-    let cm = find(&docs, "ConfigMap", "logweir-ui");
-    let data = cm.value["data"].as_mapping().expect("data");
-    let shipped = shipped_ui_files();
     assert_eq!(
-        shipped.len(),
-        data.len(),
-        "the ConfigMap holds exactly the fourteen files"
+        1,
+        volumes.len(),
+        "the proxy pod carries exactly one volume — `tmp` — now that the page is in the image: \
+         {volumes:?}"
     );
-    assert_eq!(
-        shipped.len(),
-        items.len(),
-        "every key is mapped into the volume"
+    assert!(
+        volumes[0]["emptyDir"].is_mapping(),
+        "the one volume is an emptyDir for /tmp: {:?}",
+        volumes[0]
     );
-    for rel in &shipped {
-        let key = ui_key(rel);
-        let got = data
-            .get(Value::String(key.clone()))
-            .unwrap_or_else(|| panic!("the ConfigMap has no key {key} for {rel}"))
-            .as_str()
-            .unwrap_or_else(|| panic!("{key} is a string"));
-        assert_eq!(
-            read(rel),
-            got,
-            "the ConfigMap's {key} is not the tree's {rel} byte for byte"
-        );
-        assert_eq!(
-            Some(rel.trim_start_matches("ui/").to_string()).as_deref(),
-            items.get(&key).map(String::as_str),
-            "{key} must be mounted at its path under /ui"
-        );
-    }
-    for (k, v) in data {
-        let text = v.as_str().unwrap_or("");
-        for line in text.lines() {
-            let t = line.trim();
-            assert!(
-                !(t.starts_with("-----BEGIN") && t.contains("PRIVATE KEY-----")),
-                "Global Constraint 28: {} carries a private-key PEM header",
-                k.as_str().unwrap_or("?")
-            );
-        }
-    }
 
     // The ServiceAccount, the roles, the binding.
     find(&docs, "ServiceAccount", "logweir-ui");
@@ -1220,11 +1300,16 @@ fn chart_lint_only_the_proxy_and_the_controller_hold_a_token() {
 /// The third-party images — MinIO, mc, apache/kafka, kubectl — are untouched by
 /// the ruling and are still digests, in every render including this one.
 #[test]
-fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and_the_author_only_example(
+fn chart_lint_every_rendered_image_is_a_digest_except_the_three_logweir_images_and_the_author_only_example(
 ) {
+    // RENAMED FROM
+    // `chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and_the_author_only_example`
+    // (Task 39, STANDING RULE 19): there are three Logweir images now, and the
+    // number is in the name because the number is the assertion.
     let logweir_repos = [
         repository_of(&controller_image_pin()),
         repository_of(&runner_image_constant()),
+        ui_repository(),
     ];
     let mut total = 0usize;
     let mut tagged = 0usize;
@@ -1253,8 +1338,8 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and
                 assert_eq!(
                     format!("{repo}:{LOGWEIR_TAG}"),
                     image,
-                    "{name}: {}/{} names a Logweir image as {image}; this chart names both by \
-                     `<repository>:{LOGWEIR_TAG}`",
+                    "{name}: {}/{} names a Logweir image as {image}; this chart names all three \
+                     by `<repository>:{LOGWEIR_TAG}`",
                     d.kind,
                     d.name()
                 );
@@ -1262,7 +1347,7 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and
             }
             assert!(
                 is_digest_reference(&image),
-                "{name}: {}/{} references {image} by tag — only the two Logweir images may",
+                "{name}: {}/{} references {image} by tag — only the three Logweir images may",
                 d.kind,
                 d.name()
             );
@@ -1362,10 +1447,17 @@ fn chart_lint_the_gate_script_carries_every_arm() {
     let script = read("scripts/check-chart.sh");
     for needle in [
         "cmp -s \"$src\" \"$CHART/crds/$base\"",
-        "cmp -s \"$src\" \"$CHART/ui/$rel\"",
+        // TASK 39. Arm 2 was `cmp -s "$src" "$CHART/ui/$rel"` — the byte-copy
+        // loop over the chart's duplicate of `ui/`. The directory is gone, the
+        // loop with it, and what the arm asserts now is that the copy has not
+        // come back. The needle below is the REPLACEMENT NAMED IN THE SCRIPT'S
+        // OWN HEADER, so a future editor who deletes arm 2 outright fails here
+        // rather than quietly losing both halves.
+        "scripts/check-image-ui.sh",
+        "if [ -e \"$CHART/ui\" ]; then",
         "helm lint \"$CHART\"",
         "helm template \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --include-crds",
-        "git status --porcelain -- \"$RENDERED\"",
+        "diff -u \"$RENDERED/$name.yaml\" \"$tmp/expected-$name.yaml\"",
         "@sha256:",
         "DIGEST_EXEMPT=\"author-only.yaml\"",
         "--set \"$flag=yes\"",
@@ -1379,6 +1471,11 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "runner_repo=\"${tree_runner%@sha256:*}\"",
         "$controller_repo:$LOGWEIR_TAG",
         "$runner_repo:$LOGWEIR_TAG",
+        // Task 39: the third repository, its namespace DERIVED from the runner
+        // pin and only its name spelt.
+        "UI_IMAGE_NAME=\"logweir-ui\"",
+        "ui_repo=\"${runner_repo%/*}/$UI_IMAGE_NAME\"",
+        "$ui_repo:$LOGWEIR_TAG",
     ] {
         assert!(
             script.contains(needle),
@@ -1507,4 +1604,731 @@ fn chart_lint_examples_and_readme_say_what_they_are() {
         notes.contains("acts with that ServiceAccount's authority"),
         "NOTES.txt states whose authority the page acts with"
     );
+}
+
+// ==================================================== Task 38: a chart a stranger can use
+//
+// Everything below reads CHECKED-IN BYTES — the rendered files
+// `scripts/check-chart.sh` regenerates, and the template sources themselves.
+// GC22 forbids shelling out from a `#[test]`, so a refusal that can only be
+// observed by running `helm` (an unsupported mechanism, both Kafka blocks on at
+// once) is asserted as the `fail` the template carries, and the SCRIPT gate is
+// what proves `helm` acts on it.
+
+/// Every example under `examples/` has a rendered file beside it, and vice
+/// versa — `scripts/check-chart.sh` renders the directory by glob, so this is
+/// what catches an example added without its render being committed.
+#[test]
+fn chart_lint_every_example_has_a_rendered_file() {
+    let examples: BTreeSet<String> = files_under("charts/logweir/examples")
+        .into_iter()
+        .filter_map(|p| {
+            p.rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".values.yaml"))
+                .map(str::to_string)
+        })
+        .collect();
+    let renders: BTreeSet<String> = files_under("charts/logweir/rendered")
+        .into_iter()
+        .filter_map(|p| {
+            p.rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".yaml"))
+                .map(str::to_string)
+        })
+        .filter(|n| n != "default")
+        .collect();
+    assert_eq!(
+        examples, renders,
+        "every charts/logweir/examples/<name>.values.yaml must have a checked-in \
+         charts/logweir/rendered/<name>.yaml (plus default.yaml, which has no example). Run \
+         `just chart-check` and commit what it regenerates"
+    );
+    assert!(
+        examples.contains("msk"),
+        "examples/msk.values.yaml is the copy-and-use example for a real cluster (ruling 13); \
+         found {examples:?}"
+    );
+}
+
+/// **`values.yaml` is SHORT and shows every knob** — the owner's ruling of
+/// 2026-09-12: a reader opens it, sees every option with its default, and knows
+/// what to set in under a minute. A knob a reader cannot see does not exist, so
+/// the empty defaults are listed too.
+#[test]
+fn chart_lint_values_yaml_is_short_and_shows_every_option() {
+    let text = read("charts/logweir/values.yaml");
+    let lines = text.lines().count();
+    assert!(
+        lines <= 130,
+        "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
+         read, not skimmed past (~120 lines): one short line per key, no paragraphs, and every \
+         explanation in charts/logweir/README.md"
+    );
+    let values: Value = serde_yaml::from_str(&text).expect("values.yaml parses");
+    // EVERY option the chart supports, INCLUDING the empty ones. A missing key
+    // here is a knob that exists in a template and nowhere a reader can find it.
+    for path in [
+        "environment",
+        "kubernetes.namespace",
+        "kubernetes.nodeSelector",
+        "kubernetes.tolerations",
+        "kubernetes.affinity",
+        "imagePullSecrets",
+        "controllerImage",
+        "runnerImage",
+        "imagePullPolicy",
+        "runnerImagePullPolicy",
+        "controller.logLevel",
+        "controller.resources",
+        "controller.nodeSelector",
+        "controller.tolerations",
+        "controller.affinity",
+        "archive.url",
+        "archive.s3.endpoint",
+        "archive.s3.region",
+        "archive.s3.allowHttp",
+        "archive.s3.virtualHostedStyle",
+        "kafka.enabled",
+        "kafka.name",
+        "kafka.bootstrapServers",
+        "kafka.security.protocol",
+        "kafka.security.mechanism",
+        "kafka.username",
+        "kafka.secretRef",
+        "kafka.secretKey",
+        "kafka.target.name",
+        "kafka.target.bootstrapServers",
+        "kafka.target.security.protocol",
+        "kafka.target.security.mechanism",
+        "kafka.target.username",
+        "kafka.target.secretRef",
+        "kafka.target.secretKey",
+        "kafka.target.markerTopic",
+        "minio.enabled",
+        "minio.image",
+        "minio.mcImage",
+        "minio.rootUser",
+        "minio.rootPassword",
+        "minio.persistence.enabled",
+        "minio.persistence.size",
+        "minio.persistence.storageClassName",
+        "minio.resources",
+        "minio.nodeSelector",
+        "minio.tolerations",
+        "minio.affinity",
+        "demoKafka.enabled",
+        "demoKafka.image",
+        "demoKafka.clusterIds.source",
+        "demoKafka.clusterIds.target",
+        "demoKafka.seed.recordsPerTopic",
+        "demoKafka.resources",
+        "demoKafka.nodeSelector",
+        "demoKafka.tolerations",
+        "demoKafka.affinity",
+        "ui.enabled",
+        "ui.image",
+        "ui.namespaces",
+        "ui.nodeSelector",
+        "ui.tolerations",
+        "ui.affinity",
+    ] {
+        let mut node = &values;
+        for segment in path.split('.') {
+            node = &node[segment];
+        }
+        assert!(
+            !node.is_null(),
+            "values.yaml does not carry `{path}`. Every option the chart supports appears there \
+             with its default, the empty ones included — ruling 15"
+        );
+    }
+    // AND THE DEFAULTS ARE TODAY'S BEHAVIOUR: each new key renders nothing.
+    assert_eq!(Some(""), values["environment"].as_str());
+    assert_eq!(Some(""), values["kubernetes"]["namespace"].as_str());
+    assert_eq!(Some(false), values["kafka"]["enabled"].as_bool());
+    assert_eq!(
+        Some(0),
+        values["imagePullSecrets"].as_sequence().map(Vec::len),
+        "imagePullSecrets defaults to an empty list"
+    );
+    for (owner, key) in [
+        ("kubernetes", "tolerations"),
+        ("controller", "tolerations"),
+        ("minio", "tolerations"),
+        ("demoKafka", "tolerations"),
+        ("ui", "tolerations"),
+    ] {
+        assert_eq!(
+            Some(0),
+            values[owner][key].as_sequence().map(Vec::len),
+            "{owner}.{key} defaults to an empty list"
+        );
+    }
+    // The schema accepts exactly this set — `additionalProperties: false` means
+    // a key in values.yaml that the schema forgot refuses every install.
+    let schema: serde_json::Value =
+        serde_json::from_str(&read("charts/logweir/values.schema.json"))
+            .expect("the schema parses");
+    let typed: BTreeSet<String> = schema["properties"]
+        .as_object()
+        .expect("a properties object")
+        .keys()
+        .cloned()
+        .collect();
+    let written: BTreeSet<String> = values
+        .as_mapping()
+        .expect("a mapping")
+        .keys()
+        .filter_map(|k| k.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        written, typed,
+        "values.schema.json is additionalProperties:false, so every top-level key in values.yaml \
+         must be typed there and nothing may be typed that values.yaml does not show"
+    );
+}
+
+/// **`kafka.enabled: false` renders no `KafkaCluster` at all** — every example
+/// that predates ruling 10 renders exactly as it did.
+#[test]
+fn chart_lint_kafka_renders_nothing_unless_enabled() {
+    for name in ["default", "minimal", "demo", "author-only"] {
+        let docs = rendered(name);
+        let clusters = names_of(&docs, "KafkaCluster");
+        assert!(
+            clusters.is_empty(),
+            "rendered/{name}.yaml carries KafkaCluster {clusters:?} — `kafka.enabled` defaults to \
+             false and these values do not set it"
+        );
+    }
+}
+
+/// **The `kafka:` block renders the two cluster objects, with the SASL_SSL +
+/// SCRAM-SHA-512 mapping the CRD declares** — the owner's own values file,
+/// corrected to this task's keys, rendered and read back.
+#[test]
+fn chart_lint_kafka_renders_the_cluster_objects_with_the_mapped_auth() {
+    let docs = rendered("msk");
+    assert_eq!(
+        BTreeSet::from(["source".to_string(), "target".to_string()]),
+        names_of(&docs, "KafkaCluster"),
+        "examples/msk.values.yaml renders a source and a target KafkaCluster"
+    );
+    let example = read("charts/logweir/examples/msk.values.yaml");
+    for (name, role, secret) in [
+        ("source", "source", "kafbat-ui-msk-credentials"),
+        ("target", "target", "kafbat-scratch-credentials"),
+    ] {
+        let doc = find(&docs, "KafkaCluster", name);
+        let spec = &doc.value["spec"];
+        assert_eq!(Some(role), spec["role"].as_str(), "{name}'s role");
+        // THE MAPPING, which is the whole point of the block: SASL_SSL +
+        // SCRAM-SHA-512 is `scramSha512` over TLS, and the CRD's enum has no
+        // third value.
+        assert_eq!(
+            Some("scramSha512"),
+            spec["auth"]["mode"].as_str(),
+            "{name}: SASL_SSL + SCRAM-SHA-512 maps to auth.mode scramSha512"
+        );
+        assert_eq!(
+            Some(true),
+            spec["auth"]["tls"].as_bool(),
+            "{name}: SASL_SSL is TLS; a chart that rendered tls:false here would install and fail \
+             to connect"
+        );
+        assert_eq!(Some("kafbat"), spec["auth"]["username"].as_str());
+        assert_eq!(
+            Some(secret),
+            spec["auth"]["secretRef"]["name"].as_str(),
+            "{name}: the Secret the adopter named, unread by Logweir"
+        );
+        // THE ADDRESSES ARE THE EXAMPLE'S, SPLIT OUT OF ITS COMMA-SEPARATED
+        // STRING — the shape the AWS console hands you.
+        let servers: Vec<&str> = spec["bootstrapServers"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{name}.spec.bootstrapServers is a list"))
+            .iter()
+            .map(|v| v.as_str().expect("a host:port string"))
+            .collect();
+        assert!(
+            !servers.is_empty(),
+            "{name} renders at least one bootstrap server"
+        );
+        for server in &servers {
+            assert!(
+                example.contains(server),
+                "{name} renders `{server}`, which examples/msk.values.yaml does not name — the \
+                 splitter invented an address"
+            );
+            assert!(
+                server.ends_with(":9096"),
+                "{name}: `{server}` — SASL/SCRAM on MSK is port 9096"
+            );
+        }
+    }
+    // A comma-separated STRING became a LIST of more than one entry: the split
+    // actually happened, rather than one long value being passed through.
+    assert!(
+        find(&docs, "KafkaCluster", "source").value["spec"]["bootstrapServers"]
+            .as_sequence()
+            .map(|s| s.len() >= 2)
+            .unwrap_or(false),
+        "the source's comma-separated string must be split into two or more entries, or this \
+         assertion proves nothing about the splitter"
+    );
+    // The scratch proof travels with the target and nowhere else.
+    assert_eq!(
+        Some("logweir.scratch"),
+        find(&docs, "KafkaCluster", "target").value["spec"]["markerTopic"].as_str(),
+        "the target carries the marker topic that proves it is scratch"
+    );
+    assert!(
+        find(&docs, "KafkaCluster", "source").value["spec"]["markerTopic"].is_null(),
+        "a SOURCE has no marker topic — that field is what authorises a scratch RESTORE target"
+    );
+    // RENDERED INTO THE RELEASE NAMESPACE, with the chart's labels. The release
+    // namespace is `helm -n`'s — `logweir-system`, what `scripts/check-chart.sh`
+    // renders every example with, and what every other template in this chart
+    // writes. It is NOT `kubernetes.namespace`, which this example sets to
+    // `kafka` and which ruling 11 says does not move the install: a template
+    // that reached for `.Values.kubernetes.namespace` here would put the cluster
+    // objects in a namespace Helm never installed into, where neither the
+    // operator nor the runner ServiceAccount is.
+    let key_namespace =
+        serde_yaml::from_str::<Value>(&read("charts/logweir/examples/msk.values.yaml"))
+            .expect("the example parses")["kubernetes"]["namespace"]
+            .as_str()
+            .expect("examples/msk.values.yaml sets kubernetes.namespace")
+            .to_string();
+    assert_ne!(
+        "logweir-system", key_namespace,
+        "examples/msk.values.yaml's kubernetes.namespace must differ from the release namespace, \
+         or the assertion below cannot tell the two sources apart"
+    );
+    for name in ["source", "target"] {
+        let doc = find(&docs, "KafkaCluster", name);
+        assert_eq!(
+            Some("logweir-system"),
+            doc.value["metadata"]["namespace"].as_str(),
+            "{name} must render into the RELEASE namespace (these files are rendered with \
+             `helm template -n logweir-system`), never into `kubernetes.namespace: \
+             {key_namespace}` — that key feeds ui.namespaces and nothing else"
+        );
+        assert_eq!(
+            Some("logweir"),
+            doc.value["metadata"]["labels"]["app.kubernetes.io/name"].as_str(),
+            "{name} carries the chart's labels"
+        );
+    }
+}
+
+/// **Every protocol/mechanism pair the chart accepts, and the refusal for every
+/// other one** — read from the template that does the mapping, because a
+/// refusal cannot be observed in a rendered file by definition, and because the
+/// two arms a rendered example does not exercise would otherwise be untested.
+#[test]
+fn chart_lint_kafka_maps_every_supported_mechanism_and_refuses_the_rest() {
+    let helpers = read("charts/logweir/templates/_helpers.tpl");
+    // PLAINTEXT -> plaintext, no TLS.
+    assert!(
+        helpers.contains(r#"{{- if eq $protocol "PLAINTEXT" -}}"#)
+            && helpers.contains(r#"{{- $mode = "plaintext" -}}"#),
+        "_helpers.tpl must map PLAINTEXT onto auth.mode plaintext"
+    );
+    // SASL_SSL + SCRAM-SHA-512 -> scramSha512 over TLS.
+    assert!(
+        helpers.contains(
+            r#"{{- else if and (eq $protocol "SASL_SSL") (eq $mechanism "SCRAM-SHA-512") -}}"#
+        ) && helpers.contains(r#"{{- $tls = true -}}"#),
+        "_helpers.tpl must map SASL_SSL + SCRAM-SHA-512 onto scramSha512 WITH tls"
+    );
+    // SASL_PLAINTEXT + SCRAM-SHA-512 -> scramSha512 without TLS. The arm no
+    // rendered example exercises, and the one a careless edit collapses into
+    // the SASL_SSL branch.
+    let sasl_plaintext = helpers
+        .find(r#"{{- else if and (eq $protocol "SASL_PLAINTEXT") (eq $mechanism "SCRAM-SHA-512") -}}"#)
+        .expect("_helpers.tpl must map SASL_PLAINTEXT + SCRAM-SHA-512 onto scramSha512");
+    let after = &helpers[sasl_plaintext..];
+    let arm_end = after
+        .find("{{- else -}}")
+        .expect("the mapping ends in an else");
+    assert!(
+        !after[..arm_end].contains("$tls = true"),
+        "the SASL_PLAINTEXT arm must NOT set tls — SASL_PLAINTEXT is SASL over a cleartext \
+         transport, and a chart claiming TLS there installs and cannot connect"
+    );
+    // AND EVERYTHING ELSE IS A REFUSAL AT RENDER TIME, naming what is supported.
+    let refusal = helpers
+        .split("{{- else -}}")
+        .nth(1)
+        .expect("a final else arm")
+        .to_string();
+    assert!(
+        refusal.contains("fail") && refusal.contains("is not supported"),
+        "an unsupported protocol/mechanism pair must be a render-time `fail`, not a rendered \
+         object: the CRD's enum is plaintext|scramSha512 and the client speaks SCRAM-SHA-512 only"
+    );
+    for named in ["SCRAM-SHA-512", "SASL_SSL", "SASL_PLAINTEXT", "PLAINTEXT"] {
+        assert!(
+            refusal.contains(named),
+            "the refusal must name `{named}` — a reader who hit it has to learn what IS supported"
+        );
+    }
+    // The secret key the operator actually projects, and no other.
+    let projected = read("crates/weirkeeper/src/controllers/restore.rs")
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("pub const TARGET_PASSWORD_SECRET_KEY: &str = \"")
+                .and_then(|r| r.strip_suffix("\";"))
+                .map(str::to_string)
+        })
+        .expect("restore.rs declares TARGET_PASSWORD_SECRET_KEY");
+    assert!(
+        helpers.contains(&format!(r#"(ne $c.secretKey "{projected}")"#)),
+        "_helpers.tpl must refuse any `secretKey` but `{projected}` — the ONE key name the \
+         operator projects into the probe. Any other value renders a KafkaCluster whose probe \
+         cannot read its credential"
+    );
+    // And both blocks on at once is a refusal too, in the template that renders
+    // the objects.
+    let template = read("charts/logweir/templates/kafka/kafkacluster.yaml");
+    assert!(
+        template.contains("{{- fail \"kafka.enabled and demoKafka.enabled are both true."),
+        "kafka.enabled beside demoKafka.enabled must be a render-time `fail`: demoKafka brings \
+         its own two brokers and its own cluster objects"
+    );
+    assert!(
+        template.contains("demoKafka.enabled: false") && template.contains("kafka.enabled: false"),
+        "that refusal must say which flag to turn off, for each of the two intents"
+    );
+}
+
+/// **Node placement reaches every pod the chart renders** — the controller,
+/// MinIO and its seed Job, the UI (from the MSK example) and a demo broker and
+/// its seed Job (from the demo example, the only render that carries them).
+#[test]
+fn chart_lint_placement_reaches_every_pod() {
+    let msk_selector =
+        serde_yaml::from_str::<Value>(&read("charts/logweir/examples/msk.values.yaml"))
+            .expect("the example parses")["kubernetes"]["nodeSelector"]
+            .clone();
+    let msk_keys: Vec<String> = msk_selector
+        .as_mapping()
+        .expect("examples/msk.values.yaml sets kubernetes.nodeSelector")
+        .keys()
+        .map(|k| k.as_str().expect("a string key").to_string())
+        .collect();
+    assert!(
+        !msk_keys.is_empty(),
+        "examples/msk.values.yaml must set a nodeSelector, or this test proves nothing"
+    );
+
+    let mut checked = 0usize;
+    for (render, kind, name) in [
+        ("msk", "Deployment", "weirkeeper"),
+        ("msk", "Deployment", "logweir-minio"),
+        ("msk", "Job", "logweir-minio-seed"),
+        ("msk", "Deployment", "logweir-ui"),
+    ] {
+        let docs = rendered(render);
+        let spec = pod_spec(find(&docs, kind, name));
+        for key in &msk_keys {
+            assert!(
+                !spec["nodeSelector"][key.as_str()].is_null(),
+                "{render}: {kind}/{name} has no nodeSelector key `{key}` — kubernetes.nodeSelector \
+                 must reach EVERY pod the chart renders, or the chart cannot be installed on a \
+                 cluster whose nodes are labelled"
+            );
+        }
+        let tolerations = spec["tolerations"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{render}: {kind}/{name} carries no tolerations"));
+        assert!(
+            tolerations
+                .iter()
+                .any(|t| t["key"].as_str() == Some("kafka")),
+            "{render}: {kind}/{name} does not tolerate the tainted nodepool"
+        );
+        checked += 1;
+    }
+
+    // THE DEMO BROKERS AND THEIR SEED JOB, from the one render that has them.
+    let demo_values: Value =
+        serde_yaml::from_str(&read("charts/logweir/examples/demo.values.yaml"))
+            .expect("demo.values.yaml parses");
+    let demo_keys: Vec<String> = demo_values["kubernetes"]["nodeSelector"]
+        .as_mapping()
+        .expect("examples/demo.values.yaml sets kubernetes.nodeSelector")
+        .keys()
+        .map(|k| k.as_str().expect("a string key").to_string())
+        .collect();
+    let demo = rendered("demo");
+    for (kind, name) in [
+        ("StatefulSet", "logweir-kafka-source"),
+        ("StatefulSet", "logweir-kafka-target"),
+        ("Job", "logweir-kafka-seed"),
+    ] {
+        let spec = pod_spec(find(&demo, kind, name));
+        for key in &demo_keys {
+            assert!(
+                !spec["nodeSelector"][key.as_str()].is_null(),
+                "demo: {kind}/{name} has no nodeSelector key `{key}` — the demo brokers are pods \
+                 this chart renders, so placement must reach them too"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(7, checked, "seven pod specs were checked, not {checked}");
+
+    // AND THE DEFAULT RENDER HAS NONE OF IT: an empty value renders nothing.
+    for doc in rendered("default") {
+        let spec = pod_spec(&doc);
+        if spec.is_null() {
+            continue;
+        }
+        for key in ["nodeSelector", "tolerations", "affinity"] {
+            assert!(
+                spec[key].is_null(),
+                "rendered/default.yaml {}/{} carries `{key}` — the placement defaults are empty \
+                 and must render nothing at all",
+                doc.kind,
+                doc.name()
+            );
+        }
+    }
+}
+
+/// **`imagePullSecrets` reach the controller ServiceAccount AND the runner
+/// ServiceAccount** — the runner one is the whole mechanism by which Jobs the
+/// OPERATOR creates can pull from a private registry without an operator
+/// change, because a pod inherits its ServiceAccount's pull secrets.
+#[test]
+fn chart_lint_image_pull_secrets_reach_both_service_accounts() {
+    let example: Value = serde_yaml::from_str(&read("charts/logweir/examples/msk.values.yaml"))
+        .expect("the example parses");
+    let wanted: Vec<String> = example["imagePullSecrets"]
+        .as_sequence()
+        .expect("examples/msk.values.yaml sets imagePullSecrets")
+        .iter()
+        .map(|s| s["name"].as_str().expect("a secret name").to_string())
+        .collect();
+    assert!(
+        !wanted.is_empty(),
+        "the example must name at least one pull secret, or this test proves nothing"
+    );
+
+    let docs = rendered("msk");
+    for account in ["weirkeeper", "logweir-runner", "logweir-ui"] {
+        let sa = find(&docs, "ServiceAccount", account);
+        let got: Vec<String> = sa.value["imagePullSecrets"]
+            .as_sequence()
+            .unwrap_or_else(|| {
+                panic!(
+                    "ServiceAccount/{account} carries no imagePullSecrets. On `logweir-runner` \
+                     that is the ONLY path a runner Job has to a private registry"
+                )
+            })
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name").to_string())
+            .collect();
+        assert_eq!(wanted, got, "ServiceAccount/{account}'s pull secrets");
+    }
+    // The pods that run under no ServiceAccount of ours carry them directly.
+    for (kind, name) in [
+        ("Deployment", "logweir-minio"),
+        ("Job", "logweir-minio-seed"),
+    ] {
+        let spec = pod_spec(find(&docs, kind, name));
+        let got: Vec<String> = spec["imagePullSecrets"]
+            .as_sequence()
+            .unwrap_or_else(|| {
+                panic!("{kind}/{name} runs under the `default` ServiceAccount, so its pull secrets must be on its PodSpec")
+            })
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name").to_string())
+            .collect();
+        assert_eq!(wanted, got, "{kind}/{name}'s pull secrets");
+    }
+    // Empty by default, everywhere.
+    for doc in rendered("default") {
+        assert!(
+            doc.value["imagePullSecrets"].is_null(),
+            "rendered/default.yaml {}/{} carries imagePullSecrets — the default is an empty list \
+             and must render nothing",
+            doc.kind,
+            doc.name()
+        );
+    }
+}
+
+/// **`environment` is a label on every object the chart renders, and nothing
+/// else.** The six CRDs are the one exception and not an omission: Helm copies
+/// `crds/` verbatim and never templates it, which `check-chart.sh` holds
+/// byte-identical to `config/crd/`.
+#[test]
+fn chart_lint_the_environment_label_is_on_every_rendered_object() {
+    let example: Value = serde_yaml::from_str(&read("charts/logweir/examples/msk.values.yaml"))
+        .expect("the example parses");
+    let want = example["environment"]
+        .as_str()
+        .expect("examples/msk.values.yaml sets environment");
+    assert!(!want.is_empty(), "the example must set a non-empty value");
+
+    let mut labelled = 0usize;
+    let mut missing = Vec::new();
+    for doc in rendered("msk") {
+        if doc.kind == "CustomResourceDefinition" {
+            continue;
+        }
+        match doc.value["metadata"]["labels"]["logweir.dev/environment"].as_str() {
+            Some(v) if v == want => labelled += 1,
+            other => missing.push(format!("{}/{} -> {other:?}", doc.kind, doc.name())),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} rendered object(s) do not carry `logweir.dev/environment: {want}`:\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
+    assert!(
+        labelled >= 15,
+        "only {labelled} object(s) were checked for the environment label; the MSK example \
+         renders far more than that, so this lint would be near-vacuous"
+    );
+    // AND IT SWITCHES NOTHING. The default is empty and renders no label at all.
+    for doc in rendered("demo") {
+        assert!(
+            doc.value["metadata"]["labels"]["logweir.dev/environment"].is_null(),
+            "rendered/demo.yaml {}/{} carries an environment label — `environment` defaults to \
+             empty and must render nothing",
+            doc.kind,
+            doc.name()
+        );
+    }
+}
+
+/// **The copy-and-use path is written down**: the chart README opens by saying
+/// to copy the directory and install it, the MSK example is short and carries
+/// the keys this task defines, and the MSK facts a values file has no room for
+/// live in the README.
+#[test]
+fn chart_lint_the_readme_opens_with_copy_this_directory() {
+    let readme = read("charts/logweir/README.md");
+    assert!(
+        readme.contains("## Copy this directory and install it"),
+        "charts/logweir/README.md must OPEN with `## Copy this directory and install it` — the \
+         chart is self-contained and one command installs it (ruling 13)"
+    );
+    let copy = readme
+        .find("## Copy this directory and install it")
+        .expect("the heading is there");
+    let installs = readme
+        .find("## What it installs")
+        .expect("the second section");
+    assert!(
+        copy < installs,
+        "the copy-and-use section must come FIRST, before `## What it installs`"
+    );
+    assert!(
+        readme[..installs].contains("helm upgrade --install logweir . -n"),
+        "the copy-and-use section must show the whole command"
+    );
+    // The MSK facts, measured 2026-09-12, that an adopter on MSK needs and a
+    // short values file cannot hold.
+    for fact in [
+        "9096",
+        "Secrets Manager",
+        "UNRENDERABLE_CREDENTIAL_CHARACTERS",
+        "DescribeCluster",
+        "MSK IAM authentication is not implemented",
+    ] {
+        assert!(
+            readme.contains(fact),
+            "charts/logweir/README.md must state the MSK fact `{fact}`"
+        );
+    }
+    // The named gap: runner Jobs get pull secrets and do NOT get placement.
+    // Read against a whitespace-collapsed copy, because both sentences are
+    // wrapped across lines: a needle that pinned the wrap column would go red on
+    // a reflow that changed no meaning, and a needle that avoided the wrap would
+    // be too short to mean anything.
+    let flowed = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flowed.contains("Node placement **does not**"),
+        "the README must NAME the runner-Job placement gap rather than leave it silent"
+    );
+    assert!(
+        flowed.contains(
+            "`logweir-runner` ServiceAccount, because a pod inherits its ServiceAccount's pull \
+             secrets"
+        ),
+        "the README must say HOW pull secrets reach a runner Job — through the runner \
+         ServiceAccount, which is the whole reason they reach Jobs the chart never renders"
+    );
+    // The two Docker Hub facts an adopter needs (ruling 16).
+    assert!(
+        readme.contains("created by a push is public by default"),
+        "the README must say that a Docker Hub repository created by a push is public by default \
+         — the opposite of GHCR's"
+    );
+    assert!(
+        readme.contains("rate-limited per source IP"),
+        "the README must say anonymous Docker Hub pulls are rate-limited per IP, which is why a \
+         pull secret is useful on a public image too"
+    );
+    // The example itself: short, and the keys this task defines.
+    let example = read("charts/logweir/examples/msk.values.yaml");
+    let lines = example.lines().count();
+    assert!(
+        lines <= 60,
+        "examples/msk.values.yaml is {lines} lines; ruling 15 asks for the same short shape as \
+         values.yaml, with the MSK facts in the README"
+    );
+    for key in [
+        "environment:",
+        "kubernetes:",
+        "nodeSelector:",
+        "tolerations:",
+        "imagePullSecrets:",
+        "kafka:",
+        "enabled: true",
+        "secretRef:",
+    ] {
+        assert!(
+            example.contains(key),
+            "examples/msk.values.yaml must set `{key}`"
+        );
+    }
+}
+
+/// Registry overrides remain documented independently of historical release status.
+#[test]
+fn chart_lint_install_md_carries_bring_your_own_registry() {
+    let install = read("docs/install.md");
+    let section = install
+        .split("### (d) Bring your own registry")
+        .nth(1)
+        .expect("install guide documents bringing your own registry")
+        .split("\n---")
+        .next()
+        .expect("the section body");
+    for needle in [
+        "ecr",
+        "controllerImage",
+        "runnerImage",
+        "ui.image",
+        "imagePullPolicy",
+        "runnerImagePullPolicy",
+        "imagePullSecrets",
+        "amd64",
+    ] {
+        assert!(
+            section.contains(needle),
+            "registry instructions must document {needle}"
+        );
+    }
 }

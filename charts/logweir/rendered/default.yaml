@@ -2,7 +2,7 @@
 # Rendered by scripts/check-chart.sh (just chart-check):
 #   helm template logweir charts/logweir -n logweir-system --include-crds
 # It is checked in so a template change lands as a diff a reviewer reads; the
-# gate regenerates it and fails on any drift (git status --porcelain).
+# gate compares a temporary render and fails on drift.
 ---
 # Source: logweir/crds/approvals.yaml
 # GENERATED FILE — do not edit by hand.

@@ -387,24 +387,6 @@ fn just_lint_runs_the_one_signer_gate() {
 // would retire the check for `weirkeeper` for good. These two tests are what
 // make "recorded" mean something.
 
-/// The whole `#`-comment header at the top of a script, as prose: `# ` prefixes
-/// stripped and every run of whitespace collapsed to one space, so an assertion
-/// can name a sentence without depending on where the author wrapped it.
-fn comment_prose(script: &str) -> String {
-    let mut out = String::new();
-    for line in script.lines() {
-        if line.starts_with("#!") {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix('#') else {
-            break;
-        };
-        out.push(' ');
-        out.push_str(rest.trim());
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// The value of a `NAME="a b c"` shell assignment, split on whitespace.
 fn allowlist(script: &str, name: &str) -> Vec<String> {
     let prefix = format!("{name}=\"");
@@ -423,210 +405,67 @@ fn one_signer_source() -> String {
         .expect("scripts/check-one-signer.sh is readable")
 }
 
-/// Check 2 says what it now claims, and the reason for the re-scope is in the
-/// script itself rather than only in a commit message.
-///
-/// The mutant this kills is not "someone widened the allowlist" — the widening
-/// is REQUIRED and correct. It is "someone widened the allowlist without
-/// writing down why", and "someone widened it by one name too many".
+/// Primitive reachability is wider than signing API reachability: verifiers
+/// legitimately use the same crypto libraries. Keep the allowed crate set explicit.
 #[test]
-fn check_two_states_the_narrowed_claim() {
-    let src = one_signer_source();
-    let prose = comment_prose(&src);
-
-    // (1) the re-scope paragraph, naming both primitives and saying in as many
-    //     words that the old reading of check 2 has stopped being true.
-    assert!(
-        prose.contains("p256") && prose.contains("ed25519-dalek"),
-        "the header must name both primitive crates in the re-scope paragraph; \
-         header prose was:\n{prose}"
-    );
-    assert!(
-        prose.contains("\"reaches a signing primitive\" is no longer a proxy for \"can sign\""),
-        "the header must state, in as many words, that reaching a signing \
-         primitive has stopped being a proxy for being able to sign — that \
-         sentence is the whole justification for the widening (STANDING RULE \
-         21). Header prose was:\n{prose}"
-    );
-    assert!(
-        prose.contains("THESE FOUR CRATES AND NO OTHERS REACH THE PRIMITIVE CRATES"),
-        "the header must state the narrowed claim check 2 now makes; header \
-         prose was:\n{prose}"
-    );
-    assert!(
-        prose.contains("THE FOURTH ALLOWLIST DOES NOT WEAKEN CHECKS 1 AND 3"),
-        "the header must say, once, that the fourth allowlist does not weaken \
-         checks 1 and 3; header prose was:\n{prose}"
-    );
-
-    // (2) exactly the four names, in that order, and no fifth.
-    let primitive = allowlist(&src, "ALLOWED_PRIMITIVE");
+fn primitive_dependencies_have_an_explicit_allowlist() {
+    let mut primitive = allowlist(&one_signer_source(), "ALLOWED_PRIMITIVE");
+    primitive.sort();
     assert_eq!(
         primitive,
-        vec![
-            "logweir-evidence".to_string(),
-            "logweir".to_string(),
-            "logweir-verify".to_string(),
-            "weirkeeper".to_string(),
-        ],
-        "ALLOWED_PRIMITIVE must be exactly those four names in that order and no \
-         fifth. A fifth name is how this check quietly stops covering a crate \
-         that has no business reaching a signing primitive."
-    );
-
-    // (3) check 2's own heading and `ok:` line point at checks 1 and 3 for the
-    //     signing half — so nobody reads a green check 2 as "nothing else can
-    //     sign".
-    let heading = src
-        .lines()
-        .find(|l| l.contains("echo \"== cargo tree:"))
-        .expect("check 2 still prints a `== cargo tree:` heading");
-    assert!(
-        heading.contains("checks 1 and 3"),
-        "check 2's heading must point at checks 1 and 3 for the signing half; it was:\n{heading}"
-    );
-    assert!(
-        heading.contains("$ALLOWED_PRIMITIVE"),
-        "check 2's heading must name the allowlist it is actually testing; it was:\n{heading}"
-    );
-    let ok_line = src
-        .lines()
-        .find(|l| l.contains("echo \"ok: $prim reaches"))
-        .expect("check 2 still prints an `ok: $prim reaches` line");
-    assert!(
-        ok_line.contains("checks 1 and 3"),
-        "check 2's `ok:` line must point at checks 1 and 3 for the signing half; it was:\n{ok_line}"
+        [
+            "logweir",
+            "logweir-evidence",
+            "logweir-verify",
+            "weirkeeper"
+        ]
     );
 }
 
-/// The two allowlists the extraction did NOT touch, asserted byte-for-byte.
-///
-/// Renamed from a first draft that said "three": `ALLOWED_PRIMITIVE` is exactly
-/// the one that HAD to change, so asserting it unchanged was an impossible
-/// property. These two did not change, `weirkeeper` is on neither, and the
-/// expected bytes are written out here so the assertion is a byte comparison
-/// against `fdc73a5` rather than a description of one.
+/// The controller can verify signatures but cannot link the signing API.
 #[test]
-fn the_two_original_allowlists_are_unchanged() {
+fn signing_and_verification_have_separate_allowed_consumers() {
     let src = one_signer_source();
-    for expected in [
-        "ALLOWED_LINK=\"logweir e2e\"",
-        "ALLOWED_SOURCE=\"logweir-evidence logweir e2e\"",
+    for (name, expected) in [
+        ("ALLOWED_LINK", vec!["e2e", "logweir"]),
+        ("ALLOWED_SOURCE", vec!["e2e", "logweir", "logweir-evidence"]),
+        (
+            "ALLOWED_VERIFY_LINK",
+            vec!["e2e", "logweir", "logweir-evidence", "weirkeeper"],
+        ),
     ] {
-        assert!(
-            src.lines().any(|l| l == expected),
-            "scripts/check-one-signer.sh must still carry the line `{expected}` \
-             byte-for-byte as it stood at fdc73a5. The verify-only extraction \
-             re-scoped check 2 and added a FOURTH allowlist; it did not touch \
-             these two."
-        );
+        let mut actual = allowlist(&src, name);
+        actual.sort();
+        assert_eq!(actual, expected, "unexpected consumers in {name}");
     }
-    for name in ["ALLOWED_LINK", "ALLOWED_SOURCE"] {
-        assert!(
-            !allowlist(&src, name).iter().any(|c| c == "weirkeeper"),
-            "`weirkeeper` must be absent from {name}: it links the VERIFYING \
-             crate and never the signer (spec §8, §10 G-SIGN)"
-        );
-    }
-    // The fourth allowlist exists and is its own list, not an extension of
-    // either of those two.
-    assert_eq!(
-        allowlist(&src, "ALLOWED_VERIFY_LINK"),
-        vec![
-            "logweir-evidence".to_string(),
-            "logweir".to_string(),
-            "weirkeeper".to_string(),
-            "e2e".to_string(),
-        ],
-        "ALLOWED_VERIFY_LINK is the fourth, separate allowlist for the crates \
-         permitted to link `logweir-verify`"
-    );
 }
 
-/// The pure layer is four crates now, and the CI job that proves it says so in
-/// both places.
-///
-/// Global Constraint 1 names `crates/logweir-store` and `crates/weirkeeper` as
-/// outside the pure layer "by ADR, never by a quiet edit to the grep", and
-/// `logweir-verify` as inside it. Both halves are asserted: the four that must
-/// be there, and `logweir-store`, which must not.
+/// The dependency check remains in the shared entrypoint after removing the
+/// redundant standalone workflow and its per-crate build jobs.
 #[test]
-fn the_pure_layer_loop_covers_logweir_verify() {
-    let yml = std::fs::read_to_string(repo_root().join(".github/workflows/no-oso.yml"))
-        .expect(".github/workflows/no-oso.yml is readable");
-    let expected: std::collections::BTreeSet<String> = [
-        "logweir-core",
-        "logweir-evidence",
-        "logweir-kafka",
-        "logweir-verify",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-
-    // (a) the one-crate-per-line `--no-default-features` build list.
-    let singles: std::collections::BTreeSet<String> = yml
+fn the_shared_check_covers_all_pure_libraries() {
+    let script = std::fs::read_to_string(repo_root().join("scripts/ci-check.sh"))
+        .expect("shared CI script is readable");
+    let loop_line = script
         .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("cargo build -p ") && l.ends_with("--no-default-features"))
-        .filter_map(|l| l.split_whitespace().nth(3).map(|s| s.to_string()))
-        .collect();
-    assert_eq!(
-        singles, expected,
-        "the per-crate `--no-default-features` build list must be exactly the \
-         four pure crates"
-    );
-
-    // (b) the combined build, on one line.
-    let combined = yml
-        .lines()
-        .map(str::trim)
-        .find(|l| {
-            l.contains("cargo build -p ")
-                && l.contains("--no-default-features")
-                && l.matches("-p ").count() > 1
-        })
-        .expect("no-oso.yml still carries the combined --no-default-features build");
-    let combined_names: std::collections::BTreeSet<String> = combined
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .filter(|w| w[0] == "-p")
-        .map(|w| w[1].to_string())
-        .collect();
-    assert_eq!(
-        combined_names, expected,
-        "the combined build must name the same four crates; the line was:\n{combined}"
-    );
-
-    // (c) the forbidden-dependency loop.
-    let loop_line = yml
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("for c in "))
-        .expect("no-oso.yml still carries the forbidden-dependency `for c in` loop");
-    let loop_names: std::collections::BTreeSet<String> = loop_line
-        .trim_start_matches("for c in ")
+        .find(|line| line.starts_with("for crate in "))
+        .expect("pure-library dependency check exists");
+    let mut names: Vec<_> = loop_line
+        .trim_start_matches("for crate in ")
         .split(';')
         .next()
-        .expect("the loop line has a `;`")
+        .unwrap()
         .split_whitespace()
-        .map(|s| s.to_string())
         .collect();
+    names.sort();
     assert_eq!(
-        loop_names, expected,
-        "the forbidden-dependency loop must cover the same four crates: a crate \
-         that is BUILT with --no-default-features but never grepped is half a \
-         gate. The line was:\n{loop_line}"
+        names,
+        [
+            "logweir-core",
+            "logweir-evidence",
+            "logweir-kafka",
+            "logweir-verify"
+        ]
     );
-
-    // (d) the asymmetry Task 13 and Task 14 exist to record.
-    for set in [&singles, &combined_names, &loop_names] {
-        assert!(
-            !set.contains("logweir-store"),
-            "`logweir-store` is outside the pure layer BY ADR (docs/architecture.md §E; Global Constraint 1) — it \
-             takes object_store with the aws feature and would fail the grep by \
-             construction. Adding it here is the quiet edit GC1 forbids."
-        );
-    }
+    assert!(script.contains("cargo tree --locked -p \"$crate\" --no-default-features"));
 }

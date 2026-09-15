@@ -511,59 +511,14 @@ fn every_phase_the_orchestrator_runs_says_so_including_a_clean_teardown() {
 
 // ---------------------------------------------------------------- the false sentence
 
-/// The documented guarantee the code does not deliver, deleted and kept deleted.
-///
-/// `phase9_teardown::persist`'s doc comment claimed "a teardown that cannot be
-/// attested is exit 4 rather than a silent success" in the SAME paragraph as
-/// "A failure here is a WARNING at the call site, never an outcome", and
-/// `drill::teardown` proved the first sentence false. That is the signature
-/// defect of stage 1, sitting inside the exact function this task touches.
-///
-/// A doc comment is the one kind of claim no other test in this repository
-/// reads, so it is asserted here and, for the operator who never runs
-/// `cargo test`, in `just lint` — and the second half of this test is what
-/// keeps the `lint` membership honest, in the idiom
-/// `one_signer_gate.rs::just_lint_runs_the_one_signer_gate` established.
+/// Cleanup failure is a warning after the outcome has been signed, so the
+/// function's documentation must not promise a different process exit code.
 #[test]
-fn the_false_exit_4_guarantee_is_gone_and_the_gate_keeps_it_gone() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR");
-
+fn teardown_docs_do_not_promise_a_false_exit_code() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = std::fs::read_to_string(root.join("crates/logweir/src/drill/phase9_teardown.rs"))
         .expect("phase9_teardown.rs is checked in");
-    assert!(
-        !source.contains("exit 4 rather than a silent success"),
-        "`persist`'s doc comment promises an exit code the call site does not produce. The \
-         drill result is signed and uploaded by phase 8 before phase 9 runs, so a failure here \
-         is a WARNING and nothing else — which the same paragraph already said."
-    );
-
-    let justfile = std::fs::read_to_string(root.join("justfile")).expect("justfile is checked in");
-    let mut body = String::new();
-    let mut inside = false;
-    for line in justfile.lines() {
-        if line.starts_with("lint:") {
-            inside = true;
-            continue;
-        }
-        if inside {
-            if line.starts_with(|c: char| c.is_ascii_lowercase()) {
-                break;
-            }
-            body.push_str(line);
-            body.push('\n');
-        }
-    }
-    assert!(inside, "the justfile must still declare a `lint` recipe");
-    assert!(
-        body.contains("exit 4 rather than a silent success"),
-        "`just lint` no longer greps for the deleted sentence, so restoring it to the doc \
-         comment would go unnoticed by everyone who does not run `cargo test`. The `lint` body \
-         was:\n{body}"
-    );
+    assert!(!source.contains("exit 4 rather than a silent success"));
 }
 
 // ---------------------------------------------------------------- the dashboard

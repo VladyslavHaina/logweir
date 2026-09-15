@@ -28,10 +28,11 @@ kubectl --context docker-desktop apply --server-side -f logweir.yaml
 
 using the `@sha256:` references the file carries.
 
-Release verification is still recorded as **`blocked: images not published`**
-in [tag1-checklist.md](tag1-checklist.md). Treat this as the checkout's release
-status, not a live registry check. A published installation requires pulling
-both image digests on a host that did not build them.
+Check the [CI and release runs](https://github.com/VladyslavHaina/logweir/actions)
+for published digests. Main publishes all three images after tests and registry
+verification; version releases also run a drill with the packaged binary.
+The checked-in base-manifest pins are not automatically updated by publication.
+Use the desired run's digests when deploying a new version.
 
 | Image | Current reference |
 |---|---|
@@ -90,12 +91,14 @@ helm install logweir charts/logweir -n logweir-system --create-namespace
 
 The [chart reference](../charts/logweir/README.md) documents all values and
 optional components, including MinIO, demo brokers, existing Kafka clusters
-and the UI. The chart's two Logweir images default to `latest`, with `Always`
-pull policies; base manifests remain digest-pinned. For reproducibility,
-override both images with published digests and set both pull policies
-explicitly. `just chart-check` checks its rendered resources and copied files.
+and the UI. The controller, runner and optional UI images default to `latest`,
+with `Always` pull policies for all three (`ui.imagePullPolicy` controls the UI). Base manifests remain digest-pinned. For reproducibility,
+override enabled images with published digests and set controller and runner
+pull policies explicitly. `just chart-check` checks rendered resources and
+copied CRDs. The UI ships in `logweir-ui`, built by `Dockerfile.ui`, rather
+than a chart ConfigMap; `just smoke-ui` compares its assets with `ui/`.
 
-The release caveat in path (a) also applies to the chart. For local images use
+A running pod does not restart when a tag changes; roll out the deployment or upgrade its image reference. For local images use
 `charts/logweir/examples/author-only.values.yaml`; recorded local and CI walks
 are **author-only**, not evidence of publication.
 
@@ -106,7 +109,8 @@ credentials. Helm installs CRDs once and does not upgrade them automatically.
 
 ### (d) Bring your own registry
 
-Build both images and publish them to a registry your nodes can pull from.
+Build the controller and runner images, plus `logweir-ui` when enabling the
+UI, and publish them to a registry your nodes can pull from.
 Set `ACCOUNT` and `REGION` for this ECR example. The runner remains amd64;
 choose compatible runner nodes and build the controller natively for its nodes.
 For an amd64 controller, set `LOGWEIR_IMAGE_PLATFORM=linux/amd64` before its build.
@@ -117,17 +121,28 @@ aws ecr create-repository --repository-name logweir/logweir
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 just image && just image-weirkeeper                              # on a builder of the cluster's arch
+# Include these UI steps only when enabling ui.enabled:
+aws ecr create-repository --repository-name logweir/logweir-ui
+just image-ui
 docker tag weirkeeper:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
 docker tag logweir:check    "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
+docker tag logweir-ui:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
 helm upgrade --install logweir charts/logweir -n logweir-system --create-namespace \
   --set controllerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0" \
   --set runnerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
+  --set ui.image="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0" \
   --set imagePullPolicy=IfNotPresent \
   --set runnerImagePullPolicy=IfNotPresent \
   --set 'imagePullSecrets[0].name=my-regcred'
 ```
+
+`Dockerfile.ui` compiles nothing, so the UI image can be built for another
+architecture with `LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-ui`.
+The UI image includes its pinned kubectl base; the cluster pulls `logweir-ui`
+and does not need a separate kubectl image.
 
 `imagePullSecrets` is rendered onto the controller ServiceAccount **and the
 runner ServiceAccount**, so the runner Jobs the operator creates inherit it
@@ -139,6 +154,19 @@ to the cluster, and supply a registry Secret through `imagePullSecrets` when
 required. Repository visibility and pull quotas depend on the registry account.
 
 ---
+
+## Images and restricted registries
+
+With both demo flags disabled, the chart uses only Logweir’s controller,
+runner and optional UI images. The optional MinIO and demo Kafka components
+pull upstream MinIO, mc and Apache Kafka images pinned by digest. Logweir does
+not mirror these images into its own namespace.
+
+For a cluster without public registry access, mirror the enabled images into
+your registry and configure their references. The demo images use
+`minio.image`, `minio.mcImage` and `demoKafka.image`; the three Logweir image
+values are shown above. Keep the upstream licenses and notices with any
+redistributed images.
 
 ## Before any custom resource
 
@@ -385,7 +413,9 @@ kubectl --context docker-desktop -n <namespace> \
 ## Serving the UI
 
 The local UI serves `ui/` through a Kubernetes API proxy. The chart also
-offers an optional in-cluster UI; see its reference for that account's authority.
+offers an optional in-cluster UI served from the `logweir-ui` image, built
+from the same files. Its proxy uses a ServiceAccount; see the
+[chart reference](../charts/logweir/README.md#the-uis-authority) for its authority.
 
 ```bash
 kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1

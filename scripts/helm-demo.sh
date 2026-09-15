@@ -922,9 +922,16 @@ expect_http "$PROXY_BASE/ui/" "200" "the page itself"
 expect_http "$PROXY_BASE/ui/app.js" "200" "the router"
 served_sha=$(shasum -a 256 "$OUT/http-body.txt" | awk '{print $1}')
 tree_sha=$(shasum -a 256 ui/app.js | awk '{print $1}')
+# TASK 39: THIS IS THE WHOLE POINT OF THE IMAGE, AND IT IS PROVED THROUGH THE
+# NETWORK. The fourteen files used to arrive as a ConfigMap the chart built from
+# its own copy of `ui/`; they now arrive inside `ui.image`, and what the browser
+# actually receives is compared with the tree here — end to end, through
+# `kubectl proxy`, on a real cluster. `scripts/check-image-ui.sh` makes the same
+# comparison over all fourteen files against the image's filesystem; this line
+# makes it over the one file the router lives in, against the HTTP response.
 echo "    served ui/app.js sha256 $served_sha"
 echo "    tree   ui/app.js sha256 $tree_sha"
-[ "$served_sha" = "$tree_sha" ] || die "the page served from the ConfigMap is not the tree's ui/app.js"
+[ "$served_sha" = "$tree_sha" ] || die "the page served from the logweir-ui image is not the tree's ui/app.js"
 expect_http "$API_BASE/backups" "200" "the API, same origin, the ${REL}-ui ServiceAccount's authority"
 grep -q "\"name\": *\"$BACKUP_NAME\"" "$OUT/http-body.txt" || die "the Backup list through the proxy does not name $BACKUP_NAME"
 echo "    the Backup list names $BACKUP_NAME"

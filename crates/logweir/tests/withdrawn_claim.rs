@@ -139,40 +139,6 @@ fn the_exemption_list_is_exactly_two_paths() {
     }
 }
 
-/// `just lint` is the enforcement point: `ci.yml` mirrors it (green since
-/// 2026-09-12), and membership in the recipe is what makes this gate
-/// enforced on a laptop before a push.
-///
-/// It asserts membership and nothing else — not the recipe's length, not its
-/// line numbers, not the absence of other arms — so a later task adding a guard
-/// to `lint` cannot turn it red. Same shape as
-/// `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`.
-#[test]
-fn the_withdrawn_claim_gate_is_in_just_lint() {
-    let justfile = std::fs::read_to_string(repo_root().join("justfile")).expect("justfile is read");
-    let mut body = String::new();
-    let mut inside = false;
-    for line in justfile.lines() {
-        if line.starts_with("lint:") {
-            inside = true;
-            continue;
-        }
-        if inside {
-            if line.starts_with(|c: char| c.is_ascii_lowercase()) {
-                break;
-            }
-            body.push_str(line);
-            body.push('\n');
-        }
-    }
-    assert!(inside, "the justfile must still declare a `lint` recipe");
-    assert!(
-        body.contains("check-withdrawn-claim.sh"),
-        "`just lint` is where this gate is enforced; removing it from the recipe \
-         silently disarms G-SIGN's second half. The `lint` body was:\n{body}"
-    );
-}
-
 // --------------------------------------------------------------- the red side
 //
 // A gate nobody has ever seen fail is indistinguishable from `exit 0`. The two

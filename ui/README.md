@@ -6,9 +6,12 @@ shipped assets are the sources. API requests use the same origin as the page.
 
 For local use, `kubectl proxy` serves the files using your kubeconfig. The
 [Helm chart](../charts/logweir/README.md#the-uis-authority) optionally deploys
-an in-cluster `kubectl proxy` using its own ServiceAccount, with an init
-container that places these assets in a shared volume. The serving identity
-is different on those two paths; neither requires a credential in the browser.
+an in-cluster `kubectl proxy` using its own ServiceAccount.
+[Dockerfile.ui](../Dockerfile.ui) copies the assets into `/ui` over a pinned
+kubectl base; the chart supplies the proxy arguments and carries no duplicate
+UI files or asset ConfigMap. The serving identity differs between the two
+paths; neither requires a credential in the browser. `just smoke-ui` compares
+every served file in the image with this directory.
 
 ## Serving it
 

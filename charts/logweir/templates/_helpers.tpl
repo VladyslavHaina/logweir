@@ -56,13 +56,15 @@ us-east-1
 {{- end -}}
 
 {{- /*
-A UI file's ConfigMap key. A ConfigMap key may not contain `/`, so
-`ui/pages/approvals.js` becomes `pages__approvals.js`; the Deployment's volume
-`items` map each key back to its path under `/ui`.
+`logweir.ui.key` LIVED HERE UNTIL TASK 39 and is DELETED, not kept beside its
+replacement. It turned a UI file's path into a ConfigMap key
+(`ui/pages/approvals.js` -> `pages__approvals.js`) for the ConfigMap this chart
+built from its own copy of `ui/`. The page now arrives as the `logweir-ui`
+IMAGE — `ui.image`, built by `Dockerfile.ui`, asserted by
+`scripts/check-image-ui.sh` — so there is no ConfigMap, no copy of `ui/` under
+`charts/`, and nothing for this helper to key. A template helper with no caller
+is a helper the next reader has to prove is dead.
 */ -}}
-{{- define "logweir.ui.key" -}}
-{{ . | trimPrefix "ui/" | replace "/" "__" }}
-{{- end -}}
 
 {{- /*
 Task 38. The three cross-cutting values the owner's own file asked for, in one

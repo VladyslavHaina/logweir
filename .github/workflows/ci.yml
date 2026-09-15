@@ -1,243 +1,42 @@
-# THIS FILE IS DOCUMENTATION, NOT A GATE — and the sentence below is written
-# from the runs themselves rather than from intent.
-#
-# WORKFLOWS IN THIS REPOSITORY THAT HAVE ACTUALLY EXECUTED, as of 2026-09-12, on
-# https://github.com/VladyslavHaina/logweir; see docs/tag1-checklist.md clauses 2
-# and 4:
-#
-#   * no-oso.yml — green on every run since the first, run 34692903300 on commit
-#     5ea1c73, 2026-09-12; latest green run 34700987811 on commit a113dd2.
-#   * ci.yml — red on its first seven runs, each on one environment fact a laptop
-#     had hidden; GREEN on run 34700428677, commit 9aa6bb2, 2026-09-12, and again
-#     on run 34700987730, commit a113dd2. Every job green: build, e2e,
-#     python-verifier, deny, sync-upstream.
-#   * kind-demo.yml — red on its first eight runs; GREEN on run 34700987743,
-#     commit a113dd2, 2026-09-12. That run installed the AUTHOR-ONLY branch: both
-#     images were built by the run and loaded onto the kind node, never pulled.
-#     It closes clause 2 and it is NOT evidence for clause 1 (Global Constraint
-#     37 — the images are still not published).
-#   * helm-demo.yml — GREEN on its first run, 34718123956, commit 1f77f79,
-#     2026-09-12: the Helm chart installed on a kind cluster the run created,
-#     with both images built by the run (author-only values), the whole walk of
-#     scripts/helm-demo.sh green. NOT evidence for clause 1 either.
-#
-# NEVER EXECUTED, not once, on any commit:
-#
-#   * release.yml — it fires on a pushed tag, and no tag has been pushed, so
-#     checklist clause 4 reads `blocked: no tag pushed` and clause 6, whose
-#     artefact this workflow would publish, reads `blocked: no release run`.
-#   * release-drill.yml and engine-matrix.yml — scheduled, and no schedule has
-#     fired.
-#
-# Nothing here may describe those three as checks that run.
-#
-# THE ENFORCEMENT POINT IS STILL `just gate` (Task 32), which runs the same set
-# in one order on a laptop, BEFORE a push rather than after one. The steps below
-# MIRROR it, which is why the first green run of this file needed eleven fix
-# commits and no new check — and
-# `crates/logweir/tests/gate_lint.rs::gate_lint_ci_mirrors_the_gate` asserts the
-# mirror stays complete: every `scripts/*.sh` that `just gate` runs appears on an
-# executed line here, and this comment names the same state the checklist does.
-# Dropping a script from this file fails that test at assertion time.
-#
-# `just gate` itself is deliberately NOT the step here: a workflow that shells
-# `just` hides which check failed behind one red step, and this file's whole
-# purpose is to read as the list.
 name: ci
 on:
   push: { branches: [main] }
   pull_request:
+  workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  build:
+  check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The Dockerfile's build-stage package list, verbatim: a bare runner lacks
-      # libsasl2 (sasl2-sys) and curl's headers (librdkafka's cmake build) — the
-      # first two CI runs, 2026-09-12, failed on each in turn.
-      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
-      - name: Extract the pinned engine
-        run: ./scripts/extract-engine.sh
-      # `cargo fetch --locked`: `linkage.rs` runs `cargo metadata --offline` in a copy
-      # of the workspace, which needs EVERY locked package's manifest in the
-      # registry cache — platform-only ones included (`android_system_properties`
-      # was the one the fourth CI run, 2026-09-12, could not find). A build
-      # downloads only what it compiles; a fetch downloads the lockfile.
-      - run: cargo fetch --locked
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      # `crates/logweir/tests/two_reader_parity.rs` runs BOTH readers over
-      # `e2e/fixtures/invariants/` inside the ordinary `cargo test --workspace`
-      # set, and the second reader is `docs/verify_scorecard.py`. That test
-      # PANICS rather than skipping when `cryptography` is missing — a parity
-      # check that quietly did not run is the exact "documented guarantee the
-      # code does not deliver" it exists to remove — so this install is
-      # load-bearing, not decoration. Same reason as the `e2e` job's copy.
-      - run: pip install cryptography
-      - run: cargo test --workspace
-      - name: pure-layer linkage guard (Global Constraint 2)
-        run: ./scripts/check-no-oso.sh
-      - name: pure-layer purity guard (Global Constraint 1)
-        run: ./scripts/check-pure-core.sh
-      # G2': no crate outside {logweir, e2e} LINKS the signing API. This proves a
-      # link-time property only — it does NOT bound anyone's CAPABILITY to sign
-      # (the signing key is a Secret; `create pods` in its namespace is equivalent
-      # to holding it; Global Constraint 27). NOTE for whoever edits this comment:
-      # `scripts/check-withdrawn-claim.sh` walks this directory for the withdrawn
-      # stronger claim and its paraphrases, and `check-one-signer.sh:16` binds "the
-      # CI step that runs it" by name — so state the narrowed claim, as above, and
-      # do not quote the withdrawn one even to deny it. (Same hazard as the
-      # check-dod.sh note two comments below.) Per line item 1g this step is the
-      # MIRROR of `just lint`'s line (this workflow has executed green since
-      # 2026-09-12); `just lint` is the gate a laptop runs before a push.
-      - name: single-signer linkage gate (G2')
-        run: ./scripts/check-one-signer.sh
-      # `scripts/check-dod.sh` — the sole enforcer of the ASF attribution
-      # footer (Global Constraint 14), the GC14 namespace rule and relative
-      # link integrity. It existed, worked, printed an honest list of what it
-      # does NOT cover, and was reachable only from `just dod`: `grep -rn
-      # check-dod .github/` returned nothing, so a doc merged without the
-      # footer, or a publish to a forbidden namespace added to a workflow, was
-      # caught by nobody. It is a laptop-only check by design (no network, no
-      # GitHub API), which is exactly why it runs here as an ordinary step.
-      # NOTE for whoever edits this comment: check-dod.sh greps THIS directory
-      # for a publish under the upstream namespace, so do not write that
-      # pattern out in prose here — the guard would report itself.
-      - name: definition of done (attribution, GC14 namespaces, link integrity)
-        run: ./scripts/check-dod.sh
-      # ------------------------------------------------------------------
-      # THE REST OF `just gate`'s SHELL GATES, in the gate's own order (Task
-      # 32). Each was reachable only from the justfile before this task, which
-      # for a repository whose workflows have never run is the same as being
-      # reachable only from a developer's memory.
-      - name: unit-suite timing bounds (Global Constraint 22)
-        # REFUSES, exit 1, while 9092 or 9000 answers. This job starts no
-        # compose stack, which is why the step can live beside the unit tests.
-        run: ./scripts/time-unit-suite.sh
-      # cargo-deny is not on a runner (the fifth CI run, 2026-09-12: `no such
-      # command: deny`); the `deny` job below gets it from its action, this job
-      # from the same installer the release uses, pinned to the local version.
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
       - uses: taiki-e/install-action@v2
-        with: { tool: cargo-deny@0.20.2 }
-      - name: licence permissions over the resolved graph (Global Constraint 15)
-        # `--offline` is a GLOBAL flag and goes before `check`. The `deny` job
-        # below runs the same tool through EmbarkStudios/cargo-deny-action; this
-        # step is the one that matches the local gate line token for token.
-        run: cargo deny --offline check licenses
-      - name: the withdrawn signing claim stays withdrawn (G-SIGN, half two)
-        run: ./scripts/check-withdrawn-claim.sh
-      - name: no archive-write capability outside the runner (Global Constraint 6)
-        run: ./scripts/check-no-archive-write.sh
-      - name: the UI loads no remote asset (spec 8)
-        run: ./scripts/check-ui-offline.sh
-      # `check-ui-behaviour.sh` refuses without `target/release/logweir` (STANDING
-      # RULE 5's fourth prerequisite). `just gate` has it from its release test
-      # line; this mirror had never built it (the sixth CI run, 2026-09-12).
-      - run: cargo build --release -p logweir
-      - name: the UI behaviour suite (interface I24)
-        run: ./scripts/check-ui-behaviour.sh
-      - name: every mark in the shipped docs is labelled (spec 16 clause 9)
-        run: ./scripts/check-unverified-labels.sh
-      - name: the artifact-directory ceiling (STANDING RULE 6)
-        run: ./scripts/check-deps-count.sh
-      - name: relative markdown link integrity (never fetches http/https)
-        run: ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
-      - name: the install file has no drift (interface I26)
-        run: ./scripts/render-install.sh --check
-      # Task 35: the chart gate — `just chart-check` in `just gate`. Helm is
-      # pinned to the major the checked-in rendered files were produced with
-      # (`scripts/check-chart.sh` refuses an older one by name), so a drift
-      # here is a template change and never a serialiser difference.
+        with: { tool: 'just,cargo-deny@0.20.2' }
       - uses: azure/setup-helm@v4
-        with:
-          version: v4.0.1
-      - name: the Helm chart is what the tree says it is (charts/logweir, Task 35)
-        run: ./scripts/check-chart.sh
-      - name: the third-party inventory matches the resolved graph (interface I30)
-        run: |
-          bash scripts/gen-third-party-notices.sh > /tmp/tpn.check
-          diff -u THIRD_PARTY_NOTICES.md /tmp/tpn.check
-      - name: schema drift
-        run: |
-          cargo run -p logweir-core --example emit_schema > /tmp/schema.json
-          diff -u schemas/logweir-drill-scorecard-1.0.0.json /tmp/schema.json
-      # Task 5: THE SECOND DRIFT ARM, in the same shape as the scorecard arm
-      # above and for the same reason. The backup receipt is a document Global
-      # Constraint 12 requires a `cmp` on the drift gate for, exactly like the
-      # scorecard — and it is a SEPARATE step rather than two more lines in the
-      # step above so a failure names which schema drifted without a reviewer
-      # having to read the diff to find out.
-      #
-      # A DISTINCT /tmp PATH, not /tmp/schema.json: two arms writing one
-      # temporary file would make the second diff depend on the order the steps
-      # happened to run in, and a `diff` of a file against itself is the one
-      # comparison that cannot fail.
-      - name: backup receipt schema drift
-        run: |
-          cargo run -p logweir-core --example emit_backup_receipt_schema > /tmp/backup-receipt-schema.json
-          diff -u schemas/logweir-backup-receipt-1.0.0.json /tmp/backup-receipt-schema.json
-      # Task 15b: THE THIRD DRIFT ARM, beside the schema arm above and for the
-      # same reason. A CRD change is a FORMAT change — config/crd/ is what
-      # `kubectl apply` consumes, what the UI's forms are written against and
-      # what Tasks 16-24 read — so it has to appear as a diff a reviewer sees
-      # rather than as a surprise at apply time.
-      #
-      # SIX EXPLICIT DIFFS, NOT `diff -r`. A recursive diff of two directories
-      # says nothing when a file is missing from BOTH sides, which is exactly
-      # what a deleted kind looks like. Naming each file means a seventh kind
-      # (an extra file in /tmp/crd) and a vanished kind (a missing file here)
-      # are both non-zero. `just crds` is the regenerator.
-      - name: crd drift
-        run: |
-          cargo run -p weirkeeper --example emit_crds -- --out /tmp/crd
-          diff -u config/crd/kafkaclusters.yaml   /tmp/crd/kafkaclusters.yaml
-          diff -u config/crd/backupschedules.yaml /tmp/crd/backupschedules.yaml
-          diff -u config/crd/backups.yaml         /tmp/crd/backups.yaml
-          diff -u config/crd/restores.yaml        /tmp/crd/restores.yaml
-          diff -u config/crd/approvals.yaml       /tmp/crd/approvals.yaml
-          diff -u config/crd/trustrosters.yaml    /tmp/crd/trustrosters.yaml
-          test "$(ls -1 /tmp/crd | wc -l)" -eq 6
-      - name: known-TODO tracker (Task 19 fix round 2, review FIX 6)
-        # Runs every `#[ignore]`d marker test in the workspace — currently only
-        # `oso_cli_engine_must_override_validation_run_once_docker_is_available`
-        # (crates/logweir-engine-oso/tests/engine.rs), tracking the
-        # `DataEngine::validation_run` override still owed on `OsoCliEngine`.
-        # EXPECTED TO FAIL here, same as locally: this CI runner has no
-        # Docker/extracted kafka-backup binary either. `continue-on-error`
-        # keeps that failure informational rather than blocking merges — the
-        # point is that this step is ACTUALLY EXECUTED on every build, so a
-        # default trait method nobody is reminded to override cannot go
-        # unnoticed the way a doc comment alone would let it. The day the
-        # real override lands (and this marker test is deleted as part of
-        # that change, per its own doc comment), this step simply stops
-        # running it — the obligation is closed, not silently long-lived.
-        continue-on-error: true
-        run: cargo test --workspace -- --ignored
-  # Task 21c. The only job that runs Logweir end to end against a real broker,
-  # a real MinIO and a real archive. Deliberately a SEPARATE job from `build`:
-  # it needs Docker, it takes minutes rather than seconds, and its failures mean
-  # something different from a unit-test failure.
-  #
-  # linux/amd64 runner, so `.engine/kafka-backup` executes natively and
-  # `harness::engine_bin`'s probe picks it over `e2e/fixtures/engine-docker.sh`.
-  # The harness PRINTS which route it took; read that line before trusting a
-  # green run on any other architecture.
+        with: { version: v4.0.1 }
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - run: pip install cryptography pytest
+      - run: bash scripts/ci-check.sh
   e2e:
+    timeout-minutes: 35
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # FREE THE DISK FIRST. The runner image ships tens of gigabytes of toolchains
-      # this job never touches (.NET, Android, GHC, Boost, CodeQL); with a debug
-      # build of the workspace and the Docker images beside them MinIO reaches its
-      # free-space floor and refuses every PUT (`XMinioStorageFull`, the sixth CI
-      # run, 2026-09-12 — the same job had passed at the margin one run earlier).
-      # `df` before and after is the record.
       - name: free disk space (MinIO refuses writes below its free-space floor)
         run: |
           df -h /
@@ -245,45 +44,23 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      # The Dockerfile's build-stage package list, verbatim: `logweir-kafka` builds
-      # rdkafka with `sasl` (sasl2-sys links the system libsasl2) and librdkafka's
-      # cmake build wants curl's headers — present in the image build's apt line
-      # and in macOS's SDK, absent on a GitHub runner (the first two CI runs).
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
-      # `docs/verify_scorecard.py` is the auditor's independent verifier and the
-      # e2e suite runs it on every signed artifact. `harness::python_verify`
-      # PANICS rather than skipping when `cryptography` is missing, so this
-      # install is load-bearing, not decoration.
+      - uses: taiki-e/install-action@v2
+        with: { tool: just }
       - run: pip install cryptography
-      # `cargo fetch --locked`: `linkage.rs` runs `cargo metadata --offline` in a copy
-      # of the workspace, which needs EVERY locked package's manifest in the
-      # registry cache — platform-only ones included (`android_system_properties`
-      # was the one the fourth CI run, 2026-09-12, could not find). A build
-      # downloads only what it compiles; a fetch downloads the lockfile.
       - run: cargo fetch --locked
       - name: Extract the pinned engine
         run: ./scripts/extract-engine.sh
-      - run: docker compose -f e2e/compose/docker-compose.yml up -d --wait
-      - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
-      - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
-      # THE THIRD SEEDER IS NOT OPTIONAL: `just e2e-up` runs all three, and a stack
-      # without the SCRAM user fails every SCRAM test with an authentication
-      # error (the third CI run, 2026-09-12). `gate_lint_ci_e2e_seeds_like_e2e_up`
-      # holds this job to the recipe's lines.
-      - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm scram-setup
-      # A SUCCESSFUL SEED ALWAYS DIRTIES THE TREE (scripts/e2e-seed.sh says so
-      # in those words): the two refreshed fixtures are not byte-reproducible.
-      # Never add a `git diff --exit-code` after this step.
+      - run: just e2e-up
       - run: ./scripts/e2e-seed.sh
-      # ONE TEST IS SKIPPED BY NAME, AND THE NAME IS THE RECORD.
-      # `a_pod_really_reaches_the_k8s_listener` starts a pod on the laptop's
-      # `docker-desktop` cluster; this job has Docker and no Kubernetes, so on a
-      # runner it can only fail on a missing context (the third CI run,
-      # 2026-09-12). The property it proves — a pod reaches the advertised `K8S`
-      # listener — is proven on CI by `kind-demo.yml`'s in-cluster `cluster-probe`
-      # (`reachable=true`, read directly off the pod's exit). `just e2e` on the
-      # laptop still runs it.
-      - run: cargo test --workspace --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
+      - run: cargo build --locked -p logweir
+      - run: cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
+      - name: Kafka adapter and production timeout integration tests
+        run: |
+          cargo test --locked -p logweir-kafka --features e2e --test live -- --test-threads=1
+          cargo test --locked -p logweir --features e2e --lib check_storage_skips_a_genuinely_unreachable_endpoint
+          cargo test --locked -p logweir --features e2e --test doctor check_7_an_unreachable_target_is_named_as_a_target_problem
+          cargo test --locked -p logweir --features e2e --test notify the_production_agent_gives_up_on_a_sink_that_never_replies
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
       - if: always()
@@ -292,75 +69,11 @@ jobs:
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
-  # The auditor's independent verifier, and — since T0-1 — the job that proves
-  # the TWO readers agree. That second claim needs BOTH readers, so this job
-  # builds the Rust one. It used to be pure-Python (checkout, setup-python, pip,
-  # pytest); `test_self_attested_parity` then arrived needing
-  # `target/debug/logweir` and REFUSING to skip without it, which is the correct
-  # instinct and made this job red on every push. A parity job that cannot run
-  # the first reader is a documented guarantee nothing enforces — exactly what
-  # T0-1 exists to eliminate — so the fix is to give the job the binary, never
-  # to let the test skip.
-  python-verifier:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      # `logweir` -> `logweir-kafka` -> rdkafka's `cmake-build` feature. The e2e
-      # job installs this for the same reason; a plain `cargo build -p logweir`
-      # needs it too. No engine extraction: that is a RUNTIME dependency of the
-      # drill tests, and nothing here runs a drill.
-      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
-      - run: pip install cryptography pytest
-      - name: Build the Rust reader (the parity check compares the two readers)
-        run: cargo build -p logweir
-      - run: python3 -m pytest docs/test_verify_scorecard.py -q
-      # `scripts/check-verifier-parity.sh` was, on the commit that introduced it,
-      # the ONE guard script in `scripts/` that no CI job invoked — its three
-      # siblings each have a named step in `build`, and CI does not run
-      # `just lint`. So the mechanical two-reader claim held only on a
-      # developer's laptop. It runs here, next to the pytest suite that shares
-      # its fixtures, and it FAILS rather than skipping when `cryptography` or
-      # the Rust binary is missing.
-      - name: two-verifier parity over the signed fixture corpus (T0-1)
-        run: ./scripts/check-verifier-parity.sh
-      # The auditor-side half of the invariant-corpus gate (T0-6 / T0-3). The
-      # Rust walker `crates/logweir/tests/two_reader_parity.rs` runs both
-      # readers in the `build` job; this one runs the SECOND reader alone over
-      # the same `e2e/fixtures/invariants/index.json`, so the corpus stays
-      # checked on the machine an auditor actually has — python3 and no Rust
-      # toolchain. It is in `just lint` too; CI does not run `just lint`, which
-      # is how its sibling went a whole release unreachable.
-      - name: the invariant corpus, auditor's reader only (T0-6 / T0-3)
-        run: ./scripts/check-invariant-corpus.sh
-
-  deny:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
-  sync-upstream:
-    runs-on: ubuntu-24.04
-    env:
-      # The single place the upstream SOURCE pin lives. Global Constraint 8 pins v0.1
-      # to engine v0.21.0. The engine BINARY is pinned by digest, in
-      # third_party/kafka-backup-binary.digest (Global Constraint 7); this tag pins only
-      # the read-only source checkout the vendored structs are compared against.
-      UPSTREAM_TAG: v0.21.0
-    steps:
-      - uses: actions/checkout@v4
-      # Upstream's own repository, checked out read-only to READ its struct definitions.
-      # Permitted by global ruling GR6: Global Constraint 14 forbids Logweir PUBLISHING
-      # under the osodevops/ namespace, not referencing upstream's published source.
-      - uses: actions/checkout@v4
-        with:
-          repository: osodevops/kafka-backup
-          ref: ${{ env.UPSTREAM_TAG }}
-          path: upstream/kafka-backup
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo xtask sync-upstream --tag "$UPSTREAM_TAG" --upstream upstream/kafka-backup
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, e2e]
+    uses: ./.github/workflows/images.yml
+    with:
+      tag: sha-${{ github.sha }}
+      promote_latest: true
+    secrets: inherit

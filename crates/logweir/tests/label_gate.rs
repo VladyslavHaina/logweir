@@ -1,33 +1,6 @@
-//! The label gate and the tag-1 checklist — Task 29b, spec §16 clauses 9 and 8.
-//!
-//! `scripts/check-unverified-labels.sh` is the gate: it walks the tree, anchors
-//! on the bracket token, and refuses a mark that carries no description or that
-//! sits on a line which also asserts the thing is true. These tests are the
-//! half a shell script cannot hold on its own.
-//!
-//! WHY A RUST TEST AT ALL, when the script is the gate. Three reasons, and each
-//! is a defect that has happened in this repository before:
-//!
-//! 1. A gate that is not in `just lint` is documentation. `.github/workflows/ci.yml`
-//!    mirrors `just gate` (green since 2026-09-12); membership in the `lint`
-//!    recipe is what makes a script run on a laptop before a push — `just_lint_runs_the_label_gate`
-//!    is the same test, for the same reason, as
-//!    `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`.
-//! 2. The two marks this task closed were closed by EDITING PROSE, and prose
-//!    reverts. `the_two_pre_existing_marks_are_closed` pins both.
-//! 3. `docs/tag1-checklist.md` is the ledger a tag is cut against, and its
-//!    failure mode is a row that reads `closed` with nothing behind it. Two
-//!    tests read it back.
-//!
-//! NO SUBPROCESS AND NO NETWORK (Global Constraint 22). Everything here reads
-//! checked-in files. The RED side of the shell gate — a bare mark, a
-//! contradicted line, a two-word description, a bare-word mention, a backticked
-//! quotation — is exercised by running the script against temp trees through
-//! `LOGWEIR_ROOT`, and those runs are recorded in the task report; a test that
-//! shelled out would put a filesystem walk of the whole repository inside the
-//! 15 s per-test budget for no assertion the script does not already make.
+//! Documentation label checks and reusable release-checklist consistency.
+//! These read local files; execution results belong in workflow summaries.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The bracket token, assembled at compile time from two pieces so this file
@@ -130,7 +103,7 @@ fn the_two_pre_existing_marks_are_closed() {
 
 /// **`just lint` runs the label gate.**
 ///
-/// `.github/workflows/ci.yml` mirrors `just gate` (green since 2026-09-12); a
+/// `.github/workflows/ci.yml` and `just gate` share the check script; a
 /// workflow step runs on a push, and membership in the `lint` recipe is what
 /// makes a script a gate on a laptop before one. Deleting the line from `justfile` leaves
 /// `cargo test --workspace` entirely green, which is the whole reason this test
@@ -223,31 +196,24 @@ fn closers(cell: &str) -> Vec<String> {
         .collect()
 }
 
-/// **Ten rows, one per spec §16 clause, each with a status literal and a
-/// closer — and every `closed` row's named path exists on disk.**
-///
-/// Spec §16 lists ten clauses and the checklist is the ledger a tag is cut
-/// against, so a missing row is a clause nobody is tracking. The status
-/// grammar admits exactly three literals, because a fourth is where "mostly
-/// done" gets written down.
-///
-/// The last assertion is the one that makes a tick mean something: a row may
-/// read `closed` only if the command or the transcript it names is in the tree
-/// TODAY. Naming a test a later task will write is the same defect as naming
-/// nothing at all.
+/// Checklist rows have unique consecutive numbers, known statuses and real
+/// evidence-source paths. No assertion freezes the current release's result.
 #[test]
-fn the_tag1_checklist_has_one_row_per_spec_clause() {
+fn the_release_checklist_has_consistent_rows_and_evidence_sources() {
     let text = read("docs/tag1-checklist.md");
     let rows = checklist_rows(&text);
 
     let numbers: Vec<u32> = rows.iter().map(|r| r.number).collect();
     assert_eq!(
         numbers,
-        (1..=10).collect::<Vec<u32>>(),
-        "docs/tag1-checklist.md carries one row per spec §16 clause, numbered 1-10 in \
-         order; found {numbers:?}"
+        (1..=rows.len() as u32).collect::<Vec<u32>>(),
+        "release checklist rows must have unique consecutive numbers; found {numbers:?}"
     );
 
+    assert!(
+        !rows.is_empty(),
+        "the release checklist must contain checks"
+    );
     let root = repo_root();
     for row in &rows {
         let n = row.number;
@@ -269,71 +235,28 @@ fn the_tag1_checklist_has_one_row_per_spec_clause() {
             row.closer
         );
 
-        if row.status == "closed" {
-            for target in &named {
-                assert!(
-                    root.join(target).exists(),
-                    "row {n} reads `closed` and names `{target}`, which is not in the tree. \
-                     A closed row must name something a reader can run or open today; if the \
-                     closer belongs to a later task, the row is not closed yet."
-                );
-            }
+        for target in &named {
+            assert!(
+                root.join(target).exists(),
+                "row {n} names `{target}`, which is not in the tree. \
+                     Evidence sources must be available to the release operator."
+            );
         }
     }
 }
 
-/// **No blocked row is written as closed, and the four that are blocked today
-/// are the four that cannot be closed from this tree.**
-///
-/// Tag-1 STANDING RULE 22: a mark that is blocked is recorded as blocked, never
-/// as closed. The same rule governs a clause. Clause 1 needs images published
-/// to a registry the author does not control; clause 4 needs a tagged run of
-/// `release.yml`, and no tag has been pushed; clause 6 needs the artefact that
-/// run would publish; clause 8 is an act by the owner — a formal registry
-/// search — and no task in the plan closes it.
-///
-/// **Clause 2 was one of five until 2026-09-12 and is now `closed`**, by
-/// `kind-demo.yml` run 34700987743 on commit `a113dd2`, which the row names
-/// with its URL. That is what the exactness below is for: the row moved
-/// because a run in the world moved, and the move cost this line of diff.
-///
-/// The second assertion is deliberately exact rather than a lower bound. If a
-/// later task closes one of the four it must edit this list in the same commit,
-/// which is the point: a row moving from `blocked` to `closed` is a claim about
-/// the world and should cost a reviewer a line of diff.
+/// A blocked check cannot simultaneously be reported as closed. Which checks
+/// are blocked changes between candidates and is deliberately not pinned here.
 #[test]
 fn no_blocked_row_is_written_as_closed() {
-    let text = read("docs/tag1-checklist.md");
-    let rows = checklist_rows(&text);
-
-    let mut blocked = BTreeSet::new();
-    for row in &rows {
-        let n = row.number;
+    for row in checklist_rows(&read("docs/tag1-checklist.md")) {
         if row.line.contains("blocked:") {
             assert!(
                 row.status.starts_with("blocked: "),
-                "row {n} says \"blocked:\" somewhere in its text but its status cell reads \
-                 \"{}\". The status is the field anything mechanical reads.",
+                "row {} describes a block but its status is {}",
+                row.number,
                 row.status
             );
-            assert_ne!(
-                row.status, "closed",
-                "row {n} is blocked and closed at once; a clause is one or the other"
-            );
-            blocked.insert(n);
-        }
-        if row.status.starts_with("blocked: ") {
-            blocked.insert(n);
         }
     }
-
-    let expected: BTreeSet<u32> = [1, 4, 6, 8].into_iter().collect();
-    assert_eq!(
-        blocked, expected,
-        "clauses 1 (images not published), 4 (no tag pushed), 6 (no release run) and 8 \
-         (owner action) are the four that cannot be closed from this tree; clause 2 closed \
-         on 2026-09-12 with the URL of a green `kind-demo.yml` run. A change to this set is \
-         a change to what the project claims, and belongs in the same commit as the work \
-         that earned it."
-    );
 }

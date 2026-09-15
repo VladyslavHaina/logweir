@@ -228,9 +228,10 @@ pre-release ruling by accident.**
 
 ### Controller image architecture and release evidence
 
-The release checklist records `blocked: no tag pushed`; closure requires a
-successful tagged release and the pullback job's recorded digests. These are
-recorded release conditions, not a fresh check of GitHub status.
+The shared image workflow records digests after native execution and registry
+verification. Main publication and versioned releases reuse it; check the
+exact Actions run before deploying a digest. The release checklist records
+evidence per candidate.
 
 The workflow builds `linux/amd64` and `linux/arm64` controller variants on
 native runners, checks each variant, and assembles a manifest list after

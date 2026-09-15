@@ -1,140 +1,42 @@
-# The default recipe is the release gate (Task 22 step 8), so it must be able to
-# FAIL on formatting: it never runs the rewriting `fmt` recipe. Run `just fmt`
-# yourself to fix formatting; `lint` checks it, and also runs the guard scripts
-# listed in the `lint` recipe below — read the recipe for the current set. This
-# comment deliberately does not enumerate them, so it cannot go stale.
-# check-verifier-parity.sh and check-invariant-corpus.sh need a `python3` with
-# the `cryptography` package (Tasks 3 and 4) — they FAIL rather than skipping
-# when the package is missing, because the two-reader parity claim is not
-# checkable without the second reader.
-# check-invariant-corpus.sh is the auditor-side half: it walks
-# e2e/fixtures/invariants/index.json with the Python reader alone, so the
-# corpus is still checked where there is no Rust toolchain.
-default: lint test
+# Fast local checks. `just gate` is the shared CI quality check.
+default: gate
 
 fmt:
     cargo fmt --all
 
-# The `phase9_teardown.rs` grep in `lint` is T0-11's, and it is a grep rather
-# than a script because what it guards is a DOC COMMENT — the one kind of claim
-# no unit test reads. `phase9_teardown::persist` promised "a teardown that
-# cannot be attested is exit 4 rather than a silent success" one sentence away
-# from the sentence that contradicts it, and the call site proved the promise
-# false. The claim is deleted; this keeps it deleted. `test -f` runs first so a
-# renamed file fails here rather than passing on grep's exit 2, and
-# `crates/logweir/tests/teardown.rs::the_false_exit_4_guarantee_is_gone_and_the_gate_keeps_it_gone`
-# keeps this line's membership in the recipe honest.
-#
-# Task 14 appends `check-withdrawn-claim.sh` after it — G-SIGN's second half,
-# the corpus grep that keeps the withdrawn stronger claim about signing off
-# every shipped surface. `ci.yml` mirrors `just gate` (green since 2026-09-12), and
-# membership in THIS recipe is what makes it enforced on a laptop before a push;
-# `crates/logweir/tests/withdrawn_claim.rs::the_withdrawn_claim_gate_is_in_just_lint`
-# keeps it here.
-#
-# Task 19 (chain J, slot 9) appends `check-no-archive-write.sh` last — G-RET,
-# the capability gate for the retention path. It greps `crates/weirkeeper/src`
-# for `Store::from_url`, the put methods and a RECEIVER-ANCHORED `.delete(`,
-# with comment and doc-comment lines stripped first, and never for the bare
-# word delete: that is a Kubernetes verb the controller legitimately holds on
-# Jobs and an ordinary English word in the doc comments this design requires.
-# The question a guard has to answer about a deletion is not "did it?" but
-# "CAN it?", which is why this is a grep beside `check-one-signer.sh` and not
-# a behavioural test.
-# `crates/weirkeeper/tests/retention.rs::the_no_archive_write_gate_is_in_just_lint`
-# keeps it here.
 lint:
     cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
     ./scripts/check-no-oso.sh
     ./scripts/check-pure-core.sh
     ./scripts/check-verifier-parity.sh
     ./scripts/check-invariant-corpus.sh
-    ./scripts/check-deps-count.sh
-    ./scripts/time-unit-suite.sh
     ./scripts/check-one-signer.sh
-    test -f crates/logweir/src/drill/phase9_teardown.rs && ! grep -q 'exit 4 rather than a silent success' crates/logweir/src/drill/phase9_teardown.rs
-    ./scripts/check-withdrawn-claim.sh
     ./scripts/check-no-archive-write.sh
     ./scripts/check-ui-offline.sh
     ./scripts/check-ui-behaviour.sh
     ./scripts/check-unverified-labels.sh
 
-# Task 7 (Phase 1 line item 1c). G2′: the set of workspace crates from which
-# the signing API is reachable is exactly {logweir, e2e}, computed from the
-# dependency graph rather than a text search.
-#
-# A LINK-TIME PROPERTY AND NOTHING MORE. It does NOT prove the control plane
-# cannot sign: the signing key is a Kubernetes Secret and `create pods` in its
-# namespace is equivalent to holding it. The stronger claim was withdrawn once
-# already and must not be restated here or in the script's output.
-#
-# Membership in `lint` above is what makes this a gate: ci.yml has never
-# executed on any commit, so the workflow step is documentation.
-# `crates/logweir/tests/one_signer_gate.rs::just_lint_runs_the_one_signer_gate`
-# keeps the membership honest.
+# Dependency-graph guard for the signing API's allowed consumers.
 check-one-signer:
     ./scripts/check-one-signer.sh
 
-# Task 5b. The artifact-directory ceiling. `target/debug/deps` reached 873,349
-# files / 43.5 GiB across five tasks of mutation rounds that nobody cleaned up
-# after, and at that size cargo spends ~30 s PER TEST BINARY fingerprinting the
-# directory: `cargo test --workspace` took twenty minutes at 0% CPU and was
-# twice mistaken for a hang. Fails over 50,000 files and PRINTS THE COUNT on
-# every run, so the trend is readable long before it fails. Part of `lint`.
+# Optional diagnostics for slow local test runs; excluded from CI quality checks.
 deps-count:
     ./scripts/check-deps-count.sh
 
-# Task 5b. THE RULE mutation rounds inherit.
-#
-# FIRST: a mutation round does not run in this working tree at all. It runs in
-# an isolated worktree or clone, because a round leaves mutated source behind
-# whenever it is interrupted, and "there were backups" is not a property anyone
-# can check afterwards.
-#
-# SECOND, wherever it does run: build it under a throwaway target dir, so it
-# never pollutes a shared artifact set —
-#
-#     just mutant "test --workspace --lib doctor"
-#     just mutant-clean
-#
-# — because five tasks of rounds that did not is what put 873,349 files in
-# target/debug/deps and turned a 13-second suite into a twenty-minute one.
-# `just deps-count` above is the detection for the round that forgot. See
-# docs/stability.md, "The unit suite dials nothing; the e2e suite dials".
+time-unit-suite:
+    ./scripts/time-unit-suite.sh
+
+# Keep mutation build artifacts separate from the normal target directory.
 mutant ARGS:
     CARGO_TARGET_DIR=target/mutants cargo {{ARGS}}
 
 mutant-clean:
     rm -rf target/mutants
 
-# Task 5b, wired into `lint` in fix round 1 (review F3). The suite's OWN clock,
-# and the check that keeps it honest. Bounds the whole default suite
-# (LOGWEIR_UNIT_SUITE_BUDGET_SECS, default 120) AND every individual test
-# (LOGWEIR_UNIT_TEST_BUDGET_SECS, default 5).
-#
-# THE PER-TEST BOUND IS THE ONLY THING THAT CATCHES A RE-ADDED DIALER. The
-# reviewer verified it: deleting the `#[cfg(feature = "e2e")]` from
-# `check_7_…` puts a 20 s broker wait back in the default suite, and the grep
-# audit does not see it (its address is `127.0.0.1:1`, and by ruling B1(a) no
-# address could usefully be a token, since every address costs the same 20 s).
-# This harness caught it — `FAIL 20.31s check_7_…`, exit 1 — while the 120 s
-# SUITE budget stayed green at 44 s. So the catcher has to run automatically,
-# and that means here.
-#
-# IT REFUSES TO RUN, EXIT 1, WHILE 9092 OR 9000 ANSWERS. A timing number taken
-# against a live stack is about a different machine than the one this bound is
-# for, and a gate that reports PASS without having measured anything is the
-# defect this whole task exists to remove. The consequence, stated plainly:
-# **`just lint` fails while the compose stack is up.** Run `just e2e-down`
-# first, or run `just e2e` (which wants the stack up) as the separate phase it
-# is. Exiting 0 with a "skipped" line was considered and rejected — that is a
-# check that cannot fail.
-time-unit-suite:
-    ./scripts/time-unit-suite.sh
-
 test:
-    cargo test --workspace
+    cargo test --locked --workspace
 
 golden:
     INSTA_UPDATE=always cargo test --workspace
@@ -153,53 +55,20 @@ schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
 
-# Task 32, chain J slot 25. THE CHECKING HALF of `schema` above — the recipe
-# `just gate` runs, because `schema` itself WRITES the tracked files and a gate
-# that rewrites the thing it is checking cannot fail on its own.
-#
-# THE DETECTION IS THE POINT: regenerate, then require `git status --porcelain
-# -- schemas/` to come back EMPTY. `schemas/` is regenerated by the recipe and
-# must return byte-identical; anything else is drift, and the porcelain listing
-# names which file drifted. `.github/workflows/ci.yml` does the same job with
-# two `diff -u`s into /tmp — that one executes on every push since 2026-09-12, and
-# this is the copy a laptop enforces before one.
-#
-# ONE RECIPE, COVERING BOTH SCHEMAS, because `just schema` regenerates both in
-# one go: splitting the check would mean claiming two checks where the tree has
-# one command. `receipt-schema-check` below is a SECOND NAME for this same
-# recipe (the plan's gate list names both), and `just gate` runs both names — so
-# a reader who types either gets the whole check rather than half of one.
-#
-# `just schema`'s status is read on the next line (STANDING RULE 20); nothing
-# here is piped.
+# Compare regenerated schemas without changing the working tree.
 schema-check:
     #!/usr/bin/env bash
-    set -uo pipefail
+    set -euo pipefail
     cd "{{justfile_directory()}}"
-    just schema
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      echo "schema-check: \`just schema\` exited $rc — the two schemas could not be regenerated," >&2
-      echo "  so nothing was compared. That is a build failure, not a drift verdict." >&2
-      exit "$rc"
-    fi
-    drift="$(git status --porcelain -- schemas/)"
-    if [ -n "$drift" ]; then
-      echo "schema-check: FAIL — regenerating the schemas CHANGED schemas/." >&2
-      echo "  A checked-in schema has stopped describing its type. Global Constraint 12 makes" >&2
-      echo "  this a format change: land the regenerated file in the same commit as the type," >&2
-      echo "  with a SCRIPT_VERSION bump and a corpus case if a reader is affected." >&2
-      printf '%s\n' "$drift" >&2
-      exit 1
-    fi
-    echo "schema-check: ok — schemas/ came back byte-identical (both documents)"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cargo run --locked -p logweir-core --example emit_schema > "$tmp/scorecard.json"
+    cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
+    diff -u schemas/logweir-drill-scorecard-1.0.0.json "$tmp/scorecard.json"
+    diff -u schemas/logweir-backup-receipt-1.0.0.json "$tmp/receipt.json"
 
-# The plan's gate list names the backup-receipt drift check separately, and the
-# tree has one regenerator for both documents. This is that same recipe under
-# the second name rather than a second, thinner check: a name that ran a
-# narrower check than the one people think it runs is worse than a duplicate.
+# Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check
-    @echo 'receipt-schema-check: the same recipe as just schema-check — just schema regenerates BOTH schemas, so one drift check covers both documents'
 
 # The Python auditor verifier. Task 7 — needs `pip install cryptography pytest`.
 #
@@ -410,47 +279,22 @@ smoke: image
 crds:
     cargo run -p weirkeeper --example emit_crds -- --out config/crd
 
-# Task 32, chain J slot 25. THE CHECKING HALF of `crds` above, and the CRD drift
-# check this plan has run by hand at every landing: regenerate, then require
-# `git status --porcelain -- config/crd` to come back EMPTY.
-#
-# `crds` itself WRITES the six tracked files, so it is not a gate; this is.
-# `crates/weirkeeper/tests/crd_shape.rs::the_checked_in_crds_are_what_the_emitter_renders`
-# compares the same bytes IN-PROCESS and is the cheaper, always-on half — this
-# recipe is the one that also catches a renderer whose output depends on
-# something the in-process comparison does not see (a file `--out` writes that
-# the test does not read, an emitter that drops a kind).
+# Compare all emitted CRDs without requiring a clean working tree.
 crds-check:
     #!/usr/bin/env bash
-    set -uo pipefail
+    set -euo pipefail
     cd "{{justfile_directory()}}"
-    just crds
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      echo "crds-check: \`just crds\` exited $rc — the CRDs could not be regenerated, so nothing" >&2
-      echo "  was compared. That is a build failure, not a drift verdict." >&2
-      exit "$rc"
-    fi
-    drift="$(git status --porcelain -- config/crd)"
-    if [ -n "$drift" ]; then
-      echo "crds-check: FAIL — regenerating the CRDs CHANGED config/crd." >&2
-      echo "  A CRD change is a FORMAT change: config/crd/ is what \`kubectl apply\` consumes and" >&2
-      echo "  what the UI's forms are written against. Land the regenerated files in the same" >&2
-      echo "  commit as the type change, so it is a diff a reviewer reads." >&2
-      printf '%s\n' "$drift" >&2
-      exit 1
-    fi
-    echo "crds-check: ok — config/crd came back byte-identical (six kinds)"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cargo run --locked -p weirkeeper --example emit_crds -- --out "$tmp"
+    for crd in "$tmp"/*.yaml; do
+      diff -u "config/crd/$(basename "$crd")" "$crd"
+    done
+    for crd in config/crd/*.yaml; do
+      [ "$(basename "$crd")" = kustomization.yaml ] || test -f "$tmp/$(basename "$crd")"
+    done
 
-# Task 35: THE CHART GATE. `charts/logweir` is derived from `config/` and `ui/`,
-# and this is what keeps it derived: the six CRDs and the fourteen UI files
-# byte-identical to the tree (`cmp`), `helm lint` for the defaults and every
-# example, `helm template` regenerated into `charts/logweir/rendered/` with the
-# `crds-check` drift idiom (porcelain must be empty), every rendered image a
-# digest (the author-only render exempt by name), the values schema refusing a
-# non-boolean flag, and `values.yaml` carrying the tree's own pins. Refuses
-# without helm >= 4, naming it. In `just gate`, right after `crds-check`;
-# `crates/logweir/tests/gate_lint.rs` keeps it there.
+# Lint the chart and verify CRD copies, rendered manifests and image references.
 chart-check:
     bash scripts/check-chart.sh
 
@@ -685,23 +529,7 @@ check-secrets ns scram="kafka-scram":
 image-weirkeeper:
     docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.weirkeeper -t weirkeeper:check .
 
-# Task 32, chain J slot 25. THE CONTROLLER IMAGE'S GATE — `just smoke`'s sibling,
-# and the recipe that gives `scripts/check-image-weirkeeper.sh` (interface I25,
-# Task 23) a caller. Task 23 shipped the script and no recipe, so the only thing
-# invoking it was `release.yml`, which has never executed: the check existed and
-# nothing ran it.
-#
-# DELIBERATELY NOT IN `just gate`, for the same reason `smoke` is not: it builds
-# an image and needs a Docker daemon, and `just gate` must stay runnable on a
-# machine that has neither. It is one of the seven recipes named in
-# `docs/gates.md`'s stack/cluster table, and
-# `crates/logweir/tests/gate_lint.rs::gate_lint_every_check_is_in_the_gate`
-# asserts that every `scripts/check-*.sh` is reached by the gate OR by a recipe
-# in that table, that the two sets are disjoint, and that together they are
-# exhaustive — so this recipe is what keeps `check-image-weirkeeper.sh` inside
-# the enumeration rather than orphaned.
-#
-#     just smoke-weirkeeper; echo "rc=$?"
+# Build and inspect the controller image. Requires Docker.
 smoke-weirkeeper: image-weirkeeper
     bash scripts/check-image-weirkeeper.sh weirkeeper:check
 
@@ -798,12 +626,7 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
 # from a registry the author does not control, and the install file's digest
 # rows still read `blocked: images not published`.
 #
-# THE ORDER OF THE FIRST THREE STEPS IS NOT A STYLE CHOICE.
-# `scripts/time-unit-suite.sh` refuses to run, exit 1, while 9092 or 9000
-# answers (Global Constraint 22), so `just lint` runs at step 2, with the stack
-# DOWN, and the stack comes up at step 3 — never the other way round.
-# `crates/weirkeeper/tests/verification.rs::the_demo_runs_lint_before_the_stack_is_up`
-# asserts it over the script text, in the default test suite.
+# The legacy walkthrough runs lint before starting its compose stack.
 #
 # THE OBJECT STORE IS ADDRESSED AS `http://host.docker.internal:9000`
 # (critique B H20): the compose stack's MinIO already publishes `9000:9000`, so
@@ -925,83 +748,48 @@ helm-demo:
     cargo build -p logweir
     bash scripts/helm-demo.sh
 
-# ===========================================================================
-# Task 32, chain J slot 25. THE GATE — the one local command that runs every
-# check this repository has, in an order chosen so the total is what it is.
-#
-# WHY IT EXISTS. Every check in this tree must be reachable by one local
-# command or it is not enforced. "Wired into ci.yml" is still not the gate here,
-# even now that `ci.yml` HAS executed (run 34700987730, commit a113dd2,
-# 2026-09-12, green): a workflow reports after a push, this recipe reports
-# before one, and `docs/tag1-checklist.md` clause 4 still reads
-# `blocked: no tag pushed` because `release.yml` has never run. This recipe is
-# the enforcement point and `ci.yml` is its mirror.
-#
-# THE ORDERING IS THE BUDGET. `./scripts/time-unit-suite.sh` sits IMMEDIATELY
-# after `cargo test --workspace` and BEFORE the `--release` line, because its
-# SUITE_CMD is that same `cargo test --workspace`, in the same profile and the
-# same target directory: at that position it is a second RUN of artefacts the
-# previous line already built, not a third build. So this recipe contains
-# exactly TWO workspace compilations — one debug (shared by clippy's target
-# set, the suite and the timing harness) and one release. Move the timing line
-# above `cargo test --workspace` and the recipe still exits 0 while the timing
-# line silently absorbs a whole debug compile; the per-line seconds in
-# docs/gates.md are what catch that, and that file says so rather than implying
-# a guard exists.
-#
-# MEASURED — 2026-09-11, quiet 10-core Apple-silicon host, CARGO_BUILD_JOBS=4,
-# compose stack down, warm debug target directory and a COLD release profile:
-# **420.1 s (7 min 0 s)**, of which 315.7 s is line 5, the release compile.
-# Re-run immediately with everything cached: **118.9 s**. `docs/gates.md`
-# carries the per-line seconds and what each line does and does not prove.
-#
-# THE STANDING THRESHOLD IS 2x THE RECORDED TOTAL — **840 s**. Over that, stop
-# and report; `cargo clean` is NOT the remedy (STANDING RULE 6's triggers are
-# 50,000 files in target/debug/deps or a single workspace RUN over five minutes,
-# and a slow gate is neither).
-#
-# NO STATUS THROUGH A PIPE (STANDING RULE 20, Global Constraint 11). `just`
-# runs each line in its own shell and aborts on the first non-zero status, so
-# every line's exit code is read by `just` itself. The one `&&` line is the
-# third-party-notices diff, where both halves' statuses are load-bearing and
-# neither is piped.
-#
-# WHAT IT DELIBERATELY DOES NOT RUN: `just e2e`, `just smoke`,
-# `just smoke-weirkeeper`, `just mvp-demo`, `just k8s-demo`, `just laptop-demo`
-# and `just pitr`. Each needs the compose stack, a Kubernetes cluster or a
-# Docker build — and `./scripts/time-unit-suite.sh` REFUSES to run, exit 1,
-# while 9092 or 9000 answers, so a gate that brought the stack up would fail
-# itself. Those seven are in `docs/gates.md`'s stack/cluster table with what
-# each proves and which `check-*.sh` each invokes, and
-# `crates/logweir/tests/gate_lint.rs` asserts the two sets are disjoint and
-# together exhaustive over every `scripts/check-*.sh` in the tree.
-#
-# THE COMPOSE STACK MUST BE DOWN: `just e2e-down` first, or the timing line
-# refuses.
+# Run the same checks as the GitHub Actions check job. Docker integration and
+# image/release checks have separate recipes and workflows.
 gate:
-    cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
-    ./scripts/time-unit-suite.sh
-    cargo test --workspace --release
-    cargo deny --offline check licenses
-    ./scripts/check-no-oso.sh
-    ./scripts/check-pure-core.sh
-    ./scripts/check-one-signer.sh
-    ./scripts/check-withdrawn-claim.sh
-    ./scripts/check-no-archive-write.sh
-    ./scripts/check-ui-offline.sh
-    ./scripts/check-ui-behaviour.sh
-    ./scripts/check-unverified-labels.sh
-    ./scripts/check-verifier-parity.sh
-    ./scripts/check-invariant-corpus.sh
-    ./scripts/check-deps-count.sh
-    ./scripts/check-dod.sh
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
-    ./scripts/render-install.sh --check
-    just schema-check
-    just crds-check
-    just chart-check
-    just receipt-schema-check
-    bash scripts/gen-third-party-notices.sh > target/tpn.check && diff -u THIRD_PARTY_NOTICES.md target/tpn.check
-    just verify-py
+    bash scripts/ci-check.sh
+
+# Task 39, appended at the END of this file as STANDING RULE 17 requires of
+# every editor of it. THE UI IMAGE — the third image this project publishes,
+# and the one that replaced the chart's ConfigMap copy of the page.
+
+# THE NAMED PRODUCER of the local `logweir-ui:check` tag — the sibling of
+# `image` and `image-weirkeeper` above. Three images, three Dockerfiles, three
+# producers, three gates: `scripts/check-image.sh` asserts the runner,
+# `scripts/check-image-weirkeeper.sh` the controller and
+# `scripts/check-image-ui.sh` this one, because each of the other two is
+# written around binaries this image does not carry.
+#
+# SECONDS, NOT MINUTES, AND THAT IS WHY THIS RECIPE IS DIFFERENT FROM ITS TWO
+# SIBLINGS. `Dockerfile.ui` compiles nothing: it is two `COPY`s of ~90 KB over
+# a kubectl the Kubernetes project publishes. There is no builder stage, no
+# `aws-lc-sys`, no cross-compile refusal — so unlike `image-weirkeeper` this
+# recipe has no architecture it cannot build, and unlike `image` it is not
+# pinned to linux/amd64 (no engine ELF is involved).
+#
+# `${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}` IS THE SAME VARIABLE `image-weirkeeper`
+# READS, and for the same reason: the developer default is this host's own
+# architecture, and a CI runner sets its own. The base
+# (`registry.k8s.io/kubectl@sha256:59bafa07…`) is a MANIFEST LIST carrying
+# linux/amd64 and linux/arm64, so either value resolves to that architecture's
+# own variant — measured 2026-09-14.
+#
+# SINGLE-PLATFORM AND LOADED, exactly as its two siblings: the local image
+# store holds single-platform images only, so a multi-platform build could not
+# `--load` and would have to `--push`. Nothing in this tree pushes (Global
+# Constraint 17); multi-arch is `release.yml`'s image job and nothing else, and
+# there is deliberately no `image-ui-release` recipe here.
+#
+# DELIBERATELY NOT PART OF `lint`, `test`, `default`, `e2e` OR `gate`: it needs
+# a Docker daemon, and `just gate` must stay runnable on a machine that has
+# none. It is a row in `docs/gates.md`'s stack/cluster table instead.
+image-ui:
+    docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.ui -t logweir-ui:check .
+
+# Build the UI image and compare its served files with ui/. Requires Docker.
+smoke-ui: image-ui
+    bash scripts/check-image-ui.sh logweir-ui:check

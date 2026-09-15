@@ -1,66 +1,6 @@
 name: helm-demo
-# **The Helm chart, installed on a `kind` cluster this workflow creates, and
-# walked end to end.** Task 35 (post-plan).
-#
-# EXECUTED, AND GREEN ON ITS FIRST RUN — run 34718123956, commit 1f77f79,
-# 2026-09-12: https://github.com/VladyslavHaina/logweir/actions/runs/34718123956
-#
-# That run (19 min) built both images natively on the amd64 runner, created a
-# `kind` cluster from the pinned `e2e/k8s/kind-config.yaml`, loaded the two
-# author-only tags, installed the chart with `minio.enabled`,
-# `demoKafka.enabled` and `ui.enabled` on, and ran every step of
-# `scripts/helm-demo.sh`: both `KafkaCluster`s reachable with distinct cluster
-# ids, the `Backup` at `phase: Succeeded` 10 s after the schedule's apply, the
-# `Restore` at `phase: Succeeded` with `status.outcome: pass` 41 s after its
-# create, both readers over the scorecard (`VALID`), the in-cluster UI
-# answering HTTP 200 on its page, its router and its API and 403 on a Pod exec
-# path and on the core API, and a teardown that left no `logweir-*` namespace
-# before `kind delete cluster`. The same walk had been proven on the author's
-# docker-desktop with author-only images the same day (`docs/kubernetes.md`
-# §19), which is a different cluster and a different claim. The shape of this
-# file is held by `crates/logweir/tests/workflow_lint.rs`.
-#
-# IT TOOK THE AUTHOR-ONLY VALUES, AND THAT IS THE WHOLE LIMIT OF WHAT IT
-# PROVES. Both images were built by that run and `kind load`ed onto the node;
-# nothing was pulled from a registry. So this run is NOT evidence for clause 1
-# of `docs/tag1-checklist.md` (Global Constraint 37: the images are still not
-# published), and no checklist row moves on it.
-#
-# NO COMPOSE STACK AT ALL. `kind-demo.yml` reaches a broker on the runner's
-# host over a published listener and patches CoreDNS to make the name resolve
-# inside the cluster; this workflow needs none of that, because THE CHART
-# BRINGS ITS OWN BACKEND: `minio.enabled` is the archive, `demoKafka.enabled`
-# is two brokers in the cluster's own network, advertising the Service names a
-# pod already resolves, and `ui.enabled` is the page served in-cluster. There
-# is no `docker compose` line in this file.
-#
-# THE SAME RUNNER PREPARATION AS `kind-demo.yml`, step for step: free the disk
-# (MinIO refuses writes below its free-space floor), the Dockerfile's package
-# list, `just image` and `just image-weirkeeper` with
-# `LOGWEIR_IMAGE_PLATFORM: linux/amd64` so the controller image is compiled
-# NATIVELY on the amd64 runner (STANDING RULE 10 forbids emulating that
-# compile), `kind create cluster` from the pinned `e2e/k8s/kind-config.yaml`,
-# and `kind load` of the two author-only tags. There is no `docker build` line
-# here: the producers of the two tags are `just image` and
-# `just image-weirkeeper`, and the workflow lint refuses a second.
-#
-# AUTHOR-ONLY, AND NOT EVIDENCE FOR SPEC §16 CLAUSE 1 (Global Constraint 37).
-# The install below uses `charts/logweir/examples/author-only.values.yaml` —
-# `weirkeeper:check` and `logweir:check`, built by this run and loaded onto
-# the node, never pulled. A green run proves the chart's objects work together
-# on a cluster the workflow created; it says nothing about publication, and
-# the digest rows keep reading `blocked: images not published`.
-#
-# `helm install … --wait --timeout 10m` returns only when the controller, both
-# brokers, MinIO and the UI are Ready and the two seed Jobs (Helm hooks) have
-# succeeded. `scripts/helm-demo.sh` then walks the product over the release
-# with `LOGWEIR_KUBE_CONTEXT=kind-logweir`, every kubectl naming that context
-# and every exit code on its own line, and tears down its own objects; the
-# cluster itself is deleted by the last step, whatever happened.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -71,9 +11,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      # FREE THE DISK FIRST — `kind-demo.yml`'s reason: with a debug build of the
-      # workspace and the images beside it, MinIO reaches its free-space floor
-      # and refuses every PUT (`XMinioStorageFull`).
       - name: free disk space (MinIO refuses writes below its free-space floor)
         run: |
           df -h /
@@ -81,8 +18,6 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      # The Dockerfile's build-stage package list, verbatim (sasl2-sys wants
-      # libsasl2, librdkafka's cmake build wants curl's headers).
       - name: the Dockerfile's packages (the runner compiles the same crates the image does)
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - uses: taiki-e/install-action@v2
@@ -92,14 +27,9 @@ jobs:
         with:
           install_only: true
           version: v0.30.0
-      # The same Helm major the tree's rendered files were produced with
-      # (`scripts/check-chart.sh` names it); any Helm installs the chart, this
-      # one is pinned so a run and the gate agree on the tool.
       - uses: azure/setup-helm@v4
         with:
           version: v4.0.1
-      # `docs/verify_scorecard.py` — the second reader over the scorecard —
-      # imports `cryptography` and refuses rather than skipping without it.
       - name: cryptography (the auditor's reader is a real second implementation)
         run: python3 -m pip install cryptography
       - name: Extract the pinned engine
@@ -108,36 +38,24 @@ jobs:
         run: cargo build -p logweir
       - name: just image (the runner image; amd64, Global Constraint 10)
         run: just image
+      - name: just image-ui (the page's image — the chart no longer carries the files)
+        env:
+          LOGWEIR_IMAGE_PLATFORM: linux/amd64
+        run: just image-ui
       - name: just image-weirkeeper (the controller image, built NATIVELY for this runner)
         env:
           LOGWEIR_IMAGE_PLATFORM: linux/amd64
         run: just image-weirkeeper
       - name: kind create cluster
         run: kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
-      # THE TWO AUTHOR-ONLY TAGS, loaded onto the node. `runnerImage` in the
-      # author-only example is `logweir:check` and reaches the controller as
-      # LOGWEIR_RUNNER_IMAGE (Task 33), so no `docker tag` of the Docker Hub name is
-      # needed here — the kubelet is asked for the name the node holds.
-      - name: kind load the two author-only tags
-        run: kind load docker-image logweir:check weirkeeper:check --name logweir
-      # ---------------------------------------------------------------------
-      # THE INSTALL — author-only images, all three optional components on.
-      # ---------------------------------------------------------------------
+      - name: kind load the three author-only tags
+        run: kind load docker-image logweir:check weirkeeper:check logweir-ui:check --name logweir
       - name: helm install (author-only images; NOT evidence for §16 clause 1)
         run: helm install logweir charts/logweir -n logweir-system --create-namespace --kube-context kind-logweir -f charts/logweir/examples/author-only.values.yaml --set demoKafka.enabled=true --set minio.enabled=true --set ui.enabled=true --wait --timeout 10m
-      # ---------------------------------------------------------------------
-      # THE WALK. Every kubectl in `scripts/helm-demo.sh` names
-      # `--context "$LOGWEIR_KUBE_CONTEXT"`; the trap tears down what the walk
-      # created and asserts no `logweir-*` namespace is left.
-      # ---------------------------------------------------------------------
       - name: "The walk — scripts/helm-demo.sh, every step, on the kind cluster the job created"
         env:
           LOGWEIR_KUBE_CONTEXT: kind-logweir
         run: bash scripts/helm-demo.sh
-      # ---------------------------------------------------------------------
-      # DIAGNOSTICS AND TEARDOWN, ALL `if: always()`. A failed run that deleted
-      # its evidence has told you nothing you can act on.
-      # ---------------------------------------------------------------------
       - name: collect diagnostics
         if: always()
         run: |
@@ -151,6 +69,23 @@ jobs:
           echo "rc=$? (kubectl get events -A)"
           helm --kube-context kind-logweir -n logweir-system status logweir > diagnostics/helm-status.txt 2>&1
           echo "rc=$? (helm status logweir)"
+          for ns in logweir-system logweir-helm; do
+            for pod in $(kubectl --context kind-logweir -n "$ns" get pods -o name 2>/dev/null); do
+              name="${pod#pod/}"
+              kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --tail=2000 \
+                > "diagnostics/$ns-$name.log" 2>&1
+              echo "rc=$? (logs $ns/$name)"
+              kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --previous --tail=2000 \
+                > "diagnostics/$ns-$name.previous.log" 2>&1
+              echo "rc=$? (logs $ns/$name --previous)"
+              kubectl --context kind-logweir -n "$ns" describe "$pod" \
+                > "diagnostics/$ns-$name.describe.txt" 2>&1
+              echo "rc=$? (describe $ns/$name)"
+              echo "--- $ns/$name (last 40 lines, current then previous) ---"
+              tail -40 "diagnostics/$ns-$name.log"
+              tail -40 "diagnostics/$ns-$name.previous.log"
+            done
+          done
           cp -r .demo/helm diagnostics/walk 2>/dev/null
           rm -f diagnostics/walk/*.pem
           echo "rc=$? (the walk's own logs, keys removed)"
@@ -165,14 +100,13 @@ jobs:
             diagnostics/cluster.yaml
             diagnostics/events.txt
             diagnostics/helm-status.txt
+            diagnostics/*.describe.txt
       - name: upload the controller logs and the walk's logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: helm-demo-logs
-          path: |
-            diagnostics/weirkeeper.log
-            diagnostics/walk
+          path: diagnostics/
       - name: kind delete cluster
         if: always()
         run: kind delete cluster --name logweir

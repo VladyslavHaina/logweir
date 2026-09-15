@@ -1773,22 +1773,15 @@ fn the_crds_recipe_is_in_the_justfile() {
 fn the_ci_workflow_carries_the_crd_drift_arm() {
     let ci = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
         .expect("ci.yml is read");
-    assert!(
-        ci.contains("emit_crds"),
-        "ci.yml must re-render the CRDs: a CRD change is a format change, and a format change \
-         that appears as a diff is one a reviewer sees"
-    );
-    for file in FILES {
-        assert!(
-            ci.contains(file),
-            "ci.yml's drift arm must diff `{file}` — an arm that diffs five of six files is a \
-             gate the sixth kind walks through"
-        );
-    }
-    assert!(
-        ci.contains("cargo run -p logweir-core --example emit_schema"),
-        "the scorecard schema arm stays as it was"
-    );
+    assert!(ci.lines().any(
+        |line| !line.trim_start().starts_with('#') && line.contains("bash scripts/ci-check.sh")
+    ));
+    let checks = std::fs::read_to_string(repo_root().join("scripts/ci-check.sh"))
+        .expect("shared checks are read");
+    assert!(checks.lines().any(|line| line == "just crds-check"));
+    assert!(checks.lines().any(|line| line == "just schema-check"));
+    // The following in-process test compares every CRD to the actual emitter;
+    // no workflow needs a duplicate list of the six filenames.
 }
 
 /// THE DRIFT GATE, LOCALLY AND IN-PROCESS: the checked-in files are exactly

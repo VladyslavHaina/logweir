@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Inherited, and REQUIRED: `dist` refuses to plan a GitHub release for a crate
+# that names no repository.
+repository.workspace = true
 
 [lib]
 name = "logweir"

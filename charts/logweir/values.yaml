@@ -101,7 +101,8 @@ demoKafka:
 # the Service acts as it. No Ingress; reach it with kubectl port-forward.
 ui:
   enabled: false
-  image: registry.k8s.io/kubectl@sha256:59bafa07ff3a6d4b417e7633ddb9d79a9606ca98bf64bac080b3e65748669250
+  image: docker.io/vladyslavhaina/logweir-ui:latest  # kubectl + the fourteen page files
+  imagePullPolicy: Always      # use Never for locally loaded images
   namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
   nodeSelector: {}
   tolerations: []

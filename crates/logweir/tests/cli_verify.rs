@@ -447,17 +447,14 @@ fn the_verifier_parity_script_is_wired_into_lint_and_ci() {
          runs before pushing. Recipe body was: {body:?}"
     );
 
-    // 2. A CI job runs it, on a line that is not a comment.
+    // CI calls the shared script, which calls the same lint recipe above.
     let ci = std::fs::read_to_string("../../.github/workflows/ci.yml")
         .expect("read .github/workflows/ci.yml");
-    assert!(
-        executed(&ci).iter().any(|l| l.contains(SCRIPT)),
-        "no CI step runs ./scripts/{SCRIPT}. `just lint` is NOT the merge gate — \
-         ci.yml runs cargo fmt/clippy/test and the three sibling guard scripts as \
-         individual steps and never invokes just — so a parity script that only \
-         `just lint` calls is enforced on nobody's pull request. A comment naming \
-         the script does not count."
-    );
+    assert!(executed(&ci)
+        .iter()
+        .any(|l| l.contains("bash scripts/ci-check.sh")));
+    let check = std::fs::read_to_string("../../scripts/ci-check.sh").expect("read shared check");
+    assert!(executed(&check).iter().any(|l| l.trim() == "just lint"));
 }
 
 // ---------------------------------------------------------------- Task 5

@@ -1611,13 +1611,17 @@ reference, including all values, registry overrides, optional Kafka resources,
 MinIO, demo brokers and the in-cluster UI. [install.md](install.md) path (c)
 connects it to the same key, Secret and roster prerequisites as the manifests.
 
-The chart derives its CRDs and UI files from `config/` and `ui/`.
-`just chart-check` checks byte parity, rendered manifests, schema and Helm lint;
+The chart copies its CRDs from `config/`. The UI is packaged separately by
+`Dockerfile.ui`, which copies `ui/` into `/ui` over a pinned kubectl base.
+The chart carries no duplicate UI files or asset ConfigMap. `just smoke-ui`
+compares the image’s served assets with `ui/`.
+`just chart-check` checks CRD parity, rendered manifests, schema and Helm lint;
 `chart_lint.rs` checks the control-plane contract. Helm installs CRDs from
 `crds/` but does not upgrade or delete them; manage CRD changes separately.
 
-The two Logweir images default to mutable `latest` tags with `Always` pull
-policies. The base manifests and compiled runner default remain digest-pinned;
+The controller, runner and optional UI images default to mutable `latest`
+tags. All three pull policies default to `Always`; `ui.imagePullPolicy` can
+be overridden for local images. The base manifests and compiled runner default remain digest-pinned;
 third-party chart images remain pinned too. The author-only values use locally
 loaded tags with `Never`. Runner pull policy reaches Jobs through
 `LOGWEIR_RUNNER_PULL_POLICY` (§14).
@@ -1634,7 +1638,10 @@ Recorded evidence from 2026-09-12: the local Helm walk and
 independent verifiers and UI checks (200 for its three allowed requests;
 403 for pod exec and core API). Local follow-ups exercised `Never` and
 `IfNotPresent` runner policies. These used author-only images and do not prove
-that the chart's default registry references are published. Consult
+that the chart's default registry references are published. A local walk on
+2026-09-14 additionally exercised the image-based UI: the served `app.js`
+matched the checkout, with the same three allowed and two rejected requests.
+Consult
 [tag1-checklist.md](tag1-checklist.md) for release gates.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).

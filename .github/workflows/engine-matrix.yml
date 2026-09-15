@@ -1,37 +1,22 @@
 name: engine-matrix
-# Weekly: run the full compose drill against every engine tag in the declared
-# window and regenerate docs/support-matrix.md, opening a PR when it changes.
-#
-# The five outcomes (Task 22 step 6):
-#   pass | pass-degraded | fail(reason) | fail(lever-not-honoured)
-#   | unsupported(lever-absent)
-#
-# Tags BELOW the declared full-drill floor (0.21.0) run a REDUCED row set —
-# asserting only "restore succeeds, pass-degraded, integrity.level:
-# consume-only" — and are reported `unsupported (lever-absent)`, NEVER as a
-# fault. v0.19.1 predates both levers and can never be green; reporting it as a
-# failure would be Logweir raising a fault against an operator whose default has
-# not caught up.
 on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+concurrency:
+  group: engine-matrix
+  cancel-in-progress: false
 
 jobs:
   matrix:
+    timeout-minutes: 45
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        # Global Constraint 14 forbids PUBLISHING Logweir artifacts under `osodevops/`.
-        # It does not forbid PULLING upstream's published image: Global Constraints 7, 8,
-        # 10 and 15 mandate digest-pinned engine extraction and MIT redistribution from
-        # `third_party/`, which is impossible without naming the upstream image.
-        # Adjudicated by global ruling GR6 — do not re-raise.
         include:
           - tag: v0.21.0
             below_floor: "false"
@@ -41,9 +26,6 @@ jobs:
             below_floor: "false"
           - tag: v0.18.0
             below_floor: "true"
-          # strimzi-backup-operator's hard-coded DEFAULT_BACKUP_IMAGE. Below the
-          # floor by construction; present so the matrix SAYS SO rather than
-          # leaving a reader to assume it works.
           - tag: v0.19.1
             below_floor: "true"
     steps:
@@ -52,14 +34,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography
-      # `cargo fetch --locked`: the workspace tests include an offline `cargo metadata`
-      # over a copy of the tree (`linkage.rs`) that needs every locked package cached.
       - run: cargo fetch --locked
 
       - name: Resolve this tag to an immutable digest
         id: pin
         run: |
-          # A tag is mutable; every artifact this job produces names the DIGEST.
           docker pull "osodevops/kafka-backup:${{ matrix.tag }}"
           d=$(docker inspect --format='{{index .RepoDigests 0}}' \
                 "osodevops/kafka-backup:${{ matrix.tag }}" | cut -d@ -f2)
@@ -68,13 +47,6 @@ jobs:
           echo "${{ matrix.tag }} -> $d"
 
       - name: Extract the engine for this tag
-        # NOT `scripts/extract-engine.sh`. That script deliberately REFUSES any
-        # image whose `org.opencontainers.image.revision` label differs from the
-        # one this workspace's vendored structs were verified against — it
-        # guards the PINNED engine, and refusing an unexpected build is exactly
-        # what it is for. This job's whole purpose is to sweep OTHER tags, so it
-        # extracts inline instead, and never writes
-        # third_party/kafka-backup-binary.digest.
         run: |
           mkdir -p .engine
           cid=$(docker create --platform linux/amd64 "osodevops/kafka-backup@$DIGEST")
@@ -82,8 +54,6 @@ jobs:
           docker rm "$cid" >/dev/null
           chmod +x .engine/kafka-backup
           .engine/kafka-backup --version
-          # The compose stack reads OSO_DIGEST from e2e/compose/.env, which is
-          # generated and never checked in.
           printf 'KAFKA_VERSION=3.7.1\nOSO_DIGEST=%s\n' "$DIGEST" > e2e/compose/.env
         env:
           DIGEST: ${{ steps.pin.outputs.digest }}
@@ -91,16 +61,6 @@ jobs:
       - run: docker compose -f e2e/compose/docker-compose.yml up -d --wait
       - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
       - run: docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
-      # A SUCCESSFUL SEED ALWAYS DIRTIES THE TREE. Never `git diff --exit-code`
-      # after this step; the refreshed fixtures are not byte-reproducible.
-      #
-      # `scripts/e2e-seed.sh` fails closed when e2e/compose/.env and
-      # third_party/kafka-backup-binary.digest disagree, which is correct for a
-      # normal run and is precisely the condition this sweep creates on every
-      # tag except the pinned one. So the pin file is pointed at the tag under
-      # test for the duration of this job. It is a WORKTREE edit that is never
-      # committed: the `publish` job below checks out a fresh tree and rewrites
-      # only the Rows table of docs/support-matrix.md.
       - name: Point the pin file at the tag under test (worktree only)
         run: echo "${{ steps.pin.outputs.digest }}" > third_party/kafka-backup-binary.digest
       - run: ./scripts/e2e-seed.sh
@@ -115,40 +75,11 @@ jobs:
         if: matrix.below_floor == 'true'
         id: reduced
         continue-on-error: true
-        # Only three assertions: the restore succeeds, the outcome is
-        # pass-degraded, and integrity.level is consume-only. Nothing here may
-        # report a FAULT — the verdict for these tags is
-        # `unsupported (lever-absent)` whatever happens.
         run: ./scripts/run-named-tests.sh a_restore_into_an_empty_scratch_target_succeeds
 
       - name: Deleted-segment positive control
         id: control
         continue-on-error: true
-        # THE POSITIVE CONTROL, and the ONLY input to `fail(lever-not-honoured)`
-        # below. A fixture archive with a deliberately deleted NON-OLDEST
-        # segment must make the engine's `validate-restore` report the archive
-        # unrestorable, so the drill blocks at phase 5 and signs
-        # `outcome: preflight-failed` with the finding inside the signed bytes.
-        # A tag where the drill sails past that is a tag that accepted the
-        # `dry_run_check_segments` lever and did not act on it — which is
-        # `fail (lever-not-honoured)`, a materially different verdict from a
-        # plain failure, because the engine reported success over an archive it
-        # never checked. The test quarantines a real segment out of the live
-        # MinIO archive and puts it back before it asserts, so a failure cannot
-        # leave the archive broken for the rest of the sweep.
-        # (`e2e/fixtures/dryrun/{clean,data-missing}.json` are PARSE fixtures for
-        # the dry-run report struct — they exercise no engine and are not this
-        # control.)
-        #
-        # This step used to filter on the string `dry_run_check_segments`. That
-        # is the name of a struct field and of a rendered-YAML key; it has never
-        # been the name of a test, so the filter matched 0 of the 475 tests,
-        # `cargo test` exited 0 having run nothing, `steps.control.outcome` was
-        # always `success`, and the `fail(lever-not-honoured)` branch below was
-        # unreachable by construction. The real control is the e2e test named
-        # here (`e2e/tests/full_drill.rs`). `run-named-tests.sh` resolves every
-        # name against `--list` first and exits 1 on a name that matches
-        # nothing, so this cannot silently go vacuous again.
         run: ./scripts/run-named-tests.sh a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard
 
       - name: Record this row
@@ -169,6 +100,7 @@ jobs:
             reason="see the job log"
           fi
           mkdir -p .matrix
+          # shellcheck disable=SC2016
           printf '| %s | `%s` | `%s` | %s |\n' \
             "${{ matrix.tag }}" "${{ steps.pin.outputs.digest }}" "$outcome" "$reason" \
             > ".matrix/${{ matrix.tag }}.row"
@@ -184,6 +116,10 @@ jobs:
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
   publish:
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
     needs: matrix
     if: always()
     runs-on: ubuntu-24.04
@@ -191,10 +127,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: .matrix, merge-multiple: true }
-      # Only the `## Rows` table is regenerated. The floors, the five outcomes
-      # and the "no row yet" section are prose this job must not invent — a
-      # generated matrix that also generates its own caveats is a matrix with
-      # no caveats.
       - name: Rewrite the Rows table in docs/support-matrix.md
         shell: python
         run: |
