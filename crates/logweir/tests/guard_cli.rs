@@ -1,4 +1,59 @@
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
+
+/// `--approval`, `--approver-key`, `--allowed-clusters` and `--signing-key` for
+/// a run over `spec`, with an approval and detached sidecar minted for those
+/// exact bytes and written into `dir`.
+///
+/// Startup verifies the whole approval bundle before phase 0 runs, so a row
+/// that means to be REFUSED by a phase-0 guard has to be genuinely approved
+/// first. With the shipped example approval, which has no sidecar beside it and
+/// was not minted for these modified specs, every row here would measure that
+/// exit-1 operational failure instead of the guard. Minted the same way as
+/// `cli_exit_codes.rs`'s `drill_run_capturing_stdout`.
+fn approved_bundle_args(dir: &Path, spec: &str) -> Vec<OsString> {
+    let key = logweir_evidence::keys::SigningKey::generate_p256();
+    let approver_key = dir.join("approver.pub.pem");
+    let signing_key = dir.join("signing.pem");
+    std::fs::write(
+        &approver_key,
+        key.verifying_key().to_public_key_pem().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&signing_key, key.to_pkcs8_pem().unwrap()).unwrap();
+    let approval = dir.join("approval.json");
+    let approval_doc = logweir_core::spec::ApprovalDoc {
+        approver: "guard-cli-test@example.com".into(),
+        ticket: "GUARD-CLI-PHASE0".into(),
+        plan_hash: logweir_core::ids::sha256_prefixed(spec.as_bytes()),
+        approved_at: chrono::Utc::now(),
+        subject_kind: logweir_core::spec::SUBJECT_KIND_RESTORE.into(),
+    };
+    let approval_bytes = serde_json::to_vec(&approval_doc).unwrap();
+    std::fs::write(&approval, &approval_bytes).unwrap();
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &key,
+        logweir::drill::phase1_approval::PAYLOAD_TYPE_APPROVAL,
+        &approval_bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        approval.with_extension("sig"),
+        serde_json::to_vec(&sidecar).unwrap(),
+    )
+    .unwrap();
+    vec![
+        "--approval".into(),
+        approval.into(),
+        "--approver-key".into(),
+        approver_key.into(),
+        "--allowed-clusters".into(),
+        "../../examples/allowed-clusters.json".into(),
+        "--signing-key".into(),
+        signing_key.into(),
+    ]
+}
 
 fn run_with_spec(spec: &str) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
@@ -7,16 +62,7 @@ fn run_with_spec(spec: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_logweir"))
         .args(["drill", "run", "--spec"])
         .arg(&p)
-        .args([
-            "--approval",
-            "../../examples/approval.json",
-            "--approver-key",
-            "../../e2e/fixtures/signed/public.pem",
-            "--allowed-clusters",
-            "../../examples/allowed-clusters.json",
-            "--signing-key",
-            "../../e2e/fixtures/signed/signing.pem",
-        ])
+        .args(approved_bundle_args(dir.path(), spec))
         .output()
         .unwrap()
 }
@@ -87,16 +133,7 @@ fn run_with_spec_capturing_streams(spec: &str) -> (Option<i32>, String, String) 
     let status = Command::new(env!("CARGO_BIN_EXE_logweir"))
         .args(["drill", "run", "--spec"])
         .arg(&p)
-        .args([
-            "--approval",
-            "../../examples/approval.json",
-            "--approver-key",
-            "../../e2e/fixtures/signed/public.pem",
-            "--allowed-clusters",
-            "../../examples/allowed-clusters.json",
-            "--signing-key",
-            "../../e2e/fixtures/signed/signing.pem",
-        ])
+        .args(approved_bundle_args(dir.path(), spec))
         .env_remove("LOGWEIR_SOURCE_PASSWORD")
         .env_remove("LOGWEIR_TARGET_PASSWORD")
         .stdout(std::process::Stdio::from(out_file))

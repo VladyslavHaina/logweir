@@ -25,8 +25,10 @@
 //! a root-level key is unreachable without `.flatten_event(true)`, which would
 //! change the shape of every log line the product emits.
 //!
-//! Every test here spawns the real binary against paths that do not exist. No
-//! broker, no engine binary, no cluster, no Docker, no network (GC17, GR2).
+//! Every test here spawns the real binary against paths that do not exist,
+//! apart from the checked-in signing key that startup validates before it
+//! reads the spec. No broker, no engine binary, no cluster, no Docker, no
+//! network (GC17, GR2).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -37,8 +39,9 @@ fn bin() -> Command {
 }
 
 /// A `drill run` invocation that fails operationally (exit 1) before it can
-/// reach a broker, the engine binary or a cluster: the spec is read first, and
-/// it is not there.
+/// reach a broker, the engine binary or a cluster. Startup validates the
+/// signing key first, so that one path is the checked-in e2e fixture; the spec
+/// is read next, and it is not there.
 ///
 /// The paths are built under a fresh `tempfile::tempdir()` and the directory is
 /// then dropped, so nothing absolute about this host is baked into the test and
@@ -63,8 +66,8 @@ impl FailingRun {
     }
 
     /// Same invocation, but the temp dir stays alive so a caller can point
-    /// `--metrics-file` somewhere real. The five `--*-key`/spec paths are still
-    /// absent, because nothing creates them.
+    /// `--metrics-file` somewhere real. The spec, approval, approver-key and
+    /// allowed-clusters paths are still absent, because nothing creates them.
     fn with_live_dir() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let argv = Self::argv(&dir.path().join("absent"));
@@ -83,7 +86,12 @@ impl FailingRun {
             format!("--approval={}", p("a.json")),
             format!("--approver-key={}", p("k.pem")),
             format!("--allowed-clusters={}", p("c.json")),
-            format!("--signing-key={}", p("s.pem")),
+            format!(
+                "--signing-key={}",
+                repo_root()
+                    .join("e2e/fixtures/signed/signing.pem")
+                    .display()
+            ),
         ]
     }
 
