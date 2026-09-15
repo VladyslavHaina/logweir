@@ -37,11 +37,13 @@ belong in [product expansion](product-expansion.md), not this baseline tracker.
 
 ## Execution rules and completion contract
 
-- User model preference (2026-09-14): Astra is orchestration only. Delegate
-  implementation, testing and technical reviews to GPT-5.6 Sol for complex
-  operator/security/recovery work and GPT-5.6 Terra for bounded work. Spark may
-  handle small edits only where supported. Complete this platform tracker
-  before beginning implementation of product expansion.
+- Orchestration (updated 2026-09-15): the lead orchestrator dispatches bounded
+  workers and does not self-certify their output. The 2026-09-14 batch ran as
+  Codex workers (Astra orchestrating, GPT-5.6 Sol/Terra implementing) and
+  stopped at that service's usage limit on 2026-09-15; work continues with
+  Claude Code subagents under the same ownership, independent-review and
+  evidence rules. Complete this platform tracker before beginning
+  implementation of product expansion.
 - User disabled custom and third-party skills, including gstack and graphify.
   Use direct reasoning and standard tools; do not apply those skill workflows.
 - Work on a single task or a named dependency group. Record its owner, state,
@@ -84,6 +86,38 @@ belong in [product expansion](product-expansion.md), not this baseline tracker.
    until the end.
 
 ## Active execution ledger
+
+Current state (2026-09-15). Source candidate `a2bf5220e92d7c712ff77bf44c47d6fbabd1e9bc`
+failed CI run [34936909533](https://github.com/VladyslavHaina/logweir/actions/runs/34936909533)
+(label gate and a stale invalid-signer guard). Commits `44f1c2d` through
+`4956785ba0f6` committed the backend live harness and fixed those failures;
+CI run [35019727967](https://github.com/VladyslavHaina/logweir/actions/runs/35019727967)
+passed check, e2e and publish for `4956785`. The Codex batch below stopped
+at its usage limit: backend-live-close and plat06-implementation ended without
+terminal reports, and backend-live-close left namespace
+`logweir-backend-close-20260915` behind. Its interrupted PLAT-06.1 worktree
+`/tmp/logweir-plat06-worktree` is preserved, unmerged and unreviewed.
+
+Claude orchestration recovery: worker rules, reports and artifacts are under
+`/tmp/logweir-roadmap-run/claude/`; workers use isolated worktrees under
+`/tmp/logweir-roadmap-run/wt/` and serialize docker-desktop operations that
+change shared or cluster-scoped state through `claude/k8s-lock.sh`. This table
+records dispatch and next evidence, not completion.
+
+| Tasks | State | Worker | Boundary and next evidence |
+| --- | --- | --- | --- |
+| PLAT-01.1 / 01.2 / 02.1 / 02.2 | In progress | plat01-02-live | Rebuild images from `4956785`, rerun the committed live matrix to one terminal report with retained evidence, clean up the leftover namespace, run full-chart bootstrap acceptance and resolve bootstrap image digest pinning. |
+| PLAT-13.1 | Done | closure-0413 | Completion record under PLAT-13.1. |
+| PLAT-04.1 | In progress (one live case) | closure-0413, then plat06 | Source identity, focused tests (schedule_controller 44/44, crd_shape 24/24, retention 48/48) and published controller digest `sha256:bdaaf374…` verified at `4956785`; overlap, two-replica, restart, stale-finalizer and Allow cases have live evidence. The deleted-Job case has controller-double evidence only; plat06's live run adds it (Job recreated from frozen inputs, schedule stays blocked until terminal). |
+| PLAT-06.1 | In progress | plat06 | Typed runner inputs, immutable owned input snapshot, server-derived identity, legacy annotation path; controller tests and live manual/scheduled/hostile-annotation runs. |
+| PLAT-07.1 | In progress | plat07 | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
+| PLAT-13.2, PLAT-12.1 (immediate), PLAT-12.2 (subject slice) | In progress | ui-correct | Draft preservation, mutation state and idempotent submission; one guided restore submission; displayed approval subject equals submitted subject; node specs and real browser journeys. |
+| PLAT-17.1 (stage 1) | In progress | plat17-api | New `crates/logweir-api`: bounded `/api/v1` routes over current resources, local-admin mode only, idempotency, problem responses, cursors, static assets; mock-API tests and live smoke. OIDC/roles (PLAT-17.2), console image/chart and UI migration follow. |
+| PLAT-04.2, 05.x, 06.2, 09.2 | Proposed (contract spike) | decision D1 | Scheduling, revision, history and dynamic selection contracts with worker split. |
+| PLAT-03.x, 08.x, 09.1 | Proposed (contract spike) | decision D2 | Destination, discovery and readiness contracts with worker split. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | Proposed (contract spike) | decision D3 | Status, catalog, retention and trust lifecycle contracts with worker split. |
+
+### Codex batch history (2026-09-14, superseded by the table above)
 
 Source candidate `a2bf5220e92d7c712ff77bf44c47d6fbabd1e9bc` was pushed to main.
 Its CI run is [34936909533](https://github.com/VladyslavHaina/logweir/actions/runs/34936909533),
@@ -589,6 +623,29 @@ namespace. **Tests:** Slow A response after switching to B, rapid routes,
 back/forward navigation, unmount, namespace deletion, restricted namespace
 permissions and stale submit callback.
 **Dependencies:** None.
+
+**Completion record — Done (2026-09-15).** Implementation landed in
+`a2bf522`; no PLAT-13.1 production or harness file changed through
+`4956785d00d7` except the later README port-forward/Bash 3.2 hardening, which
+`ui_lint::chart_readme_ui_harness_binds_readiness_and_cleans_up_on_bash_3_2`
+now guards. Verified at `4956785`: `ui/tests/lifecycle.spec.js` 7/7 (delayed A
+after B, rapid routes and back/forward, hash ownership, route-exit disposal,
+stale form callback, restore preparation after exit, explicit namespace
+source), `scripts/check-ui-behaviour.sh` 61/61, `scripts/check-ui-offline.sh`
+16 files clean, `ui_lint` 26/26, `chart_lint` 27/27. Live docker-desktop
+evidence against the same source: `/tmp/plat13-e2e-authoritative.md` and
+`/tmp/plat13-harness-fix-report.md` (delayed live GET, namespace deletion 403,
+restricted RBAC with `kubectl auth can-i`, delayed POST and restore
+preparation after navigation, cleanup), accepted by the final UI/harness
+reviews in `/tmp/logweir-roadmap-run/`. CI run 35019727967 passed and
+published `vladyslavhaina/logweir-ui:sha-4956785d00d74fe960c84d396d2eff852c68ebd8`
+(`sha256:fb2b9467285b190f1bb872959c474a0001ce284f1f525a38c4d2ec6f8f83dfbe`,
+revision label matches). Closure verification:
+`/tmp/logweir-roadmap-run/claude/closure-0413.result.md`. Migration: none;
+production assets remain static and same-origin. Limitations: the literal
+`ns=default` approval handoff is covered by a behaviour test only; the full
+multi-role chart was not installed beside the lab singleton controller (the
+UI template was installed through a disposable wrapper).
 
 ### PLAT-13.2 — Preserve drafts and standardize mutation state
 
