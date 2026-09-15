@@ -108,7 +108,8 @@ records dispatch and next evidence, not completion.
 | --- | --- | --- | --- |
 | PLAT-01.1 / 01.2 / 02.1 / 02.2 | In progress | plat01-02-live | Rebuild images from `4956785`, rerun the committed live matrix to one terminal report with retained evidence, clean up the leftover namespace, run full-chart bootstrap acceptance and resolve bootstrap image digest pinning. |
 | PLAT-13.1 | Done | closure-0413 | Completion record under PLAT-13.1. |
-| PLAT-04.1 | In progress (one live case) | closure-0413, then plat06 | Source identity, focused tests (schedule_controller 44/44, crd_shape 24/24, retention 48/48) and published controller digest `sha256:bdaaf374…` verified at `4956785`; overlap, two-replica, restart, stale-finalizer and Allow cases have live evidence. The deleted-Job case has controller-double evidence only; plat06's live run adds it (Job recreated from frozen inputs, schedule stays blocked until terminal). |
+| PLAT-04.1 | In progress (defect found) | closure-0413, w0-reservation, plat06 | Source identity, focused tests (schedule_controller 44/44, crd_shape 24/24, retention 48/48) and published controller digest `sha256:bdaaf374…` verified at `4956785`; overlap, two-replica, restart, stale-finalizer and Allow cases have live evidence. Two gaps block Done: the deleted-Job case has controller-double evidence only (plat06's live run adds it), and the slot reservation is unauthorized by the shipped role (below), so the accepted live evidence does not describe a shipped install. |
+| PLAT-04.1 defect (P0) | In progress | w0-reservation | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
 | PLAT-06.1 | In progress | plat06 | Typed runner inputs, immutable owned input snapshot, server-derived identity, legacy annotation path; controller tests and live manual/scheduled/hostile-annotation runs. |
 | PLAT-07.1 | In progress | plat07 | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2, PLAT-12.1 (immediate), PLAT-12.2 (subject slice) | In progress | ui-correct | Draft preservation, mutation state and idempotent submission; one guided restore submission; displayed approval subject equals submitted subject; node specs and real browser journeys. |
@@ -116,6 +117,22 @@ records dispatch and next evidence, not completion.
 | PLAT-04.2, 05.x, 06.2, 09.2 | Proposed (contract spike) | decision D1 | Scheduling, revision, history and dynamic selection contracts with worker split. |
 | PLAT-03.x, 08.x, 09.1 | Proposed (contract spike) | decision D2 | Destination, discovery and readiness contracts with worker split. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | Proposed (contract spike) | decision D3 | Status, catalog, retention and trust lifecycle contracts with worker split. |
+
+### Defects found by the 2026-09-15 contract spikes
+
+Each was confirmed against current source (and, where marked, against the live
+cluster). They are recorded here so no finding depends on a worker report
+surviving. None is fixed yet except where a worker is named.
+
+| Id | Defect | Owner |
+| --- | --- | --- |
+| P0-RESERVE | `backup_schedule.rs:1359` reserves a slot with `replace_status` (PUT, verb `update`) while the shipped role grants only `patch` on `backupschedules/status`; default `Forbid` schedules therefore never create a Backup on a shipped install. Confirmed live (`auth can-i`: update no, patch yes). | w0-reservation (dispatched) |
+| SEC-ENVHTTP | The controller forwards its own `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into every runner Job (`controllers/backup.rs:192`, `restore.rs:1297`); the engine's `from_env()` then honours them, so a forwarded `AWS_ALLOW_HTTP=true` enables plaintext transport even when the approved plan says `allow_http: false`. A global setting overrides approved execution inputs. | PLAT-08.1 destination resolver (D2 W6b) |
+| SEC-PODLOG | Pod lookup for exit codes and evidence keys matches on labels alone and takes the first result (`controllers/backup.rs:1683`, `restore.rs:2519`, `kafka_cluster.rs:832`); a tenant able to create a pod with `batch.kubernetes.io/job-name=<job>` can have its log read as the run's outcome. The pod's controller owner UID is never checked. | queued after plat06/plat07 merge |
+| UI-HTTPDOWNGRADE | The restore wizard sets `allowHttp` from the path-style checkbox (`ui/pages/restore-wizard.js:1142`) and applies one endpoint/region/addressing to both the source archive and evidence store (`:1135`). | PLAT-08.2 UI slice, after ui-correct |
+| UI-FAKEPREFLIGHT | Wizard step 5 "Target-topic preflight" shows only the target cluster's cached `status.reachable` (`ui/pages/restore-wizard.js:424`), and restore admission gates on the same cached value (`controllers/restore.rs:638`). | PLAT-03.2 |
+| RET-WRONGBUCKET | Retention lists manifests through the controller's single global store while rendering commands for the schedule's own URL (`backup_schedule.rs:1417`), so a schedule on another bucket is reported against the wrong catalog. | PLAT-16.1 |
+| ENGINE-PATHSTYLE | The pinned engine ignores `path_style` and forces path-style addressing whenever an endpoint is set (`kafka-backup-core storage/s3.rs:66`), so virtual-hosted addressing with a custom endpoint cannot be honoured and must be refused rather than advertised. | PLAT-08.1 (documented refusal) |
 
 ### Codex batch history (2026-09-14, superseded by the table above)
 
