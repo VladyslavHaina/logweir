@@ -253,9 +253,46 @@ fn body_name(seen: &SeenBody) -> String {
         .to_string()
 }
 
-/// The one `status` object out of the recorded `PATCH` bodies.
+/// The one `status` object out of the recorded **finalization** `PATCH` bodies.
 fn patched_status(bodies: &[SeenBody]) -> serde_json::Value {
     patched_status_opt(bodies).expect("the reconciler patches /status")
+}
+
+/// Whether a recorded `/status` patch body is a slot RESERVATION.
+///
+/// BOTH STATUS WRITES ARE NOW `PATCH`es — the admission reservation used to be
+/// an `Api::replace_status`, which is a `PUT` the API server authorises as the
+/// verb `update` on `backupschedules/status`, and the shipped ClusterRole
+/// grants only `patch` there (W0). So a test can no longer tell the two apart
+/// by method, and tells them apart by CONTENT instead: only a reservation
+/// writes a `status.pendingBackupRef` OBJECT. A finalization either clears that
+/// reference (explicit `null`, [`PendingRefUpdate::Clear`]) or leaves it alone
+/// (absent key), and there is no third writer of the field in the reconciler.
+fn is_reservation(status: &serde_json::Value) -> bool {
+    status["pendingBackupRef"].is_object()
+}
+
+/// Every `/status` patch body's `status`, in the order the double saw them.
+fn status_patches(bodies: &[SeenBody]) -> Vec<serde_json::Value> {
+    bodies
+        .iter()
+        .filter(|b| b.method == "PATCH")
+        .map(|b| {
+            let v: serde_json::Value =
+                serde_json::from_str(&b.body).expect("a recorded PATCH body is JSON");
+            v["status"].clone()
+        })
+        .collect()
+}
+
+/// The reservation patch's `status`, or `None` when this reconcile made none.
+fn reserved_status_opt(bodies: &[SeenBody]) -> Option<serde_json::Value> {
+    status_patches(bodies).into_iter().find(is_reservation)
+}
+
+/// The reservation patch's `status`, which this reconcile is asserted to make.
+fn reserved_status(bodies: &[SeenBody]) -> serde_json::Value {
+    reserved_status_opt(bodies).expect("the reconciler reserves the slot before creating it")
 }
 
 /// The `status` object out of the recorded `PATCH` bodies, or `None` when the
@@ -268,14 +305,22 @@ fn patched_status(bodies: &[SeenBody]) -> serde_json::Value {
 /// because `retentionReport.evaluatedAt = now` made each of them a change.
 /// "No patch" is now an expected outcome, so it is a `None` a test can assert
 /// on rather than a panic inside a helper.
+/// W0: THE FINALIZATION AND NOT THE RESERVATION. A `Forbid` admission now
+/// sends two `PATCH`es to the same path — the reservation, then the
+/// finalization — so "the first PATCH" would silently become the reservation
+/// for every admitting test, and every assertion about the settled status
+/// would be about a body written before the child existed. [`is_reservation`]
+/// is the discriminator, and the finalization is the last body that is not one.
 fn patched_status_opt(bodies: &[SeenBody]) -> Option<serde_json::Value> {
-    let patch = bodies.iter().find(|b| b.method == "PATCH")?;
-    let v: serde_json::Value =
-        serde_json::from_str(&patch.body).expect("a recorded PATCH body is JSON");
-    Some(v["status"].clone())
+    status_patches(bodies)
+        .into_iter()
+        .filter(|status| !is_reservation(status))
+        .next_back()
 }
 
-/// How many `/status` `PATCH`es the double was asked for.
+/// How many `/status` `PATCH`es the double was asked for — reservations
+/// included, because the property every caller of this helper has is "how many
+/// times did this reconcile write status at all".
 fn patch_count(bodies: &[SeenBody]) -> usize {
     bodies.iter().filter(|b| b.method == "PATCH").count()
 }
@@ -2578,7 +2623,10 @@ async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
             )]),
         },
         Route {
-            method: "PUT",
+            // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
+            // route and the finalization one below answer the same method and
+            // path, which is exactly what the shipped RBAC grants.
+            method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
             body: serde_json::to_string(&schedule).unwrap(),
@@ -2604,7 +2652,7 @@ async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["GET", "PUT", "POST", "PATCH"]);
+    assert_eq!(methods, ["GET", "PATCH", "POST", "PATCH"]);
     let status = patched_status(&bodies.lock().unwrap());
     assert_eq!(status["activeBackupRef"]["name"], current);
     assert!(status["pendingBackupRef"].is_null());
@@ -2629,7 +2677,10 @@ async fn a_stale_active_reference_is_cleared_before_the_new_slot_is_admitted() {
             body: backup_list_body(vec![]),
         },
         Route {
-            method: "PUT",
+            // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
+            // route and the finalization one below answer the same method and
+            // path, which is exactly what the shipped RBAC grants.
+            method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
             body: serde_json::to_string(&schedule).unwrap(),
@@ -2649,10 +2700,22 @@ async fn a_stale_active_reference_is_cleared_before_the_new_slot_is_admitted() {
     ]);
     reconcile_schedule(&schedule, &client, now).await.unwrap();
     let recorded = bodies.lock().unwrap().clone();
-    let reservation = recorded.iter().find(|body| body.method == "PUT").unwrap();
-    let reservation: serde_json::Value = serde_json::from_str(&reservation.body).unwrap();
-    assert!(reservation["status"]["activeBackupRef"].is_null());
-    assert_eq!(reservation["status"]["pendingBackupRef"]["name"], current);
+    let reservation = reserved_status(&recorded);
+    // AN EXPLICIT `null` AND NOT AN OMITTED KEY. The reservation is a merge
+    // patch now, so the stale reference is cleared only if the body SAYS null.
+    assert_eq!(reservation["activeBackupRef"], serde_json::Value::Null);
+    assert_eq!(reservation["pendingBackupRef"]["name"], current);
+    // And the CAS token the reservation is conditional on.
+    let raw: serde_json::Value = serde_json::from_str(
+        &recorded
+            .iter()
+            .find(|body| body.method == "PATCH")
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert_eq!(raw["metadata"]["resourceVersion"], serde_json::json!("17"));
+    assert_eq!(raw["metadata"]["name"], serde_json::json!("nightly"));
 }
 
 #[tokio::test]
@@ -2856,7 +2919,10 @@ async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
             body: backup_list_body(vec![]),
         },
         Route {
-            method: "PUT",
+            // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
+            // route and the finalization one below answer the same method and
+            // path, which is exactly what the shipped RBAC grants.
+            method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
             body: serde_json::to_string(&schedule).unwrap(),
@@ -2875,16 +2941,9 @@ async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["GET", "PUT", "POST"]);
-    let reservation = bodies
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|body| body.method == "PUT")
-        .cloned()
-        .unwrap();
-    let reservation: serde_json::Value = serde_json::from_str(&reservation.body).unwrap();
-    assert_eq!(reservation["status"]["pendingBackupRef"]["name"], current);
+    assert_eq!(methods, ["GET", "PATCH", "POST"]);
+    let reservation = reserved_status(&bodies.lock().unwrap());
+    assert_eq!(reservation["pendingBackupRef"]["name"], current);
 }
 
 #[tokio::test]
@@ -3030,20 +3089,31 @@ async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_reso
     use std::sync::{Arc, Mutex};
     use tower::service_fn;
 
-    #[derive(Default)]
     struct ApiState {
-        reservation_taken: bool,
+        /// The stored object, whose `metadata.resourceVersion` is the CAS
+        /// token — moved by every accepted status write, exactly as the API
+        /// server moves it.
+        stored: serde_json::Value,
+        /// What each RESERVATION patch offered as its precondition, in order:
+        /// `None` for a body that carried no `metadata.resourceVersion` at all.
+        /// Reservations only, because a winner's finalization legitimately
+        /// offers the token it was just handed, and the two interleave.
+        reservation_tokens: Vec<Option<String>>,
+        reservations_accepted: usize,
         posted_names: Vec<String>,
     }
 
     let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
-    let schedule_response = serde_json::to_string(&schedule).unwrap();
-    let state = Arc::new(Mutex::new(ApiState::default()));
+    let state = Arc::new(Mutex::new(ApiState {
+        stored: serde_json::to_value(&schedule).unwrap(),
+        reservation_tokens: Vec::new(),
+        reservations_accepted: 0,
+        posted_names: Vec::new(),
+    }));
     let service = {
         let state = Arc::clone(&state);
         service_fn(move |request: Request<Body>| {
             let state = Arc::clone(&state);
-            let schedule_response = schedule_response.clone();
             async move {
                 let method = request.method().as_str().to_string();
                 let path = request.uri().path().to_string();
@@ -3057,22 +3127,45 @@ async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_reso
                     // Both replicas are allowed to observe the same empty list;
                     // the status resourceVersion is the actual admission CAS.
                     (200, backup_list_body(vec![]))
-                } else if method == "PUT" && path.ends_with("/backupschedules/nightly/status") {
-                    let reservation: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    assert_eq!(
-                        reservation["metadata"]["resourceVersion"],
-                        serde_json::json!("17"),
-                        "both stale replicas must submit the watched resourceVersion as the CAS token"
-                    );
+                } else if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
+                    // THE API SERVER'S OWN RULE, MODELLED AND NOT ASSERTED.
+                    // A merge patch is applied to the CURRENT object, so a body
+                    // that carries no `metadata.resourceVersion` inherits the
+                    // stored one and can never conflict — which is precisely
+                    // what dropping the precondition would do. Modelling that
+                    // (rather than asserting the token inside the double) is
+                    // what makes the mutant show up as TWO winners and TWO
+                    // POSTs instead of as a panic on a spawned task.
+                    let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     let mut state = state.lock().unwrap();
-                    if state.reservation_taken {
+                    let stored_version = state.stored["metadata"]["resourceVersion"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    let offered = patch["metadata"]["resourceVersion"]
+                        .as_str()
+                        .map(str::to_string);
+                    let reserving = is_reservation(&patch["status"]);
+                    if reserving {
+                        state.reservation_tokens.push(offered.clone());
+                    }
+                    if offered.as_ref().is_some_and(|v| *v != stored_version) {
                         (
                             409,
                             r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","message":"the object has been modified","code":409}"#.to_string(),
                         )
                     } else {
-                        state.reservation_taken = true;
-                        (200, schedule_response)
+                        if reserving {
+                            state.reservations_accepted += 1;
+                        }
+                        let mut stored = state.stored.clone();
+                        weirkeeper::conditions::apply_merge_patch(&mut stored, &patch);
+                        stored["metadata"]["resourceVersion"] = serde_json::json!(stored_version
+                            .parse::<u64>()
+                            .map(|v| (v + 1).to_string())
+                            .unwrap());
+                        state.stored = stored;
+                        (200, state.stored.to_string())
                     }
                 } else if method == "POST" && path.ends_with("/backups") {
                     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -3082,8 +3175,6 @@ async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_reso
                         .posted_names
                         .push(value["metadata"]["name"].as_str().unwrap().to_string());
                     (201, String::from_utf8(body.to_vec()).unwrap())
-                } else if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
-                    (200, schedule_response)
                 } else {
                     panic!("unexpected replica-race request: {method} {path}")
                 };
@@ -3109,11 +3200,24 @@ async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_reso
         1
     );
     let state = state.lock().unwrap();
-    assert!(state.reservation_taken);
+    assert_eq!(
+        state.reservations_accepted, 1,
+        "exactly one replica may take the slot reservation: {:?}",
+        state.reservation_tokens
+    );
     assert_eq!(
         state.posted_names.len(),
         1,
         "only the resourceVersion winner may create its deterministic slot child"
+    );
+    // THE MUTANT THIS ROW IS AGAINST. Both replicas hold the watched object,
+    // so both MUST offer `17` as their precondition; a reservation patch sent
+    // without one (`None` here) is applied to whatever the object has become,
+    // both replicas win, and the two assertions above both see 2.
+    assert_eq!(
+        state.reservation_tokens,
+        vec![Some("17".to_string()), Some("17".to_string())],
+        "both stale replicas must submit the watched resourceVersion as the CAS token"
     );
 }
 
@@ -3145,7 +3249,8 @@ async fn failed_and_refused_children_each_release_forbid_admission() {
                 )]),
             },
             Route {
-                method: "PUT",
+                // W0: the reservation is a `PATCH`; see `is_reservation`.
+                method: "PATCH",
                 path_suffix: "/backupschedules/nightly/status",
                 status: 200,
                 body: serde_json::to_string(&schedule).unwrap(),
@@ -3174,7 +3279,7 @@ async fn failed_and_refused_children_each_release_forbid_admission() {
             .iter()
             .map(|call| call.method.clone())
             .collect();
-        assert_eq!(methods, ["GET", "PUT", "POST", "PATCH"], "{phase}");
+        assert_eq!(methods, ["GET", "PATCH", "POST", "PATCH"], "{phase}");
     }
 }
 
@@ -3455,7 +3560,8 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
             )]),
         },
         Route {
-            method: "PUT",
+            // W0: the reservation is a `PATCH`; see `is_reservation`.
+            method: "PATCH",
             path_suffix: "/backupschedules/nightly-v2/status",
             status: 200,
             body: serde_json::to_string(&replacement).unwrap(),
@@ -3566,7 +3672,14 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
 
                 if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
                     let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    if patch["metadata"]["resourceVersion"] == serde_json::json!("18") {
+                    // A's OLD FINALIZER IS HELD, AND ONLY IT. W0 made the
+                    // reservation a `PATCH` too, so `resourceVersion == 18`
+                    // alone now also matches B's reservation — which is the one
+                    // write this gate is waiting FOR, and gating it would
+                    // deadlock. `is_reservation` separates them.
+                    if patch["metadata"]["resourceVersion"] == serde_json::json!("18")
+                        && !is_reservation(&patch["status"])
+                    {
                         while !b_reserved.load(Ordering::SeqCst) {
                             b_reserved_notify.notified().await;
                         }
@@ -3580,38 +3693,6 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             200,
                             backup_list_body(state.backups.values().cloned().collect()),
                         )
-                    } else if method == "PUT" && path.ends_with("/backupschedules/nightly/status") {
-                        let mut replacement: serde_json::Value =
-                            serde_json::from_slice(&body).unwrap();
-                        let expected = state.schedule["metadata"]["resourceVersion"]
-                            .as_str()
-                            .unwrap()
-                            .parse::<u64>()
-                            .unwrap();
-                        let offered = replacement["metadata"]["resourceVersion"]
-                            .as_str()
-                            .unwrap()
-                            .parse::<u64>()
-                            .unwrap();
-                        if offered != expected {
-                            (
-                                409,
-                                r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","message":"the object has been modified","code":409}"#.to_string(),
-                            )
-                        } else {
-                            replacement["metadata"]["resourceVersion"] =
-                                serde_json::json!((expected + 1).to_string());
-                            state.schedule = replacement;
-                            let pending = state.schedule["status"]["pendingBackupRef"]["name"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string();
-                            if pending == slot_b {
-                                b_reserved.store(true, Ordering::SeqCst);
-                                b_reserved_notify.notify_waiters();
-                            }
-                            (200, state.schedule.to_string())
-                        }
                     } else if method == "POST" && path.ends_with("/backups") {
                         let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
                         let posted_name = posted["metadata"]["name"].as_str().unwrap().to_string();
@@ -3643,12 +3724,15 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             .unwrap()
                             .parse::<u64>()
                             .unwrap();
+                        // A MERGE PATCH WITH NO `resourceVersion` INHERITS THE
+                        // STORED ONE and can never conflict — the API server's
+                        // own rule, modelled rather than `unwrap`ed, so that a
+                        // reservation sent without a precondition shows up as a
+                        // wrong OUTCOME here instead of as a hang.
                         let offered = patch["metadata"]["resourceVersion"]
                             .as_str()
-                            .unwrap()
-                            .parse::<u64>()
-                            .unwrap();
-                        if offered != expected {
+                            .and_then(|v| v.parse::<u64>().ok());
+                        if offered.is_some_and(|offered| offered != expected) {
                             (
                                 409,
                                 r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","message":"the object has been modified","code":409}"#.to_string(),
@@ -3657,6 +3741,17 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             weirkeeper::conditions::apply_merge_patch(&mut state.schedule, &patch);
                             state.schedule["metadata"]["resourceVersion"] =
                                 serde_json::json!((expected + 1).to_string());
+                            // B's RESERVATION IS THE EVENT A's FINALIZER WAITS
+                            // FOR — one merge patch away from the write that
+                            // used to be a replace.
+                            let pending = state.schedule["status"]["pendingBackupRef"]["name"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
+                            if pending == slot_b {
+                                b_reserved.store(true, Ordering::SeqCst);
+                                b_reserved_notify.notify_waiters();
+                            }
                             (200, state.schedule.to_string())
                         }
                     } else {

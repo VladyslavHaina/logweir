@@ -600,35 +600,69 @@ pub fn backup_is_terminal(backup: &Backup) -> bool {
     )
 }
 
-fn reservation_body(
+/// The `/status` **merge patch** one slot reservation is.
+///
+/// A PATCH AND NOT A PUT, AND THAT IS AN RBAC CONTRACT AS MUCH AS A
+/// CONCURRENCY ONE. `Api::replace_status` issues `PUT`, which the API server
+/// authorises as the verb `update` on `backupschedules/status`; the shipped
+/// ClusterRole grants `patch` on the status subresources and deliberately
+/// grants no `update` anywhere (`config/rbac/role.yaml`, and the chart and
+/// install-file copies of it). A reservation sent as a replace is therefore
+/// **403 on every shipped install** — with the default `concurrencyPolicy:
+/// Forbid` that is every due slot of every schedule, so nothing is ever
+/// created. The compare-and-set is not lost by moving to a patch: Kubernetes
+/// applies a `metadata.resourceVersion` carried in a patch BODY as an update
+/// precondition and answers a mismatch `409 Conflict`, which is the same
+/// mechanism the final status write has always used — hence
+/// [`status_patch_with_preconditions`] and not a second one here.
+///
+/// EXPLICIT `null`s, because merge-patch semantics make an absent key mean
+/// "leave it alone" while the replaced object this used to build cleared
+/// `activeBackupRef` by simply not carrying it. The two fields a reservation
+/// decides — a cleared active reference and the accepted pending one — are
+/// therefore both written, always.
+fn reservation_patch(
     schedule: &BackupSchedule,
     decision: &SlotDecision,
     backup_name: &str,
     now: DateTime<Utc>,
-) -> Result<Vec<u8>, serde_json::Error> {
-    let mut reserved = schedule.clone();
-    let mut status = schedule.status.clone().unwrap_or_default();
-    status.active_backup_ref = None;
-    status.pending_backup_ref = Some(LocalRef {
-        name: backup_name.to_string(),
-    });
-    status.next_fire_time = decision.next_fire_time();
-    status.conditions = Some(vec![merge_condition(
-        current_condition(status.conditions.as_ref(), CONDITION_READY),
-        Condition {
-            r#type: CONDITION_READY.to_string(),
-            status: "True".to_string(),
-            observed_generation: schedule.metadata.generation,
-            last_transition_time: Some(now),
-            reason: Some(REASON_SCHEDULED.to_string()),
-            message: Some(format!(
-                "{}; concurrencyPolicy Forbid atomically admitted this slot and is creating the Backup",
-                decision.message()
-            )),
+) -> serde_json::Value {
+    let mut status = serde_json::Map::new();
+    status.insert("activeBackupRef".to_string(), serde_json::Value::Null);
+    status.insert(
+        "pendingBackupRef".to_string(),
+        json!(LocalRef {
+            name: backup_name.to_string(),
+        }),
+    );
+    status.insert(
+        "nextFireTime".to_string(),
+        match decision.next_fire_time() {
+            Some(t) => json!(t),
+            None => serde_json::Value::Null,
         },
-    )]);
-    reserved.status = Some(status);
-    serde_json::to_vec(&reserved)
+    );
+    status.insert(
+        "conditions".to_string(),
+        json!([merge_condition(
+            current_condition(
+                schedule.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                CONDITION_READY,
+            ),
+            Condition {
+                r#type: CONDITION_READY.to_string(),
+                status: "True".to_string(),
+                observed_generation: schedule.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(REASON_SCHEDULED.to_string()),
+                message: Some(format!(
+                    "{}; concurrencyPolicy Forbid atomically admitted this slot and is creating the Backup",
+                    decision.message()
+                )),
+            },
+        )]),
+    );
+    json!({ "status": serde_json::Value::Object(status) })
 }
 
 fn reserved_slot(schedule_name: &str, backup_name: &str) -> Option<(String, DateTime<Utc>)> {
@@ -1263,14 +1297,18 @@ pub async fn reconcile_schedule_with_archive(
                 }
 
                 if needs_reservation {
-                    if schedule.metadata.resource_version.is_none() {
-                        return Err(ScheduleError::MissingResourceVersion(name));
-                    }
+                    // THE ADMISSION CAS, AND THE ONE VERB IT NEEDS. The
+                    // precondition helper refuses an object with no
+                    // `resourceVersion` before anything is sent, so the
+                    // reservation is either compare-and-set or not made.
                     let schedules_api: Api<BackupSchedule> =
                         Api::namespaced(client.clone(), &namespace);
-                    let body = reservation_body(schedule, &decision, &create_name, now)?;
+                    let body = status_patch_with_preconditions(
+                        schedule,
+                        reservation_patch(schedule, &decision, &create_name, now),
+                    )?;
                     status_write_base = schedules_api
-                        .replace_status(&name, &PostParams::default(), body)
+                        .patch_status(&name, &PatchParams::default(), &Patch::Merge(body))
                         .await?;
                 }
 
