@@ -997,7 +997,7 @@ cosmetic one — a condition array is a **map keyed by `type`**, so a standard
 the array is given the standard `x-kubernetes-list-type: map` the API server
 would reject every failed `Backup`'s status patch.
 
-Two RBAC notes, because both are easy to get wrong:
+Three RBAC notes, because each is easy to get wrong:
 
 - **`pods/log` is a subresource and `pods` does not cover it.** A role granting
   `get` on `pods` reads every pod's spec and cannot read one line of any pod's
@@ -1007,6 +1007,20 @@ Two RBAC notes, because both are easy to get wrong:
   the controller never reads it and cannot start a process inside the pod that
   holds it. `config/rbac/` carries the request; the install file carries the
   grant.
+- **Every status write is a merge `PATCH`, and the role grants no `update`.**
+  A `PUT` — `Api::replace_status` in kube — is authorised as the verb `update`
+  on `<kind>/status`, which no rule in this install grants; the controller
+  therefore uses `Api::patch_status` with `Patch::Merge` everywhere, including
+  the `BackupSchedule` slot reservation `concurrencyPolicy: Forbid` makes
+  before it creates a run. Compare-and-set is not given up by that choice: the
+  patch body carries `metadata.resourceVersion`, which the API server applies
+  as an update precondition and answers `409 Conflict` on a mismatch, so two
+  controller replicas reading the same object still produce exactly one
+  winner. A reservation sent as a replace is a 403 on every due slot of every
+  schedule, and the tests that answer whatever route they are asked for cannot
+  see it; `manifest_lint.rs`'s `every_call_site_has_a_grant` is what does,
+  by deriving each `Api<T>` call in `crates/weirkeeper/src/` and requiring a
+  grant for it in every shipped copy of the role.
 
 ### The crashed Job: when there is no exit code at all
 
@@ -1418,8 +1432,11 @@ proxy and its authority.
 not RBAC, restricts mutation to `spec.suspend`. The controller has reads on the
 six kinds, status patches, Backup creation, Job create/read/patch, Pod and
 `pods/log` reads, and ConfigMap create/get. It has no Secret read, pod exec,
-pod attach or delete permission. Inspect [config/rbac](../config/rbac/) for
-the authoritative grants.
+pod attach or delete permission, and **no `update` on anything**: every status
+write, the `Forbid` slot reservation included, is a merge `PATCH` whose body
+carries `metadata.resourceVersion` as the compare-and-set precondition (§10's
+three RBAC notes). Inspect [config/rbac](../config/rbac/) for the authoritative
+grants.
 
 Job creation still allows the controller to mount a signing Secret. No Secret
 read permission is not isolation from the signing key; see §15.

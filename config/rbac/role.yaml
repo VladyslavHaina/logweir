@@ -20,6 +20,20 @@
 # `every_granted_verb_has_a_caller` keeps that true, and the call site is named
 # in the comment above each rule.
 #
+# AND THE CONVERSE, WHICH COST A P0: EVERY CALL HAS A GRANT. The rule above,
+# read alone, is silent about a call whose verb is granted NOWHERE, and one
+# shipped: the `BackupSchedule` reconciler reserved a `Forbid` slot with
+# `Api::replace_status`, a `PUT`, authorised as `update` on
+# `backupschedules/status` — which this file grants on nothing. Every due slot
+# of every schedule 403'd and no scheduled Backup was ever created, while the
+# route-table tests, which answer whatever they are asked for, stayed green.
+# `manifest_lint.rs`'s `every_call_site_has_a_grant` is the other direction:
+# it derives each `Api<T>` method called under `crates/weirkeeper/src/` and
+# requires a matching (resource, verb) here, in `logweir.yaml`, and in every
+# rendered chart copy. Status writes are merge `PATCH`es carrying
+# `metadata.resourceVersion` as the API server's update precondition — that is
+# how the reservation keeps its compare-and-set with `patch` alone.
+#
 # WHERE SPEC §9's ENGLISH AND THE RBAC VERB SET DISAGREE, THE CALLERS DECIDE.
 # §9 says "`update` on their `/status` only" and "Job CRUD"; the load-bearing
 # words are **only** (the status subresource and not the whole object) and
@@ -115,6 +129,14 @@ rules:
   # `Api::patch_status` with `Patch::Merge`; NOT `update`, which no reconciler
   # calls. Six entries and not a wildcard, so adding a seventh kind is a visible
   # diff in this file.
+  #
+  # A COMPARE-AND-SET NEEDS NO `update`. The `BackupSchedule` slot reservation
+  # and every final status write carry `metadata.resourceVersion` in the PATCH
+  # BODY, which the API server applies as an update precondition and answers
+  # `409 Conflict` on a mismatch. A reservation written as `replace_status`
+  # instead is a `PUT`, is authorised as `update`, and 403s here — see the
+  # header note. If a future reconciler needs `update`, the call is wrong
+  # before the grant is.
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals/status
