@@ -1548,13 +1548,15 @@ const NS: &str = "logweir-t19";
 const UID: &str = "3f1c8a5e-0000-4000-8000-000000000019";
 
 /// A `BackupSchedule` whose archive is the scratch tree's own prefix and whose
-/// retention rule selects exactly one of the five sets.
+/// retention rule selects exactly one of the five sets. It carries a
+/// `resourceVersion`, as every object the API server returns does, because the
+/// status patch sends it back as its compare-and-swap precondition.
 fn schedule_json(retention: &str) -> String {
     format!(
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "BackupSchedule",
-  "metadata": {{ "name": "nightly", "namespace": "{NS}", "uid": "{UID}", "generation": 1 }},
+  "metadata": {{ "name": "nightly", "namespace": "{NS}", "uid": "{UID}", "generation": 1, "resourceVersion": "17" }},
   "spec": {{
     "schedule": "0 0 * * *",
     "sourceRef": {{ "name": "prod" }},
@@ -1567,14 +1569,33 @@ fn schedule_json(retention: &str) -> String {
     )
 }
 
+/// The owned-`Backup` LIST that every reconcile of a non-`Allow` schedule reads:
+/// the reconciler filters it by controller UID to find the active child. A
+/// suspended schedule that has never fired owns none, so the truthful answer is
+/// an empty list.
+fn no_backups_route() -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/namespaces/logweir-t19/backups",
+        status: 200,
+        body: serde_json::json!({
+            "apiVersion": "logweir.dev/v1alpha1",
+            "kind": "BackupList",
+            "metadata": { "resourceVersion": "1" },
+            "items": []
+        })
+        .to_string(),
+    }
+}
+
 /// The report lands on the schedule's status, through the reconciler.
 ///
 /// `suspend: true` SO NO `Backup` IS CREATED, and the route table therefore
-/// holds exactly one route: the status `PATCH`. The double panics on a request
-/// it was not given a route for, so "the reconciler asked for nothing else"
-/// is a property of this table rather than a hope — and it makes the point
-/// that the retention report is refreshed on EVERY reconcile, including one
-/// that fires nothing.
+/// holds exactly two routes: the owned-`Backup` LIST every reconcile reads, and
+/// the status `PATCH`. The double panics on a request it was not given a route
+/// for, so "the reconciler asked for nothing else" is a property of this table
+/// rather than a hope — and it makes the point that the retention report is
+/// refreshed on EVERY reconcile, including one that fires nothing.
 ///
 /// NOT `#[tokio::test]`, AND THE REASON **IS** INTERFACE I13. The handle is
 /// built BEFORE the runtime exists, exactly as `main.rs` builds it: `Store`'s
@@ -1602,12 +1623,15 @@ fn the_retention_report_lands_on_the_schedule_status() {
         .build()
         .expect("the test runtime builds");
     let bodies = rt.block_on(async {
-        let (client, _recorder, bodies) = mock_client_recording_bodies(vec![Route {
-            method: "PATCH",
-            path_suffix: "/backupschedules/nightly/status",
-            status: 200,
-            body: schedule_json(r#"{ "keepDays": 7 }"#),
-        }]);
+        let (client, _recorder, bodies) = mock_client_recording_bodies(vec![
+            no_backups_route(),
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: schedule_json(r#"{ "keepDays": 7 }"#),
+            },
+        ]);
 
         weirkeeper::controllers::backup_schedule::reconcile_schedule_with_archive(
             &schedule,
@@ -1671,12 +1695,15 @@ fn the_retention_report_lands_on_the_schedule_status() {
 async fn no_archive_handle_means_no_retention_key_in_the_patch() {
     let schedule: BackupSchedule = serde_json::from_str(&schedule_json(r#"{ "keepDays": 7 }"#))
         .expect("the fixture is a BackupSchedule");
-    let (client, _recorder, bodies) = mock_client_recording_bodies(vec![Route {
-        method: "PATCH",
-        path_suffix: "/backupschedules/nightly/status",
-        status: 200,
-        body: schedule_json(r#"{ "keepDays": 7 }"#),
-    }]);
+    let (client, _recorder, bodies) = mock_client_recording_bodies(vec![
+        no_backups_route(),
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: schedule_json(r#"{ "keepDays": 7 }"#),
+        },
+    ]);
 
     weirkeeper::controllers::backup_schedule::reconcile_schedule_with_archive(
         &schedule,
@@ -2511,13 +2538,19 @@ fn a_steady_schedule_with_an_archive_does_not_rewrite_evaluated_at() {
         serde_json::from_str(&body).expect("the fixture is a BackupSchedule");
 
     let route = || {
-        vec![Route {
-            method: "PATCH",
-            path_suffix: "/backupschedules/nightly/status",
-            status: 200,
-            body: schedule_json(r#"{ "keepDays": 7 }"#),
-        }]
+        vec![
+            no_backups_route(),
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: schedule_json(r#"{ "keepDays": 7 }"#),
+            },
+        ]
     };
+    // The recorder logs every request, the LIST included; these rows count
+    // WRITES, which is what spins a watch.
+    let writes = |seen: &[SeenBody]| seen.iter().filter(|b| b.method != "GET").count();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2536,7 +2569,7 @@ fn a_steady_schedule_with_an_archive_does_not_rewrite_evaluated_at() {
         .await
         .expect("the first reconcile succeeds");
         let seen = bodies.lock().expect("readable").clone();
-        (patched_status(&seen), seen.len())
+        (patched_status(&seen), writes(&seen))
     });
     assert_eq!(first.1, 1, "the first pass writes once");
     assert_eq!(
@@ -2571,7 +2604,7 @@ fn a_steady_schedule_with_an_archive_does_not_rewrite_evaluated_at() {
         .await
         .expect("the second reconcile succeeds");
         let seen = bodies.lock().expect("readable").clone();
-        seen.len()
+        writes(&seen)
     });
     assert_eq!(
         second, 0,
