@@ -1265,11 +1265,9 @@ fn install_md_distinguishes_local_images_and_registry_publication() {
 
 /// **The Secret preflight runs before any custom resource.**
 ///
-/// `just check-secrets` exits 1 naming the first absent Secret, and an absent
-/// `logweir-signing-key` is the worst of the five: the key is MINTED when the
-/// path is absent, so the run succeeds and signs its evidence with a key
-/// nothing attests. A document that runs that check after the samples have
-/// been applied has documented the trap rather than avoided it.
+/// `just check-secrets` exits 1 naming the first absent Secret. The Helm path
+/// initializes the retained signer first; a document that runs the check after
+/// samples have been applied has documented the trap rather than avoided it.
 #[test]
 fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     let install = read("docs/install.md");
@@ -1306,17 +1304,14 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         preflight < first_sample,
         "docs/install.md applies a file under config/samples/ at byte {first_sample} \
          but does not reach `just check-secrets` until byte {preflight}. The preflight \
-         runs BEFORE any custom resource: an absent `logweir-signing-key` does not \
-         fail, it succeeds and signs with a key nothing attests"
+         runs BEFORE any custom resource: missing workload prerequisites must fail \
+         before a controller creates a Job"
     );
 
-    // The five Secrets, by the names the code reads.
-    for secret in [
-        "logweir-signing-key",
-        "logweir-approval-bundle",
-        "logweir-s3",
-        "logweir-evidence-ro",
-    ] {
+    // Workload credentials remain explicit. The signing Secret is the one
+    // fixed Secret that MUST NOT have a manual creation command on the
+    // supported Helm path: bootstrap initializes it without local key files.
+    for secret in ["logweir-s3", "logweir-evidence-ro"] {
         let found = install
             .match_indices("create secret generic")
             .any(|(at, _)| {
@@ -1335,37 +1330,100 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
          whose data key is fixed at `password` (`TARGET_PASSWORD_SECRET_KEY`)"
     );
     assert!(
-        install.contains("--from-file=signing.pem=signing.pem"),
-        "docs/install.md must use the signing Secret's real data key, `signing.pem` — \
-         a Secret keyed `key.pem` mounts a directory without the file the runner was \
-         told to read"
+        install.contains("short-lived bootstrap Job")
+            && install.contains("logweir-signing-trust")
+            && install.contains("Helm never renders private key"),
+        "docs/install.md must document managed bootstrap, public material and the no-render boundary"
     );
     assert!(
-        install.contains("load_or_generate") && install.contains("keys.rs:81-92"),
-        "docs/install.md must carry the silent-mint warning citing \
-         `crates/logweir-evidence/src/keys.rs:81-92`"
+        !install.contains("-out signing.pem"),
+        "the supported install must not require local signing-key generation"
     );
-    for pair in ["signing.pem", "approver.pem"] {
-        assert!(
-            install.contains(&format!(
-                "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out {pair}"
-            )),
-            "docs/install.md must carry the verbatim `openssl genpkey` command for {pair}"
-        );
-    }
+    assert!(
+        install.contains(
+            "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem"
+        ),
+        "the independent approver recipe remains explicit"
+    );
 
-    // The runner ServiceAccount is applied PER NAMESPACE: it is not in
-    // `logweir.yaml`, which installs only into `logweir-system`, where no
-    // runner ever runs.
+    // The managed and low-level paths are deliberately distinct: Helm owns
+    // declared runner namespaces; logweir.yaml users apply the base account.
     assert!(
         install.contains("config/rbac/backup-runner-serviceaccount.yaml"),
         "docs/install.md must tell the reader to apply the runner ServiceAccount"
     );
     assert!(
-        install.contains("Apply it once per namespace that will run jobs"),
-        "docs/install.md must say the runner ServiceAccount is applied per namespace: \
-         a pod whose PodSpec names no ServiceAccount silently gets `default`"
+        install.contains("identity.authorizedRunnerNamespaces")
+            && install.contains("For the low-level path, apply it once per namespace"),
+        "docs/install.md must distinguish Helm-managed authorized namespaces from the low-level manual account path"
     );
+
+    assert!(
+        install.contains("identity.bootstrapImage")
+            && install.contains("identity bootstrap --help")
+            && install.contains("intentionally release-blocked"),
+        "install docs must state the exact compatible-image publish/pin prerequisite"
+    );
+    assert!(
+        install.contains("post-rollback")
+            && install.contains("rollback to a pre-bootstrap chart")
+            && install.contains("retention—not active validation"),
+        "rollback validation must be limited to targets that actually carry the hook"
+    );
+    assert!(
+        install.contains("connected Helm operation")
+            && install.contains("offline `helm template`")
+            && install.contains("unsupported with\n`identity.enabled=true`")
+            && install.contains("exact\nIPv4 `/32` or IPv6 `/128`")
+            && install.contains("TCP 443\nand 6443")
+            && install.contains("Other API ports are unsupported"),
+        "managed identity docs must refuse unsafe offline renders and state exact API CIDR/port requirements"
+    );
+    assert!(
+        install.contains("Only the bootstrap/distributor **processes and their projected API tokens** are\nshort-lived")
+            && install.contains("ordinary persistent release resources")
+            && install.contains("does not automatically revoke these RBAC grants"),
+        "identity docs must distinguish short-lived processes/tokens from persistent scoped RBAC"
+    );
+    assert!(
+        install.contains("Routine Helm 3 and Helm 4 upgrades")
+            && install.contains("`pre-install,pre-upgrade` hooks")
+            && install.contains("not `pre-rollback` hooks")
+            && install.contains("never the patched private bytes"),
+        "rollback docs must describe the Helm 3/4-safe creation-hook retention boundary"
+    );
+    assert!(
+        install.contains("one Logweir\ninstallation identity per cluster")
+            && install.contains("different signer")
+            && install.contains("Never mint a per-namespace signer"),
+        "the singleton and same-identity namespace contract must be actionable"
+    );
+    assert!(
+        install.contains("apply --server-side -f charts/logweir/crds/")
+            && install.contains("--for=condition=Established")
+            && install.contains("#upgrade-rollback-and-legacy-jobs"),
+        "install docs must order CRD apply/wait before Helm upgrade and cross-link details"
+    );
+
+    let chart_readme = read("charts/logweir/README.md");
+    assert!(!chart_readme.contains("mints two\nkeypairs, creates the five Secrets"));
+    assert!(!chart_readme.contains("the chart creates none of them on this path"));
+    for required in [
+        "identity.bootstrapImage",
+        "identity.authorizedRunnerNamespaces",
+        "logweir-identity-singleton",
+        "identity bootstrap --help",
+        "post-rollback",
+    ] {
+        assert!(
+            chart_readme.contains(required),
+            "chart README omits current identity contract `{required}`"
+        );
+    }
+
+    let sample = read("config/samples/secrets.yaml");
+    assert!(sample.contains("HELM-MANAGED; low-level/external/recovery only"));
+    assert!(!sample.contains("-out signing.pem"));
 
     // The `TrustRoster`'s name is fixed.
     assert!(

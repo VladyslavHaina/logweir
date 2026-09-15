@@ -3,16 +3,11 @@
 //!
 //! # Why the admission happens HERE and not in the pod
 //!
-//! Exit 3 from a runner pod is ambiguous today, and the corpus says why: phase
-//! 0 dials before phase 1 runs, so a `plan_hash` mismatch or a bad approval
-//! signature only becomes exit 3 **when the target answers**. With a dead
-//! broker the same spec exits `1`, and a UI that maps exit 3 to *"your
-//! approval does not match this spec"* mislabels that case every time the
-//! scratch cluster is down. This reconciler removes the ambiguity **at the
-//! source**: [`admit`] verifies the approval and recomputes the plan hash
-//! **before any pod exists**, so a mismatch is a terminal status with no run
-//! created, and **exit 3 from a pod therefore means only "a phase-0 admission
-//! guard refused"**.
+//! Approval identity and plan hash are checked here before any pod exists.
+//! The runner then independently captures and validates the controller-pinned
+//! plan, approval, sidecar, public key, and allowlist before constructing a
+//! Kafka or object-store client. A bundle replacement therefore refuses
+//! before phase 0 rather than being masked by target reachability.
 //!
 //! Recomputing at Job-creation time rather than trusting a `status` matters
 //! because a spec schema change invalidates every approval
@@ -121,9 +116,11 @@ use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
     CONDITION_JOB_CREATED, PHASE_FAILED, PHASE_PENDING, PHASE_RUNNING, PHASE_SUCCEEDED,
-    REASON_ADMITTED, REASON_APPROVAL_NOT_VERIFIED, REASON_EVIDENCE_KEYS_RECORDED,
-    REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL, TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
-    TERMINAL_STATE_CLUSTER_NOT_REACHABLE, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+    REASON_ADMITTED, REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED, REASON_APPROVAL_NOT_VERIFIED,
+    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL,
+    TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT, TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
+    TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
+    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_JOB_NAME_CONFLICT,
     TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
     TERMINAL_STATE_PLAN_HASH_MISMATCH, TERMINAL_STATE_WINDOW_NOT_COVERED,
 };
@@ -132,8 +129,8 @@ use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
 use crate::crds::restore::Restore;
 use crate::crds::trust_roster::TrustRoster;
 use crate::job::{
-    self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, APPROVAL_MOUNT_PATH,
-    APPROVAL_VOLUME, CONTAINER_NAME, PLAN_MOUNT_PATH,
+    self, ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount,
+    APPROVAL_MOUNT_PATH, APPROVAL_VOLUME, CONTAINER_NAME, PLAN_MOUNT_PATH,
 };
 use crate::verification::{
     conditions_in, restore_badge, second_patch, stored_verification, verified_condition,
@@ -177,17 +174,26 @@ pub fn plan_config_map_name(restore_name: &str) -> String {
 // The approval bundle, the signing key, and the credential that is NOT ours
 // ---------------------------------------------------------------------------
 
-/// The Secret carrying the approval bundle — Task 22's, projected at
-/// [`APPROVAL_MOUNT_PATH`].
+/// The namespace-wide Secret mounted by Jobs created before PLAT-01.
 ///
-/// A SECRET AND NOT A ConfigMap, AND THE DIRECTION IS WHY. `allowed-clusters.json`
-/// on this path authorises a restore **TARGET**: any subject with `patch
-/// configmaps` who could replace it would WIDEN the set of clusters a restore
-/// may write into. On the `Backup` path the same file is a consistency rail
-/// whose only possible effect is to make a run refuse (errata **E5a**;
-/// `docs/kubernetes.md` §10 carries that reason), so it stays a ConfigMap
-/// there. Same file name, opposite blast radius, two homes.
+/// Kept as a named compatibility contract: an existing Job that references
+/// this Secret is legacy and is observed without rewriting its pod template.
 pub const APPROVAL_BUNDLE_SECRET: &str = "logweir-approval-bundle";
+
+/// Suffix for the immutable, public bundle created for one Restore.
+pub const APPROVAL_BUNDLE_SUFFIX: &str = "-approval-bundle";
+
+/// Annotation carrying the Restore UID bound to the bundle.
+pub const BUNDLE_RESTORE_UID_ANNOTATION: &str = "logweir.dev/restore-uid";
+/// Annotation carrying `sha256(spec.planBytes)`.
+pub const BUNDLE_PLAN_HASH_ANNOTATION: &str = "logweir.dev/plan-hash";
+/// Annotation carrying the referenced Approval name.
+pub const BUNDLE_APPROVAL_NAME_ANNOTATION: &str = "logweir.dev/approval-name";
+/// Annotation carrying the referenced Approval UID.
+pub const BUNDLE_APPROVAL_UID_ANNOTATION: &str = "logweir.dev/approval-uid";
+
+/// Condition type showing whether the per-Restore public inputs are ready.
+pub const CONDITION_APPROVAL_BUNDLE_READY: &str = "ApprovalBundleReady";
 
 /// The signed approval document, at `/approval/approval.json`.
 pub const APPROVAL_DOC_FILE: &str = "approval.json";
@@ -198,6 +204,12 @@ pub const APPROVAL_SIG_FILE: &str = "approval.sig";
 pub const APPROVER_KEY_FILE: &str = "approver.pub.pem";
 /// The cluster allowlist, at `/approval/allowed-clusters.json`.
 pub const ALLOWED_CLUSTERS_FILE: &str = "allowed-clusters.json";
+
+/// The per-Restore immutable ConfigMap mounted at [`APPROVAL_MOUNT_PATH`].
+#[must_use]
+pub fn approval_bundle_config_map_name(restore_name: &str) -> String {
+    format!("{restore_name}{APPROVAL_BUNDLE_SUFFIX}")
+}
 
 /// The environment variable the runner reads the TARGET SASL password from,
 /// and from nowhere else.
@@ -323,10 +335,10 @@ pub const OUTCOME_FAIL_COVERAGE: &str = "fail-coverage";
 
 /// What [`admit`] decided.
 ///
-/// FIVE VARIANTS AND THE SET IS CLOSED. Tasks 26 and 27 render the `reason`
+/// SIX VARIANTS AND THE SET IS CLOSED. Tasks 26 and 27 render the `reason`
 /// this produces, so a variant is an interface and not an implementation
 /// detail; [`RestoreAdmission::reason`] is a `match` with no wildcard so a
-/// sixth variant fails to compile until someone names its reason.
+/// seventh variant fails to compile until someone names its reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreAdmission {
     /// Every check passed. A Job may be created.
@@ -352,6 +364,14 @@ pub enum RestoreAdmission {
     ApprovalNotReceived {
         /// Empty, and named in the message as such.
         approval: String,
+    },
+    /// The named Approval is verified, but for a different Kubernetes
+    /// subject identity. Both specs are immutable, so this is terminal.
+    ApprovalSubjectMismatch {
+        /// The referenced Approval name.
+        approval: String,
+        /// Which non-secret identity component failed.
+        detail: String,
     },
     /// `sha256_prefixed(spec.planBytes)` is not the `plan_hash` inside
     /// `Approval.spec.approvalBytes`.
@@ -384,6 +404,7 @@ impl RestoreAdmission {
             Self::Ok => REASON_ADMITTED,
             Self::ApprovalNotVerified { .. } => REASON_APPROVAL_NOT_VERIFIED,
             Self::ApprovalNotReceived { .. } => TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
+            Self::ApprovalSubjectMismatch { .. } => TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
             Self::PlanHashMismatch { .. } => TERMINAL_STATE_PLAN_HASH_MISMATCH,
             Self::ClusterNotReachable { .. } => TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
         }
@@ -395,7 +416,7 @@ impl RestoreAdmission {
     ///
     /// [`Self::ApprovalNotVerified`] is a HOLD: the fact it reports can change
     /// without anybody touching this object, so it requeues at
-    /// [`ADMISSION_REQUEUE_SECS`] (interface **I19**). The other three cannot:
+    /// [`ADMISSION_REQUEUE_SECS`] (interface **I19**). The other four cannot:
     /// `Restore.spec` and `Approval.spec` are both sealed by CEL rules, so an
     /// empty `approvalRef` stays empty and a plan hash that does not match
     /// never will. `ClusterNotReachable` is terminal by controller ruling
@@ -412,6 +433,7 @@ impl RestoreAdmission {
         match self {
             Self::Ok | Self::ApprovalNotVerified { .. } => false,
             Self::ApprovalNotReceived { .. }
+            | Self::ApprovalSubjectMismatch { .. }
             | Self::PlanHashMismatch { .. }
             | Self::ClusterNotReachable { .. } => true,
         }
@@ -437,6 +459,12 @@ impl fmt::Display for RestoreAdmission {
                 "spec.approvalRef.name is `{approval}` — it names nothing, so no Approval can \
                  ever bind to this Restore; spec is immutable, so create a new Restore that names \
                  one"
+            ),
+            Self::ApprovalSubjectMismatch { approval, detail } => write!(
+                f,
+                "spec.approvalRef names Approval `{approval}`, but its verified subject binding \
+                 does not identify this Restore ({detail}); create a new Approval for this exact \
+                 Restore name, namespace, and UID"
             ),
             Self::PlanHashMismatch {
                 recomputed,
@@ -493,8 +521,9 @@ pub fn recomputed_plan_hash(restore: &Restore) -> String {
 ///
 /// Recomputes `sha256_prefixed(spec.planBytes)` and compares it against the
 /// `Approval`'s own `plan_hash`, parsed from `spec.approvalBytes`, at
-/// Job-creation time. **NEVER reads `Approval.status.matchedKeyId` or any
-/// other status value as evidence** (interface **I18**);
+/// Job-creation time. **NEVER reads `Approval.status.matchedKeyId` as proof of
+/// the document hash** (interface **I18**); status is used only for the
+/// controller-produced verified flag and exact subject provenance.
 /// `the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation`'s second
 /// arm sets `Approval.status` to carry the CORRECT hash and asserts it changes
 /// nothing.
@@ -505,13 +534,16 @@ pub fn recomputed_plan_hash(restore: &Restore) -> String {
 ///    [`RestoreAdmission::ApprovalNotReceived`], terminal. First, because a
 ///    `Restore` that asks for no authorisation is not a `Restore` whose plan
 ///    hash is worth computing.
-/// 2. That `Approval` must exist and be `status.verified == Some(true)` →
-///    else [`RestoreAdmission::ApprovalNotVerified`], **requeued at
+/// 2. That `Approval` must exist and its immutable subject plus sticky verified
+///    provenance must identify this exact Restore name, namespace and UID →
+///    else [`RestoreAdmission::ApprovalSubjectMismatch`], terminal.
+/// 3. That exact Approval must be `status.verified == Some(true)` → else
+///    [`RestoreAdmission::ApprovalNotVerified`], **requeued at
 ///    [`ADMISSION_REQUEUE_SECS`]** (interface **I19**). Before the hash,
 ///    because the hash inside unverified bytes is a claim nobody signed for.
-/// 3. The recomputed hash must equal the approval document's own → else
+/// 4. The recomputed hash must equal the approval document's own → else
 ///    [`RestoreAdmission::PlanHashMismatch`], terminal, naming both.
-/// 4. `spec.target.clusterRef` must resolve to a `KafkaCluster` with
+/// 5. `spec.target.clusterRef` must resolve to a `KafkaCluster` with
 ///    `status.reachable == Some(true)` → else
 ///    [`RestoreAdmission::ClusterNotReachable`]. Last, because it is the only
 ///    check whose answer is about the world rather than about the documents.
@@ -536,15 +568,64 @@ pub fn admit(
         };
     }
 
-    // ---- 2. and that Approval must be Verified=True ----------------------
+    // ---- 2. the referenced object must be this exact subject -------------
     let Some(approval) = approval else {
         return RestoreAdmission::ApprovalNotVerified { approval: referent };
     };
-    if approval.status.as_ref().and_then(|s| s.verified) != Some(true) {
+
+    // A plan hash is not a subject identity.  The Approval controller records
+    // the exact referent UID it actually read, and this side checks the whole
+    // binding before accepting its cached verdict. Check immutable subject
+    // mismatches even after Verified was revoked so a recreated UID produces
+    // an actionable terminal Restore status instead of a permanent generic
+    // hold. A legacy status without provenance is still held for refresh.
+    let status = approval.status.as_ref();
+    let bound = status.and_then(|status| status.verified_subject_ref.as_ref());
+    let restore_name = restore.name_any();
+    let restore_namespace = restore.namespace().unwrap_or_default();
+    let restore_uid = restore.uid().unwrap_or_default();
+    let approval_namespace = approval.namespace().unwrap_or_default();
+    let subject = &approval.spec.subject_ref;
+    let expected_api_version = Restore::api_version(&()).to_string();
+    let mismatch = if approval.name_any() != referent {
+        Some("the API response name differs from spec.approvalRef".to_string())
+    } else if approval_namespace != restore_namespace {
+        Some("the Approval is from a different namespace".to_string())
+    } else if subject.kind != crate::crds::approval::SubjectKind::Restore {
+        Some(format!("spec.subjectRef.kind is {}", subject.kind))
+    } else if subject.name != restore_name {
+        Some(format!("spec.subjectRef.name is `{}`", subject.name))
+    } else if let Some(bound) = bound {
+        if bound.api_version != expected_api_version
+            || bound.kind != crate::crds::approval::SubjectKind::Restore
+            || bound.name != restore_name
+            || bound.namespace != restore_namespace
+        {
+            Some("status.verifiedSubjectRef names a different object".to_string())
+        } else if bound.uid != restore_uid {
+            Some(format!(
+                "status.verifiedSubjectRef.uid is `{}`, current metadata.uid is `{restore_uid}`",
+                bound.uid
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(detail) = mismatch {
+        return RestoreAdmission::ApprovalSubjectMismatch {
+            approval: referent,
+            detail,
+        };
+    }
+
+    // ---- 3. and that exact Approval must currently be Verified=True -------
+    if status.and_then(|status| status.verified) != Some(true) || bound.is_none() {
         return RestoreAdmission::ApprovalNotVerified { approval: referent };
     }
 
-    // ---- 3. the plan hash, RECOMPUTED, from inside the signed bytes ------
+    // ---- 4. the plan hash, RECOMPUTED, from inside the signed bytes ------
     let recomputed = recomputed_plan_hash(restore);
     let approval_says = approval_plan_hash(approval).unwrap_or_default();
     if recomputed != approval_says {
@@ -554,7 +635,7 @@ pub fn admit(
         };
     }
 
-    // ---- 4. the target must report reachable -----------------------------
+    // ---- 5. the target must report reachable -----------------------------
     let cluster_name = restore.spec.target.cluster_ref.name.clone();
     let reachable = cluster
         .and_then(|c| c.status.as_ref())
@@ -606,6 +687,17 @@ pub fn plan_config_map(restore: &Restore) -> Result<ConfigMap, RestoreError> {
         metadata: ObjectMeta {
             name: Some(plan_config_map_name(&name)),
             namespace: Some(namespace),
+            annotations: Some(
+                [
+                    (BUNDLE_RESTORE_UID_ANNOTATION.to_string(), uid.clone()),
+                    (
+                        BUNDLE_PLAN_HASH_ANNOTATION.to_string(),
+                        recomputed_plan_hash(restore),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
             owner_references: Some(vec![OwnerReference {
                 api_version: Restore::api_version(&()).to_string(),
                 kind: Restore::kind(&()).to_string(),
@@ -625,8 +717,315 @@ pub fn plan_config_map(restore: &Restore) -> Result<ConfigMap, RestoreError> {
             .into_iter()
             .collect(),
         ),
+        immutable: Some(true),
         ..ConfigMap::default()
     })
+}
+
+/// Exact compatibility for a create-only plan ConfigMap retry.
+#[must_use]
+pub fn compatible_plan_config_map(existing: &ConfigMap, desired: &ConfigMap, uid: &str) -> bool {
+    complete_restore_owner(&existing.metadata, desired, uid)
+        && existing.immutable == Some(true)
+        && existing.data == desired.data
+        && desired_annotations_match(existing, desired)
+}
+
+/// Compatibility for a controller-crash transition where the previous
+/// release created the mutable plan ConfigMap but had not created its Job.
+/// The new Job pins the exact plan digest, so a later replacement is rejected
+/// by the runner before any client is constructed.
+#[must_use]
+pub fn compatible_legacy_plan_config_map(
+    existing: &ConfigMap,
+    desired: &ConfigMap,
+    uid: &str,
+) -> bool {
+    complete_restore_owner(&existing.metadata, desired, uid)
+        && existing.immutable != Some(true)
+        && existing.data == desired.data
+        && existing
+            .metadata
+            .annotations
+            .as_ref()
+            .is_none_or(|annotations| {
+                !annotations.contains_key(BUNDLE_RESTORE_UID_ANNOTATION)
+                    && !annotations.contains_key(BUNDLE_PLAN_HASH_ANNOTATION)
+            })
+}
+
+/// Build the immutable public approval bundle for exactly one Restore.
+///
+/// The bytes copied from `Approval.spec` are never parsed and re-emitted. The
+/// public key is the roster entry named by the verified status, and the
+/// allowlist is rendered from that same immutable roster. Owner UID plus the
+/// binding annotations make the Kubernetes object specific to this Restore;
+/// the runner still independently verifies the signature and plan hash from
+/// the mounted files.
+pub fn approval_bundle_config_map(
+    restore: &Restore,
+    approval: &Approval,
+    roster: &TrustRoster,
+) -> Result<ConfigMap, RestoreError> {
+    let name = restore.name_any();
+    let namespace = restore
+        .namespace()
+        .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
+    let restore_uid = restore
+        .uid()
+        .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
+    let approval_uid = approval.uid().ok_or_else(|| {
+        RestoreError::Materialization(format!(
+            "the verified Approval {} carries no metadata.uid",
+            approval.name_any()
+        ))
+    })?;
+    let matched_key_id = approval
+        .status
+        .as_ref()
+        .filter(|status| status.verified == Some(true))
+        .and_then(|status| status.matched_key_id.as_deref())
+        .ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the Approval {} is not Verified=True with a matchedKeyId",
+                approval.name_any()
+            ))
+        })?;
+    let expired = roster
+        .status
+        .as_ref()
+        .and_then(|status| status.expired_key_ids.as_deref())
+        .unwrap_or_default();
+    if expired.iter().any(|id| id == matched_key_id) {
+        return Err(RestoreError::Materialization(format!(
+            "the Approval {} verified under key {matched_key_id}, which the TrustRoster now marks expired",
+            approval.name_any()
+        )));
+    }
+    let key = roster
+        .spec
+        .approver_keys
+        .iter()
+        .find(|entry| entry.key_id == matched_key_id)
+        .ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the Approval {} verified under key {matched_key_id}, which is absent from the TrustRoster",
+                approval.name_any()
+            ))
+        })?;
+    let plan_hash = recomputed_plan_hash(restore);
+    let approval_hash = approval_plan_hash(approval).unwrap_or_default();
+    if approval_hash != plan_hash {
+        return Err(RestoreError::Refused(
+            TERMINAL_STATE_PLAN_HASH_MISMATCH,
+            format!(
+                "spec.planBytes hash to {plan_hash} and the verified Approval document names {approval_hash}"
+            ),
+        ));
+    }
+    let allowed = logweir_core::spec::AllowedClusters {
+        allowed_cluster_ids: roster.spec.allowed_cluster_ids.clone(),
+        source_cluster_id: None,
+    };
+    let allowed_bytes = serde_json::to_string_pretty(&allowed).map_err(|error| {
+        RestoreError::Materialization(format!(
+            "the TrustRoster allowlist could not be rendered: {error}"
+        ))
+    })?;
+    let annotations = [
+        (
+            BUNDLE_RESTORE_UID_ANNOTATION.to_string(),
+            restore_uid.clone(),
+        ),
+        (BUNDLE_PLAN_HASH_ANNOTATION.to_string(), plan_hash),
+        (
+            BUNDLE_APPROVAL_NAME_ANNOTATION.to_string(),
+            approval.name_any(),
+        ),
+        (BUNDLE_APPROVAL_UID_ANNOTATION.to_string(), approval_uid),
+    ]
+    .into_iter()
+    .collect();
+
+    Ok(ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(approval_bundle_config_map_name(&name)),
+            namespace: Some(namespace),
+            annotations: Some(annotations),
+            owner_references: Some(vec![OwnerReference {
+                api_version: Restore::api_version(&()).to_string(),
+                kind: Restore::kind(&()).to_string(),
+                name,
+                uid: restore_uid,
+                controller: Some(true),
+                block_owner_deletion: Some(true),
+            }]),
+            ..ObjectMeta::default()
+        },
+        immutable: Some(true),
+        data: Some(
+            [
+                (
+                    APPROVAL_DOC_FILE.to_string(),
+                    approval.spec.approval_bytes.clone(),
+                ),
+                (
+                    APPROVAL_SIG_FILE.to_string(),
+                    approval.spec.sidecar_bytes.clone(),
+                ),
+                (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()),
+                (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        ..ConfigMap::default()
+    })
+}
+
+/// Environment contract pinned into every newly rendered Restore Job.
+/// Projected ConfigMaps are name-bound and may be delete/recreated; these
+/// values live in the immutable Job template and let the runner reject any
+/// replacement before it constructs Kafka, store, or engine clients.
+pub fn execution_contract_env(
+    restore: &Restore,
+    approval: &Approval,
+    roster: &TrustRoster,
+) -> Result<Vec<(String, String)>, RestoreError> {
+    use logweir_core::execution_contract as contract;
+
+    let bundle = approval_bundle_config_map(restore, approval, roster)?;
+    let data = bundle.data.as_ref().ok_or_else(|| {
+        RestoreError::Materialization("the rendered approval bundle has no data".to_string())
+    })?;
+    let get = |key: &str| {
+        data.get(key).ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the rendered approval bundle is missing public member {key}"
+            ))
+        })
+    };
+    let namespace = restore
+        .namespace()
+        .ok_or_else(|| RestoreError::NoNamespace(restore.name_any()))?;
+    let restore_uid = restore
+        .uid()
+        .ok_or_else(|| RestoreError::NoUid(restore.name_any()))?;
+    let approval_uid = approval.uid().ok_or_else(|| {
+        RestoreError::Materialization(format!(
+            "the verified Approval {} carries no metadata.uid",
+            approval.name_any()
+        ))
+    })?;
+    let digest = |bytes: &[u8]| sha256_prefixed(bytes);
+
+    Ok(vec![
+        (
+            contract::VERSION_ENV.to_string(),
+            contract::VERSION.to_string(),
+        ),
+        (
+            contract::SUBJECT_API_VERSION_ENV.to_string(),
+            Restore::api_version(&()).to_string(),
+        ),
+        (
+            contract::SUBJECT_KIND_ENV.to_string(),
+            Restore::kind(&()).to_string(),
+        ),
+        (contract::SUBJECT_NAME_ENV.to_string(), restore.name_any()),
+        (contract::SUBJECT_NAMESPACE_ENV.to_string(), namespace),
+        (contract::SUBJECT_UID_ENV.to_string(), restore_uid),
+        (contract::APPROVAL_NAME_ENV.to_string(), approval.name_any()),
+        (contract::APPROVAL_UID_ENV.to_string(), approval_uid),
+        (
+            contract::PLAN_SHA256_ENV.to_string(),
+            digest(restore.spec.plan_bytes.as_bytes()),
+        ),
+        (
+            contract::APPROVAL_SHA256_ENV.to_string(),
+            digest(get(APPROVAL_DOC_FILE)?.as_bytes()),
+        ),
+        (
+            contract::APPROVAL_SIDECAR_SHA256_ENV.to_string(),
+            digest(get(APPROVAL_SIG_FILE)?.as_bytes()),
+        ),
+        (
+            contract::APPROVER_KEY_SHA256_ENV.to_string(),
+            digest(get(APPROVER_KEY_FILE)?.as_bytes()),
+        ),
+        (
+            contract::ALLOWED_CLUSTERS_SHA256_ENV.to_string(),
+            digest(get(ALLOWED_CLUSTERS_FILE)?.as_bytes()),
+        ),
+    ])
+}
+
+/// Whether an `AlreadyExists` object is the exact bundle this reconcile
+/// intended. Ownership without byte equality is never accepted.
+#[must_use]
+pub fn compatible_approval_bundle(existing: &ConfigMap, desired: &ConfigMap, uid: &str) -> bool {
+    complete_restore_owner(&existing.metadata, desired, uid)
+        && existing.immutable == Some(true)
+        && existing.data == desired.data
+        && desired_annotations_match(existing, desired)
+}
+
+fn desired_annotations_match(existing: &ConfigMap, desired: &ConfigMap) -> bool {
+    let existing = existing.metadata.annotations.as_ref();
+    desired.metadata.annotations.as_ref().is_some_and(|wanted| {
+        wanted.iter().all(|(key, value)| {
+            existing.and_then(|annotations| annotations.get(key)) == Some(value)
+        })
+    })
+}
+
+/// The exact single controller owner contract for a Restore-owned object.
+/// A second owner can retain the object after Restore deletion, so even a
+/// complete expected owner is insufficient unless it is the only owner.
+#[must_use]
+pub fn has_complete_restore_owner(metadata: &ObjectMeta, restore: &Restore) -> bool {
+    let Some(uid) = restore.uid() else {
+        return false;
+    };
+    has_exact_restore_owner_set(metadata, &restore.name_any(), &uid)
+}
+
+fn has_exact_restore_owner_set(metadata: &ObjectMeta, restore_name: &str, uid: &str) -> bool {
+    let owners = metadata.owner_references.as_deref().unwrap_or_default();
+    owners.len() == 1
+        && owners.first().is_some_and(|owner| {
+            owner.api_version == Restore::api_version(&())
+                && owner.kind == Restore::kind(&())
+                && owner.name == restore_name
+                && owner.uid == uid
+                && owner.controller == Some(true)
+                && owner.block_owner_deletion == Some(true)
+        })
+}
+
+/// A same-named Job is observable only when it is controlled by this exact
+/// Restore incarnation. Its volume shape may be legacy, but its identity may
+/// never be inferred from the name alone.
+#[must_use]
+pub fn compatible_restore_job(job: &Job, restore: &Restore) -> bool {
+    job.metadata.name.as_deref() == Some(restore.name_any().as_str())
+        && job.metadata.namespace == restore.namespace()
+        && has_complete_restore_owner(&job.metadata, restore)
+}
+
+fn complete_restore_owner(metadata: &ObjectMeta, desired: &ConfigMap, uid: &str) -> bool {
+    let Some(restore_name) = desired
+        .metadata
+        .owner_references
+        .as_deref()
+        .and_then(|owners| owners.first())
+        .map(|owner| owner.name.as_str())
+    else {
+        return false;
+    };
+    metadata.name == desired.metadata.name
+        && metadata.namespace == desired.metadata.namespace
+        && has_exact_restore_owner_set(metadata, restore_name, uid)
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +1140,8 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
     let mut argv: Vec<String> = vec![
         "restore".to_string(),
         "run".to_string(),
+        logweir_core::execution_contract::VERSION_ARG.to_string(),
+        logweir_core::execution_contract::VERSION.to_string(),
         "--spec".to_string(),
         format!("{PLAN_MOUNT_PATH}/{PLAN_SPEC_KEY}"),
         "--approval".to_string(),
@@ -791,6 +1192,8 @@ pub fn runner_job_spec(
     restore: &Restore,
     cluster: &KafkaCluster,
     approver_key_ids: &[String],
+    approval: &Approval,
+    roster: &TrustRoster,
 ) -> Result<RunnerJobSpec, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -800,36 +1203,21 @@ pub fn runner_job_spec(
         .uid()
         .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
 
-    // Two Secret volumes, sorted by volume name so the rendered spec is a
-    // function of the inputs and not of the order this function happens to
-    // push them in. Both are FILES the runner opens by path: a key or a
-    // signed document in an env var would appear in `kubectl describe pod`
-    // for anyone with pod read.
-    let mut secret_mounts = vec![
-        SecretMount {
-            volume: APPROVAL_VOLUME.to_string(),
-            secret_name: APPROVAL_BUNDLE_SECRET.to_string(),
-            mount_path: APPROVAL_MOUNT_PATH.to_string(),
-            items: vec![
-                (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
-                (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
-                (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
-                (
-                    ALLOWED_CLUSTERS_FILE.to_string(),
-                    ALLOWED_CLUSTERS_FILE.to_string(),
-                ),
-            ],
-        },
-        SecretMount {
-            volume: SIGNING_VOLUME.to_string(),
-            secret_name: SIGNING_KEY_SECRET.to_string(),
-            mount_path: SIGNING_MOUNT_PATH.to_string(),
-            items: vec![(
-                SIGNING_KEY_SECRET_KEY.to_string(),
-                SIGNING_KEY_FILE.to_string(),
-            )],
-        },
-    ];
+    // The private signing key remains the only file-backed Secret. The
+    // approval inputs are public and come from the immutable ConfigMap this
+    // Restore owns.
+    //
+    // A key is a FILE the runner opens by path: putting it in an env var would
+    // expose it through `kubectl describe pod` to anyone with pod read.
+    let mut secret_mounts = vec![SecretMount {
+        volume: SIGNING_VOLUME.to_string(),
+        secret_name: SIGNING_KEY_SECRET.to_string(),
+        mount_path: SIGNING_MOUNT_PATH.to_string(),
+        items: vec![(
+            SIGNING_KEY_SECRET_KEY.to_string(),
+            SIGNING_KEY_FILE.to_string(),
+        )],
+    }];
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = Vec::new();
@@ -877,6 +1265,20 @@ pub fn runner_job_spec(
         deadline_seconds: restore.spec.deadline_seconds,
         service_account_name: RUNNER_SERVICE_ACCOUNT.to_string(),
         secret_mounts,
+        config_map_mounts: vec![ConfigMapMount {
+            volume: APPROVAL_VOLUME.to_string(),
+            config_map_name: approval_bundle_config_map_name(&restore.name_any()),
+            mount_path: APPROVAL_MOUNT_PATH.to_string(),
+            items: vec![
+                (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
+                (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
+                (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
+                (
+                    ALLOWED_CLUSTERS_FILE.to_string(),
+                    ALLOWED_CLUSTERS_FILE.to_string(),
+                ),
+            ],
+        }],
         env_from_secret,
         // `RUST_LOG` is pinned rather than inherited: below `info` the run id
         // and the exit-code meaning line are lost, and those two are how a pod
@@ -893,6 +1295,7 @@ pub fn runner_job_spec(
         env_literal: {
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
             env.extend(backup::archive_addressing_env());
+            env.extend(execution_contract_env(restore, approval, roster)?);
             env
         },
         plan_config_map: Some(plan_config_map_name(&restore.name_any())),
@@ -1333,8 +1736,29 @@ pub fn admission_hold_patch(
     })
 }
 
+/// A retryable status for failure to materialize controller-pinned execution
+/// inputs. The detailed condition message names the plan, approval bundle, or
+/// raced Job operation that will be retried.
+#[must_use]
+pub fn approval_bundle_hold_patch(restore: &Restore, message: &str, now: DateTime<Utc>) -> Value {
+    json!({
+        "status": {
+            "phase": PHASE_PENDING,
+            "reason": REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
+            "conditions": [condition(
+                restore,
+                CONDITION_APPROVAL_BUNDLE_READY,
+                "False",
+                REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
+                message,
+                now,
+            )],
+        }
+    })
+}
+
 /// The `/status` merge patch for a run this CONTROLLER refused terminally,
-/// before any `POST`.
+/// before any Job was created.
 ///
 /// TERMINAL, WITH NO `exitCode`, AND NEVER A REQUEUE. Nothing ran, so there is
 /// no code to lift and none is invented; `exitReason` is
@@ -1807,6 +2231,9 @@ pub enum RestoreError {
     NoUid(String),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
+    /// The verified public inputs could not be materialized. This is exposed
+    /// as a Pending status and retried; no Job is created.
+    Materialization(String),
     /// A TERMINAL REFUSAL THIS CONTROLLER DECIDED BY ITSELF, carrying the
     /// terminal state and the message its condition names.
     ///
@@ -1824,6 +2251,7 @@ impl fmt::Display for RestoreError {
             }
             Self::NoUid(name) => write!(f, "the object {name} carries no metadata.uid"),
             Self::Api(e) => write!(f, "kubernetes API error: {e}"),
+            Self::Materialization(message) => write!(f, "{message}"),
             Self::Refused(state, message) => write!(f, "{state}: {message}"),
         }
     }
@@ -1832,7 +2260,10 @@ impl fmt::Display for RestoreError {
 impl std::error::Error for RestoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoNamespace(_) | Self::NoUid(_) | Self::Refused(..) => None,
+            Self::NoNamespace(_)
+            | Self::NoUid(_)
+            | Self::Materialization(_)
+            | Self::Refused(..) => None,
             Self::Api(e) => Some(e),
         }
     }
@@ -1922,11 +2353,10 @@ async fn get_roster(client: &kube::Client) -> Result<Option<TrustRoster>, Restor
 
 /// `POST` the plan ConfigMap, and decide the 409.
 ///
-/// A 409 IS SUCCESS ONLY IF THE EXISTING OBJECT IS OURS. The ordinary 409 is
-/// this same reconcile's previous pass: the object is byte-identical, because
-/// its one key is `spec.planBytes` and `spec` is immutable. A 409 on an object
-/// owned by something else is a plan document a stranger wrote, at the mount
-/// path of a pod that holds this `Restore`'s signing key, and it is terminal.
+/// A 409 IS SUCCESS ONLY IF THE EXISTING OBJECT IS OURS, immutable, has the
+/// exact binding annotations, and carries byte-identical `spec.planBytes`.
+/// Ownership alone is insufficient: a same-UID stale or substituted object
+/// must never become the plan paired with a verified approval bundle.
 ///
 /// THE CONFIGMAP WRITE IS A KUBERNETES API WRITE, NOT AN ARCHIVE WRITE.
 /// `scripts/check-no-archive-write.sh` is unaffected: its control-plane token
@@ -1951,7 +2381,7 @@ async fn write_plan_config_map(
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
 
     match maps.create(&PostParams::default(), &desired).await {
-        Ok(_) => {
+        Ok(created) if has_exact_restore_owner_set(&created.metadata, &name, &uid) => {
             info!(
                 restore = %name,
                 namespace = %namespace,
@@ -1962,46 +2392,121 @@ async fn write_plan_config_map(
             );
             Ok(())
         }
+        Ok(_) => Err(RestoreError::Refused(
+            TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+            format!(
+                "the API create response for ConfigMap {cm_name} did not retain the exact single \
+                 owner reference for Restore {name} UID {uid}"
+            ),
+        )),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             let existing = maps
                 .get_opt(&cm_name)
                 .await
                 .map_err(RestoreError::Api)?
                 .ok_or_else(|| {
-                    // A 409 followed by a 404 is a race with a deletion, and a
-                    // race IS transient — but it is reported as the conflict
-                    // it looked like rather than silently retried, because a
-                    // second `POST` in the same pass would race the same way.
-                    RestoreError::Refused(
-                        TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-                        format!(
-                            "the ConfigMap {cm_name} answered 409 to a create and 404 to the \
-                             read that followed it"
-                        ),
-                    )
+                    RestoreError::Materialization(format!(
+                        "the plan ConfigMap {cm_name} answered 409 to create and 404 to the \
+                         following read; it was deleted concurrently and will be retried"
+                    ))
                 })?;
-            if backup::is_owned_by(&existing, &uid) {
+            if compatible_plan_config_map(&existing, &desired, &uid) {
                 debug!(
                     restore = %name,
                     namespace = %namespace,
                     config_map = %cm_name,
-                    "the plan ConfigMap already exists and is owned by this Restore; its one key \
-                     is spec.planBytes and spec is immutable, so it is the same bytes"
+                    "the existing immutable plan ConfigMap exactly matches this Restore's bytes and bindings"
+                );
+                Ok(())
+            } else if compatible_legacy_plan_config_map(&existing, &desired, &uid) {
+                info!(
+                    restore = %name,
+                    namespace = %namespace,
+                    config_map = %cm_name,
+                    "adopting the exact mutable plan left by a pre-PLAT-01 controller crash; \
+                     the new Job independently pins and verifies these bytes before data access"
                 );
                 Ok(())
             } else {
                 Err(RestoreError::Refused(
                     TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
                     format!(
-                        "the ConfigMap {cm_name} already exists and carries no controller owner \
-                         reference with this Restore's UID; the runner Job would mount a plan \
-                         document this object did not render, in the pod that holds the signing \
-                         key"
+                        "the ConfigMap {cm_name} already exists but its owner UID, immutable bit, \
+                         binding annotations, or plan bytes differ; the runner Job would mount a \
+                         plan document this object did not render"
                     ),
                 ))
             }
         }
         Err(e) => Err(RestoreError::Api(e)),
+    }
+}
+
+/// Create the immutable per-Restore approval bundle, accepting a 409 only
+/// when the existing object is byte-for-byte identical and owned by this
+/// Restore UID.
+async fn write_approval_bundle_config_map(
+    restore: &Restore,
+    approval: &Approval,
+    roster: &TrustRoster,
+    client: &kube::Client,
+    namespace: &str,
+) -> Result<(), RestoreError> {
+    let restore_name = restore.name_any();
+    let uid = restore
+        .uid()
+        .ok_or_else(|| RestoreError::NoUid(restore_name.clone()))?;
+    let desired = approval_bundle_config_map(restore, approval, roster)?;
+    let bundle_name = approval_bundle_config_map_name(&restore_name);
+    let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+
+    match maps.create(&PostParams::default(), &desired).await {
+        Ok(created) if has_exact_restore_owner_set(&created.metadata, &restore_name, &uid) => {
+            info!(
+                restore = %restore_name,
+                namespace = %namespace,
+                config_map = %bundle_name,
+                "materialized the immutable per-Restore approval bundle"
+            );
+            Ok(())
+        }
+        Ok(_) => Err(RestoreError::Refused(
+            TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT,
+            format!(
+                "the API create response for ConfigMap {bundle_name} did not retain the exact \
+                 single owner reference for Restore {restore_name} UID {uid}"
+            ),
+        )),
+        Err(kube::Error::Api(error)) if error.code == 409 => {
+            let existing = maps
+                .get_opt(&bundle_name)
+                .await
+                .map_err(|error| RestoreError::Materialization(format!(
+                    "could not inspect the existing approval bundle {bundle_name}: {error}"
+                )))?
+                .ok_or_else(|| RestoreError::Materialization(format!(
+                    "the approval bundle {bundle_name} answered 409 to create and 404 to the following read"
+                )))?;
+            if compatible_approval_bundle(&existing, &desired, &uid) {
+                debug!(
+                    restore = %restore_name,
+                    namespace = %namespace,
+                    config_map = %bundle_name,
+                    "the existing immutable approval bundle exactly matches the desired bytes and bindings"
+                );
+                Ok(())
+            } else {
+                Err(RestoreError::Refused(
+                    TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT,
+                    format!(
+                        "the ConfigMap {bundle_name} already exists but its owner UID, immutable bit, binding annotations, or public artifact bytes differ; it cannot substitute for this Restore's verified approval"
+                    ),
+                ))
+            }
+        }
+        Err(error) => Err(RestoreError::Materialization(format!(
+            "could not create approval bundle {bundle_name}: {error}"
+        ))),
     }
 }
 
@@ -2114,6 +2619,37 @@ pub async fn reconcile_restore_with_runner_image(
     runner: &job::RunnerImage,
 ) -> Result<RestoreOutcome, RestoreError> {
     match reconcile_restore_inner(restore, client, scorecard, verify, now, runner).await {
+        Err(RestoreError::Materialization(message)) => {
+            let name = restore.name_any();
+            let namespace = restore
+                .namespace()
+                .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
+            warn!(
+                restore = %name,
+                namespace = %namespace,
+                reason = REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
+                error = %message,
+                "Restore execution-input materialization failed; no Job was created"
+            );
+            let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
+            patch_status_if_changed(
+                &restores,
+                restore,
+                &name,
+                approval_bundle_hold_patch(restore, &message, now),
+            )
+            .await?;
+            Ok(RestoreOutcome {
+                job_name: name,
+                created: false,
+                admission: None,
+                exit_code: None,
+                terminal_state: None,
+                keys: RestoreEvidenceKeys::default(),
+                ttl_patched: false,
+                requeue: Requeue::After(ADMISSION_REQUEUE_SECS),
+            })
+        }
         Err(RestoreError::Refused(state, message)) => {
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `RestoreError::Refused`, so the
@@ -2127,8 +2663,8 @@ pub async fn reconcile_restore_with_runner_image(
                 namespace = %namespace,
                 terminal_state = state,
                 reason = %message,
-                "refusing this Restore terminally: nothing was created, and a requeue over an \
-                 immutable spec would never succeed"
+                "refusing this Restore terminally: no Job was created and no unverified inputs \
+                 were used; a requeue over an immutable spec would never succeed"
             );
             if !status_is_terminal(restore) {
                 let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
@@ -2190,6 +2726,19 @@ async fn reconcile_restore_inner(
     }
 
     let existing = jobs.get_opt(&job_name).await.map_err(RestoreError::Api)?;
+    if let Some(job) = existing.as_ref() {
+        if !compatible_restore_job(job, restore) {
+            return Err(RestoreError::Refused(
+                TERMINAL_STATE_JOB_NAME_CONFLICT,
+                format!(
+                    "Job {namespace}/{job_name} already exists but is not controlled by Restore \
+                     {namespace}/{name} with UID {}; remove the foreign or stale Job before \
+                     retrying; the controller did not observe or adopt it",
+                    restore.uid().unwrap_or_default()
+                ),
+            ));
+        }
+    }
 
     // STEP 1. Nothing running and nothing terminal: admit, then create.
     let Some(job) = existing else {
@@ -2302,8 +2851,30 @@ async fn reconcile_restore_inner(
                 ),
             ));
         };
-        let key_ids = approver_key_ids(get_roster(client).await?.as_ref());
-        let mut spec = runner_job_spec(restore, &cluster, &key_ids)?;
+        let approval = approval.ok_or_else(|| {
+            RestoreError::Materialization(
+                "the admitted Approval disappeared before its bundle was materialized".to_string(),
+            )
+        })?;
+        let roster = get_roster(client).await?.ok_or_else(|| {
+            RestoreError::Materialization(
+                "the TrustRoster disappeared before the verified Approval bundle was materialized"
+                    .to_string(),
+            )
+        })?;
+        let matched_key_id = approval
+            .status
+            .as_ref()
+            .and_then(|status| status.matched_key_id.clone())
+            .ok_or_else(|| {
+                RestoreError::Materialization(
+                    "the admitted Approval carries no status.matchedKeyId".to_string(),
+                )
+            })?;
+        // One exact verified key, not every key the roster happens to contain.
+        // The runner pins this id and verifies the detached signature again.
+        let key_ids = vec![matched_key_id];
+        let mut spec = runner_job_spec(restore, &cluster, &key_ids, &approval, &roster)?;
         // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
         // policy). `None` in either leaves the compiled-in constant in place,
         // which is what every test that does not pass one sees.
@@ -2316,10 +2887,47 @@ async fn reconcile_restore_inner(
         // deadline fires — measured live on the `Backup` path, and the reason
         // every scheduled backup was failing as an unexplained `NoExitCode`.
         write_plan_config_map(restore, client, &namespace).await?;
+        write_approval_bundle_config_map(restore, &approval, &roster, client, &namespace).await?;
 
-        jobs.create(&PostParams::default(), &job::build(&spec))
+        let created = match jobs
+            .create(&PostParams::default(), &job::build(&spec))
             .await
-            .map_err(RestoreError::Api)?;
+        {
+            Ok(created) if compatible_restore_job(&created, restore) => true,
+            Ok(_) => {
+                return Err(RestoreError::Refused(
+                    TERMINAL_STATE_JOB_NAME_CONFLICT,
+                    format!(
+                        "the API create response for Job {namespace}/{job_name} did not retain \
+                         the exact single owner reference for Restore {namespace}/{name} UID {}",
+                        restore.uid().unwrap_or_default()
+                    ),
+                ))
+            }
+            Err(kube::Error::Api(error)) if error.code == 409 => {
+                let raced = jobs
+                    .get_opt(&job_name)
+                    .await
+                    .map_err(RestoreError::Api)?
+                    .ok_or_else(|| {
+                        RestoreError::Materialization(format!(
+                            "Job {namespace}/{job_name} answered 409 to create and 404 to the \
+                             following read; it was deleted concurrently and will be retried"
+                        ))
+                    })?;
+                if !compatible_restore_job(&raced, restore) {
+                    return Err(RestoreError::Refused(
+                        TERMINAL_STATE_JOB_NAME_CONFLICT,
+                        format!(
+                            "Job {namespace}/{job_name} won a concurrent create but is not \
+                             controlled by this Restore UID; it was not adopted"
+                        ),
+                    ));
+                }
+                false
+            }
+            Err(error) => return Err(RestoreError::Api(error)),
+        };
         info!(
             restore = %name,
             namespace = %namespace,
@@ -2333,12 +2941,12 @@ async fn reconcile_restore_inner(
             &restores,
             restore,
             &name,
-            running_status_patch(restore, &job_name, true, now),
+            running_status_patch(restore, &job_name, created, now),
         )
         .await?;
         return Ok(RestoreOutcome {
             job_name,
-            created: true,
+            created,
             admission: Some(RestoreAdmission::Ok),
             exit_code: None,
             terminal_state: None,

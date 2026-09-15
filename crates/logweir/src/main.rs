@@ -25,6 +25,31 @@ fn main() -> std::process::ExitCode {
         }
     };
     let code = match args.command {
+        cli::Command::Identity(cli::IdentityCmd::Bootstrap {
+            namespace,
+            secret_name,
+            secret_key,
+            public_configmap_name,
+            external_secret_name,
+            external_secret_key,
+        }) => logweir::identity::run(&logweir::identity::BootstrapArgs {
+            namespace,
+            secret_name,
+            secret_key,
+            public_configmap_name,
+            external_secret: external_secret_name.zip(external_secret_key),
+        }),
+        cli::Command::Identity(cli::IdentityCmd::Distribute {
+            source_namespace,
+            target_namespace,
+            secret_name,
+            secret_key,
+        }) => logweir::identity::run_distribution(&logweir::identity::DistributeArgs {
+            source_namespace,
+            target_namespace,
+            secret_name,
+            secret_key,
+        }),
         cli::Command::Schema { which } => schema::run(&which),
         cli::Command::Backup(cli::BackupCmd::Run {
             spec,

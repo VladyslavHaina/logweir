@@ -49,17 +49,24 @@ impl SigningKey {
     pub fn from_pem_file(path: &Path) -> Result<Self, Error> {
         let pem = std::fs::read_to_string(path)
             .map_err(|e| Error::Key(format!("{}: {e}", path.display())))?;
-        if let Ok(k) = p256::ecdsa::SigningKey::from_pkcs8_pem(&pem) {
+        Self::from_pkcs8_pem(&pem).map_err(|e| match e {
+            Error::Key(detail) => Error::Key(format!("{}: {detail}", path.display())),
+            other => other,
+        })
+    }
+
+    /// Parses an in-memory PKCS#8 PEM private key.
+    ///
+    /// Kubernetes identity bootstrap receives an existing key from the API;
+    /// keeping that value in memory avoids making a second private-key file in
+    /// a writable temporary directory merely to use the file parser.
+    pub fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
+        if let Ok(k) = p256::ecdsa::SigningKey::from_pkcs8_pem(pem) {
             return Ok(SigningKey::P256(k));
         }
-        ed25519_dalek::SigningKey::from_pkcs8_pem(&pem)
+        ed25519_dalek::SigningKey::from_pkcs8_pem(pem)
             .map(SigningKey::Ed25519)
-            .map_err(|e| {
-                Error::Key(format!(
-                    "{}: not a P-256 or Ed25519 PKCS#8 key: {e}",
-                    path.display()
-                ))
-            })
+            .map_err(|e| Error::Key(format!("not a P-256 or Ed25519 PKCS#8 key: {e}")))
     }
 
     /// Reads `path` as a PKCS#8 PEM private key if it exists; otherwise mints a

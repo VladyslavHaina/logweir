@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 # Rendered by scripts/check-chart.sh (just chart-check):
-#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/demo.values.yaml
+#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/demo.values.yaml --set-string identity.bootstrapImage=<unpublished-test-digest>
 # It is checked in so a template change lands as a diff a reviewer reads; the
 # gate compares a temporary render and fails on drift.
 ---
@@ -151,6 +151,35 @@ spec:
                 description: Whether the DSSE signature over `approvalBytes` verified against a `TrustRoster` approver key, and the recomputed plan hash matched.
                 nullable: true
                 type: boolean
+              verifiedSubjectRef:
+                description: The exact referent identity used for the first successful verification. Once present it is retained across later failures so a same-named, recreated object can never acquire this Approval on a later reconcile.
+                nullable: true
+                properties:
+                  apiVersion:
+                    description: The referent's API version at verification time.
+                    type: string
+                  kind:
+                    description: The referent's kind at verification time.
+                    enum:
+                    - Restore
+                    - Backup
+                    type: string
+                  name:
+                    description: The referent's name at verification time.
+                    type: string
+                  namespace:
+                    description: The referent's namespace at verification time.
+                    type: string
+                  uid:
+                    description: The referent's immutable Kubernetes UID at verification time.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                - namespace
+                - uid
+                type: object
             type: object
         required:
         - spec
@@ -521,6 +550,13 @@ spec:
                 required:
                 - url
                 type: object
+              concurrencyPolicy:
+                default: Forbid
+                description: Whether a due slot may start while an earlier Backup owned by this schedule is unfinished. Omitted means `Forbid`, including on schedules stored before this field was introduced. `Allow` is explicit.
+                enum:
+                - Forbid
+                - Allow
+                type: string
               retention:
                 description: '`{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.'
                 nullable: true
@@ -565,7 +601,7 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: only spec.suspend is mutable; create a new BackupSchedule instead
-              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)
+              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)
           status:
             description: '`BackupSchedule.status`.'
             nullable: true
@@ -622,9 +658,9 @@ spec:
                 type: string
               lastMissedSlot:
                 description: |-
-                  The most recent slot that came due and was NOT fired — the controller was down, or the previous run was still active. Recorded because object identity is a pure function of the trigger (guard **G-SLOT**): a missed slot is never silently re-fired under a different name.
+                  The most recent slot that came due and was NOT fired — the controller was down, or `Forbid` found a previous owned run still active. Recorded because object identity is a pure function of the trigger (guard **G-SLOT**): a missed slot is never silently re-fired under a different name.
 
-                  THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one hour before the controller looked is skipped and recorded here, with a `Ready` condition whose reason is `SlotMissed`; a controller restarted after a week therefore fires at most the current slot and never six days of backlog. The field is written when a slot is skipped and is never cleared afterwards — it is the audit trail of the skip, so a correct implementation is distinguishable from a broken schedule.
+                  THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one hour before the controller looked is skipped and recorded here, with a `Ready` condition whose reason is `SlotMissed`; a controller restarted after a week therefore fires at most the current slot and never six days of backlog. A concurrency skip uses reason `ConcurrencyBlocked`. The field is written when a slot is skipped and is never cleared afterwards — it is the audit trail of the skip, so a correct implementation is distinguishable from a broken schedule.
                 nullable: true
                 type: string
               nextFireTime:
@@ -632,6 +668,16 @@ spec:
                 format: date-time
                 nullable: true
                 type: string
+              pendingBackupRef:
+                description: A `Forbid` slot atomically admitted in status but whose `Backup` creation has not yet been confirmed. This short-lived reservation closes the controller crash window and is cleared after the child is observed or created.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
               retentionReport:
                 description: What retention WOULD remove. Nothing was deleted — see [`RetentionReport`].
                 nullable: true
@@ -1478,9 +1524,9 @@ spec:
 
 ---
 # Source: logweir/templates/networkpolicy.yaml
-# [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a
-# deny is never observed here; only the kind+Calico probe would make this claim
-# real, and it is backlogged]
+# [UNVERIFIED ENFORCEMENT — Docker Desktop may accept this object without a
+# NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
+# CNI; Service ClusterIP versus post-DNAT endpoint matching is provider-specific.]
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1497,6 +1543,8 @@ spec:
     matchExpressions:
       - key: batch.kubernetes.io/job-name
         operator: Exists
+      - key: logweir.dev/identity-authority
+        operator: DoesNotExist
   policyTypes:
     - Egress
   egress:
@@ -1525,6 +1573,61 @@ spec:
           port: 443
         - protocol: TCP
           port: 9000
+---
+# Source: logweir/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logweir-identity-kubernetes-api-egress
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      logweir.dev/identity-authority: bootstrap
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              component: kube-apiserver
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
+# Source: logweir/templates/identity.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-identity-bootstrap
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+automountServiceAccountToken: false
 ---
 # Source: logweir/templates/runner-serviceaccount.yaml
 apiVersion: v1
@@ -1599,6 +1702,23 @@ type: Opaque
 stringData:
   access-key-id: "minioadmin"
   secret-access-key: "minioadmin"
+---
+# Source: logweir/templates/ui/ui.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-ui-runtime-050a1aeb70
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: ui
+immutable: true
+data:
+  runtime.js: |
+    window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({"allowed": ["logweir-system"], "selected": "logweir-system"});
 ---
 # Source: logweir/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1792,6 +1912,57 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: logweir-ui
+    namespace: logweir-system
+---
+# Source: logweir/templates/identity.yaml
+# The bootstrap account cannot list Secrets and cannot read arbitrary names.
+# The external source, when configured, is get-only; only the fixed managed
+# Secret and public ConfigMap can be patched.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: logweir-identity-bootstrap
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - logweir-signing-key
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["logweir-signing-key"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["logweir-signing-trust"]
+    verbs: ["get", "patch"]
+---
+# Source: logweir/templates/identity.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-identity-bootstrap
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: logweir-identity-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: logweir-identity-bootstrap
     namespace: logweir-system
 ---
 # Source: logweir/templates/ui/ui.yaml
@@ -2138,6 +2309,10 @@ spec:
       app.kubernetes.io/component: ui
   template:
     metadata:
+      annotations:
+        # The immutable, content-addressed context changes name on upgrade;
+        # this rolls the pod to the newly selected namespace set.
+        checksum/logweir-ui-runtime: 050a1aeb7038b79f657802c45a372907bcb497df81faf539555b045c0ddff911
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -2194,20 +2369,27 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          # NO `ui` VOLUME. `/ui` is a read-only part of the image's own
-          # filesystem now, under `readOnlyRootFilesystem: true` above — which
-          # is a stronger statement than the ConfigMap mount it replaced: a
-          # ConfigMap is a mutable API object, so the page the browser loaded
-          # was whatever anyone with `patch configmaps` had last written.
+          # `/ui` remains the image's read-only page. This single mounted file
+          # replaces its empty standalone context with Helm's non-secret one;
+          # it is not a page copy.
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: runtime
+              mountPath: /ui/runtime.js
+              subPath: runtime.js
+              readOnly: true
       volumes:
-        # `tmp` AND NOTHING ELSE. `HOME=/tmp` and `KUBECACHEDIR=/tmp/kube-cache`
-        # above need a writable path under `readOnlyRootFilesystem: true`; the
-        # page does not, because it is in the image.
+        # `tmp` is the only writable volume. `runtime` is a read-only
+        # ConfigMap containing only the namespace context, never page assets.
         - name: tmp
           emptyDir: {}
+        - name: runtime
+          configMap:
+            name: logweir-ui-runtime-050a1aeb70
+            items:
+              - key: runtime.js
+                path: runtime.js
 ---
 # Source: logweir/templates/demo-kafka/kafka.yaml
 apiVersion: apps/v1
@@ -2435,6 +2617,73 @@ spec:
         - name: data
           emptyDir: {}
 ---
+# Source: logweir/templates/identity.yaml
+# The private object is intentionally rendered EMPTY. The hook Job generates or
+# adopts a key through an optimistic API patch; Helm never renders key material.
+# `keep` makes uninstall/reinstall fail-safe: losing a Helm release record must
+# not silently rotate the signer used by old archives.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logweir-signing-key
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: signing-identity
+type: Opaque
+data: {}
+---
+# Source: logweir/templates/identity.yaml
+# Public verification material only: key-id, algorithm, SPKI PEM and the exact
+# current TrustRoster field that consumes it. Retained with the private object
+# so an absent private key is detected as loss, never treated as a fresh install.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-signing-trust
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: signing-trust
+data: {}
+---
+# Source: logweir/templates/identity.yaml
+# A fixed, authority-free cluster-scoped marker makes the current singleton
+# contract explicit. It contains no key material and grants no permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-identity-singleton
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/release-name: "logweir"
+    logweir.dev/release-namespace: "logweir-system"
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: signing-identity
+rules: []
+---
 # Source: logweir/templates/demo-kafka/kafka.yaml
 apiVersion: batch/v1
 kind: Job
@@ -2526,6 +2775,69 @@ spec:
                 echo "$topic: $after records on the source"
               done
               echo "READY: orders and payments seeded on $SOURCE; logweir.scratch present on $TARGET"
+---
+# Source: logweir/templates/identity.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: logweir-identity-bootstrap
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: post-install,post-upgrade,post-rollback
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "-10"
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: logweir
+        app.kubernetes.io/component: identity-bootstrap
+        logweir.dev/identity-authority: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: logweir-identity-bootstrap
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - key: demo.logweir.dev/example
+        operator: Exists
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrap
+          image: docker.io/vladyslavhaina/logweir@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - identity
+            - bootstrap
+            - --namespace
+            - logweir-system
+            - --public-configmap-name
+            - logweir-signing-trust
+          resources:
+            limits:
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
 ---
 # Source: logweir/templates/minio/minio.yaml
 apiVersion: batch/v1

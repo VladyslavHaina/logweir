@@ -18,35 +18,44 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use futures::future::BoxFuture;
+use http::{Request, Response};
+use http_body_util::BodyExt as _;
+use kube::client::Body;
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use tower::service_fn;
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     CONDITION_REASONS, CONDITION_REASON_GUARD_REFUSED, CONDITION_REASON_OK, REASON_ADMITTED,
     REASON_APPROVAL_NOT_VERIFIED, REASON_DRILL_NOT_PASS, REASON_GUARD_REFUSED, REASON_OK,
     REASON_OPERATIONAL, REASON_SIGNING_OR_LOCK, TERMINAL_STATES,
-    TERMINAL_STATE_APPROVAL_NOT_RECEIVED, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
+    TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT, TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
+    TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
-    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_PLAN_HASH_MISMATCH, TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
-    TERMINAL_STATE_WINDOW_NOT_COVERED,
+    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG,
+    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_PLAN_HASH_MISMATCH,
+    TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED, TERMINAL_STATE_WINDOW_NOT_COVERED,
 };
 use weirkeeper::controllers::backup::SIGNING_VOLUME;
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY};
 use weirkeeper::controllers::restore::TOPIC_PREFLIGHT_KEY_PREFIX;
 use weirkeeper::controllers::restore::{
-    action_for, admission_hold_patch, admit, approval_plan_hash, approver_key_ids,
-    crashed_status_patch, finished_status_patch, observe_scorecard, plan_config_map_name,
-    recomputed_plan_hash, reconcile_restore, refused_status_patch, restore_evidence_keys,
-    runner_argv, runner_job_spec, running_status_patch, scorecard_observation, topic_mapping,
-    triggered_by, unobserved_scorecard, window_not_covered, Requeue, RestoreAdmission,
-    RestoreEvidenceKeys, ScorecardObservation, ADMISSION_REQUEUE_SECS, ALLOWED_CLUSTERS_FILE,
-    APPROVAL_BUNDLE_SECRET, APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE,
-    OFFSET_REPORT_KEY_PREFIX, OFFSET_REPORT_OUT_PATH, OUTCOME_FAIL_COVERAGE, PLAN_SPEC_KEY,
-    REFERENT_NOT_FOUND_REASON, SCORECARD_KEY_PREFIX, SCORECARD_OUT_PATH, SIDECAR_KEY_PREFIX,
-    TARGET_PASSWORD_ENV, TARGET_PASSWORD_SECRET_KEY,
+    action_for, admission_hold_patch, admit, approval_bundle_config_map,
+    approval_bundle_config_map_name, approval_plan_hash, approver_key_ids,
+    compatible_approval_bundle, compatible_legacy_plan_config_map, compatible_restore_job,
+    crashed_status_patch, finished_status_patch, observe_scorecard, plan_config_map,
+    plan_config_map_name, recomputed_plan_hash, reconcile_restore, refused_status_patch,
+    restore_evidence_keys, runner_argv, runner_job_spec, running_status_patch,
+    scorecard_observation, topic_mapping, triggered_by, unobserved_scorecard, window_not_covered,
+    Requeue, RestoreAdmission, RestoreEvidenceKeys, ScorecardObservation, ADMISSION_REQUEUE_SECS,
+    ALLOWED_CLUSTERS_FILE, APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE,
+    BUNDLE_APPROVAL_NAME_ANNOTATION, BUNDLE_APPROVAL_UID_ANNOTATION, BUNDLE_PLAN_HASH_ANNOTATION,
+    BUNDLE_RESTORE_UID_ANNOTATION, OFFSET_REPORT_KEY_PREFIX, OFFSET_REPORT_OUT_PATH,
+    OUTCOME_FAIL_COVERAGE, PLAN_SPEC_KEY, REFERENT_NOT_FOUND_REASON, SCORECARD_KEY_PREFIX,
+    SCORECARD_OUT_PATH, SIDECAR_KEY_PREFIX, TARGET_PASSWORD_ENV, TARGET_PASSWORD_SECRET_KEY,
 };
 use weirkeeper::crds::restore::{Restore, RestoreStatus};
 use weirkeeper::job::{self, APPROVAL_MOUNT_PATH, APPROVAL_VOLUME};
@@ -71,6 +80,7 @@ const POD: &str = "logweir-restore-incident-4471-abcde";
 const UID: &str = "5c2e7b91-0000-4000-8000-0000000000a2";
 const CLUSTER_UID: &str = "8b3c1d2e-0000-4000-8000-0000000000c2";
 const APPROVAL: &str = "a1";
+type JsonMutation = (&'static str, fn(&mut Value));
 
 /// The three keys interface **I8** prints, in the contract's order.
 const SCORECARD_KEY: &str = "logweir/drills/01JB7Z0000000000000000000A.json";
@@ -249,6 +259,13 @@ fn now() -> DateTime<Utc> {
 /// spec field".
 fn approval_json(verified: bool, doc_hash: &str, cached_hash: &str) -> String {
     let doc = serde_json::to_string(&approval_doc(doc_hash)).expect("the doc is a JSON string");
+    let subject_binding = if verified {
+        format!(
+            r#", "verifiedSubjectRef": {{ "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore", "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}" }}"#
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
@@ -262,7 +279,7 @@ fn approval_json(verified: bool, doc_hash: &str, cached_hash: &str) -> String {
   }},
   "status": {{
     "verified": {verified},
-    "matchedKeyId": "{KEY_ID_LIVE}",
+    "matchedKeyId": "{KEY_ID_LIVE}"{subject_binding},
     "conditions": [{{ "type": "Verified", "status": "{}", "reason": "{}" }}]
   }}
 }}"#,
@@ -344,7 +361,8 @@ fn not_found_body(kind: &str, name: &str) -> String {
 fn running_job_body() -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b2"}},
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b2",
+    "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"active":1}}}}"#
     )
@@ -354,7 +372,8 @@ fn running_job_body() -> String {
 fn job_body(condition: &str) -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b2"}},
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b2",
+    "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"conditions":[{{"type":"{condition}","status":"True",
      "lastProbeTime":"2026-09-10T11:59:00Z","lastTransitionTime":"2026-09-10T11:59:00Z"}}]}}}}"#
@@ -482,6 +501,12 @@ fn admission_routes(
             body: existing_plan_config_map(UID),
         },
         Route {
+            method: "GET",
+            path_suffix: "/configmaps/logweir-restore-incident-4471-approval-bundle",
+            status: 200,
+            body: existing_approval_bundle(UID),
+        },
+        Route {
             method: "POST",
             path_suffix: "/jobs",
             status: 201,
@@ -499,20 +524,16 @@ fn admission_routes(
 /// A plan ConfigMap as the API server would hand it back, owned by `owner_uid`
 /// with `controller: true`.
 fn existing_plan_config_map(owner_uid: &str) -> String {
-    let plan = serde_json::to_string(PLAN_BYTES).expect("planBytes is a JSON string");
-    format!(
-        r#"{{
-  "apiVersion": "v1", "kind": "ConfigMap",
-  "metadata": {{
-    "name": "{NAME}-plan", "namespace": "{NS}",
-    "ownerReferences": [{{
-      "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore", "name": "{NAME}",
-      "uid": "{owner_uid}", "controller": true, "blockOwnerDeletion": true
-    }}]
-  }},
-  "data": {{ "{PLAN_SPEC_KEY}": {plan} }}
-}}"#
-    )
+    let mut plan = plan_config_map(&restore()).expect("the fixture materializes a plan");
+    plan.metadata.owner_references.as_mut().unwrap()[0].uid = owner_uid.to_string();
+    serde_json::to_string(&plan).expect("the plan ConfigMap serializes")
+}
+
+fn existing_approval_bundle(owner_uid: &str) -> String {
+    let mut bundle = approval_bundle_config_map(&restore(), &approval(true), &roster())
+        .expect("the fixture materializes an approval bundle");
+    bundle.metadata.owner_references.as_mut().unwrap()[0].uid = owner_uid.to_string();
+    serde_json::to_string(&bundle).expect("the approval bundle serializes")
 }
 
 /// The route table for a reconcile that finds a FINISHED Job.
@@ -1090,6 +1111,68 @@ fn approval_bytes_are_document_text_and_not_base64() {
     );
 }
 
+#[test]
+fn admission_binds_the_complete_verified_subject_identity() {
+    let restore = restore();
+    let cluster = cluster(true);
+    assert_eq!(
+        admit(&restore, Some(&approval(true)), Some(&cluster)),
+        RestoreAdmission::Ok
+    );
+
+    let cases: [JsonMutation; 5] = [
+        ("another Restore with the same plan", |value: &mut Value| {
+            value["spec"]["subjectRef"]["name"] = serde_json::json!("another-restore");
+        }),
+        ("a Backup/Drill kind substitution", |value: &mut Value| {
+            value["spec"]["subjectRef"]["kind"] = serde_json::json!("Backup");
+        }),
+        ("another namespace", |value: &mut Value| {
+            value["metadata"]["namespace"] = serde_json::json!("other-namespace");
+        }),
+        ("a recreated Restore UID", |value: &mut Value| {
+            value["status"]["verifiedSubjectRef"]["uid"] = serde_json::json!("previous-uid");
+        }),
+        (
+            "a recreated UID after verification was revoked",
+            |value: &mut Value| {
+                value["status"]["verified"] = serde_json::json!(false);
+                value["status"]["verifiedSubjectRef"]["uid"] = serde_json::json!("previous-uid");
+            },
+        ),
+    ];
+    for (label, mutate) in cases {
+        let mut value: Value =
+            serde_json::from_str(&approval_json(true, &plan_hash(), &plan_hash())).unwrap();
+        mutate(&mut value);
+        let approval = serde_json::from_value(value).unwrap();
+        let verdict = admit(&restore, Some(&approval), Some(&cluster));
+        assert!(
+            matches!(verdict, RestoreAdmission::ApprovalSubjectMismatch { .. }),
+            "{label} must not replay an Approval: {verdict:?}"
+        );
+        assert_eq!(verdict.reason(), TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH);
+    }
+}
+
+#[test]
+fn a_legacy_verified_status_waits_for_subject_provenance_refresh() {
+    let mut value: Value =
+        serde_json::from_str(&approval_json(true, &plan_hash(), &plan_hash())).unwrap();
+    value["status"]
+        .as_object_mut()
+        .unwrap()
+        .remove("verifiedSubjectRef");
+    let approval = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        admit(&restore(), Some(&approval), Some(&cluster(true))),
+        RestoreAdmission::ApprovalNotVerified {
+            approval: APPROVAL.to_string()
+        },
+        "upgrade is fail-closed but retryable until the Approval controller records the UID"
+    );
+}
+
 /// Base64, standard alphabet with padding. Hand-written: Global Constraint 38
 /// closes the workspace graph, and one test's negative fixture is not worth a
 /// dependency edge.
@@ -1385,12 +1468,21 @@ async fn the_plan_configmap_carries_the_spec_bytes_verbatim() {
     assert_eq!(
         cm["data"].as_object().map(serde_json::Map::len),
         Some(1),
-        "exactly one key: the Restore path COPIES bytes, so there is nothing else to render — \
-         the cluster allowlist lives in the approval-bundle Secret (see APPROVAL_BUNDLE_SECRET)"
+        "the plan remains a separate one-key ConfigMap; approval artifacts live in the immutable \
+         per-Restore bundle"
     );
     assert_eq!(
         cm["metadata"]["name"].as_str(),
         Some(plan_config_map_name(NAME).as_str())
+    );
+    assert_eq!(cm["immutable"].as_bool(), Some(true));
+    assert_eq!(
+        cm["metadata"]["annotations"][BUNDLE_RESTORE_UID_ANNOTATION].as_str(),
+        Some(UID)
+    );
+    assert_eq!(
+        cm["metadata"]["annotations"][BUNDLE_PLAN_HASH_ANNOTATION].as_str(),
+        Some(plan_hash().as_str())
     );
 
     // The owner reference, both flags.
@@ -1419,6 +1511,21 @@ async fn the_plan_configmap_carries_the_spec_bytes_verbatim() {
         "the ConfigMap POST precedes the Job POST: a Job created first is a pod that stalls in \
          ContainerCreating on `configmap not found` until its deadline fires. Order: {posts:?}"
     );
+    let created_maps: Vec<Value> = seen
+        .iter()
+        .filter(|body| body.method == "POST" && path(&body.uri).ends_with("/configmaps"))
+        .map(|body| serde_json::from_str(&body.body).expect("a ConfigMap POST body is JSON"))
+        .collect();
+    assert_eq!(
+        created_maps.len(),
+        2,
+        "plan plus per-Restore approval bundle"
+    );
+    assert_eq!(
+        created_maps[1]["metadata"]["name"].as_str(),
+        Some(approval_bundle_config_map_name(NAME).as_str())
+    );
+    assert_eq!(created_maps[1]["immutable"].as_bool(), Some(true));
 }
 
 /// **Interface I20.** The fixture's `planBytes` is accepted by
@@ -1454,17 +1561,216 @@ fn the_plan_bytes_fixture_is_a_document_the_runner_parses() {
     );
 }
 
-/// A 409 on the plan ConfigMap is success only when the existing object is
-/// OURS.
+#[test]
+fn the_approval_bundle_is_immutable_exact_and_bound_to_the_restore() {
+    let restore = restore();
+    let approval = approval(true);
+    let bundle = approval_bundle_config_map(&restore, &approval, &roster())
+        .expect("verified inputs materialize");
+
+    assert_eq!(bundle.immutable, Some(true));
+    assert_eq!(
+        bundle.metadata.name.as_deref(),
+        Some(approval_bundle_config_map_name(NAME).as_str())
+    );
+    let owner = &bundle.metadata.owner_references.as_ref().unwrap()[0];
+    assert_eq!(owner.uid, UID);
+    assert_eq!(owner.controller, Some(true));
+    assert_eq!(owner.block_owner_deletion, Some(true));
+
+    let annotations = bundle.metadata.annotations.as_ref().unwrap();
+    assert_eq!(
+        annotations
+            .get(BUNDLE_RESTORE_UID_ANNOTATION)
+            .map(String::as_str),
+        Some(UID)
+    );
+    assert_eq!(
+        annotations
+            .get(BUNDLE_PLAN_HASH_ANNOTATION)
+            .map(String::as_str),
+        Some(plan_hash().as_str())
+    );
+    assert_eq!(
+        annotations
+            .get(BUNDLE_APPROVAL_NAME_ANNOTATION)
+            .map(String::as_str),
+        Some(APPROVAL)
+    );
+    assert_eq!(
+        annotations
+            .get(BUNDLE_APPROVAL_UID_ANNOTATION)
+            .map(String::as_str),
+        approval.metadata.uid.as_deref()
+    );
+
+    let data = bundle.data.as_ref().unwrap();
+    assert_eq!(data.len(), 4);
+    assert_eq!(
+        data.get(APPROVAL_DOC_FILE).map(String::as_str),
+        Some(approval.spec.approval_bytes.as_str()),
+        "signed approval bytes are copied verbatim"
+    );
+    assert_eq!(
+        data.get(APPROVAL_SIG_FILE).map(String::as_str),
+        Some(approval.spec.sidecar_bytes.as_str()),
+        "detached sidecar bytes are copied verbatim"
+    );
+    assert_eq!(
+        data.get(APPROVER_KEY_FILE).map(String::as_str),
+        Some("-----BEGIN PUBLIC KEY-----\nA\n-----END PUBLIC KEY-----\n")
+    );
+    let allowed: logweir_core::spec::AllowedClusters =
+        serde_json::from_str(&data[ALLOWED_CLUSTERS_FILE]).expect("runner allowlist grammar");
+    assert_eq!(allowed.allowed_cluster_ids, vec!["MkU3OEVBNTcwNTJENDM2Qk"]);
+    assert!(
+        data.values().all(|value| !value.contains("PRIVATE KEY")),
+        "private signing material is never a public bundle member"
+    );
+}
+
+#[test]
+fn an_existing_bundle_must_match_owner_bindings_immutability_and_every_byte() {
+    let desired = approval_bundle_config_map(&restore(), &approval(true), &roster()).unwrap();
+    assert!(compatible_approval_bundle(&desired, &desired, UID));
+
+    let mut changed = desired.clone();
+    changed.data.as_mut().unwrap().insert(
+        ALLOWED_CLUSTERS_FILE.to_string(),
+        r#"{"allowed_cluster_ids":["substitute"]}"#.to_string(),
+    );
+    assert!(!compatible_approval_bundle(&changed, &desired, UID));
+
+    let mut changed = desired.clone();
+    changed.immutable = Some(false);
+    assert!(!compatible_approval_bundle(&changed, &desired, UID));
+
+    let mut changed = desired.clone();
+    changed.metadata.annotations.as_mut().unwrap().insert(
+        BUNDLE_PLAN_HASH_ANNOTATION.to_string(),
+        "sha256:other".to_string(),
+    );
+    assert!(!compatible_approval_bundle(&changed, &desired, UID));
+
+    let mut changed = desired.clone();
+    changed.metadata.owner_references.as_mut().unwrap()[0].uid = "other-uid".to_string();
+    assert!(!compatible_approval_bundle(&changed, &desired, UID));
+
+    let mut extra_owner = desired.clone();
+    let mut secondary = extra_owner.metadata.owner_references.as_ref().unwrap()[0].clone();
+    secondary.kind = "Backup".to_string();
+    secondary.name = "secondary-owner".to_string();
+    secondary.uid = "secondary-owner-uid".to_string();
+    secondary.controller = Some(false);
+    extra_owner
+        .metadata
+        .owner_references
+        .as_mut()
+        .unwrap()
+        .push(secondary);
+    assert!(
+        !compatible_approval_bundle(&extra_owner, &desired, UID),
+        "the expected owner plus a second owner is not the expected single-owner set"
+    );
+
+    for mutate in [
+        |owner: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference| {
+            owner.api_version = "v1".to_string();
+        },
+        |owner: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference| {
+            owner.kind = "Backup".to_string();
+        },
+        |owner: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference| {
+            owner.name = "other".to_string();
+        },
+        |owner: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference| {
+            owner.controller = Some(false);
+        },
+        |owner: &mut k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference| {
+            owner.block_owner_deletion = Some(false);
+        },
+    ] {
+        let mut changed = desired.clone();
+        mutate(&mut changed.metadata.owner_references.as_mut().unwrap()[0]);
+        assert!(
+            !compatible_approval_bundle(&changed, &desired, UID),
+            "every ownerReference field is load-bearing"
+        );
+    }
+
+    let mut admission_mutated = desired.clone();
+    admission_mutated
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .insert("admission.example/injected".to_string(), "true".to_string());
+    assert!(compatible_approval_bundle(
+        &admission_mutated,
+        &desired,
+        UID
+    ));
+}
+
+#[test]
+fn a_pre_job_legacy_plan_is_accepted_only_with_exact_bytes_and_complete_owner() {
+    let desired = plan_config_map(&restore()).unwrap();
+    let mut legacy = desired.clone();
+    legacy.immutable = None;
+    legacy.metadata.annotations = None;
+    assert!(compatible_legacy_plan_config_map(&legacy, &desired, UID));
+
+    legacy
+        .data
+        .as_mut()
+        .unwrap()
+        .insert(PLAN_SPEC_KEY.to_string(), "substituted plan".to_string());
+    assert!(!compatible_legacy_plan_config_map(&legacy, &desired, UID));
+
+    let mut legacy = desired.clone();
+    legacy.immutable = None;
+    legacy.metadata.annotations = None;
+    legacy.metadata.owner_references.as_mut().unwrap()[0].block_owner_deletion = Some(false);
+    assert!(!compatible_legacy_plan_config_map(&legacy, &desired, UID));
+}
+
+#[test]
+fn distinct_restores_get_distinct_bundle_names_and_bindings() {
+    let first_restore = restore();
+    let first = approval_bundle_config_map(&first_restore, &approval(true), &roster()).unwrap();
+
+    let mut second_restore = restore();
+    second_restore.metadata.name = Some("logweir-restore-incident-4472".to_string());
+    second_restore.metadata.uid = Some("bbbbbbbb-0000-4000-8000-000000000002".to_string());
+    let mut second_approval = approval(true);
+    second_approval.metadata.name = Some("a2".to_string());
+    second_approval.metadata.uid = Some("aaaaaaaa-0000-4000-8000-00000000000b".to_string());
+    let second = approval_bundle_config_map(&second_restore, &second_approval, &roster()).unwrap();
+
+    assert_ne!(first.metadata.name, second.metadata.name);
+    assert_ne!(
+        first.metadata.annotations.as_ref().unwrap()[BUNDLE_RESTORE_UID_ANNOTATION],
+        second.metadata.annotations.as_ref().unwrap()[BUNDLE_RESTORE_UID_ANNOTATION]
+    );
+    assert_ne!(
+        first.metadata.annotations.as_ref().unwrap()[BUNDLE_APPROVAL_UID_ANNOTATION],
+        second.metadata.annotations.as_ref().unwrap()[BUNDLE_APPROVAL_UID_ANNOTATION]
+    );
+}
+
+/// A restart or concurrent reconcile may observe both create-only ConfigMaps
+/// already present. Exact owned bytes are idempotent; a foreign plan is not.
 #[tokio::test]
-async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
-    for (label, owner_uid, expect_job) in [
-        ("ours", UID, true),
+async fn config_map_retries_are_idempotent_only_for_exact_owned_artifacts() {
+    for (label, owner_uid, append_owner, expect_job) in [
+        ("ours", UID, false, true),
         (
             "a stranger's",
             "ffffffff-0000-4000-8000-0000000000ff",
             false,
+            false,
         ),
+        ("ours plus a secondary owner", UID, true, false),
     ] {
         let mut routes = admission_routes(
             200,
@@ -1479,8 +1785,26 @@ async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
                     "message":"configmaps already exists","reason":"AlreadyExists","code":409}"#
                     .to_string();
             }
-            if route.method == "GET" && route.path_suffix.contains("/configmaps/") {
-                route.body = existing_plan_config_map(owner_uid);
+            if route.method == "GET" && route.path_suffix.ends_with("-plan") {
+                let mut plan: Value =
+                    serde_json::from_str(&existing_plan_config_map(owner_uid)).unwrap();
+                if append_owner {
+                    plan["metadata"]["ownerReferences"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "apiVersion": "logweir.dev/v1alpha1",
+                            "kind": "Backup",
+                            "name": "secondary-owner",
+                            "uid": "secondary-owner-uid",
+                            "controller": false,
+                            "blockOwnerDeletion": true
+                        }));
+                }
+                route.body = serde_json::to_string(&plan).unwrap();
+            }
+            if route.method == "GET" && route.path_suffix.ends_with("-approval-bundle") {
+                route.body = existing_approval_bundle(owner_uid);
             }
         }
         let (client, _rec, bodies) = mock_client_recording_bodies(routes);
@@ -1519,6 +1843,234 @@ async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_bundle_materialization_failure_is_visible_and_starts_no_job() {
+    let mut routes = admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    );
+    let mut missing_key: Value = serde_json::from_str(&roster_json()).unwrap();
+    missing_key["spec"]["approverKeys"] = serde_json::json!([]);
+    for route in &mut routes {
+        if route.method == "GET" && route.path_suffix == "/trustrosters/default" {
+            route.body = serde_json::to_string(&missing_key).unwrap();
+        }
+    }
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("materialization failure is an observable outcome, not a controller error");
+
+    assert!(!outcome.created);
+    assert_eq!(outcome.requeue, Requeue::After(ADMISSION_REQUEUE_SECS));
+    let seen = bodies.lock().unwrap().clone();
+    assert_eq!(post_count(&seen, "/jobs"), 0);
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0]["reason"].as_str(),
+        Some("ApprovalBundleMaterializationFailed")
+    );
+    assert_eq!(statuses[0]["phase"].as_str(), Some("Pending"));
+    assert!(statuses[0]["conditions"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("absent from the TrustRoster"));
+}
+
+#[tokio::test]
+async fn an_owned_name_collision_cannot_substitute_bundle_content() {
+    let mut routes = admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    );
+    let mut substitute: Value = serde_json::from_str(&existing_approval_bundle(UID)).unwrap();
+    substitute["data"][ALLOWED_CLUSTERS_FILE] =
+        serde_json::json!(r#"{"allowed_cluster_ids":["substitute"]}"#);
+    for route in &mut routes {
+        if route.method == "POST" && route.path_suffix == "/configmaps" {
+            route.status = 409;
+            route.body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"AlreadyExists","code":409}"#.to_string();
+        }
+        if route.method == "GET" && route.path_suffix.ends_with("-approval-bundle") {
+            route.body = serde_json::to_string(&substitute).unwrap();
+        }
+    }
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a content collision is a terminal controller verdict");
+
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT)
+    );
+    let seen = bodies.lock().unwrap().clone();
+    assert_eq!(post_count(&seen, "/jobs"), 0);
+    let statuses = patched_statuses(&seen);
+    assert_eq!(
+        statuses[0]["reason"].as_str(),
+        Some(TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT)
+    );
+}
+
+#[tokio::test]
+async fn a_plan_create_deletion_race_is_retryable_not_terminal() {
+    let mut routes = admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    );
+    for route in &mut routes {
+        if route.method == "POST" && route.path_suffix == "/configmaps" {
+            route.status = 409;
+        }
+        if route.method == "GET" && route.path_suffix.ends_with("-plan") {
+            route.status = 404;
+            route.body = not_found_body("configmaps", "plan");
+        }
+    }
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a deletion race is reported and retried");
+    assert_eq!(outcome.requeue, Requeue::After(ADMISSION_REQUEUE_SECS));
+    assert!(outcome.terminal_state.is_none());
+    assert_eq!(post_count(&bodies.lock().unwrap(), "/jobs"), 0);
+    let seen = bodies.lock().unwrap();
+    let statuses = patched_statuses(&seen);
+    let message = statuses[0]["conditions"][0]["message"]
+        .as_str()
+        .expect("the retry status carries an actionable message");
+    assert!(
+        message.contains("plan ConfigMap") && message.contains("deleted concurrently"),
+        "the operator must see which input raced and why it is retryable: {message}"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_after_legacy_plan_creation_safely_creates_a_pinned_job() {
+    let mut routes = admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    );
+    let desired = plan_config_map(&restore()).unwrap();
+    let mut legacy = desired.clone();
+    legacy.immutable = None;
+    legacy.metadata.annotations = None;
+    for route in &mut routes {
+        if route.method == "POST" && route.path_suffix == "/configmaps" {
+            route.status = 409;
+        }
+        if route.method == "GET" && route.path_suffix.ends_with("-plan") {
+            route.body = serde_json::to_string(&legacy).unwrap();
+        }
+    }
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the exact owned legacy plan is a supported crash transition");
+    assert!(outcome.created);
+    let job = posted_job(&bodies.lock().unwrap());
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .unwrap();
+    assert!(env.iter().any(|entry| {
+        entry["name"] == logweir_core::execution_contract::PLAN_SHA256_ENV
+            && entry["value"] == plan_hash()
+    }));
+}
+
+#[tokio::test]
+async fn a_concurrent_job_create_is_accepted_only_after_owner_uid_revalidation() {
+    let job_gets = Arc::new(Mutex::new(0usize));
+    let job_gets_for_service = Arc::clone(&job_gets);
+    let service = service_fn(move |request: Request<Body>| {
+        let job_gets = Arc::clone(&job_gets_for_service);
+        async move {
+            let method = request.method().as_str().to_string();
+            let path = request.uri().path().to_string();
+            let _ = request.into_body().collect().await;
+            let (status, body) = if method == "GET" && path.ends_with(&format!("/jobs/{NAME}")) {
+                let mut count = job_gets.lock().unwrap();
+                *count += 1;
+                if *count == 1 {
+                    (404, not_found_body("jobs.batch", NAME))
+                } else {
+                    (200, running_job_body())
+                }
+            } else if method == "GET" && path.ends_with("/approvals/a1") {
+                (200, approval_json(true, &plan_hash(), &plan_hash()))
+            } else if method == "GET" && path.ends_with("/kafkaclusters/scratch") {
+                (200, cluster_json(true, PLAINTEXT_AUTH))
+            } else if method == "GET" && path.ends_with("/trustrosters/default") {
+                (200, roster_json())
+            } else if method == "POST" && path.ends_with("/configmaps") {
+                (201, existing_plan_config_map(UID))
+            } else if method == "POST" && path.ends_with("/jobs") {
+                (
+                    409,
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"AlreadyExists","code":409}"#.to_string(),
+                )
+            } else if method == "PATCH" && path.ends_with(&format!("/restores/{NAME}/status")) {
+                (200, restore_json(PLAN_BYTES, APPROVAL, NAME))
+            } else {
+                panic!("unexpected request in concurrent-create test: {method} {path}")
+            };
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        }
+    });
+    let client = kube::Client::new(service, "default");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the losing reconcile revalidates the winning Job");
+    assert!(!outcome.created);
+    assert_eq!(outcome.requeue, Requeue::After(15));
+    assert_eq!(*job_gets.lock().unwrap(), 2);
 }
 
 // ===========================================================================
@@ -1570,9 +2122,44 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
         plans[0], plans[1],
         "the two plans differ — that is the whole of the mode difference"
     );
+    let contract_digests: Vec<(String, String)> = jobs
+        .iter()
+        .map(|job| {
+            let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .expect("runner env");
+            let value = |name: &str| {
+                env.iter()
+                    .find(|entry| entry["name"] == name)
+                    .and_then(|entry| entry["value"].as_str())
+                    .expect("contract digest")
+                    .to_string()
+            };
+            (
+                value(logweir_core::execution_contract::PLAN_SHA256_ENV),
+                value(logweir_core::execution_contract::APPROVAL_SHA256_ENV),
+            )
+        })
+        .collect();
+    assert_ne!(contract_digests[0], contract_digests[1]);
+    for job in &mut jobs {
+        job["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| {
+                !matches!(
+                    entry["name"].as_str(),
+                    Some(
+                        logweir_core::execution_contract::PLAN_SHA256_ENV
+                            | logweir_core::execution_contract::APPROVAL_SHA256_ENV
+                    )
+                )
+            });
+    }
     assert_eq!(
         jobs[0], jobs[1],
-        "…and the Jobs are IDENTICAL. `spec.target.mode` adds a marker topic, an allowlisted \
+        "…and the Jobs are identical except for the mandatory exact plan/approval digests. \
+         `spec.target.mode` adds a marker topic, an allowlisted \
          cluster, a source-equals-target check and phase-9 teardown, and every one of those is a \
          decision the RUNNER makes from the plan document it parses. A controller that gave \
          `scratch` a different Job would put half the mode's meaning in a place the approval does \
@@ -1619,6 +2206,8 @@ fn the_runner_argv_is_the_contract() {
         vec![
             "restore".to_string(),
             "run".to_string(),
+            logweir_core::execution_contract::VERSION_ARG.to_string(),
+            logweir_core::execution_contract::VERSION.to_string(),
             "--spec".to_string(),
             "/plan/restore.yaml".to_string(),
             "--approval".to_string(),
@@ -1703,12 +2292,18 @@ fn only_unexpired_roster_key_ids_reach_the_argv() {
     );
 }
 
-/// The Job's mounts: the plan ConfigMap, the approval bundle Secret and the
-/// signing key, each at its own path.
+/// The Job's mounts: the plan ConfigMap, the immutable approval ConfigMap and
+/// the private signing-key Secret, each at its own path.
 #[test]
 fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
-    let spec = runner_job_spec(&restore(), &cluster(true), &[KEY_ID_LIVE.to_string()])
-        .expect("the fixture builds a job spec");
+    let spec = runner_job_spec(
+        &restore(),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &roster(),
+    )
+    .expect("the fixture builds a job spec");
     let built = job::build(&spec);
     let pod = built
         .spec
@@ -1725,9 +2320,8 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
         .collect();
     assert_eq!(
         volumes,
-        vec![APPROVAL_VOLUME, SIGNING_VOLUME, "plan", "work"],
-        "the two Secret volumes are sorted by name, then the plan ConfigMap, then the writable \
-         scratch volume — a deterministic order so the rendered spec is a function of the inputs"
+        vec![SIGNING_VOLUME, APPROVAL_VOLUME, "plan", "work"],
+        "the private Secret, public approval ConfigMap, plan ConfigMap and writable scratch volume"
     );
 
     let approval_volume = pod
@@ -1737,17 +2331,17 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
         .iter()
         .find(|v| v.name == APPROVAL_VOLUME)
         .expect("the approval bundle is projected");
-    let secret = approval_volume
-        .secret
-        .as_ref()
-        .expect("as a SECRET and not a ConfigMap");
-    assert_eq!(secret.secret_name.as_deref(), Some(APPROVAL_BUNDLE_SECRET));
-    assert_eq!(
-        secret.default_mode,
-        Some(0o440),
-        "0440 with fsGroup set is the permission that actually exists on disk"
+    assert!(
+        approval_volume.secret.is_none(),
+        "the legacy namespace-wide Secret is not mounted by a new Job"
     );
-    let items: Vec<&str> = secret
+    let config_map = approval_volume
+        .config_map
+        .as_ref()
+        .expect("the approval bundle is a public ConfigMap");
+    assert_eq!(config_map.name, approval_bundle_config_map_name(NAME));
+    assert_eq!(config_map.optional, Some(false));
+    let items: Vec<&str> = config_map
         .items
         .as_deref()
         .unwrap_or_default()
@@ -1781,6 +2375,33 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
         Some(65532),
         "without fsGroup every run dies opening its own signing key"
     );
+
+    let env: std::collections::BTreeMap<&str, &str> = pod.containers[0]
+        .env
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| Some((entry.name.as_str(), entry.value.as_deref()?)))
+        .collect();
+    assert_eq!(
+        env[logweir_core::execution_contract::VERSION_ENV],
+        logweir_core::execution_contract::VERSION
+    );
+    assert_eq!(env[logweir_core::execution_contract::SUBJECT_UID_ENV], UID);
+    assert_eq!(
+        env[logweir_core::execution_contract::APPROVAL_UID_ENV],
+        "aaaaaaaa-0000-4000-8000-00000000000a"
+    );
+    assert_eq!(
+        env[logweir_core::execution_contract::PLAN_SHA256_ENV],
+        plan_hash()
+    );
+    let bundle = approval_bundle_config_map(&restore(), &approval(true), &roster()).unwrap();
+    let data = bundle.data.unwrap();
+    assert_eq!(
+        env[logweir_core::execution_contract::ALLOWED_CLUSTERS_SHA256_ENV],
+        sha256_prefixed(data[ALLOWED_CLUSTERS_FILE].as_bytes())
+    );
 }
 
 /// A `scramSha512` target's password reaches the runner as `secretKeyRef`
@@ -1789,7 +2410,8 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
 fn a_scram_target_password_is_projected_by_reference_and_never_read() {
     let scram: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_str(&cluster_json(true, SCRAM_AUTH)).expect("the fixture is a cluster");
-    let spec = runner_job_spec(&restore(), &scram, &[]).expect("the job spec builds");
+    let spec = runner_job_spec(&restore(), &scram, &[], &approval(true), &roster())
+        .expect("the job spec builds");
     let built = job::build(&spec);
     let env = built
         .spec
@@ -1815,7 +2437,8 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
     assert_eq!(key_ref.key, TARGET_PASSWORD_SECRET_KEY);
 
     // A plaintext target projects NO password variable at all.
-    let plain = runner_job_spec(&restore(), &cluster(true), &[]).expect("the job spec builds");
+    let plain = runner_job_spec(&restore(), &cluster(true), &[], &approval(true), &roster())
+        .expect("the job spec builds");
     assert!(
         !job::build(&plain)
             .spec
@@ -1839,7 +2462,8 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
         .remove("secretRef");
     let no_secret: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_value(value).expect("the mutated fixture is a cluster");
-    let spec = runner_job_spec(&restore(), &no_secret, &[]).expect("the job spec still builds");
+    let spec = runner_job_spec(&restore(), &no_secret, &[], &approval(true), &roster())
+        .expect("the job spec still builds");
     assert!(
         !job::build(&spec)
             .spec
@@ -3570,6 +4194,178 @@ fn status_patch_count(bodies: &[SeenBody]) -> usize {
         .count()
 }
 
+/// An already-created Job is the migration boundary. The controller observes
+/// it with its original namespace-wide Secret transport and never rewrites or
+/// backfills a new bundle into the in-flight pod template.
+#[tokio::test]
+async fn an_in_flight_legacy_restore_is_not_silently_migrated() {
+    let (client, recorder, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("an in-flight legacy Job remains observable");
+
+    let calls = recorder.lock().unwrap().clone();
+    assert!(
+        calls.iter().all(|call| {
+            !path(&call.uri).contains("/approvals/")
+                && !path(&call.uri).contains("/configmaps/")
+                && !path(&call.uri).contains("/trustrosters/")
+        }),
+        "an existing Job is not rematerialized or rebound: {calls:?}"
+    );
+    assert_eq!(post_count(&bodies.lock().unwrap(), "/configmaps"), 0);
+}
+
+#[tokio::test]
+async fn a_same_name_job_is_never_adopted_across_an_identity_boundary() {
+    let mutations: [JsonMutation; 5] = [
+        ("missing owner", |job: &mut Value| {
+            job["metadata"]
+                .as_object_mut()
+                .unwrap()
+                .remove("ownerReferences");
+        }),
+        ("previous Restore UID", |job: &mut Value| {
+            job["metadata"]["ownerReferences"][0]["uid"] = serde_json::json!("previous-uid");
+        }),
+        ("wrong owner kind", |job: &mut Value| {
+            job["metadata"]["ownerReferences"][0]["kind"] = serde_json::json!("Backup");
+        }),
+        ("non-blocking owner", |job: &mut Value| {
+            job["metadata"]["ownerReferences"][0]["blockOwnerDeletion"] = serde_json::json!(false);
+        }),
+        ("appended secondary owner", |job: &mut Value| {
+            let second = serde_json::json!({
+                "apiVersion": "logweir.dev/v1alpha1",
+                "kind": "Backup",
+                "name": "secondary-owner",
+                "uid": "secondary-owner-uid",
+                "controller": false,
+                "blockOwnerDeletion": true
+            });
+            job["metadata"]["ownerReferences"]
+                .as_array_mut()
+                .unwrap()
+                .push(second);
+        }),
+    ];
+
+    for (label, mutate) in mutations {
+        let mut routes = running_routes();
+        let mut job: Value = serde_json::from_str(&running_job_body()).unwrap();
+        mutate(&mut job);
+        routes[0].body = serde_json::to_string(&job).unwrap();
+        let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a collision is a status verdict");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_JOB_NAME_CONFLICT),
+            "{label}"
+        );
+        assert_eq!(post_count(&bodies.lock().unwrap(), "/jobs"), 0);
+    }
+}
+
+#[tokio::test]
+async fn successful_create_responses_reject_an_appended_secondary_owner() {
+    let secondary = serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Backup",
+        "name": "secondary-owner",
+        "uid": "secondary-owner-uid",
+        "controller": false,
+        "blockOwnerDeletion": true
+    });
+
+    let mut config_map_routes = admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    );
+    for route in &mut config_map_routes {
+        if route.method == "POST" && route.path_suffix == "/configmaps" {
+            let mut response: Value = serde_json::from_str(&route.body).unwrap();
+            response["metadata"]["ownerReferences"]
+                .as_array_mut()
+                .unwrap()
+                .push(secondary.clone());
+            route.body = serde_json::to_string(&response).unwrap();
+        }
+    }
+    let (client, _recorder, bodies) = mock_client_recording_bodies(config_map_routes);
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a mutated ConfigMap creation response is a status verdict");
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT)
+    );
+    assert_eq!(post_count(&bodies.lock().unwrap(), "/jobs"), 0);
+
+    let mut job_routes = admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    );
+    for route in &mut job_routes {
+        if route.method == "POST" && route.path_suffix == "/jobs" {
+            let mut response: Value = serde_json::from_str(&route.body).unwrap();
+            response["metadata"]["ownerReferences"]
+                .as_array_mut()
+                .unwrap()
+                .push(secondary.clone());
+            route.body = serde_json::to_string(&response).unwrap();
+        }
+    }
+    let (client, _recorder, bodies) = mock_client_recording_bodies(job_routes);
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a mutated Job creation response is a status verdict");
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(TERMINAL_STATE_JOB_NAME_CONFLICT)
+    );
+    assert_eq!(post_count(&bodies.lock().unwrap(), "/jobs"), 1);
+}
+
+#[test]
+fn an_owned_legacy_job_remains_compatible_only_for_the_same_restore_uid() {
+    let job: k8s_openapi::api::batch::v1::Job = serde_json::from_str(&running_job_body()).unwrap();
+    assert!(compatible_restore_job(&job, &restore()));
+
+    let mut recreated = restore();
+    recreated.metadata.uid = Some("recreated-uid".to_string());
+    assert!(!compatible_restore_job(&job, &recreated));
+}
+
 /// **Task 16b.** A steady `Restore` — one whose Job is still running — is
 /// patched once and then never again.
 ///
@@ -3777,11 +4573,19 @@ fn the_restore_job_projects_every_unexpired_roster_key_id() {
     std::fs::write(&spec, plan).expect("the scratch plan is writable");
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let approval = dir.join("approval.json");
+    std::fs::copy(root.join("examples/approval.json"), &approval)
+        .expect("copy the approval fixture");
+    std::fs::copy(
+        root.join("e2e/fixtures/signed/scorecard.sig"),
+        approval.with_extension("sig"),
+    )
+    .expect("copy a parseable, wrong-purpose sidecar");
     let mut cmd = std::process::Command::new(runner_binary());
     cmd.args(["restore", "run", "--spec"])
         .arg(&spec)
         .arg("--approval")
-        .arg(root.join("examples/approval.json"))
+        .arg(&approval)
         .arg("--approver-key")
         .arg(&fixture_pub)
         .arg("--allowed-clusters")
@@ -3802,7 +4606,7 @@ fn the_restore_job_projects_every_unexpired_roster_key_id() {
     assert_eq!(
         out.status.code(),
         Some(3),
-        "the run is refused by phase 0's local check, not by a usage error: {stderr}"
+        "the accepted pin reaches independent approval verification: {stderr}"
     );
     assert!(
         !stderr.contains("is not in the pinned set"),
@@ -3810,8 +4614,8 @@ fn the_restore_job_projects_every_unexpired_roster_key_id() {
          first entry of the roster: {stderr}"
     );
     assert!(
-        stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
-        "and the run reached PHASE 0, whose refusal this is: {stderr}"
+        stderr.contains("approval signature does not verify"),
+        "the matching pin proceeds to the pre-phase-0 approval gate: {stderr}"
     );
 
     // --- the negative twin: drop the matching id and it refuses -------------
@@ -3819,7 +4623,7 @@ fn the_restore_job_projects_every_unexpired_roster_key_id() {
     cmd.args(["restore", "run", "--spec"])
         .arg(&spec)
         .arg("--approval")
-        .arg(root.join("examples/approval.json"))
+        .arg(&approval)
         .arg("--approver-key")
         .arg(&fixture_pub)
         .arg("--allowed-clusters")

@@ -1,7 +1,7 @@
 {{/*
 `ui.enabled` — THE UI IN-CLUSTER, WITH ITS AUTHORITY STATED.
 
-One Deployment running `kubectl proxy`, which serves the fourteen shipped UI
+One Deployment running `kubectl proxy`, which serves the sixteen shipped UI
 files out of the `logweir-ui` IMAGE at `/ui` (Task 39: `ui.image`, built by
 `Dockerfile.ui`, whose served bytes `scripts/check-image-ui.sh` hashes against
 the tree's `ui/`) AND proxies the Kubernetes API on the same origin, attaching
@@ -35,11 +35,40 @@ is right for a Service whose reachability IS the authorisation boundary. The
 image is Logweir's own `logweir-ui` at `:latest` (Task 37's tag ruling, the
 same shape the controller and runner images carry here); it is kubectl at the
 cluster's minor version — from the Kubernetes project's own registry, pinned by
-digest in `Dockerfile.ui` — with the fourteen shipped files copied in at `/ui`
+digest in `Dockerfile.ui` — with the sixteen shipped files copied in at `/ui`
 and nothing else. Nothing in this file renders unless the flag is on.
 */}}
 {{- if .Values.ui.enabled }}
 {{- $name := printf "%s-ui" .Release.Name }}
+{{- $namespaces := (include "logweir.ui.namespaces" . | fromJsonArray) }}
+{{- $selected := "" }}
+{{- if eq (len $namespaces) 1 }}
+{{- $selected = index $namespaces 0 }}
+{{- end }}
+{{- $runtimeContext := dict "allowed" $namespaces "selected" $selected }}
+{{- $runtimeHash := $runtimeContext | toJson | sha256sum }}
+{{- $runtimeName := printf "%s-runtime-%s" $name ($runtimeHash | trunc 10) }}
+{{/*
+This is configuration, not a second copy of the UI. `index.html` always asks
+for this same-origin file before app.js; the volume below makes the configured
+namespace set available to the actual browser runtime. `toJson` produces a JS
+string literal safely even when Helm values contain punctuation. The RoleBinding
+loop uses the exact same helper output, so the picker cannot name a namespace
+the ServiceAccount was not bound in. No Namespace list permission is added.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $runtimeName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+immutable: true
+data:
+  runtime.js: |
+    window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({"allowed": {{ $namespaces | toJson }}, "selected": {{ $selected | toJson }}});
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -174,6 +203,10 @@ spec:
       app.kubernetes.io/component: ui
   template:
     metadata:
+      annotations:
+        # The immutable, content-addressed context changes name on upgrade;
+        # this rolls the pod to the newly selected namespace set.
+        checksum/logweir-ui-runtime: {{ $runtimeHash }}
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -228,18 +261,25 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          # NO `ui` VOLUME. `/ui` is a read-only part of the image's own
-          # filesystem now, under `readOnlyRootFilesystem: true` above — which
-          # is a stronger statement than the ConfigMap mount it replaced: a
-          # ConfigMap is a mutable API object, so the page the browser loaded
-          # was whatever anyone with `patch configmaps` had last written.
+          # `/ui` remains the image's read-only page. This single mounted file
+          # replaces its empty standalone context with Helm's non-secret one;
+          # it is not a page copy.
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: runtime
+              mountPath: /ui/runtime.js
+              subPath: runtime.js
+              readOnly: true
       volumes:
-        # `tmp` AND NOTHING ELSE. `HOME=/tmp` and `KUBECACHEDIR=/tmp/kube-cache`
-        # above need a writable path under `readOnlyRootFilesystem: true`; the
-        # page does not, because it is in the image.
+        # `tmp` is the only writable volume. `runtime` is a read-only
+        # ConfigMap containing only the namespace context, never page assets.
         - name: tmp
           emptyDir: {}
+        - name: runtime
+          configMap:
+            name: {{ $runtimeName }}
+            items:
+              - key: runtime.js
+                path: runtime.js
 {{- end }}

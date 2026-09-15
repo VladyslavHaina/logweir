@@ -56,7 +56,7 @@ use futures::StreamExt as _;
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
-use kube::{Api, ResourceExt};
+use kube::{Api, Resource, ResourceExt};
 use logweir_core::ids::sha256_prefixed;
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde::Deserialize;
@@ -65,7 +65,7 @@ use tracing::{debug, info, warn};
 
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
-use crate::crds::approval::{Approval, ApprovalStatus, SubjectKind};
+use crate::crds::approval::{Approval, ApprovalStatus, SubjectKind, VerifiedSubjectRef};
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
 use crate::crds::trust_roster::{TrustRoster, TrustRosterSpec};
@@ -250,6 +250,10 @@ pub struct Verified {
     /// keys satisfies it (`design-operator.md:169-181`). It is LABELLED, never
     /// refused.
     pub self_attested_risk: bool,
+    /// Filled by [`decide`] with the API object whose bytes were checked.
+    /// Pure [`evaluate`] callers have no Kubernetes referent and leave it
+    /// absent; only a reconcile outcome is written to status.
+    pub verified_subject_ref: Option<VerifiedSubjectRef>,
 }
 
 /// The approval document, as this controller reads it.
@@ -488,6 +492,7 @@ pub fn evaluate(
         approver: doc.approver,
         ticket: doc.ticket,
         self_attested_risk,
+        verified_subject_ref: None,
     })
 }
 
@@ -573,6 +578,18 @@ pub enum ReferentProblem {
         /// The name `spec.subjectRef.name` gave.
         name: String,
     },
+    /// This immutable Approval was already verified for an older incarnation
+    /// of the same-named object.  Re-verification must not rebind it.
+    ReferentUidChanged {
+        /// `Restore` or `Backup`.
+        kind: String,
+        /// The immutable subject name in `spec.subjectRef`.
+        name: String,
+        /// The UID recorded by the first successful verification.
+        verified_uid: String,
+        /// The UID now returned by the API server.
+        current_uid: String,
+    },
 }
 
 impl ReferentProblem {
@@ -582,6 +599,7 @@ impl ReferentProblem {
         match self {
             Self::ReferentNotFound { .. } => "ReferentNotFound",
             Self::ReferentHasNoPlanBytes { .. } => "ReferentHasNoPlanBytes",
+            Self::ReferentUidChanged { .. } => "ReferentUidChanged",
         }
     }
 }
@@ -598,6 +616,17 @@ impl fmt::Display for ReferentProblem {
                 "spec.subjectRef names {kind} '{name}', and the {kind} kind carries no \
                  spec.planBytes for the plan hash to be recomputed from; in tag 1 an approval \
                  binds a Restore's planBytes"
+            ),
+            Self::ReferentUidChanged {
+                kind,
+                name,
+                verified_uid,
+                current_uid,
+            } => write!(
+                f,
+                "spec.subjectRef names {kind} '{name}', but this Approval was verified for UID \
+                 {verified_uid} and that name now has UID {current_uid}; create a new Approval \
+                 for the recreated object"
             ),
         }
     }
@@ -667,6 +696,8 @@ pub enum ReconcileError {
     /// The `Approval` carries no namespace. Unreachable for an object that
     /// came from the API server; named rather than unwrapped.
     NoNamespace(String),
+    /// The referent carries no UID. Unreachable for a persisted API object.
+    NoUid(String),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
 }
@@ -677,6 +708,7 @@ impl fmt::Display for ReconcileError {
             Self::NoNamespace(name) => {
                 write!(f, "the object {name} carries no metadata.namespace")
             }
+            Self::NoUid(name) => write!(f, "the object {name} carries no metadata.uid"),
             Self::Api(e) => write!(f, "kubernetes API error: {e}"),
         }
     }
@@ -685,7 +717,7 @@ impl fmt::Display for ReconcileError {
 impl std::error::Error for ReconcileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoNamespace(_) => None,
+            Self::NoNamespace(_) | Self::NoUid(_) => None,
             Self::Api(e) => Some(e),
         }
     }
@@ -729,11 +761,39 @@ pub async fn decide(
 
     let subject = &approval.spec.subject_ref;
     let referent_kind = subject.kind.as_str();
-    let plan_bytes = match subject.kind {
+    let (plan_bytes, verified_subject_ref) = match subject.kind {
         SubjectKind::Restore => {
             let api: Api<Restore> = Api::namespaced(client.clone(), &namespace);
             match api.get(&subject.name).await {
-                Ok(restore) => restore.spec.plan_bytes,
+                Ok(restore) => {
+                    let uid = restore
+                        .uid()
+                        .ok_or_else(|| ReconcileError::NoUid(subject.name.clone()))?;
+                    let current = VerifiedSubjectRef {
+                        api_version: Restore::api_version(&()).to_string(),
+                        kind: SubjectKind::Restore,
+                        name: subject.name.clone(),
+                        namespace: namespace.clone(),
+                        uid,
+                    };
+                    if let Some(previous) = approval
+                        .status
+                        .as_ref()
+                        .and_then(|status| status.verified_subject_ref.as_ref())
+                    {
+                        if previous != &current {
+                            return Ok(ApprovalOutcome::Referent(
+                                ReferentProblem::ReferentUidChanged {
+                                    kind: referent_kind.to_string(),
+                                    name: subject.name.clone(),
+                                    verified_uid: previous.uid.clone(),
+                                    current_uid: current.uid,
+                                },
+                            ));
+                        }
+                    }
+                    (restore.spec.plan_bytes, Some(current))
+                }
                 Err(kube::Error::Api(e)) if e.code == 404 => {
                     return Ok(ApprovalOutcome::Referent(
                         ReferentProblem::ReferentNotFound {
@@ -783,7 +843,10 @@ pub async fn decide(
             referent_kind,
             plan_bytes.as_bytes(),
         ) {
-            Ok(verified) => ApprovalOutcome::Verified(verified),
+            Ok(mut verified) => {
+                verified.verified_subject_ref = verified_subject_ref;
+                ApprovalOutcome::Verified(verified)
+            }
             Err(refusal) => ApprovalOutcome::Refused(refusal),
         },
     )
@@ -797,17 +860,30 @@ pub fn status_for(
     now: DateTime<Utc>,
 ) -> ApprovalStatus {
     let verified = outcome.is_verified();
-    let (matched_key_id, approver, ticket, self_attested_risk) = match outcome {
+    let (matched_key_id, approver, ticket, self_attested_risk, verified_subject_ref) = match outcome
+    {
         ApprovalOutcome::Verified(v) => (
             Some(v.matched_key_id.clone()),
             Some(v.approver.clone()),
             Some(v.ticket.clone()),
             Some(v.self_attested_risk),
+            v.verified_subject_ref.clone(),
         ),
         // A refused approval reports NO approver and NO key id. An approver
         // name lifted out of bytes whose signature did not verify is an
-        // attacker-controlled string on a status field a UI renders.
-        _ => (None, None, None, None),
+        // attacker-controlled string on a status field a UI renders. Subject
+        // provenance is different: once established it is a replay fence and
+        // must survive every later failure, including referent deletion.
+        _ => (
+            None,
+            None,
+            None,
+            None,
+            approval
+                .status
+                .as_ref()
+                .and_then(|status| status.verified_subject_ref.clone()),
+        ),
     };
     ApprovalStatus {
         verified: Some(verified),
@@ -815,6 +891,7 @@ pub fn status_for(
         approver,
         ticket,
         self_attested_risk,
+        verified_subject_ref,
         conditions: Some(vec![merge_condition(
             current_condition(
                 approval.status.as_ref().and_then(|s| s.conditions.as_ref()),

@@ -16,6 +16,7 @@ pub mod phase8_score;
 pub mod phase9_teardown;
 
 use crate::exit::ExitCode;
+use crate::signer::ValidatedSigner;
 use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, DataEngine, RestorePlan, WindowFloorSource,
 };
@@ -72,11 +73,18 @@ pub enum DrillError {
     /// could not be obtained. That is neither a pass nor an operational
     /// failure: "the result exists but is unattested" is its own outcome, and
     /// the exit contract reserves 4 for it. Constructed in exactly two places
-    /// — `phase8_score::run` and `phase9_teardown::persist` — both of which
-    /// sign BEFORE they put, so a document that reaches this variant left the
-    /// bucket untouched.
+    /// Signing readiness also reaches this variant before any data work. The
+    /// phase-8 and phase-9 persistence paths sign before they put, so a
+    /// document whose signing fails still leaves the bucket untouched.
     #[error("signing or lock proof failed: {0}")]
     SigningOrLock(String),
+    /// Startup signing readiness failed before a client, work directory, or
+    /// output existed. Kept distinct from [`Self::SigningOrLock`] because a
+    /// later unattested drill result still owes terminal metrics/notification
+    /// handling, while a failed prerequisite must cause no execution output
+    /// or network side effect at all.
+    #[error("signing or lock proof failed: {0}")]
+    SigningPrerequisite(String),
 }
 
 impl DrillError {
@@ -96,7 +104,9 @@ impl DrillError {
             // variant, which is what makes exit 2's promise true.
             DrillError::NotPass(_) => ExitCode::DrillNotPass, // 2
             // The drill ran; its result is unattested.
-            DrillError::SigningOrLock(_) => ExitCode::SigningOrLock, // 4
+            DrillError::SigningOrLock(_) | DrillError::SigningPrerequisite(_) => {
+                ExitCode::SigningOrLock // 4
+            }
             // A drill RESULT that is not a pass. It must have been intercepted
             // by the orchestrator, scored, signed and uploaded before any exit
             // code was derived — reaching here means the artifact was never
@@ -175,6 +185,7 @@ pub fn record<T>(
 }
 
 pub struct RunArgs {
+    pub execution_contract_version: Option<String>,
     pub spec: PathBuf,
     pub approval: PathBuf,
     pub approver_key: PathBuf,
@@ -204,6 +215,211 @@ pub struct RunArgs {
     /// in roster order), which is how the one source of truth reaches a pod
     /// that holds no cluster credential.
     pub approver_key_ids: Vec<String>,
+}
+
+/// Controller-pinned identity and byte digests carried by a new Restore Job's
+/// immutable pod template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionContract {
+    pub subject_api_version: String,
+    pub subject_kind: String,
+    pub subject_name: String,
+    pub subject_namespace: String,
+    pub subject_uid: String,
+    pub approval_name: String,
+    pub approval_uid: String,
+    pub plan_sha256: String,
+    pub approval_sha256: String,
+    pub approval_sidecar_sha256: String,
+    pub approver_key_sha256: String,
+    pub allowed_clusters_sha256: String,
+}
+
+/// Parse the all-or-nothing execution contract without reading process-global
+/// state in tests. No variables means a compatible standalone invocation;
+/// one or more variables means every field and the current version are
+/// mandatory.
+pub fn execution_contract_from(
+    mut get: impl FnMut(&str) -> Option<String>,
+) -> Result<Option<ExecutionContract>, DrillError> {
+    use logweir_core::execution_contract as wire;
+
+    let values: BTreeMap<&str, Option<String>> = wire::ALL_ENV
+        .into_iter()
+        .map(|name| (name, get(name)))
+        .collect();
+    if values.values().all(Option::is_none) {
+        return Ok(None);
+    }
+    let required = |name: &'static str| -> Result<String, DrillError> {
+        values
+            .get(name)
+            .and_then(Clone::clone)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                GuardRefusal(format!(
+                    "incomplete Restore execution contract: {name} is missing; no data \
+                     operation was started"
+                ))
+                .into()
+            })
+    };
+    let version = required(wire::VERSION_ENV)?;
+    if version != wire::VERSION {
+        return Err(GuardRefusal(format!(
+            "unsupported Restore execution contract version {version:?}; expected {:?}; no \
+             data operation was started",
+            wire::VERSION
+        ))
+        .into());
+    }
+    Ok(Some(ExecutionContract {
+        subject_api_version: required(wire::SUBJECT_API_VERSION_ENV)?,
+        subject_kind: required(wire::SUBJECT_KIND_ENV)?,
+        subject_name: required(wire::SUBJECT_NAME_ENV)?,
+        subject_namespace: required(wire::SUBJECT_NAMESPACE_ENV)?,
+        subject_uid: required(wire::SUBJECT_UID_ENV)?,
+        approval_name: required(wire::APPROVAL_NAME_ENV)?,
+        approval_uid: required(wire::APPROVAL_UID_ENV)?,
+        plan_sha256: required(wire::PLAN_SHA256_ENV)?,
+        approval_sha256: required(wire::APPROVAL_SHA256_ENV)?,
+        approval_sidecar_sha256: required(wire::APPROVAL_SIDECAR_SHA256_ENV)?,
+        approver_key_sha256: required(wire::APPROVER_KEY_SHA256_ENV)?,
+        allowed_clusters_sha256: required(wire::ALLOWED_CLUSTERS_SHA256_ENV)?,
+    }))
+}
+
+/// Bind a new Job's mandatory argv handshake to its immutable environment
+/// contract. Both absent is the explicit legacy/standalone shape; every other
+/// invocation must carry a complete current contract through both channels.
+pub fn execution_contract_for_invocation(
+    cli_version: Option<&str>,
+    mut get: impl FnMut(&str) -> Option<String>,
+) -> Result<Option<ExecutionContract>, DrillError> {
+    use logweir_core::execution_contract as wire;
+
+    let values: BTreeMap<&str, Option<String>> = wire::ALL_ENV
+        .into_iter()
+        .map(|name| (name, get(name)))
+        .collect();
+    let has_environment_contract = values.values().any(Option::is_some);
+    match (cli_version, has_environment_contract) {
+        (None, false) => return Ok(None),
+        (None, true) => {
+            return Err(GuardRefusal(format!(
+                "incomplete Restore execution contract: {} is missing while contract \
+                 environment is present; no data operation was started",
+                wire::VERSION_ARG
+            ))
+            .into())
+        }
+        (Some(_), false) => {
+            return Err(GuardRefusal(format!(
+                "incomplete Restore execution contract: {} was supplied without the required \
+                 contract environment; no data operation was started",
+                wire::VERSION_ARG
+            ))
+            .into())
+        }
+        (Some(_), true) => {}
+    }
+
+    let cli_version = cli_version.expect("the exhaustive match established a CLI version");
+    if cli_version != wire::VERSION {
+        return Err(GuardRefusal(format!(
+            "unsupported Restore execution contract argv version {cli_version:?}; expected {:?}; \
+             no data operation was started",
+            wire::VERSION
+        ))
+        .into());
+    }
+    let environment_version = values
+        .get(wire::VERSION_ENV)
+        .and_then(Option::as_deref)
+        .filter(|value| !value.trim().is_empty());
+    if environment_version != Some(cli_version) {
+        return Err(GuardRefusal(format!(
+            "Restore execution contract version mismatch: {} carries {:?} but {} carries \
+             {cli_version:?}; no data operation was started",
+            wire::VERSION_ENV,
+            environment_version,
+            wire::VERSION_ARG
+        ))
+        .into());
+    }
+
+    execution_contract_from(|name| values.get(name).and_then(Clone::clone))
+}
+
+/// Exact projected bytes captured once at process startup.
+#[derive(Clone, Debug)]
+pub struct ApprovalBundleBytes {
+    pub plan: Vec<u8>,
+    pub approval: Vec<u8>,
+    pub approval_sidecar: Vec<u8>,
+    pub approver_key: Vec<u8>,
+    pub allowed_clusters: Vec<u8>,
+}
+
+/// Independently compare every mounted public input with the immutable Job
+/// template before those bytes are parsed or any client is constructed.
+pub fn validate_execution_contract(
+    contract: &ExecutionContract,
+    triggered_by: Option<&str>,
+    bundle: &ApprovalBundleBytes,
+) -> Result<(), DrillError> {
+    if contract.subject_api_version != "logweir.dev/v1alpha1" || contract.subject_kind != "Restore"
+    {
+        return Err(GuardRefusal(
+            "the execution contract does not identify a logweir.dev/v1alpha1 Restore; no data \
+             operation was started"
+                .to_string(),
+        )
+        .into());
+    }
+    let expected_trigger = format!("approval/{}", contract.approval_name);
+    if triggered_by != Some(expected_trigger.as_str()) {
+        return Err(GuardRefusal(format!(
+            "the execution contract names Approval {} but --triggered-by is {:?}; no data \
+             operation was started",
+            contract.approval_name, triggered_by
+        ))
+        .into());
+    }
+    let checks = [
+        ("plan", &contract.plan_sha256, bundle.plan.as_slice()),
+        (
+            "approval",
+            &contract.approval_sha256,
+            bundle.approval.as_slice(),
+        ),
+        (
+            "approval sidecar",
+            &contract.approval_sidecar_sha256,
+            bundle.approval_sidecar.as_slice(),
+        ),
+        (
+            "approver public key",
+            &contract.approver_key_sha256,
+            bundle.approver_key.as_slice(),
+        ),
+        (
+            "allowed-clusters",
+            &contract.allowed_clusters_sha256,
+            bundle.allowed_clusters.as_slice(),
+        ),
+    ];
+    for (label, expected, bytes) in checks {
+        let actual = logweir_core::ids::sha256_prefixed(bytes);
+        if &actual != expected {
+            return Err(GuardRefusal(format!(
+                "the mounted {label} bytes hash to {actual}, not the controller-pinned \
+                 {expected}; no data operation was started"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// The log filter used when `RUST_LOG` is unset or blank.
@@ -384,12 +600,8 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
     // The alias's ONE line, before anything else this process says.
     let _ = print_deprecation_to(&mut std::io::stderr().lock(), invoked_as);
 
-    let outcome = execute(&args, &run_id);
-    // Read for notification purposes ONLY, and read here rather than taken
-    // from `execute`'s `Ctx`: `execute` returning `Err` is exactly the exit-1
-    // path, and on that path there is no `Ctx` to take anything from.
-    let spec = notification_spec(&args);
-    report(&args, &run_id, spec.as_ref(), outcome)
+    let (outcome, authenticated_spec) = execute_for_reporting(&args, &run_id);
+    report(&args, &run_id, authenticated_spec.as_ref(), outcome)
 }
 
 /// `run_named` with the run's handles SUPPLIED rather than constructed — the
@@ -408,7 +620,9 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
 /// It does NOT install a tracing subscriber and does not enter the `drill`
 /// span. Those are process-global and belong to the binary's entry point;
 /// installing them here would make two calls in one test process fight over
-/// the global default.
+/// the global default. It also does not send plan-controlled notifications:
+/// supplying a `Ctx` bypasses captured-byte contract and approval startup, so
+/// this test seam has no authenticated notification authority.
 pub fn run_with(
     args: &RunArgs,
     run_id: &str,
@@ -418,37 +632,7 @@ pub fn run_with(
 ) -> ExitCode {
     let _ = print_deprecation_to(&mut stderr, invoked_as);
     let outcome = execute_with_outcome(args, run_id, c);
-    let spec = notification_spec(args);
-    report(args, run_id, spec.as_ref(), outcome)
-}
-
-/// Re-read `args.spec` so the failure paths can reach the notification
-/// configuration. **Best-effort and never fatal.**
-///
-/// `report` is reached on paths where the spec never parsed at all — a
-/// malformed spec IS an exit-1 operational failure — so every error here is a
-/// `debug!` and a `None`, and the drill's exit code is decided elsewhere and
-/// stays decided (GC11). This must never be used for anything but
-/// notification: the drill's own copy of the spec is the one `context()`
-/// parsed and guarded, and a second parse that fed a phase would be a second
-/// source of truth.
-fn notification_spec(args: &RunArgs) -> Option<DrillSpec> {
-    let text = match std::fs::read_to_string(&args.spec) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::debug!(error = %e, path = %args.spec.display(),
-                            "spec not readable for notification purposes");
-            return None;
-        }
-    };
-    match serde_yaml::from_str::<DrillSpec>(&text) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            tracing::debug!(error = %e, path = %args.spec.display(),
-                            "spec not parseable for notification purposes");
-            None
-        }
-    }
+    report(args, run_id, None, outcome)
 }
 
 /// Everything `run` does with `execute`'s answer, split out so it can be
@@ -470,10 +654,16 @@ fn notification_spec(args: &RunArgs) -> Option<DrillSpec> {
 fn report(
     args: &RunArgs,
     run_id: &str,
-    spec: Option<&DrillSpec>,
+    authenticated_spec: Option<&DrillSpec>,
     outcome: Result<RestoreOutcome, DrillError>,
 ) -> ExitCode {
-    report_with(args, run_id, spec, outcome, &phase7_verify::UreqSink::new())
+    report_with(
+        args,
+        run_id,
+        authenticated_spec,
+        outcome,
+        &phase7_verify::UreqSink::new(),
+    )
 }
 
 /// Split from `report` for the same reason `run`/`execute` are split: the test
@@ -481,7 +671,7 @@ fn report(
 fn report_with(
     args: &RunArgs,
     run_id: &str,
-    spec: Option<&DrillSpec>,
+    authenticated_spec: Option<&DrillSpec>,
     outcome: Result<RestoreOutcome, DrillError>,
     sink: &dyn phase7_verify::EventSink,
 ) -> ExitCode {
@@ -545,15 +735,18 @@ fn report_with(
     // is fine. GC11: `notify_failure_with` returns nothing and swallows every
     // transport failure — the code is already decided above and is not
     // reachable from here.
-    if let (Some(msg), Some(s)) = (failure_message.as_deref(), spec) {
-        phase7_verify::notify_failure_with(
-            &s.notifications,
-            s.name.as_deref(),
-            run_id,
-            code,
-            msg,
-            sink,
-        );
+    let signing_prerequisite_failed = matches!(&outcome, Err(DrillError::SigningPrerequisite(_)));
+    if !signing_prerequisite_failed {
+        if let (Some(msg), Some(s)) = (failure_message.as_deref(), authenticated_spec) {
+            phase7_verify::notify_failure_with(
+                &s.notifications,
+                s.name.as_deref(),
+                run_id,
+                code,
+                msg,
+                sink,
+            );
+        }
     }
     // [I8] Only a successful run has three keys to name — see `exiting`.
     let evidence = match &outcome {
@@ -627,7 +820,9 @@ fn exiting(
         ExitCode::Operational => "logweir could not do its job; NO scorecard was written",
         ExitCode::DrillNotPass => "a drill ran and did not pass; a SIGNED scorecard was written",
         ExitCode::GuardRefused => "the plan was refused before anything ran; no scorecard",
-        ExitCode::SigningOrLock => "the drill ran but its result is unattested; nothing uploaded",
+        ExitCode::SigningOrLock => {
+            "signing readiness failed or the drill result is unattested; nothing uploaded"
+        }
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "drill finished");
     // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout —
@@ -866,14 +1061,9 @@ pub struct Ctx {
     pub store: Store,
 }
 
-fn context(args: &RunArgs) -> Result<Ctx, DrillError> {
-    let spec_text = std::fs::read_to_string(&args.spec)
-        .map_err(|e| DrillError::Operational(format!("{}: {e}", args.spec.display())))?;
+fn context_from_text(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
-    let allowed_text = std::fs::read_to_string(&args.allowed_clusters).map_err(|e| {
-        DrillError::Operational(format!("{}: {e}", args.allowed_clusters.display()))
-    })?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| DrillError::Operational(format!("allowed-clusters does not parse: {e}")))?;
 
@@ -1113,10 +1303,76 @@ pub fn naming_the_password_var(
 /// is what prints them. `execute_with` stays the scorecard-returning half for
 /// the ~40 existing call sites in `tests/orchestrator.rs` and
 /// `tests/teardown.rs`.
+struct StartupInputs {
+    spec_text: String,
+    allowed_text: String,
+    approved: phase1_approval::Approved,
+}
+
+fn read_startup_file(path: &std::path::Path, label: &str) -> Result<Vec<u8>, DrillError> {
+    std::fs::read(path)
+        .map_err(|error| DrillError::Operational(format!("{label} {}: {error}", path.display())))
+}
+
+fn load_startup_inputs(
+    args: &RunArgs,
+    signing_key: &logweir_evidence::keys::VerifyingKey,
+    contract: Option<&ExecutionContract>,
+) -> Result<StartupInputs, DrillError> {
+    let sidecar_path = args.approval.with_extension("sig");
+    let bundle = ApprovalBundleBytes {
+        plan: read_startup_file(&args.spec, "restore plan")?,
+        approval: read_startup_file(&args.approval, "approval")?,
+        approval_sidecar: read_startup_file(&sidecar_path, "approval sidecar")?,
+        approver_key: read_startup_file(&args.approver_key, "approver public key")?,
+        allowed_clusters: read_startup_file(&args.allowed_clusters, "allowed-clusters")?,
+    };
+    if let Some(contract) = contract {
+        validate_execution_contract(contract, args.triggered_by.as_deref(), &bundle)?;
+    }
+    phase1_approval::admit_pinned_approver_key_bytes(&bundle.approver_key, &args.approver_key_ids)?;
+    let spec_text = String::from_utf8(bundle.plan.clone())
+        .map_err(|error| DrillError::Operational(format!("restore plan is not UTF-8: {error}")))?;
+    let allowed_text = String::from_utf8(bundle.allowed_clusters.clone()).map_err(|error| {
+        DrillError::Operational(format!("allowed-clusters is not UTF-8: {error}"))
+    })?;
+    let approved = phase1_approval::verify_bytes(
+        &spec_text,
+        &bundle.approval,
+        &bundle.approval_sidecar,
+        &bundle.approver_key,
+        signing_key,
+    )?;
+    Ok(StartupInputs {
+        spec_text,
+        allowed_text,
+        approved,
+    })
+}
+
 pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillError> {
+    execute_for_reporting(args, run_id).0
+}
+
+/// Execute while retaining notification authority only after the exact plan
+/// bytes have passed the argv/environment contract and approval verification.
+/// The retained value is independent of any later projected-file replacement.
+fn execute_for_reporting(
+    args: &RunArgs,
+    run_id: &str,
+) -> (Result<RestoreOutcome, DrillError>, Option<DrillSpec>) {
+    let contract = match execution_contract_for_invocation(
+        args.execution_contract_version.as_deref(),
+        |name| std::env::var(name).ok(),
+    ) {
+        Ok(contract) => contract,
+        Err(error) => return (Err(error), None),
+    };
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
-    check_projected_credentials()?;
+    if let Err(error) = check_projected_credentials() {
+        return (Err(error.into()), None);
+    }
     // The pinned approver set, at the SAME seam and for the same reason (Task
     // 22 fix round 1, review finding MED-1). It began one frame lower, at the
     // top of `execute_with_outcome` — which is already past `context(args)`,
@@ -1133,9 +1389,48 @@ pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillErro
     // which is what `tests/approval.rs::
     // an_unpinned_approver_is_refused_without_dialling_the_bootstrap` asserts
     // over the whole transcript of a run against a closed port.
-    phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)?;
-    let c = context(args)?;
-    execute_with_outcome(args, run_id, &c)
+    if let Err(error) =
+        phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)
+    {
+        return (Err(error), None);
+    }
+    // Signing readiness is established before `context` constructs the Kafka
+    // client, object stores, or engine runner. Keep this parsed identity for
+    // approval comparison and every evidence document the run emits.
+    let signer = match load_signer(&args.signing_key) {
+        Ok(signer) => signer,
+        Err(error) => return (Err(error), None),
+    };
+    let startup = match load_startup_inputs(args, &signer.verifying_key(), contract.as_ref()) {
+        Ok(startup) => startup,
+        Err(error) => return (Err(error), None),
+    };
+    let authenticated_spec: DrillSpec = match serde_yaml::from_str(&startup.spec_text) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return (
+                Err(DrillError::Operational(format!(
+                    "drill spec does not parse: {error}"
+                ))),
+                None,
+            )
+        }
+    };
+    let outcome = match context_from_text(startup.spec_text, startup.allowed_text) {
+        Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, startup.approved),
+        Err(error) => Err(error),
+    };
+    (outcome, Some(authenticated_spec))
+}
+
+fn load_signer(path: &std::path::Path) -> Result<ValidatedSigner, DrillError> {
+    ValidatedSigner::load(
+        path,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        b"logweir restore signing readiness probe v1",
+        "No engine data operation was started",
+    )
+    .map_err(DrillError::SigningPrerequisite)
 }
 
 /// Refuses an engine identity that would enter a signed document empty.
@@ -1184,6 +1479,38 @@ pub fn execute_with_outcome(
     run_id: &str,
     c: &Ctx,
 ) -> Result<RestoreOutcome, DrillError> {
+    // A caller supplying already-built doubles still gets the same safety
+    // boundary: validate before the first method call on the client or engine.
+    let signer = load_signer(&args.signing_key)?;
+    execute_with_signer(args, run_id, c, &signer)
+}
+
+fn execute_with_signer(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    signer: &ValidatedSigner,
+) -> Result<RestoreOutcome, DrillError> {
+    execute_with_validated_approval(args, run_id, c, signer, None)
+}
+
+fn execute_with_prevalidated(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    signer: &ValidatedSigner,
+    approved: phase1_approval::Approved,
+) -> Result<RestoreOutcome, DrillError> {
+    execute_with_validated_approval(args, run_id, c, signer, Some(approved))
+}
+
+fn execute_with_validated_approval(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    signer: &ValidatedSigner,
+    prevalidated_approval: Option<phase1_approval::Approved>,
+) -> Result<RestoreOutcome, DrillError> {
     // `--approver-key-ids` is deliberately NOT checked here, though phase 1 is
     // where the approval is otherwise handled. This function takes a `&Ctx`,
     // so by the time it runs the rdkafka client already exists and the
@@ -1214,16 +1541,15 @@ pub fn execute_with_outcome(
     assert_engine_identity(&c.engine.id())?;
 
     // 1
-    let signing_pub = logweir_evidence::keys::SigningKey::from_pem_file(&args.signing_key)
-        .map_err(|e| DrillError::Operational(e.to_string()))?
-        .verifying_key();
-    let approved = record(&mut sc, 1, "approval", || {
-        phase1_approval::verify(
+    let signing_pub = signer.verifying_key();
+    let approved = record(&mut sc, 1, "approval", || match &prevalidated_approval {
+        Some(approved) => Ok(approved.clone()),
+        None => phase1_approval::verify(
             &c.spec_text,
             &args.approval,
             &args.approver_key,
             &signing_pub,
-        )
+        ),
     })?;
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
@@ -1359,7 +1685,7 @@ pub fn execute_with_outcome(
         // `None`: phase 5 BLOCKED, so `restore` never ran and there is no
         // offset-mapping report to describe. The engine writes one only from a
         // completed restore.
-        let signed = sign_and_publish(&mut sc, args, run_id, c, None)?;
+        let signed = sign_and_publish(&mut sc, args, run_id, c, signer, None)?;
         // NO teardown here, deliberately, and the asymmetry with the phase-6
         // branch below is the point: a blocked preflight means `restore` never
         // ran, so this drill created NOTHING on the target. Phase 0 now
@@ -1451,7 +1777,7 @@ pub fn execute_with_outcome(
             // `None` for the same reason as the phase-5 branch, with one extra
             // fact: `RestoreNoOp` is the engine having exited 0 having produced
             // nothing, so any offset mapping it wrote would describe no records.
-            let signed = sign_and_publish(&mut sc, args, run_id, c, None)?;
+            let signed = sign_and_publish(&mut sc, args, run_id, c, signer, None)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -1466,9 +1792,9 @@ pub fn execute_with_outcome(
             let mut out = signed.scorecard.clone();
             teardown(
                 &mut out,
-                args,
                 run_id,
                 c,
+                signer,
                 deleter,
                 &admitted.topic_mapping,
                 &logweir_core::ids::sha256_prefixed(&signed.bytes),
@@ -1547,7 +1873,7 @@ pub fn execute_with_outcome(
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
     // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
-    let signed = sign_and_publish(&mut sc, args, run_id, c, Some(&plan.offset_report))?;
+    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
@@ -1560,9 +1886,9 @@ pub fn execute_with_outcome(
     // 9
     teardown(
         &mut sc,
-        args,
         run_id,
         c,
+        signer,
         deleter,
         &admitted.topic_mapping,
         &signed_bytes_sha256,
@@ -1629,9 +1955,9 @@ pub struct EvidenceKeys {
 /// identify WHICH signed document this teardown accompanies.
 fn teardown(
     sc: &mut Scorecard,
-    args: &RunArgs,
     run_id: &str,
     c: &Ctx,
+    signer: &ValidatedSigner,
     deleter: &dyn TopicDeleter,
     mapping: &BTreeMap<String, String>,
     scorecard_sha256: &str,
@@ -1669,7 +1995,7 @@ fn teardown(
                 "{msg}"
             );
         }
-        if let Err(e) = phase9_teardown::persist(&a, &args.signing_key, &c.store) {
+        if let Err(e) = phase9_teardown::persist_with_signer(&a, signer, &c.store) {
             tracing::warn!(error = %e, "teardown attestation not persisted");
         }
         Ok(a)
@@ -1701,11 +2027,12 @@ fn sign_and_publish(
     args: &RunArgs,
     run_id: &str,
     c: &Ctx,
+    signer: &ValidatedSigner,
     offset_report: Option<&std::path::Path>,
 ) -> Result<phase8_score::Signed, DrillError> {
     let to_sign = sc.clone();
     let signed = record(sc, 8, "score-and-sign", || {
-        phase8_score::run(&to_sign, &args.signing_key, &c.store, offset_report)
+        phase8_score::run_with_signer(&to_sign, signer, &c.store, offset_report)
     })?;
     write_scorecard_artifact(args, run_id, &signed);
     // Carried obligation from Task 20. Phase 8 signs BEFORE it puts — bytes
@@ -1718,7 +2045,7 @@ fn sign_and_publish(
     // the real post-put readback — the same pattern phase 9 uses for the
     // teardown attestation, and for the same reason.
     let receipt = phase8_score::put_receipt(&signed);
-    if let Err(e) = phase8_score::persist_put_receipt(&receipt, &args.signing_key, &c.store) {
+    if let Err(e) = phase8_score::persist_put_receipt_with_signer(&receipt, signer, &c.store) {
         // A warning, never an outcome: the drill result is already signed and
         // uploaded, and a receipt that could not be written must not retract
         // a measurement. It also must not be silent.
@@ -2304,6 +2631,7 @@ mod tests {
 
     fn args_with(metrics_file: Option<PathBuf>) -> RunArgs {
         RunArgs {
+            execution_contract_version: None,
             spec: PathBuf::from("drill.yaml"),
             approval: PathBuf::from("approval.json"),
             approver_key: PathBuf::from("approver.pem"),
@@ -3113,9 +3441,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------- T0-15
-    // The notification half of the terminal paths. `report_with` and
-    // `notification_spec` are private, so these live here rather than in
-    // `crates/logweir/tests/notify.rs`, where the rest of T0-15's coverage is.
+    // The notification half of the terminal paths. `report_with` is private,
+    // so these live here rather than in `crates/logweir/tests/notify.rs`, where
+    // the rest of T0-15's coverage is.
 
     /// An `EventSink` that records instead of dialling (GC17).
     #[derive(Default)]
@@ -3214,11 +3542,23 @@ mod tests {
         );
         assert_eq!(code, ExitCode::Operational);
         assert!(sink.posts.lock().unwrap().is_empty());
+
+        let sink = RecordingSink::default();
+        let code = report_with(
+            &args_with(None),
+            "01TEST",
+            Some(&spec),
+            Err(DrillError::SigningPrerequisite("invalid key".into())),
+            &sink,
+        );
+        assert_eq!(code, ExitCode::SigningOrLock);
+        assert!(
+            sink.posts.lock().unwrap().is_empty(),
+            "signer prerequisite diagnostics are local-only even if a caller incorrectly supplies \
+             notification configuration"
+        );
     }
 
-    /// **M8.** `notification_spec` actually reads the spec file, and its
-    /// failures are silent and non-fatal.
-    ///
     /// **The signed document says WHICH MODE the run was in, and names a
     /// marker topic only in the mode that verified one** (fix round 1, review
     /// F1).
@@ -3294,33 +3634,33 @@ mod tests {
         );
     }
 
-    /// It is the only thing standing between `report`'s failure paths and the
-    /// notification config: `RunArgs` carries paths, not a parsed spec, and
-    /// on the exit-1 path `execute` returned `Err` so there is no `Ctx` to
-    /// take one from.
+    /// Reporting uses the authenticated in-memory plan snapshot and never
+    /// follows a later replacement at `args.spec`.
     #[test]
-    fn notification_spec_reads_the_spec_and_never_aborts() {
+    fn late_plan_replacement_cannot_change_the_notification_destination() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("drill.yaml");
-        let mut text = include_str!("../../../../examples/drill.yaml").to_string();
-        text.insert_str(0, "name: nightly\n");
-        std::fs::write(&p, &text).unwrap();
-
+        let mut authenticated = spec_with_a_routing_key();
+        authenticated.notifications.pagerduty_endpoint =
+            Some("https://trusted-notify.example/events".into());
+        let mut substituted = authenticated.clone();
+        substituted.notifications.pagerduty_endpoint =
+            Some("https://substituted.example/events".into());
+        std::fs::write(&p, serde_yaml::to_string(&substituted).unwrap()).unwrap();
         let mut args = args_with(None);
-        args.spec = p.clone();
-        let got = notification_spec(&args).expect("a readable, parseable spec must be returned");
-        assert_eq!(got.name.as_deref(), Some("nightly"));
-
-        // Unreadable and unparseable are both `None`, never a panic and never
-        // an error that could reach an exit code.
-        let mut missing = args_with(None);
-        missing.spec = dir.path().join("does-not-exist.yaml");
-        assert!(notification_spec(&missing).is_none());
-
-        let bad = dir.path().join("bad.yaml");
-        std::fs::write(&bad, b"this: [is not, a drill spec").unwrap();
-        let mut args_bad = args_with(None);
-        args_bad.spec = bad;
-        assert!(notification_spec(&args_bad).is_none());
+        args.spec = p;
+        let sink = RecordingSink::default();
+        let code = report_with(
+            &args,
+            "01TEST",
+            Some(&authenticated),
+            Err(DrillError::Operational("post-auth startup failure".into())),
+            &sink,
+        );
+        assert_eq!(code, ExitCode::Operational);
+        let posts = sink.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, "https://trusted-notify.example/events");
+        assert_ne!(posts[0].0, "https://substituted.example/events");
     }
 }

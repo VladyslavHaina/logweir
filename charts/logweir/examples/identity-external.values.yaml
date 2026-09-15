@@ -1,0 +1,7 @@
+# Explicitly adopt a pre-existing PKCS#8 PEM signing identity. Create this
+# Secret in the release namespace before the first install. Bootstrap copies
+# it once into the retained managed Secret; later upgrades validate equality.
+identity:
+  externalSecret:
+    name: company-logweir-signer
+    key: identity.pem

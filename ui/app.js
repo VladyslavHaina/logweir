@@ -43,7 +43,49 @@ const DEFAULT_HASH = ROUTES[0].hash;
 // `ui/` by `no_credential_appears_in_the_page`. A hash is also the only place
 // that survives a reload without the file server being asked for a path it
 // cannot serve.
-const DEFAULT_NAMESPACE = "default";
+const DEFAULT_NAMESPACE = "";
+
+/** Owns the short-lived reads and callbacks for one route render. Starting a
+ *  new route aborts only its predecessor's reads; mutation calls receive no
+ *  signal and therefore remain durable after navigation. */
+export function createRouteLifecycle(AbortControllerClass) {
+  const Controller = AbortControllerClass || globalThis.AbortController;
+  let current = null;
+  let generation = 0;
+  return {
+    begin(routeHash) {
+      if (current !== null) {
+        current.controller.abort();
+      }
+      const controller = new Controller();
+      const token = {
+        controller: controller,
+        generation: generation + 1,
+        routeHash: typeof routeHash === "string" ? routeHash : null,
+      };
+      generation = token.generation;
+      current = token;
+      return {
+        generation: token.generation,
+        signal: controller.signal,
+        isCurrent() {
+          // `location.hash` changes synchronously, but `hashchange` is queued.
+          // Compare the captured route as well as the controller so a short
+          // client-side await cannot submit or render in that gap.
+          return current === token &&
+            !controller.signal.aborted &&
+            (token.routeHash === null || typeof window === "undefined" || window.location.hash === token.routeHash);
+        },
+      };
+    },
+    dispose() {
+      if (current !== null) {
+        current.controller.abort();
+        current = null;
+      }
+    },
+  };
+}
 
 /** The `#/route?ns=name` a hash carries: the route half, the namespace, and
  *  every other parameter the hash names.
@@ -61,11 +103,11 @@ const DEFAULT_NAMESPACE = "default";
  *  module scope -- and the three values above are worth a test that can
  *  actually run. This function keeps `params` as the generic bag every route
  *  can read. */
-export function parseHash(hash) {
+export function parseHash(hash, initialNamespace) {
   const text = typeof hash === "string" ? hash : "";
   const question = text.indexOf("?");
   const route = question === -1 ? text : text.slice(0, question);
-  let ns = DEFAULT_NAMESPACE;
+  let ns = typeof initialNamespace === "string" ? initialNamespace : DEFAULT_NAMESPACE;
   let name = "";
   const params = {};
   if (question !== -1) {
@@ -147,7 +189,7 @@ function labelTableCells(parsed) {
   }
 }
 
-function nav(current, ns) {
+function nav(current, ns, allowedNamespaces) {
   const links = [];
   const suffix = ns === DEFAULT_NAMESPACE ? "" : "?ns=" + encodeURIComponent(ns);
   for (const route of ROUTES) {
@@ -160,14 +202,23 @@ function nav(current, ns) {
   }
   return el("div", { class: "nav-bar" }, [
     el("nav", { class: "nav", "aria-label": "Sections" }, links),
-    namespaceForm(current, ns),
+    namespaceForm(current, ns, allowedNamespaces),
   ]);
 }
 
 // The namespace picker. It changes the hash and nothing else -- no request is
 // issued here, and no value is stored anywhere.
-function namespaceForm(current, ns) {
-  const input = el("input", { id: "ns-input", name: "ns", value: ns });
+function namespaceForm(current, ns, allowedNamespaces) {
+  const allowed = Array.isArray(allowedNamespaces) ? allowedNamespaces : [];
+  const input = allowed.length === 0
+    ? el("input", { id: "ns-input", name: "ns", value: ns, required: "" })
+    : el(
+      "select",
+      { id: "ns-input", name: "ns" },
+      [el("option", { value: "" }, "Choose a namespace")].concat(
+        allowed.map((name) => el("option", { value: name, selected: name === ns ? "" : null }, name)),
+      ),
+    );
   const form = el("form", { class: "ns-form" }, [
     el("label", { for: "ns-input" }, "namespace"),
     input,
@@ -175,9 +226,12 @@ function namespaceForm(current, ns) {
   ]);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const value = input.value.trim() || DEFAULT_NAMESPACE;
+    const value = input.value.trim();
+    if (value.length === 0) {
+      return;
+    }
     window.location.hash =
-      current.hash + (value === DEFAULT_NAMESPACE ? "" : "?ns=" + encodeURIComponent(value));
+      current.hash + "?ns=" + encodeURIComponent(value);
   });
   return form;
 }
@@ -200,24 +254,52 @@ function view(route) {
   ];
 }
 
-function render() {
+export function namespaceContext(root) {
+  const runtime = globalThis.LOGWEIR_NAMESPACE_CONTEXT || {};
+  const raw = root.getAttribute("data-logweir-namespaces") || "";
+  const configured = Array.isArray(runtime.allowed) ? runtime.allowed : raw.split(",");
+  const allowed = configured
+    .filter((name) => typeof name === "string")
+    .map((name) => name.trim())
+    .filter((name, index, all) => name.length > 0 && all.indexOf(name) === index);
+  const selectedAttribute = root.getAttribute("data-logweir-namespace") || "";
+  const selectedRuntime = typeof runtime.selected === "string" ? runtime.selected : "";
+  const selected = (selectedAttribute || selectedRuntime).trim();
+  return {
+    allowed: allowed,
+    selected: selected.length > 0 && (allowed.length === 0 || allowed.indexOf(selected) !== -1)
+      ? selected
+      : (allowed.length === 1 ? allowed[0] : ""),
+  };
+}
+
+function namespacePrompt(allowed) {
+  const sentence = allowed.length === 0
+    ? "Choose a namespace above before Logweir reads cluster resources. The page does not list namespaces."
+    : "Choose one of the namespaces this installation explicitly authorizes above.";
+  return el("p", { class: "pending", role: "status" }, sentence);
+}
+
+function render(lifecycle, context) {
   const hash = window.location.hash;
-  const here = parseHash(hash);
+  const here = parseHash(hash, context.selected);
   const current = routeFor(here.route) || routeFor(DEFAULT_HASH);
   const header = document.getElementById("nav-slot");
   const main = document.getElementById("view-slot");
   if (header !== null) {
-    replace(header, nav(current, here.ns));
+    replace(header, nav(current, here.ns, context.allowed));
   }
   if (main !== null) {
-    if (here.name !== "" && typeof current.detail === "function") {
+    if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
+      replace(main, namespacePrompt(context.allowed));
+    } else if (here.name !== "" && typeof current.detail === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));
-      current.detail(main, here.ns, here.name, parseFragment);
+      current.detail(main, here.ns, here.name, parseFragment, lifecycle);
     } else if (current.cluster === true && typeof current.mount === "function") {
       // The one CLUSTER-SCOPED read in this application. It takes no
       // namespace, because the TrustRoster has none.
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, parseFragment);
+      current.mount(main, parseFragment, undefined, lifecycle);
     } else if (current.route === true && typeof current.mount === "function") {
       // The approvals page reads `subject`, `hash` and `name` off the hash the
       // wizard navigated to. They are route parameters and never values parsed
@@ -230,10 +312,14 @@ function render() {
       // three values left the whole suite green. `approvalRouteParams` is a
       // pure function of the hash string, and the suite calls it.
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, here.ns, approvalRouteParams(hash), parseFragment);
+      current.mount(main, here.ns, approvalRouteParams(hash), parseFragment, undefined, lifecycle);
     } else if (typeof current.mount === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, here.ns, parseFragment);
+      if (current.hash === "#/restore") {
+        current.mount(main, here.ns, parseFragment, undefined, lifecycle);
+      } else {
+        current.mount(main, here.ns, parseFragment, lifecycle);
+      }
     } else {
       replace(main, view(current));
     }
@@ -241,24 +327,39 @@ function render() {
   document.title = "Logweir -- " + current.title;
 }
 
-window.addEventListener("hashchange", render);
+function boot() {
+  const context = namespaceContext(document.documentElement);
+  const routes = createRouteLifecycle();
+  const renderCurrent = () => render(routes.begin(window.location.hash), context);
+  window.addEventListener("hashchange", renderCurrent);
+  window.addEventListener("pagehide", () => routes.dispose());
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) {
+      renderCurrent();
+    }
+  });
 
-// THE SKIP LINK IS A BUTTON, NOT AN ANCHOR. An `<a href="#view-slot">` would
+  // THE SKIP LINK IS A BUTTON, NOT AN ANCHOR. An `<a href="#view-slot">` would
 // set the hash, and every hash on this page is a route: the router would
 // read `#view-slot`, find no such route, and render the default one. So the
 // control moves focus with a script and touches the hash not at all.
-const skip = document.getElementById("skip-link");
-if (skip !== null) {
-  skip.addEventListener("click", () => {
-    const main = document.getElementById("view-slot");
-    if (main !== null) {
-      main.focus();
-    }
-  });
+  const skip = document.getElementById("skip-link");
+  if (skip !== null) {
+    skip.addEventListener("click", () => {
+      const main = document.getElementById("view-slot");
+      if (main !== null) {
+        main.focus();
+      }
+    });
+  }
+
+  if (window.location.hash === "") {
+    window.location.hash = DEFAULT_HASH;
+  }
+
+  renderCurrent();
 }
 
-if (window.location.hash === "") {
-  window.location.hash = DEFAULT_HASH;
+if (typeof window !== "undefined" && typeof document !== "undefined") {
+  boot();
 }
-
-render();

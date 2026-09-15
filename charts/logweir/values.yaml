@@ -20,6 +20,24 @@ imagePullPolicy: Always         # controller container: Always | IfNotPresent | 
 runnerImagePullPolicy: Always   # runner Jobs; Never only for images loaded onto the node
 imagePullSecrets: []            # [{name: regcred}] — on both ServiceAccounts and every pod
 
+# --------------------------------------- persistent installation signing identity
+# A post-install/post-upgrade hook in the signer-capable runner image initializes
+# retained objects once. It never renders private material into a Helm manifest.
+identity:
+  enabled: true
+  bootstrapImage: ""            # release must pin compatible docker.io/...@sha256:<64 hex>
+  bootstrapImagePullPolicy: IfNotPresent
+  allowMutableBootstrapImageForDevelopment: false
+  publicConfigMapName: logweir-signing-trust
+  authorizedRunnerNamespaces: [] # release namespace implicit; same signer copied to each
+  kubernetesApiCIDRs: []          # exact API /32 or /128 endpoints; TCP 443/6443 only
+  externalSecret:
+    name: ""                    # explicit adoption: pre-existing Secret in the release namespace
+    key: signing.pem            # P-256 or Ed25519 PKCS#8 PEM; never copied to chart output/logs
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
 # ------------------------------------------------------------- controller
 controller:
   logLevel: info                # RUST_LOG; below info the per-object lines are lost
@@ -101,7 +119,7 @@ demoKafka:
 # the Service acts as it. No Ingress; reach it with kubectl port-forward.
 ui:
   enabled: false
-  image: docker.io/vladyslavhaina/logweir-ui:latest  # kubectl + the fourteen page files
+  image: docker.io/vladyslavhaina/logweir-ui:latest  # kubectl + the sixteen page files
   imagePullPolicy: Always      # use Never for locally loaded images
   namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
   nodeSelector: {}

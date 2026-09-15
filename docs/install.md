@@ -85,9 +85,42 @@ including a local `registry:2` fallback: it does not prove public pullability.
 
 ### (c) The Helm chart
 
+For a supported release, `identity.bootstrapImage` is already a reviewed,
+digest-pinned runner containing the identity CLI. The source checkout is
+currently between implementation and publication: its empty value deliberately
+stops rendering instead of granting signing-key authority to the incompatible
+published `latest` image. The release coordinator must complete the exact
+publish/smoke/pin step documented below before calling this default command
+supported:
+
 ```bash
-helm install logweir charts/logweir -n logweir-system --create-namespace
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --create-namespace --wait --timeout 10m
 ```
+
+Development on Docker Desktop uses the explicit local-image exception; it is
+not a user installation or publication claim:
+
+```bash
+just image
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --create-namespace --wait --timeout 10m \
+  -f charts/logweir/examples/author-only.values.yaml
+```
+
+Managed identity installation is a **connected Helm operation**. `helm install`,
+`helm upgrade`, and `helm rollback` must be able to perform the chart's live
+`lookup` calls for the retained Secret, public ConfigMap, authorized-namespace
+copies, singleton owner, and Kubernetes API endpoints. Applying output from
+offline `helm template`, a disconnected GitOps renderer, or any renderer whose
+credentials cannot perform those lookups is unsupported with
+`identity.enabled=true`: the output cannot establish retained-resource or
+one-installation-per-cluster invariants and can contain fresh empty
+placeholders. Do not apply such output. A GitOps system must invoke connected
+Helm with lookup-capable credentials, or use the existing low-level/manual
+identity lifecycle with `identity.enabled=false` and provision/adopt the signer
+before workloads. The chart's `identity.externalSecret` adoption mode is still
+a connected managed-identity install; it is not an offline exception.
 
 The [chart reference](../charts/logweir/README.md) documents all values and
 optional components, including MinIO, demo brokers, existing Kafka clusters
@@ -102,10 +135,22 @@ A running pod does not restart when a tag changes; roll out the deployment or up
 `charts/logweir/examples/author-only.values.yaml`; recorded local and CI walks
 are **author-only**, not evidence of publication.
 
-The chart installs a runner ServiceAccount in its release namespace. Additional
-runner namespaces still need their own account, Secrets and policy. The chart
-creates no signing or approval keys; optional MinIO creates only demo archive
-credentials. Helm installs CRDs once and does not upgrade them automatically.
+The chart installs the runner prerequisites in its release namespace and every
+existing namespace explicitly listed in
+`identity.authorizedRunnerNamespaces`. A short-lived distributor copies the
+same established identity to each authorized namespace; it never generates a
+namespace-local signer. On every install, upgrade and supported rollback, a
+short-lived hook initializes or validates the retained
+installation signing identity described below; Helm never renders private key
+bytes. The chart does not create an approver key. Optional MinIO creates only
+demo archive credentials. Helm installs CRDs once and does not upgrade them
+automatically.
+
+Once the release digest is pinned, this Helm command is the supported
+clean-install path for PLAT-02.1. The
+digest-pinned `logweir.yaml` path remains a low-level/base-manifest path and
+does not run Helm hooks; when using it, provision an existing
+`logweir-signing-key` explicitly before creating workloads.
 
 ### (d) Bring your own registry
 
@@ -128,11 +173,19 @@ docker tag weirkeeper:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weir
 docker tag logweir:check    "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
+BOOTSTRAP_DIGEST=$(docker buildx imagetools inspect \
+  "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
+  --format '{{json .Manifest}}' | jq -er .digest)
+docker run --rm \
+  "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir@$BOOTSTRAP_DIGEST" \
+  identity bootstrap --help
 docker tag logweir-ui:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
 helm upgrade --install logweir charts/logweir -n logweir-system --create-namespace \
   --set controllerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0" \
   --set runnerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
+  --set-string identity.bootstrapImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir@$BOOTSTRAP_DIGEST" \
+  --set identity.bootstrapImagePullPolicy=IfNotPresent \
   --set ui.image="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0" \
   --set imagePullPolicy=IfNotPresent \
   --set runnerImagePullPolicy=IfNotPresent \
@@ -152,6 +205,28 @@ without an operator change. On ECR with the node role already granted
 The release workflow targets Docker Hub. Ensure repositories are accessible
 to the cluster, and supply a registry Secret through `imagePullSecrets` when
 required. Repository visibility and pull quotas depend on the registry account.
+
+### Release coordinator: publish and pin bootstrap bytes
+
+This is a release integration step, not end-user ceremony. The existing image
+publication path runs `scripts/check-image.sh` against the pulled candidate
+digest; that check now executes `identity bootstrap --help` before promotion.
+After a compatible candidate is public, copy the exact `runner_digest` emitted
+by the images job into `identity.bootstrapImage` in `charts/logweir/values.yaml`
+as `docker.io/<namespace>/logweir@sha256:<digest>`, leave
+`allowMutableBootstrapImageForDevelopment: false`, and rerun `just chart-check`.
+Do not pin the observed older published `latest` image: it has no `identity`
+subcommand. A final supported-release check must pull the newly pinned exact
+reference and run:
+
+```bash
+docker run --rm docker.io/<namespace>/logweir@sha256:<reviewed-digest> \
+  identity bootstrap --help
+```
+
+Until that value is populated with reviewed published bytes, the clean default
+Helm render is intentionally release-blocked. End users of the completed
+release supply neither a key nor an image hash.
 
 ---
 
@@ -188,27 +263,64 @@ against a clean cluster with no Secrets at all, and folding the check in would
 make the install refuse in exactly the state it is specified to succeed in.
 
 **Everything in this section happens before workload custom resources are
-created. On a fresh namespace the first preflight is expected to fail; repeat
-it after provisioning Secrets and before applying the workload samples.** Missing Secrets prevent successful execution. The preflight checks presence;
-it does not establish key provenance or validate a signed approval.
+created.** On the supported Helm path, wait for identity bootstrap before
+running `just check-secrets`; the signing Secret is then present automatically.
+Other missing credentials still prevent successful execution. The preflight
+checks presence; it does not establish key provenance or validate an approval.
 
-### 1. The two keypairs
+### 1. Installation signer and approver identity
+
+The supported Helm install generates a P-256 installation signer inside a
+short-lived bootstrap Job. No local OpenSSL command and no local private-key
+file is required. The Job atomically initializes the retained Secret
+`logweir-signing-key` and publishes only the key id, algorithm and SPKI public
+key in retained ConfigMap `logweir-signing-trust`:
 
 ```bash
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out signing.pem && openssl pkey -in signing.pem -pubout -out signing.pub.pem
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem && openssl pkey -in approver.pem -pubout -out approver.pub.pem
+kubectl --context docker-desktop -n logweir-system get configmap logweir-signing-trust \
+  -o jsonpath='{.data.key-id}{"\n"}{.data.algorithm}{"\n"}{.data.trust-reference}{"\n"}'
 ```
 
-P-256, because that is what `logweir-evidence` mints and verifies. Keep both
-private halves off the cluster except as the one Secret named below; the
-approver's private key never goes on the cluster at all.
+Helm normally deletes the successful hook Job, so `NotFound` after a successful
+`helm ... --wait` is expected. Do not inspect the signing Secret to obtain the
+public half; that needlessly requests private material.
 
-> **Signing-key prerequisite.** `SigningKey::load_or_generate`
-> (`crates/logweir-evidence/src/keys.rs:81-92`) creates and saves a new key when
-> the requested path is absent and writable. That key is not automatically
-> trusted by a roster. An unreadable, malformed or unwritable path fails;
-> a missing required Kubernetes Secret or key can prevent the pod from starting.
-> Provision the expected `signing.pem` and run `just check-secrets` before jobs.
+Only the bootstrap/distributor **processes and their projected API tokens** are
+short-lived. Their ServiceAccounts, resource-name-scoped Roles, and
+RoleBindings are ordinary persistent release resources so a later install,
+upgrade, rollback, or hook retry can run without expanding authority. Service
+Accounts default to `automountServiceAccountToken:false`; only the hook Pods
+opt in. Helm does not automatically revoke these RBAC grants after success.
+
+To adopt an organization-managed P-256 or Ed25519 PKCS#8 PEM key, create its
+source Secret before the first install and configure it explicitly:
+
+```bash
+kubectl --context docker-desktop create namespace logweir-system \
+  --dry-run=client -o yaml | kubectl --context docker-desktop apply -f -
+kubectl --context docker-desktop -n logweir-system create secret generic \
+  company-logweir-signer --from-file=identity.pem=/secure/path/identity.pem
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --create-namespace --wait --timeout 10m \
+  --set identity.externalSecret.name=company-logweir-signer \
+  --set identity.externalSecret.key=identity.pem
+```
+
+The source is get-only to bootstrap; only the fixed managed Secret and public
+ConfigMap are patchable. If the source is absent, unreadable or malformed, the
+install fails and does not fall back to generation. If an identity already
+exists, external configuration must resolve to the same public key or bootstrap
+refuses it as an attempted rotation. Keep the external source reachable on
+subsequent upgrades while those values remain configured, or clear both
+external values after verifying the published key id.
+
+The approver identity remains independent and operator-managed. Generate it in
+your approved key system; this OpenSSL example is only for the approver, whose
+private half never enters the cluster:
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem && openssl pkey -in approver.pem -pubout -out approver.pub.pem
+```
 
 ### 2. The cluster-scoped `TrustRoster`, whose name is fixed
 
@@ -233,12 +345,12 @@ spec:
         REPLACE-ME paste the contents of approver.pub.pem here
         -----END PUBLIC KEY-----
   signingKeys:
-    - keyId: REPLACE-ME-sha256-of-signing-DER-SPKI
+    - keyId: REPLACE-ME-from-logweir-signing-trust
       subject: logweir-runner@example.invalid
       notAfter: "2027-01-01T00:00:00Z"
       spkiPem: |
         -----BEGIN PUBLIC KEY-----
-        REPLACE-ME paste the contents of signing.pub.pem here
+        REPLACE-ME copy signing.pub.pem from logweir-signing-trust
         -----END PUBLIC KEY-----
 ```
 
@@ -249,13 +361,17 @@ called anything else is stored, reconciled and listed — and consulted by no
 approval check, so every `Approval` reports `RosterNotFound`.
 
 `TrustRoster` is **cluster-scoped**, so this is a cluster-admin step. The UI
-surfaces this snippet and does **not** submit it. Fill in `spkiPem` from
-`approver.pub.pem` and `signing.pub.pem`, and each `keyId` from
-the SHA-256 of its DER SubjectPublicKeyInfo, not the PEM file bytes:
+surfaces this snippet and does **not** submit it. Copy the installation signer's
+`key-id` and `signing.pub.pem` from the public ConfigMap; do not derive them by
+reading the Secret. Fill the approver fields from `approver.pub.pem`, with its
+id calculated over DER SubjectPublicKeyInfo rather than PEM bytes:
 
 ```bash
+kubectl --context docker-desktop -n logweir-system get configmap logweir-signing-trust \
+  -o jsonpath='{.data.key-id}{"\n"}'
+kubectl --context docker-desktop -n logweir-system get configmap logweir-signing-trust \
+  -o jsonpath='{.data.signing\.pub\.pem}' > signing.pub.pem
 openssl pkey -pubin -in approver.pub.pem -outform DER | openssl dgst -sha256
-openssl pkey -pubin -in signing.pub.pem -outform DER | openssl dgst -sha256
 ```
 
 Use the lowercase hex digest as `keyId`. A declared id that does not match
@@ -263,39 +379,34 @@ its key produces `KeyIdNotInRoster`. Fill the sample before applying it;
 `TrustRoster.spec` is immutable, so changing keys requires replacing the roster
 and temporarily interrupts approval checks.
 
-### 3. The five Secrets
+### 3. The four current Secrets
 
-There are **five**, not three. Four live in the namespace your `Backup`,
-`Restore` and `KafkaCluster` objects live in; the fifth is the controller's and
+There are four for current controller workflows. Three live in the namespace your `Backup`,
+`Restore` and `KafkaCluster` objects live in; the fourth is the controller's and
 lives in `logweir-system`. The names and the **data keys** below are the ones
 the code reads — not approximations of them.
 
-**1. `logweir-signing-key`** — the runner signs evidence with it. The data key
-is `signing.pem`, **not** `key.pem`: `SIGNING_KEY_SECRET_KEY` is
-`"signing.pem"` and the Job projects it to the *file* `key.pem` under
-`/signing`. A Secret missing the required data key prevents the volume
-projection from satisfying the Job.
+**1. `logweir-signing-key`** — the Helm bootstrap creates this automatically in
+the release namespace. The runner projects its `signing.pem` data key to
+`/signing/key.pem`. Do not create or replace it on the managed path. Declare
+every additional runner namespace up front; it must already exist:
 
 ```bash
-kubectl --context docker-desktop -n <namespace> create secret generic \
-  logweir-signing-key --from-file=signing.pem=signing.pem
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --create-namespace --wait --timeout 10m \
+  --set-string 'identity.authorizedRunnerNamespaces[0]=recoveries'
 ```
 
-**2. `logweir-approval-bundle`** — its **own** Secret, and not part of
-`logweir-signing-key`: the signed approval, its detached sidecar, the
-approver's **public** key, and the cluster allowlist. No private key reaches a
-runner pod on this path.
+The chart creates `logweir-runner`, the retained empty target Secret, scoped
+distribution RBAC and both NetworkPolicies there. A short-lived hook may read
+only the primary Secret and get/patch only that fixed target Secret. It copies
+the exact established bytes. If the namespace is absent, Helm names it as a
+missing prerequisite; if it already holds a different signer, the hook fails
+closed with restore guidance. Never mint a per-namespace signer. If the UI
+should operate there, also list the namespace under `ui.namespaces`; UI access
+and signing authorization remain separate explicit grants.
 
-```bash
-kubectl --context docker-desktop -n <namespace> create secret generic \
-  logweir-approval-bundle \
-  --from-file=approval.json=approval.json \
-  --from-file=approval.sig=approval.sig \
-  --from-file=approver.pub.pem=approver.pub.pem \
-  --from-file=allowed-clusters.json=allowed-clusters.json
-```
-
-**3. The per-cluster SCRAM credential** — its *name* is yours, whatever
+**2. The per-cluster SCRAM credential** — its *name* is yours, whatever
 `KafkaCluster.spec.auth.secretRef` says; its *data key* is fixed at `password`
 (`TARGET_PASSWORD_SECRET_KEY`). The username is `spec.auth.username`, in the
 object, not in the Secret.
@@ -305,7 +416,7 @@ kubectl --context docker-desktop -n <namespace> create secret generic \
   kafka-scram --from-literal=password="$KAFKA_PASSWORD"
 ```
 
-**4. `logweir-s3`** — the archive credential the runner needs.
+**3. `logweir-s3`** — the archive credential the runner needs.
 `object_store`'s own credential chain, not the AWS SDK's: `~/.aws`,
 `AWS_PROFILE` and SSO are unsupported.
 
@@ -316,8 +427,8 @@ kubectl --context docker-desktop -n <namespace> create secret generic \
   --from-literal=secret-access-key="$AWS_SECRET_ACCESS_KEY"
 ```
 
-**5. `logweir-evidence-ro`** — the controller's **read-only** evidence-bucket
-credential, and the only one of the five the controller's own pod consumes. A
+**4. `logweir-evidence-ro`** — the controller's **read-only** evidence-bucket
+credential, and the only one of the four the controller's own pod consumes. A
 **different principal** from the runner's archive credential, and read-only: no
 Logweir component holds any object-store delete capability. Created in
 `logweir-system`.
@@ -330,9 +441,25 @@ kubectl --context docker-desktop -n logweir-system create secret generic \
 ```
 
 [../config/samples/secrets.yaml](../config/samples/secrets.yaml) carries the
-same five, beside these commands.
+same four, beside these commands.
 
-### 4. The runner ServiceAccount, in each namespace that runs jobs
+New controller-managed Restores need no namespace-wide approval Secret.
+Weirkeeper creates an immutable `<restore>-approval-bundle` ConfigMap from the
+verified Approval and TrustRoster. Keep the legacy
+`logweir-approval-bundle` only for a Job already created by an older controller
+or a standalone manifest that explicitly mounts it. Do not delete it until
+those Jobs finish; then remove it after confirming no pod template still
+references the name.
+
+### 4. Runner namespace prerequisites: Helm-managed or low-level manifest
+
+On the supported Helm path, `identity.authorizedRunnerNamespaces` manages the
+runner ServiceAccount, protected signer distribution and NetworkPolicies; do
+not apply the following low-level files over those Helm-owned objects.
+
+Only when using `logweir.yaml` without Helm hooks, apply the runner account
+manually and provision the already-established signer through your protected
+secret-distribution system:
 
 ```bash
 kubectl --context docker-desktop -n <namespace> \
@@ -343,7 +470,8 @@ Runner Jobs run in the namespace of the `Backup`, `Restore` or `KafkaCluster`
 object that produced them, and every one of them names the ServiceAccount
 `logweir-runner`. That account is **not** in `logweir.yaml`, because
 `logweir.yaml` installs into `logweir-system` and runner objects may live
-elsewhere. **Apply it once per namespace that will run jobs.** It is
+elsewhere. **For the low-level path, apply it once per namespace that will run
+jobs.** It is
 granted no verb on anything, it sets `automountServiceAccountToken: false`, and
 so does every runner PodSpec: `logweir backup run` makes zero Kubernetes API
 calls, and it is the process that holds the signing key.
@@ -373,6 +501,27 @@ different keys", and one person holding both keypairs satisfies it.
 
 ---
 
+## Upgrade CRDs before upgrading the controller
+
+Helm installs `crds/` only on first install; it neither upgrades nor rolls CRDs
+back. Apply the new additive schemas, wait for all six Logweir definitions to
+be established, and only then upgrade the release:
+
+```bash
+kubectl --context docker-desktop apply --server-side -f charts/logweir/crds/
+for crd in approvals backups backupschedules kafkaclusters restores trustrosters; do
+  kubectl --context docker-desktop wait --for=condition=Established \
+    "crd/${crd}.logweir.dev" --timeout=60s
+done
+helm upgrade logweir charts/logweir -n logweir-system --wait --timeout 10m
+```
+
+Stop before Helm if any apply/wait fails. Schema-specific field verification,
+controller rollout checks, and the safe additive rollback boundary are in
+[kubernetes.md, “Upgrade, rollback and legacy Jobs”](kubernetes.md#upgrade-rollback-and-legacy-jobs).
+
+---
+
 ## The install itself
 
 Use the selected installation path above. The namespace is **not** created by hand:
@@ -395,10 +544,12 @@ kubectl --context docker-desktop -n <namespace> apply -f config/samples/backupsc
 kubectl --context docker-desktop -n <namespace> apply -f config/samples/restore.yaml
 ```
 
-The NetworkPolicy is namespaced and `logweir.yaml` installs it into
-`logweir-system`; runners in other namespaces need a policy there too. Apply it into each runner
-namespace too — and read its `[UNVERIFIED]` mark in
-[kubernetes.md](kubernetes.md) before relying on it. The source manifest
+The Helm chart renders both the ordinary runner policy and the narrower
+bootstrap Kubernetes-API policy into every authorized runner namespace. On the
+low-level `logweir.yaml` path, its one NetworkPolicy lands only in
+`logweir-system`; apply that source policy into each other runner namespace —
+and read its `[UNVERIFIED]` mark in [kubernetes.md](kubernetes.md) before
+relying on it. The source manifest
 carries `namespace: logweir-system` (that is how it lands in `logweir.yaml`),
 and `kubectl apply -n <namespace>` refuses a file whose own namespace
 disagrees — so drop that one line on the way in:
@@ -407,6 +558,18 @@ disagrees — so drop that one line on the way in:
 kubectl --context docker-desktop -n <namespace> \
   apply -f <(sed '/^  namespace: logweir-system$/d' config/manager/networkpolicy.yaml)
 ```
+
+NetworkPolicy enforcement and Service DNAT ordering are CNI-specific. Connected
+Helm discovers `kubernetes.default`'s ClusterIP and visible endpoint IPs. For a
+managed/external control plane, supply every actual API destination as an exact
+IPv4 `/32` or IPv6 `/128` in `identity.kubernetesApiCIDRs`; the schema rejects
+broad CIDRs. The bootstrap policy permits those destinations only on TCP 443
+and 6443. Other API ports are unsupported. The default
+`kube-system/component=kube-apiserver` selector generally cannot reach a
+provider-hosted control plane, and offline rendering discovers no Service or
+Endpoint addresses. These are structural restrictions, not proof that Docker
+Desktop enforces them. Validate DNS/API allow and arbitrary-443 deny with the
+production NetworkPolicy-enforcing CNI.
 
 ---
 
@@ -468,9 +631,117 @@ image's bundle.
 
 ## Uninstall, and what it leaves behind
 
+### Back up and recover the installation identity
+
+Back up both retained objects before the first real backup and after any
+authorized trust change. The first command writes private material directly to
+a mode-0600 file; it never prints it to the terminal. Encrypt and move that file
+to your organization's secret backup system, then remove the local copy.
+
 ```bash
+install -d -m 0700 identity-backup
+umask 077
+kubectl --context docker-desktop -n logweir-system get secret logweir-signing-key \
+  -o yaml > identity-backup/logweir-signing-key.yaml
+kubectl --context docker-desktop -n logweir-system get configmap logweir-signing-trust \
+  -o yaml > identity-backup/logweir-signing-trust.yaml
+```
+
+Recovery is restore-first: stop workloads that could start a signing Job,
+restore the original Secret and public ConfigMap into the same namespace, and
+only then run Helm. Remove stale `resourceVersion`, `uid`, `creationTimestamp`
+and `managedFields` metadata from the protected backup before applying it.
+
+```bash
+kubectl --context docker-desktop -n logweir-system apply \
+  -f identity-backup/logweir-signing-key.yaml \
+  -f identity-backup/logweir-signing-trust.yaml
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --create-namespace --wait --timeout 10m
+```
+
+If `logweir-signing-trust` says `established` but the Secret/key is missing,
+bootstrap exits nonzero with recovery guidance. It will not generate a new key.
+If the public ConfigMap differs from the private key, it likewise refuses to
+overwrite either side. Preserve the old public material and old roster entry:
+old archive signatures remain verifiable only while their original public key
+and policy history remain available.
+
+Routine Helm 3 and Helm 4 upgrades, hook retries, and rollbacks to a chart
+version carrying the `post-rollback` identity hook validate and reuse the same
+private bytes. Empty retained objects are creation-only
+`pre-install,pre-upgrade` hooks, not ordinary release-manifest resources and
+not `pre-rollback` hooks; an old revision therefore cannot reconcile an empty
+placeholder over live key material. Helm stores only the empty hook definition,
+never the patched private bytes. A rollback to a pre-bootstrap chart has no
+such hook, so retention—not active validation—is its only identity guarantee;
+validate again before resuming workloads. A failed hook leaves the retained
+objects and failed Job for diagnosis; rolling the chart back does not roll the
+identity back. After
+`helm uninstall`, Helm's `keep` policy leaves the primary Secret, public
+ConfigMap, each authorized namespace copy, and the authority-free
+`ClusterRole/logweir-identity-singleton` marker. On a same-name reinstall,
+connected live lookup omits existing identity creation hooks and the bootstrap
+hook validates them in place:
+
+```bash
+kubectl --context docker-desktop -n logweir-system get \
+  secret/logweir-signing-key configmap/logweir-signing-trust
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --create-namespace --wait --timeout 10m
+```
+
+Do not use `--take-ownership` or `--force-replace` on identity resources. If
+both retained objects were intentionally destroyed, restore them from backup.
+Creating a different key is a trust rotation, not reinstall recovery.
+
+The fixed singleton marker makes the supported v0.1 contract one Logweir
+installation identity per cluster. A second release in another namespace fails
+before claiming the global `TrustRoster/default` contract. Do not delete the
+marker to force a second independent signer; remove it only as part of an
+intentional full-cluster retirement after exporting old trust material. PLAT-19.1
+is responsible for any future multi-installation trust-reference model.
+
+Upgrading an installation that already has a manually provisioned
+`logweir-signing-key` is supported: the live lookup leaves that Secret
+unmodified and bootstrap derives the missing public ConfigMap from it. Back up
+the Secret first. If a `logweir-signing-trust` ConfigMap already exists, it must
+match exactly; bootstrap never repairs a mismatch by overwriting trust.
+
+### Trust reference and rotation contract
+
+The public ConfigMap's `trust-reference` is
+`logweir.dev/v1alpha1/TrustRoster/default#spec.signingKeys`, matching the actual
+v0.1 verifier. Bootstrap publishes material but does not silently authorize it:
+a cluster administrator explicitly copies it into that roster. The current CRD
+makes `TrustRoster.spec` immutable and the current controller reads the global
+name `default`; changing that is PLAT-19.1 work, not behavior this bootstrap
+pretends already exists.
+
+During a planned rotation, retain the retiring public key alongside the new key
+for old-archive verification, stop new signing with the retired private key,
+and record the policy-effective time. Routine retirement preserves historical
+verification; revocation is a separate policy decision and may deliberately
+make historical evidence untrusted. Never infer trust from a public key stored
+beside an archive. Until explicit overlapping trust-policy references land,
+rotation of the immutable default roster is an administrator-coordinated
+maintenance window and rollback must restore the prior roster plus matching
+private/public identity backup together.
+
+```bash
+# Managed Helm path:
+helm uninstall logweir -n logweir-system
+
+# Low-level base-manifest path:
 kubectl --context docker-desktop delete -f logweir.yaml
 ```
+
+The Helm uninstall intentionally retains the primary private/public identity,
+the signer copy in every authorized runner namespace, and
+`ClusterRole/logweir-identity-singleton`. It removes distribution Jobs/RBAC,
+runner ServiceAccounts and chart-managed NetworkPolicies. Preserve the retained
+objects for same-installation recovery; retire them only after exporting the
+private/public identity and old trust policy.
 
 The four cleanup scopes are the control plane, scratch topics, archive objects
 and evidence objects. `kubectl delete -f logweir.yaml` removes only that first thing:

@@ -464,6 +464,7 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         // approval and writes no artifact, so it is the one runner Job in this
         // crate that mounts no Secret at all.
         secret_mounts: Vec::new(),
+        config_map_mounts: Vec::new(),
         env_from_secret,
         env_literal: vec![("RUST_LOG".to_string(), "info".to_string())],
         // NO PLAN. `logweir cluster-probe` reads no `--spec`, which is why

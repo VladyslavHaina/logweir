@@ -14,6 +14,7 @@
 //! Global Constraint 6 is untouched: the archive handle is
 //! `Store::read_only_from_url`'s, which physically cannot put.
 use crate::backup::BackupError;
+use crate::signer::ValidatedSigner;
 use logweir_core::backup_receipt::{
     BackupReceipt, ReceiptArchive, ReceiptAuth, ReceiptCovered, ReceiptEngine, ReceiptSource,
 };
@@ -21,6 +22,16 @@ use logweir_core::engine::{BackupFacts, BackupPlan, DataEngine, PhaseObserver};
 use logweir_engine_oso::storage::Store;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+pub(crate) fn load_signer(path: &Path) -> Result<ValidatedSigner, BackupError> {
+    ValidatedSigner::load(
+        path,
+        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        b"logweir backup signing readiness probe v1",
+        "No engine data operation was started",
+    )
+    .map_err(BackupError::Signing)
+}
 
 /// Everything the run and the read-back established.
 #[derive(Debug)]
@@ -319,17 +330,17 @@ fn receipt_auth(render: &logweir_core::engine::AuthRender) -> ReceiptAuth {
 ///    stored and (with `--receipt-out`) written to disk. Never a
 ///    re-serialisation afterwards: a document re-rendered after signing does
 ///    not verify.
-/// 3. **Sign.** Any failure from here to the end of step 4 is Global
-///    Constraint 11's exit 4 — "signing or lock-proof failed, nothing
-///    uploaded" — and the signing step precedes every put, which is the
-///    mechanism rather than a convention.
+/// 3. **Sign with the already validated execution signer.** Any failure from
+///    here to the end of step 4 is Global Constraint 11's exit 4 — "signing or
+///    lock-proof failed, nothing uploaded" — and the signing step precedes
+///    every put, which is the mechanism rather than a convention.
 /// 4. **Put**, create-only, both objects, under `logweir/` (GC6).
 /// 5. **Write locally**, last, so a `--receipt-out` path that cannot be
 ///    written does not leave an operator wondering whether the evidence was
 ///    uploaded. It was: the two keys are already in the bucket by then.
-pub fn persist_receipt(
+pub(crate) fn persist_receipt(
     outcome: &crate::backup::BackupOutcome,
-    signing_key: &Path,
+    signer: &ValidatedSigner,
     receipt_out: Option<&Path>,
     store: &Store,
 ) -> Result<Persisted, BackupError> {
@@ -349,17 +360,13 @@ pub fn persist_receipt(
     let bytes = logweir_core::det_json::to_deterministic_json(&receipt)
         .map_err(|e| sig(format!("the backup receipt could not be serialised: {e}")))?;
 
-    // 3. Sign. `logweir-evidence` is the ONE signer (Global Constraint 27):
-    //    this is a call into it, exactly as `drill/phase8_score.rs` is, and no
-    //    signing primitive lives here.
-    let key = logweir_evidence::keys::SigningKey::from_pem_file(signing_key)
-        .map_err(|e| sig(e.to_string()))?;
-    let sidecar = logweir_evidence::sign::sign_detached(
-        &key,
-        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
-        &bytes,
-    )
-    .map_err(|e| sig(e.to_string()))?;
+    // 3. Sign with the signer exercised before engine work.
+    //    `logweir-evidence` is the ONE signer (Global Constraint 27): this is
+    //    a call into it, exactly as `drill/phase8_score.rs` is, and no signing
+    //    primitive lives here.
+    let sidecar = signer
+        .sign(logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT, &bytes)
+        .map_err(BackupError::Signing)?;
     let sidecar_bytes =
         serde_json::to_vec(&sidecar).map_err(|e| sig(format!("DSSE sidecar: {e}")))?;
 

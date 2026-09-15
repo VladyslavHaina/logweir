@@ -346,7 +346,7 @@ fn a_lever_finding_from_phase_5_survives_the_drill_level_verdict() {
 // ----------------------------------------------------------------- phase 8: sign + put
 
 #[test]
-fn a_signing_failure_exits_4_and_uploads_nothing() {
+fn an_unreadable_signing_key_exits_4_and_uploads_nothing() {
     let store = fixtures::recording_store();
     let err = logweir::drill::phase8_score::run(
         &fixtures::scorecard_pass(),
@@ -363,7 +363,7 @@ fn a_signing_failure_exits_4_and_uploads_nothing() {
     );
     assert!(
         store.puts().is_empty(),
-        "OSO's own rule, adopted verbatim: signing failures abort before anything is uploaded"
+        "an unreadable signing input aborts before anything is uploaded"
     );
 }
 
@@ -951,7 +951,7 @@ fn the_persisted_attestation_is_signed_create_only_and_still_reports_the_failure
 }
 
 #[test]
-fn a_teardown_that_cannot_be_signed_is_exit_4() {
+fn an_unreadable_teardown_signing_key_is_exit_4() {
     let store = fixtures::recording_store();
     let a = logweir::drill::phase9_teardown::run(
         &fixtures::RecordingDeleter {

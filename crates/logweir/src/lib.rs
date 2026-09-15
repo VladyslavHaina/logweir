@@ -10,6 +10,9 @@ pub mod drill;
 /// The ONE engine-binary resolution `doctor` and `drill run` both consult.
 pub mod engine_bin;
 pub mod exit;
+/// Short-lived Kubernetes installation identity bootstrap. This remains in
+/// the signer-capable runner binary; the long-lived controller never links it.
+pub mod identity;
 pub mod ids;
 pub mod metrics;
 /// Interface **I14**: `logweir cluster-probe`, the liveness probe the
@@ -19,4 +22,5 @@ pub mod metrics;
 pub mod probe;
 pub mod schema;
 pub mod show;
+mod signer;
 pub mod verify;

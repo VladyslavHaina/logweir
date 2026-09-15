@@ -229,6 +229,51 @@ use logweir::drill::execute_with;
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult, Outcome};
 use logweir_evidence::keys::{SigningKey, VerifyingKey};
 
+struct NeverCalledEngine;
+
+impl logweir_core::engine::DataEngine for NeverCalledEngine {
+    fn id(&self) -> logweir_core::engine::EngineId {
+        panic!("invalid signing material must stop before DataEngine::id")
+    }
+
+    fn list_backup_sets(
+        &self,
+        _: &logweir_core::engine::StorageUrl,
+    ) -> Result<Vec<logweir_core::engine::BackupSetRef>, logweir_core::engine::EngineError> {
+        panic!("invalid signing material must stop before DataEngine::list_backup_sets")
+    }
+
+    fn describe(
+        &self,
+        _: &logweir_core::engine::BackupSetRef,
+    ) -> Result<logweir_core::engine::BackupSetFacts, logweir_core::engine::EngineError> {
+        panic!("invalid signing material must stop before DataEngine::describe")
+    }
+
+    fn preflight(
+        &self,
+        _: &logweir_core::engine::RestorePlan,
+    ) -> Result<logweir_core::engine::PreflightReport, logweir_core::engine::EngineError> {
+        panic!("invalid signing material must stop before DataEngine::preflight")
+    }
+
+    fn restore(
+        &self,
+        _: &logweir_core::engine::RestorePlan,
+        _: &mut dyn logweir_core::engine::PhaseObserver,
+    ) -> Result<logweir_core::engine::RestoreFacts, logweir_core::engine::EngineError> {
+        panic!("invalid signing material must stop before DataEngine::restore")
+    }
+
+    fn fingerprints(
+        &self,
+        _: &logweir_core::engine::SampleSelection,
+    ) -> Result<Vec<logweir_core::engine::RecordFingerprint>, logweir_core::engine::EngineError>
+    {
+        panic!("invalid signing material must stop before DataEngine::fingerprints")
+    }
+}
+
 fn signing_pub(f: &fixtures::OrchestratorFixture) -> VerifyingKey {
     SigningKey::from_pem_file(&f.args.signing_key)
         .unwrap()
@@ -241,6 +286,134 @@ fn scorecard_from_store(f: &fixtures::OrchestratorFixture) -> Vec<u8> {
         .get(&format!("logweir/drills/{}.json", f.run_id))
         .expect("phase 8 uploaded the scorecard")
         .0
+}
+
+#[test]
+fn invalid_signing_material_stops_before_any_engine_call() {
+    for case in ["missing", "malformed", "unreadable"] {
+        let mut f = fixtures::orchestrator_args_against_fixture_engine();
+        let path = f
+            .args
+            .signing_key
+            .with_file_name(format!("{case}-signer.pem"));
+        match case {
+            "missing" => {}
+            "malformed" => std::fs::write(
+                &path,
+                "-----BEGIN PRIVATE KEY-----\nDO-NOT-ECHO-KEY-MATERIAL\n-----END PRIVATE KEY-----\n",
+            )
+            .unwrap(),
+            "unreadable" => std::fs::create_dir(&path).unwrap(),
+            _ => unreachable!(),
+        }
+        f.args.signing_key = path.clone();
+        f.ctx.engine = Box::new(NeverCalledEngine);
+
+        let err = execute_with(&f.args, &f.run_id, &f.ctx)
+            .expect_err("invalid signing material must refuse the run");
+        assert!(
+            matches!(err, DrillError::SigningPrerequisite(_)),
+            "{case}: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(&path.display().to_string()),
+            "{case}: {message}"
+        );
+        assert!(
+            message.contains("Mount a readable P-256 or Ed25519 PKCS#8 PEM private key"),
+            "{case}: {message}"
+        );
+        assert!(
+            message.contains("No engine data operation was started"),
+            "{case}: {message}"
+        );
+        assert!(
+            !message.contains("DO-NOT-ECHO-KEY-MATERIAL"),
+            "{case}: key contents leaked: {message}"
+        );
+        assert!(
+            f.ctx.store.list_keys("logweir/drills/").unwrap().is_empty(),
+            "{case}: prerequisite failure must upload no evidence"
+        );
+    }
+}
+
+#[test]
+fn rotating_the_file_does_not_change_any_execution_evidence_signer() {
+    let f = fixtures::orchestrator_fixture(Drill::RotatesSigningKey);
+    let original = signing_pub(&f);
+    let replacement = f.replacement_signing_key.as_ref().unwrap();
+
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the fixture drill passes");
+    assert_eq!(
+        SigningKey::from_pem_file(&f.args.signing_key)
+            .unwrap()
+            .verifying_key()
+            .key_id(),
+        replacement.key_id(),
+        "the engine double must actually rotate the mounted file"
+    );
+
+    for (stem, payload_type) in [
+        ("", logweir_evidence::PAYLOAD_TYPE_SCORECARD),
+        (".receipt", logweir_evidence::PAYLOAD_TYPE_PUT_RECEIPT),
+        (".teardown", logweir_evidence::PAYLOAD_TYPE_TEARDOWN),
+    ] {
+        let bytes = f
+            .ctx
+            .store
+            .get(&format!("logweir/drills/{}{stem}.json", f.run_id))
+            .unwrap()
+            .0;
+        let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+            &f.ctx
+                .store
+                .get(&format!("logweir/drills/{}{stem}.sig", f.run_id))
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        logweir_evidence::verify::verify_detached(&original, payload_type, &bytes, &sidecar)
+            .unwrap_or_else(|e| panic!("{stem} evidence must verify with the retained key: {e}"));
+        assert!(
+            logweir_evidence::verify::verify_detached(replacement, payload_type, &bytes, &sidecar)
+                .is_err(),
+            "{stem} evidence must not use the rotated file"
+        );
+    }
+}
+
+#[test]
+fn an_external_ed25519_key_still_signs_independently_verifiable_evidence() {
+    let f = fixtures::orchestrator_args_against_fixture_engine();
+    let signer = SigningKey::generate_ed25519();
+    std::fs::write(&f.args.signing_key, signer.to_pkcs8_pem().unwrap()).unwrap();
+    let public = signer.verifying_key();
+
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the Ed25519-backed drill passes");
+    for (stem, payload_type) in [
+        ("", logweir_evidence::PAYLOAD_TYPE_SCORECARD),
+        (".receipt", logweir_evidence::PAYLOAD_TYPE_PUT_RECEIPT),
+        (".teardown", logweir_evidence::PAYLOAD_TYPE_TEARDOWN),
+    ] {
+        let bytes = f
+            .ctx
+            .store
+            .get(&format!("logweir/drills/{}{stem}.json", f.run_id))
+            .unwrap()
+            .0;
+        let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+            &f.ctx
+                .store
+                .get(&format!("logweir/drills/{}{stem}.sig", f.run_id))
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        logweir_evidence::verify::verify_detached(&public, payload_type, &bytes, &sidecar)
+            .unwrap_or_else(|e| panic!("{stem} Ed25519 evidence must verify: {e}"));
+    }
 }
 
 /// The phase-5 jump. `Verdict::Block` goes STRAIGHT to phase 8 — score, sign,

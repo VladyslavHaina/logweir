@@ -35,14 +35,12 @@ pub fn pinned_set_refusal(key_id: &str, pinned: &[String]) -> String {
 ///
 /// # Why this is a separate function and not a parameter of [`verify`]
 ///
-/// [`verify`] runs at phase 1, and phase 0 runs first and DIALS: a run whose
-/// approver is outside the pinned set would otherwise be refused only after
-/// the target cluster had been contacted, and on a host with no broker it
-/// would exit 1 at phase 0 and never reach the refusal at all (the exact
-/// ambiguity Task 20's Why records). Global Constraint 11 reserves exit 3 for
-/// "refused by a guard, **before anything ran**", so the check is hoisted
-/// ahead of phase 0 by `drill::execute` and given its own entry point here,
-/// beside the approval logic it belongs to.
+/// The phase record remains phase 1, but production `drill::execute` validates
+/// the pinned key and the complete approval bundle at startup. A run whose
+/// approver is outside the pinned set is therefore refused before the target
+/// cluster is contacted. Global Constraint 11 reserves exit 3 for "refused by
+/// a guard, **before anything ran**", so the check has its own entry point
+/// here beside the approval logic it belongs to.
 ///
 /// **`drill::execute`, not `drill::execute_with_outcome`** (Task 22 fix round
 /// 1, MED-1): the latter takes an already-built `Ctx`, and `drill::context`
@@ -90,7 +88,28 @@ pub fn admit_pinned_approver_key_id(
     Err(GuardRefusal(pinned_set_refusal(&key_id, pinned)).into())
 }
 
-#[derive(Debug)]
+/// In-memory twin used by the production startup gate after the projected
+/// bundle has been captured once. This avoids validating one ConfigMap
+/// generation and later using another after kubelet swaps its projection.
+pub fn admit_pinned_approver_key_bytes(
+    approver_key: &[u8],
+    pinned: &[String],
+) -> Result<(), DrillError> {
+    if pinned.is_empty() {
+        return Ok(());
+    }
+    let pem = std::str::from_utf8(approver_key)
+        .map_err(|e| DrillError::Operational(format!("approver public key is not UTF-8: {e}")))?;
+    let key =
+        VerifyingKey::from_pem_str(pem).map_err(|e| DrillError::Operational(e.to_string()))?;
+    let key_id = key.key_id();
+    if pinned.iter().any(|p| p == &key_id) {
+        return Ok(());
+    }
+    Err(GuardRefusal(pinned_set_refusal(&key_id, pinned)).into())
+}
+
+#[derive(Clone, Debug)]
 pub struct Approved {
     pub approval: ApprovalInfo,
     pub validated_at: DateTime<Utc>,
@@ -123,16 +142,33 @@ pub fn verify(
     let bytes = std::fs::read(approval_json)
         .map_err(|e| DrillError::Operational(format!("{}: {e}", approval_json.display())))?;
     let sig_path = approval_json.with_extension("sig");
-    let sidecar: Sidecar = std::fs::read(&sig_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .ok_or_else(|| {
-            DrillError::Operational(format!("no DSSE sidecar at {}", sig_path.display()))
-        })?;
-    let key = VerifyingKey::from_pem_file(approver_key)
-        .map_err(|e| DrillError::Operational(e.to_string()))?;
+    let sidecar_bytes = std::fs::read(&sig_path).map_err(|_| {
+        DrillError::Operational(format!("no DSSE sidecar at {}", sig_path.display()))
+    })?;
+    let key_bytes = std::fs::read(approver_key)
+        .map_err(|e| DrillError::Operational(format!("{}: {e}", approver_key.display())))?;
 
-    match verify_detached(&key, PAYLOAD_TYPE_APPROVAL, &bytes, &sidecar) {
+    verify_bytes(spec_text, &bytes, &sidecar_bytes, &key_bytes, signing_key)
+}
+
+/// Verify one already-captured approval bundle. Production startup uses this
+/// entry point so the bytes checked before phase 0 are the bytes retained for
+/// the run; [`verify`] remains the compatible path-based API.
+pub fn verify_bytes(
+    spec_text: &str,
+    bytes: &[u8],
+    sidecar_bytes: &[u8],
+    approver_key_bytes: &[u8],
+    signing_key: &VerifyingKey,
+) -> Result<Approved, DrillError> {
+    let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes)
+        .map_err(|_| DrillError::Operational("approval DSSE sidecar does not parse".to_string()))?;
+    let key_pem = std::str::from_utf8(approver_key_bytes)
+        .map_err(|e| DrillError::Operational(format!("approver public key is not UTF-8: {e}")))?;
+    let key =
+        VerifyingKey::from_pem_str(key_pem).map_err(|e| DrillError::Operational(e.to_string()))?;
+
+    match verify_detached(&key, PAYLOAD_TYPE_APPROVAL, bytes, &sidecar) {
         Ok(_) => {}
         // Structural corruption of the sidecar itself (truncated base64, a
         // DER blob that will not parse or is the wrong length) says nothing
@@ -160,7 +196,7 @@ pub fn verify(
         }
     }
 
-    let doc: ApprovalDoc = serde_json::from_slice(&bytes)
+    let doc: ApprovalDoc = serde_json::from_slice(bytes)
         .map_err(|e| DrillError::Operational(format!("approval is not an ApprovalDoc: {e}")))?;
 
     let actual = sha256_prefixed(spec_text.as_bytes());

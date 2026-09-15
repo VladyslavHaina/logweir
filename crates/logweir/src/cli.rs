@@ -14,6 +14,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Provision or adopt the persistent Kubernetes installation signer.
+    #[command(subcommand)]
+    Identity(IdentityCmd),
     // Task 22 fix round 1, FIX 5. This is a `//` comment, not a `///` one, on
     // purpose: clap turns doc comments into help TEXT, so build rationale in a
     // `///` would be printed to users by `logweir drill --help`. The `///`
@@ -117,6 +120,50 @@ pub enum Command {
         /// that genuinely had no way to look (addendum A2/A4).
         #[arg(long)]
         strict: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IdentityCmd {
+    /// Initialize retained private/public identity objects, or validate the
+    /// identity already stored there. Intended for the chart's short-lived
+    /// bootstrap Job, not for a long-lived controller.
+    Bootstrap {
+        /// Namespace containing the retained identity objects.
+        #[arg(long)]
+        namespace: String,
+        /// Retained Secret written exactly once by bootstrap.
+        #[arg(long, default_value = "logweir-signing-key")]
+        secret_name: String,
+        /// Key in the retained Secret.
+        #[arg(long, default_value = "signing.pem")]
+        secret_key: String,
+        /// Retained ConfigMap carrying public verification material.
+        #[arg(long, default_value = "logweir-signing-trust")]
+        public_configmap_name: String,
+        /// Explicit source Secret to adopt instead of generating a key.
+        #[arg(long, requires = "external_secret_key")]
+        external_secret_name: Option<String>,
+        /// Key within --external-secret-name.
+        #[arg(long, requires = "external_secret_name")]
+        external_secret_key: Option<String>,
+    },
+    /// Copy the already established installation signer into one explicitly
+    /// authorized runner namespace. Refuses missing, incomplete, or different
+    /// target identities; intended only for the chart's short-lived hook Job.
+    Distribute {
+        /// Namespace containing the primary installation signing Secret.
+        #[arg(long)]
+        source_namespace: String,
+        /// Authorized runner namespace receiving the same signing identity.
+        #[arg(long)]
+        target_namespace: String,
+        /// Fixed retained Secret name in both namespaces.
+        #[arg(long, default_value = "logweir-signing-key")]
+        secret_name: String,
+        /// Key in the retained Secret.
+        #[arg(long, default_value = "signing.pem")]
+        secret_key: String,
     },
 }
 
@@ -262,6 +309,10 @@ pub enum RestoreCmd {
 /// flag — is the drift this struct exists to prevent.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct RestoreRunArgs {
+    /// Controller-to-runner compatibility handshake for newly created Jobs.
+    /// Omit only for an intentional legacy Job or standalone invocation.
+    #[arg(long)]
+    pub execution_contract_version: Option<String>,
     #[arg(long)]
     pub spec: PathBuf,
     /// MANDATORY in v0.1: approval is unconditional (spec §9.3 phase 1).
@@ -322,6 +373,7 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
     /// neither CLI name can build a different `RunArgs` from the same flags.
     fn from(a: RestoreRunArgs) -> Self {
         crate::drill::RunArgs {
+            execution_contract_version: a.execution_contract_version,
             spec: a.spec,
             approval: a.approval,
             approver_key: a.approver_key,
@@ -360,8 +412,11 @@ pub enum BackupCmd {
         /// permitted scratch target.
         #[arg(long)]
         allowed_clusters: PathBuf,
-        /// The key the backup receipt is signed with (interface I6). Opened
-        /// once, after the archive has been read back, to sign the receipt.
+        /// The key the backup receipt is signed with (interface I6). Loaded,
+        /// exercised and self-verified at startup before any Kafka, storage or
+        /// engine client is constructed, then retained in memory for receipt
+        /// signing so a mid-run file rotation cannot change this execution's
+        /// identity.
         #[arg(long)]
         signing_key: PathBuf,
         #[arg(long)]

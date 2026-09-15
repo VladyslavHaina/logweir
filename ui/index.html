@@ -19,6 +19,10 @@
     -->
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="./style.css">
+    <!-- Helm mounts this non-secret, same-origin runtime context when it serves
+         the UI. A standalone kubectl proxy has no such mount and app.js then
+         requires an explicit selection rather than inventing a namespace. -->
+    <script src="./runtime.js"></script>
     <script type="module" src="./app.js"></script>
   </head>
   <body>

@@ -30,6 +30,7 @@
 // rejected attempt and not a failure of this page.
 
 import { create, list } from "../api.js";
+import { active, cancelled, listen, readOptions } from "../lifecycle.js";
 import {
   PRIVATE_KEY_REFUSAL,
   SELF_ATTESTED_FALSE,
@@ -48,9 +49,9 @@ import { itemsOf } from "./clusters.js";
 
 const PLURAL = "approvals";
 
-/** The namespace a hash that names none means. The same default `app.js`
- *  carries, because the two read the same hash. */
-const DEFAULT_NAMESPACE = "default";
+/** A route with no namespace has no implicit authority. `app.js` asks the
+ *  viewer to select one before it mounts this page. */
+const DEFAULT_NAMESPACE = "";
 
 /** The one kind this form may name. `Switchover` is tag 2 and is not in the
  *  CRD's enum: the subject kind is part of the bytes an approval binds, and
@@ -332,24 +333,32 @@ function ageOf(creationTimestamp, now) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountApprovals(node, ns, route, parse, deps) {
+export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
   const api = deps || API;
   try {
-    const collection = await api.list(ns, PLURAL);
+    const collection = await api.list(ns, PLURAL, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return;
+    }
     replace(node, parse(renderApprovalsPage(collection, route)));
-    wire(node, ns, route, parse, api);
+    wire(node, ns, route, parse, api, lifecycle);
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
-function wire(node, ns, route, parse, api) {
+function wire(node, ns, route, parse, api, lifecycle) {
   const form = node.querySelector("#approval-form");
   if (form === null) {
     return;
   }
-  form.addEventListener("submit", async (event) => {
+  listen(form, "submit", async (event) => {
     event.preventDefault();
+    if (!active(lifecycle)) {
+      return;
+    }
     const documents = {
       approvalBytes: form.elements.approvalBytes.value,
       sidecarBytes: form.elements.sidecarBytes.value,
@@ -363,14 +372,21 @@ function wire(node, ns, route, parse, api) {
         api,
       );
       if (refusal !== null) {
+        if (!active(lifecycle)) {
+          return;
+        }
         replace(node, parse("<p class=\"refusal\">" + refusal + "</p>"));
         return;
       }
-      await mountApprovals(node, ns, route, parse, api);
+      if (active(lifecycle)) {
+        await mountApprovals(node, ns, route, parse, api, lifecycle);
+      }
     } catch (error) {
-      replace(node, errorBox(error));
+      if (active(lifecycle)) {
+        replace(node, errorBox(error));
+      }
     }
-  });
+  }, lifecycle);
 
   // A chosen file is READ AS TEXT into the textarea beside it, so the bytes
   // that are submitted are the bytes a viewer can see, and the refusal runs
@@ -384,7 +400,10 @@ function wire(node, ns, route, parse, api) {
     if (input === null || area === null) {
       continue;
     }
-    input.addEventListener("change", async () => {
+    listen(input, "change", async () => {
+      if (!active(lifecycle)) {
+        return;
+      }
       const chosen = input.files && input.files[0];
       if (!chosen) {
         return;
@@ -395,8 +414,11 @@ function wire(node, ns, route, parse, api) {
         replace(node, parse("<p class=\"refusal\">" + PRIVATE_KEY_REFUSAL + "</p>"));
         return;
       }
-      area.value = await chosen.text();
-    });
+      const text = await chosen.text();
+      if (active(lifecycle)) {
+        area.value = text;
+      }
+    }, lifecycle);
   }
 }
 

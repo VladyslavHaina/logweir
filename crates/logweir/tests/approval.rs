@@ -239,7 +239,8 @@ fn phase1_refuses_approver_key_outside_pinned_ids() {
     );
 }
 
-/// The same approval with its id pinned proceeds PAST phase 1's pinned check.
+/// The same approval with its id pinned proceeds PAST the pinned check into
+/// the early full approval gate.
 ///
 /// The discriminator is the message: phase 0's own local refusal, which is
 /// reached only because the pinned guard returned `Ok`. Asserting merely "not
@@ -260,14 +261,14 @@ fn phase1_accepts_approver_key_inside_pinned_ids() {
     let mut args = base_args_over(&spec);
     pin(&mut args, &["sha256:deadbeef", &id]);
     let (code, _stdout, stderr) = run_restore(&args);
-    assert_eq!(code, Some(3), "stderr: {stderr}");
+    assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(
         !stderr.contains("is not in the pinned set"),
         "the pinned guard must have admitted this key: {stderr}"
     );
     assert!(
-        stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
-        "and the run must have reached PHASE 0, whose local refusal this is: {stderr}"
+        stderr.contains("approval sidecar"),
+        "the matching pin proceeds to approval artifact validation before phase 0: {stderr}"
     );
 }
 
@@ -294,7 +295,7 @@ fn phase1_without_the_flag_is_unchanged() {
     let (code, _out, stderr) = run_restore(&args);
     assert_eq!(
         code,
-        Some(3),
+        Some(1),
         "no flag, and the run behaves as it always did: {stderr}"
     );
     assert!(
@@ -302,8 +303,9 @@ fn phase1_without_the_flag_is_unchanged() {
         "an absent flag pins nothing and names nothing: {stderr}"
     );
     assert!(
-        stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
-        "the pre-existing phase-0 refusal, unchanged: {stderr}"
+        stderr.contains("approval sidecar"),
+        "without pinning, standalone compatibility reaches the same early approval validation: \
+         {stderr}"
     );
 }
 

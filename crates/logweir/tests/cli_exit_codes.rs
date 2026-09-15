@@ -72,6 +72,20 @@ fn help_still_exits_ok() {
 }
 
 #[test]
+fn identity_bootstrap_and_distribution_help_are_release_smokeable() {
+    for leaf in ["bootstrap", "distribute"] {
+        let out = bin().args(["identity", leaf, "--help"]).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "identity {leaf} --help failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Usage:"));
+    }
+}
+
+#[test]
 fn version_still_exits_ok() {
     let out = bin().args(["--version"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -144,8 +158,8 @@ fn drill_verify_exits_signing_or_lock_on_a_payload_type_mismatch() {
 // RULE 20 / GC11: never through a pipe) and capture stdout by handing the
 // child a real FILE, so there is no pipe anywhere in either assertion.
 
-/// Runs `logweir drill run` over `spec_text` with the shipped example
-/// approval, key and allowed-clusters files, and returns
+/// Runs `logweir drill run` over `spec_text` with an approval and detached
+/// sidecar minted for those exact bytes, and returns
 /// `(exit_code, stdout_text)`.
 ///
 /// `env_remove` on the two password variables is not decoration: a developer
@@ -156,22 +170,52 @@ fn drill_run_capturing_stdout(spec_text: &str, env: &[(&str, &str)]) -> (Option<
     let dir = tempfile::tempdir().unwrap();
     let spec = dir.path().join("drill.yaml");
     std::fs::write(&spec, spec_text).unwrap();
+    let key = logweir_evidence::keys::SigningKey::generate_p256();
+    let approver_key = dir.path().join("approver.pub.pem");
+    let signing_key = dir.path().join("signing.pem");
+    std::fs::write(
+        &approver_key,
+        key.verifying_key().to_public_key_pem().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&signing_key, key.to_pkcs8_pem().unwrap()).unwrap();
+    let approval = dir.path().join("approval.json");
+    let approval_doc = logweir_core::spec::ApprovalDoc {
+        approver: "cli-exit-test@example.com".into(),
+        ticket: "CLI-EXIT-PHASE0".into(),
+        plan_hash: logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+        approved_at: chrono::Utc::now(),
+        subject_kind: logweir_core::spec::SUBJECT_KIND_RESTORE.into(),
+    };
+    let approval_bytes = serde_json::to_vec(&approval_doc).unwrap();
+    std::fs::write(&approval, &approval_bytes).unwrap();
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &key,
+        logweir::drill::phase1_approval::PAYLOAD_TYPE_APPROVAL,
+        &approval_bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        approval.with_extension("sig"),
+        serde_json::to_vec(&sidecar).unwrap(),
+    )
+    .unwrap();
     let out_path = dir.path().join("stdout.txt");
     let out_file = std::fs::File::create(&out_path).unwrap();
 
     let mut cmd = bin();
     cmd.args(["drill", "run", "--spec"])
         .arg(&spec)
+        .arg("--approval")
+        .arg(&approval)
+        .arg("--approver-key")
+        .arg(&approver_key)
         .args([
-            "--approval",
-            "../../examples/approval.json",
-            "--approver-key",
-            "../../e2e/fixtures/signed/public.pem",
             "--allowed-clusters",
             "../../examples/allowed-clusters.json",
             "--signing-key",
-            "../../e2e/fixtures/signed/signing.pem",
         ])
+        .arg(&signing_key)
         .env_remove("LOGWEIR_SOURCE_PASSWORD")
         .env_remove("LOGWEIR_TARGET_PASSWORD")
         .stdout(std::process::Stdio::from(out_file));

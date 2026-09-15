@@ -1,0 +1,9 @@
+# The release namespace is always authorized. Each additional runner namespace
+# must already exist; Helm creates its runner ServiceAccount, retained target
+# signer, scoped distributor RBAC, and NetworkPolicies. The distributor copies
+# the SAME installation signer and fails if a different signer is established.
+# If the in-cluster UI should operate there, list it separately under
+# ui.namespaces as well.
+identity:
+  authorizedRunnerNamespaces:
+    - recoveries

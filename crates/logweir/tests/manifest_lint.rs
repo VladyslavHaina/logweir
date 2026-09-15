@@ -1237,27 +1237,20 @@ impl std::ops::Index<&str> for Manifest {
 // Install docs and the two recipes
 // ---------------------------------------------------------------------------
 
-/// The install document carries a `kubectl create secret` line for each of the
-/// five Secrets — `logweir-approval-bundle` included.
-///
-/// There are FIVE, not three (spec §9, critique B H14), and nothing in this
-/// repository told a stranger to create any of them before Task 21.
+/// The install document carries a `kubectl create secret` line for each
+/// operator-managed Secret. New Restore Jobs receive a controller-generated,
+/// immutable per-Restore approval bundle rather than a global Secret.
 ///
 /// **The document moved, and this test followed it** (Task 29, chain W). Step 1
 /// was in `docs/kubernetes.md` §13; the tree now carries ONE install document,
 /// `docs/install.md`, and `docs/kubernetes.md` §13 is the pointer at it. The
-/// property asserted here is unchanged — "the install document carries a line
-/// an adopter can run, for each of the five" — and every assertion below is
-/// byte for byte the one Task 21 landed. Only the file it reads changed.
+/// The property asserted here is that every Secret an adopter must provision
+/// has a runnable command, while the migration prose identifies the old global
+/// approval bundle as legacy-only.
 #[test]
-fn install_docs_name_all_five_secrets() {
+fn install_docs_name_all_operator_managed_secrets() {
     let docs = read("docs/install.md");
-    for secret in [
-        "logweir-signing-key",
-        "logweir-approval-bundle",
-        "logweir-s3",
-        "logweir-evidence-ro",
-    ] {
+    for secret in ["logweir-s3", "logweir-evidence-ro"] {
         // A `kubectl create secret` COMMAND, not a mention. Each occurrence
         // of `create secret generic` opens a window over the rest of the
         // command — line continuations included — and the name has to be
@@ -1273,6 +1266,24 @@ fn install_docs_name_all_five_secrets() {
              is not a command: the install docs have to carry a line an adopter can run)"
         );
     }
+    assert!(
+        !docs.match_indices("create secret generic").any(|(at, _)| {
+            let end = (at + 400).min(docs.len());
+            docs.get(at..end)
+                .is_some_and(|window| window.contains("logweir-signing-key"))
+        }),
+        "the managed Helm path must not teach users to create the signing Secret"
+    );
+    assert!(
+        docs.contains("short-lived bootstrap Job")
+            && docs.contains("identity.authorizedRunnerNamespaces")
+            && docs.contains("low-level `logweir.yaml`"),
+        "managed signer bootstrap/distribution and low-level provisioning must be distinct"
+    );
+    assert!(
+        docs.contains("logweir-approval-bundle") && docs.contains("legacy"),
+        "docs/install.md must retain explicit migration guidance for the legacy global approval bundle"
+    );
     // The fifth is the per-cluster SCRAM credential, whose NAME is the
     // adopter's (`KafkaCluster.spec.auth.secretRef`); what is fixed is its data
     // key, which the runner reads and nothing else spells.
@@ -1281,25 +1292,16 @@ fn install_docs_name_all_five_secrets() {
         "docs/install.md must show how to create the per-cluster SCRAM credential, whose data \
          key is `password` (`TARGET_PASSWORD_SECRET_KEY`)"
     );
-    // The silent-mint warning, which is the reason the list matters at all.
     assert!(
-        docs.contains("load_or_generate") && docs.contains("keys.rs:81-92"),
-        "docs/install.md must carry the silent-mint warning citing \
-         `crates/logweir-evidence/src/keys.rs:81-92`: an absent key file is MINTED, so a first run \
-         against an empty Secret produces evidence signed by a key nothing attests"
+        !docs.contains("-out signing.pem")
+            && docs.contains(
+                "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem"
+            ),
+        "managed installs mint no local signing key; the independent approver recipe remains runnable"
     );
-    // The two keypair commands, runnable verbatim.
-    for pair in ["signing.pem", "approver.pem"] {
-        assert!(
-            docs.contains(&format!(
-                "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out {pair}"
-            )),
-            "docs/install.md must carry the verbatim `openssl genpkey` command for {pair}"
-        );
-    }
 }
 
-/// `just check-secrets` is its own recipe, names the five Secrets with
+/// `just check-secrets` is its own recipe, names the current Secrets with
 /// `logweir-signing-key` first, exits 1, and is NOT part of `just apply-install`.
 ///
 /// Critique B **M15**, interface **I26**. `just apply-check` was two different
@@ -1331,12 +1333,7 @@ fn check_secrets_refuses_a_missing_secret() {
     };
 
     let check = recipe("check-secrets ");
-    for secret in [
-        "logweir-signing-key",
-        "logweir-approval-bundle",
-        "logweir-s3",
-        "logweir-evidence-ro",
-    ] {
+    for secret in ["logweir-signing-key", "logweir-s3", "logweir-evidence-ro"] {
         assert!(
             check.contains(secret),
             "`just check-secrets` does not name `{secret}`"
@@ -1345,17 +1342,17 @@ fn check_secrets_refuses_a_missing_secret() {
     let first = check
         .find("logweir-signing-key")
         .expect("just asserted it is there");
-    for other in [
-        "logweir-approval-bundle",
-        "logweir-s3",
-        "logweir-evidence-ro",
-    ] {
+    for other in ["logweir-s3", "logweir-evidence-ro"] {
         assert!(
             first < check.find(other).expect("just asserted it is there"),
             "`logweir-signing-key` must be the FIRST Secret `just check-secrets` looks for, so it \
              is the first name an operator sees; `{other}` comes before it"
         );
     }
+    assert!(
+        !check.contains("logweir-approval-bundle"),
+        "new controller-managed Restore Jobs must not require the legacy global approval bundle"
+    );
     assert!(
         check.contains("exit 1"),
         "`just check-secrets` must exit 1 when a Secret is absent"

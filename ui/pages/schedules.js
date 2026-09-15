@@ -21,6 +21,7 @@
 // nothing in this product runs any of them.
 
 import { list, create, patchSuspend } from "../api.js";
+import { active, cancelled, listen, readOptions } from "../lifecycle.js";
 import {
   RETENTION_SENTENCE,
   badge,
@@ -260,9 +261,12 @@ export function scheduleBody(values) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountSchedules(node, ns, parse) {
+export async function mountSchedules(node, ns, parse, lifecycle) {
   try {
-    const collection = await list(ns, PLURAL);
+    const collection = await list(ns, PLURAL, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return;
+    }
     const objects = itemsOf(collection);
     const panels = objects
       .map(
@@ -278,34 +282,46 @@ export async function mountSchedules(node, ns, parse) {
       node,
       parse(renderScheduleList(collection) + panels + renderScheduleForm()),
     );
-    wire(node, ns, parse);
+    wire(node, ns, parse, lifecycle);
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
-function wire(node, ns, parse) {
+function wire(node, ns, parse, lifecycle) {
   for (const form of node.querySelectorAll("form.suspend")) {
-    form.addEventListener("submit", async (event) => {
+    listen(form, "submit", async (event) => {
       event.preventDefault();
+      if (!active(lifecycle)) {
+        return;
+      }
       try {
         await patchSuspend(
           ns,
           form.getAttribute("data-name"),
           form.getAttribute("data-next") === "true",
         );
-        await mountSchedules(node, ns, parse);
+        if (active(lifecycle)) {
+          await mountSchedules(node, ns, parse, lifecycle);
+        }
       } catch (error) {
-        replace(node, errorBox(error));
+        if (active(lifecycle)) {
+          replace(node, errorBox(error));
+        }
       }
-    });
+    }, lifecycle);
   }
   const form = node.querySelector("#schedule-form");
   if (form === null) {
     return;
   }
-  form.addEventListener("submit", async (event) => {
+  listen(form, "submit", async (event) => {
     event.preventDefault();
+    if (!active(lifecycle)) {
+      return;
+    }
     const values = {
       name: form.elements.name.value.trim(),
       cron: form.elements.cron.value.trim(),
@@ -318,9 +334,13 @@ function wire(node, ns, parse) {
     };
     try {
       await create(ns, PLURAL, scheduleBody(values));
-      await mountSchedules(node, ns, parse);
+      if (active(lifecycle)) {
+        await mountSchedules(node, ns, parse, lifecycle);
+      }
     } catch (error) {
-      replace(node, errorBox(error));
+      if (active(lifecycle)) {
+        replace(node, errorBox(error));
+      }
     }
-  });
+  }, lifecycle);
 }

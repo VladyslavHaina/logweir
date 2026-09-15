@@ -24,7 +24,7 @@ use logweir_engine_oso::storage::Store;
 use logweir_evidence::keys::SigningKey;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -263,6 +263,10 @@ struct RecordingEngine {
     /// `None` => the engine fails, as a real one exiting non-zero does.
     facts: Option<BackupFacts>,
     topics: Vec<TopicFacts>,
+    /// When set, simulates a projected Secret rotating while the engine is
+    /// running. Receipt signing must still use the signer validated before
+    /// this callback was reached.
+    rotate_signing_file_to: Option<(PathBuf, String)>,
 }
 
 impl RecordingEngine {
@@ -277,6 +281,7 @@ impl RecordingEngine {
                 unknown_key_warnings: vec![],
             }),
             topics,
+            rotate_signing_file_to: None,
         }
     }
     fn one_topic() -> Self {
@@ -291,6 +296,7 @@ impl RecordingEngine {
             identity: None,
             facts: None,
             topics: vec![],
+            rotate_signing_file_to: None,
         }
     }
     /// The engine's IDENTITY, overridden — for the row that asserts a receipt
@@ -302,6 +308,10 @@ impl RecordingEngine {
             version: version.into(),
             digest: digest.into(),
         });
+        self
+    }
+    fn rotating_signing_file_to(mut self, path: &Path, replacement_pem: String) -> Self {
+        self.rotate_signing_file_to = Some((path.to_path_buf(), replacement_pem));
         self
     }
     fn recorded_plan(&self) -> BackupPlan {
@@ -359,6 +369,11 @@ impl DataEngine for RecordingEngine {
         _obs: &mut dyn PhaseObserver,
     ) -> Result<BackupFacts, EngineError> {
         self.plans.lock().unwrap().push(plan.clone());
+        if let Some((path, replacement_pem)) = &self.rotate_signing_file_to {
+            std::fs::write(path, replacement_pem).map_err(|e| {
+                EngineError::Operational(format!("could not rotate test signing file: {e}"))
+            })?;
+        }
         match &self.facts {
             Some(f) => Ok(f.clone()),
             None => Err(EngineError::Operational(
@@ -899,6 +914,43 @@ fn backup_run_writes_a_signed_receipt() {
     );
 }
 
+/// Ed25519 is an explicit backup acceptance path, not inferred from shared
+/// parsing or from restore coverage. The verifier consumes the exact bytes
+/// retrieved from the evidence store and the public half retained before the
+/// run, independently of receipt persistence.
+#[test]
+fn backup_ed25519_receipt_is_independently_verified() {
+    let f = ok_fixture("ed25519-backup");
+    let signer = SigningKey::generate_ed25519();
+    let public = signer.verifying_key();
+    std::fs::write(&f.args.signing_key, signer.to_pkcs8_pem().unwrap()).unwrap();
+
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_with_one_manifest("ed25519-backup");
+    let outcome = execute_with(&f.args, "ed25519-run", &reader, &engine, &store, &store)
+        .expect("an Ed25519-backed backup succeeds");
+
+    let (document, _) = store.get(&outcome.receipt_key).unwrap();
+    let (sidecar_bytes, _) = store.get(&outcome.sidecar_key).unwrap();
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&sidecar_bytes).unwrap();
+    let verified_key_id = logweir_evidence::verify::verify_detached(
+        &public,
+        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        &document,
+        &sidecar,
+    )
+    .expect("the exact stored receipt bytes verify with the Ed25519 public key");
+
+    assert_eq!(verified_key_id, public.key_id());
+    assert_eq!(sidecar.signatures.len(), 1);
+    assert_eq!(sidecar.signatures[0].keyid, public.key_id());
+    assert!(matches!(
+        public,
+        logweir_evidence::keys::VerifyingKey::Ed25519(_)
+    ));
+}
+
 /// **I6's local half.** `--receipt-out <path>` leaves the receipt at `<path>`
 /// and its DSSE sidecar at the same path with the extension replaced by
 /// `.sig` — the pairing `drill run --out` already uses — and the local pair
@@ -1005,36 +1057,109 @@ fn out_is_the_same_flag_and_two_different_paths_are_refused() {
     assert!(same.exists());
 }
 
-/// A receipt this build cannot sign is a run that exits **4**, with NOTHING
-/// uploaded — Global Constraint 11's "signing or lock-proof failed".
-///
-/// Driven with an unreadable `--signing-key`, which is the one signing failure
-/// a test can produce without key material: the key path is opened inside
-/// `persist_receipt`, after the archive has been read back, so this row also
-/// pins that the failure is NOT reported as a guard refusal or as a bad plan.
+/// Missing, malformed and unreadable signing material are prerequisite
+/// failures: exit 4, no engine backup call, and no uploaded evidence. The
+/// malformed value includes a sentinel that must never appear in the error.
 #[test]
-fn a_receipt_that_cannot_be_signed_is_exit_4_and_puts_nothing() {
-    let mut f = ok_fixture("mvp-demo");
-    f.args.signing_key = f._dir.path().join("no-such-key.pem");
+fn invalid_signing_material_stops_before_engine_data_work() {
+    for case in ["missing", "malformed", "unreadable"] {
+        let mut f = ok_fixture("mvp-demo");
+        let key_path = f._dir.path().join(format!("{case}-signer.pem"));
+        match case {
+            "missing" => {}
+            "malformed" => std::fs::write(
+                &key_path,
+                "-----BEGIN PRIVATE KEY-----\nDO-NOT-ECHO-KEY-MATERIAL\n-----END PRIVATE KEY-----\n",
+            )
+            .unwrap(),
+            // A directory at the requested file path reliably fails a read on
+            // Unix without depending on whether the test process is root.
+            "unreadable" => std::fs::create_dir(&key_path).unwrap(),
+            _ => unreachable!(),
+        }
+        f.args.signing_key = key_path.clone();
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
+        let engine = RecordingEngine::one_topic();
+        // Seed the archive so deleting early validation lets the old late
+        // failure path complete all engine/read-back work before it fails.
+        let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+
+        let err = execute_with(&f.args, "run-1", &reader, &engine, &store, &store)
+            .expect_err("invalid signing material must refuse the execution");
+        assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{case}: {err}");
+        assert!(matches!(&err, BackupError::Signing(_)), "{case}: {err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&key_path.display().to_string()),
+            "{case}: {msg}"
+        );
+        assert!(
+            msg.contains("Mount a readable P-256 or Ed25519 PKCS#8 PEM private key"),
+            "{case}: {msg}"
+        );
+        assert!(
+            msg.contains("No engine data operation was started"),
+            "{case}: {msg}"
+        );
+        assert!(
+            !msg.contains("DO-NOT-ECHO-KEY-MATERIAL"),
+            "{case}: key contents leaked: {msg}"
+        );
+        assert!(
+            engine.plans.lock().unwrap().is_empty(),
+            "{case}: invalid signing material must be detected before DataEngine::backup"
+        );
+        assert!(
+            store
+                .list_keys("logweir/backups/mvp-demo/")
+                .unwrap()
+                .is_empty(),
+            "{case}: prerequisite failure must upload no evidence"
+        );
+    }
+}
+
+/// A projected key may rotate while the engine is working. One execution
+/// keeps using the signer it validated before that work, so the receipt
+/// verifies with the original public key and not the replacement key.
+#[test]
+fn a_rotated_signing_file_does_not_change_the_validated_execution_signer() {
+    let f = ok_fixture("mvp-demo");
+    let replacement = SigningKey::generate_p256();
+    let replacement_pem = replacement.to_pkcs8_pem().unwrap();
+    let replacement_public = f._dir.path().join("replacement.pub.pem");
+    std::fs::write(
+        &replacement_public,
+        replacement.verifying_key().to_public_key_pem().unwrap(),
+    )
+    .unwrap();
     let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
-    let engine = RecordingEngine::one_topic();
+    let engine = RecordingEngine::one_topic()
+        .rotating_signing_file_to(&f.args.signing_key, replacement_pem.clone());
     let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
 
+    let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(
-        run_with(&f.args, &reader, &engine, &store),
-        ExitCode::SigningOrLock,
-        "exit 4: the archive exists and the evidence does not"
+        std::fs::read_to_string(&f.args.signing_key).unwrap(),
+        replacement_pem,
+        "the engine double must actually rotate the projected file during the run"
     );
-    match execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
-        BackupError::Signing(_) => {}
-        other => panic!("expected BackupError::Signing (exit 4), got {other:?}"),
-    }
-    assert!(
-        store
-            .list_keys("logweir/backups/mvp-demo/")
-            .unwrap()
-            .is_empty(),
-        "signing precedes every put, so a signing failure uploads nothing"
+    let (doc, _) = store.get(&outcome.receipt_key).unwrap();
+    let (sidecar, _) = store.get(&outcome.sidecar_key).unwrap();
+    assert_eq!(
+        verify_receipt(
+            f._dir.path(),
+            &doc,
+            &sidecar,
+            &f._dir.path().join("signing.pub.pem")
+        ),
+        ExitCode::Ok,
+        "the receipt must use the signer validated before engine work"
+    );
+    assert_ne!(
+        verify_receipt(f._dir.path(), &doc, &sidecar, &replacement_public),
+        ExitCode::Ok,
+        "reopening the rotated key after engine work would make this verification pass"
     );
 }
 

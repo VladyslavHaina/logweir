@@ -33,6 +33,7 @@
 // page says so above the form.
 
 import { create, list } from "../api.js";
+import { active, cancelled, listen, readOptions } from "../lifecycle.js";
 import {
   CONVENIENCE_SENTENCE,
   COPY_CAVEAT,
@@ -755,7 +756,11 @@ export function restoreBody(state, prepared) {
 export function approvalRoute(state, prepared) {
   const s = state || {};
   const p = prepared || {};
-  const ns = typeof s.ns === "string" && s.ns.length > 0 ? s.ns : "default";
+  // There is no implicit namespace on a router that deliberately refuses to
+  // guess one. In particular, `default` is a real selected namespace and
+  // must cross this hand-off explicitly rather than being elided as a legacy
+  // shorthand.
+  const ns = typeof s.ns === "string" ? s.ns.trim() : "";
   return (
     "#/approvals?subject=" +
     encodeURIComponent(p.restoreName) +
@@ -763,16 +768,23 @@ export function approvalRoute(state, prepared) {
     encodeURIComponent(p.hash) +
     "&name=" +
     encodeURIComponent(p.approvalName) +
-    (ns === "default" ? "" : "&ns=" + encodeURIComponent(ns))
+    (ns.length > 0 ? "&ns=" + encodeURIComponent(ns) : "")
   );
 }
 
 /** Creates the `Restore` -- the FIRST of the two creates, with a dangling
  *  `approvalRef` -- and returns the approvals route the next action navigates
  *  to. Both names are minted before this function issues anything. */
-export async function submitRestore(state, deps) {
+export async function submitRestore(state, deps, lifecycle) {
   const api = deps || API;
   const prepared = await preparePlan(state);
+  // Hashing and minting are client-side preparation, not a submitted durable
+  // operation. Navigation while they run therefore disarms the pending
+  // action; once `create` starts, deliberately pass no route signal so an
+  // accepted server mutation can finish after navigation.
+  if (!active(lifecycle)) {
+    return null;
+  }
   const body = restoreBody(state, prepared);
   await api.create((state || {}).ns, PLURAL, body);
   return approvalRoute(state, prepared);
@@ -941,20 +953,33 @@ function windowComplaint(value, covered) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountRestoreWizard(node, ns, parse, deps) {
+export async function mountRestoreWizard(node, ns, parse, deps, lifecycle) {
   const api = deps || API;
   try {
-    const clusters = await api.list(ns, CLUSTERS);
-    const backups = await api.list(ns, BACKUPS);
+    const collections = await Promise.all([
+      api.list(ns, CLUSTERS, readOptions(lifecycle)),
+      api.list(ns, BACKUPS, readOptions(lifecycle)),
+    ]);
+    if (!active(lifecycle)) {
+      return;
+    }
+    const clusters = collections[0];
+    const backups = collections[1];
     if (completedBackups(backups).length === 0) {
       replace(node, parse(renderNoCompletedBackup(ns, backups)));
       return;
     }
     const state = initialState(ns, clusters, backups);
-    replace(node, parse(await renderRestoreWizard(state)));
-    wire(node, state, parse, api);
+    const rendered = await renderRestoreWizard(state);
+    if (!active(lifecycle)) {
+      return;
+    }
+    replace(node, parse(rendered));
+    wire(node, state, parse, api, lifecycle);
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
@@ -1081,7 +1106,7 @@ function firstTarget(clusters) {
   return all.length > 0 ? all[0] : null;
 }
 
-function wire(node, state, parse, api) {
+function wire(node, state, parse, api, lifecycle) {
   const point = node.querySelector("#point-in-time");
   const prefix = node.querySelector("#topic-prefix");
   const mode = node.querySelector("#target-mode");
@@ -1092,6 +1117,9 @@ function wire(node, state, parse, api) {
   const evidenceBucket = node.querySelector("#evidence-bucket");
   const archiveSecret = node.querySelector("#archive-secret");
   const refresh = async () => {
+    if (!active(lifecycle)) {
+      return;
+    }
     if (point !== null) {
       state.fields.pointInTime = valueOf(point);
     }
@@ -1131,8 +1159,14 @@ function wire(node, state, parse, api) {
     if (archiveSecret !== null) {
       state.archiveSecretName = valueOf(archiveSecret);
     }
-    replace(node, parse(await renderRestoreWizard(state)));
-    wire(node, state, parse, api);
+    if (!active(lifecycle)) {
+      return;
+    }
+    const rendered = await renderRestoreWizard(state);
+    if (active(lifecycle)) {
+      replace(node, parse(rendered));
+      wire(node, state, parse, api, lifecycle);
+    }
   };
   for (const field of [
     point,
@@ -1146,7 +1180,7 @@ function wire(node, state, parse, api) {
     archiveSecret,
   ]) {
     if (field !== null) {
-      field.addEventListener("change", refresh);
+      listen(field, "change", refresh, lifecycle);
     }
   }
 
@@ -1154,7 +1188,10 @@ function wire(node, state, parse, api) {
   // so a keyboard reader lands where a pointer reader looks. Motion follows
   // the reader's own preference.
   for (const link of node.querySelectorAll(".stepper-link")) {
-    link.addEventListener("click", () => {
+    listen(link, "click", () => {
+      if (!active(lifecycle)) {
+        return;
+      }
       const section = node.querySelector("#" + link.getAttribute("data-target"));
       if (section === null) {
         return;
@@ -1164,44 +1201,62 @@ function wire(node, state, parse, api) {
         window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       section.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "start" });
       section.focus({ preventScroll: true });
-    });
+    }, lifecycle);
   }
 
   const copy = node.querySelector("#copy-plan");
   if (copy !== null) {
-    copy.addEventListener("click", async () => {
+    listen(copy, "click", async () => {
+      if (!active(lifecycle)) {
+        return;
+      }
       const pre = node.querySelector("#plan-bytes");
       if (pre !== null && navigator.clipboard) {
         await navigator.clipboard.writeText(pre.textContent);
       }
-    });
+    }, lifecycle);
   }
 
   const download = node.querySelector("#download-plan");
   if (download !== null) {
-    download.addEventListener("click", async () => {
+    listen(download, "click", async () => {
+      if (!active(lifecycle)) {
+        return;
+      }
       const prepared = await preparePlan(state);
-      downloadPlan(prepared);
-    });
+      if (active(lifecycle)) {
+        downloadPlan(prepared);
+      }
+    }, lifecycle);
   }
 
   const submit = node.querySelector("#create-restore");
   if (submit !== null) {
-    submit.addEventListener("click", async () => {
-      try {
-        await submitRestore(state, api);
-      } catch (error) {
-        replace(node, errorBox(error));
+    listen(submit, "click", async () => {
+      if (!active(lifecycle)) {
+        return;
       }
-    });
+      try {
+        await submitRestore(state, api, lifecycle);
+      } catch (error) {
+        if (active(lifecycle)) {
+          replace(node, errorBox(error));
+        }
+      }
+    }, lifecycle);
   }
 
   const request = node.querySelector("#request-approval");
   if (request !== null) {
-    request.addEventListener("click", async () => {
+    listen(request, "click", async () => {
+      if (!active(lifecycle)) {
+        return;
+      }
       const prepared = await preparePlan(state);
-      window.location.hash = approvalRoute(state, prepared);
-    });
+      if (active(lifecycle)) {
+        window.location.hash = approvalRoute(state, prepared);
+      }
+    }, lifecycle);
   }
 }
 

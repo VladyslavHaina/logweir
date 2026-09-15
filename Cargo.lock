@@ -1764,6 +1764,7 @@ dependencies = [
  "logweir-evidence",
  "logweir-kafka",
  "p256",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",

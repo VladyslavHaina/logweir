@@ -15,6 +15,7 @@
 //! timestamps in `Timeline` are taken by the phases that own them and passed
 //! in here; the upload lives in this crate, not in core.
 use crate::drill::DrillError;
+use crate::signer::ValidatedSigner;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult, Outcome};
@@ -380,6 +381,22 @@ pub fn run(
     store: &Store,
     offset_report: Option<&Path>,
 ) -> Result<Signed, DrillError> {
+    let signer = ValidatedSigner::load(
+        signing_key,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        b"logweir restore signing readiness probe v1",
+        "No evidence was uploaded",
+    )
+    .map_err(sig)?;
+    run_with_signer(sc, &signer, store, offset_report)
+}
+
+pub(crate) fn run_with_signer(
+    sc: &Scorecard,
+    signer: &ValidatedSigner,
+    store: &Store,
+    offset_report: Option<&Path>,
+) -> Result<Signed, DrillError> {
     let mut sc = sc.clone();
     let run_id = sc.run_id.clone();
 
@@ -523,13 +540,9 @@ pub fn run(
 
     // 6. Sign. Any failure here is exit 4 and NOTHING has been uploaded — this
     //    step precedes every put, which is the mechanism, not a convention.
-    let key = logweir_evidence::keys::SigningKey::from_pem_file(signing_key).map_err(sig)?;
-    let sidecar = logweir_evidence::sign::sign_detached(
-        &key,
-        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
-        &bytes,
-    )
-    .map_err(sig)?;
+    let sidecar = signer
+        .sign(logweir_evidence::PAYLOAD_TYPE_SCORECARD, &bytes)
+        .map_err(sig)?;
     let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(sig)?;
 
     // 7. Create-only puts. An object that already exists is REFUSED
@@ -675,14 +688,25 @@ pub fn persist_put_receipt(
     signing_key: &Path,
     store: &Store,
 ) -> Result<(), DrillError> {
-    let bytes = logweir_core::det_json::to_deterministic_json(r).map_err(sig)?;
-    let key = logweir_evidence::keys::SigningKey::from_pem_file(signing_key).map_err(sig)?;
-    let sidecar = logweir_evidence::sign::sign_detached(
-        &key,
+    let signer = ValidatedSigner::load(
+        signing_key,
         logweir_evidence::PAYLOAD_TYPE_PUT_RECEIPT,
-        &bytes,
+        b"logweir restore signing readiness probe v1",
+        "No evidence was uploaded",
     )
     .map_err(sig)?;
+    persist_put_receipt_with_signer(r, &signer, store)
+}
+
+pub(crate) fn persist_put_receipt_with_signer(
+    r: &PutReceipt,
+    signer: &ValidatedSigner,
+    store: &Store,
+) -> Result<(), DrillError> {
+    let bytes = logweir_core::det_json::to_deterministic_json(r).map_err(sig)?;
+    let sidecar = signer
+        .sign(logweir_evidence::PAYLOAD_TYPE_PUT_RECEIPT, &bytes)
+        .map_err(sig)?;
     let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(sig)?;
     store
         .put_create_only(&format!("logweir/drills/{}.receipt.json", r.run_id), &bytes)

@@ -18,6 +18,7 @@
 // a SCRAM cluster names the Secret and carries no credential word at all.
 
 import { list, get, create } from "../api.js";
+import { active, cancelled, listen, readOptions } from "../lifecycle.js";
 import {
   badge,
   cell,
@@ -215,33 +216,46 @@ export function clusterBody(values) {
  *  from the viewer's own RBAC included -- the API server's OWN reason and
  *  message are rendered verbatim, because the page made no authorisation
  *  decision and must not narrate one. */
-export async function mountClusters(node, ns, parse) {
+export async function mountClusters(node, ns, parse, lifecycle) {
   try {
-    const collection = await list(ns, PLURAL);
+    const collection = await list(ns, PLURAL, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return;
+    }
     replace(node, parse(renderClusterList(collection, ns) + renderClusterForm()));
-    wireForm(node, ns, parse);
+    wireForm(node, ns, parse, lifecycle);
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
 /** Reads one cluster and renders its detail. */
-export async function mountClusterDetail(node, ns, name, parse) {
+export async function mountClusterDetail(node, ns, name, parse, lifecycle) {
   try {
-    const object = await get(ns, PLURAL, name);
+    const object = await get(ns, PLURAL, name, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return;
+    }
     replace(node, parse(renderClusterDetail(object)));
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
-function wireForm(node, ns, parse) {
+function wireForm(node, ns, parse, lifecycle) {
   const form = node.querySelector("#cluster-form");
   if (form === null) {
     return;
   }
-  form.addEventListener("submit", async (event) => {
+  listen(form, "submit", async (event) => {
     event.preventDefault();
+    if (!active(lifecycle)) {
+      return;
+    }
     const values = {
       name: form.elements.name.value.trim(),
       servers: form.elements.servers.value,
@@ -253,13 +267,18 @@ function wireForm(node, ns, parse) {
     };
     try {
       await create(ns, PLURAL, clusterBody(values));
-      await mountClusters(node, ns, parse);
+      if (active(lifecycle)) {
+        await mountClusters(node, ns, parse, lifecycle);
+      }
     } catch (error) {
+      if (!active(lifecycle)) {
+        return;
+      }
       const slot = node.querySelector(".create");
       if (slot !== null) {
         clear(slot);
         slot.appendChild(errorBox(error));
       }
     }
-  });
+  }, lifecycle);
 }

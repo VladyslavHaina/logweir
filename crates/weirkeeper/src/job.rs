@@ -162,8 +162,9 @@ pub const BACKOFF_LIMIT: i32 = 0;
 ///
 /// WITHOUT `fsGroup` EVERY SCHEDULED RUN DIES OPENING ITS OWN SIGNING KEY.
 /// Kubelet writes Secret files `root:root`, so a container running as 65532
-/// reads nothing through the owner bits and `backup run` exits 1 having done
-/// nothing. `fsGroup` chowns the volume's group AND ORs group-read into the
+/// reads nothing through the owner bits and the runner now exits 4 at its
+/// signing-readiness gate, before any data operation. `fsGroup` chowns the
+/// volume's group AND ORs group-read into the
 /// mode, so it is sufficient on its own; widening the mode without it is not.
 /// All four combinations were run live on docker-desktop —
 /// `docs/kubernetes.md` §3, and `examples/cronjob-drill.yaml:47-101` carries
@@ -200,24 +201,18 @@ pub const PLAN_VOLUME: &str = "plan";
 /// Where [`PLAN_VOLUME`] is mounted, read-only.
 pub const PLAN_MOUNT_PATH: &str = "/plan";
 
-/// The volume name the approval bundle Secret is projected as — the
-/// **restore** Job's mount (Task 20).
+/// The volume name the per-Restore approval bundle ConfigMap is projected as.
 ///
-/// WHY THE NAME AND THE PATH LIVE HERE AND THE SECRET'S NAME DOES NOT. This
+/// WHY THE NAME AND THE PATH LIVE HERE AND THE CONFIGMAP'S NAME DOES NOT. This
 /// module owns the Job's SHAPE: a volume name has to be unique within the pod
 /// spec [`build`] renders, and a mount path has to agree with the argv the
-/// caller writes. WHICH Secret is projected is the caller's decision — a
-/// `Restore` names its own approval bundle
-/// ([`crate::controllers::restore::APPROVAL_BUNDLE_SECRET`]) exactly as it
-/// names its own signing key — and putting it here would put a
-/// `Restore`-specific object name in the file every Job in the crate is built
-/// through. The same division `SIGNING_VOLUME` follows on the `Backup` path.
+/// caller writes. WHICH ConfigMap is projected is the Restore controller's
+/// decision; this shared renderer only enforces the mount shape.
 ///
-/// A SECRET AND NOT A ConfigMap. `allowed-clusters.json` on the restore path
-/// authorises a restore TARGET, so a subject with `patch configmaps` who
-/// replaced it would WIDEN the set of clusters a restore may write into; on
-/// the `Backup` path the same file can only make a run refuse (errata
-/// **E5a**), so it stays a ConfigMap key there.
+/// The ConfigMap is immutable, create-only and owned by the Restore. The
+/// controller compares every byte on an `AlreadyExists` response before a Job
+/// may use it. The private runner signing key remains a Secret and is never a
+/// member of this volume.
 pub const APPROVAL_VOLUME: &str = "approval";
 /// Where [`APPROVAL_VOLUME`] is mounted, read-only. The directory half of
 /// every `--approval` / `--approver-key` / `--allowed-clusters` path in
@@ -422,6 +417,19 @@ pub struct SecretMount {
     pub items: Vec<(String, String)>,
 }
 
+/// One public, immutable ConfigMap projected into a runner pod.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigMapMount {
+    /// The volume name, unique within the pod.
+    pub volume: String,
+    /// The ConfigMap's `metadata.name`, in the Job's namespace.
+    pub config_map_name: String,
+    /// Where the volume is mounted. Always `readOnly`.
+    pub mount_path: String,
+    /// `(ConfigMap key, path within the mount)` pairs.
+    pub items: Vec<(String, String)>,
+}
+
 /// One environment variable taken from a Secret key.
 ///
 /// `valueFrom.secretKeyRef` AND NEVER A LITERAL. An object-store credential
@@ -500,6 +508,8 @@ pub struct RunnerJobSpec {
     pub service_account_name: String,
     /// Secrets projected as volumes.
     pub secret_mounts: Vec<SecretMount>,
+    /// Public immutable ConfigMaps projected as volumes, other than the plan.
+    pub config_map_mounts: Vec<ConfigMapMount>,
     /// Environment variables taken from Secret keys.
     pub env_from_secret: Vec<EnvFromSecret>,
     /// Plain environment variables. [`ENGINE_VERSION_ENV`],
@@ -702,6 +712,37 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
                     )
                 },
                 optional: None,
+            }),
+            ..Volume::default()
+        });
+        mounts.push(VolumeMount {
+            name: m.volume.clone(),
+            mount_path: m.mount_path.clone(),
+            read_only: Some(true),
+            ..VolumeMount::default()
+        });
+    }
+    for m in &spec.config_map_mounts {
+        volumes.push(Volume {
+            name: m.volume.clone(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: m.config_map_name.clone(),
+                items: if m.items.is_empty() {
+                    None
+                } else {
+                    Some(
+                        m.items
+                            .iter()
+                            .map(|(key, path)| KeyToPath {
+                                key: key.clone(),
+                                path: path.clone(),
+                                mode: None,
+                            })
+                            .collect(),
+                    )
+                },
+                optional: Some(false),
+                ..ConfigMapVolumeSource::default()
             }),
             ..Volume::default()
         });

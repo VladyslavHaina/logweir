@@ -208,6 +208,39 @@ spec:
                   matched.
                 nullable: true
                 type: boolean
+              verifiedSubjectRef:
+                description: The exact referent identity used for the first successful
+                  verification. Once present it is retained across later failures
+                  so a same-named, recreated object can never acquire this Approval
+                  on a later reconcile.
+                nullable: true
+                properties:
+                  apiVersion:
+                    description: The referent's API version at verification time.
+                    type: string
+                  kind:
+                    description: The referent's kind at verification time.
+                    enum:
+                    - Restore
+                    - Backup
+                    type: string
+                  name:
+                    description: The referent's name at verification time.
+                    type: string
+                  namespace:
+                    description: The referent's namespace at verification time.
+                    type: string
+                  uid:
+                    description: The referent's immutable Kubernetes UID at verification
+                      time.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                - namespace
+                - uid
+                type: object
             type: object
         required:
         - spec
@@ -611,6 +644,16 @@ spec:
                 required:
                 - url
                 type: object
+              concurrencyPolicy:
+                default: Forbid
+                description: Whether a due slot may start while an earlier Backup
+                  owned by this schedule is unfinished. Omitted means `Forbid`, including
+                  on schedules stored before this field was introduced. `Allow` is
+                  explicit.
+                enum:
+                - Forbid
+                - Allow
+                type: string
               retention:
                 description: '`{keepLast, keepDays}` — **reporting only**. Logweir
                   deletes nothing.'
@@ -676,7 +719,9 @@ spec:
                 && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) &&
                 has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics
                 == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) &&
-                (!has(self.archive) || self.archive == oldSelf.archive) && has(self.retention)
+                (!has(self.archive) || self.archive == oldSelf.archive) && has(self.concurrencyPolicy)
+                == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy)
+                || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention)
                 == has(oldSelf.retention) && (!has(self.retention) || self.retention
                 == oldSelf.retention)
           status:
@@ -743,9 +788,9 @@ spec:
                 type: string
               lastMissedSlot:
                 description: |-
-                  The most recent slot that came due and was NOT fired — the controller was down, or the previous run was still active. Recorded because object identity is a pure function of the trigger (guard **G-SLOT**): a missed slot is never silently re-fired under a different name.
+                  The most recent slot that came due and was NOT fired — the controller was down, or `Forbid` found a previous owned run still active. Recorded because object identity is a pure function of the trigger (guard **G-SLOT**): a missed slot is never silently re-fired under a different name.
 
-                  THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one hour before the controller looked is skipped and recorded here, with a `Ready` condition whose reason is `SlotMissed`; a controller restarted after a week therefore fires at most the current slot and never six days of backlog. The field is written when a slot is skipped and is never cleared afterwards — it is the audit trail of the skip, so a correct implementation is distinguishable from a broken schedule.
+                  THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one hour before the controller looked is skipped and recorded here, with a `Ready` condition whose reason is `SlotMissed`; a controller restarted after a week therefore fires at most the current slot and never six days of backlog. A concurrency skip uses reason `ConcurrencyBlocked`. The field is written when a slot is skipped and is never cleared afterwards — it is the audit trail of the skip, so a correct implementation is distinguishable from a broken schedule.
                 nullable: true
                 type: string
               nextFireTime:
@@ -753,6 +798,20 @@ spec:
                 format: date-time
                 nullable: true
                 type: string
+              pendingBackupRef:
+                description: A `Forbid` slot atomically admitted in status but whose
+                  `Backup` creation has not yet been confirmed. This short-lived reservation
+                  closes the controller crash window and is cleared after the child
+                  is observed or created.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
               retentionReport:
                 description: What retention WOULD remove. Nothing was deleted — see
                   [`RetentionReport`].

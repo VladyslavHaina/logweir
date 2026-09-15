@@ -32,6 +32,7 @@
 //! child is spawned with `RUST_LOG=warn` pinned and contributes nothing to a
 //! clean run's stream, so those two lines are the whole of it.)
 use crate::drill::DrillError;
+use crate::signer::ValidatedSigner;
 use logweir_core::spec::TargetMode;
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::TopicDeleter;
@@ -269,14 +270,25 @@ pub fn persist(
     signing_key: &std::path::Path,
     store: &Store,
 ) -> Result<(), DrillError> {
-    let bytes = logweir_core::det_json::to_deterministic_json(att).map_err(sig)?;
-    let key = logweir_evidence::keys::SigningKey::from_pem_file(signing_key).map_err(sig)?;
-    let sidecar = logweir_evidence::sign::sign_detached(
-        &key,
+    let signer = ValidatedSigner::load(
+        signing_key,
         logweir_evidence::PAYLOAD_TYPE_TEARDOWN,
-        &bytes,
+        b"logweir restore signing readiness probe v1",
+        "No evidence was uploaded",
     )
     .map_err(sig)?;
+    persist_with_signer(att, &signer, store)
+}
+
+pub(crate) fn persist_with_signer(
+    att: &TeardownAttestation,
+    signer: &ValidatedSigner,
+    store: &Store,
+) -> Result<(), DrillError> {
+    let bytes = logweir_core::det_json::to_deterministic_json(att).map_err(sig)?;
+    let sidecar = signer
+        .sign(logweir_evidence::PAYLOAD_TYPE_TEARDOWN, &bytes)
+        .map_err(sig)?;
     let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(sig)?;
     store
         .put_create_only(

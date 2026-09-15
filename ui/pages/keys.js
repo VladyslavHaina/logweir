@@ -24,6 +24,7 @@
 // with the controller's own refusal by exactly the skew between them.
 
 import { listCluster } from "../api.js";
+import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   cell,
   copyBlock,
@@ -164,12 +165,16 @@ export function renderRosterSnippet() {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountKeys(node, parse, deps) {
+export async function mountKeys(node, parse, deps, lifecycle) {
   const api = deps || API;
   try {
-    const collection = await api.listCluster(PLURAL);
-    replace(node, parse(renderKeysPage(collection)));
+    const collection = await api.listCluster(PLURAL, readOptions(lifecycle));
+    if (active(lifecycle)) {
+      replace(node, parse(renderKeysPage(collection)));
+    }
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }

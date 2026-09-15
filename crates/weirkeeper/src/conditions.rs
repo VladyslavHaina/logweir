@@ -163,6 +163,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     "NameTooLong",
     "ReferentNotFound",
     "PlanConfigMapConflict",
+    TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT,
+    TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
+    TERMINAL_STATE_JOB_NAME_CONFLICT,
     "ArchiveUrlUnreadable",
     "PlanHashMismatch",
     "ClusterNotReachable",
@@ -305,6 +308,19 @@ pub const TERMINAL_STATE_REFERENT_NOT_FOUND: &str = "ReferentNotFound";
 /// mismatch is terminal.
 pub const TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT: &str = "PlanConfigMapConflict";
 
+/// A per-Restore approval-bundle ConfigMap exists under the desired name but
+/// does not exactly match the owner UID, immutable bit, binding annotations,
+/// or public artifact bytes the controller intended.
+pub const TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT: &str = "ApprovalBundleConflict";
+
+/// The referenced Approval was verified for a different kind, name,
+/// namespace, or Kubernetes UID than the Restore being reconciled.
+pub const TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH: &str = "ApprovalSubjectMismatch";
+
+/// A Job already occupies the Restore's name but is not controlled by this
+/// exact Restore UID with the complete garbage-collection owner contract.
+pub const TERMINAL_STATE_JOB_NAME_CONFLICT: &str = "JobNameConflict";
+
 /// `spec.archive.url` is not readable as an object-store location.
 ///
 /// The rendered `backup.yaml` carries a TYPED `storage` block
@@ -357,6 +373,11 @@ pub const REASON_ADMITTED: &str = "Admitted";
 /// workable. Its terminal sibling is
 /// [`TERMINAL_STATE_APPROVAL_NOT_RECEIVED`].
 pub const REASON_APPROVAL_NOT_VERIFIED: &str = "ApprovalNotVerified";
+
+/// The verified inputs could not be materialized into the immutable public
+/// bundle, so no Job was created and the controller will retry.
+pub const REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED: &str =
+    "ApprovalBundleMaterializationFailed";
 
 /// Whether the run's two evidence keys were recorded — **its own condition
 /// type, and raised only at exit 0**.
@@ -457,6 +478,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     CONDITION_JOB_CREATED,
     REASON_ADMITTED,
     REASON_APPROVAL_NOT_VERIFIED,
+    REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
     REASON_VERIFIED,
     REASON_VERIFICATION_INVALID,
     REASON_VERIFICATION_NOT_ATTEMPTED,

@@ -105,19 +105,19 @@ export function path(...segments) {
 }
 
 /** Lists a namespaced kind. */
-export async function list(ns, plural) {
+export async function list(ns, plural, options) {
   const response = await request(
     path("apis", GROUP, VERSION, "namespaces", ns, plural),
-    { method: "GET" },
+    readInit(options),
   );
   return body(response);
 }
 
 /** Reads one namespaced object by name. */
-export async function get(ns, plural, name) {
+export async function get(ns, plural, name, options) {
   const response = await request(
     path("apis", GROUP, VERSION, "namespaces", ns, plural, name),
-    { method: "GET" },
+    readInit(options),
   );
   return body(response);
 }
@@ -156,10 +156,10 @@ export async function patchSuspend(ns, name, value) {
 }
 
 /** Lists a cluster-scoped kind -- `trustrosters`, which no page may write. */
-export async function listCluster(plural) {
+export async function listCluster(plural, options) {
   const response = await request(
     path("apis", GROUP, VERSION, plural),
-    { method: "GET" },
+    readInit(options),
   );
   return body(response);
 }
@@ -206,6 +206,17 @@ export function apiError(response, text) {
 // behalf.
 function request(u, init) {
   return fetch(u, init);
+}
+
+// GET requests may carry a route-owned AbortSignal. Writes intentionally do
+// not accept one: a route leaving after a click must not cancel an operation
+// the API server has already accepted.
+function readInit(options) {
+  const init = { method: "GET" };
+  if (options && options.signal !== undefined) {
+    init.signal = options.signal;
+  }
+  return init;
 }
 
 // Reads a response, raising the API server's own error on a non-2xx.

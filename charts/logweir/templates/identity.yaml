@@ -1,0 +1,379 @@
+{{- if .Values.identity.enabled }}
+{{- $publicName := required "identity.publicConfigMapName must be set when identity.enabled=true" .Values.identity.publicConfigMapName }}
+{{- $bootstrapImage := required "identity.bootstrapImage is release-blocked until a reviewed runner digest containing `identity bootstrap` is published; use a digest, or the explicit local-development override" .Values.identity.bootstrapImage }}
+{{- if not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $bootstrapImage) }}
+{{- if not .Values.identity.allowMutableBootstrapImageForDevelopment }}
+{{- fail "identity.bootstrapImage must be an immutable @sha256 digest; mutable/local references require identity.allowMutableBootstrapImageForDevelopment=true and identity.bootstrapImagePullPolicy=Never" }}
+{{- end }}
+{{- if ne .Values.identity.bootstrapImagePullPolicy "Never" }}
+{{- fail "a mutable identity.bootstrapImage is development-only and requires both identity.allowMutableBootstrapImageForDevelopment=true and identity.bootstrapImagePullPolicy=Never" }}
+{{- end }}
+{{- end }}
+{{- $externalName := .Values.identity.externalSecret.name | default "" }}
+{{- $externalKey := .Values.identity.externalSecret.key | default "" }}
+{{- if and $externalName (not $externalKey) }}{{ fail "identity.externalSecret.key must be set when identity.externalSecret.name is set" }}{{ end }}
+{{- if and (not $externalName) (ne $externalKey "signing.pem") }}{{ fail "identity.externalSecret.name must be set when identity.externalSecret.key is customized" }}{{ end }}
+{{- $existingSecret := lookup "v1" "Secret" .Release.Namespace "logweir-signing-key" }}
+{{- $existingPublic := lookup "v1" "ConfigMap" .Release.Namespace $publicName }}
+{{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
+{{- if eq $namespace $.Release.Namespace }}{{ fail "identity.authorizedRunnerNamespaces must not repeat the release namespace; it is always authorized" }}{{ end }}
+{{- end }}
+{{- $singletonName := "logweir-identity-singleton" }}
+{{- $singleton := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $singletonName }}
+{{- if $singleton }}
+{{- $owner := $singleton.metadata.annotations | default dict }}
+{{- $ownerName := index $owner "logweir.dev/release-name" | default "<unknown>" }}
+{{- $ownerNamespace := index $owner "logweir.dev/release-namespace" | default "<unknown>" }}
+{{- if or (ne $ownerName .Release.Name) (ne $ownerNamespace .Release.Namespace) }}
+{{- fail (printf "cluster installation identity is already claimed by Helm release %s/%s; Logweir supports one installation identity per cluster until PLAT-19.1" $ownerNamespace $ownerName) }}
+{{- end }}
+{{- else }}
+# A fixed, authority-free cluster-scoped marker makes the current singleton
+# contract explicit. It contains no key material and grants no permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $singletonName }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/release-name: {{ .Release.Name | quote }}
+    logweir.dev/release-namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signing-identity
+rules: []
+---
+{{- end }}
+{{- if not $existingSecret }}
+# The private object is intentionally rendered EMPTY. The hook Job generates or
+# adopts a key through an optimistic API patch; Helm never renders key material.
+# `keep` makes uninstall/reinstall fail-safe: losing a Helm release record must
+# not silently rotate the signer used by old archives.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logweir-signing-key
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signing-identity
+type: Opaque
+data: {}
+---
+{{- end }}
+{{- if not $existingPublic }}
+# Public verification material only: key-id, algorithm, SPKI PEM and the exact
+# current TrustRoster field that consumes it. Retained with the private object
+# so an absent private key is detected as loss, never treated as a fresh install.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $publicName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signing-trust
+data: {}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-identity-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity-bootstrap
+automountServiceAccountToken: false
+{{- with (include "logweir.imagePullSecrets" .) }}
+{{ . }}
+{{- end }}
+---
+# The bootstrap account cannot list Secrets and cannot read arbitrary names.
+# The external source, when configured, is get-only; only the fixed managed
+# Secret and public ConfigMap can be patched.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-identity-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity-bootstrap
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - logweir-signing-key
+      {{- with $externalName }}
+      - {{ . }}
+      {{- end }}
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["logweir-signing-key"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $publicName | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-identity-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-identity-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-identity-bootstrap
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-identity-bootstrap
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade,post-rollback
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "-10"
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity-bootstrap
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: identity-bootstrap
+        logweir.dev/identity-authority: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-identity-bootstrap
+      automountServiceAccountToken: true
+      {{- with (include "logweir.placement" (dict "root" $ "over" dict)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrap
+          image: {{ $bootstrapImage }}
+          imagePullPolicy: {{ .Values.identity.bootstrapImagePullPolicy }}
+          args:
+            - identity
+            - bootstrap
+            - --namespace
+            - {{ .Release.Namespace }}
+            - --public-configmap-name
+            - {{ $publicName }}
+            {{- with $externalName }}
+            - --external-secret-name
+            - {{ . }}
+            - --external-secret-key
+            - {{ $externalKey }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.identity.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- if .Values.identity.authorizedRunnerNamespaces }}
+---
+# Only distributor ServiceAccounts in explicitly authorized namespaces may read
+# the primary Secret. They cannot patch it or read any other Secret here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-identity-distribution-source
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity-distribution
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["logweir-signing-key"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-identity-distribution-source
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity-distribution
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-identity-distribution-source
+subjects:
+{{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
+  - kind: ServiceAccount
+    name: {{ $.Release.Name }}-identity-distributor
+    namespace: {{ $namespace }}
+{{- end }}
+{{- end }}
+{{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
+{{- $suffix := trunc 10 (sha256sum $namespace) }}
+{{- $targetSecret := lookup "v1" "Secret" $namespace "logweir-signing-key" }}
+{{- if not $targetSecret }}
+---
+# Empty retained target: the distributor atomically copies the primary bytes.
+# Helm never reads or renders the established private key.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logweir-signing-key
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: signing-identity
+type: Opaque
+data: {}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-runner
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: runner
+automountServiceAccountToken: false
+{{- with (include "logweir.imagePullSecrets" $) }}
+{{ . }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $.Release.Name }}-identity-distributor
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: identity-distribution
+automountServiceAccountToken: false
+{{- with (include "logweir.imagePullSecrets" $) }}
+{{ . }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $.Release.Name }}-identity-distributor
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: identity-distribution
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["logweir-signing-key"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Release.Name }}-identity-distributor
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: identity-distribution
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $.Release.Name }}-identity-distributor
+subjects:
+  - kind: ServiceAccount
+    name: {{ $.Release.Name }}-identity-distributor
+    namespace: {{ $namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $.Release.Name }}-identity-distribute-{{ $suffix }}
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade,post-rollback
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "-5"
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: identity-distribution
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: identity-distribution
+        logweir.dev/identity-authority: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $.Release.Name }}-identity-distributor
+      automountServiceAccountToken: true
+      {{- with (include "logweir.placement" (dict "root" $ "over" dict)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: distribute
+          image: {{ $bootstrapImage }}
+          imagePullPolicy: {{ $.Values.identity.bootstrapImagePullPolicy }}
+          args:
+            - identity
+            - distribute
+            - --source-namespace
+            - {{ $.Release.Namespace }}
+            - --target-namespace
+            - {{ $namespace }}
+          resources:
+            {{- toYaml $.Values.identity.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
+{{- end }}

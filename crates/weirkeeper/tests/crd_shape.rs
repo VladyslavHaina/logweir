@@ -782,7 +782,14 @@ fn every_spec_is_sealed_and_only_suspend_is_mutable() {
         let rule = &on_spec[0].rule;
         if file == "backupschedules.yaml" {
             // The object-level rule names every field except `suspend`.
-            for named in ["schedule", "sourceRef", "topics", "archive", "retention"] {
+            for named in [
+                "schedule",
+                "sourceRef",
+                "topics",
+                "archive",
+                "concurrencyPolicy",
+                "retention",
+            ] {
                 assert!(
                     rule.contains(&format!("self.{named}")),
                     "{file}: the object-level rule must name `{named}`; rule was:\n{rule}"
@@ -1086,6 +1093,7 @@ archive:
 suspend: false
 ";
     let with_retention = format!("{base}retention:\n  keepLast: 3\n");
+    let with_forbid = format!("{base}concurrencyPolicy: Forbid\n");
 
     let cases: Vec<(&str, Value, Value, bool)> = vec![
         (
@@ -1128,6 +1136,12 @@ suspend: false
             "the topic list changes",
             yaml(base),
             yaml(&base.replace("- orders", "- orders\n- payments")),
+            false,
+        ),
+        (
+            "the concurrency policy changes",
+            yaml(&with_forbid),
+            yaml(&with_forbid.replace("Forbid", "Allow")),
             false,
         ),
         (
@@ -1294,6 +1308,29 @@ fn approval_spec_has_four_fields_and_no_base64() {
             );
         }
     }
+}
+
+/// A Verified status carries the exact Kubernetes identity the controller
+/// actually read. All five fields are required so an older or hand-written
+/// partial status cannot authorize a same-name or cross-namespace Restore.
+#[test]
+fn approval_status_subject_provenance_is_complete() {
+    let doc = crd("approvals.yaml");
+    let subject = at(status_schema(&doc), &["properties", "verifiedSubjectRef"]);
+    assert_eq!(
+        required(subject),
+        vec![
+            "apiVersion".to_string(),
+            "kind".to_string(),
+            "name".to_string(),
+            "namespace".to_string(),
+            "uid".to_string(),
+        ]
+    );
+    assert_eq!(
+        enum_values(at(subject, &["properties", "kind"])),
+        vec!["Restore", "Backup"]
+    );
 }
 
 /// The subject kind enum is exactly `["Restore","Backup"]`. `Switchover` is

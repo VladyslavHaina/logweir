@@ -208,6 +208,38 @@ fn shown(path: &Path) -> String {
         .to_string()
 }
 
+#[test]
+fn chart_readme_ui_harness_binds_readiness_and_cleans_up_on_bash_3_2() {
+    let readme = read(&repo_root().join("charts/logweir/README.md"));
+    let readiness = readme
+        .split("wait_for_ui() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("chart README wait_for_ui function");
+    assert_eq!(
+        readiness.matches("kill -0 \"$port_forward_pid\"").count(),
+        2,
+        "the exact kubectl child must be checked before and after HTTP"
+    );
+    for identity in [
+        "Forwarding from 127.0.0.1:18132 -> 8001",
+        "<title>Logweir</title>",
+        "id=\"view-slot\"",
+    ] {
+        assert!(readiness.contains(identity), "readiness omits {identity}");
+    }
+    assert!(
+        readme.contains("${owned_namespaces[@]+\"${owned_namespaces[@]}\"}"),
+        "empty owned_namespaces must be safe under Bash 3.2 nounset"
+    );
+    assert!(
+        readme.contains("image rm \"$image\" >/dev/null 2>&1 || cleanup_status=1")
+            && readme.contains("rm -rf \"$wrapper\" || cleanup_status=1")
+            && readme.contains("rm -f \"$port_forward_log\" || cleanup_status=1"),
+        "cleanup-only failures must make an otherwise successful recipe nonzero"
+    );
+}
+
 /// Collapses every run of whitespace to one space, so an assertion can name a
 /// sentence without depending on where the author wrapped it. The
 /// `one_signer_gate.rs::comment_prose` precedent.
@@ -1250,21 +1282,22 @@ fn the_offline_gate_refuses_a_bare_module_specifier() {
 // read-only roster page.
 // ===========================================================================
 
-/// The three tokens the wizard's SUBMIT REGION may not carry, plus the plan
-/// document's file extension, which is the fourth.
+/// The unambiguous reserialisation entry points the wizard's SUBMIT REGION may
+/// not carry, plus the plan document's file extension.
 ///
 /// WHY THIS LIST AND NOT A GREP FOR "TRANSFORMATION". Each of these is an
 /// entry point that produces a NEW string from the plan bytes, and a new
 /// string is a new document with a new sha256 -- which is a document the
-/// approver never signed. JavaScript has no string identity operator, so a
-/// behavioural `===` arm holds under a mutant that reserialised to an equal
-/// string; the byte comparison in `pages.spec.js` catches the mutants that
-/// change the bytes and this scan catches the machinery that could.
-const RESERIALISERS: [&str; 6] = [
+/// approver never signed. `.trim(` is deliberately not an entry: this source
+/// region also builds the approval route, where it normalises the selected
+/// namespace rather than plan bytes. The byte comparison in `pages.spec.js`
+/// exercises plan bytes with significant trailing whitespace and is the
+/// receiver-aware protection against a trim (or another transformation) of
+/// the submitted document.
+const RESERIALISERS: [&str; 5] = [
     "JSON.parse",
     "JSON.stringify",
     "structuredClone",
-    ".trim(",
     ".normalize(",
     "yaml",
 ];
@@ -1402,10 +1435,13 @@ fn the_wizard_never_reserialises_the_plan_bytes() {
         );
     }
 
-    // AND THE SUBMIT REGION CARRIES NONE OF THE SIX. `.trim(` reads a form
-    // control outside the region and the plan document's extension appears
-    // only in the download handler, which is why the scan is a region and not
-    // the whole file -- and why both markers are asserted present above.
+    // AND THE SUBMIT REGION CARRIES NONE OF THE FIVE. Namespace normalisation
+    // in approvalRoute is intentionally allowed here: this region contains
+    // both the submit path and the route hand-off, while the behavioural arm
+    // below verifies the value actually assigned to `spec.planBytes`.
+    // The plan document's extension appears only in the download handler,
+    // which is why the scan is a region and not the whole file -- and why both
+    // markers are asserted present above.
     let region = region_of(&source, "// SUBMIT-REGION-BEGIN", "// SUBMIT-REGION-END");
     assert!(
         region.len() > 400,

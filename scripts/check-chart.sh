@@ -110,6 +110,7 @@ fi
 echo "== 7. values.yaml names the tree's own repositories at $LOGWEIR_TAG =="
 values_controller="$(sed -n 's/^controllerImage:[[:space:]]*//p' "$CHART/values.yaml")"
 values_runner="$(sed -n 's/^runnerImage:[[:space:]]*//p' "$CHART/values.yaml")"
+values_bootstrap="$(sed -n 's/^[[:space:]]*bootstrapImage:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}.*$/\1/p' "$CHART/values.yaml")"
 # `ui.image` IS INDENTED AND CARRIES A TRAILING COMMENT (ruling 15's short
 # style), so it is read with its own expression rather than with the two above:
 # two leading spaces, the key, the value up to the first whitespace. `tail -1`
@@ -129,6 +130,8 @@ if [ -z "$controller_repo" ] || [ -z "$runner_repo" ] ||
   echo "      config/manager/deployment.yaml and crates/weirkeeper/src/job.rs must each pin <repository>@sha256:<64 hex>" >&2
   fail=1
 fi
+bootstrap_test_image="$runner_repo@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+bootstrap_render_args=(--set-string "identity.bootstrapImage=$bootstrap_test_image")
 # THE THIRD REPOSITORY, TASK 39. The UI image has no digest pin in the tree to
 # strip a digest off — it is referenced by this chart alone — so its NAMESPACE
 # is taken from the runner's and only the NAME is this chart's. A namespace
@@ -164,8 +167,51 @@ fi
   [ "$values_ui" = "$want_ui" ] &&
   echo "   ok: controllerImage, runnerImage and ui.image are the tree's repositories at $LOGWEIR_TAG"
 
+if [ -z "$values_bootstrap" ]; then
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" > /dev/null 2> "$tmp/bootstrap-release-blocked.err"
+  rc=$?
+  if [ "$rc" -eq 0 ] || ! grep -q "identity.bootstrapImage is release-blocked" "$tmp/bootstrap-release-blocked.err"; then
+    echo "FAIL: empty identity.bootstrapImage did not stop the unsupported default render with its release-blocked diagnostic" >&2
+    fail=1
+  else
+    echo "   rc=$rc  (unpublished bootstrap default refused, as required)"
+  fi
+else
+  case "$values_bootstrap" in
+    *@sha256:????????????????????????????????????????????????????????????????) : ;;
+    *) echo "FAIL: identity.bootstrapImage must be a reviewed immutable digest, found '$values_bootstrap'" >&2; fail=1 ;;
+  esac
+fi
+
+for unsafe_policy in Always IfNotPresent; do
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" \
+    --set-string identity.bootstrapImage=logweir:mutable-development \
+    --set identity.allowMutableBootstrapImageForDevelopment=true \
+    --set "identity.bootstrapImagePullPolicy=$unsafe_policy" \
+    > /dev/null 2> "$tmp/bootstrap-mutable-$unsafe_policy.err"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: mutable identity bootstrap image was accepted with pull policy $unsafe_policy" >&2
+    fail=1
+  else
+    echo "   rc=$rc  (mutable bootstrap with $unsafe_policy refused, as required)"
+  fi
+done
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" \
+  --set-string identity.bootstrapImage=logweir:mutable-development \
+  --set identity.allowMutableBootstrapImageForDevelopment=true \
+  --set identity.bootstrapImagePullPolicy=Never > /dev/null 2> "$tmp/bootstrap-mutable-Never.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: explicit local-only mutable bootstrap image with pull policy Never was refused" >&2
+  cat "$tmp/bootstrap-mutable-Never.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (explicit mutable bootstrap development image accepted only with Never)"
+fi
+
 # ---------------------------------------------------------------- 3 + 4. lint and render
-echo "== 3. helm lint, default values and every example =="
+echo "== 3. helm lint, release defaults/examples with an unpublished test-only bootstrap digest =="
 render_targets=("default:")
 for ex in "$EXAMPLES"/*.values.yaml; do
   name="$(basename "$ex" .values.yaml)"
@@ -176,13 +222,13 @@ for target in "${render_targets[@]}"; do
   name="${target%%:*}"
   file="${target#*:}"
   if [ -z "$file" ]; then
-    helm lint "$CHART" > "$tmp/lint-$name.log" 2>&1
+    helm lint "$CHART" "${bootstrap_render_args[@]}" > "$tmp/lint-$name.log" 2>&1
     rc=$?
   else
-    helm lint "$CHART" -f "$file" > "$tmp/lint-$name.log" 2>&1
+    helm lint "$CHART" -f "$file" "${bootstrap_render_args[@]}" > "$tmp/lint-$name.log" 2>&1
     rc=$?
   fi
-  echo "   rc=$rc  (helm lint $CHART${file:+ -f $file})"
+  echo "   rc=$rc  (helm lint $CHART${file:+ -f $file} --set-string identity.bootstrapImage=<unpublished-test-digest>)"
   if [ "$rc" -ne 0 ]; then
     cat "$tmp/lint-$name.log" >&2
     fail=1
@@ -195,13 +241,13 @@ for target in "${render_targets[@]}"; do
   name="${target%%:*}"
   file="${target#*:}"
   if [ -z "$file" ]; then
-    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --include-crds > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
+    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --include-crds "${bootstrap_render_args[@]}" > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
     rc=$?
   else
-    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --include-crds -f "$file" > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
+    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --include-crds -f "$file" "${bootstrap_render_args[@]}" > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
     rc=$?
   fi
-  echo "   rc=$rc  (helm template $RELEASE $CHART -n $NAMESPACE --include-crds${file:+ -f $file} > $RENDERED/$name.yaml)"
+  echo "   rc=$rc  (helm template $RELEASE $CHART -n $NAMESPACE --include-crds${file:+ -f $file} --set-string identity.bootstrapImage=<unpublished-test-digest> > $RENDERED/$name.yaml)"
   if [ "$rc" -ne 0 ]; then
     cat "$tmp/render-$name.err" >&2
     fail=1
@@ -210,7 +256,7 @@ for target in "${render_targets[@]}"; do
   {
     echo "# GENERATED FILE — do not edit by hand."
     echo "# Rendered by scripts/check-chart.sh (just chart-check):"
-    echo "#   helm template $RELEASE $CHART -n $NAMESPACE --include-crds${file:+ -f $file}"
+    echo "#   helm template $RELEASE $CHART -n $NAMESPACE --include-crds${file:+ -f $file} --set-string identity.bootstrapImage=<unpublished-test-digest>"
     echo "# It is checked in so a template change lands as a diff a reviewer reads; the"
     echo "# gate compares a temporary render and fails on drift."
     cat "$tmp/$name.yaml"
@@ -243,6 +289,9 @@ for f in "$RENDERED"/*.yaml; do
     ref="${ref//\'/}"
     ref="$(printf '%s' "$ref" | tr -d '[:space:]')"
     images=$((images + 1))
+    if [ "$ref" = "$bootstrap_test_image" ]; then
+      continue
+    fi
     # THE THREE LOGWEIR IMAGES, BY REPOSITORY. Each must be exactly
     # `<repository>:$LOGWEIR_TAG` — a digest there is this chart's ruling
     # reverted, and any other tag is a value nobody chose.
@@ -289,8 +338,8 @@ fi
 
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
-for flag in demoKafka.enabled minio.enabled ui.enabled; do
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
+for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled; do
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${bootstrap_render_args[@]}" --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "FAIL: \`helm template --set $flag=yes\` exited 0; values.schema.json must type $flag as a boolean and refuse the string" >&2
@@ -299,6 +348,15 @@ for flag in demoKafka.enabled minio.enabled ui.enabled; do
     echo "   rc=$rc  (helm template --set $flag=yes — refused, as it must be)"
   fi
 done
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${bootstrap_render_args[@]}" \
+  --set-string 'identity.kubernetesApiCIDRs[0]=0.0.0.0/0' > /dev/null 2> "$tmp/schema-broad-api.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: identity.kubernetesApiCIDRs accepted broad 0.0.0.0/0 egress" >&2
+  fail=1
+else
+  echo "   rc=$rc  (broad bootstrap API CIDR refused, as it must be)"
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

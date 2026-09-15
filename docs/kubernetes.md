@@ -177,7 +177,7 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | Kind | Scope | What it is |
 |---|---|---|
 | `KafkaCluster` | Namespaced | A cluster connection: bootstrap servers, `auth{mode, username, secretRef, tls}`, role, and the marker topic that proves a scratch target. `status.clusterId` is read from the broker, never from the spec. |
-| `BackupSchedule` | Namespaced | A recurring backup of a **named** topic set (no wildcard, no glob metacharacter). `spec.suspend` is the only mutable field. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
+| `BackupSchedule` | Namespaced | A recurring backup of a **named** topic set (no wildcard, no glob metacharacter). `spec.concurrencyPolicy` is `Forbid` by default or explicitly `Allow`; `spec.suspend` is the only mutable field. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
 | `Backup` | Namespaced | One archive run, as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets `AlreadyExists` rather than a second partial archive. |
 | `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
 | `Approval` | Namespaced | A DSSE-signed authorisation for one `Restore` or `Backup`. **Four required spec fields**; `approvalBytes` and `sidecarBytes` are the UTF-8 document text, verbatim, never base64. |
@@ -409,10 +409,77 @@ duplicate reconcile a 409 `AlreadyExists` instead of a second, partial archive
 (guard **G-SLOT**), and a name that had to be shortened to fit would not be
 that function any more.
 
+### Concurrency policy uses owned Backup state
+
+`spec.concurrencyPolicy` controls whether different scheduled slots may run at
+the same time. The field has two values: `Forbid` (recommended and default) and
+`Allow` (explicit opt-in). An existing `BackupSchedule` stored before the field
+was added behaves as `Forbid` without an object rewrite. The policy is sealed
+with the other schedule inputs, so choosing `Allow` for an old omitted-field
+schedule requires creating a replacement schedule. This changes no cron
+expression, timezone, missed-slot horizon, catch-up, or retry behavior.
+
+Until PLAT-05 decouples retained history from schedule ownership, replace an
+immutable schedule policy only with this drain-and-retain procedure:
+
+1. Set `spec.suspend: true` on the old schedule so it admits no new slots.
+2. List every `Backup` whose **controller owner reference UID** equals the old
+   schedule UID, and wait until all of them are terminal (`Succeeded`, `Failed`,
+   or legacy `Refused`). Do not use the singular `activeBackupRef` as proof that
+   the drain is complete.
+3. Retain the old, suspended `BackupSchedule`. Its controller owner references
+   still anchor the old `Backup` history; deleting it can let Kubernetes garbage
+   collection delete that history.
+4. Create the replacement under a **different name**, only after the drain.
+   The replacement has a different UID and therefore cannot see an old active
+   child as its own; starting it before the drain can overlap generations.
+
+Do not delete and recreate a schedule under the same name. That is not a safe
+policy migration: deletion can remove history, while the recreated object's new
+UID neither adopts nor excludes work owned by the old generation. An old
+schedule whose `concurrencyPolicy` field is omitted already behaves as
+`Forbid`; suspend that same object and follow the procedure above.
+
+Under `Forbid`, the controller lists Backups in the schedule's namespace and
+accepts only children whose controller owner UID is the schedule's current UID.
+An absent phase, an unknown phase, and a nonterminal Backup whose Job is missing
+all remain active conservatively; the Backup controller may still create or
+recreate that Job. Terminal `Succeeded`, `Failed`, or legacy `Refused` Backups
+do not block. Completed and missing `activeBackupRef` values are cleared.
+
+Admission of a new slot is a resource-version-checked status reservation, so
+two controller replicas cannot admit different slots from the same schedule
+state. `status.pendingBackupRef` identifies accepted work between reservation
+and child creation; a restart resumes that deterministic child. Once the child
+is observed or created, the controller clears the reservation and reports it
+through `status.activeBackupRef`. This uses no separate Kubernetes Lease.
+
+| Policy and observed state | Due-slot result | Schedule status |
+|---|---|---|
+| omitted or `Forbid`; no owned unfinished Backup | Atomically reserve, then create the deterministic slot child | `Scheduled`; pending ref becomes active ref |
+| `Forbid`; owned Backup is nonterminal or unknown, including a missing Job | Do not create the new slot | `ConcurrencyBlocked`; slot recorded in `lastMissedSlot` with the blocking Backup named |
+| `Forbid`; referenced Backup is terminal | Clear the completed active ref and admit the due slot | New child becomes active |
+| `Forbid`; `activeBackupRef` names no owned Backup | Clear the stale ref and admit the due slot | New child becomes active |
+| `Forbid`; `pendingBackupRef` has no child after restart | Resume the already accepted deterministic child | Pending ref becomes active ref; no second admission |
+| explicit `Allow` | Create the deterministic due-slot child regardless of earlier slots; after a 409, fetch the winner and require the current schedule's complete controller identity | The owned winner is reported; foreign, ownerless, old-UID, or transiently missing winners are errors and are not adopted |
+
+Apply the regenerated CRD before starting the new controller. For a strict
+no-overlap upgrade, suspend schedules or stop the old controller before the
+rollout: an old and new replica briefly running together do not share the new
+reservation protocol. No schedule rewrite is needed, and existing Backup
+children remain the run-state authority.
+
+After the updated CRD is installed, an older controller ignores the additive
+fields but does not enforce cross-slot `Forbid`. Suspend schedules and drain or
+stop the new controller before rollback if overlap prevention must remain
+guaranteed; remove neither accepted Backup children nor their pending
+reservation during that handoff.
+
 ### A slot older than one hour is skipped, and the skip is recorded
 
 The controller has no timer and no leader lease: it re-examines every schedule
-every 30 seconds and works out which slot is due. A slot that came due more
+every 30 seconds, works out which slot is due, and uses the status reservation
+above only when admitting `Forbid` work. A slot that came due more
 than **one hour** before the controller looked is **skipped** — a controller
 restarted after a week must not fire six days of backlog, because a `Backup`
 for a window nobody is waiting for costs the same broker read as one somebody
@@ -672,10 +739,10 @@ deleted and recreated between retries; this check prevents old plan bytes
 from being combined with its new credentials. The controller does not overwrite
 an existing plan that another reconcile might already have mounted.
 
-**Why the allowlist is a ConfigMap key here when the drill path keeps its own in
-a Secret.** On the drill path `allowedClusterIds` authorises a restore
-*target*, so a subject with `patch configmaps` could widen it, and it lives in
-the `logweir-approval-bundle` Secret. On the backup path the direction is
+**Why the allowlist needs a stronger binding on the drill path.** On that path
+`allowedClusterIds` authorises a restore *target*, so the per-Restore bundle is
+immutable and its exact bytes are pinned in the Job template and checked by
+the runner before phase 0. On the backup path the direction is
 reversed: **the allowlist is a consistency rail, not a boundary.** The address
 the run dials comes from the CEL-immutable `sourceRef` and never from this file,
 and the backup guard *refuses* a run whose broker-observed source cluster id
@@ -933,16 +1000,84 @@ TTL at creation time:
 
 | Volume | From | At | Why |
 |---|---|---|---|
-| `approval` | Secret `logweir-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` |
+| `approval` | immutable ConfigMap `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` |
 | `signing` | Secret `logweir-signing-key`, `0440` | `/signing` | the runner's own signing key, readable only because `fsGroup: 65532` is set |
 | `plan` | ConfigMap `<name>-plan` | `/plan` | `spec.planBytes`, verbatim |
 | `work` | `emptyDir` | `/work` | the scorecard, the offset report and the checkpoint state, on a pod whose root filesystem is read-only |
 
-**`allowed-clusters.json` is in a SECRET here and a ConfigMap on the backup
-path, and the direction is why.** On this path the file authorises a restore
-*target*: a subject with `patch configmaps` who replaced it would WIDEN the set
-of clusters a restore may write into. On the backup path the same file can only
-make a run refuse (§10), so it stays a ConfigMap key there.
+The Job template pins the SHA-256 of the plan and every approval-bundle member,
+including `allowed-clusters.json`, plus the Restore and Approval identities.
+New Jobs also pass `--execution-contract-version 1`, matching
+`LOGWEIR_EXECUTION_CONTRACT_VERSION=1` in the immutable pod template. The
+runner captures the projected bytes once, checks every digest, verifies the
+approval signature and plan hash, and only then constructs Kafka, archive or
+engine clients. A current runner rejects a missing, partial or mismatched
+argv/environment contract. A pre-contract runner rejects the new argv flag as
+unknown before command dispatch, so a new controller cannot silently run a
+vulnerable old binary. `immutable: true` prevents updates; the runner-side
+digest check also closes delete/recreate substitution under the same ConfigMap
+name. Failure notifications retain only the routing fields parsed from these
+authenticated bytes; reporting never reopens `/plan/restore.yaml`.
+
+#### Upgrade, rollback and legacy Jobs
+
+Upgrade the Approval CRD before rolling out a controller that writes or relies
+on `status.verifiedSubjectRef`. Helm installs CRDs on a fresh release but does
+not upgrade existing CRDs. For a real installation, deliberately select its
+context and namespace; do not rely on the kubeconfig's current context:
+
+```bash
+export LOGWEIR_CONTEXT=<production-context>
+export LOGWEIR_NAMESPACE=<logweir-namespace>
+
+# 1. Apply the additive API schema before any new controller pod can start.
+kubectl --context "$LOGWEIR_CONTEXT" apply -f config/crd/approvals.yaml
+
+# 2. Wait for API discovery, then verify the provenance object and UID field.
+kubectl --context "$LOGWEIR_CONTEXT" wait \
+  --for=condition=Established crd/approvals.logweir.dev --timeout=60s
+approval_schema="$(kubectl --context "$LOGWEIR_CONTEXT" get \
+  crd/approvals.logweir.dev \
+  -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.status.properties.verifiedSubjectRef.type}{" "}{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.status.properties.verifiedSubjectRef.properties.uid.type}')"
+test "$approval_schema" = "object string"
+
+# 3. Only after both checks succeed, perform the controller/chart rollout.
+helm upgrade --install logweir ./charts/logweir \
+  --kube-context "$LOGWEIR_CONTEXT" --namespace "$LOGWEIR_NAMESPACE"
+kubectl --context "$LOGWEIR_CONTEXT" -n "$LOGWEIR_NAMESPACE" rollout status \
+  deployment/logweir-weirkeeper
+```
+
+If either CRD check fails, stop before step 3. Starting the new controller
+against an older structural schema can prune `verifiedSubjectRef`; a Restore
+can then wait forever for provenance the API server discarded.
+
+An already-created Job is the compatibility boundary. If its complete
+single controller owner reference names the same Restore UID, the upgraded
+controller observes it without changing its legacy namespace-wide Secret
+mount. A same-named Job with no owner, a malformed owner, an older Restore UID,
+or an appended secondary owner is a terminal `JobNameConflict` and is never
+adopted. Unrelated annotations remain compatible.
+
+If the old controller created `<restore>-plan` and crashed before creating the
+Job, the new controller accepts it only when its bytes and complete owner
+reference exactly match. The new Job still carries the execution digests, so
+later replacement is refused before phase 0. Legacy Verified Approval status
+is held until the Approval controller records `verifiedSubjectRef`; an Approval
+already bound to a deleted UID is refused and must be recreated.
+
+The Approval CRD change is additive and may remain installed during and after a
+controller rollback; do not attempt to downgrade or delete the CRD as part of
+rollback. Fence controller changes by scaling weirkeeper to zero, then let or
+cancel every pending/running Restore and verify none is between ConfigMap
+materialization and Job creation. Roll back controller and runner images only
+after that drain. An older controller does not understand the new execution
+contract and could otherwise create a legacy-transport Job from a partially
+materialized new Restore. A current runner deliberately accepts a Job only when
+both contract channels are absent (the preserved legacy/standalone shape) or
+when both carry the complete matching current contract. Keep
+`logweir-approval-bundle` until all pre-upgrade Jobs finish; after the drain,
+delete it only when no remaining Job pod template references it.
 
 The object-store credential reaches the pod as `secretKeyRef` env
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) from
@@ -1383,8 +1518,10 @@ kubectl config use-context docker-desktop
 kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
 ```
 
-`kubectl config` writes the kubeconfig itself and takes no `--context`; every
-other `kubectl` line in this document names `--context docker-desktop`.
+`kubectl config` writes the kubeconfig itself and takes no `--context`. Other
+commands name either `--context docker-desktop` for this guide's local examples
+or the deliberately selected `$LOGWEIR_CONTEXT` in the production CRD-upgrade
+procedure.
 
 Under that kubeconfig a 403 from the page is the API server refusing
 `logweir-ui`, which is the story the page tells: every error it shows carries the

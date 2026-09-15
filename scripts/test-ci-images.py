@@ -246,6 +246,19 @@ class PromotionTests(unittest.TestCase):
         result = self.run_promotion(success=False)
         self.assertIn("Tag verification failed", result.stderr)
 
+    def test_runner_candidate_executes_identity_bootstrap_help_before_promotion(self):
+        image_check = (ROOT / "scripts/check-image.sh").read_text()
+        self.assertIn(
+            'docker run --rm --platform "$PLATFORM" "$ref" identity bootstrap --help',
+            image_check,
+        )
+        publication = (ROOT / "scripts/ci-images.sh").read_text()
+        pull = publication.index('docker pull --platform "linux/$ARCH" "$repo@$digest"')
+        exact_check = publication.index('check_image "$product" "$repo@$digest"', pull)
+        promote = publication.index('  promote)')
+        self.assertLess(pull, exact_check)
+        self.assertLess(exact_check, promote)
+
 
 if __name__ == "__main__":
     unittest.main()

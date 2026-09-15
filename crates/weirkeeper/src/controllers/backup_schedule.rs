@@ -2,10 +2,11 @@
 //!
 //! # The whole design in one sentence
 //!
-//! The object name is a pure function of the trigger, so the reconciler's only
-//! write for a due slot is a `create`, and a duplicate reconcile after a crash
-//! gets **409 `AlreadyExists`** from the API server — which **is** the
-//! idempotence key. No lease, no lock, no `status` round trip.
+//! The object name is a pure function of the trigger, while `Forbid` first
+//! reserves that name through a resource-version-checked `/status` replace.
+//! The reservation serializes different slots across replicas; a duplicate
+//! child `create` still gets **409 `AlreadyExists`**, which is the same-slot
+//! idempotence key.
 //!
 //! # Why that is the design and not merely a tidy one
 //!
@@ -22,13 +23,13 @@
 //! `Utc::now()` at all: the one clock read in this file is in the
 //! `kube::runtime` wrapper, before anything is decided.
 //!
-//! # The status write happens AFTER the create, deliberately
+//! # The final status write happens AFTER the create, deliberately
 //!
-//! That is what makes the crash window harmless. Crash after the create and
-//! before the status patch and the next reconcile recomputes the same name,
-//! collides, and completes the status write it never got to. Crash the other
-//! way round — status first — and a controller that then died would have
-//! recorded a fire that never happened.
+//! `Forbid` has a short-lived `pendingBackupRef` before the create, but it does
+//! not claim the Backup fired. A restart resumes that accepted deterministic
+//! child. After the child is observed or created, the final patch records
+//! `lastFireTime`, moves the reference to `activeBackupRef`, and clears the
+//! reservation. This distinguishes accepted work from a stale active ref.
 //!
 //! # A skipped slot is a fact, not a silence
 //!
@@ -78,7 +79,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt as _;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{ListParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
@@ -90,7 +91,9 @@ use logweir_store::Store;
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::backup::{Backup, BackupSpec};
-use crate::crds::backup_schedule::{BackupSchedule, BackupScheduleSpec, Retention};
+use crate::crds::backup_schedule::{
+    BackupSchedule, BackupScheduleSpec, ConcurrencyPolicy, Retention,
+};
 use crate::crds::{Condition, LocalRef};
 use crate::retention::RetentionReport;
 use crate::slot::{backup_id_for, scheduled_backup_name, slot_name, Cron, CronError, SlotError};
@@ -106,6 +109,10 @@ pub const REASON_SUSPENDED: &str = "Suspended";
 
 /// `reason` when the due slot was older than [`MISSED_SLOT_HORIZON`].
 pub const REASON_SLOT_MISSED: &str = "SlotMissed";
+
+/// `reason` when `Forbid` declines a due slot because an earlier owned Backup
+/// has not reached a known terminal phase.
+pub const REASON_CONCURRENCY_BLOCKED: &str = "ConcurrencyBlocked";
 
 /// `reason` when the expression parses but has no fire inside the parser's
 /// lookback.
@@ -253,6 +260,17 @@ pub enum SlotDecision {
         /// When it will next fire.
         next_fire_time: Option<DateTime<Utc>>,
     },
+    /// A slot was due but `Forbid` found an earlier owned Backup whose state is
+    /// nonterminal or unknown. The slot is not retried under a new identity.
+    ConcurrencyBlocked {
+        /// The slot that was not fired.
+        slot: String,
+        /// Names of the owned Backups that prevented admission, sorted for a
+        /// stable condition message.
+        active_backups: Vec<String>,
+        /// When the cron expression next fires.
+        next_fire_time: Option<DateTime<Utc>>,
+    },
     /// A slot is due, and the object name it needs does not fit.
     NameTooLong {
         /// That slot as [`slot_name`] spells it.
@@ -278,7 +296,7 @@ pub enum SlotDecision {
 impl SlotDecision {
     /// The condition `reason` for this decision.
     ///
-    /// A `match` WITH NO WILDCARD, so an eighth variant fails to compile until
+    /// A `match` WITH NO WILDCARD, so a ninth variant fails to compile until
     /// someone names its reason — the same discipline
     /// [`super::approval::ApprovalRefusal::reason`] holds.
     ///
@@ -295,6 +313,7 @@ impl SlotDecision {
             Self::Unparseable(_) => REASON_UNPARSEABLE_SCHEDULE,
             Self::NoDueSlot { .. } => REASON_NO_DUE_SLOT,
             Self::Missed { .. } => REASON_SLOT_MISSED,
+            Self::ConcurrencyBlocked { .. } => REASON_CONCURRENCY_BLOCKED,
             Self::NameTooLong { .. } => REASON_NAME_TOO_LONG,
             Self::Due { .. } | Self::AlreadyFired { .. } => REASON_SCHEDULED,
         }
@@ -318,7 +337,10 @@ impl SlotDecision {
     #[must_use]
     pub fn ready(&self) -> bool {
         match self {
-            Self::Due { .. } | Self::AlreadyFired { .. } | Self::Missed { .. } => true,
+            Self::Due { .. }
+            | Self::AlreadyFired { .. }
+            | Self::Missed { .. }
+            | Self::ConcurrencyBlocked { .. } => true,
             Self::Suspended | Self::Unparseable(_) | Self::NoDueSlot { .. } => false,
             Self::NameTooLong { .. } => false,
         }
@@ -336,6 +358,7 @@ impl SlotDecision {
             Self::NoDueSlot { next_fire_time }
             | Self::AlreadyFired { next_fire_time, .. }
             | Self::Missed { next_fire_time, .. }
+            | Self::ConcurrencyBlocked { next_fire_time, .. }
             | Self::NameTooLong { next_fire_time, .. }
             | Self::Due { next_fire_time, .. } => *next_fire_time,
         }
@@ -375,6 +398,15 @@ impl SlotDecision {
             Self::Missed { slot, .. } => format!(
                 "slot {slot} is older than the one-hour missed-slot horizon and was not fired; \
                  the next firing is {next}"
+            ),
+            Self::ConcurrencyBlocked {
+                slot,
+                active_backups,
+                ..
+            } => format!(
+                "slot {slot} was not fired because concurrencyPolicy Forbid found unfinished or \
+                 unknown owned Backup(s) {}; the next firing is {next}",
+                active_backups.join(", ")
             ),
             Self::NameTooLong { slot, error, .. } => format!(
                 "slot {slot} is due but no Backup could be named for it: {error}; the next \
@@ -620,6 +652,119 @@ pub fn scheduled_backup(
     }
 }
 
+/// Whether `backup` has this complete `BackupSchedule` identity as controller.
+///
+/// Labels and `spec.scheduleRef` are hints. The controller reference must match
+/// API version, kind, name, UID, and `controller: true`; a schedule deleted and
+/// recreated under the same name must not adopt the previous object's work.
+#[must_use]
+pub fn is_owned_by_schedule(backup: &Backup, schedule_name: &str, schedule_uid: &str) -> bool {
+    backup
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|owner| {
+            owner.controller == Some(true)
+                && owner.name == schedule_name
+                && owner.uid == schedule_uid
+                && owner.kind == BackupSchedule::kind(&())
+                && owner.api_version == BackupSchedule::api_version(&())
+        })
+}
+
+/// Whether the Backup CR has reached a phase that cannot run again.
+///
+/// Everything else, including an absent or future phase, is deliberately
+/// nonterminal: `Forbid` treats unknown state conservatively. A missing Job is
+/// not terminal because the Backup controller may recreate it.
+#[must_use]
+pub fn backup_is_terminal(backup: &Backup) -> bool {
+    matches!(
+        backup
+            .status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
+        Some("Succeeded" | "Failed" | "Refused")
+    )
+}
+
+fn reservation_body(
+    schedule: &BackupSchedule,
+    decision: &SlotDecision,
+    backup_name: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut reserved = schedule.clone();
+    let mut status = schedule.status.clone().unwrap_or_default();
+    status.active_backup_ref = None;
+    status.pending_backup_ref = Some(LocalRef {
+        name: backup_name.to_string(),
+    });
+    status.next_fire_time = decision.next_fire_time();
+    status.conditions = Some(vec![merge_condition(
+        current_condition(status.conditions.as_ref(), CONDITION_READY),
+        Condition {
+            r#type: CONDITION_READY.to_string(),
+            status: "True".to_string(),
+            observed_generation: schedule.metadata.generation,
+            last_transition_time: Some(now),
+            reason: Some(REASON_SCHEDULED.to_string()),
+            message: Some(format!(
+                "{}; concurrencyPolicy Forbid atomically admitted this slot and is creating the Backup",
+                decision.message()
+            )),
+        },
+    )]);
+    reserved.status = Some(status);
+    serde_json::to_vec(&reserved)
+}
+
+fn reserved_slot(schedule_name: &str, backup_name: &str) -> Option<(String, DateTime<Utc>)> {
+    let prefix = format!("{}{}-", crate::slot::SCHEDULED_BACKUP_PREFIX, schedule_name);
+    let slot = backup_name.strip_prefix(&prefix)?;
+    if slot.len() != 15
+        || scheduled_backup_name(schedule_name, slot).ok().as_deref() != Some(backup_name)
+    {
+        return None;
+    }
+    let due = chrono::NaiveDateTime::parse_from_str(slot, "%Y%m%d-%H%M%S")
+        .ok()?
+        .and_utc();
+    Some((slot.to_string(), due))
+}
+
+/// Add optimistic-concurrency preconditions to a `/status` merge patch.
+///
+/// Kubernetes applies `metadata.resourceVersion` as an update precondition.
+/// Including the object name as well makes the body self-identifying and keeps
+/// the precondition tied to the same object named by the request path. A stale
+/// finalizer therefore receives `409 Conflict` instead of merging scheduling
+/// fields computed before a newer reservation.
+fn status_patch_with_preconditions(
+    schedule: &BackupSchedule,
+    mut patch: serde_json::Value,
+) -> Result<serde_json::Value, ScheduleError> {
+    let name = schedule.name_any();
+    let resource_version = schedule
+        .metadata
+        .resource_version
+        .clone()
+        .ok_or_else(|| ScheduleError::MissingResourceVersion(name.clone()))?;
+    patch
+        .as_object_mut()
+        .expect("a status patch is always a JSON object")
+        .insert(
+            "metadata".to_string(),
+            json!({
+                "name": name,
+                "resourceVersion": resource_version,
+            }),
+        );
+    Ok(patch)
+}
+
 /// The `/status` merge patch one decision produces.
 ///
 /// BUILT AS JSON RATHER THAN BY SERIALISING `BackupScheduleStatus`, and the
@@ -629,15 +774,15 @@ pub fn scheduled_backup(
 /// Clearing `nextFireTime` when a schedule is suspended therefore needs an
 /// explicit JSON `null`, which only a hand-built body can carry.
 ///
-/// WHAT IS DELIBERATELY NOT WRITTEN. `lastFireTime` and `activeBackupRef` are
-/// omitted for every decision except [`SlotDecision::Due`], so a schedule that
-/// skips a slot keeps the record of when it last actually fired. `lastMissedSlot`
-/// is likewise written only by [`SlotDecision::Missed`] and never cleared: it is
-/// the audit trail of a skip, and clearing it on the next successful fire would
-/// erase the one thing critique B M20 asked for. [`SlotDecision::AlreadyFired`]
-/// writes NONE of the three — it is the steady state of a healthy schedule, and
-/// a steady state that rewrote `lastFireTime` on every requeue would move the
-/// timestamp an operator uses to tell when the backup actually ran.
+/// WHAT IS DELIBERATELY NOT WRITTEN. `lastFireTime` is omitted unless a child
+/// was created or observed for the decision. `activeBackupRef` and
+/// `pendingBackupRef` are updated only when the API-facing reconciliation has
+/// actual owned-run information; the public pure helper keeps them otherwise.
+/// `lastMissedSlot` is written by [`SlotDecision::Missed`] and
+/// [`SlotDecision::ConcurrencyBlocked`] and never cleared: it is the audit
+/// trail of a skip. [`SlotDecision::AlreadyFired`] does not rewrite the fire
+/// time, so a steady reconcile cannot move the timestamp an operator uses to
+/// tell when the backup actually ran.
 ///
 /// `lastTransitionTime` MOVES ONLY WHEN THE CONDITION TRANSITIONS — see
 /// [`crate::conditions::merge_condition`], which is now the ONE
@@ -659,6 +804,19 @@ pub fn status_patch(
     status_patch_with_retention(schedule, decision, created, None, now)
 }
 
+#[derive(Clone, Debug)]
+enum ActiveRefUpdate {
+    Keep,
+    Set(String),
+    Clear,
+}
+
+#[derive(Clone, Debug)]
+enum PendingRefUpdate {
+    Keep,
+    Clear,
+}
+
 /// [`status_patch`], plus the retention report (Task 19).
 ///
 /// `None` OMITS THE KEY ENTIRELY, and that is deliberate. A `Merge` patch
@@ -673,6 +831,29 @@ pub fn status_patch_with_retention(
     schedule: &BackupSchedule,
     decision: &SlotDecision,
     created: Option<&str>,
+    retention: Option<&RetentionReport>,
+    now: DateTime<Utc>,
+) -> serde_json::Value {
+    let active = created.map_or(ActiveRefUpdate::Keep, |name| {
+        ActiveRefUpdate::Set(name.to_string())
+    });
+    status_patch_with_refs(
+        schedule,
+        decision,
+        active,
+        PendingRefUpdate::Keep,
+        None,
+        retention,
+        now,
+    )
+}
+
+fn status_patch_with_refs(
+    schedule: &BackupSchedule,
+    decision: &SlotDecision,
+    active: ActiveRefUpdate,
+    pending: PendingRefUpdate,
+    fired_due: Option<DateTime<Utc>>,
     retention: Option<&RetentionReport>,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
@@ -707,13 +888,30 @@ pub fn status_patch_with_retention(
             None => serde_json::Value::Null,
         },
     );
-    if let SlotDecision::Missed { slot, .. } = decision {
+    if let SlotDecision::Missed { slot, .. } | SlotDecision::ConcurrencyBlocked { slot, .. } =
+        decision
+    {
         status.insert("lastMissedSlot".to_string(), json!(slot));
     }
-    if let SlotDecision::Due { due, .. } = decision {
+    if let Some(due) = fired_due.or(match decision {
+        SlotDecision::Due { due, .. } => Some(*due),
+        _ => None,
+    }) {
         status.insert("lastFireTime".to_string(), json!(due));
-        if let Some(name) = created {
+    }
+    match active {
+        ActiveRefUpdate::Keep => {}
+        ActiveRefUpdate::Set(name) => {
             status.insert("activeBackupRef".to_string(), json!({ "name": name }));
+        }
+        ActiveRefUpdate::Clear => {
+            status.insert("activeBackupRef".to_string(), serde_json::Value::Null);
+        }
+    }
+    match pending {
+        PendingRefUpdate::Keep => {}
+        PendingRefUpdate::Clear => {
+            status.insert("pendingBackupRef".to_string(), serde_json::Value::Null);
         }
     }
     let ready = if decision.ready() { "True" } else { "False" };
@@ -761,6 +959,14 @@ pub enum ScheduleError {
     /// named: a `backup_id` built from a name instead would reintroduce the
     /// cross-namespace collision [`backup_id_for`] exists to prevent.
     NoUid(String),
+    /// A status admission or finalization needs the API server's
+    /// optimistic-concurrency token.
+    MissingResourceVersion(String),
+    /// The deterministic name for a due slot is already held by an object this
+    /// schedule UID does not own.
+    ForeignBackup(String),
+    /// A status reservation could not be serialized.
+    Serialization(serde_json::Error),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
 }
@@ -772,6 +978,15 @@ impl fmt::Display for ScheduleError {
                 write!(f, "the object {name} carries no metadata.namespace")
             }
             Self::NoUid(name) => write!(f, "the object {name} carries no metadata.uid"),
+            Self::MissingResourceVersion(name) => write!(
+                f,
+                "the object {name} carries no metadata.resourceVersion required for status compare-and-swap"
+            ),
+            Self::ForeignBackup(name) => write!(
+                f,
+                "the deterministic Backup name {name} is held by an object that does not carry the complete current BackupSchedule controller identity"
+            ),
+            Self::Serialization(e) => write!(f, "could not serialize schedule status: {e}"),
             Self::Api(e) => write!(f, "kubernetes API error: {e}"),
         }
     }
@@ -780,7 +995,11 @@ impl fmt::Display for ScheduleError {
 impl std::error::Error for ScheduleError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoNamespace(_) | Self::NoUid(_) => None,
+            Self::NoNamespace(_)
+            | Self::NoUid(_)
+            | Self::MissingResourceVersion(_)
+            | Self::ForeignBackup(_) => None,
+            Self::Serialization(e) => Some(e),
             Self::Api(e) => Some(e),
         }
     }
@@ -789,6 +1008,12 @@ impl std::error::Error for ScheduleError {
 impl From<kube::Error> for ScheduleError {
     fn from(e: kube::Error) -> Self {
         Self::Api(e)
+    }
+}
+
+impl From<serde_json::Error> for ScheduleError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Serialization(e)
     }
 }
 
@@ -874,43 +1099,315 @@ pub async fn reconcile_schedule_with_archive(
     // this function holds before anything refines how it is reported — and so
     // the refinement cannot be mistaken for part of the name.
     let decision = decide(&name, &schedule.spec, now);
-    let decision = refine_against_last_fire(
+    let mut decision = refine_against_last_fire(
         decision,
         schedule.status.as_ref().and_then(|s| s.last_fire_time),
     );
 
     let mut created = None;
     let mut already_existed = false;
-    if let SlotDecision::Due {
-        slot,
-        name: object_name,
-        ..
-    } = &decision
-    {
-        let backup = scheduled_backup(schedule, &uid, slot, object_name);
-        let api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
-        match api.create(&PostParams::default(), &backup).await {
-            Ok(_) => info!(
-                schedule = %name,
-                namespace = %namespace,
-                backup = %object_name,
-                slot = %slot,
-                "created a scheduled Backup"
-            ),
-            Err(kube::Error::Api(e)) if e.code == 409 => {
-                already_existed = true;
-                debug!(
+    let mut fired_due_override = None;
+    let mut active_update = ActiveRefUpdate::Keep;
+    let mut pending_update = PendingRefUpdate::Keep;
+    // The final status CAS is based on the watched object unless this reconcile
+    // first wins a reservation. In that case the API server's reservation
+    // response supplies the newer resourceVersion that only this finalizer may
+    // consume. A later reservation necessarily advances it again.
+    let mut status_write_base = schedule.clone();
+    let backups_api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
+
+    if schedule.spec.concurrency_policy == ConcurrencyPolicy::Allow {
+        // `Allow` may have several active children, so the singular status ref
+        // is only the most recently reported one. Between due slots, still
+        // clear or replace it from actual owned Backup state so a completed or
+        // deleted child is not displayed as running forever.
+        if !matches!(decision, SlotDecision::Due { .. }) {
+            if let Some(stored_active) = schedule
+                .status
+                .as_ref()
+                .and_then(|status| status.active_backup_ref.as_ref())
+            {
+                let listed = backups_api.list(&ListParams::default()).await?;
+                let mut active_names: Vec<String> = listed
+                    .items
+                    .iter()
+                    .filter(|backup| {
+                        is_owned_by_schedule(backup, &name, &uid) && !backup_is_terminal(backup)
+                    })
+                    .map(|backup| backup.name_any())
+                    .collect();
+                active_names.sort();
+                active_update = active_names
+                    .iter()
+                    .find(|name| name.as_str() == stored_active.name)
+                    .or_else(|| active_names.first())
+                    .map_or(ActiveRefUpdate::Clear, |name| {
+                        ActiveRefUpdate::Set(name.clone())
+                    });
+            }
+        }
+        if let SlotDecision::Due {
+            slot,
+            name: object_name,
+            ..
+        } = &decision
+        {
+            let backup = scheduled_backup(schedule, &uid, slot, object_name);
+            let mut create_was_terminal = false;
+            match backups_api.create(&PostParams::default(), &backup).await {
+                Ok(_) => info!(
                     schedule = %name,
                     namespace = %namespace,
                     backup = %object_name,
                     slot = %slot,
-                    "the Backup for this slot already exists; AlreadyExists IS the idempotence \
-                     key, so this reconcile has nothing to create"
-                );
+                    "created a scheduled Backup"
+                ),
+                Err(kube::Error::Api(e)) if e.code == 409 => {
+                    // A 409 proves only that *something* owns the deterministic
+                    // name. Fetch the winner and require the complete current
+                    // schedule controller identity before treating it as
+                    // same-slot idempotence. A transient 404 or GET failure is
+                    // returned conservatively and no success status is written.
+                    let existing = backups_api.get(object_name).await?;
+                    if existing.name_any() != *object_name
+                        || !is_owned_by_schedule(&existing, &name, &uid)
+                    {
+                        return Err(ScheduleError::ForeignBackup(object_name.clone()));
+                    }
+                    create_was_terminal = backup_is_terminal(&existing);
+                    already_existed = true;
+                    debug!(
+                        schedule = %name,
+                        namespace = %namespace,
+                        backup = %object_name,
+                        slot = %slot,
+                        "the Backup for this slot already exists; AlreadyExists IS the idempotence key"
+                    );
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
+            created = Some(object_name.clone());
+            active_update = if create_was_terminal {
+                ActiveRefUpdate::Clear
+            } else {
+                ActiveRefUpdate::Set(object_name.clone())
+            };
         }
-        created = Some(object_name.clone());
+    } else {
+        // LIST, THEN FILTER BY CONTROLLER UID. Labels and names are not an
+        // ownership boundary, and an omitted/unknown phase is active.
+        let listed = backups_api.list(&ListParams::default()).await?;
+        let mut owned: Vec<&Backup> = listed
+            .items
+            .iter()
+            .filter(|backup| is_owned_by_schedule(backup, &name, &uid))
+            .collect();
+        owned.sort_by_key(|backup| backup.name_any());
+        let mut active_names: Vec<String> = owned
+            .iter()
+            .filter(|backup| !backup_is_terminal(backup))
+            .map(|backup| backup.name_any())
+            .collect();
+        active_names.sort();
+
+        let stored_active = schedule
+            .status
+            .as_ref()
+            .and_then(|status| status.active_backup_ref.as_ref())
+            .map(|reference| reference.name.as_str());
+        let preferred_active = stored_active
+            .filter(|stored| active_names.iter().any(|name| name == *stored))
+            .or_else(|| active_names.first().map(String::as_str));
+        active_update = preferred_active.map_or_else(
+            || {
+                if stored_active.is_some() {
+                    ActiveRefUpdate::Clear
+                } else {
+                    ActiveRefUpdate::Keep
+                }
+            },
+            |name| ActiveRefUpdate::Set(name.to_string()),
+        );
+
+        let pending_name = schedule
+            .status
+            .as_ref()
+            .and_then(|status| status.pending_backup_ref.as_ref())
+            .map(|reference| reference.name.clone());
+        if let Some(pending) = pending_name.as_deref() {
+            if let Some(existing) = listed
+                .items
+                .iter()
+                .find(|backup| backup.name_any() == pending)
+            {
+                if !is_owned_by_schedule(existing, &name, &uid) {
+                    return Err(ScheduleError::ForeignBackup(pending.to_string()));
+                }
+                pending_update = PendingRefUpdate::Clear;
+            } else if reserved_slot(&name, pending).is_none() {
+                // Only a deterministic scheduled name can be an admission
+                // reservation. Anything else is stale status, not work to
+                // preserve.
+                pending_update = PendingRefUpdate::Clear;
+            }
+        }
+
+        // A reservation is accepted in-flight work even when the controller
+        // was down long enough that the cron decision is now Missed, or the
+        // operator suspended future slots. Resume it before considering a new
+        // admission; `activeBackupRef` is not used for this because a missing
+        // active child is stale, while a missing pending child is intentional.
+        if !matches!(decision, SlotDecision::Due { .. }) && active_names.is_empty() {
+            if let Some(pending) = pending_name.as_deref() {
+                if let Some(existing) = listed
+                    .items
+                    .iter()
+                    .find(|backup| backup.name_any() == pending)
+                {
+                    if !is_owned_by_schedule(existing, &name, &uid) {
+                        return Err(ScheduleError::ForeignBackup(pending.to_string()));
+                    }
+                    if backup_is_terminal(existing) {
+                        already_existed = true;
+                        created = Some(pending.to_string());
+                        fired_due_override = reserved_slot(&name, pending).map(|(_, due)| due);
+                    }
+                } else if let Some((pending_slot, pending_due)) = reserved_slot(&name, pending) {
+                    let backup = scheduled_backup(schedule, &uid, &pending_slot, pending);
+                    let mut pending_was_terminal = false;
+                    match backups_api.create(&PostParams::default(), &backup).await {
+                        Ok(_) => {}
+                        Err(kube::Error::Api(e)) if e.code == 409 => {
+                            let existing = backups_api.get(pending).await?;
+                            if !is_owned_by_schedule(&existing, &name, &uid) {
+                                return Err(ScheduleError::ForeignBackup(pending.to_string()));
+                            }
+                            pending_was_terminal = backup_is_terminal(&existing);
+                            already_existed = true;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                    created = Some(pending.to_string());
+                    active_update = if pending_was_terminal {
+                        ActiveRefUpdate::Clear
+                    } else {
+                        ActiveRefUpdate::Set(pending.to_string())
+                    };
+                    pending_update = PendingRefUpdate::Clear;
+                    fired_due_override = Some(pending_due);
+                }
+            }
+        }
+
+        if let SlotDecision::Due {
+            due,
+            slot,
+            name: due_name,
+            next_fire_time,
+        } = &decision
+        {
+            let due_value = *due;
+            let slot_value = slot.clone();
+            let due_name_value = due_name.clone();
+            let next_value = *next_fire_time;
+
+            if let Some(existing) = listed
+                .items
+                .iter()
+                .find(|backup| backup.name_any() == due_name_value)
+            {
+                if !is_owned_by_schedule(existing, &name, &uid) {
+                    return Err(ScheduleError::ForeignBackup(due_name_value));
+                }
+                created = Some(due_name_value.clone());
+                already_existed = true;
+            } else if !active_names.is_empty() {
+                decision = SlotDecision::ConcurrencyBlocked {
+                    slot: slot_value,
+                    active_backups: active_names,
+                    next_fire_time: next_value,
+                };
+            } else {
+                let mut create_name = due_name_value.clone();
+                let mut create_slot = slot_value.clone();
+                let mut create_due = due_value;
+                let mut needs_reservation = true;
+
+                if let Some(pending) = pending_name.as_deref() {
+                    if let Some(existing) = listed
+                        .items
+                        .iter()
+                        .find(|backup| backup.name_any() == pending)
+                    {
+                        if !is_owned_by_schedule(existing, &name, &uid) {
+                            return Err(ScheduleError::ForeignBackup(pending.to_string()));
+                        }
+                    } else if let Some((reserved_slot, reserved_due)) =
+                        reserved_slot(&name, pending)
+                    {
+                        create_name = pending.to_string();
+                        create_slot = reserved_slot;
+                        create_due = reserved_due;
+                        needs_reservation = false;
+                    }
+                }
+
+                if needs_reservation {
+                    if schedule.metadata.resource_version.is_none() {
+                        return Err(ScheduleError::MissingResourceVersion(name));
+                    }
+                    let schedules_api: Api<BackupSchedule> =
+                        Api::namespaced(client.clone(), &namespace);
+                    let body = reservation_body(schedule, &decision, &create_name, now)?;
+                    status_write_base = schedules_api
+                        .replace_status(&name, &PostParams::default(), body)
+                        .await?;
+                }
+
+                let backup = scheduled_backup(schedule, &uid, &create_slot, &create_name);
+                let mut create_was_terminal = false;
+                match backups_api.create(&PostParams::default(), &backup).await {
+                    Ok(_) => info!(
+                        schedule = %name,
+                        namespace = %namespace,
+                        backup = %create_name,
+                        slot = %create_slot,
+                        "created a scheduled Backup admitted by concurrencyPolicy Forbid"
+                    ),
+                    Err(kube::Error::Api(e)) if e.code == 409 => {
+                        let existing = backups_api.get(&create_name).await?;
+                        if !is_owned_by_schedule(&existing, &name, &uid) {
+                            return Err(ScheduleError::ForeignBackup(create_name));
+                        }
+                        create_was_terminal = backup_is_terminal(&existing);
+                        already_existed = true;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                created = Some(create_name.clone());
+                active_update = if create_was_terminal {
+                    ActiveRefUpdate::Clear
+                } else {
+                    ActiveRefUpdate::Set(create_name.clone())
+                };
+                pending_update = PendingRefUpdate::Clear;
+                if create_name != due_name_value {
+                    fired_due_override = Some(create_due);
+                    decision = SlotDecision::ConcurrencyBlocked {
+                        slot: slot_value,
+                        active_backups: vec![create_name],
+                        next_fire_time: next_value,
+                    };
+                } else {
+                    decision = SlotDecision::Due {
+                        due: create_due,
+                        slot: create_slot,
+                        name: due_name_value,
+                        next_fire_time: next_value,
+                    };
+                }
+            }
+        }
     }
 
     // THE RETENTION REPORT. Between the create and the status write, so the
@@ -969,10 +1466,12 @@ pub async fn reconcile_schedule_with_archive(
     // AFTER THE CREATE, ALWAYS. See the function note: the crash window is
     // harmless only in this order.
     let api: Api<BackupSchedule> = Api::namespaced(client.clone(), &namespace);
-    let patch = status_patch_with_retention(
-        schedule,
+    let patch = status_patch_with_refs(
+        &status_write_base,
         &decision,
-        created.as_deref(),
+        active_update,
+        pending_update,
+        fired_due_override,
         retention_report.as_ref(),
         now,
     );
@@ -983,7 +1482,7 @@ pub async fn reconcile_schedule_with_archive(
     // route-table test can see. The decision is still returned and still
     // logged.
     if status_unchanged(
-        schedule
+        status_write_base
             .status
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
@@ -996,6 +1495,12 @@ pub async fn reconcile_schedule_with_archive(
             "the computed status equals the one on the object; no patch is sent"
         );
     } else {
+        // Every finalization and stale-reference clear is a real CAS. In
+        // particular, `pendingBackupRef: null` can be applied only to the
+        // resourceVersion that still held the reservation this reconcile
+        // observed or created; a newer reservation and its scheduling
+        // condition survive an older writer intact.
+        let patch = status_patch_with_preconditions(&status_write_base, patch)?;
         api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
             .await?;
     }

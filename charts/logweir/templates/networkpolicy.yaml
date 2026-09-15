@@ -1,28 +1,55 @@
 {{- /*
-Default-deny egress on runner pods, with explicit allowances —
-`config/manager/networkpolicy.yaml`, rendered into the release namespace. A
-NetworkPolicy is namespaced and runner Jobs run in the namespace of the object
-that produced them, so apply the source file into each of those too. The
-selector is the Job label because runner pods carry no label of their own.
-The mark below is the source file's and stays in the rendered output on
-purpose, with the sentence that would verify it.
+NetworkPolicy intent is rendered in the release namespace and every explicitly
+authorized runner namespace. Docker Desktop commonly has no enforcing CNI, so
+successful local traffic is structural evidence only, not production proof.
+
+Bootstrap/distribution pods are excluded from the ordinary runner policy: that
+policy intentionally permits broker/object-store destinations by port. Their
+dedicated policy permits only DNS plus discovered/configured Kubernetes API
+destinations. Service-DNAT enforcement differs by CNI, so we include the
+kubernetes.default ClusterIP, visible endpoint IPs, and operator-supplied CIDRs.
 */ -}}
-# [UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a
-# deny is never observed here; only the kind+Calico probe would make this claim
-# real, and it is backlogged]
+{{- $root := . }}
+{{- $namespaces := prepend .Values.identity.authorizedRunnerNamespaces .Release.Namespace | uniq }}
+{{- $apiCIDRs := list }}
+{{- range $cidr := .Values.identity.kubernetesApiCIDRs }}
+{{- $apiCIDRs = append $apiCIDRs $cidr }}
+{{- end }}
+{{- $apiService := lookup "v1" "Service" "default" "kubernetes" }}
+{{- if and $apiService $apiService.spec.clusterIP (ne $apiService.spec.clusterIP "None") }}
+{{- $mask := ternary "128" "32" (contains ":" $apiService.spec.clusterIP) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $apiService.spec.clusterIP $mask) }}
+{{- end }}
+{{- $apiEndpoints := lookup "v1" "Endpoints" "default" "kubernetes" }}
+{{- if $apiEndpoints }}
+{{- range $subset := $apiEndpoints.subsets }}
+{{- range $address := $subset.addresses }}
+{{- $mask := ternary "128" "32" (contains ":" $address.ip) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address.ip $mask) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $apiCIDRs = uniq $apiCIDRs }}
+{{- range $namespace := $namespaces }}
+---
+# [UNVERIFIED ENFORCEMENT — Docker Desktop may accept this object without a
+# NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
+# CNI; Service ClusterIP versus post-DNAT endpoint matching is provider-specific.]
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: logweir-runner-egress
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $namespace }}
   labels:
-    {{- include "logweir.labels" . | nindent 4 }}
+    {{- include "logweir.labels" $root | nindent 4 }}
     app.kubernetes.io/component: runner
 spec:
   podSelector:
     matchExpressions:
       - key: batch.kubernetes.io/job-name
         operator: Exists
+      - key: logweir.dev/identity-authority
+        operator: DoesNotExist
   policyTypes:
     - Egress
   egress:
@@ -51,3 +78,47 @@ spec:
           port: 443
         - protocol: TCP
           port: 9000
+{{- if $root.Values.identity.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logweir-identity-kubernetes-api-egress
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "logweir.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: identity-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      logweir.dev/identity-authority: bootstrap
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              component: kube-apiserver
+        {{- range $cidr := $apiCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+{{- end }}
+{{- end }}

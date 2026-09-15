@@ -16,7 +16,7 @@
 //! # The properties
 //!
 //! * The chart's `crds/` and `ui/` are byte-identical copies of `config/crd/`
-//!   and the fourteen shipped UI files — asserted here with `std::fs` and in
+//!   and the sixteen shipped UI files — asserted here with `std::fs` and in
 //!   the script with `cmp`, so the property holds whichever runs first.
 //! * The DEFAULT render and `logweir.yaml` agree on the substance of the
 //!   control plane: the Deployment's args, every other env name and value,
@@ -285,7 +285,7 @@ fn is_digest_reference(reference: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
-/// The fourteen shipped UI files: everything under `ui/` except `*.md` and
+/// The sixteen shipped UI files: everything under `ui/` except `*.md` and
 /// `tests/` — `scripts/check-ui-offline.sh`'s scope, by construction.
 fn shipped_ui_files() -> Vec<String> {
     let files: Vec<String> = files_under("ui")
@@ -293,9 +293,9 @@ fn shipped_ui_files() -> Vec<String> {
         .filter(|p| !p.ends_with(".md") && !p.starts_with("ui/tests/"))
         .collect();
     assert_eq!(
-        14,
+        16,
         files.len(),
-        "the shipped UI is fourteen files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found {files:?}"
+        "the shipped UI is sixteen files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found {files:?}"
     );
     files
 }
@@ -352,8 +352,9 @@ fn chart_lint_crds_are_byte_identical_copies() {
     }
 }
 
-/// **The chart carries NO copy of the UI and mounts no ConfigMap into the
-/// proxy.** Task 39: the page ships as the `logweir-ui` IMAGE.
+/// **The chart carries NO copy of the UI.** The proxy serves the page from the
+/// `logweir-ui` IMAGE; its only ConfigMap mount is the non-secret namespace
+/// context that the actual browser runtime reads.
 ///
 /// RENAMED FROM `chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else`
 /// (STANDING RULE 19), and the rename is the whole change of substance. That
@@ -366,18 +367,16 @@ fn chart_lint_crds_are_byte_identical_copies() {
 /// the artefact a browser loads is wrong; the image gate reads the artefact.
 ///
 /// WHAT THIS TEST CAN STILL SAY, and does: the chart holds no second copy of
-/// the page, renders no ConfigMap for it, and mounts no ConfigMap into the
-/// proxy pod. Each of the three is how the old shape would come back — a merge
-/// that resurrected the directory, a template that rebuilt the object, a volume
-/// that re-mounted it — and each would be a source of served bytes that nothing
-/// hashes.
+/// the page and the only UI ConfigMap contains one generated runtime context,
+/// not page bytes. A mount at `/ui` would shadow the image and make the image
+/// hash gate meaningless; a narrowly mounted `/ui/runtime` context does not.
 #[test]
-fn chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap() {
-    // The fourteen are still fourteen, in the tree, where the image gate hashes
+fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_context() {
+    // The sixteen are in the tree, where the image gate hashes
     // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
     // comparing against the wrong set.
     let shipped = shipped_ui_files();
-    assert_eq!(14, shipped.len());
+    assert_eq!(16, shipped.len());
 
     let under_chart: Vec<String> = files_under("charts/logweir")
         .into_iter()
@@ -391,41 +390,62 @@ fn chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap() {
          chart is a second source of the page that nothing hashes."
     );
 
-    // NO ConfigMap FOR THE PAGE IN ANY RENDER, and no ConfigMap VOLUME in the
-    // proxy pod. The demo render is the one with `ui.enabled: true`.
+    // The demo render is the one with `ui.enabled: true`. Its only UI
+    // ConfigMap is one generated JS file describing the same namespace set as
+    // the RoleBindings; it cannot contain an alternate page.
     let docs = rendered("demo");
     let ui_configmaps: Vec<String> = docs
         .iter()
         .filter(|d| d.kind == "ConfigMap" && d.name().contains("-ui"))
         .map(|d| d.name())
         .collect();
-    assert!(
-        ui_configmaps.is_empty(),
-        "the chart renders a ConfigMap for the page: {ui_configmaps:?}. The fourteen files are \
-         in the image; a ConfigMap is a MUTABLE API object, so a page served from one is \
-         whatever the last holder of `patch configmaps` wrote."
+    assert_eq!(
+        1,
+        ui_configmaps.len(),
+        "exactly one runtime ConfigMap is rendered"
+    );
+    assert!(ui_configmaps[0].starts_with("logweir-ui-runtime-"));
+    let runtime = docs
+        .iter()
+        .find(|d| d.kind == "ConfigMap" && d.name() == ui_configmaps[0])
+        .expect("the named runtime ConfigMap exists");
+    assert_eq!(
+        Some(true),
+        runtime.value["immutable"].as_bool(),
+        "runtime JS is immutable once installed"
+    );
+    let context = runtime.value["data"]["runtime.js"]
+        .as_str()
+        .expect("the runtime ConfigMap has its JS context");
+    assert_eq!(
+        "window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({\"allowed\": [\"logweir-system\"], \"selected\": \"logweir-system\"});\n",
+        context,
+        "the single release namespace reaches the browser runtime explicitly"
     );
     let ui = find(&docs, "Deployment", "logweir-ui");
     let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
-    for v in volumes {
-        assert!(
-            !v["configMap"].is_mapping(),
-            "the proxy pod mounts a ConfigMap volume: {v:?}. `/ui` is part of the image's own \
-             read-only filesystem now."
-        );
-    }
+    let runtime_volume = volumes
+        .iter()
+        .find(|v| v["name"].as_str() == Some("runtime"))
+        .expect("the proxy mounts its runtime namespace context");
+    assert_eq!(
+        Some(ui_configmaps[0].as_str()),
+        runtime_volume["configMap"]["name"].as_str(),
+        "the runtime volume names the generated context, not a page ConfigMap"
+    );
     let mounts = container(ui)["volumeMounts"]
         .as_sequence()
         .expect("volumeMounts");
-    for m in mounts {
-        assert_ne!(
-            Some("/ui"),
-            m["mountPath"].as_str(),
-            "something is still mounted at /ui: {m:?}. Whatever it is would shadow the fourteen \
-             files the image carries, and scripts/check-image-ui.sh would be hashing bytes \
-             nobody serves."
-        );
-    }
+    assert!(
+        mounts.iter().any(|m| m["name"].as_str() == Some("runtime") && m["mountPath"].as_str() == Some("/ui/runtime.js") && m["subPath"].as_str() == Some("runtime.js") && m["readOnly"].as_bool() == Some(true)),
+        "the only ConfigMap mount replaces the read-only runtime context file, never /ui: {mounts:?}"
+    );
+    assert!(
+        !mounts
+            .iter()
+            .any(|m| m["mountPath"].as_str() == Some("/ui")),
+        "nothing may be mounted over /ui: the image remains the page source"
+    );
 }
 
 // ================================================ the default render vs logweir.yaml
@@ -558,10 +578,15 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
             "ClusterRole {role}'s rules differ from logweir.yaml's"
         );
     }
+    let mut chart_roles = names_of(&chart, "ClusterRole");
+    assert!(
+        chart_roles.remove("logweir-identity-singleton"),
+        "managed Helm must carry the authority-free singleton marker"
+    );
     assert_eq!(
         names_of(&install, "ClusterRole"),
-        names_of(&chart, "ClusterRole"),
-        "the default render carries a ClusterRole logweir.yaml does not, or lacks one"
+        chart_roles,
+        "apart from the managed identity singleton, ClusterRoles must match logweir.yaml"
     );
 
     // The ClusterRoleBinding binds the same role to the same ServiceAccount.
@@ -593,11 +618,18 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         );
     }
 
-    // The NetworkPolicy and the two ServiceAccounts.
+    // The NetworkPolicy and the controller/runner ServiceAccounts. The
+    // identity bootstrap account is asserted separately with its narrow Role.
+    let base_policy = &find(&install, "NetworkPolicy", "logweir-runner-egress").value["spec"];
+    let mut managed_policy =
+        find(&chart, "NetworkPolicy", "logweir-runner-egress").value["spec"].clone();
+    managed_policy["podSelector"]["matchExpressions"]
+        .as_sequence_mut()
+        .expect("managed policy expressions")
+        .retain(|expression| expression["key"].as_str() != Some("logweir.dev/identity-authority"));
     assert_eq!(
-        find(&install, "NetworkPolicy", "logweir-runner-egress").value["spec"],
-        find(&chart, "NetworkPolicy", "logweir-runner-egress").value["spec"],
-        "the NetworkPolicy's spec differs"
+        base_policy, &managed_policy,
+        "the Helm policy may only add the identity-authority exclusion; the low-level manifest runs no bootstrap hook"
     );
     let runner_sa = find(&chart, "ServiceAccount", "logweir-runner");
     assert_eq!(
@@ -607,8 +639,9 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     );
     find(&chart, "ServiceAccount", "weirkeeper");
 
-    // Nothing the install file does not have, kind by kind — except the runner
-    // ServiceAccount the chart renders into the release namespace by ruling.
+    // The chart additionally carries PLAT-02.1's retained identity objects,
+    // namespaced Role/Binding and short-lived hook Job. Every other kind still
+    // agrees with the base install file.
     let mut chart_kinds: BTreeSet<String> = chart.iter().map(|d| d.kind.clone()).collect();
     let install_kinds: BTreeSet<String> = install
         .iter()
@@ -616,10 +649,13 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         .filter(|k| k != "Namespace")
         .collect();
     chart_kinds.remove("Namespace");
-    assert_eq!(
-        install_kinds, chart_kinds,
-        "the default render's kinds must be logweir.yaml's (minus the Namespace, which --create-namespace makes)"
+    let mut expected_kinds = install_kinds;
+    expected_kinds.extend(
+        ["Secret", "ConfigMap", "Role", "RoleBinding", "Job"]
+            .into_iter()
+            .map(str::to_string),
     );
+    assert_eq!(expected_kinds, chart_kinds, "the only new default-render kinds are PLAT-02.1's retained identity objects and bootstrap resources");
     // Every namespaced object landed in the release namespace.
     for d in &chart {
         if let Some(ns) = d.value["metadata"]["namespace"].as_str() {
@@ -811,13 +847,18 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
 
 // ============================================ the three flags, off and on
 
-const SHIPPED_KINDS: [&str; 6] = [
+const SHIPPED_KINDS: [&str; 11] = [
     "CustomResourceDefinition",
     "ServiceAccount",
     "ClusterRole",
     "ClusterRoleBinding",
     "Deployment",
     "NetworkPolicy",
+    "Secret",
+    "ConfigMap",
+    "Role",
+    "RoleBinding",
+    "Job",
 ];
 
 /// **Under the defaults and under the minimal example, the three optional
@@ -825,7 +866,7 @@ const SHIPPED_KINDS: [&str; 6] = [
 /// ConfigMap, no Secret, no PVC, no RoleBinding, no object named after them.
 #[test]
 fn chart_lint_optional_components_render_nothing_under_defaults() {
-    for name in ["default", "minimal", "author-only"] {
+    for name in ["default", "minimal", "author-only", "identity-external"] {
         let docs = rendered(name);
         let kinds: BTreeSet<String> = docs.iter().map(|d| d.kind.clone()).collect();
         let allowed: BTreeSet<String> = SHIPPED_KINDS.iter().map(|s| s.to_string()).collect();
@@ -851,6 +892,285 @@ fn chart_lint_optional_components_render_nothing_under_defaults() {
             "rendered/{name}.yaml: exactly one Deployment (the controller)"
         );
     }
+}
+
+/// PLAT-02.1: the chart renders no private bytes, retains both halves of the
+/// identity record, and delegates bootstrap to a short-lived signer-capable
+/// Job with name-scoped API access. The controller's ClusterRole remains
+/// Secret-blind.
+#[test]
+fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
+    let docs = rendered("default");
+    let secret = find(&docs, "Secret", "logweir-signing-key");
+    let public = find(&docs, "ConfigMap", "logweir-signing-trust");
+    for object in [secret, public] {
+        assert_eq!(
+            Some("keep"),
+            object.value["metadata"]["annotations"]["helm.sh/resource-policy"].as_str(),
+            "{}/{} must survive uninstall/reinstall",
+            object.kind,
+            object.name()
+        );
+        assert_eq!(
+            Some("uninitialized"),
+            object.value["metadata"]["annotations"]["logweir.dev/identity-state"].as_str()
+        );
+        assert!(
+            object.value["data"]
+                .as_mapping()
+                .is_some_and(|data| data.is_empty()),
+            "{}/{} is a placeholder; Helm must render no key bytes",
+            object.kind,
+            object.name()
+        );
+        assert_eq!(
+            Some("pre-install,pre-upgrade"),
+            object.value["metadata"]["annotations"]["helm.sh/hook"].as_str(),
+            "{}/{} must be a creation-only hook, never an ordinary rollback-reconciled manifest",
+            object.kind,
+            object.name()
+        );
+    }
+    let rendered_bytes = read("charts/logweir/rendered/default.yaml");
+    assert!(
+        !rendered_bytes.contains("BEGIN PRIVATE KEY"),
+        "a private key must never enter Helm render/release state"
+    );
+    let template = read("charts/logweir/templates/identity.yaml");
+    assert!(
+        template.contains("lookup \"v1\" \"Secret\"")
+            && template.contains("lookup \"v1\" \"ConfigMap\""),
+        "connected lookup must omit established retained objects instead of importing private bytes into Helm state"
+    );
+    assert!(
+        !template.contains("helm.sh/hook: pre-install,pre-upgrade,pre-rollback"),
+        "stored old revisions must never recreate empty placeholders during rollback"
+    );
+
+    let job = find(&docs, "Job", "logweir-identity-bootstrap");
+    assert_eq!(
+        Some(false),
+        find(&docs, "ServiceAccount", "logweir-identity-bootstrap").value
+            ["automountServiceAccountToken"]
+            .as_bool(),
+        "the bootstrap account defaults to no token; only its hook Pod explicitly opts in"
+    );
+    assert_eq!(
+        Some("post-install,post-upgrade,post-rollback"),
+        job.value["metadata"]["annotations"]["helm.sh/hook"].as_str()
+    );
+    assert!(
+        is_digest_reference(container(job)["image"].as_str().expect("bootstrap image")),
+        "the Secret-authorized bootstrap image must be immutable"
+    );
+    assert_eq!(
+        Some(true),
+        pod_spec(job)["automountServiceAccountToken"].as_bool()
+    );
+    assert_eq!(
+        Some("logweir-identity-bootstrap"),
+        pod_spec(job)["serviceAccountName"].as_str()
+    );
+    let args: Vec<&str> = container(job)["args"]
+        .as_sequence()
+        .expect("bootstrap args")
+        .iter()
+        .map(|v| v.as_str().expect("string arg"))
+        .collect();
+    assert_eq!(
+        vec![
+            "identity",
+            "bootstrap",
+            "--namespace",
+            "logweir-system",
+            "--public-configmap-name",
+            "logweir-signing-trust"
+        ],
+        args
+    );
+
+    let role = find(&docs, "Role", "logweir-identity-bootstrap");
+    let rules = role.value["rules"].as_sequence().expect("bootstrap rules");
+    assert_eq!(
+        3,
+        rules.len(),
+        "get Secret, patch managed Secret, get/patch public ConfigMap"
+    );
+    let all_verbs: BTreeSet<&str> = rules
+        .iter()
+        .flat_map(|rule| rule["verbs"].as_sequence().expect("verbs"))
+        .map(|verb| verb.as_str().expect("verb"))
+        .collect();
+    assert_eq!(BTreeSet::from(["get", "patch"]), all_verbs);
+    for rule in rules {
+        assert!(
+            rule["resourceNames"]
+                .as_sequence()
+                .is_some_and(|names| !names.is_empty()),
+            "every bootstrap permission is resourceNames-scoped"
+        );
+    }
+    let controller_rules = find(&docs, "ClusterRole", "weirkeeper").value["rules"]
+        .as_sequence()
+        .expect("controller rules");
+    assert!(controller_rules.iter().all(|rule| {
+        rule["resources"]
+            .as_sequence()
+            .is_none_or(|resources| resources.iter().all(|r| r.as_str() != Some("secrets")))
+    }));
+
+    let singleton = find(&docs, "ClusterRole", "logweir-identity-singleton");
+    assert_eq!(
+        Some("keep"),
+        singleton.value["metadata"]["annotations"]["helm.sh/resource-policy"].as_str()
+    );
+    assert_eq!(
+        Some("pre-install,pre-upgrade"),
+        singleton.value["metadata"]["annotations"]["helm.sh/hook"].as_str()
+    );
+    assert!(singleton.value["rules"]
+        .as_sequence()
+        .is_some_and(Vec::is_empty));
+
+    let ordinary = find(&docs, "NetworkPolicy", "logweir-runner-egress");
+    assert!(ordinary.value["spec"]["podSelector"]["matchExpressions"]
+        .as_sequence()
+        .is_some_and(|expressions| expressions.iter().any(|expression| {
+            expression["key"].as_str() == Some("logweir.dev/identity-authority")
+                && expression["operator"].as_str() == Some("DoesNotExist")
+        })));
+    let bootstrap_policy = find(
+        &docs,
+        "NetworkPolicy",
+        "logweir-identity-kubernetes-api-egress",
+    );
+    for egress in bootstrap_policy.value["spec"]["egress"]
+        .as_sequence()
+        .expect("bootstrap egress rules")
+    {
+        assert!(
+            egress.get("to").is_some(),
+            "bootstrap must have no port-only destination rule"
+        );
+    }
+}
+
+#[test]
+fn chart_lint_authorized_namespace_receives_the_same_identity_distribution_contract() {
+    let docs = rendered("identity-multinamespace");
+    let target = docs
+        .iter()
+        .find(|doc| {
+            doc.kind == "Secret"
+                && doc.name() == "logweir-signing-key"
+                && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
+        })
+        .expect("retained target signing Secret");
+    assert_eq!(
+        Some("recoveries"),
+        target.value["metadata"]["namespace"].as_str()
+    );
+    assert_eq!(
+        Some("pre-install,pre-upgrade"),
+        target.value["metadata"]["annotations"]["helm.sh/hook"].as_str()
+    );
+    assert!(target.value["data"]
+        .as_mapping()
+        .is_some_and(|data| data.is_empty()));
+    assert!(docs.iter().any(|doc| {
+        doc.kind == "ServiceAccount"
+            && doc.name() == "logweir-runner"
+            && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
+    }));
+    let job = docs
+        .iter()
+        .find(|doc| {
+            doc.kind == "Job"
+                && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
+                && doc.name().starts_with("logweir-identity-distribute-")
+        })
+        .expect("distribution Job in the authorized namespace");
+    let args: Vec<&str> = container(job)["args"]
+        .as_sequence()
+        .expect("distribution args")
+        .iter()
+        .map(|value| value.as_str().expect("string arg"))
+        .collect();
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--source-namespace", "logweir-system"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--target-namespace", "recoveries"]));
+    assert!(!args.contains(&"bootstrap"));
+
+    let source_role = find(&docs, "Role", "logweir-identity-distribution-source");
+    assert_eq!(
+        Some("logweir-system"),
+        source_role.value["metadata"]["namespace"].as_str()
+    );
+    assert_eq!(
+        Some("get"),
+        source_role.value["rules"][0]["verbs"][0].as_str()
+    );
+    let target_role = docs
+        .iter()
+        .find(|doc| {
+            doc.kind == "Role"
+                && doc.name() == "logweir-identity-distributor"
+                && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
+        })
+        .expect("target distributor role");
+    assert_eq!(
+        vec!["get", "patch"],
+        target_role.value["rules"][0]["verbs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn chart_lint_external_identity_is_explicit_get_only_adoption() {
+    let docs = rendered("identity-external");
+    let job = find(&docs, "Job", "logweir-identity-bootstrap");
+    let args: Vec<&str> = container(job)["args"]
+        .as_sequence()
+        .expect("bootstrap args")
+        .iter()
+        .map(|v| v.as_str().expect("string arg"))
+        .collect();
+    assert!(args
+        .windows(2)
+        .any(|w| w == ["--external-secret-name", "company-logweir-signer"]));
+    assert!(args
+        .windows(2)
+        .any(|w| w == ["--external-secret-key", "identity.pem"]));
+
+    let role = find(&docs, "Role", "logweir-identity-bootstrap");
+    let rules = role.value["rules"].as_sequence().expect("rules");
+    let external_rules: Vec<&Value> = rules
+        .iter()
+        .filter(|rule| {
+            rule["resourceNames"].as_sequence().is_some_and(|names| {
+                names
+                    .iter()
+                    .any(|n| n.as_str() == Some("company-logweir-signer"))
+            })
+        })
+        .collect();
+    assert_eq!(1, external_rules.len());
+    assert_eq!(
+        vec!["get"],
+        external_rules[0]["verbs"]
+            .as_sequence()
+            .expect("verbs")
+            .iter()
+            .map(|v| v.as_str().expect("verb"))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// **`demoKafka.enabled` renders two one-replica StatefulSets advertising
@@ -1087,7 +1407,7 @@ const ACCEPT_PATHS: &str = "--accept-paths=^/(ui/|apis/logweir\\.dev/v1alpha1/)"
 /// not "stay green unedited": they would panic looking for it. They moved, and
 /// each of them got stronger on the way:
 ///
-///   * the fourteen files' BYTES -> `scripts/check-image-ui.sh` check 1, which
+///   * the sixteen files' BYTES -> `scripts/check-image-ui.sh` check 1, which
 ///     hashes what the image serves against `ui/` rather than what a template
 ///     inlined;
 ///   * "and nothing else" -> the same check, which fails naming every extra
@@ -1113,7 +1433,7 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     assert_eq!(
         Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
         c["image"].as_str(),
-        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the fourteen \
+        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the sixteen \
          shipped files copied in at /ui — under the namespace the runner pin names, at \
          `:{LOGWEIR_TAG}` like the other two Logweir images. A bare kubectl digest here is the \
          page back in a ConfigMap."
@@ -1156,21 +1476,25 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
         pod_spec(ui)["automountServiceAccountToken"].as_bool(),
         "the proxy pod needs its token: it is the credential the proxy attaches"
     );
-    // THE ONE VOLUME LEFT is `tmp`, for `HOME` and `KUBECACHEDIR` under
-    // `readOnlyRootFilesystem: true`. The page is not a volume any more, and
-    // `chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap`
-    // is what holds the ConfigMap and its mount absent.
+    // `tmp` is writable for kubectl; `runtime` is the one read-only, generated
+    // namespace context. The page itself remains in the image.
     let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
     assert_eq!(
-        1,
+        2,
         volumes.len(),
-        "the proxy pod carries exactly one volume — `tmp` — now that the page is in the image: \
+        "the proxy pod carries exactly two volumes — writable `tmp` and read-only runtime context: \
          {volumes:?}"
     );
     assert!(
         volumes[0]["emptyDir"].is_mapping(),
-        "the one volume is an emptyDir for /tmp: {:?}",
+        "the first volume is an emptyDir for /tmp: {:?}",
         volumes[0]
+    );
+    assert!(
+        volumes[1]["configMap"]["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("logweir-ui-runtime-")),
+        "the second volume is the content-addressed namespace runtime context"
     );
 
     // The ServiceAccount, the roles, the binding.
@@ -1218,7 +1542,12 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
         )]),
         rules_of(roster)
     );
-    let bindings: Vec<&Doc> = docs.iter().filter(|d| d.kind == "RoleBinding").collect();
+    let bindings: Vec<&Doc> = docs
+        .iter()
+        .filter(|d| {
+            d.kind == "RoleBinding" && d.value["roleRef"]["name"].as_str() == Some("logweir-ui")
+        })
+        .collect();
     assert!(
         !bindings.is_empty(),
         "the page's role is bound by a RoleBinding"
@@ -1253,11 +1582,10 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
 }
 
 /// **Every PodSpec of the optional components refuses a ServiceAccount token
-/// except the proxy's, which needs it.** Under the demo render, every Pod-
-/// carrying object is enumerated; the controller (the shipped exemption) and
-/// the UI proxy are the only two that keep a token.
+/// except the proxy and the short-lived identity bootstrap, which need it.**
+/// Under the demo render, every Pod-carrying object is enumerated.
 #[test]
-fn chart_lint_only_the_proxy_and_the_controller_hold_a_token() {
+fn chart_lint_only_api_callers_hold_a_token() {
     let docs = rendered("demo");
     let mut seen = 0usize;
     for d in &docs {
@@ -1272,6 +1600,11 @@ fn chart_lint_only_the_proxy_and_the_controller_hold_a_token() {
                 "the controller leaves the field unset (the shipped exemption)"
             ),
             "logweir-ui" => assert_eq!(Some(true), automount, "the proxy pod needs its token"),
+            "logweir-identity-bootstrap" => assert_eq!(
+                Some(true),
+                automount,
+                "the short-lived bootstrap calls the Kubernetes API"
+            ),
             other => assert_eq!(
                 Some(false),
                 automount,
@@ -1281,8 +1614,8 @@ fn chart_lint_only_the_proxy_and_the_controller_hold_a_token() {
         }
     }
     assert_eq!(
-        7, seen,
-        "the demo render carries seven Pod-carrying objects: 3 Deployments, 2 StatefulSets, 2 Jobs"
+        8, seen,
+        "the demo render carries eight Pod-carrying objects including identity bootstrap"
     );
 }
 
@@ -1326,8 +1659,22 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_three_logweir_images_a
             total += 1;
             if name == "author-only.yaml" {
                 assert!(
-                    image == "weirkeeper:check" || is_digest_reference(&image),
-                    "author-only.yaml: the controller is the locally built tag; found {image}"
+                    image == "weirkeeper:check"
+                        || image == "logweir:check"
+                        || is_digest_reference(&image),
+                    "author-only.yaml: controller/bootstrap use the locally built tags; found {image}"
+                );
+                continue;
+            }
+            if d.value["metadata"]["labels"]["app.kubernetes.io/component"]
+                .as_str()
+                .is_some_and(|component| {
+                    component == "identity-bootstrap" || component == "identity-distribution"
+                })
+            {
+                assert!(
+                    is_digest_reference(&image),
+                    "{name}: privileged identity image is not digest-pinned: {image}"
                 );
                 continue;
             }
@@ -1363,15 +1710,15 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_three_logweir_images_a
     );
 }
 
-/// **`values.schema.json` types the three flags as booleans** (the script
+/// **`values.schema.json` types the four flags as booleans** (the script
 /// proves the refusal with `--set demoKafka.enabled=yes`; this reads the
 /// schema) and the four image values as strings.
 #[test]
-fn chart_lint_values_schema_types_the_three_flags_as_booleans() {
+fn chart_lint_values_schema_types_the_four_flags_as_booleans() {
     let schema: serde_json::Value =
         serde_json::from_str(&read("charts/logweir/values.schema.json"))
             .expect("values.schema.json parses");
-    for flag in ["minio", "demoKafka", "ui"] {
+    for flag in ["minio", "demoKafka", "ui", "identity"] {
         assert_eq!(
             Some("boolean"),
             schema["properties"][flag]["properties"]["enabled"]["type"].as_str(),
@@ -1680,6 +2027,16 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "runnerImage",
         "imagePullPolicy",
         "runnerImagePullPolicy",
+        "identity.enabled",
+        "identity.bootstrapImage",
+        "identity.bootstrapImagePullPolicy",
+        "identity.allowMutableBootstrapImageForDevelopment",
+        "identity.publicConfigMapName",
+        "identity.authorizedRunnerNamespaces",
+        "identity.kubernetesApiCIDRs",
+        "identity.externalSecret.name",
+        "identity.externalSecret.key",
+        "identity.resources",
         "controller.logLevel",
         "controller.resources",
         "controller.nodeSelector",
@@ -1748,6 +2105,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     assert_eq!(Some(""), values["environment"].as_str());
     assert_eq!(Some(""), values["kubernetes"]["namespace"].as_str());
     assert_eq!(Some(false), values["kafka"]["enabled"].as_bool());
+    assert_eq!(Some(true), values["identity"]["enabled"].as_bool());
     assert_eq!(
         Some(0),
         values["imagePullSecrets"].as_sequence().map(Vec::len),
@@ -2029,6 +2387,7 @@ fn chart_lint_placement_reaches_every_pod() {
     let mut checked = 0usize;
     for (render, kind, name) in [
         ("msk", "Deployment", "weirkeeper"),
+        ("msk", "Job", "logweir-identity-bootstrap"),
         ("msk", "Deployment", "logweir-minio"),
         ("msk", "Job", "logweir-minio-seed"),
         ("msk", "Deployment", "logweir-ui"),
@@ -2067,6 +2426,7 @@ fn chart_lint_placement_reaches_every_pod() {
         .collect();
     let demo = rendered("demo");
     for (kind, name) in [
+        ("Job", "logweir-identity-bootstrap"),
         ("StatefulSet", "logweir-kafka-source"),
         ("StatefulSet", "logweir-kafka-target"),
         ("Job", "logweir-kafka-seed"),
@@ -2081,7 +2441,7 @@ fn chart_lint_placement_reaches_every_pod() {
         }
         checked += 1;
     }
-    assert_eq!(7, checked, "seven pod specs were checked, not {checked}");
+    assert_eq!(9, checked, "nine pod specs were checked, not {checked}");
 
     // AND THE DEFAULT RENDER HAS NONE OF IT: an empty value renders nothing.
     for doc in rendered("default") {
@@ -2121,7 +2481,12 @@ fn chart_lint_image_pull_secrets_reach_both_service_accounts() {
     );
 
     let docs = rendered("msk");
-    for account in ["weirkeeper", "logweir-runner", "logweir-ui"] {
+    for account in [
+        "weirkeeper",
+        "logweir-runner",
+        "logweir-ui",
+        "logweir-identity-bootstrap",
+    ] {
         let sa = find(&docs, "ServiceAccount", account);
         let got: Vec<String> = sa.value["imagePullSecrets"]
             .as_sequence()

@@ -426,19 +426,19 @@ apply-install:
     kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" apply --server-side -f logweir.yaml
     kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" apply --server-side -f logweir.yaml
 
-# The pre-flight: refuse a namespace that is missing any of the five Secrets,
-# naming the FIRST absent one.
+# The pre-flight: refuse a namespace that is missing any of the four current
+# Secrets, naming the FIRST absent one.
 #
 # RUN IT BEFORE THE FIRST CUSTOM RESOURCE, AND NEVER AS PART OF THE INSTALL.
-# There are FIVE Secrets, not three (spec §9, critique B H14), and until this
-# task nothing in the repository told a stranger to create any of them. The one
-# that matters most is `logweir-signing-key`, which is why it is checked first:
+# There are four current Secrets, and until this task nothing in the repository
+# told a stranger to create any of them. The one that matters most is
+# `logweir-signing-key`, which is why it is checked first:
 # `SigningKey::load_or_generate` MINTS A NEW KEY when the path is absent
 # (`crates/logweir-evidence/src/keys.rs:81-92`), so a first run against an empty
 # Secret produces evidence signed by a key nothing attests — silently, and with
 # a green scorecard.
 #
-# FOUR OF THE FIVE LIVE IN THE RUNNER'S NAMESPACE; the fifth,
+# THREE OF THE FOUR LIVE IN THE RUNNER'S NAMESPACE; the fourth,
 # `logweir-evidence-ro`, is the CONTROLLER's read-only evidence credential and
 # lives in `logweir-system` (spec §9's table: the kubelet reads it, so "no `get`
 # on Secrets" holds in the letter). The per-cluster SCRAM credential's NAME is
@@ -459,7 +459,6 @@ check-secrets ns scram="kafka-scram":
     set -uo pipefail
     missing=""
     for pair in "logweir-signing-key:{{ns}}" \
-                "logweir-approval-bundle:{{ns}}" \
                 "{{scram}}:{{ns}}" \
                 "logweir-s3:{{ns}}" \
                 "logweir-evidence-ro:logweir-system"; do
@@ -477,12 +476,12 @@ check-secrets ns scram="kafka-scram":
       echo ""
       echo "Create it before any custom resource — docs/kubernetes.md §13 step 1 carries the"
       echo "exact command, and the two openssl commands that mint the keypairs. An absent"
-      echo "logweir-signing-key is the worst of the five: SigningKey::load_or_generate mints a"
+      echo "logweir-signing-key is the worst of the four: SigningKey::load_or_generate mints a"
       echo "new key when the path is absent (crates/logweir-evidence/src/keys.rs:81-92), so the"
       echo "run would succeed and sign its evidence with a key nothing attests."
       exit 1
     fi
-    echo "check-secrets: all five Secrets are present ({{ns}}, and logweir-evidence-ro in logweir-system)."
+    echo "check-secrets: all four current Secrets are present ({{ns}}, and logweir-evidence-ro in logweir-system)."
 
 # Task 23, chain J slot 16. The two image recipes for the CONTROLLER image and
 # the org-root anchor — appended at the END of this file, as STANDING RULE 17

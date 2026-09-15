@@ -9,9 +9,9 @@ INSTALLED (the control plane, the same objects logweir.yaml ships):
     (imagePullPolicy {{ .Values.imagePullPolicy }}); every runner Job it creates
     will use {{ .Values.runnerImage }} with imagePullPolicy
     {{ .Values.runnerImagePullPolicy }}
-  * NetworkPolicy "logweir-runner-egress" and ServiceAccount "logweir-runner",
-    both in this namespace only — apply them into each namespace that will run
-    Backups, Restores or KafkaClusters (docs/install.md steps 4 and after)
+  * NetworkPolicies and ServiceAccount "logweir-runner" in this namespace and
+    every identity.authorizedRunnerNamespaces entry; short-lived distribution
+    hooks copy the SAME installation signer into those namespaces
   * ClusterRoles logweir-viewer, logweir-operator, logweir-approver — UNBOUND;
     who may act in which namespace is your decision:
       kubectl create rolebinding logweir-approver --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
@@ -39,16 +39,24 @@ THE UI, AND WHOSE AUTHORITY IT ACTS WITH:
       kubectl create rolebinding {{ .Release.Name }}-ui --clusterrole={{ .Release.Name }}-ui --serviceaccount={{ .Release.Namespace }}:{{ .Release.Name }}-ui -n <namespace>
 {{- end }}
 
-BEFORE ANY CUSTOM RESOURCE — the five Secrets, the two keypairs, the
-cluster-scoped TrustRoster named "default" and the per-namespace runner
-ServiceAccount: docs/install.md. Then `just check-secrets <namespace>`.
+{{- if .Values.identity.enabled }}
+BEFORE ANY CUSTOM RESOURCE — wait for the retained installation signer hook,
+publish its ConfigMap material through the cluster-scoped TrustRoster named
+"default", and provision the approver and workload credentials. Additional
+runner namespaces must already exist and be declared in
+identity.authorizedRunnerNamespaces: docs/install.md. Then
+`just check-secrets <namespace>`.
+{{- else }}
+IDENTITY BOOTSTRAP IS DISABLED. Provision the existing
+`logweir-signing-key/signing.pem` and matching public trust material before any
+workload custom resource. This is the legacy/manual path, not the supported
+clean-install default. See docs/install.md.
+{{- end }}
 
-THE TWO LOGWEIR IMAGES ABOVE ARE NAMED BY THE `latest` TAG by default — the
-owner's decision of 2026-09-12; values.yaml's header carries the trade-off and
-the command that pins them back to digests. `latest` exists in NO registry
-today (Global Constraint 37, `blocked: images not published`: release.yml has
-never run), so a cluster with no access to docker.io/vladyslavhaina/… leaves the
-controller pod in ImagePullBackOff, exactly as docs/install.md path (a)
-records. An author-only install (images you built and loaded yourself) is
-examples/author-only.values.yaml — with runnerImagePullPolicy: Never beside
-them — and it is not evidence that anything was published.
+CONTROLLER AND ORDINARY RUNNER DEFAULTS USE `latest`, but the identity
+bootstrap image is separately digest-pinned because it can read/patch the
+private signer. This pre-publication checkout leaves that value empty and
+refuses to render until compatible reviewed bytes are published and pinned.
+An author-only install uses examples/author-only.values.yaml with local tags,
+pull policy Never and the explicit development exception; it is not evidence
+that anything was published.

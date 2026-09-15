@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { GROUP, VERSION, WRITABLE_PLURALS, create, path } from "../api.js";
+import { GROUP, VERSION, WRITABLE_PLURALS, create, list, path } from "../api.js";
 
 test("path builds a relative identifier from its segments", () => {
   assert.equal(path("apis", "logweir.dev", "v1alpha1"), "/apis/logweir.dev/v1alpha1");
@@ -130,4 +130,24 @@ test("patchSuspend and create reach the network only through path()", async () =
   for (const u of seen) {
     assert.equal(u.charAt(0), "/", "every identifier issued is relative to the serving origin");
   }
+});
+
+test("route reads receive an abort signal while durable creates do not", async () => {
+  const seen = [];
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  globalThis.fetch = function (u, init) {
+    seen.push({ u: u, init: init });
+    return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("{}") });
+  };
+  try {
+    await list("logweir-t25", "backups", { signal: controller.signal });
+    // A fourth argument is intentionally ignored: an accepted POST is a
+    // durable operation, not a route-owned read that navigation may cancel.
+    await create("logweir-t25", "backups", {}, { signal: controller.signal });
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.equal(seen[0].init.signal, controller.signal, "the read is cancellable");
+  assert.equal(seen[1].init.signal, undefined, "the create is never route-cancelled");
 });

@@ -69,6 +69,26 @@ pub struct SubjectRef {
     pub name: String,
 }
 
+/// The exact Kubernetes object whose bytes were verified.
+///
+/// This is controller-produced provenance, not another user assertion.  In
+/// particular, `uid` prevents a verified Approval from silently following a
+/// delete/recreate of a same-named Restore.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedSubjectRef {
+    /// The referent's API version at verification time.
+    pub api_version: String,
+    /// The referent's kind at verification time.
+    pub kind: SubjectKind,
+    /// The referent's name at verification time.
+    pub name: String,
+    /// The referent's namespace at verification time.
+    pub namespace: String,
+    /// The referent's immutable Kubernetes UID at verification time.
+    pub uid: String,
+}
+
 /// `Approval.spec` — **four fields, all required**.
 #[derive(kube::CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -137,6 +157,11 @@ pub struct ApprovalStatus {
     /// `false` means only that the two matched key ids differ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_attested_risk: Option<bool>,
+    /// The exact referent identity used for the first successful verification.
+    /// Once present it is retained across later failures so a same-named,
+    /// recreated object can never acquire this Approval on a later reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_subject_ref: Option<VerifiedSubjectRef>,
     /// `Verified`, and whatever else the controller reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,

@@ -25,15 +25,19 @@
 //! and `suspend` arms checkable.
 
 use chrono::{DateTime, TimeZone, Utc};
+use kube::CustomResourceExt as _;
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
     decide, reconcile_schedule, refine_against_last_fire, runner_argv, scheduled_backup,
     status_patch, ScheduleOutcome, SlotDecision, ALLOWED_CLUSTERS_PATH, MISSED_SLOT_HORIZON,
-    OUT_PATH, REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED, RECEIPT_OUT_PATH,
-    REQUEUE_SECS, RUNNER_ARGV_ANNOTATION, SCHEDULE_LABEL, SIGNING_KEY_PATH, SLOT_LABEL, SPEC_PATH,
-    TRIGGERED_BY_SCHEDULE,
+    OUT_PATH, REASON_CONCURRENCY_BLOCKED, REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED,
+    RECEIPT_OUT_PATH, REQUEUE_SECS, RUNNER_ARGV_ANNOTATION, SCHEDULE_LABEL, SIGNING_KEY_PATH,
+    SLOT_LABEL, SPEC_PATH, TRIGGERED_BY_SCHEDULE,
 };
-use weirkeeper::crds::backup_schedule::{BackupSchedule, BackupScheduleStatus};
+use weirkeeper::crds::backup_schedule::{
+    BackupSchedule, BackupScheduleStatus, ConcurrencyPolicy, SUSPEND_ONLY_RULE,
+};
+use weirkeeper::crds::LocalRef;
 use weirkeeper::slot::{
     backup_id_for, scheduled_backup_name, slot_name, Cron, SlotError, NAME_LIMIT,
 };
@@ -66,6 +70,7 @@ fn schedule_json(name: &str, uid: &str, cron: &str, suspend: bool) -> String {
     "name": "{name}",
     "namespace": "{NS}",
     "uid": "{uid}",
+    "resourceVersion": "17",
     "generation": 4
   }},
   "spec": {{
@@ -73,6 +78,7 @@ fn schedule_json(name: &str, uid: &str, cron: &str, suspend: bool) -> String {
     "sourceRef": {{ "name": "prod" }},
     "topics": ["orders", "payments"],
     "archive": {{ "url": "s3://kafka-backups/logweir" }},
+    "concurrencyPolicy": "Allow",
     "suspend": {suspend}
   }}
 }}"#
@@ -83,6 +89,64 @@ fn schedule_json(name: &str, uid: &str, cron: &str, suspend: bool) -> String {
 fn schedule(name: &str, uid: &str, cron: &str, suspend: bool) -> BackupSchedule {
     serde_json::from_str(&schedule_json(name, uid, cron, suspend))
         .expect("the fixture is a BackupSchedule")
+}
+
+fn forbid_schedule(name: &str, uid: &str, cron: &str, suspend: bool) -> BackupSchedule {
+    let mut schedule = schedule(name, uid, cron, suspend);
+    schedule.spec.concurrency_policy = ConcurrencyPolicy::Forbid;
+    schedule
+}
+
+fn backup_value(
+    name: &str,
+    owner_uid: &str,
+    phase: Option<&str>,
+    job_ref: Option<&str>,
+) -> serde_json::Value {
+    let mut status = serde_json::Map::new();
+    if let Some(phase) = phase {
+        status.insert("phase".to_string(), serde_json::json!(phase));
+    }
+    if let Some(job) = job_ref {
+        status.insert("jobRef".to_string(), serde_json::json!({ "name": job }));
+    }
+    serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Backup",
+        "metadata": {
+            "name": name,
+            "namespace": NS,
+            "uid": format!("backup-{name}"),
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1",
+                "kind": "BackupSchedule",
+                "name": "nightly",
+                "uid": owner_uid,
+                "controller": true,
+                "blockOwnerDeletion": true
+            }]
+        },
+        "spec": {
+            "sourceRef": { "name": "prod" },
+            "topics": ["orders"],
+            "archive": { "url": "s3://kafka-backups/logweir" },
+            "scheduleRef": { "name": "nightly" },
+            "slot": name.get(name.len().saturating_sub(15)..).unwrap_or_default(),
+            "triggeredBy": "schedule",
+            "deadlineSeconds": 3600
+        },
+        "status": serde_json::Value::Object(status)
+    })
+}
+
+fn backup_list_body(items: Vec<serde_json::Value>) -> String {
+    serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "BackupList",
+        "metadata": { "resourceVersion": "41" },
+        "items": items
+    })
+    .to_string()
 }
 
 /// A UTC instant, spelled as five integers so a test reads like a calendar.
@@ -141,6 +205,12 @@ const DAILY: &str = "0 0 * * *";
 fn daily_routes(name: &str, post_status: u16) -> Vec<Route> {
     vec![
         Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(name, UID, Some("Running"), Some(name))]),
+        },
+        Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
             status: post_status,
@@ -149,6 +219,12 @@ fn daily_routes(name: &str, post_status: u16) -> Vec<Route> {
             } else {
                 already_exists_body(name)
             },
+        },
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{name}").into_boxed_str()),
+            status: 200,
+            body: backup_value(name, UID, Some("Running"), Some(name)).to_string(),
         },
         Route {
             method: "PATCH",
@@ -363,6 +439,12 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
             path_suffix: "/namespaces/logweir-t18/backups",
             status: 409,
             body: already_exists_body(&expected),
+        },
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{expected}").into_boxed_str()),
+            status: 200,
+            body: backup_value(&expected, UID, Some("Running"), Some(&expected)).to_string(),
         },
         Route {
             method: "PATCH",
@@ -1846,14 +1928,18 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
         .expect("the stub allowlist serialises"),
     )
     .expect("the scratch allowlist is writable");
-    // NOT A KEY, AND IT NEVER NEEDS TO BE. `--signing-key` is opened AFTER the
-    // archive has been read back; this run stops long before that, and no
-    // private key material belongs in a test tree.
-    std::fs::write(
+    // A valid PKCS#8 signer in the SCRATCH path. Signing readiness is checked
+    // before credential projection, so a malformed placeholder would stop at
+    // exit 4 and cease to prove that the controller's complete argv reaches
+    // the expected missing-password boundary. The checked-in key is test-only
+    // fixture material; copying it keeps the runner path identical to its pod
+    // mount without adding a signer dependency to this controller crate.
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../e2e/fixtures/signed/signing.pem"),
         dir.join("key.pem"),
-        b"this file is never opened by this run\n",
     )
-    .expect("the scratch signing-key path is writable");
+    .expect("a valid PKCS#8 signer is copied into the scratch mount path");
 
     let emitted = runner_argv("b1");
     let argv = argv_against(&dir, &emitted);
@@ -2295,5 +2381,1317 @@ async fn a_steady_backup_schedule_is_patched_once_and_a_suspend_flip_once_more()
         status["conditions"][0]["lastTransitionTime"],
         serde_json::json!(settled_transition),
         "a comparison that never moved the field would be as wrong as one that always did"
+    );
+}
+
+// ===========================================================================
+// PLAT-04.1 — ACTUAL-RUN CONCURRENCY
+// ===========================================================================
+
+#[test]
+fn omitted_concurrency_policy_defaults_to_forbid_and_the_schema_validates_both_values() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&schedule_json("nightly", UID, DAILY, false)).unwrap();
+    value["spec"]
+        .as_object_mut()
+        .expect("spec is an object")
+        .remove("concurrencyPolicy");
+    let old: BackupSchedule = serde_json::from_value(value).expect("an old schedule still parses");
+    assert_eq!(old.spec.concurrency_policy, ConcurrencyPolicy::Forbid);
+
+    let mut invalid: serde_json::Value =
+        serde_json::from_str(&schedule_json("nightly", UID, DAILY, false)).unwrap();
+    invalid["spec"]["concurrencyPolicy"] = serde_json::json!("Replace");
+    assert!(
+        serde_json::from_value::<BackupSchedule>(invalid).is_err(),
+        "the typed model refuses policy values outside Forbid and Allow"
+    );
+
+    let crd = serde_json::to_value(BackupSchedule::crd()).expect("the CRD serializes");
+    let policy = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+        ["properties"]["concurrencyPolicy"];
+    assert_eq!(policy["default"], serde_json::json!("Forbid"));
+    assert_eq!(policy["enum"], serde_json::json!(["Forbid", "Allow"]));
+    assert!(
+        SUSPEND_ONLY_RULE.contains("self.concurrencyPolicy == oldSelf.concurrencyPolicy"),
+        "the new policy is sealed with the rest of the schedule inputs"
+    );
+}
+
+#[tokio::test]
+async fn a_long_running_previous_slot_blocks_the_next_slot_under_forbid() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let previous = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        active_backup_ref: Some(LocalRef {
+            name: previous.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &previous,
+                UID,
+                Some("Running"),
+                Some(&previous),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body("must-not-be-created"),
+        },
+    ]);
+
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert!(matches!(
+        outcome.decision,
+        SlotDecision::ConcurrencyBlocked { .. }
+    ));
+    assert_eq!(outcome.decision.reason(), REASON_CONCURRENCY_BLOCKED);
+    assert_eq!(outcome.created, None);
+    let seen = calls.lock().unwrap().clone();
+    assert_eq!(seen.iter().filter(|call| call.method == "POST").count(), 0);
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(status["activeBackupRef"]["name"], previous);
+    assert_eq!(status["lastMissedSlot"], slot_name(now));
+    assert!(status["conditions"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("was not fired because concurrencyPolicy Forbid"));
+}
+
+#[tokio::test]
+async fn a_deleted_job_keeps_its_nonterminal_backup_conservatively_active() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let previous = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    let (client, calls) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            // The referenced Job is deliberately absent. The Backup controller
+            // may recreate it, so the schedule must not infer completion.
+            body: backup_list_body(vec![backup_value(
+                &previous,
+                UID,
+                Some("Running"),
+                Some("deleted-job"),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert_eq!(outcome.decision.reason(), REASON_CONCURRENCY_BLOCKED);
+    assert!(calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|call| !call.uri.contains("/jobs")));
+}
+
+#[tokio::test]
+async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let previous = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        active_backup_ref: Some(LocalRef {
+            name: previous.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &previous,
+                UID,
+                Some("Succeeded"),
+                Some(&previous),
+            )]),
+        },
+        Route {
+            method: "PUT",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
+    let methods: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.method.clone())
+        .collect();
+    assert_eq!(methods, ["GET", "PUT", "POST", "PATCH"]);
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(status["activeBackupRef"]["name"], current);
+    assert!(status["pendingBackupRef"].is_null());
+}
+
+#[tokio::test]
+async fn a_stale_active_reference_is_cleared_before_the_new_slot_is_admitted() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        active_backup_ref: Some(LocalRef {
+            name: "deleted-backup".to_string(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "PUT",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    reconcile_schedule(&schedule, &client, now).await.unwrap();
+    let recorded = bodies.lock().unwrap().clone();
+    let reservation = recorded.iter().find(|body| body.method == "PUT").unwrap();
+    let reservation: serde_json::Value = serde_json::from_str(&reservation.body).unwrap();
+    assert!(reservation["status"]["activeBackupRef"].is_null());
+    assert_eq!(reservation["status"]["pendingBackupRef"]["name"], current);
+}
+
+#[tokio::test]
+async fn restart_after_child_creation_adopts_the_owned_child_and_clears_the_reservation() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: current.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(&current, UID, None, None)]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert!(outcome.already_existed);
+    assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "POST")
+            .count(),
+        0
+    );
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(status["activeBackupRef"]["name"], current);
+    assert!(status["pendingBackupRef"].is_null());
+}
+
+#[tokio::test]
+async fn allow_explicitly_permits_a_new_slot_without_active_run_admission() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let previous = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let mut schedule = schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        active_backup_ref: Some(LocalRef { name: previous }),
+        ..BackupScheduleStatus::default()
+    });
+    assert_eq!(schedule.spec.concurrency_policy, ConcurrencyPolicy::Allow);
+    let (client, calls) = mock_client_recording(vec![
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    reconcile_schedule(&schedule, &client, now).await.unwrap();
+    let methods: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.method.clone())
+        .collect();
+    assert_eq!(methods, ["POST", "PATCH"]);
+}
+
+#[tokio::test]
+async fn an_unknown_previous_run_state_blocks_conservatively_under_forbid() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let previous = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    let (client, calls) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(&previous, UID, None, None)]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert_eq!(outcome.decision.reason(), REASON_CONCURRENCY_BLOCKED);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "POST")
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn allow_still_clears_a_completed_singular_active_reference_between_slots() {
+    let due = utc(2026, 9, 10, 0, 0);
+    let previous = scheduled_backup_name("nightly", &slot_name(due)).unwrap();
+    let mut schedule = schedule("nightly", UID, DAILY, false);
+    schedule.status = Some(BackupScheduleStatus {
+        last_fire_time: Some(due),
+        active_backup_ref: Some(LocalRef {
+            name: previous.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &previous,
+                UID,
+                Some("Succeeded"),
+                Some(&previous),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    reconcile_schedule(&schedule, &client, utc(2026, 9, 10, 12, 0))
+        .await
+        .unwrap();
+    assert!(patched_status(&bodies.lock().unwrap())["activeBackupRef"].is_null());
+}
+
+#[tokio::test]
+async fn a_wrong_owner_uid_at_the_deterministic_name_is_not_adopted() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    let (client, calls) = mock_client_recording(vec![Route {
+        method: "GET",
+        path_suffix: "/namespaces/logweir-t18/backups",
+        status: 200,
+        body: backup_list_body(vec![backup_value(
+            &current,
+            OTHER_UID,
+            Some("Running"),
+            None,
+        )]),
+    }]);
+    let error = reconcile_schedule(&schedule, &client, now)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("complete current BackupSchedule controller identity"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_backup_list_api_failure_never_admits_or_creates_work() {
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    let (client, calls) = mock_client_recording(vec![Route {
+        method: "GET",
+        path_suffix: "/namespaces/logweir-t18/backups",
+        status: 500,
+        body: SERVER_ERROR_BODY.to_string(),
+    }]);
+    assert!(
+        reconcile_schedule(&schedule, &client, utc(2026, 9, 10, 12, 1))
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "PUT",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 500,
+            body: SERVER_ERROR_BODY.to_string(),
+        },
+    ]);
+    assert!(reconcile_schedule(&schedule, &client, now).await.is_err());
+    let methods: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.method.clone())
+        .collect();
+    assert_eq!(methods, ["GET", "PUT", "POST"]);
+    let reservation = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|body| body.method == "PUT")
+        .cloned()
+        .unwrap();
+    let reservation: serde_json::Value = serde_json::from_str(&reservation.body).unwrap();
+    assert_eq!(reservation["status"]["pendingBackupRef"]["name"], current);
+}
+
+#[tokio::test]
+async fn restart_after_reservation_resumes_the_accepted_slot_without_readmitting_it() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: current.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
+    let methods: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.method.clone())
+        .collect();
+    assert_eq!(methods, ["GET", "POST", "PATCH"]);
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(status["activeBackupRef"]["name"], current);
+    assert!(status["pendingBackupRef"].is_null());
+}
+
+#[tokio::test]
+async fn an_accepted_reservation_survives_past_the_missed_slot_horizon() {
+    let due = utc(2026, 9, 10, 0, 0);
+    let now = utc(2026, 9, 10, 12, 0);
+    let reserved = scheduled_backup_name("nightly", &slot_name(due)).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, DAILY, false);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: reserved.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&reserved),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert_eq!(outcome.created.as_deref(), Some(reserved.as_str()));
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "POST")
+            .count(),
+        1
+    );
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(status["lastFireTime"], serde_json::json!(due));
+    assert_eq!(status["activeBackupRef"]["name"], reserved);
+    assert!(status["pendingBackupRef"].is_null());
+}
+
+#[tokio::test]
+async fn a_newer_due_slot_cannot_overtake_an_accepted_previous_reservation() {
+    let accepted_due = utc(2026, 9, 10, 12, 0);
+    let now = utc(2026, 9, 10, 12, 1);
+    let accepted = scheduled_backup_name("nightly", &slot_name(accepted_due)).unwrap();
+    let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: accepted.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&accepted),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert_eq!(outcome.created.as_deref(), Some(accepted.as_str()));
+    assert_eq!(outcome.decision.reason(), REASON_CONCURRENCY_BLOCKED);
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(status["lastFireTime"], serde_json::json!(accepted_due));
+    assert_eq!(status["lastMissedSlot"], slot_name(now));
+    assert_eq!(status["activeBackupRef"]["name"], accepted);
+}
+
+#[tokio::test]
+async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_resource_version() {
+    use http::{Request, Response};
+    use http_body_util::BodyExt as _;
+    use kube::client::Body;
+    use std::sync::{Arc, Mutex};
+    use tower::service_fn;
+
+    #[derive(Default)]
+    struct ApiState {
+        reservation_taken: bool,
+        posted_names: Vec<String>,
+    }
+
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+    let schedule_response = serde_json::to_string(&schedule).unwrap();
+    let state = Arc::new(Mutex::new(ApiState::default()));
+    let service = {
+        let state = Arc::clone(&state);
+        service_fn(move |request: Request<Body>| {
+            let state = Arc::clone(&state);
+            let schedule_response = schedule_response.clone();
+            async move {
+                let method = request.method().as_str().to_string();
+                let path = request.uri().path().to_string();
+                let body = request
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|collected| collected.to_bytes())
+                    .unwrap_or_default();
+                let (status, response_body) = if method == "GET" && path.ends_with("/backups") {
+                    // Both replicas are allowed to observe the same empty list;
+                    // the status resourceVersion is the actual admission CAS.
+                    (200, backup_list_body(vec![]))
+                } else if method == "PUT" && path.ends_with("/backupschedules/nightly/status") {
+                    let reservation: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        reservation["metadata"]["resourceVersion"],
+                        serde_json::json!("17"),
+                        "both stale replicas must submit the watched resourceVersion as the CAS token"
+                    );
+                    let mut state = state.lock().unwrap();
+                    if state.reservation_taken {
+                        (
+                            409,
+                            r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","message":"the object has been modified","code":409}"#.to_string(),
+                        )
+                    } else {
+                        state.reservation_taken = true;
+                        (200, schedule_response)
+                    }
+                } else if method == "POST" && path.ends_with("/backups") {
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    state
+                        .lock()
+                        .unwrap()
+                        .posted_names
+                        .push(value["metadata"]["name"].as_str().unwrap().to_string());
+                    (201, String::from_utf8(body.to_vec()).unwrap())
+                } else if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
+                    (200, schedule_response)
+                } else {
+                    panic!("unexpected replica-race request: {method} {path}")
+                };
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(response_body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        })
+    };
+    let client = kube::Client::new(service, "default");
+    let a = schedule.clone();
+    let b = schedule;
+    let (first, second) = tokio::join!(
+        reconcile_schedule(&a, &client, utc(2026, 9, 10, 12, 0)),
+        reconcile_schedule(&b, &client, utc(2026, 9, 10, 12, 1)),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert_eq!(
+        usize::from(first.is_err()) + usize::from(second.is_err()),
+        1
+    );
+    let state = state.lock().unwrap();
+    assert!(state.reservation_taken);
+    assert_eq!(
+        state.posted_names.len(),
+        1,
+        "only the resourceVersion winner may create its deterministic slot child"
+    );
+}
+
+#[tokio::test]
+async fn failed_and_refused_children_each_release_forbid_admission() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let previous = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0)))
+        .expect("the previous name fits");
+    let current = scheduled_backup_name("nightly", &slot_name(now)).expect("the current name fits");
+
+    for phase in ["Failed", "Refused"] {
+        let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+        schedule.status = Some(BackupScheduleStatus {
+            active_backup_ref: Some(LocalRef {
+                name: previous.clone(),
+            }),
+            ..BackupScheduleStatus::default()
+        });
+        let (client, calls) = mock_client_recording(vec![
+            Route {
+                method: "GET",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 200,
+                body: backup_list_body(vec![backup_value(
+                    &previous,
+                    UID,
+                    Some(phase),
+                    Some(&previous),
+                )]),
+            },
+            Route {
+                method: "PUT",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).unwrap(),
+            },
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(&current),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).unwrap(),
+            },
+        ]);
+
+        let outcome = reconcile_schedule(&schedule, &client, now)
+            .await
+            .unwrap_or_else(|e| panic!("terminal phase {phase} releases admission: {e}"));
+        assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
+        let methods: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.method.clone())
+            .collect();
+        assert_eq!(methods, ["GET", "PUT", "POST", "PATCH"], "{phase}");
+    }
+}
+
+#[tokio::test]
+async fn an_invalid_pending_reference_is_cleared_with_a_resource_version_precondition() {
+    let mut schedule = forbid_schedule("nightly", UID, DAILY, true);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: "not-a-deterministic-slot-name".to_string(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+
+    reconcile_schedule(&schedule, &client, utc(2026, 9, 10, 12, 0))
+        .await
+        .expect("invalid pending status is stale, not accepted work");
+    let recorded = bodies.lock().unwrap().clone();
+    let patch: serde_json::Value = serde_json::from_str(
+        &recorded
+            .iter()
+            .find(|body| body.method == "PATCH")
+            .expect("stale status is cleared")
+            .body,
+    )
+    .unwrap();
+    assert!(patch["status"]["pendingBackupRef"].is_null());
+    assert_eq!(patch["metadata"]["name"], serde_json::json!("nightly"));
+    assert_eq!(
+        patch["metadata"]["resourceVersion"],
+        serde_json::json!("17")
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "POST")
+            .count(),
+        0,
+        "an invalid reservation is cleared, never created"
+    );
+}
+
+#[tokio::test]
+async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let mut wrong_name = backup_value(&current, UID, Some("Running"), None);
+    wrong_name["metadata"]["ownerReferences"][0]["name"] = serde_json::json!("retired-nightly");
+    let mut ownerless = backup_value(&current, UID, Some("Running"), None);
+    ownerless["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ownerReferences");
+
+    for (case, winner) in [
+        (
+            "old UID",
+            backup_value(&current, OTHER_UID, Some("Running"), None),
+        ),
+        ("ownerless", ownerless),
+        ("wrong controller name", wrong_name),
+    ] {
+        let schedule = schedule("nightly", UID, "* * * * *", false);
+        let (client, calls) = mock_client_recording(vec![
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 409,
+                body: already_exists_body(&current),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/backups/logweir-backup-nightly-20260910-120100",
+                status: 200,
+                body: winner.to_string(),
+            },
+        ]);
+        let error = reconcile_schedule(&schedule, &client, now)
+            .await
+            .expect_err("a foreign 409 winner is not owned success");
+        assert!(
+            error
+                .to_string()
+                .contains("complete current BackupSchedule controller identity"),
+            "{case}: {error}"
+        );
+        let methods: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.method.clone())
+            .collect();
+        assert_eq!(methods, ["POST", "GET"], "{case}");
+    }
+}
+
+#[tokio::test]
+async fn allow_accepts_only_the_owned_409_winner_and_observes_its_terminal_state() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let schedule = schedule("nightly", UID, "* * * * *", false);
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 409,
+            body: already_exists_body(&current),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/backups/logweir-backup-nightly-20260910-120100",
+            status: 200,
+            body: backup_value(&current, UID, Some("Failed"), None).to_string(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    assert!(outcome.already_existed);
+    assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
+    assert!(patched_status(&bodies.lock().unwrap())["activeBackupRef"].is_null());
+    let methods: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.method.clone())
+        .collect();
+    assert_eq!(methods, ["POST", "GET", "PATCH"]);
+}
+
+#[tokio::test]
+async fn allow_409_followed_by_get_404_is_transient_not_owned_success() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    let schedule = schedule("nightly", UID, "* * * * *", false);
+    let not_found = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","message":"the winner is not observable yet","code":404}"#;
+    let (client, calls) = mock_client_recording(vec![
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 409,
+            body: already_exists_body(&current),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/backups/logweir-backup-nightly-20260910-120100",
+            status: 404,
+            body: not_found.to_string(),
+        },
+    ]);
+
+    let error = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect_err("a 404 after 409 must requeue rather than claim ownership");
+    assert!(error.to_string().contains("404"));
+    let methods: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.method.clone())
+        .collect();
+    assert_eq!(methods, ["POST", "GET"]);
+}
+
+#[tokio::test]
+async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_history() {
+    let old_run = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let mut old_value: serde_json::Value =
+        serde_json::from_str(&schedule_json("nightly", UID, "* * * * *", true)).unwrap();
+    old_value["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("concurrencyPolicy");
+    let mut old: BackupSchedule = serde_json::from_value(old_value).unwrap();
+    old.status = Some(BackupScheduleStatus {
+        active_backup_ref: Some(LocalRef {
+            name: old_run.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    assert_eq!(old.spec.concurrency_policy, ConcurrencyPolicy::Forbid);
+
+    let (client, calls) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &old_run,
+                UID,
+                Some("Running"),
+                Some(&old_run),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&old).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&old, &client, utc(2026, 9, 10, 12, 1))
+        .await
+        .expect("the suspended old schedule observes its active child without firing");
+    assert!(matches!(outcome.decision, SlotDecision::Suspended));
+    assert!(calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|call| call.method != "POST" && call.method != "DELETE"));
+
+    // The old child reaches terminal while the old schedule stays suspended.
+    // Reconciliation clears only the display reference; it does not delete the
+    // terminal Backup or the schedule that anchors its history.
+    let (client, drained_calls) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &old_run,
+                UID,
+                Some("Succeeded"),
+                Some(&old_run),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&old).unwrap(),
+        },
+    ]);
+    reconcile_schedule(&old, &client, utc(2026, 9, 10, 12, 2))
+        .await
+        .expect("the suspended old schedule observes that every child is terminal");
+    assert!(drained_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|call| call.method != "POST" && call.method != "DELETE"));
+
+    // Only after that drain, a differently named schedule starts its own UID
+    // generation while the old terminal Backup remains in the list as history.
+    let replacement = forbid_schedule("nightly-v2", OTHER_UID, "* * * * *", false);
+    let replacement_name =
+        scheduled_backup_name("nightly-v2", &slot_name(utc(2026, 9, 10, 12, 3))).unwrap();
+    let (client, replacement_calls) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &old_run,
+                UID,
+                Some("Succeeded"),
+                Some(&old_run),
+            )]),
+        },
+        Route {
+            method: "PUT",
+            path_suffix: "/backupschedules/nightly-v2/status",
+            status: 200,
+            body: serde_json::to_string(&replacement).unwrap(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&replacement_name),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly-v2/status",
+            status: 200,
+            body: serde_json::to_string(&replacement).unwrap(),
+        },
+    ]);
+    let replacement_outcome = reconcile_schedule(&replacement, &client, utc(2026, 9, 10, 12, 3))
+        .await
+        .expect("the differently named replacement starts after the old generation drains");
+    assert_eq!(
+        replacement_outcome.created.as_deref(),
+        Some(replacement_name.as_str())
+    );
+    assert!(replacement_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|call| call.method != "DELETE"));
+
+    let docs = workspace_source("docs/kubernetes.md");
+    let replacement_guidance = docs
+        .split("Until PLAT-05 decouples retained history")
+        .nth(1)
+        .expect("the migration procedure is documented");
+    for required in [
+        "Set `spec.suspend: true` on the old schedule",
+        "wait until all of them are terminal",
+        "Retain the old, suspended `BackupSchedule`",
+        "replacement under a **different name**",
+        "Do not delete and recreate a schedule under the same name",
+        "field is omitted already behaves as\n`Forbid`",
+    ] {
+        assert!(
+            replacement_guidance.contains(required),
+            "migration guidance must contain {required:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_recovers() {
+    use http::{Request, Response};
+    use http_body_util::BodyExt as _;
+    use kube::client::Body;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+    use tower::service_fn;
+
+    struct ApiState {
+        schedule: serde_json::Value,
+        backups: BTreeMap<String, serde_json::Value>,
+        posted_names: Vec<String>,
+        first_b_create_failed: bool,
+    }
+
+    let slot_a = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 0))).unwrap();
+    let slot_b = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 10, 12, 1))).unwrap();
+    let initial = forbid_schedule("nightly", UID, "* * * * *", false);
+    let state = Arc::new(Mutex::new(ApiState {
+        schedule: serde_json::to_value(&initial).unwrap(),
+        backups: BTreeMap::new(),
+        posted_names: Vec::new(),
+        first_b_create_failed: false,
+    }));
+    let a_created = Arc::new(AtomicBool::new(false));
+    let a_created_notify = Arc::new(Notify::new());
+    let b_reserved = Arc::new(AtomicBool::new(false));
+    let b_reserved_notify = Arc::new(Notify::new());
+
+    let service = {
+        let state = Arc::clone(&state);
+        let a_created = Arc::clone(&a_created);
+        let a_created_notify = Arc::clone(&a_created_notify);
+        let b_reserved = Arc::clone(&b_reserved);
+        let b_reserved_notify = Arc::clone(&b_reserved_notify);
+        let slot_a = slot_a.clone();
+        let slot_b = slot_b.clone();
+        service_fn(move |request: Request<Body>| {
+            let state = Arc::clone(&state);
+            let a_created = Arc::clone(&a_created);
+            let a_created_notify = Arc::clone(&a_created_notify);
+            let b_reserved = Arc::clone(&b_reserved);
+            let b_reserved_notify = Arc::clone(&b_reserved_notify);
+            let slot_a = slot_a.clone();
+            let slot_b = slot_b.clone();
+            async move {
+                let method = request.method().as_str().to_string();
+                let path = request.uri().path().to_string();
+                let body = request
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|collected| collected.to_bytes())
+                    .unwrap_or_default();
+
+                if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
+                    let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    if patch["metadata"]["resourceVersion"] == serde_json::json!("18") {
+                        while !b_reserved.load(Ordering::SeqCst) {
+                            b_reserved_notify.notified().await;
+                        }
+                    }
+                }
+
+                let (status, response_body) = {
+                    let mut state = state.lock().unwrap();
+                    if method == "GET" && path.ends_with("/backups") {
+                        (
+                            200,
+                            backup_list_body(state.backups.values().cloned().collect()),
+                        )
+                    } else if method == "PUT" && path.ends_with("/backupschedules/nightly/status") {
+                        let mut replacement: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap();
+                        let expected = state.schedule["metadata"]["resourceVersion"]
+                            .as_str()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        let offered = replacement["metadata"]["resourceVersion"]
+                            .as_str()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        if offered != expected {
+                            (
+                                409,
+                                r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","message":"the object has been modified","code":409}"#.to_string(),
+                            )
+                        } else {
+                            replacement["metadata"]["resourceVersion"] =
+                                serde_json::json!((expected + 1).to_string());
+                            state.schedule = replacement;
+                            let pending = state.schedule["status"]["pendingBackupRef"]["name"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
+                            if pending == slot_b {
+                                b_reserved.store(true, Ordering::SeqCst);
+                                b_reserved_notify.notify_waiters();
+                            }
+                            (200, state.schedule.to_string())
+                        }
+                    } else if method == "POST" && path.ends_with("/backups") {
+                        let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let posted_name = posted["metadata"]["name"].as_str().unwrap().to_string();
+                        state.posted_names.push(posted_name.clone());
+                        if posted_name == slot_b && !state.first_b_create_failed {
+                            state.first_b_create_failed = true;
+                            (500, SERVER_ERROR_BODY.to_string())
+                        } else {
+                            let phase = if posted_name == slot_a {
+                                "Succeeded"
+                            } else {
+                                "Running"
+                            };
+                            state.backups.insert(
+                                posted_name.clone(),
+                                backup_value(&posted_name, UID, Some(phase), Some(&posted_name)),
+                            );
+                            if posted_name == slot_a {
+                                a_created.store(true, Ordering::SeqCst);
+                                a_created_notify.notify_waiters();
+                            }
+                            (201, posted.to_string())
+                        }
+                    } else if method == "PATCH" && path.ends_with("/backupschedules/nightly/status")
+                    {
+                        let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let expected = state.schedule["metadata"]["resourceVersion"]
+                            .as_str()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        let offered = patch["metadata"]["resourceVersion"]
+                            .as_str()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        if offered != expected {
+                            (
+                                409,
+                                r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","message":"the object has been modified","code":409}"#.to_string(),
+                            )
+                        } else {
+                            weirkeeper::conditions::apply_merge_patch(&mut state.schedule, &patch);
+                            state.schedule["metadata"]["resourceVersion"] =
+                                serde_json::json!((expected + 1).to_string());
+                            (200, state.schedule.to_string())
+                        }
+                    } else {
+                        panic!("unexpected stale-finalizer request: {method} {path}")
+                    }
+                };
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(response_body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        })
+    };
+    let client = kube::Client::new(service, "default");
+
+    let a_client = client.clone();
+    let a_schedule = initial.clone();
+    let old_finalizer = tokio::spawn(async move {
+        reconcile_schedule(&a_schedule, &a_client, utc(2026, 9, 10, 12, 0)).await
+    });
+    while !a_created.load(Ordering::SeqCst) {
+        a_created_notify.notified().await;
+    }
+
+    let schedule_after_a: BackupSchedule =
+        serde_json::from_value(state.lock().unwrap().schedule.clone()).unwrap();
+    assert_eq!(
+        schedule_after_a
+            .status
+            .as_ref()
+            .and_then(|status| status.pending_backup_ref.as_ref())
+            .map(|reference| reference.name.as_str()),
+        Some(slot_a.as_str())
+    );
+    let b = reconcile_schedule(&schedule_after_a, &client, utc(2026, 9, 10, 12, 1)).await;
+    assert!(b.is_err(), "slot B's first create simulates a worker crash");
+    let a = old_finalizer.await.unwrap();
+    assert!(a.is_err(), "A's stale final status CAS must conflict");
+
+    let after_race: BackupSchedule =
+        serde_json::from_value(state.lock().unwrap().schedule.clone()).unwrap();
+    assert_eq!(
+        after_race
+            .status
+            .as_ref()
+            .and_then(|status| status.pending_backup_ref.as_ref())
+            .map(|reference| reference.name.as_str()),
+        Some(slot_b.as_str()),
+        "A's old finalizer cannot clear B's newer accepted reservation"
+    );
+    assert!(
+        after_race
+            .status
+            .as_ref()
+            .and_then(|status| status.conditions.as_ref())
+            .and_then(|conditions| conditions.first())
+            .and_then(|condition| condition.message.as_deref())
+            .is_some_and(|message| message.contains(&slot_b)),
+        "A's old finalizer cannot overwrite B's newer scheduling condition"
+    );
+
+    let recovered = reconcile_schedule(&after_race, &client, utc(2026, 9, 10, 12, 2))
+        .await
+        .expect("restart resumes B from the surviving reservation");
+    assert_eq!(recovered.created.as_deref(), Some(slot_b.as_str()));
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state
+            .posted_names
+            .iter()
+            .filter(|name| name.as_str() == slot_b)
+            .count(),
+        2,
+        "B is attempted once before the crash and exactly once on recovery"
+    );
+    assert!(state.schedule["status"]["pendingBackupRef"].is_null());
+    assert_eq!(
+        state.schedule["status"]["activeBackupRef"]["name"],
+        serde_json::json!(slot_b)
     );
 }

@@ -608,19 +608,19 @@ spend).
 
 **O0, default (a): none of this stops a cluster-admin, and that is accepted and
 stated rather than implied.** Logweir's Kubernetes surface narrows *who can
-change what*, and it does so with real mechanisms — the approval bundle
-(`approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json`)
-lives in the Secret `logweir-approval-bundle` rather than in a ConfigMap,
-because a Secret's `get` and `patch` are different RBAC verbs from a
-ConfigMap's; `--approver-key-ids` pins which approver key ids a run accepts and
+change what*, and it does so with real mechanisms — each Restore owns an
+immutable approval-bundle ConfigMap, the immutable Job template pins the
+SHA-256 of every mounted public input (including the allowlist), and the runner
+checks those bytes before constructing a data-plane client;
+`--approver-key-ids` pins which approver key ids a run accepts and
 refuses anything outside the set with exit 3 before phase 0 dials; and
 `subject_kind` is inside the signed bytes so an approval cannot be retargeted at
 another kind of object. **None of that is a claim about a cluster-admin.**
 Anyone holding `create pods` in the runner's namespace can mount the signing
 Secret and sign whatever they like with no Logweir crate involved
 (`scripts/check-one-signer.sh`'s header states the same thing about the
-narrowed link-time gate), and anyone who can edit a Secret can replace the
-approval bundle wholesale. The boundary this product draws is between *namespace
+narrowed link-time gate), and anyone who can create pods or replace the Job
+template can replace the execution contract wholesale. The boundary this product draws is between *namespace
 users* and *the operator's own trust roster*, not between an adopter and their
 own cluster administrator. A document that said otherwise would be a guarantee
 the code does not deliver, which is the defect class these pages exist to

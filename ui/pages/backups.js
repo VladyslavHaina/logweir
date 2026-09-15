@@ -33,6 +33,7 @@
 // evidence block beside it so a reader can see which of the four cases it was.
 
 import { get, list } from "../api.js";
+import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   UNVERIFIED,
   badge,
@@ -184,20 +185,28 @@ export function renderBackupDetail(object) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountBackups(node, ns, parse) {
+export async function mountBackups(node, ns, parse, lifecycle) {
   try {
-    const collection = await list(ns, PLURAL);
-    replace(node, parse(renderBackupList(collection, ns)));
+    const collection = await list(ns, PLURAL, readOptions(lifecycle));
+    if (active(lifecycle)) {
+      replace(node, parse(renderBackupList(collection, ns)));
+    }
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
-export async function mountBackupDetail(node, ns, name, parse) {
+export async function mountBackupDetail(node, ns, name, parse, lifecycle) {
   try {
-    const object = await get(ns, PLURAL, name);
-    replace(node, parse(renderBackupDetail(object)));
+    const object = await get(ns, PLURAL, name, readOptions(lifecycle));
+    if (active(lifecycle)) {
+      replace(node, parse(renderBackupDetail(object)));
+    }
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }

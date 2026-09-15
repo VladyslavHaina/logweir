@@ -144,6 +144,35 @@ spec:
                 description: Whether the DSSE signature over `approvalBytes` verified against a `TrustRoster` approver key, and the recomputed plan hash matched.
                 nullable: true
                 type: boolean
+              verifiedSubjectRef:
+                description: The exact referent identity used for the first successful verification. Once present it is retained across later failures so a same-named, recreated object can never acquire this Approval on a later reconcile.
+                nullable: true
+                properties:
+                  apiVersion:
+                    description: The referent's API version at verification time.
+                    type: string
+                  kind:
+                    description: The referent's kind at verification time.
+                    enum:
+                    - Restore
+                    - Backup
+                    type: string
+                  name:
+                    description: The referent's name at verification time.
+                    type: string
+                  namespace:
+                    description: The referent's namespace at verification time.
+                    type: string
+                  uid:
+                    description: The referent's immutable Kubernetes UID at verification time.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                - namespace
+                - uid
+                type: object
             type: object
         required:
         - spec

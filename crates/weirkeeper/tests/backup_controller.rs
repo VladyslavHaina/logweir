@@ -1609,9 +1609,10 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        16,
-        "the sixteen terminal states that are NOT an exit code — the original ten, plus \
+        19,
+        "the nineteen terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
+         `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
          (Task 20's `Restore` admission, and note that its third admission reason \
          `ApprovalNotVerified` is deliberately NOT here — it is a thirty-second HOLD under \

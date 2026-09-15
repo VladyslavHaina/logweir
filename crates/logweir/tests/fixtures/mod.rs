@@ -750,6 +750,9 @@ pub fn engine_that_sleeps_ms(ms: u64) -> (FakeReader, SleepEngine) {
 pub enum Drill {
     /// Every phase succeeds and the objectives are met.
     Passes,
+    /// The mounted signing-key file is replaced while phase 6 is executing.
+    /// One run must retain the identity it validated before phase 0.
+    RotatesSigningKey,
     /// The engine's preflight reports `CoverageState::Empty` for the sampled
     /// partition, which `phase5_preflight::adjudicate` blocks on.
     BlocksAtPreflight,
@@ -995,6 +998,9 @@ pub struct FixtureEngine {
     /// assert the orchestrator bound the real `BackupSetRef` into them first.
     pub fingerprint_calls: std::sync::Arc<std::sync::Mutex<Vec<SampleSelection>>>,
     pub restored: std::sync::Arc<std::sync::Mutex<bool>>,
+    /// Optional replacement written during `restore`, after signer validation
+    /// and before scorecard/receipt/teardown persistence.
+    pub signing_key_rotation: Option<(PathBuf, String)>,
 }
 
 impl FixtureEngine {
@@ -1015,6 +1021,7 @@ impl FixtureEngine {
             digest: format!("sha256:{}", "0".repeat(64)),
             fingerprint_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             restored: std::sync::Arc::new(std::sync::Mutex::new(false)),
+            signing_key_rotation: None,
         }
     }
 }
@@ -1066,6 +1073,9 @@ impl DataEngine for FixtureEngine {
         o: &mut dyn PhaseObserver,
     ) -> Result<RestoreFacts, EngineError> {
         *self.restored.lock().unwrap() = true;
+        if let Some((path, pem)) = &self.signing_key_rotation {
+            std::fs::write(path, pem).expect("the fixture rotates the signing key");
+        }
         o.phase_started(6, "restore");
         let started_at = Utc::now();
         // The offset-mapping report, written EXACTLY where the real engine
@@ -1236,6 +1246,8 @@ pub struct OrchestratorFixture {
     /// unreachable behind `Box<dyn TargetClient>` — every `NewTopicSpec` the
     /// drill's creation step asked for, in order (Task 8, guard **G-TS**).
     pub created_topics: std::sync::Arc<std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>>,
+    /// Present only for `Drill::RotatesSigningKey`.
+    pub replacement_signing_key: Option<logweir_evidence::keys::VerifyingKey>,
     _dir: tempfile::TempDir,
 }
 
@@ -1402,6 +1414,14 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     }
 
     let mut engine = FixtureEngine::new(facts, fps);
+    let replacement_signing_key = if shape == Drill::RotatesSigningKey {
+        let replacement = SigningKey::generate_p256();
+        engine.signing_key_rotation =
+            Some((signing_pem.clone(), replacement.to_pkcs8_pem().unwrap()));
+        Some(replacement.verifying_key())
+    } else {
+        None
+    };
     match shape {
         Drill::BlocksAtPreflight => engine.coverage = CoverageState::Empty,
         Drill::HasASlowPreflight => engine.preflight_sleep_ms = 1_100,
@@ -1419,6 +1439,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // against is byte-for-byte the passing one, which is what makes "the
         // drill verified correctly and could not clean up" the single variable.
         Drill::Passes
+        | Drill::RotatesSigningKey
         | Drill::RestoresNothing
         | Drill::MissesTheRpoObjective
         | Drill::ReconcilesWithMismatches
@@ -1514,6 +1535,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     let created_topics = client.created.clone();
     OrchestratorFixture {
         args: logweir::drill::RunArgs {
+            execution_contract_version: None,
             spec: spec_path,
             approval,
             approver_key: approver_pub,
@@ -1549,6 +1571,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         metrics,
         fingerprint_calls,
         created_topics,
+        replacement_signing_key,
         _dir: dir,
     }
 }

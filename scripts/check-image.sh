@@ -285,6 +285,15 @@ docker run --rm --platform "$PLATFORM" "$ref" --version \
           "  This is the check the shipped libsasl2 defect failed; check 1" \
           "  above names the library when the cause is the dynamic loader."
 
+# PLAT-02.1: the exact candidate digest must carry the bootstrap CLI before
+# promotion. This runs in the existing image publication check, after the
+# registry candidate is pulled by digest and before any public tag moves.
+echo "-- check 3b: logweir identity bootstrap --help"
+docker run --rm --platform "$PLATFORM" "$ref" identity bootstrap --help \
+  || fail "check 3b: identity bootstrap --help failed inside $ref" \
+          "  Do not publish or pin this runner for identity-enabled Helm installs;" \
+          "  it predates or breaks the PLAT-02.1 bootstrap CLI contract."
+
 # ------------------------------------------------------------------ check 4
 # THE IMAGE ALONE MUST BE ABLE TO MINT THE APPROVAL `drill run` REFUSES TO
 # START WITHOUT. `--approval` is mandatory and, until `drill approve` existed,

@@ -72,10 +72,11 @@ use std::path::{Path, PathBuf};
 pub struct BackupRunArgs {
     pub spec: PathBuf,
     pub allowed_clusters: PathBuf,
-    /// The key the backup receipt is signed with (**I6**). Opened by
-    /// `phase_run::persist_receipt`, once, AFTER every guard has run and after
-    /// the engine has produced an archive — so a refused plan never reads key
-    /// material at all.
+    /// The key the backup receipt is signed with (**I6**). Loaded, exercised
+    /// and self-verified after local admission but before the production
+    /// runner constructs any client; the same parsed key is retained through
+    /// receipt signing, so an execution never reopens rotated material after
+    /// the engine has produced an archive.
     pub signing_key: PathBuf,
     /// Copied into `BackupReceipt.triggered_by` verbatim. Absent becomes the
     /// empty string: the field is required in the document (a receipt says
@@ -165,16 +166,18 @@ pub enum BackupError {
     /// describe it.
     #[error("engine: {0}")]
     Engine(#[from] logweir_core::engine::EngineError),
-    /// The receipt could not be validated, signed or uploaded. **Exit 4**
+    /// The signing prerequisite failed, or the receipt could not be
+    /// validated, signed or uploaded. **Exit 4**
     /// (Global Constraint 11: "signing or lock-proof failed, nothing
     /// uploaded"), and Task 5b is the task that makes this variant reachable —
     /// Task 4's `exit_code` comment said as much.
     ///
-    /// It covers the whole atomic step, deliberately: a validation failure
-    /// (Logweir measured a document its own reader refuses), a key that will
-    /// not load, a signature that will not compute, and a create-only put that
-    /// was refused all leave the same state behind — an archive with no
-    /// verifiable evidence — and GC11 gives that state one code.
+    /// It covers the whole atomic step, deliberately. A key that will not load
+    /// or exercise is caught before the engine runs; a later receipt
+    /// validation failure (Logweir measured a document its own reader
+    /// refuses), a signature that will not compute, or a refused create-only
+    /// put may leave an archive with no verifiable evidence. GC11 gives all of
+    /// those states one code.
     #[error("signing: {0}")]
     Signing(String),
 }
@@ -306,6 +309,21 @@ pub fn execute_with(
     store: &Store,
     evidence: &Store,
 ) -> Result<BackupOutcome, BackupError> {
+    execute_with_signer(args, run_id, reader, engine, store, evidence, None)
+}
+
+/// The common execution path. Production supplies the signer it validated
+/// before constructing any runner clients; the in-process seam validates at
+/// the same logical boundary, immediately before its first engine operation.
+fn execute_with_signer(
+    args: &BackupRunArgs,
+    run_id: &str,
+    reader: &dyn ClusterReader,
+    engine: &dyn DataEngine,
+    store: &Store,
+    evidence: &Store,
+    validated_signer: Option<&crate::signer::ValidatedSigner>,
+) -> Result<BackupOutcome, BackupError> {
     // READ ONCE, and FIRST: `requested_at` is when the run was requested, so
     // it is measured before the guards rather than after them — a plan refused
     // at phase −1 took no time it should be credited with, and a receipt whose
@@ -328,6 +346,21 @@ pub fn execute_with(
         &inputs.allowed,
         reader,
     )?;
+
+    // Resolve the signing prerequisite before making the first call on the
+    // engine. `run` already did this before constructing its real clients and
+    // passes that stable in-memory signer here; direct seam callers load it at
+    // this same boundary. In both cases receipt persistence reuses the value
+    // instead of reopening a file that may have disappeared or rotated after
+    // the engine wrote archive data.
+    let loaded_signer;
+    let signer = match validated_signer {
+        Some(signer) => signer,
+        None => {
+            loaded_signer = phase_run::load_signer(&args.signing_key)?;
+            &loaded_signer
+        }
+    };
 
     // **I10.** The derived id is the spec's own `backup_id`; the override
     // replaces it in the plan AND in the outcome, from this one binding.
@@ -401,12 +434,7 @@ pub fn execute_with(
     // **I6 / I7 / GC6.** The archive exists; now it gets evidence. Validate,
     // sign, put both objects under `logweir/`, and write the local pair when
     // `--receipt-out` (or `--out`) asked for it.
-    let persisted = phase_run::persist_receipt(
-        &outcome,
-        &args.signing_key,
-        receipt_out_path(args),
-        evidence,
-    )?;
+    let persisted = phase_run::persist_receipt(&outcome, signer, receipt_out_path(args), evidence)?;
     outcome.receipt_key = persisted.receipt_key;
     outcome.sidecar_key = persisted.sidecar_key;
 
@@ -549,10 +577,11 @@ fn exiting(
             "the plan was refused before anything ran; no archive was written"
         }
         // Reachable since Task 5b, through `BackupError::Signing`. "Nothing
-        // uploaded" is about the EVIDENCE and is exact: the validate → sign →
-        // put order means a failure at any of those three steps leaves no
-        // receipt and no sidecar in the bucket. The ARCHIVE may exist; the
-        // engine ran before any of this.
+        // uploaded" is about the EVIDENCE and is exact: early signer
+        // validation and the later validate → sign → put order both precede
+        // every evidence write. The archive may exist for failures discovered
+        // after engine work; a signing-prerequisite error explicitly states
+        // that no engine data operation started.
         ExitCode::SigningOrLock => {
             "the backup's result is unattested: no receipt was signed or uploaded, though the \
              archive may exist"
@@ -656,6 +685,15 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         return report(&run_id, Err(e));
     }
 
+    // Signing is a prerequisite for starting a backup, not a postcondition
+    // checked after the engine has written an archive. Load, exercise and
+    // self-verify it before constructing the Kafka reader, archive stores or
+    // engine runner, then keep this exact parsed key for receipt persistence.
+    let signer = match phase_run::load_signer(&args.signing_key) {
+        Ok(signer) => signer,
+        Err(e) => return report(&run_id, Err(e)),
+    };
+
     // NO SCRATCH NAMESPACE IS SET ON THIS READER, ever — GC18(c) rail 2. An
     // unscoped reader can delete nothing at all: the deleting method refuses
     // every name it is handed until a scratch namespace has been configured
@@ -748,7 +786,15 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
     };
 
-    let outcome = execute_with(args, &run_id, &reader, &engine, &store, &evidence);
+    let outcome = execute_with_signer(
+        args,
+        &run_id,
+        &reader,
+        &engine,
+        &store,
+        &evidence,
+        Some(&signer),
+    );
     report(&run_id, outcome)
 }
 

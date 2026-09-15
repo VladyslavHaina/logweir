@@ -687,6 +687,12 @@ test("the_wizard_never_reserialises_the_plan_bytes", async () => {
   const crafted = rendered.slice(0, rendered.length - 1) + "  \n";
   assert.equal(crafted.slice(-3), "  \n", "the fixture ends in two spaces and a newline");
   assert.ok(crafted.indexOf("ç") !== -1, "and carries a non-ASCII character");
+  assert.notDeepEqual(
+    Array.from(bytesOf(crafted.trim())),
+    Array.from(bytesOf(crafted)),
+    "this is a live trim mutant: trimming before `create` loses signed bytes, so the final " +
+      "submitted-versus-crafted equality below fails if the plan path ever does it",
+  );
 
   const state = wizardState();
   state.planBytes = crafted;
@@ -1187,8 +1193,7 @@ test("the_approvals_route_values_reach_the_form_in_their_own_positions", () => {
   // `metadata.name`. The page is forbidden from parsing the two approval
   // documents, so not one of them can be recovered from the bytes if the hop
   // delivers them swapped or blank -- and the router that performs it cannot be
-  // imported here at all (`ui/app.js` touches `window` at module scope and dies
-  // with `ReferenceError: window is not defined`), so the extraction is
+  // imported here at all in earlier revisions, so the extraction is
   // `approvalRouteParams`, exported by the page module itself, and this row is
   // the guard the hop did not have.
   const digest = "sha256:" + "ab12cd34".repeat(8);
@@ -1203,13 +1208,13 @@ test("the_approvals_route_values_reach_the_form_in_their_own_positions", () => {
   assert.deepEqual(
     route,
     {
-      ns: "default",
+      ns: "",
       subject: "restore-1a2b3c4d",
       hash: digest,
       name: "approval-1a2b3c4d",
     },
     "the three route values arrive under their own keys, and a hash naming no " +
-      "namespace means the default one",
+    "namespace carries no implicit default",
   );
 
   // AND THE FORM PUTS EACH ONE WHERE IT BELONGS. The route object above is
@@ -1244,11 +1249,19 @@ test("the_approvals_route_values_reach_the_form_in_their_own_positions", () => {
   // A hash with no parameters at all is four empty-ish values and never
   // `undefined`, so the form renders empty controls rather than the word.
   assert.deepEqual(approvalRouteParams("#/approvals"), {
-    ns: "default",
+    ns: "",
     subject: "",
     hash: "",
     name: "",
   });
+});
+
+test("the_literal_default_namespace_survives_the_restore_to_approval_handoff", async () => {
+  const state = wizardState();
+  state.ns = "default";
+  const route = approvalRoute(state, await preparePlan(state));
+  assert.match(route, /(?:^|&)ns=default(?:&|$)/, "default is explicit when the router requires a namespace");
+  assert.equal(approvalRouteParams(route).ns, "default");
 });
 
 test("the_restore_names_the_archive_credential_the_runner_reads_it_with", async () => {

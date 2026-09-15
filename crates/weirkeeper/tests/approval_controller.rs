@@ -51,7 +51,9 @@ use weirkeeper::controllers::approval::{
 };
 use weirkeeper::controllers::trust_roster;
 use weirkeeper::crds::approval::ApprovalStatus;
-use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
+use weirkeeper::crds::approval::{
+    Approval, ApprovalSpec, SubjectKind, SubjectRef, VerifiedSubjectRef,
+};
 use weirkeeper::crds::trust_roster::TrustRosterStatus;
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec};
 use weirkeeper::testing::{
@@ -221,7 +223,7 @@ fn restore_body(plan_bytes: &str, status_plan_hash: &str) -> String {
     let plan = plan_bytes.replace('\n', "\\n");
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore",
-             "metadata":{{"name":"r1","namespace":"{NS}"}},
+             "metadata":{{"name":"r1","namespace":"{NS}","uid":"restore-uid-1"}},
              "spec":{{"planBytes":"{plan}","approvalRef":{{"name":"a1"}},
                       "sourceArchive":{{"url":"s3://archive/logweir"}},
                       "backupSetRef":"bk-1","pointInTime":"2026-09-02T00:00:00Z",
@@ -977,6 +979,13 @@ async fn approval_reconcile_patches_only_status() {
     assert_eq!(status.approver.as_deref(), Some("ops@example.com"));
     assert_eq!(status.ticket.as_deref(), Some("CHG-4711"));
     assert_eq!(status.self_attested_risk, Some(false));
+    let subject = status
+        .verified_subject_ref
+        .as_ref()
+        .expect("successful verification records exact subject provenance");
+    assert_eq!(subject.name, "r1");
+    assert_eq!(subject.namespace, NS);
+    assert_eq!(subject.uid, "restore-uid-1");
 
     let calls = seen(&recorder);
     let patches: Vec<_> = calls.iter().filter(|(m, _)| m == "PATCH").collect();
@@ -995,6 +1004,82 @@ async fn approval_reconcile_patches_only_status() {
         !calls.iter().any(|(_, p)| p.ends_with(&bare)),
         "zero requests to the Approval without the /status suffix — spec is CEL-sealed and a \
          controller that patched it would be widening an approval. Got {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
+    let (client, _recorder) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_body(&approver_entry_json(), ""),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/restores/r1",
+            status: 200,
+            body: restore_body(PLAN_BYTES, PLAN_HASH),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_body(&approver_entry_json(), ""),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/restores/r1",
+            status: 200,
+            body: restore_body(PLAN_BYTES, PLAN_HASH),
+        },
+    ]);
+    let mut approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    approval.status = Some(ApprovalStatus {
+        verified: Some(true),
+        matched_key_id: Some(APPROVER_KEY_ID.to_string()),
+        approver: Some("ops@example.com".to_string()),
+        ticket: Some("CHG-4711".to_string()),
+        self_attested_risk: Some(false),
+        verified_subject_ref: Some(VerifiedSubjectRef {
+            api_version: "logweir.dev/v1alpha1".to_string(),
+            kind: SubjectKind::Restore,
+            name: "r1".to_string(),
+            namespace: NS.to_string(),
+            uid: "deleted-restore-uid".to_string(),
+        }),
+        conditions: None,
+    });
+
+    let outcome = approval::decide(&approval, &client).await.unwrap();
+    assert!(matches!(
+        outcome,
+        ApprovalOutcome::Referent(ReferentProblem::ReferentUidChanged {
+            ref verified_uid,
+            ref current_uid,
+            ..
+        }) if verified_uid == "deleted-restore-uid" && current_uid == "restore-uid-1"
+    ));
+    let status = approval::status_for(&approval, &outcome, now());
+    assert_eq!(status.verified, Some(false));
+    assert_eq!(
+        status
+            .verified_subject_ref
+            .as_ref()
+            .expect("the old identity remains a permanent replay fence")
+            .uid,
+        "deleted-restore-uid"
+    );
+
+    approval.status = Some(status);
+    let second = approval::decide(&approval, &client).await.unwrap();
+    assert!(
+        matches!(
+            second,
+            ApprovalOutcome::Referent(ReferentProblem::ReferentUidChanged { .. })
+        ),
+        "a second reconcile must not erase the refusal and rebind the Approval: {second:?}"
     );
 }
 

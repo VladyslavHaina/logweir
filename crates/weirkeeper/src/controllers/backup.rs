@@ -995,6 +995,7 @@ pub fn runner_job_spec(
         deadline_seconds: backup.spec.deadline_seconds,
         service_account_name: RUNNER_SERVICE_ACCOUNT.to_string(),
         secret_mounts,
+        config_map_mounts: Vec::new(),
         env_from_secret,
         // `RUST_LOG` is pinned rather than inherited: below `info` the run id
         // and the exit-code meaning line are lost, and those two are how a

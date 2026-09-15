@@ -8,7 +8,7 @@
 //! only write the controller performs on any `.spec` in tag 1 (spec §7).
 //!
 //! The obvious shape — a `self == oldSelf` transition rule on each of the
-//! other five fields — DOES NOT HOLD. A per-field transition rule is evaluated
+//! other six fields — DOES NOT HOLD. A per-field transition rule is evaluated
 //! only when `oldSelf` exists for that field, so an OPTIONAL field could be
 //! **added** after creation (absent → present) and the rule would never fire.
 //! `retention` is optional, and `retention.keepDays` inside it is optional
@@ -59,10 +59,10 @@ use super::{ArchiveRef, Condition, LocalRef, Time};
 
 /// The object-level CEL rule that makes `spec.suspend` the only mutable field.
 ///
-/// Read the module header for why this is one rule on `.spec` and not five
-/// rules on five fields, and for the rejected map-based form. The clause order
+/// Read the module header for why this is one rule on `.spec` and not six
+/// rules on six fields, and for the rejected map-based form. The clause order
 /// is the field order of [`BackupScheduleSpec`], minus `suspend`.
-pub const SUSPEND_ONLY_RULE: &str = "has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)";
+pub const SUSPEND_ONLY_RULE: &str = "has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)";
 
 /// The message the API server returns when [`SUSPEND_ONLY_RULE`] refuses an
 /// update.
@@ -88,6 +88,21 @@ pub struct Retention {
     /// removable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_days: Option<i64>,
+}
+
+/// Whether a new scheduled slot may start while an earlier one is unfinished.
+///
+/// `Forbid` is both the wire-schema default and the deserialization default,
+/// so schedules created before this field existed acquire the safe behavior
+/// without a migration write. `Allow` must be selected explicitly.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+pub enum ConcurrencyPolicy {
+    /// Do not start a slot while any Backup owned by this schedule is
+    /// nonterminal or has an unknown state.
+    #[default]
+    Forbid,
+    /// Permit different scheduled slots to run at the same time.
+    Allow,
 }
 
 /// What a retention evaluation found. **Nothing here was deleted.**
@@ -274,6 +289,11 @@ pub struct BackupScheduleSpec {
     pub topics: Vec<String>,
     /// Where the backup is written.
     pub archive: ArchiveRef,
+    /// Whether a due slot may start while an earlier Backup owned by this
+    /// schedule is unfinished. Omitted means `Forbid`, including on schedules
+    /// stored before this field was introduced. `Allow` is explicit.
+    #[serde(default)]
+    pub concurrency_policy: ConcurrencyPolicy,
     /// `{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
@@ -296,8 +316,14 @@ pub struct BackupScheduleStatus {
     /// The `Backup` currently running for this schedule, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_backup_ref: Option<LocalRef>,
+    /// A `Forbid` slot atomically admitted in status but whose `Backup`
+    /// creation has not yet been confirmed. This short-lived reservation
+    /// closes the controller crash window and is cleared after the child is
+    /// observed or created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_backup_ref: Option<LocalRef>,
     /// The most recent slot that came due and was NOT fired — the controller
-    /// was down, or the previous run was still active. Recorded because
+    /// was down, or `Forbid` found a previous owned run still active. Recorded because
     /// object identity is a pure function of the trigger (guard **G-SLOT**):
     /// a missed slot is never silently re-fired under a different name.
     ///
@@ -305,7 +331,8 @@ pub struct BackupScheduleStatus {
     /// hour before the controller looked is skipped and recorded here, with a
     /// `Ready` condition whose reason is `SlotMissed`; a controller restarted
     /// after a week therefore fires at most the current slot and never six
-    /// days of backlog. The field is written when a slot is skipped and is
+    /// days of backlog. A concurrency skip uses reason `ConcurrencyBlocked`.
+    /// The field is written when a slot is skipped and is
     /// never cleared afterwards — it is the audit trail of the skip, so a
     /// correct implementation is distinguishable from a broken schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]

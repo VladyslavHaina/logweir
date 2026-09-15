@@ -25,6 +25,7 @@
 //   without saying whether it was enough.
 
 import { get, list } from "../api.js";
+import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   ENGINE_SUBREPORT_LINE,
   UNVERIFIED,
@@ -223,21 +224,31 @@ export function renderRestoreDetail(object) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountHistory(node, ns, parse) {
+export async function mountHistory(node, ns, parse, lifecycle) {
   try {
-    const restores = await list(ns, PLURAL);
-    const backups = await list(ns, BACKUPS);
-    replace(node, parse(renderHistoryList(restores, backups, ns)));
+    const collections = await Promise.all([
+      list(ns, PLURAL, readOptions(lifecycle)),
+      list(ns, BACKUPS, readOptions(lifecycle)),
+    ]);
+    if (active(lifecycle)) {
+      replace(node, parse(renderHistoryList(collections[0], collections[1], ns)));
+    }
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
 
-export async function mountRestoreDetail(node, ns, name, parse) {
+export async function mountRestoreDetail(node, ns, name, parse, lifecycle) {
   try {
-    const object = await get(ns, PLURAL, name);
-    replace(node, parse(renderRestoreDetail(object)));
+    const object = await get(ns, PLURAL, name, readOptions(lifecycle));
+    if (active(lifecycle)) {
+      replace(node, parse(renderRestoreDetail(object)));
+    }
   } catch (error) {
-    replace(node, errorBox(error));
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
   }
 }
