@@ -105,6 +105,27 @@ pub const SOURCE_PASSWORD_ENV: &str = "LOGWEIR_SOURCE_PASSWORD";
 /// have to write a second one for the probe.
 pub const SOURCE_PASSWORD_SECRET_KEY: &str = super::restore::TARGET_PASSWORD_SECRET_KEY;
 
+/// Reuse the cluster's source credential for both probes and backup Jobs.
+/// Kubernetes resolves the reference in the Job's namespace; the controller
+/// never reads or caches the password. Plaintext clusters need no credential.
+#[must_use]
+pub fn source_password_env(cluster: &KafkaCluster) -> Option<EnvFromSecret> {
+    if !matches!(cluster.spec.auth.mode, AuthMode::ScramSha512) {
+        return None;
+    }
+    let secret = cluster
+        .spec
+        .auth
+        .secret_ref
+        .as_ref()
+        .filter(|secret| !secret.name.trim().is_empty())?;
+    Some(EnvFromSecret {
+        name: SOURCE_PASSWORD_ENV.to_string(),
+        secret_name: secret.name.clone(),
+        key: SOURCE_PASSWORD_SECRET_KEY.to_string(),
+    })
+}
+
 /// Interface **I14**'s first line, as a prefix. Matched BY NAME (erratum E4).
 pub const CLUSTER_ID_PREFIX: &str = "cluster-id=";
 
@@ -425,16 +446,7 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
     // the probe then prints `reachable=false` naming the unprojected credential
     // — interface I11's division of labour, and the reason that case is not a
     // refusal on this side.
-    let mut env_from_secret = Vec::new();
-    if matches!(cluster.spec.auth.mode, AuthMode::ScramSha512) {
-        if let Some(secret) = cluster.spec.auth.secret_ref.as_ref() {
-            env_from_secret.push(EnvFromSecret {
-                name: SOURCE_PASSWORD_ENV.to_string(),
-                secret_name: secret.name.clone(),
-                key: SOURCE_PASSWORD_SECRET_KEY.to_string(),
-            });
-        }
-    }
+    let env_from_secret = source_password_env(cluster).into_iter().collect();
 
     Ok(RunnerJobSpec {
         name: probe_job_name(&name),

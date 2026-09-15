@@ -1009,6 +1009,7 @@ export function initialState(ns, clusters, backups) {
       ),
       target: {
         bootstrapServers: ((target || {}).spec || {}).bootstrapServers || [],
+        auth: targetAuth(target),
         mode: TARGET_MODES[1],
         topicPrefix: prefixFor(pointInTime),
         // UNREAD in `newTopic` mode and still required by the grammar (it has
@@ -1040,9 +1041,20 @@ export function initialState(ns, clusters, backups) {
   };
 }
 
-function bootstrapOf(state) {
+// Copy public settings only. The controller projects the selected cluster's
+// Secret into the runner; its reference and contents do not belong in a plan.
+function targetAuth(cluster) {
+  const auth = ((cluster || {}).spec || {}).auth || {};
+  if (!auth.mode || auth.mode === "plaintext") {
+    return undefined;
+  }
+  return { mode: auth.mode, username: auth.username, tls: auth.tls === true };
+}
+export function selectTarget(state, name) {
+  state.targetClusterName = name;
   const cluster = targetCluster(state);
-  return ((cluster || {}).spec || {}).bootstrapServers || [];
+  state.fields.target.bootstrapServers = ((cluster || {}).spec || {}).bootstrapServers || [];
+  state.fields.target.auth = targetAuth(cluster);
 }
 
 /** The cluster step 4 preselects: one labelled `role: target` if the namespace
@@ -1090,8 +1102,7 @@ function wire(node, state, parse, api) {
       state.fields.target.topicPrefix = valueOf(prefix);
     }
     if (cluster !== null) {
-      state.targetClusterName = valueOf(cluster);
-      state.fields.target.bootstrapServers = bootstrapOf(state);
+      selectTarget(state, valueOf(cluster));
     }
     for (const block of [state.fields.source, state.fields.evidence]) {
       if (endpoint !== null) {

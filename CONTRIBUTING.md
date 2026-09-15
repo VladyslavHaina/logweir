@@ -67,15 +67,6 @@ By making a contribution to this project, I certify that:
 copyright; the DCO sign-off above is the only thing this project asks of a
 contributor, and it is a certification rather than a transfer.
 
-That is a deliberate choice with a consequence, and the consequence is the
-point. Relicensing a project requires the agreement of every copyright holder
-unless a CLA has assigned those rights to one party. Without a CLA, once a
-handful of outside contributors have landed code, **no single party — the
-project's own author included — can quietly relicense the whole.** Terraform
-and Redis were both relicensed by their owners; what preserved openness in each
-case was the fork right under the old licence, not the licence family. Refusing
-a CLA is how this project makes that reversal expensive for itself in advance.
-
 ## Licence
 
 Logweir is licensed under **Apache-2.0**. By contributing, you agree that your
@@ -88,44 +79,42 @@ its dependencies is in [NOTICE](NOTICE) and
 [docs/LICENSE-docs](docs/LICENSE-docs). A change under `docs/` is contributed
 under that licence, with the same DCO sign-off.
 
-## Before you push: run `just gate`
+## Development setup and checks
+
+Use the pinned Rust toolchain in `rust-toolchain.toml`. The workspace also
+needs a C/C++ build toolchain and CMake for librdkafka. Install `just`, Node.js
+20 or newer, Helm 4 or newer, and Python with `cryptography` and `pytest` for
+the corresponding gates. Docker is needed to extract the engine and run demos.
+See [architecture](docs/architecture.md) for the source map.
 
 ```bash
-just e2e-down              # the timing gate refuses while 9092 or 9000 answers
-just gate; echo "rc=$?"
+just engine                  # extract the digest-pinned engine on a fresh clone
+cargo test --workspace --locked
 ```
 
-**`just gate` is the one command that runs every check this repository has**, in
-one order, on a laptop. It takes about **seven minutes** on a quiet
-10-core machine from a warm debug target directory — of which most is the
-release compile — and it contains exactly **two workspace compilations**, one
-debug and one release. `docs/gates.md` carries the per-line seconds, what each
-gate proves, and what each gate does **not** prove; read it before adding a
-check, and add the row in the same commit as the check.
+Before pushing, run the full local gate with the Compose stack down:
 
-**Please do not treat `.github/workflows/` as the gate.** Four workflows have
-now executed — `ci.yml` (run 34700987730), `no-oso.yml` (run 34700987811) and
-`kind-demo.yml` (run 34700987743), all green on commit `a113dd2`, and
-`helm-demo.yml` (run 34718123956), green on its first run, commit `1f77f79`, all on
-2026-09-12 — and `ci.yml` still mirrors the gate set as documentation rather than replacing
-it: `just gate` is the enforcement point, it is what a laptop can run before a
-push, and `release.yml` has never run at all (no tag has been pushed, so
-`docs/tag1-checklist.md` clause 4 reads `blocked: no tag pushed` and the digest
-rows read `blocked: images not published`). If a check is not in `just gate` or in
-`docs/gates.md`'s stack/cluster table, nothing runs it, and
-`crates/logweir/tests/gate_lint.rs` fails when a new `scripts/check-*.sh` is in
-neither.
+```bash
+just e2e-down                 # removes the demo stack and its volumes
+just gate
+```
 
-Eight recipes are deliberately **outside** `just gate` — `e2e`, `smoke`,
-`smoke-weirkeeper`, `mvp-demo`, `k8s-demo`, `laptop-demo`, `pitr`, `helm-demo` —
-because each needs the compose stack, a Kubernetes cluster or a Docker build.
-They are in `docs/gates.md`'s table with what each proves. Run the one your
-change touches.
+[The gate reference](docs/gates.md) lists every check, prerequisites, recorded
+timings and workflow evidence. The gate compiles the workspace in debug and
+release profiles; individual test commands are useful during development.
 
-A change under `charts/logweir/`, `config/crd/` or `ui/` is checked by
-`just chart-check` (one line of `just gate`; it needs `helm` >= 4): the chart's
-CRDs and UI files must stay byte-identical to the tree, and the regenerated
-`charts/logweir/rendered/` must be committed with the change.
+Eight recipes run separately because they need Docker, Kafka or Kubernetes:
+`e2e`, `smoke`, `smoke-weirkeeper`, `mvp-demo`, `k8s-demo`, `laptop-demo`,
+`pitr`, and `helm-demo`. Run those relevant to your change. Release readiness
+is tracked in [the release checklist](docs/tag1-checklist.md).
+
+Changes to `charts/logweir/`, `config/crd/` or `ui/` need `just chart-check`.
+The chart's CRDs and shipped UI assets are intentionally copied into the chart
+so it can be distributed independently. Keep those copies byte-identical to
+the canonical files and commit regenerated `charts/logweir/rendered/` output.
+Do not delete them as duplicate files. Likewise, the generated schemas,
+`logweir.yaml`, signed test fixtures and dependency notices are checked inputs
+to distribution or regression tests.
 
 ## Before you open a pull request
 

@@ -78,7 +78,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Global Constraint 3, REVISED 2026-09-09 by docs/mvp/03-spec.md §5 and
-# docs/adr/0008-mvp-constraint-amendments.md §D: FOUR engine subcommands are
+# docs/architecture.md#adr-0008-mvp-constraint-amendments §D: FOUR engine subcommands are
 # reachable from shipped code, not three. `backup` joins the contract because
 # GC18's `--from-cluster` path renders and runs a backup; `list`,
 # `restore-status`, `offset`, `evidence-verify` and `validation evidence-verify`

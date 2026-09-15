@@ -41,13 +41,11 @@ previous line already built, not a third build. `cargo clippy --workspace
 --all-targets` shares the debug target set. Twenty of the remaining lines
 compile nothing at all. A fully cold run — no target directory at all, measured by the review on 2026-09-11 — took 698 s, 142 s under the 840 s threshold; a cold run that crosses the threshold is a report, not a `cargo clean`.
 
-**Move the timing line above `cargo test --workspace` and nothing goes red.**
-`just gate` still exits 0; what changes is that the timing line silently absorbs
-a whole debug compile and the two-compilation claim above becomes false. **The
-per-line figures in the table below are what catch that** — there is no guard,
-and this row says so rather than implying one exists.
-`crates/logweir/tests/gate_lint.rs::gate_lint_docs_record_the_measured_seconds`
-keeps the figures present; it cannot keep them honest.
+**The timing line's order is checked.**
+`crates/logweir/tests/gate_lint.rs::gate_lint_the_timing_line_sits_between_the_two_compilations`
+requires it to follow the debug workspace test and precede the release test.
+The timing figures are historical observations; the ordering assertion is
+what prevents moving the timer into the wrong build position.
 
 **Over 2× the recorded total, stop and report.** `cargo clean` is **not** the
 remedy: STANDING RULE 6's triggers are 50,000 files in `target/debug/deps`

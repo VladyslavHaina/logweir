@@ -1,131 +1,77 @@
 # Verifying a Logweir drill scorecard
 
-This guide is for an auditor who has been handed a Logweir drill scorecard
-and needs to check it — without installing Rust, without trusting Logweir's
-own binary, and without reading a line of this project's source code.
+This guide explains how to authenticate a scorecard, check its consistency,
+and interpret its limits using either Logweir or an independent Python verifier.
 
 ## What the artifact is
 
-A **drill scorecard** is a JSON document that records the measured result
-of one Kafka restore drill: which backup it restored, what RTO/RPO it
-measured, whether the restored data matched **the archive** by byte
-fingerprint, who approved the drill, and more. (The archive, not the source
-cluster: v0.1 never contacts the source, and the scorecard says so itself in
-`measured.rpo_source_relative_unmeasured_reason`. Every other surface —
-`README.md`, the format reference — says "archive" too; this page said "source"
-and was the one page written for the reader least able to check it.) It is published as a
-[DSSE (Dead Simple Signing Envelope)](https://github.com/secure-systems-lab/dsse)
-signed statement: the scorecard itself is never modified to carry a
-signature — instead, a separate sidecar file holds the signature over the
-*exact bytes* of the scorecard file.
+A **drill scorecard** records one Kafka restore drill: its archive, measured
+RTO/RPO, sampled-record fingerprints and approval. Restore drills compare the
+restored data with **the archive**, without contacting the source cluster;
+`measured.rpo_source_relative_unmeasured_reason` records that limitation. The
+separate `logweir backup run` command does contact a source cluster.
 
-The claim Logweir makes about this artifact is: **the scorecard is
-verifiable evidence, not something you have to take Logweir's word for.**
-This document, together with `docs/verify_scorecard.py`, is the proof —
-an independent, twenty-line-core re-implementation of the DSSE check, built
-from the public DSSE specification rather than from Logweir's Rust. If this
-script and Logweir's own `logweir drill verify` ever disagree, that is a bug
-in the format, not a bug in this script.
+The scorecard is a [DSSE statement](https://github.com/secure-systems-lab/dsse).
+Its JSON is never modified to carry a signature: a sidecar signs the exact
+payload bytes. The independent [Python verifier](verify_scorecard.py) implements
+DSSE and the document checks separately from Rust. A disagreement between the
+readers should be reported; neither reader's verdict alone proves the underlying
+measurements are true.
 
 ## The three files you receive
 
-An auditor needs exactly three files to check one scorecard:
+| File | Purpose |
+| --- | --- |
+| `scorecard.json` | The original measured result, as JSON. |
+| `scorecard.sig` | DSSE sidecar naming the key and signature over the exact JSON bytes. |
+| `public.pem` | Publisher's SPKI public key, authenticated independently of the scorecard handoff. |
 
-| File | What it is |
-|---|---|
-| `scorecard.json` | The scorecard itself: the measured result, as a JSON document. |
-| `scorecard.sig` | The DSSE sidecar: a JSON file naming the signing key and holding the signature over `scorecard.json`'s exact bytes. |
-| `public.pem` | The publisher's public key, PEM-encoded (SPKI), used to check the signature. This is *not* secret, but **it must not arrive by the same channel as the other two files** — see the next section before you run anything. |
+These are the three inputs to the signature check. Never substitute a retyped
+or reformatted scorecard; see [payload handling](#the-payload-is-never-re-serialised).
 
-Do not accept a fourth input **to the signature check**. In particular, never
-let anyone hand you a "re-typed" or "reformatted" copy of `scorecard.json` —
-see [The payload is never re-serialised](#the-payload-is-never-re-serialised)
-below for why that would silently defeat the check.
-
-Two further files may accompany a scorecard, and they are **separate signed
-documents, not extra inputs to the check above**: `<run_id>.receipt.json` /
-`.receipt.sig`, the storage receipt (see
-[The storage receipt](#the-storage-receipt-a-second-signed-document)), and
-`<run_id>.teardown.json` / `.teardown.sig`, the teardown attestation. Each is
-verified on its own, against its own `payloadType`. Neither is required to
-verify a scorecard, and neither can substitute for one.
+A storage receipt (`<run_id>.receipt.json` / `.receipt.sig`) and teardown
+attestation (`<run_id>.teardown.json` / `.teardown.sig`) may also accompany the
+scorecard. They are separate signed documents, each with its own `payloadType`.
+Neither is needed to verify the scorecard, and neither substitutes for it.
 
 ## Where the public key comes from
 
-Read this before you verify anything — it changes what you do first, not
-just how you interpret the result.
+**Authenticate the key through a channel independent of the document.** Someone
+who substitutes a scorecard and signature can include their own matching public
+key. A `VALID` result for that bundle proves only internal consistency, not that
+it came from the organization you intended to trust.
 
-**Never verify a scorecard against a `public.pem` that arrived in the same
-handoff as `scorecard.json` and `scorecard.sig`.** If someone hands you a
-forged scorecard and a forged signature, they can just as easily hand you
-the public half of whatever key they forged it with, all three in one
-bundle. This script will print a clean `VALID` for that bundle — correctly,
-by its own narrow contract: the three files really are consistent with each
-other. That is not the same claim as "this scorecard was published by the
-organization you think published it," and a `VALID` result does not
-distinguish the two unless you have separately pinned the key.
+Obtain the key from the publisher's established TLS website, an in-person or
+voice exchange, or your organization's previously established trusted-key
+registry. A key in the same email, folder or archive is insufficient by itself.
 
-**The key must reach you through a channel independent of the document
-itself** — read off the publisher's own website over TLS, read aloud or
-handed over in person, retrieved from your organization's own trusted-key
-registry established ahead of time — anything other than "it was in the
-same email, folder, or tarball as the scorecard."
-
-**Pin it once, the first time you receive a key from a given publisher,**
-by recording its fingerprint:
+Pin the publisher's key fingerprint on first use:
 
 ```bash
 openssl pkey -pubin -in public.pem -outform DER | openssl dgst -sha256
 ```
 
-This prints something like `SHA2-256(stdin)= 917cf9a2...`. That hex digest
-is the SHA-256 of the key's SPKI DER encoding — which is exactly the value
-the sidecar's `signatures[].keyid` field carries, so you can cross-check
-the sidecar's own claim about which key it's signed by, before running any
-cryptographic verification at all:
+The hex digest is SHA-256 of the SPKI DER encoding. It is also the value used by
+`signatures[].keyid`. Inspect the sidecar's first declared key ID with:
 
 ```bash
 python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['signatures'][0]['keyid'])" scorecard.sig
 ```
 
-If that value does not match the fingerprint you pinned for this publisher,
-stop. Do not proceed to Route 1 or Route 2 below — a mismatch means either
-an untold-you key rotation or a forgery attempt, and either way it is
-something to resolve with the publisher out of band, not something either
-verifier can adjudicate for you.
+Compare it with your pinned fingerprint. Resolve any mismatch with the publisher
+out of band before using either verification route; a verifier cannot decide
+whether an unexpected key represents an authorized rotation or substitution.
+See [key generation and rotation](keys.md).
 
-For how a publisher generates the key behind that fingerprint, what the
-fingerprint is a digest of, and what a legitimate rotation looks like from
-the publisher's side, see [`keys.md`](keys.md).
-
-Record the pinned fingerprint somewhere durable (next to the publisher's
-name, alongside your own organization's other trusted keys) and reuse
-*that* retained copy of `public.pem` for every later scorecard from this
-publisher. A fresh `public.pem` that arrives bundled with a later scorecard
-is worth nothing on its own, however convenient it is to use — check its
-fingerprint against your pinned one first.
-
-**To state the failure mode plainly: verifying `scorecard.json` against a
-`public.pem` delivered in the same bundle proves only that the bundle is
-internally consistent. It does not prove authenticity. Authenticity comes
-from the key having reached you a different way.**
+Retain the fingerprint alongside the publisher's identity and reuse your trusted
+`public.pem` for later scorecards. Check any replacement key against that trust
+record; receiving a fresh bundled key does not authenticate it.
 
 ## Two ways to verify
 
-Both routes check the same three files and reach the same verdict. Use
-whichever is convenient; running both and comparing the verdict is even
-better, since agreement between two independent implementations is stronger
-evidence than either alone.
-
-That equality is a property somebody has to maintain, and for one release it
-did not hold: `verify_scorecard.py` implemented ONE of the ~12 self-consistency
-rules `logweir drill verify` applies, so a document with
-`format_version: "2.0.0"`, or `measured.rpo_seconds: -90`, or
-`records_sampled_matching: 9999` over `records_sampled: 10`, printed `VALID`
-here and was refused there. The Python verifier's `check_invariants` now
-mirrors the Rust validator arm for arm, in the same order and with the same
-wording. If you find a document the two disagree about, that is a bug in the
-format — report it.
+The readers are intended to agree on acceptance or refusal. Running both gives
+an additional independent check. Exit codes and malformed-document diagnostics
+can differ, as described below; a disagreement in acceptance is a defect to report.
 
 ### Route 1: `logweir drill verify` (if you have the Logweir binary)
 
@@ -136,158 +82,125 @@ logweir drill verify \
   --public-key public.pem
 ```
 
-Exit code `0` means the signature is valid and the document does not
-contradict itself. A non-zero exit code means it does not: `1` for an
-operational problem such as a file that will not parse, and `4` for a
-signature failure, a lock-proof failure, **or a document this reader cannot
-honestly interpret** — a `format_version` whose major is newer than this build
-understands, or any other self-contradiction `validate_invariants` catches.
-The last case is a valid signature over a document the reader must refuse
-anyway (Global Constraint 12), which is why it is not exit 0: a signature
-proves who wrote the bytes, never that this reader may act on them.
+| Exit | Meaning |
+| --- | --- |
+| `0` | Signature valid; the document passes the reader's checks. |
+| `1` | Operational or parsing failure, including malformed scorecard shape. |
+| `4` | Signature, lock-proof or invariant failure, including an unsupported newer format major or an inconsistent approval claim. |
+
+A valid signature does not override a refusal to interpret an unsupported or
+self-contradictory document.
 
 ### Route 2: `verify_scorecard.py` (no Rust required)
 
-This is the route that matters for this document: it needs only Python 3
-and one widely available third-party package, [`cryptography`](https://cryptography.io/),
-which implements the actual elliptic-curve and Ed25519 signature math.
-There is no pure-standard-library way to do that math in Python, so this
-one dependency is unavoidable if the check is to be a real cryptographic
-verification rather than a string comparison.
+Use Python 3 and the [cryptography](https://cryptography.io/) package, which
+performs the elliptic-curve and Ed25519 signature math:
 
 ```bash
 pip install cryptography
 python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
 ```
 
-A drill publishes three signed documents and a backup publishes a fourth, each
-under its own payload type.
-`--payload-type scorecard|backup-receipt|receipt|teardown` selects which one is
-being checked; the default is the scorecard, so the three-argument form above is
-unchanged. `backup-receipt` is the signed record of one `logweir backup run`
-([`formats/backup-receipt.md`](formats/backup-receipt.md)) and is checked
-arm-for-arm by both readers; `receipt` is the drill's post-put storage readback
-of a scorecard.
-See [Verifying the receipt's signature](#verifying-the-receipts-signature).
+The command assumes the downloaded script is in your current directory. From
+this repository's root, use `python3 docs/verify_scorecard.py ...`. For an
+isolated installation:
 
-(If you would rather not install into your system Python, create a
-virtual environment first: `python3 -m venv venv && venv/bin/pip install
-cryptography && venv/bin/python3 verify_scorecard.py ...`. Either way, this
-is the only package the script imports beyond the Python standard library —
-read `docs/verify_scorecard.py` yourself to confirm that.)
+```bash
+python3 -m venv venv
+venv/bin/pip install cryptography
+venv/bin/python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
+```
 
-Exit code `0` and a line starting `VALID` means the signature checks out.
-Exit code `1` and a line starting `INVALID` (printed to stderr) means it
-does not, along with the specific reason (signature mismatch, unexpected
-`payloadType`, malformed base64, or a self-contradicting document).
+`--payload-type scorecard|backup-receipt|receipt|teardown` selects the signed
+document type; the default is `scorecard`. `backup-receipt` records a
+[backup run](formats/backup-receipt.md); `receipt` records a scorecard's storage
+readback. See [receipt verification](#verifying-the-receipts-signature).
 
-Exit code **`2` means the script could not run at all** — its one dependency,
-`cryptography`, is not installed. It prints `CANNOT RUN:` and the `pip install`
-line, and says `NOTHING WAS VERIFIED`. This is deliberately **not** exit 1: exit
-1 is a verdict on your document, and "the verifier would not start" must never
-be mistaken for "the signature did not check out". If you are branching on this
-in automation, treat 2 as an infrastructure failure and re-run, never as a
-finding.
+| Exit/output | Meaning |
+| --- | --- |
+| `0`, `VALID` | Signature and applicable document checks passed. |
+| `1`, `INVALID` on stderr | Refusal, with a reason such as signature mismatch, wrong payload type, malformed base64, unreadable input or document inconsistency. |
+| `2`, `CANNOT RUN:` and `NOTHING WAS VERIFIED` | The `cryptography` dependency is missing. Install it and rerun; this is an infrastructure failure, not a verdict on the document. |
 
 ### What "verify" actually checks
 
-Both routes check three things, in order:
+Both routes check the sidecar's expected `payloadType`, the signature over DSSE
+PAE of the type and raw payload bytes, then the applicable document rules.
+Scorecards use `application/vnd.logweir.drill-scorecard+json;version=1.0.0`.
+A signature for another document type cannot serve as a scorecard signature.
 
-1. **The sidecar's declared `payloadType`** matches the one Logweir scorecards
-   use (`application/vnd.logweir.drill-scorecard+json;version=1.0.0`). A
-   sidecar for some other kind of document, even if genuinely signed, must
-   not be accepted as a scorecard signature.
-2. **The signature verifies** over the DSSE v1 Pre-Authentication Encoding
-   (PAE) of `(payloadType, payload)`, where `payload` is the raw bytes of
-   `scorecard.json` as they were read from disk — see below.
-3. **The document does not contradict itself.** A signature only proves who
-   wrote the bytes; it says nothing about whether the bytes make sense, so this
-   check is separate from the cryptography — and **both routes apply the same
-   set**, which is what makes the "same verdict" claim above true. The set is:
+The current scorecard checks include:
 
-   - `format_version`'s major is not newer than this reader understands
-     (Global Constraint 12), checked **first**, before any rule that depends on
-     what a field means;
-   - `integrity.result` is never `"partial"` without a `partial_reason`;
-   - the two float fields are finite;
-   - `source.captured_by_logweir` agrees, in **both** directions, with
-     `last_phase_completed` and the two `rpo_source_relative_*` fields;
-   - `objectives.met` is not `true` when the pass rate was not measurable;
-   - no seconds-valued gap — `measured.rpo_seconds`,
-     `measured.rpo_source_relative_seconds`, `objectives.rpo_seconds` — is
-     negative;
-   - `records_sampled_matching` does not exceed `records_sampled`;
-   - `engine.matrix_verdict: "fail"` carries a `matrix_verdict_reason`;
-   - `integrity.pass_rate_measured` is null unless the level is
-     `byte-fingerprint`;
-   - `last_phase_completed` is within `-1..=9`.
+- A readable format major, checked before interpreting its invariants; the
+  eleven required blocks and six required non-block fields; `u64` fields within
+  `0 <= v < 2**64`, with null allowed only for optional `u64` fields.
+- The four post-put `evidence` fields remain zeroed. Offset-report key and
+  digest are present or absent together. An absent target mode means `scratch`;
+  a present mode is `scratch` or `newTopic`, and scratch requires a marker topic.
+- A partial integrity result has a nonblank `partial_reason`; the two float
+  fields (`objectives.pass_rate`, `integrity.pass_rate_measured`) are finite.
+- Source-capture status agrees in both directions with the phase and source-RPO
+  value/reason. `last_phase_completed` stays within `-1..=9`.
+- Recovery-point gaps (`measured.rpo_seconds`, source-relative RPO and the RPO
+  objective) are nonnegative. Matching records do not exceed sampled records,
+  and sampled records do not exceed `sample.records_expected`.
+- `outcome: pass` agrees with integrity, the absence of a partial reason,
+  objectives and matching counts. An unmeasurable pass-rate objective cannot be
+  reported as met, and `pass_rate_measured` is null outside `byte-fingerprint`.
+- Matrix `fail` carries a reason; matrix `pass` requires a passing drill at
+  `byte-fingerprint` level.
+- An auth block names a nonblank supported mode (`plaintext` or `scramSha512`);
+  a username without a mode is refused. `redactions` is empty.
+- The claimed `approval.self_attested` agrees with a derivation from the key
+  that actually verified the signature; see [approval](#reading-approvalself_attested).
 
-   `logweir drill show` is the third reader Logweir ships. It renders rather
-   than verifies, so it applies only the first rule — it **refuses** a document
-   whose major version it does not understand, and exits 1 rather than printing
-   a table under field meanings a future major may have redefined.
+Backup receipts have their own shape and invariants. Receipt and teardown
+verification do not apply scorecard-specific integrity rules.
+
+`logweir drill show` renders a document without verifying its signature. It
+refuses an unsupported newer major with exit `1`, but it does not perform the
+full verification above.
 
 ### The payload is never re-serialised
 
-`verify_scorecard.py` reads `scorecard.json` with `open(path, "rb").read()`
-and signs/verifies exactly those bytes — including the file's trailing
-newline, its exact key order, and its exact whitespace. It never parses the
-JSON and writes it back out before verifying.
+The verifier reads the payload as bytes (`open(path, "rb").read()`). The
+signature covers trailing newlines, key order, whitespace, number formatting
+and Unicode escaping. Semantically equivalent JSON can have different bytes.
 
-This matters because re-serialising would silently defeat the entire point
-of the format. Two JSON documents can be semantically identical yet differ
-byte-for-byte (key order, spacing, number formatting, Unicode escaping), and
-a signature is a bitwise-exact check. If a verifier reformatted the
-scorecard before checking the signature, it would in effect be checking a
-signature against a document nobody actually published — exactly the kind
-of substitution DSSE is designed to catch, defeated by the verifier itself.
-So: **never "pretty-print", `jq .`, or re-save `scorecard.json` before
-handing it to either verifier.** Verify the file exactly as it was
-delivered to you.
+**Do not pretty-print, run `jq .` over, or re-save the file before verification.**
+Verify the delivered bytes. Parsing and writing JSON back out would check a
+different payload rather than the stored artifact.
 
 ### The DSSE PAE encoding, precisely
 
-Both `logweir drill verify` and `verify_scorecard.py` sign and verify the
-same bytes, defined by the [DSSE v1 specification](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md):
+The signed message is defined by the
+[DSSE v1 specification](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md):
 
 ```
 PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body
 ```
 
-`SP` is a single `0x20` byte. `LEN` is the ASCII-decimal count of **bytes**,
-not characters. This distinction is invisible on every fixture in this
-repository, because `payloadType` here is pure ASCII, where byte count and
-character count are the same number — but it is not invisible in general.
-In Python, `len(payload_type)` counts Unicode code points; `len(payload_type
-.encode())` counts bytes. A payload type containing so much as one non-ASCII
-character would make the two diverge, and a verifier using the wrong one
-would silently check a different message than the one that was signed. This
-is exactly the kind of bug that passes every test you have and fails in
-production the first time it matters — so `verify_scorecard.py`'s `pae()`
-function encodes to bytes *before* taking `len()`, and that is worth
-checking for yourself by reading the function; it is four lines.
+`SP` is byte `0x20`; `LEN` is the ASCII-decimal count of **bytes**, not
+characters. Encode the type to UTF-8 before measuring it. Python's
+`len(payload_type)` counts code points, while `len(payload_type.encode("utf-8"))`
+counts bytes; these differ for non-ASCII text. Logweir's media types are ASCII,
+but independent implementations must still implement the byte-count rule.
 
 ### One asymmetry in the signature encoding
 
-The sidecar's `signatures[].sig` field is base64-encoded, but *what* it is
-base64 of depends on the key type:
+`signatures[].sig` is base64 of:
 
-- For an **ECDSA P-256** key, `sig` is base64 of a **DER-encoded**
-  `ECDSA-Sig-Value` (the ASN.1 SEQUENCE of two INTEGERs, r and s).
-- For an **Ed25519** key, `sig` is base64 of the **raw 64-byte** `R || S`
-  value. There is no ASN.1 encoding involved at all for Ed25519.
+- **ECDSA P-256:** a DER-encoded `ECDSA-Sig-Value`, the ASN.1 sequence of integers
+  `r` and `s`.
+- **Ed25519:** the raw 64-byte `R || S` value, without ASN.1 wrapping.
 
-Nothing in the sidecar's JSON shape tells you which encoding to expect —
-you have to know it from the public key's type, which is exactly what
-`verify_scorecard.py` does (it branches on whether the loaded key is an
-`Ed25519PublicKey` before choosing how to interpret `sig`). If you ever
-write your own third implementation, get this asymmetry wrong and it will
-work for one key type and silently produce "invalid signature" for the
-other — never a crash, just a rejection that looks like tampering.
+Select the interpretation from the public key's type; the sidecar's JSON shape
+alone does not distinguish them. The Python verifier branches on the loaded key
+before checking the signature.
 
 ## Re-deriving `source.manifest_sha256` independently
 
-The scorecard's `source` block names the backup it restored from:
+A source block identifies the archive manifest, for example:
 
 ```json
 "source": {
@@ -298,70 +211,43 @@ The scorecard's `source` block names the backup it restored from:
 }
 ```
 
-`manifest_sha256` is a claim about a specific object in the backup engine's
-own object-store bucket — the `manifest.json` that engine wrote when it
-took the backup identified by `backup_id`. A signature on the scorecard
-proves Logweir's publisher signed this claim; it does **not** prove the
-claim is true. To check it independently:
+The signature authenticates this claim; it does not independently establish
+which bytes were in storage. To check the claim:
 
-1. Ask your operator (or consult your organization's backup runbook) for
-   the object-store bucket and key prefix the backup engine writes to for
-   this `backup_id`. Backup manifests are conventionally stored as a
-   `manifest.json` object under a prefix tied to the backup, alongside the
-   segment files it references — the exact bucket and prefix are a
-   deployment detail, not something this document can hardcode.
-2. Fetch that object. If `manifest_version_id` is non-null, fetch that
-   *specific version* of the object (most S3-compatible stores, including
-   MinIO, support fetching by version ID) — otherwise you may be hashing a
-   manifest that has since been overwritten.
-3. Hash it:
-   ```bash
-   sha256sum manifest.json
-   ```
-4. Compare the resulting hex digest, prefixed with `sha256:`, against
-   `source.manifest_sha256` in the scorecard. A mismatch means either the
-   scorecard is describing a different manifest than the one currently in
-   the bucket, or the manifest has changed since the drill ran — either
-   way, it is a finding, not something to wave through.
+1. Obtain the backup engine's bucket and key prefix for `backup_id` from your
+   operator or runbook. The manifest is conventionally `manifest.json` beside
+   its segment files, but the exact location is deployment-specific.
+2. Fetch the manifest. If `manifest_version_id` is non-null, request that
+   specific object version so an overwrite cannot silently change the input.
+3. Run `sha256sum manifest.json` (or `shasum -a 256 manifest.json` on macOS).
+4. Prefix the resulting hex digest with `sha256:` and compare it with
+   `source.manifest_sha256`.
 
-This step is entirely independent of the DSSE signature check above: it
-does not use `verify_scorecard.py`, `logweir`, or any cryptography beyond
-`sha256sum`. It is the auditor re-deriving a fact from the underlying
-storage, not re-checking Logweir's own signature.
+A mismatch is a finding: the fetched object differs from the signed claim,
+possibly because it is a different manifest or version. This check uses the
+underlying storage independently of either scorecard verifier.
 
 ## The storage receipt: a second signed document
 
-**Read this before quoting a scorecard's `evidence` block to anyone.**
-
-The scorecard's `evidence` block —
+The four post-put fields in every emitted scorecard start as:
 
 ```json
 "evidence": { "create_only_enforced": false, "immutable": false,
               "retain_until": null, "version_id": null }
 ```
 
-— is **always exactly that**, in every scorecard Logweir emits, on every
-storage backend. It is not a finding. The reason is structural rather than a
-limitation: all four fields describe the *upload of this scorecard*, an event
-that has not happened when the scorecard is signed, and cannot happen before
-it, because a signature covers bytes and the bytes have to exist first. The
-document is never re-serialised afterwards — that would invalidate the
-signature. So rather than sign four values nothing had established, Logweir
-zeroes them.
+They describe an upload that has not happened when the scorecard is signed.
+Updating them afterward would alter the signed bytes. Read them as **no storage
+proof obtained at signing time**, not as evidence that the object was mutable,
+unprotected or uploaded without a conditional put. Optional offset-report
+fields may also appear in this block.
 
-Read those four fields as **"no proof was obtainable at signing time"**, never
-as "the object is mutable", "the put was not conditional", or "no retention
-applies". The block deliberately under-claims, and that is what guarantees a
-valid Logweir signature can never cover an unsubstantiated WORM or
-create-only assertion.
+Post-upload facts live in a separately signed storage receipt:
 
-The real post-upload readback is published in a **second signed document**,
-written after the put and stored beside the scorecard in the evidence bucket:
-
-| File | What it is |
-|---|---|
-| `<run_id>.receipt.json` | The storage receipt: what the object store actually answered *after* the scorecard was uploaded. |
-| `<run_id>.receipt.sig` | Its own DSSE sidecar, under `payloadType` `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`. |
+| File | Purpose |
+| --- | --- |
+| `<run_id>.receipt.json` | Readback after uploading the scorecard. |
+| `<run_id>.receipt.sig` | DSSE sidecar with type `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`. |
 
 ```json
 {
@@ -376,47 +262,38 @@ written after the put and stored beside the scorecard in the evidence bucket:
 }
 ```
 
-`create_only_enforced: true` here means the store performed a genuine
-conditional put — the object could not have silently replaced a previous
-drill's evidence. `false` means the backend answered "not supported" and
-Logweir took a HEAD-then-PUT fallback, which is recorded honestly and is
-**not** the same statement as "the object was overwritten". `immutable` and
-`retain_until` are `true`/non-null only after a provider readback actually
-answered; on every backend Logweir can build today that readback returns
-nothing, so expect `false`/`null` and do not read it as a finding.
+`create_only_enforced: true` means the store performed a conditional put.
+`false` records an unsupported-operation response and HEAD-then-PUT fallback;
+it does not establish that anything was overwritten. `immutable` and
+`retain_until` become true/non-null only with provider readback. Current
+backends supply no such readback, so false/null is absence of proof.
 
 ### How the receipt binds to the scorecard
 
-`scorecard_sha256` is the SHA-256 of the **exact signed bytes** of
-`scorecard.json` — not the run id, not a re-serialisation. That is what makes
-the pairing checkable rather than asserted: any other scorecard, including the
-same run signed a second time, produces a different digest, so a receipt
-cannot be moved onto a document it does not describe.
-
-Check the binding with no tooling at all:
+`scorecard_sha256` hashes the scorecard's **exact signed bytes**. Compare it
+with the document you verified:
 
 ```bash
 sha256sum scorecard.json
 python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['scorecard_sha256'])" receipt.json
 ```
 
-The second value is the first, prefixed with `sha256:`. If they differ, the
-receipt describes a different document — treat that as a finding, not as a
-formatting quirk. Do not `jq .` or re-save `scorecard.json` first, for the
-same reason the signature check forbids it.
+Use the actual receipt filename in place of `receipt.json`. The second value
+must equal `sha256:` plus the first digest. A mismatch means the receipt does
+not bind to these bytes. Do not reformat the scorecard before hashing.
 
-`scorecard_key` is the object key the scorecard was actually put at, carried
-out of the upload rather than reconstructed, so you can fetch that exact
-object and hash it yourself.
+The binding is to payload bytes, not to a particular signature: signing unchanged
+scorecard bytes again leaves the digest unchanged. `scorecard_key` records the
+actual uploaded object key, which you can fetch and hash independently.
 
 ### Verifying the receipt's signature
 
-The shipped verifier does it, with `--payload-type`:
-
 ```bash
 python3 docs/verify_scorecard.py --payload-type receipt \
-    <run_id>.receipt.json <run_id>.receipt.sig public.pem
+    '<run_id>.receipt.json' '<run_id>.receipt.sig' public.pem
 ```
+
+Replace `<run_id>` with the real identifier. Example output:
 
 ```
 VALID  receipt for logweir/drills/01M1RJZNEM507A7XQ7WCGPK6SJ.json
@@ -427,179 +304,89 @@ VALID  receipt for logweir/drills/01M1RJZNEM507A7XQ7WCGPK6SJ.json
        then check sha256(scorecard.json) equals the digest above.
 ```
 
-The flag takes `scorecard` (the default), `receipt`, `teardown`, or a full media
-type. **Naming the wrong one is a refusal, not a warning** — the default path
-still refuses a receipt, exactly as it did before the flag existed, because a
-sidecar for one kind of document must never be accepted as the signature over
-another. And selecting the right type is not a way to pass: the signature still
-has to cover those exact bytes.
+The flag accepts `scorecard`, `backup-receipt`, `receipt`, `teardown`, or the
+corresponding full supported media type. A wrong type is a refusal. Selecting
+the right type still requires a valid signature over those exact bytes; it does
+not run scorecard-specific integrity checks on a receipt. Use the shipped flag
+instead of hand-written receipt-verification scripts from older documentation.
 
-The scorecard-specific consistency checks (the `integrity.result: partial`
-rule, the run summary) apply **only** on the scorecard path. A receipt has no
-`integrity` block, and the script does not reach for one.
-
-Until v0.1.0 this flag did not exist and an auditor had to hand-roll PAE in a
-throwaway script to check a receipt at all — which is how a signature that
-verifies nothing gets built. If you have such a script from an earlier draft of
-this document, delete it and use the flag.
-
-Everything the [Where the public key comes from](#where-the-public-key-comes-from)
-section says applies unchanged: the receipt is signed by the same publisher
-key, so a receipt verified against a `public.pem` from the same bundle proves
-internal consistency and nothing about authenticity.
-
-**A receipt that is absent means no storage evidence was published for that
-run** — it does not mean the upload was not create-only. The receipt is
-written after the scorecard is already signed and stored, and a failure to
-write it is logged and deliberately does not retract a measurement.
+The [independent-key requirement](#where-the-public-key-comes-from) also applies
+to the receipt. An absent receipt means no storage evidence was published, not
+that the upload lacked create-only protection. Receipt publication happens after
+the scorecard is stored; failure is logged without retracting the measurement.
 
 ## The `logweir drill show` table is a SUMMARY, not the document
 
-`logweir drill show scorecard.json` renders a fixed-width table. It is the
-image in the README and it is what most people will actually look at, so it is
-worth being precise about what it is.
+`logweir drill show scorecard.json` renders fourteen fixed rows covering outcome,
+engine identity, levers, target, approval, RTO/RPO, integrity, target changes,
+topic parity and evidence. The footer adds qualifications:
 
-**The fourteen rows are frozen by the specification.** Their layout does not
-change between versions, which is what makes them safe to paste into a ticket.
-They carry: outcome; engine id/version/digest; the two levers; target cluster,
-marker topic and mapping count; approval; the four RTO figures with the compared
-one starred; RPO; integrity level/result and the sampled counts; the target
-diff; topic parity; and the `evidence` block.
+| Detail | Footer display |
+| --- | --- |
+| RTO, RPO and pass-rate objectives | `objectives (from the approved plan)` |
+| `objectives.met` | `yes`, `NO` or `unmeasurable`; the last means a requested pass rate could not be measured. |
+| `integrity.partial_reason` | Verbatim reason. |
+| `engine_subreport.caveat` | Verbatim caveat, or an explicit notice that the block is null. |
 
-**Those fourteen rows omit three things that most qualify the result**, and a
-reader who saw only them came away more confident than the signed document
-supports. That was a real defect and it is fixed by a **footer** printed below
-the table — the rows themselves are untouched:
+The footer states that the table is a summary; `--format json` prints the signed
+bytes. Read the JSON for details the summary omits:
 
-| Omitted from the fourteen rows | Where it is now |
-|---|---|
-| `objectives.rto_seconds`, `rpo_seconds`, `pass_rate` — the starred row *cites* the RTO objective and never displayed it | footer, `objectives (from the approved plan)` |
-| `objectives.met` — whether the drill met what it was asked to meet | footer, rendered as a **tri-state**: `yes` / `NO` / `unmeasurable`. `unmeasurable` is not met; it means a `pass_rate` objective was requested and could not be measured |
-| `integrity.partial_reason` — why a `partial` result was partial | footer, verbatim |
-| `engine_subreport.caveat` — which states the sub-report "corroborates nothing Logweir claims" | footer, verbatim; and when the block is `null`, the footer says so in words rather than leaving a blank |
+- `phases`, including refusal notes; `source.manifest_sha256` and
+  `target.topic_mapping_sha256`; `approval.plan_hash` and `approval.key_id`.
+- `sample.records_expected` versus `integrity.records_sampled`. A null measured
+  pass rate is not zero: the footer displays `measured —`, while
+  `integrity.partial_reason` explains why it is unmeasured.
+- `engine.matrix_verdict` and its reason; `redactions`.
+- `last_phase_completed`: a completed drill signs `7` because phase 8's record
+  and phase 9 teardown follow the frozen payload. This does not imply teardown
+  was skipped; teardown has its own attestation. See the
+  [format reference](formats/drill-scorecard.md).
 
-The footer closes with the sentence that matters most:
-
-> This table is a SUMMARY of a signed document, not the document. `--format
-> json` prints the signed bytes; docs/verify-a-scorecard.md lists what the
-> summary omits.
-
-**What the table still does not show, by design.** The signed JSON is the
-authority, and these live only there:
-
-- The whole `phases` array, including the `notes` a `preflight-failed` run uses
-  to say *why* it was refused.
-- `source.manifest_sha256` and `target.topic_mapping_sha256` — the two digests
-  that make the archive and the mapping checkable rather than described.
-- `approval.plan_hash` and `approval.key_id`.
-- `sample.records_expected` versus `integrity.records_sampled` — the canary size
-  against what was actually reconciled.
-- `integrity.pass_rate_measured`'s null-ness, which is a different statement
-  from a measured 0. (It IS shown, as `measured —`, on the footer's `pass_rate`
-  line; what the table cannot convey is *which* of the three null cases applies.
-  `integrity.partial_reason`, printed verbatim below it, names it.)
-- `engine.matrix_verdict` and `engine.matrix_verdict_reason` — the
-  support-matrix row this run established. The table does not render them at
-  all, so the JSON is the only place to read them. A `fail` here always carries
-  its reason.
-- `last_phase_completed`. A completed drill signs `7`, not `9` — phase 8's own
-  record and phase 9's teardown are both written after the bytes are frozen.
-  `7` is **not** "teardown was skipped"; teardown is attested in its own signed
-  document. See [the format reference](formats/drill-scorecard.md).
-- `redactions[]`.
-
-If you are deciding what a scorecard proves, read the JSON. If you are pasting
-evidence into a change record, paste the table **and** attach the JSON and its
-`.sig` — a table cannot be verified.
+Attach the JSON and sidecar when copying a table into a change record. The table
+itself cannot be verified.
 
 ## What the scorecard does **not** claim
 
-A signature guarantees the *bytes* are what the publisher wrote and
-attested to. It says nothing about the *scope* or *reliability* of what is
-inside. Two things in particular are easy to over-read from this document,
-and neither is a claim the scorecard is making:
+A signature authenticates the publisher's bytes. Assess the scope and strength
+of the signed claims separately.
 
 ### The sample window is not a claim about the whole archive
 
-The `sample` block (`window_start`, `window_end`, `topics`, `partitions`,
-`records_expected`, `records_restored`, `coverage_note`) describes the
-records the drill actually verified byte-for-byte, not the entire backup
-archive. A `pass` result with `integrity.level: "byte-fingerprint"` and
-`integrity.result: "pass"` means every record *in the sampled window*
-matched; it is not a statement that every record ever written to the
-archive, outside that window, would also match. Read `sample.coverage_note`
-for whatever the drill itself says about how representative the window is
-— but do not extend a byte-fingerprint match on one window into a claim
-about records the drill never touched.
+The `sample` block's window, topics, partitions, expected/restored counts and
+`coverage_note` describe what was sampled. A passing byte-fingerprint result
+establishes agreement within that sampled window; it does not establish that
+unsampled archive records would also match. Read `coverage_note` before making
+claims about representativeness.
 
 ### The `evidence` block is not a finding about your bucket
 
-`evidence.create_only_enforced: false` and `evidence.immutable: false` are
-what *every* Logweir scorecard says, because the upload had not happened when
-the document was signed. They are not evidence that the object was
-overwritable or unprotected. The storage facts live in the separately signed
-receipt — see [The storage receipt](#the-storage-receipt-a-second-signed-document).
+The four post-put fields are zeroed before signing. Storage facts belong in the
+[separate receipt](#the-storage-receipt-a-second-signed-document); false values
+in the scorecard do not establish that the bucket is mutable or unprotected.
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
-**In v0.1 this block is `null` in every scorecard the tool produces.** Logweir
-never invokes the engine's `validation run`, so nothing writes a report for it
-to retain: `OsoCliEngine` inherits `DataEngine::validation_run`'s default, which
-refuses rather than fabricating one, and phase 8 leaves the field null. (Phase 8
-also logs `"no engine validation report under the per-run prefix"`, on the
-structured log and **not** in the scorecard — the signed document's `phases`
-array ends before phase 8's own record, because phase 8 signs a frozen copy.
-Do not go looking for that sentence in the JSON.) A drill that reaches phase 8
-at all therefore publishes
-`"engine_subreport": null`, and that is the correct reading of the field today:
-no engine sub-report was retained. The rest of this section describes what the
-block WOULD mean once the engine's own validation run is invoked, and it is here
-now so that nobody who meets a populated one later mistakes it for corroboration.
-(The checked-in fixtures under `e2e/fixtures/signed/` and
-`e2e/fixtures/scorecard-pass.json` do carry a populated block; they are
-hand-authored examples of the FORMAT, predate this limitation being established,
-and are not what the shipping code emits.)
+The current engine wrapper inherits the refusing default for `validation_run`,
+so emitted scorecards have `engine_subreport: null`. Phase 8's missing-report
+message is in structured logs, not the already frozen scorecard. Populated
+checked-in fixtures are hand-authored format examples, not current production
+output; their bodies can be minimal placeholders.
 
-The `engine_subreport` block embeds the upstream backup engine's own
-evidence report, retained verbatim (see `engine_subreport.caveat` in the
-scorecard itself, which states this in the document). It is tempting to
-read a `pass`-looking upstream sub-report as independent corroboration of
-Logweir's own `integrity` block. It is not, for two concrete, verified
-reasons. (The checked-in test fixtures under `e2e/fixtures/signed/` embed a
-minimal placeholder body — decode `scorecard.json`'s
-`engine_subreport.body_b64` yourself and you will find a two-field stub,
-not a full report — so the paths below describe the real upstream engine's
-report schema, the one a genuine production scorecard embeds, not
-necessarily the bytes in these particular fixtures.)
+If a populated report is encountered, base64-decode `engine_subreport.body_b64`
+and check `body_sha256` against the decoded bytes. There is no literal `body`
+field: the paths below refer to that decoded JSON. The pinned upstream source
+records two reasons not to treat it as independent corroboration:
 
-- The literal JSON path **`engine_subreport.body.integrity.checksums_valid`**
-  — where `body` denotes the JSON object you get by base64-decoding
-  `engine_subreport.body_b64` (there is no field literally named `body` in
-  the sidecar; decode `body_b64` first, then walk `.integrity
-  .checksums_valid` in the result) — is the hardcoded literal `true` in
-  every report the upstream engine ever emits. It is not computed from
-  anything
-  [VERIFIED `U/kafka-backup/crates/kafka-backup-core/src/evidence/emit.rs:109`
-  — `checksums_valid: true,` is a literal in the struct construction].
-  A field that is always `true` by construction cannot corroborate
-  anything; it is not evidence, it is a constant.
-- The same decoded report's restore timing fields — reachable the same
-  way at `engine_subreport.body.restore.start_time`,
-  `engine_subreport.body.restore.end_time`, and
-  `engine_subreport.body.restore.duration_seconds` — are always `None`
-  [VERIFIED `U/kafka-backup/crates/kafka-backup-core/src/evidence/emit.rs:100-104`
-  — `RestoreInfo { target_bootstrap_servers, start_time: None, end_time:
-  None, duration_seconds: None }`], so the sub-report cannot corroborate
-  Logweir's own measured RTO figures either — there is nothing there to
-  compare against.
+- `integrity.checksums_valid` is constructed as literal `true`, rather than
+  computed (`kafka-backup-core/src/evidence/emit.rs:109` in the upstream source).
+- `restore.start_time`, `restore.end_time` and `restore.duration_seconds` are
+  constructed as `None` (`emit.rs:100–104`), so they cannot corroborate RTO.
 
-In short: `engine_subreport` is included for provenance and traceability
-(you can verify `body_sha256` against `body_b64` yourself, and confirm the
-bytes really are what the upstream engine wrote), but you should never read
-it as a second, independent check on Logweir's `integrity` or `measured`
-blocks. Logweir's own signed claim stands or falls on its own `integrity`
-block, checked against the sample described in `sample`, and nothing else
-in this document backs it up.
+These are findings about the inspected upstream version, not promises about
+future versions. The report is retained for provenance and traceability; a
+matching body digest binds the included bytes but does not independently prove
+who produced them or validate Logweir's integrity measurement. Read its caveat
+and assess Logweir's `integrity` block against the declared sample.
 
 ## Reading `approval.self_attested`
 
@@ -614,160 +401,75 @@ in this document backs it up.
 }
 ```
 
-`approval.self_attested` is `true` exactly when the key that approved the
-drill plan is the same key that signed the resulting scorecard — that is,
-the same party planned the drill, ran it, and vouches for its own result,
-with no separation between approver and publisher. Logweir never refuses to
-sign such a scorecard; it labels it instead (spec's own design choice: a
-self-attested run is not a forgery, but it is a materially weaker
-governance signal than one where a different approving party's key is on
-record).
+Self-attestation means the approval key equals the scorecard-signing key. It
+indicates no separation at the key level; it does not independently identify the
+humans operating those keys. Logweir permits and labels such runs.
 
-**The field in the document is a CLAIM. Both verifiers DERIVE the finding
-instead.** They compare `approval.key_id` against the key id of the signature
-that actually verified, which is the same comparison the writer makes when it
-fills the field in. Neither reader reports the document's own `self_attested`
-value, ever: for one release both did, so a document could assert or deny its
-own provenance — the single most damaging property in the artifact — and both
-verifiers would repeat the assertion under a `VALID` banner.
-
-A document whose claim disagrees with the derivation is **refused**, not
-annotated. `logweir drill verify` exits **4** — the same class as a bad
-signature, because it is a provenance claim the signature cannot support —
-and `docs/verify_scorecard.py` exits **1**, its own "INVALID" code. Both print
-the same line, byte for byte (the script prefixes its copy with `INVALID: `):
+**Both verifiers derive this finding** by comparing `approval.key_id` with the
+key ID that actually verified the signature. They refuse a contradictory
+`self_attested` claim: Rust exits `4`, Python exits `1`. The diagnostic is one
+of the following, with Python adding `INVALID: `:
 
 ```
 APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=true but the approval key id <a> does not match the verifying key id <b>
 APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=false but the approval key id <a> matches the verifying key id <b>
 ```
 
-Both directions are refused. A document that *under*-reports its lack of
-separation of duties is as false as one that over-claims, and a message that
-said "does not match" in the second case would be stating a falsehood in the
-one line whose whole purpose is to be trustworthy.
+`drill show` has neither signature nor key and cannot derive the result. Its
+self-attestation row says
+`SELF-ATTESTED (claimed; run 'drill verify' to check it against the signing key)`.
+Do not treat it as a verification.
 
-`logweir drill show` is the exception, and it says so on its own face: that
-command renders a table from the scorecard alone and is handed no signature
-and no key, so it cannot derive anything. Its approval row reads
-`SELF-ATTESTED (claimed; run 'drill verify' to check it against the signing
-key)`. Do not read `drill show` as a check.
-
-This narrows what a `1.0.0` reader accepts without changing the format: no
-field is added, removed or retyped, `format_version` stays `1.0.0`, and **no
-document Logweir has ever written is refused**, because the writer has always
-derived the field correctly.
-
-Both verifiers surface a derived `true` rather than hiding it:
-`verify_scorecard.py` prints, verbatim (this is the actual output — compare
-your terminal against these exact characters, not a paraphrase of them):
+The stricter reader rule did not change `format_version: 1.0.0`; it rejects
+contradictory claims without adding or changing fields. Both verifiers surface a
+derived true with:
 
 ```
-VALID  run_id=01J9X2QK7C4V0R8YB3ZP6MTS5A  outcome=pass
-       rto_seconds=512  rpo_seconds=0
-       integrity=byte-fingerprint/pass
-       approval: SELF-ATTESTED — the approval key equals the signing key
-       evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
-       verifier: verify_scorecard.py 1.8.0 (invariant set: evidence-zeroing, trimmed-empty partial_reason, redactions, outcome-entailment, all eleven required blocks in serde order, the six required non-block fields present and of the type their Rust type implies, u64 domain with null refused where Rust has no Option; approval.self_attested derived, not echoed)
+approval: SELF-ATTESTED — the approval key equals the signing key
 ```
 
-(The `evidence:` line is printed on **every** scorecard, self-attested or not.
-It is there so nobody reads the zeroed `evidence` block as a finding about
-their bucket — see [The `evidence` block is not a finding about your
-bucket](#the-evidence-block-is-not-a-finding-about-your-bucket).)
+The Python scorecard report also prints this reminder on every successful check:
+
+```
+evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
+```
+
+Treat derived self-attestation as a reason to seek additional corroboration,
+such as the change ticket, another reviewer or an independent drill. It is a
+weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The last line names the script's own version — **not** the scorecard's
-`format_version`, which is `1.0.0` and stays there. `verify_scorecard.py`'s
-version tracks its **verdict rule**: it moves whenever there is a document this
-script would now decide differently from the previous version. Every version so
-far is such a move:
+The Python report ends with `verifier: verify_scorecard.py 1.13.0` followed by
+the checks it applied. This is the **verifier's version**, not the document's
+`format_version` (`1.0.0`). It changes when the reader's accepted-document set
+changes. The compatibility history is:
 
-| Version | What it decides differently |
-|---|---|
-| `1.1.0` | Refuses a `1.0.x` scorecard whose four post-put `evidence` fields are not zeroed. |
-| `1.2.0` | **Derives** `approval.self_attested` from the key that verified the signature and refuses a document whose claim disagrees, where `1.1.0` printed the document's own claim and returned `VALID`. |
-| `1.3.0` | Refuses a `partial` integrity result whose `partial_reason` is **blank** (`""` or whitespace) and not merely null, and refuses any document with a non-empty `redactions`. Both were `VALID` under `1.2.0`. |
-| `1.4.0` | Reads `outcome` **for the first time**. Refuses a document whose headline field contradicts the fields it summarises: `pass` beside a non-`pass` `integrity.result`, beside a non-blank `partial_reason`, beside `objectives.met: false`, or beside a sample where not every record matched; a `records_sampled` larger than `sample.records_expected`; and `engine.matrix_verdict: "pass"` on a drill that did not pass at `byte-fingerprint` level. All were `VALID` under `1.3.0`. |
-| `1.5.0` | Requires the `sample` block and an integer `sample.records_expected`. A scorecard with no `sample` block at all — or with `"records_expected": "75"` — printed `VALID` under `1.4.0` while `logweir drill verify` exited **1** on the same bytes, because Rust gets the shape from its own types and this script had no equivalent layer. Not an invariant arm; a bump all the same, because there are documents this script now decides differently. |
-| `1.6.0` | Completes the *block* shape layer and pins its order. All **eleven** required blocks are checked, not seven — `target`, `approval`, `target_diff` and `topic_parity` join the list; a document missing `target`, `target_diff` or `topic_parity` printed `VALID` under `1.5.0` while `logweir drill verify` exited **1** (`approval` absent was already refused by both, in Python by `main`'s approval derivation rather than the block loop, which now names it consistently). Every field the Rust reader types as `u64` must satisfy `0 <= v < 2**64`, where `isinstance(v, int)` mirrored serde's *type* and not its *domain*: `sample.records_expected: 18446744073709551616` was `VALID` under `1.5.0` and exit **1** from `drill verify`. And the block list is now in the struct's declaration order, so a document missing several *blocks* is named for the same block by both readers. |
-| `1.7.0` | Finishes the shape layer on the fields that are **not** blocks, and stops treating every `u64` as nullable. `Scorecard` has six required fields whose type is not a block — `format_version`, `run_id`, `outcome`, `last_phase_completed`, `requested_at` and `phases` — and `1.6.0` checked none of them: with `run_id`, `requested_at` or `phases` absent, `logweir drill verify` exited **1** (`missing field ...`) and this script printed `VALID`; with `outcome` absent it refused, but on an *invariant* about `engine.matrix_verdict`, which is not what is wrong with the document. And `null` was skipped for all eleven `u64` fields although only five are `Option<u64>` in Rust: `sample.records_restored: null`, `integrity.records_sampled: null`, `integrity.records_sampled_matching: null`, `integrity.mismatches: null` and `phases[].duration_ms: null` were each `VALID` under `1.6.0` and exit **1** (`invalid type: null, expected u64`) from `drill verify`. The five `Option<u64>` fields still accept null. |
-| `1.8.0` | Type-checks the six required non-block fields, and derives the two lists that were still hand-written. `1.7.0` asserted PRESENCE only and recorded the rest as a residual; measured at `b99239a` over the release binary, `run_id: 42` was `logweir drill verify` exit **1** (``invalid type: integer `42`, expected a string``) against `VALID` here, `phases: "x"` was exit **1** (`invalid type: string "x", expected a sequence`) against `VALID`, `requested_at: 5` was exit **1** against `VALID`, and `outcome: 7` refused here on an *invariant* about `engine.matrix_verdict` rather than on the type. Each Rust type implies exactly one JSON type — `String`, `DateTime<Utc>` and the `Outcome` enum are strings, `i8` is a number, `Vec<PhaseRecord>` is an array — so the check is one rule read off the struct, not five guesses. |
+| Version | Changed checks |
+| --- | --- |
+| `1.1.0` | Rejects nonzero post-put evidence fields in `1.0.x` scorecards. |
+| `1.2.0` | Derives self-attestation from the verified key and rejects contradictory claims. |
+| `1.3.0` | Rejects blank/whitespace partial reasons and nonempty redactions. |
+| `1.4.0` | Checks outcome against integrity, partial reason, objectives and matching counts; bounds sampled counts by expected counts; requires matrix pass to be a passing byte-fingerprint drill. |
+| `1.5.0` | Requires `sample` and integer `sample.records_expected`, closing Python/Rust disagreement on absent or mistyped sample data. |
+| `1.6.0` | Checks all eleven required blocks in Rust declaration order and bounds every `u64` field to `0 <= v < 2**64`; closes missing target, target-diff and topic-parity gaps. |
+| `1.7.0` | Requires all six non-block fields and rejects null for nonoptional `u64` values; the five optional `u64` fields still permit null. |
+| `1.8.0` | Type-checks the six non-block fields using their Rust-implied JSON types, closing cases such as `run_id: 42`, `phases: "x"` and `requested_at: 5`. |
+| `1.9.0` | Adds backup-receipt verification and scorecard auth-field consistency checks. |
+| `1.10.0` | Restricts scorecard/backup-receipt auth modes to `plaintext` or `scramSha512`. |
+| `1.11.0` | Requires offset-report key and digest to be present or absent together. |
+| `1.12.0` | Requires a marker topic unless target mode is `newTopic`. |
+| `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
 
-**What `1.8.0` does not claim.** The field loop runs *after* the block loop, and
-one consequence survives: a document missing a plain field **and** a block is
-still named for the block here and for whichever comes first in the struct there
-— `run_id` plus `engine` absent is `engine` from this script and `run_id` from
-`drill verify`. Full order parity needs one merged loop over all seventeen
-required fields in declaration order, which is a change to three parsers rather
-than a clause. It is recorded rather than closed.
+A known diagnostic-order difference remains: Python checks blocks before plain
+fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
+reports `run_id`. Both refuse; this is not an acceptance disagreement.
 
-(`1.7.0` recorded a second residual here — a field present but of the wrong
-type, `phases: "none"`, refused by `drill verify` and not by this script — on the
-grounds that "the six fields carry five different Rust types and share no JSON
-shape, so a type check here would be five guesses rather than one rule". They
-share no JSON shape, but each Rust type *implies* one, which is a rule and not a
-guess. `1.8.0` closes it and derives the five implications from the struct.)
-
-The parenthetical on the `verifier:` line enumerates the current invariant set,
-so the line an auditor reads names the checks that actually produced the verdict
-in front of them rather than one member of the set.
-
-**What that means for you as an auditor.** A scorecard you verified with an
-earlier version was checked by a weaker rule. If you retained the document and
-its sidecar — and you should have; a signature is over a fixed byte string and
-stays checkable forever — **re-run the current script over your retained
-documents.** Nothing about the artifact changed and no signature is affected;
-what changed is what this reader is willing to call `VALID`. A document that
-passed under an earlier version and is refused under `1.5.0` was always making a
-claim its signature could not support. The script was not catching it.
-
-`1.4.0` is the version worth re-running for. `outcome` is the field you read
-first and the field that had never been checked against anything: a scorecard
-saying `pass` next to `integrity.result: fail` verified clean under every
-earlier version, from both readers. If you retained scorecards from an earlier
-run, that is the claim worth re-testing.
-
-`1.5.0` is worth re-running for a narrower reason, and it is the only version so
-far where **the two readers disagreed**. Every version up to `1.4.0` made this
-script stricter in step with `logweir drill verify`; `1.5.0` closes a case where
-they did not agree at all. A scorecard with the whole `sample` block removed —
-the block carrying the canary size the whole integrity result is measured
-against — was refused by `logweir drill verify` and called `VALID` by this
-script. If you hold a `VALID` printed by `1.4.0` or earlier and you cannot see a
-`sample` block in the document it was printed for, that `VALID` was wrong. Run
-`1.5.0` over it.
-
-`1.6.0` is worth re-running for the same reason, three more times over. `1.5.0`
-closed the `sample` block; `1.6.0` closed `target`, `target_diff` and
-`topic_parity`, each of which was the identical divergence — a document with the
-block deleted, refused by `logweir drill verify` and called `VALID` here — and
-each of which was missed because this script's arms never read those blocks. The
-block list is now taken from the Rust struct rather than grown one arm at a time,
-and a test refuses to let the two drift apart, so this class of gap is closed
-rather than reduced.
-
-`1.6.0` also bounds every `u64` field. Python integers have no upper limit, so
-`"records_expected": 18446744073709551616` — one past `u64::MAX` — satisfied an
-`isinstance(v, int)` check that `logweir drill verify` refuses outright. If you
-hold a `VALID` for a document whose record counts are implausibly large, re-run
-it.
-
-Read the version line, not just the verdict. The verdict alone cannot tell you
-which rule produced it.
-
-`logweir drill verify` prints the equivalent line as `approval:
-SELF-ATTESTED — the approval key equals the signing key` among its own
-report fields. Either way, the line to look for ends in `SELF-ATTESTED —
-the approval key equals the signing key`.
-
-If you are an auditor deciding how much weight to give a passing scorecard,
-treat a **derived** `self_attested: true` as a reason to seek additional corroboration —
-an out-of-band record of the change ticket, a second reviewer, or a
-separate independent drill — rather than as a defect in the artifact
-itself.
-
+**Rerun the current verifier over retained documents and sidecars checked with
+older versions.** Earlier `VALID` results may reflect weaker consistency or
+shape checks. The original payload bytes and signature stay unchanged; the
+reader's rules become stricter. Keep the verifier version with your audit record,
+not just the verdict.
 
 ---
 

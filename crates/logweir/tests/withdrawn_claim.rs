@@ -242,7 +242,7 @@ fn the_gate_names_every_shipped_surface_it_walks() {
         "MAINTAINERS.md",
         "TRADEMARKS.md",
         "docs/keys.md",
-        "docs/adr/0008-mvp-constraint-amendments.md",
+        "docs/architecture.md",
         "config/logweir.yaml",
         "examples/demo.md",
         "ui/index.html",

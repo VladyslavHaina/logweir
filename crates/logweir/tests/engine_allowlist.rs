@@ -234,7 +234,7 @@ fn engine_allowlist_refuses_an_unjustified_token() {
 
 #[test]
 fn adr_0002_decision_reads_four_commands() {
-    let adr = std::fs::read_to_string(repo_root().join("docs/adr/0002-shell-out.md"))
+    let adr = std::fs::read_to_string(repo_root().join("docs/architecture.md"))
         .expect("ADR 0002 is readable");
     let flat = collapse(&adr);
     assert!(
@@ -252,9 +252,8 @@ fn adr_0002_decision_reads_four_commands() {
 
 #[test]
 fn adr_0008_records_all_four_amendments() {
-    let adr =
-        std::fs::read_to_string(repo_root().join("docs/adr/0008-mvp-constraint-amendments.md"))
-            .expect("ADR 0008 is readable");
+    let adr = std::fs::read_to_string(repo_root().join("docs/architecture.md"))
+        .expect("ADR 0008 is readable");
     for heading in [
         "## Amendment A",
         "## Amendment B",

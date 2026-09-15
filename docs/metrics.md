@@ -1,16 +1,16 @@
 # Metrics
 
-v0.1 has **no HTTP surface** — no `/metrics`, no `/healthz`, no `/readyz`. The
-Prometheus **textfile** written at `--metrics-file` is not one of two routes; it
-is the route, and node_exporter's textfile collector scrapes it. Where that file
-has to live is [kubernetes.md §5](kubernetes.md); what it contains is here.
+The CLI writes a Prometheus textfile at `--metrics-file`; it has no HTTP
+metrics endpoint. node_exporter's textfile collector scrapes the file. For
+persistent mounts, see [kubernetes.md §5](kubernetes.md).
 
 Every metric is written by [`crates/logweir/src/metrics.rs`](../crates/logweir/src/metrics.rs)
 and rendered by [`../dashboards/logweir.json`](../dashboards/logweir.json).
 
 ## The terminal-path contract
 
-**Every terminal path writes the file.** There are five, one per exit code:
+**With `--metrics-file` configured, every handled terminal path attempts to
+write the file.** A killed process or failed write cannot report its own result:
 
 | Exit | What happened | Written by | Metric families in the file |
 |---|---|---|---|
@@ -20,19 +20,8 @@ and rendered by [`../dashboards/logweir.json`](../dashboards/logweir.json).
 | `3` | the plan was refused by a guard, before anything ran | `write_minimal_textfile` | exit code + timestamp only |
 | `4` | signing or lock proof failed; nothing was uploaded | `write_minimal_textfile` | exit code + timestamp only |
 
-Before this contract existed, exits 1, 3 and 4 wrote nothing at all, so a
-CronJob whose pod died and a CronJob that was never scheduled produced the same
-observation — none — and the dashboard's `1`/`3`/`4` value mappings were
-unreachable by any code path.
-
-Two consequences follow, and they are the whole point:
-
-- **The file's existence carries no information any more.** Staleness does.
-  See [Is the drill still running at all?](#is-the-drill-still-running-at-all)
-  below.
-- **The absence of `logweir_drill_runs_total` inside a PRESENT file** means the
-  run ended before a scorecard existed. Every scorecard-derived family is
-  written only on exits 0 and 2.
+An existing file may contain an old run. Check freshness as well as its values.
+Scorecard-derived families are absent on exits 1, 3 and 4.
 
 A metrics write that fails is logged at `warn` and swallowed. It never changes
 the exit code the drill already decided: the textfile is a local operational
@@ -40,33 +29,23 @@ side-channel on a node-local volume, not an artifact and not an upload.
 
 ## Labels
 
-`cluster` is on every series. On exits 0 and 2 it is the scorecard's
-`target.cluster_id`. On exits 1, 3 and 4 it is the literal `unknown`: the id is
-learned from the live broker at phase 2, a guard refusal (exit 3) happens at
-phase 0 and most operational failures happen earlier still, and the drill spec
-does not carry a cluster id to fall back on. The spec is deliberately **not**
-parsed on a terminal path — a new failure surface at the exact moment the
-process is already failing — and the label is never omitted, because a series
-that sometimes has a label and sometimes does not is a Prometheus modelling
-error.
+`cluster` is on every series: the scorecard's `target.cluster_id` on exits
+0 and 2, and `unknown` on exits 1, 3 and 4, where the terminal writer has no
+scorecard-derived id. The terminal writer does not reparse the spec.
 
-`run_id` is **not a label**, on any series, ever. It is a ULID — unbounded
-cardinality, strictly worse than `triggered_by`, which lives in the scorecard
-for the same reason. It rides both shapes of the file as a leading comment line
-that the textfile collector passes over and `cat` shows:
+`run_id` is a comment, never a label, to avoid unbounded cardinality:
 
 ```
 # logweir run_id=01JBQ7Q6X2K3V4M5N6P7R8S9T0
 ```
 
-That is the only correlation handle an operator has on the failure paths, where
-there is no scorecard to read.
+Use it to correlate the file with logs, including failures without scorecards.
 
 ## The metrics
 
 | Metric | Type | Labels | What its ABSENCE means |
 |---|---|---|---|
-| `logweir_drill_last_run_timestamp_seconds` | gauge | `cluster` | nothing has ever written this file. Present on every terminal path, so an absent series means no run reached the end of `drill run` at all. |
+| `logweir_drill_last_run_timestamp_seconds` | gauge | `cluster` | No current sample was collected. Check whether the run finished, the write succeeded, the file still exists and the exporter scraped it. |
 | `logweir_drill_exit_code` | gauge | `cluster` | same. `0` pass · `1` operational, no artifact · `2` a signed drill result that is not a pass · `3` refused by a guard · `4` signing or lock proof failed. |
 | `logweir_drill_runs_total` | counter | `cluster`, `outcome` | **no scorecard was produced** — the run ended on exit 1, 3 or 4. This is the single most informative absence in the file. |
 | `logweir_drill_rto_seconds` | gauge | `cluster` | `measured.rto_excluding_preflight_seconds` was null, or no scorecard exists. |
@@ -95,29 +74,31 @@ are still on the target cluster and someone has to remove them by hand. Whether
 it *should* also change the exit code is an open question, recorded under
 "Known limitations" in [stability.md](stability.md).
 
+Although declared a counter, `logweir_drill_runs_total` is written as `1` for
+the current scorecard and replaces the previous file. It is not a cumulative
+run count; `rate()` or `increase()` over this textfile does not count drills.
+
 ## Is the drill still running at all?
 
 This is the query, and it is deliberately **not** a Logweir series:
 
 ```promql
-time() - node_textfile_mtime_seconds{file=~".*logweir.*"} > 8d
+time() - node_textfile_mtime_seconds{file=~".*logweir.*"} > 691200
 ```
 
 A metric Logweir writes cannot report that Logweir did not run. node_exporter
 publishes the textfile's own mtime as `node_textfile_mtime_seconds`, which
-carries **no Logweir label at all** — so absence detection works identically on
+carries **no Logweir label at all** — so stale-file detection works identically on
 the terminal paths where the cluster id was never learned and every Logweir
 series is labelled `cluster="unknown"`.
 
-`8d` is one day of slack over the weekly CronJob schedule in
-[`../examples/cronjob-drill.yaml`](../examples/cronjob-drill.yaml). The
-dashboard panel "Time since the last drill reported" thresholds at the same
-`691200` seconds so the panel and the alert cannot disagree.
-
-`time() - logweir_drill_last_run_timestamp_seconds{cluster=~".+"}` answers a *different*
-question — when the last run that got as far as writing a file ended — and it
-cannot see a pod that never started. Use the timestamp series to read the last
-run's wall clock; use the mtime query to alert.
+`691200` seconds is eight days: one day of slack over the weekly CronJob in
+[examples/cronjob-drill.yaml](../examples/cronjob-drill.yaml). The dashboard
+uses the same threshold. This query detects a stale **existing** file. It
+cannot detect a file that was never created, a removed file, or an exporter
+that stopped reporting; use a separate absence/exporter-health alert scoped to
+the hosts expected to run drills. Neither freshness timestamp can distinguish
+"pod did not start" from "metrics writing failed" without that context.
 
 **v0.1 ships no alert rules.** The query above is documented, not deployed;
 `.rules.yaml` files are a later piece of work.

@@ -53,7 +53,7 @@
 # This widening is RECORDED, not silent, and that is the whole point: an
 # implementer who hit check 2 could have added two names to `ALLOWED_PRIMITIVE`
 # and retired the check for `weirkeeper` for good. It is written here, in
-# `docs/adr/0008-mvp-constraint-amendments.md` §E, and in `docs/mvp/03-spec.md`
+# `docs/architecture.md#adr-0008-mvp-constraint-amendments` §E, and in `docs/mvp/03-spec.md`
 # §10's G-SIGN row, and
 # `crates/logweir/tests/one_signer_gate.rs`'s
 # `check_two_states_the_narrowed_claim` fails if this paragraph goes missing or

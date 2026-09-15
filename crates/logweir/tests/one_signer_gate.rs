@@ -624,8 +624,7 @@ fn the_pure_layer_loop_covers_logweir_verify() {
     for set in [&singles, &combined_names, &loop_names] {
         assert!(
             !set.contains("logweir-store"),
-            "`logweir-store` is outside the pure layer BY ADR (docs/adr/\
-             0008-mvp-constraint-amendments.md §E; Global Constraint 1) — it \
+            "`logweir-store` is outside the pure layer BY ADR (docs/architecture.md §E; Global Constraint 1) — it \
              takes object_store with the aws feature and would fail the grep by \
              construction. Adding it here is the quiet edit GC1 forbids."
         );

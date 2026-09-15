@@ -61,30 +61,19 @@ pre-release ruling by accident.**
     `name` collapses every operational failure on the install to one incident,
     which is the second reason to set `name`.
 
-- **`--from-cluster` (phase −1) has no execution path in v0.1.0.** This is the
-  most consequential gap on this page, and it is a *scheduling* gap, not a
-  scope decision: `--from-cluster` **is** in v0.1's scope, funded and decided —
-  the 2026-09-03 deferral was refuted 3-0 and revoked
-  ([ADR 0007](adr/0007-from-cluster-in-v0.1.md)). What is deferred is when in
-  the task order the code lands, and it lands in a follow-up task authored after
-  the main line is green.
+- **Backups and drills are separate commands.** `logweir backup run` captures
+  the source cluster and writes a signed backup receipt; `logweir restore run`
+  and `logweir drill run` consume an existing archive. The historical
+  `--from-cluster` flag is not implemented. See the [quickstart](quickstart.md)
+  and [backup receipt format](formats/backup-receipt.md).
 
-  What that means concretely, and each item is checkable:
-
-  - There is **no `--from-cluster` flag on the CLI**.
-    `logweir drill run --from-cluster ...` is a usage error and exits **1**,
-    naming the unknown argument. It is not silently ignored.
-  - Every scorecard v0.1.0 emits carries `source.captured_by_logweir: false`, a
-    null `measured.rpo_source_relative_seconds`, and
-    `rpo_source_relative_unmeasured_reason: "source cluster never contacted"`.
-    `last_phase_completed` never takes the value `-1`.
-  - **The format is already bound**, so this costs no compatibility event later:
-    the three fields are in the frozen 1.0.0 schema and
-    `Scorecard::validate_invariants` enforces their pairing in **both**
-    directions today, before the first writer exists.
-  - **The consequence for an adopter is real and is the point of recording it:**
-    you must already possess a `kafka-backup` archive to run a drill. Logweir
-    cannot take the backup for you in v0.1.0.
+  A drill does not contact the source cluster: its scorecard has
+  `source.captured_by_logweir: false`, null
+  `measured.rpo_source_relative_seconds`, and
+  `rpo_source_relative_unmeasured_reason: "source cluster never contacted"`.
+  `last_phase_completed` never takes `-1`. The schema already reserves these
+  fields and validates their pairing; a separately created backup receipt
+  does not turn a drill's archive-relative RPO into source-relative RPO.
 
 - **The YAML parser is archived.** The drill spec and both rendered engine
   documents are YAML, parsed by `serde_yaml` 0.9, which resolves to
@@ -98,40 +87,23 @@ pre-release ruling by accident.**
 
 - **No musl release target.** `rdkafka` vendors and compiles `librdkafka` from
   C, which does not cross-compile to musl without substantially more work than
-  v0.1 has ([ADR 0004](adr/0004-kafka-client.md)). This is not contradicted by
+  v0.1 has ([ADR 0004](architecture.md#adr-0004-kafka-client)). This is not contradicted by
   the `Dockerfile` cross-compiling to `x86_64-unknown-linux-gnu`: that target
   has a one-package Debian toolchain and multiarch `:amd64` copies of every
   C library librdkafka wants, and musl has neither. `release.yml` *attempts* the
   build in a `continue-on-error` job and the release does not block on it, so a
   musl binary may or may not be attached to a given release. Do not assume one.
 
-- **Three release workflows have never been executed.**
-  `.github/workflows/release.yml`, `release-drill.yml` and `engine-matrix.yml`
-  were authored for the v0.1.0 tag against a repository with **no GitHub remote
-  configured**, so none of them has ever run. They are checked in, their YAML
-  parses, and their content is reviewed — but "the release workflow produced
-  binaries and an image" and "the drill ran from the released binary artifact"
-  are **UNVERIFIED**, not green. Run them via `workflow_dispatch` before
-  announcing the tag. `docs/support-matrix.md` says the same about its own rows.
+- **Release execution remains an evidence requirement.** The checked-in
+  [release checklist](tag1-checklist.md) records which release obligations are
+  blocked; [gates.md](gates.md) records dated workflow results. A local test
+  of workflow YAML does not prove that a published artifact was pulled and
+  executed. Update those records when the corresponding run is observed.
 
-- **The release image is built once and pushed only after the gate returns 0 —
-  a lint-proved shape, not an observed run.** `.github/workflows/release.yml`
-  produces the runtime image a single time, into the runner's own daemon
-  (`docker/build-push-action` with `load: true`, `push: false`, tagged
-  `logweir:check`); runs `scripts/check-image.sh logweir:check` against it; and
-  only then tags and pushes those same bytes to Docker Hub. Nothing is
-  recompiled between the assertion and the upload, so the bytes the gate
-  interrogated are the bytes an operator pulls. The repository digest is read
-  back from the daemon after the upload and republished in the release notes,
-  so a consumer can pin by digest instead of by a mutable tag (Global
-  Constraint 7). What is machine-checked is what the workflow *says*:
-  `crates/logweir/tests/workflow_lint.rs` parses the YAML on a laptop and
-  asserts the shape, in the default `cargo test`. **The workflow itself has
-  still never executed on any commit, including the v0.1.0 tag — no tag has been pushed** (the entry
-  above), so its first run will also be its first debugging session. The digest
-  in the release notes is also **not** the digest the Kubernetes manifests pin:
-  those name a locally built image, which is a different artifact from a
-  different machine.
+  The runner release image is built once, checked with
+  `scripts/check-image.sh`, and those same bytes are pushed only after the
+  check succeeds. `crates/logweir/tests/workflow_lint.rs` tests that ordering.
+  The published digest and a locally built digest are different artifacts.
 
 - **The sample window in `examples/drill.yaml` is illustrative and will not
   match your archive.** `sample.window_start` / `sample.window_end` name the
@@ -181,21 +153,14 @@ pre-release ruling by accident.**
   to detect it checks for the `.teardown.json` key beside each drill's
   scorecard.
 
-- **The checked-in fixtures show one value the code cannot emit.**
-  `e2e/fixtures/signed/*.json` carry a POPULATED `engine_subreport`, which no
-  v0.1 scorecard has; it is kept because it is the only checked-in example of
-  that block. Their two OTHER divergences are closed, not documented:
-  `last_phase_completed` reads `7` and the `evidence` block is fully zeroed in
-  both. Regenerating them no longer invalidates anything — the fixture keypair
-  is pinned and read, so `just fixtures-sign` re-signs under the same key.
-  `e2e/fixtures/scorecard-pass.json` is unsigned and was corrected the same way:
-  its `evidence.create_only_enforced` reads `false`, matching what phase 8
-  emits. All of it is stated beside the files in
-  [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
-
+- **Fixtures document more than the current writer emits.** Some scorecard
+  fixtures populate `engine_subreport`, which the current writer always sets
+  to null. Their `last_phase_completed` and zeroed evidence fields do match
+  runtime output. Keep these signed format examples and their pinned test keys;
+  [fixture notes](../e2e/fixtures/README.md) explain regeneration.
 
 - **S3 credentials come from `object_store`'s own chain, not the AWS SDK's.**
-  `logweir-engine-oso`'s `Store::from_url`/`Store::read_only_from_url` build
+  `logweir-store`'s `Store::from_url`/`Store::read_only_from_url` build
   the S3 client with `object_store` 0.14's `AmazonS3Builder::from_env()`,
   which applies `object_store`'s OWN credential chain (static keys, then web
   identity / IRSA, ECS, EKS Pod Identity, IMDS). That is **not** the AWS SDK
@@ -232,128 +197,57 @@ pre-release ruling by accident.**
      bullet — so the only way to know which path a given backend takes is to
      test that backend, as MinIO was tested here.
 
-- **The signed scorecard's `evidence` block makes NO claim about the upload.**
-  Read this before quoting a scorecard's `evidence` block to an auditor.
-
-  Four fields — `create_only_enforced`, `immutable`, `retain_until`,
-  `version_id` — describe facts that only exist *after* the scorecard has been
-  uploaded. The scorecard is signed *before* that upload (it must be: a
-  signature covers bytes, and the bytes have to exist first), and it is never
-  re-serialised afterwards, because re-serialising would invalidate the
-  signature. So at signing time those four fields cannot be known.
-
-  Rather than sign whatever value happened to be in them, Logweir **zeroes all
-  four before signing**. Every scorecard Logweir emits in v0.1 therefore reads:
+- **The signed scorecard's `evidence` block cannot establish upload facts.**
+  The scorecard is signed before upload. Logweir therefore zeroes the fields
+  that cannot yet be known:
 
   ```json
   "evidence": { "create_only_enforced": false, "immutable": false,
                 "retain_until": null, "version_id": null }
   ```
 
-  What that does and does not mean:
+  These values mean no storage proof was available at signing time, not that
+  the object is mutable or unversioned. The post-upload readback is a separate
+  signed document:
 
-  - It means **"no proof was obtainable at signing time."** It is *not* a claim
-    that the object is mutable, was overwritten, or is unversioned.
-  - The document **deliberately under-claims.** A run whose upload really was
-    conditional still publishes `create_only_enforced: false`, because phase 8
-    cannot know that yet and a signed document is not the place to guess.
-  - Conversely — and this is the point — **a signed scorecard can never assert
-    WORM protection or create-only enforcement that Logweir did not establish.**
-    A valid signature over `immutable: true` would be indistinguishable from a
-    verified fact, and nothing downstream (`logweir drill verify` included)
-    could tell the difference.
-  - The real post-upload readback *is* captured — `Store::put_create_only`
-    reports whether the conditional put was used, and
-    `Store::object_lock_readback` is consulted — and since Task 21a it **is**
-    published, in a **second signed document written after the upload**:
+  ```text
+  logweir/drills/<run_id>.receipt.json
+  logweir/drills/<run_id>.receipt.sig
+  ```
 
-    ```
-    logweir/drills/<run_id>.receipt.json   # the readback
-    logweir/drills/<run_id>.receipt.sig    # its DSSE sidecar
-    ```
+  The put receipt records `create_only_enforced`, `version_id`, `immutable`,
+  `retain_until`, observation time and `scorecard_sha256`, which binds it to
+  the exact scorecard bytes. Its payload type is
+  `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`.
+  A receipt upload failure is a logged warning and does not change the drill
+  result; a missing receipt means no storage evidence was published.
 
-    The receipt carries `create_only_enforced`, `version_id`, `immutable`,
-    `retain_until` and the time they were observed, plus `scorecard_sha256` —
-    the sha256 of the **exact signed scorecard bytes** it describes, so a
-    reader can tell which document the readback belongs to. Its payload type is
-    `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`; verify it
-    the same way as the scorecard, against that type. This is the same shape as
-    the teardown attestation, and for the same reason: a fact that only becomes
-    true after signing needs its own signature rather than a second bite at the
-    first one.
+  `object_store` 0.14 models no Object Lock/WORM readback API for the enabled
+  backends, so `Store::object_lock_readback` returns `None` and the immutable
+  fields remain unproven even for a bucket with Object Lock configured.
 
-    Read the two documents together. The scorecard is the measurement and
-    under-claims about storage; the receipt is the storage evidence and claims
-    only what the store actually answered. A receipt that fails to upload is a
-    logged warning and never changes the drill's outcome — so its **absence**
-    means "no storage evidence was published for this run", never "the upload
-    was not create-only".
+### Controller image architecture and release evidence
 
-  Independently of the above: `object_store` 0.14 — the crate, version and
-  feature set Global Constraint 9 fixes — models no Object Lock / WORM API on
-  any of its `aws`/`azure`/`gcp`/`http` backends, so
-  `Store::object_lock_readback` returns `None` on every backend Logweir can
-  build. Even the in-memory readback is therefore always "no proof" for
-  `immutable`/`retain_until` today. A bucket genuinely under Object Lock will
-  not be recognised as such until that API exists.
+The release checklist records `blocked: no tag pushed`; closure requires a
+successful tagged release and the pullback job's recorded digests. These are
+recorded release conditions, not a fresh check of GitHub status.
 
-### The controller image is multi-architecture in CI only — and `release.yml` has never run: `blocked: no tag pushed`
+The workflow builds `linux/amd64` and `linux/arm64` controller variants on
+native runners, checks each variant, and assembles a manifest list after
+checking the resulting artifacts. The runtime supports
+`scripts/check-image-weirkeeper.sh --no-exec` for inspecting a foreign
+architecture without executing it.
 
-**Task 30b, 2026-09-11. The status of this entry is `blocked: no tag pushed`,
-and what would close it is one sentence: a green tagged run of
-`.github/workflows/release.yml` whose `pullback` job summary carries the runner
-digest and the controller manifest digest, pulled on a machine that did not
-produce them.** **2026-09-12: the remote exists now** —
-<https://github.com/VladyslavHaina/logweir> — and `ci.yml`, `no-oso.yml` and
-`kind-demo.yml` have all run green on it. `release.yml` has not: it fires on a
-pushed tag, no tag has been pushed, so no such summary exists. Everything below
-is the shape of a file and the measurement of a laptop.
+`Dockerfile.weirkeeper` refuses cross-compilation because its `aws-lc-sys`
+build reads host headers. A cross attempt failed on `sys/types.h` in the
+recorded 2026-09-11 trial; the native arm64 build took 182 s with cached base
+layers. These are historical measurements, not build-time guarantees.
 
-**What the workflow now says.** `docker.io/vladyslavhaina/weirkeeper` is published as a
-manifest list carrying `linux/amd64` and `linux/arm64`. Each variant is compiled
-by a job of its own, on a runner **of that architecture**
-(`build-weirkeeper-amd64` on `ubuntu-24.04`, `build-weirkeeper-arm64` on
-`ubuntu-24.04-arm`, GitHub's hosted arm64 label for public repositories; an owner
-of a private repository substitutes a self-hosted arm64 label). Each of those
-jobs asserts its own image with all five of `scripts/check-image-weirkeeper.sh`'s
-checks **by execution** — a native runner can run what it just produced — and
-then hands the bytes on as a tarball, pushing nothing. The `image` job loads both
-tarballs, asserts the amd64 variant by execution again and the arm64 variant with
-`scripts/check-image-weirkeeper.sh --no-exec` (`docker create` + `docker cp`, ELF
-header, licence set and org-root anchor read on the host, nothing executed from
-the image), and only then pushes. Every push in the workflow is in that one job.
-
-**Why not one job with a two-platform build, which is the obvious shape.** It
-cannot work here and the reason is measured, not assumed. `Dockerfile.weirkeeper`
-refuses a cross compile by name: the workspace graph contains `aws-lc-sys`, whose
-cmake and bindgen steps read the host `/usr/include`, and a cross attempt on
-2026-09-11 died after 106 s on `sys/types.h: No such file or directory`. The only
-remaining way to produce a foreign variant on one machine is QEMU, which STANDING
-RULE 10 forbids — the emulated cargo layer measured elsewhere on this page at
-**33x** is what that rule is made of. A multi-platform image also cannot be
-`--load`ed into a daemon at all, so a gate that inspects a local tag would have
-nothing to inspect.
-
-**The wall clocks, and the one that is missing.** A native `linux/arm64`
-controller image on this host (Docker Desktop, `just image-weirkeeper`,
-2026-09-11): **182 s**, exit 0, with the base layers already cached. The matching
-**amd64 figure is `blocked: no amd64 host`** — there is no x86-64 machine here and
-the cross path is the refusal above, so the ratio between them cannot be measured
-from this tree. That ratio was a proxy for "is a leg being emulated"; under the
-per-architecture jobs above it is moot, because each leg runs natively and the
-`dpkg --print-architecture` assertion inside the builder stage fails if it does
-not.
-
-**And the digest moved again.** Rebuilding the controller image for the dry run
-above produced `weirkeeper@sha256:6ab14111…`, superseding `…e6e3384e…` in
-`config/manager/deployment.yaml` and `logweir.yaml`. That is the fourth time this
-one pin has moved in this plan, which is the entry above restated: a locally
-pinned digest is the measurement of one build on one machine, and it is not a
-reproducible identifier for anything.
-
-**And a fifth time**, after the Helm chart landed (2026-09-12): the pinned build predated Task 33's `LOGWEIR_RUNNER_IMAGE`, so the controller image was rebuilt from the tree that carries it, and `weirkeeper@sha256:6ab14111…` was superseded by `weirkeeper@sha256:51145a3f…` in the same two files and in `charts/logweir/values.yaml` (with the chart's rendered files regenerated).
-
-**And a sixth time**, for Task 37 (2026-09-12): the chart's two Logweir images are now named by the `latest` tag and the runner Jobs' pull policy follows it through a new `LOGWEIR_RUNNER_PULL_POLICY`, which the pinned build did not know — measured, 0 occurrences in that image's binary against 2 in the rebuild. A 223 s native `arm64` rebuild moved `weirkeeper@sha256:51145a3f…` to `weirkeeper@sha256:fa0060bd…` in `config/manager/deployment.yaml` and `logweir.yaml`. It moved it in **nothing else**, which is the one thing this entry adds: the chart's values no longer carry a controller digest, so the sixth instance of "a locally pinned digest is a measurement, not a reproducible pin" cost two files instead of six. That is what naming a tag buys, and `charts/logweir/values.yaml`'s header says what it costs.
+Local rebuilds change image digests. `config/manager/deployment.yaml` and
+`logweir.yaml` retain local digest pins; the Helm chart uses `:latest` for the
+Logweir repositories by the owner's 2026-09-12 decision. Third-party chart
+images remain digest-pinned. See the [chart guide](../charts/logweir/README.md)
+for the pull-policy and registry consequences.
 
 ### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
 
@@ -422,33 +316,15 @@ implementation refuses rather than fabricating a report, so there is no risk of
 a scorecard claiming an engine validation that never happened — the field is
 simply `null`.
 
-**The reason is NOT in the scorecard.** This paragraph used to say
-`phases[8].notes` records it; it cannot. Phase 8 signs a frozen copy of the
-document, so the document's `phases` array ends before phase 8's own record —
-there is nowhere in the signed bytes for a phase-8 warning to go. The note is
-emitted on the structured log instead (`target: logweir::score`, with the run
-id), and it says in the line that it is not in the signed document. What the
-artifact carries is `engine_subreport: null`, and this section is what tells
-you how to read it.
+The structured log explains the missing report. The signed scorecard cannot
+include that phase-8 warning because signing freezes its phase list before
+phase 8's own record is appended. Read null as "no engine sub-report retained",
+not as a successful upstream validation. Populated format fixtures are
+explained in the [fixture notes](../e2e/fixtures/README.md).
 
-Two consequences worth stating plainly:
-
-- Reading `engine_subreport: null` means "no engine sub-report was retained",
-  not "the engine reported nothing wrong".
-- The checked-in examples (`e2e/fixtures/signed/*.json`,
-  `e2e/fixtures/scorecard-pass.json`) show a POPULATED block. They document the
-  format; they are not output the shipping code can produce. This is the LAST
-  remaining divergence in those files: the `signed/` pair was re-minted under
-  the pinned keypair, so `last_phase_completed` reads `7` and the `evidence`
-  block is zeroed in both, and `scorecard-pass.json` — which is unsigned — was
-  corrected the same way in Task 22. See
-  [`e2e/fixtures/README.md`](../e2e/fixtures/README.md).
-
-`crates/logweir-engine-oso/tests/engine.rs` carries an `#[ignore]`d marker test
-that CI runs on every build so the missing override cannot be forgotten, and
-`e2e/tests/full_drill.rs`'s
-`the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
-turns RED the day it lands.
+`crates/logweir-engine-oso/tests/engine.rs` and
+`e2e/tests/full_drill.rs::the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
+record this limitation and fail when the implementation changes.
 
 ### A crashed restore is not resumable in v0.1
 
@@ -478,30 +354,12 @@ configures two things**, not one: the CA file for the engine, and a CA bundle
 the image trusts for Logweir. Tag 1 renders no `ssl_ca_location` — an adopter
 with a private CA is a case tag 1 does not configure for them.
 
-**The mechanism has two spellings and they are both correct.** The engine's
-wire value is `SCRAM-SHA512`, with **one** hyphen: its `SaslMechanism` is
-`#[serde(rename_all = "SCREAMING-KEBAB-CASE")]` over
-`Plain, ScramSha256, ScramSha512, Gssapi`
-[U:crates/kafka-backup-core/src/config.rs:318-331]. librdkafka's is
-`SCRAM-SHA-512`, with **two**. Upstream's own `config/example-backup.yaml`
-comments the librdkafka form and is wrong for its own parser. Verified by
-execution against the digest-pinned engine: the two-hyphen value in an engine
-config is a serde **type** error that aborts config load —
-`Failed to parse config: source.security.sasl_mechanism: unknown variant
-"SCRAM-SHA-512", expected one of "PLAIN", "SCRAM-SHA256", "SCRAM-SHA512",
-"GSSAPI"` — and **not** an unknown key, so the stderr unknown-key readback
-cannot catch it. Both spellings are read out of source by
-`crates/logweir-engine-oso/tests/render_scram.rs::the_engine_spelling_is_one_hyphen_and_librdkafkas_is_two`,
-so neither can drift alone.
-
-**The four keys are nested under `security:`, and the nesting was measured.**
-They are fields of `SecurityConfig`, reached through `KafkaConfig.security`
-[U:config.rs:173-208] — not fields of `KafkaConfig`. Rendered one level too
-high, the pinned engine returns four *"Ignoring unknown config key
-`source.security_protocol`"* warnings and `OsoCliEngine`'s
-`assert_no_dropped_logweir_key` aborts the run at exit 1 **after** the document
-was written. Short of that abort, a plan that named SCRAM would have dialled
-the cluster unauthenticated.
+**Use each client's mechanism spelling.** librdkafka expects
+`SCRAM-SHA-512`; the engine's YAML parser expects `SCRAM-SHA512`. The engine
+keys must be nested under `security:`, not directly under `source` or
+`target`. A wrong spelling fails parsing; wrongly nested keys trigger the
+engine's unknown-key warnings, which Logweir rejects. The rendering tests in
+`crates/logweir-engine-oso/tests/render_scram.rs` cover both requirements.
 
 **The password is never in a spec, a plan, a rendered document, a receipt or a
 plan hash.** It is projected into the runner's environment as
@@ -510,198 +368,71 @@ plan hash.** It is projected into the runner's environment as
 `sasl_password: ${LOGWEIR_*_PASSWORD}` and the engine substitutes it out of its
 own process environment. There is **no CLI flag** for it, at any command.
 
-Three consequences an operator should know:
+The credential failure modes are:
 
-- **An unset variable under `auth.mode: scramSha512` exits 1, not 3.** Nothing
-  was refused; project the Secret and re-run. The check happens in Logweir,
-  before the engine is spawned, and that ordering is load-bearing: with the
-  variable unset the engine substitutes the **empty string** behind nothing
-  but a `WARN Environment variable 'LOGWEIR_SOURCE_PASSWORD' is not set, using
-  empty string` and **still loads the config and starts the run** — verified by
-  execution against the pinned engine.
-- **Five characters make a password unrenderable and are refused (exit 3,
-  `refusal-reason=CredentialNotRenderable`):** newline, carriage return,
-  double quote, single quote and `$`. The refusal names the character *class*
-  and the variable, never the value.
+- An unset password variable exits **1** before the engine starts.
+- Newline, carriage return, double quote, single quote or `$` exits **3** with
+  `refusal-reason=CredentialNotRenderable`. Errors name the variable and
+  character class, never the password. The pinned engine currently expands
+  variables in one pass, but `$` remains refused across future engine changes.
+- The placeholder expands into an unquoted YAML plain scalar. A space before
+  `#`, a `: ` sequence or a leading flow indicator can cause a parse error or
+  truncate the password and fail authentication. Newline refusal prevents
+  inserting another YAML key. Double-quoting would introduce backslash escape
+  interpretation, so the renderer does not use it.
 
-  On `$`, specifically, the reason was settled by execution rather than left
-  as a reading. The engine's `expand_env_vars`
-  [U:crates/kafka-backup-cli/src/commands/config.rs:6-34] is a **single**
-  left-to-right pass over the input: substituted text is appended to the
-  output and never re-scanned. Probed against the pinned engine with
-  `OUTER='${INNER}'`, the engine logged
-  ``Ignoring unknown config key `probe_${INNER}` `` — the literal, unexpanded.
-  So a `$`, and even a whole `${VAR}`, inside a projected password provably
-  **cannot** name or read an environment variable at engine 0.21.0. The
-  refusal is kept anyway, and the reason is now forward-defence rather than
-  ambiguity: **GC8's 0.21.0 is a floor, not a ceiling**, upstream describes its
-  own approach as *"this simple approach is sufficient"*, and the failure mode
-  of a future recursive pass is a password that reads an environment variable
-  — while the cost of the refusal is one refused password and a message that
-  says why. Narrowing it to `${` would buy `pa$$word` and no security.
-- **The placeholder is rendered unquoted, so the expanded value is a YAML
-  plain scalar.** Its residual hazards — a `#` preceded by a space, a `: `, a
-  leading flow indicator — produce a config **parse error** or a **truncated
-  password**, i.e. a failed authentication. They cannot open a new YAML key,
-  because newline and carriage return are refused before the value is ever
-  projected. Double-quoting would be worse, not better: `\` becomes an escape
-  introducer, so a password containing a backslash would be silently rewritten
-  and a trailing one would unterminate the scalar. A parse error is the right
-  way to fail.
+**Local SCRAM has end-to-end coverage.** The compose stack includes
+`SASL://kafka-broker-1:9096`, `SASLEXT://localhost:9097` and `scram-setup`.
+`e2e/tests/scram.rs` tests successful and incorrect-password authentication
+through librdkafka, backup through the engine's own client, and a full drill.
+Run these with `just e2e`; the default offline suite does not dial the stack.
 
-**What is not verified.** Nothing in tag 1 authenticates against a real SCRAM
-listener in an automated gate: `e2e/compose/docker-compose.yml` gains its
-`SASL://kafka-broker-1:9096` + `SASLEXT://localhost:9097` listeners and its
-`scram-setup` service in a later task (STANDING RULE 15), and until then every
-SCRAM test asserts rendered bytes, exit codes and refusals — never a successful
-handshake. **`[UNVERIFIED — needs an MSK cluster]`** for everything
-MSK-specific: MSK's SCRAM credentials are held in AWS Secrets Manager and its
-brokers require TLS, so the sentence that would verify it is *"point
-`auth.tls: true` and `bootstrap_servers` at an MSK cluster's
-`*.kafka.<region>.amazonaws.com:9096` endpoint, project the Secrets Manager
-value into `LOGWEIR_TARGET_PASSWORD`, and record that `drill run` reaches
-phase 2"* — which needs a provisioned MSK cluster and is therefore forbidden by
-Global Constraint 17 (zero cloud spend). It is recorded as blocked, never as
-closed. **`[UNVERIFIED — needs an MSK cluster]`** likewise for MSK IAM /
-OAUTHBEARER, which is `AuthConfig::Token` and is not in tag 1 at all.
+**MSK-specific behavior remains [UNVERIFIED — needs an MSK cluster].**
+MSK's TLS endpoints and Secrets Manager credential projection require a real
+MSK run. Local SASL_PLAINTEXT tests do not establish private-CA or MSK TLS
+compatibility. MSK IAM / OAUTHBEARER remains unimplemented; the
+[authentication matrix](support-matrix.md) records that distinction.
 
 ### The unit suite dials nothing; the e2e suite dials
 
-Recorded rulings from Task 5b. They bind every later task in this repository.
+The default `cargo test --workspace` suite must not contact a broker, bucket,
+cluster or webhook. `just time-unit-suite` enforces 120 s for the whole suite
+and **15 s for any individual test**; it refuses while ports 9092 or 9000
+answer. Use `just e2e` separately for tests that need the compose stack.
+[The gate reference](gates.md) describes all checks and prerequisites.
 
-**`cargo test --workspace` must open no connection, and no single test in it
-may take more than five seconds.** The default feature set is the run every
-contributor and every agent does dozens of times a day; a test in it that waits
-on a broker, a bucket or a webhook that is not there is paying for a dependency
-it does not have. The two bounds — 120 s for the whole suite, 5 s for any one
-test — are enforced by `just time-unit-suite`, which also refuses to run while
-9092 or 9000 answers, because a timing number taken against a live stack is
-about a different machine. `just e2e` is where dialling belongs, and it is a
-different check run at a different time.
+A refused address is not a fast test double: librdkafka retries for its fixed
+20 s metadata timeout even when the endpoint is unreachable. Use a
+`ClusterReader` double in the default suite. Likewise, S3 configuration with
+no credentials can fall through to IMDS at `169.254.169.254`; test storage
+classification through the pure evaluator and reserve real clients for e2e.
+The source audit in `no_network_in_unit_tests.rs` complements the timing gate.
 
-**An unroutable address is not a fast-failing mechanism for librdkafka.**
-MEASURED at Task 5b, through the compiled binary, with a local archive so only
-the target check was timed: `127.0.0.1:1`, `localhost:0`, `localhost:99999`, a
-syntactically invalid host, and an EMPTY broker list each cost **20.1 s**,
-which is `crates/logweir-kafka/src/rdkafka_reader.rs:16`'s
-`const T: Duration = Duration::from_secs(20)` to three significant figures. A
-refused connect does not shorten `T`; librdkafka retries the connection with
-backoff and the metadata *request* waits the constant out. So no test may use
-an address as its speed mechanism. Any test that needs "unreachable broker"
-behaviour in the default suite uses a `ClusterReader` double. Making `T`
-configurable is open decision **O18** (folded into G19) and is not any test's
-to take.
+Run mutation tests in an isolated worktree with a disposable target directory:
 
-**A well-formed S3 config with no credentials does not dial its endpoint
-first — it dials `169.254.169.254`.** `AmazonS3Builder::from_env()` falls
-through to the EC2 instance-metadata credential provider, and `object_store`
-0.14.1's unconfigured retry budget spends ten attempts against that link-local
-address — ~6.5 s — before the configured endpoint is ever contacted. On a
-workstation that is not an EC2 instance this is traffic off the loopback
-interface from a unit test (Global Constraint 17), and it is invisible in the
-error message unless you read the URL in it. A unit test that wants an
-unreachable *classification* calls the pure `evaluate_storage`; only the
-`e2e`-gated form dials.
+```bash
+just mutant "test --workspace --lib doctor"
+just mutant-clean
+```
 
-**A grep audit proves a constructor is absent, not that a socket is closed.**
-`crates/logweir/tests/no_network_in_unit_tests.rs` is the cheap always-on half
-and `just time-unit-suite`'s per-test bound is the independent second half.
-Neither alone is the acceptance.
+`just deps-count` fails above 50,000 files in `target/debug/deps` and prints
+the count on each run. This guards against accumulated mutation artifacts
+making Cargo's fingerprint checks dominate test time.
 
-**Mutation rounds run in an isolated worktree, and build under a throwaway
-target directory.** A round leaves mutated source behind whenever it is
-interrupted, and "there were backups" is not a property anyone can verify
-afterwards — so it does not happen in a working tree that also holds work in
-progress. And wherever it runs, it builds somewhere disposable. Five tasks of
-mutants built into the shared `target/` and nothing cleaned up after them:
-`target/debug/deps` reached **873,349 files / 43.5 GiB**, and at that size
-cargo spends ~30 s per test binary fingerprinting the directory — the whole
-workspace suite took twenty minutes at 0% CPU and was twice mistaken for a
-hang. The pure-core binary cargo took 30 s over runs its tests in 17 ms when
-executed directly; the cost was never in the tests. So:
+Notification POSTs use a 5 s connection timeout and 10 s overall timeout.
+Transport failures are logged and do not change a signed drill result.
 
-    just mutant "test --workspace --lib doctor"   # CARGO_TARGET_DIR=target/mutants
-    just mutant-clean                             # when the round is done
+**Image smoke checks require Docker.** `just smoke` builds the amd64 runner
+image and checks both binaries' architecture, dynamic linkage, versions,
+approval signing and license files. It does not contact an archive or broker.
+The runner builder executes natively and cross-compiles Rust for amd64;
+only foreign runtime-stage commands use emulation on arm64 hosts.
 
-`just deps-count` (part of `just lint`) is the detection: it fails above
-**50,000** files in `target/debug/deps` and prints the count on every run so
-the trend is visible before it fails. The ceiling is measured, not guessed —
-5,608 files for a fresh clean-and-build, 10,026 after one ordinary task.
-
-**Every notification POST is bounded.** `phase7_verify::notify` had no timeout
-of any kind: ureq's agentless request builders carry none, so a sink that
-accepted the connection and never replied hung the drill indefinitely — after
-the scorecard was signed and uploaded. A refused connection was never the risk;
-a firewall that DROPs, or a wedged sink, was. Notifications now go through
-`notify_agent()` (connect 5 s, overall 10 s) and a timeout is swallowed and
-logged exactly like any other transport failure, so the exit-code contract is
-unchanged.
-
-- **The image smoke gate (`just smoke`) — what it needs, what it proves, what it costs.**
-  `just smoke` needs `docker` and `openssl` on the host and builds a `linux/amd64`
-  image. **The Rust compile in that build is not emulated**: the builder stage runs on
-  the build machine's own architecture and cross-compiles to
-  `x86_64-unknown-linux-gnu`, so on an arm64 host only the runtime stage's `apt-get`
-  and its four `COPY`s go through QEMU.
-  `scripts/check-image.sh <image-ref>` proves six things about the image: **both**
-  shipped binaries — `/usr/local/bin/logweir` and `/usr/local/bin/kafka-backup` — are
-  **x86-64 ELFs** (`e_machine` 0x3e, which is what keeps the cross-compile honest for
-  the one and the digest pin honest for the other), the CLI's dynamic linkage resolves
-  (`ldd`, GC10),
-  `kafka-backup --version` runs, `logweir --version` runs, `drill approve` mints a
-  signed approval over `examples/drill.yaml`, and both redistributed licences are
-  present (GC15 — asserted one file at a time, so a failure names which). It proves
-  **nothing** about a real drill: no broker, no bucket, no cluster and no archive is
-  touched.
-
-  Measured on the development host on 2026-09-09, arm64, with the host otherwise
-  quiet — load average `2.16` at the start of the build and `5.79` at its end. **A
-  floor, not a support statement**, and in particular not a budget: build time here
-  scales with how many other compiles share the machine. Task 17 sizes CronJob
-  `requests` from these numbers and must not read them as a guarantee.
-  - `docker build --platform linux/amd64` with the WHOLE builder stage forced cold
-    (`--no-cache-filter builder`, i.e. packages, rustup target and compile all re-run):
-    **`00:02:01`**, of which `20.8s` was the `apt-get` layer, `7.7s` `rustup target add`,
-    `0.1s` `COPY . .` and **`92.1s`** the cargo layer (267 crates, `librdkafka` compiled
-    from C among them). An ordinary edit-and-rebuild pays only the last of those,
-    because the two layers above `COPY . .` stay cached.
-  - Fully warm, nothing recompiled and every layer `CACHED`: `00:00:04`.
-  - `bash scripts/check-image.sh logweir:check`: `00:02`.
-  - `just smoke` end to end (cached build + gate + the `#[ignore]`d image tests):
-    `00:29`, of which the tests were `25.5s`. **That is a RE-RUN figure, and it
-    assumes the e2e test binary is already compiled.** `just smoke`'s last line is
-    `cargo test -p e2e --features e2e --test check_image`, and on a tree where that
-    target has never been built the compile is part of the wall clock: measured
-    separately on 2026-09-09 at `37.4s` for the compile alone (`Finished test
-    profile ... in 37.40s`), on a host under load average ~9. Quote `00:29` for a
-    second run and nothing else. There are now **twelve** such tests, not eleven —
-    Task 9 added `check_image_rejects_an_image_whose_engine_is_not_x86_64` with
-    check 6's engine arm — and each builds a one-layer overlay image, so the test
-    figure moves with the docker daemon and the host's load, not with the code:
-    the same twelve took `100.7s` on a loaded host the same day.
-  - resulting image size (`docker image inspect --format '{{.Size}}'`): `54453404` bytes.
-  - peak RSS: `not observed`.
-
-  Read those figures narrowly, because they are the ones most likely to be quoted at
-  something they do not cover.
-  - **They are a quiet-host floor.** The cargo layer is a 267-crate release compile
-    and takes whatever share of the CPU it is left; on a machine running other builds
-    it costs multiples of the figure above. Size against the slow case, never this one.
-  - **Any** edit to a tracked file invalidates `COPY . .` and re-runs
-    `RUN cargo build --release --target x86_64-unknown-linux-gnu -p logweir` from
-    scratch: there is no cargo cache mount in the builder stage, so the compile
-    never resumes, it restarts. That is the `92.1s`, not the `00:00:04`.
-  - A machine with an empty BuildKit cache pays more than any of these — it also
-    downloads both base images — and a machine whose builder architecture is already
-    amd64 pays less, because there the "cross" build is a native one.
-
-  **For contrast, and to keep the reason for the shape of the Dockerfile legible:**
-  until 2026-09-07 the builder stage was emulated, and the same cargo layer took
-  `3027s` of a `3044s` build on this host. That is **33x** the cross-compiled cargo
-  layer above, and the emulated run had its `apt-get` layers already cached while the
-  run above did not. The `FROM --platform=$BUILDPLATFORM` line and the `--target` flag
-  are what removed it; check 6 of the smoke gate is what proves the resulting binary
-  is still the right architecture.
+Historical development-host measurements (2026-09-09, arm64): the runner's
+cold builder took 121 s, including a 92.1 s Cargo layer; a cached rebuild took
+4 s, and the direct image check took 2 s. The former emulated Cargo layer
+took 3027 s, **33x** the native cross-compile. Cache state, dependency changes
+and host load change these figures; they are not release budgets.
 
 ## Recorded rulings that have no ADR yet
 
@@ -786,94 +517,31 @@ inclusive — `r.timestamp >= s && r.timestamp <= e`
 (`crates/kafka-backup-core/src/restore/helpers.rs:74-82`) — so Logweir's guard **confirms a stated
 expectation** rather than discovering one.
 
-**The recorded result.** `e2e/tests/pitr_boundary.rs::pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time`,
-run by `just pitr` with the compose stack live. Measured against engine **0.21.0** at digest
-`sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`, Apache Kafka **3.7.1**
-(KRaft, node 1001), on 2026-09-10:
+**The recorded result.**
+`e2e/tests/pitr_boundary.rs::pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time`
+is run by `just pitr` with the compose stack live. The 2026-09-10 measurement
+used engine **0.21.0**, digest
+`sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
+and Apache Kafka **3.7.1** (KRaft).
 
-```
-[pitr] point_in_time=2025-10-09T08:53:20Z (T=1760000000000) -> target topic restore-20251009T085320Z-pitr-src
-[e2e] produced 9 record(s) into pitr-src across 3 partition(s) with explicit CreateTime; end offsets 0 -> 9
-[pitr] partition 0: p0-before-1ms@ts=1759999999999 offset=0 x-original-offset=Some(0)  p0-boundary@ts=1760000000000 offset=1 x-original-offset=Some(1)
-[pitr] partition 1: p1-before-1ms@ts=1759999999999 offset=0 x-original-offset=Some(0)  p1-boundary@ts=1760000000000 offset=1 x-original-offset=Some(1)
-[pitr] partition 2: p2-before-1ms@ts=1759999999999 offset=0 x-original-offset=Some(0)  p2-boundary@ts=1760000000000 offset=1 x-original-offset=Some(1)
-[pitr] manifest bound over [1759999999999, 1760000000000] = [0, 9]; restored 6
-```
+At the fixed recovery point `T = 1_760_000_000_000`, each of three partitions
+contains records at `T − 1 ms`, `T` and `T + 1 ms`. The restore returns
+**six of the nine records**: the first two from each partition. The boundary
+record retains its timestamp and partition; its `x-original-offset` header
+identifies its source offset. No `T + 1 ms` record is returned.
 
-The signed scorecard for that run: `outcome: pass`, `integrity.result: pass`,
-`integrity.records_sampled: 6`, `records_sampled_matching: 6`, `mismatches: 0`,
-`pass_rate_measured: 1.0`, `sample.records_restored: 6`, `measured.rpo_seconds: 0`,
-`target.mode: newTopic`, `target.topic_mapping_prefix: restore-20251009T085320Z-`. Both readers
-accept it (`logweir drill verify` and `docs/verify_scorecard.py` 1.13.0).
+The standing test uses `sample.records_per_partition: 25`, matching the
+examples. With this value the recorded 2026-09-11 rerun passed in 38 s, with
+both readers accepting the signed result. This covers the repaired
+reconciliation bug where a segment straddling the recovery point used to
+inflate the minimum number of records the window must contain.
 
-The fixture is nine records with explicit `CreateTime` — `T − 1 ms`, `T`, `T + 1 ms` on **each** of
-three partitions, where `T` is the fixed literal `1_760_000_000_000` (2025-10-09T08:53:20Z) and never
-a clock read. A `mode: newTopic` restore at `point_in_time = T` brought back
-**six of the nine records**: `T − 1 ms` and `T` on every partition, and none of the three at
-`T + 1 ms`. Partitions 0, 1 and 2 each returned exactly two records, on the partition they were
-produced to, each carrying an 8-byte little-endian `x-original-offset` decoding to its source
-offset. The boundary record — the one whose timestamp equals `point_in_time` exactly — came back on
-all three partitions, still stamped `T`.
-
-**What this measurement also found: the canary size cannot exceed what the window really holds.**
-`sample.records_per_partition: 25` over this fixture scored `fail-integrity` on **all three**
-partitions — not one — with exit code **2** and a **signed** scorecard written for the failing run
-(`integrity.records_sampled: 6`, `records_sampled_matching: 6`, `mismatches: 0`). The text is the
-same for each selection; partition 1's:
-
-```
-selection pitr-src/1  claimed 3  records Unverified { why: "the archive returned 2 fingerprints
-  where the manifest claims 3 for this selection; a short sample is coverage the drill did not
-  obtain, not a smaller successful sample" }
-```
-
-`phase7_verify::verdict_for_selection` claims
-`min(records_per_partition, Σ record_count over the segments overlapping the sample window)`, and
-the manifest's finest granularity is the SEGMENT — so a recovery point that falls INSIDE a segment
-makes the manifest claim the whole segment (3) while the archive side correctly yields only the
-records inside the window (2). This is the same segment-granularity fact that makes
-`expected_restored_count` a bound rather than an equality.
-
-**It was a known limitation of the sampled reconciliation's `claimed`, not a property of the
-restore.** `phase7_verify::verdict_for_selection` summed the WHOLE record count of every segment
-that OVERLAPS the sample window, so a straddling segment claimed records the window deliberately
-excludes. Nothing was short: the archive side returned every record the window contains, and the
-shortfall existed only against a figure derived from records the window excludes — so a signed
-document reporting `fail-integrity` with `mismatches: 0` over a restore that was verified
-record-by-record off the broker was a false negative, not a correct refusal.
-
-**Fixed by Task 10b, and the fixture now proves it.** `claimed` is
-`min(sample.records_per_partition, Σ record_count over the segments WHOLLY inside the sample
-window)`, a straddler counting towards an upper bound only, and the short-sample `Unverified` text
-names the supportable claim and the straddler count. Task 11 had worked the defect around by
-setting this row's `sample.records_per_partition` to **2**; **Task 12 raised it to 25** — the value
-`examples/restore.yaml`, `examples/drill.yaml` and `harness::spec_default` all use — so that `just
-pitr` is the standing end-to-end proof of the fix rather than a row that would stay green through
-its regression. Every segment in this fixture straddles `T`, so the manifest supports a claim of
-nothing at all. Measured at `records_per_partition: 25` (2026-09-11, `just pitr` rc **0**, 38 s),
-one line per partition, asserted by the row and not merely printed:
-
-```
-selection verdict  selection="pitr-src/0"  claimed=0  segments=Verified { checked: 1 }  records=Verified { checked: 2 }  records_restored=2
-selection verdict  selection="pitr-src/1"  claimed=0  segments=Verified { checked: 1 }  records=Verified { checked: 2 }  records_restored=2
-selection verdict  selection="pitr-src/2"  claimed=0  segments=Verified { checked: 1 }  records=Verified { checked: 2 }  records_restored=2
-```
-
-Outcome `pass`, exit 0, both readers VALID. The operator consequence recorded here before the fix —
-*set `sample.records_per_partition` at or below the number of records each partition holds inside
-the window, or the run reports `fail-integrity` about its own sample* — **no longer holds and is
-kept only as history of what was measured.** A canary larger than the window is now ordinary: the
-run reports what the manifest can support, which over a straddled recovery point is zero, and the
-per-record lane still verifies every record the window does hold.
-
-**The count is bounded, never equated.** The nine records land in one segment per partition
-(`segment_max_records: 1000`), and each of those segments straddles `T`: it starts at `T − 1 ms` and
-ends at `T + 1 ms`. Nothing is wholly inside `[floor, T]`, so
-`logweir_core::engine::expected_restored_count` returns **`[0, 9]`** and the six restored records are
-inside it. That is the whole claim a manifest can support: `point_in_time` falls INSIDE a segment on
-any real archive and `SegmentFacts` carries no per-record timestamp, so an equality would fail a
-correct implementation and would then be "fixed" by weakening it. The boundary property is proved by
-the restored payload **set**; the count is proved only to be within the bound.
+The current lower bound counts only segments **wholly inside** the window;
+straddling segments contribute only to the upper bound. All three fixture
+segments straddle `T`, so the count bound is **[0, 9]** and six restored
+records fit it. Each partition reports `claimed=0`, one verified segment and
+two verified records. The payload set proves the inclusive boundary; the
+manifest's segment-level counts establish a bound, not exact equality.
 
 ### A broker on `LogAppendTime` honours a per-topic `CreateTime` override (Task 8, residual 3)
 
@@ -920,24 +588,13 @@ spend).
   of an exit code, without a major bump. New flags and new exit codes may be
   added in a minor.
 
-- **Supported OSO digests.** Logweir supports the digest currently pinned in
-  `third_party/kafka-backup-binary.digest`, plus the two minor versions
-  before it, on a two-minor deprecation window:
-
-  | Engine version | Status |
-  | --- | --- |
-  | 0.21.x | supported (currently pinned) |
-  | 0.20.x | supported (deprecation window) |
-  | 0.19.x | supported (deprecation window) |
-  | 0.16.0 – 0.18.x | unsupported (below the full-drill floor; only the unknown-key warning mechanism works) |
-  | < 0.16.0 | unsupported (lever-absent: the warning mechanism this plan depends on does not exist) |
-
-  `strimzi-backup-operator` hard-codes `DEFAULT_BACKUP_IMAGE =
-  "osodevops/kafka-backup:v0.19.1"` [VERIFIED-SPEC
-  `U/strimzi-backup-operator/src/engine.rs:17`], which is **below** the
-  0.21.0 full-drill floor. That is a support-matrix row reading `unsupported
-  (lever-absent)` — an operator whose default has not caught up yet — not a
-  fault Logweir raises against that operator.
+- **Supported engine pin.** The full-drill pin is 0.21.0 and the digest in
+  `third_party/kafka-backup-binary.digest`; `doctor` checks that exact version.
+  Older archive-manifest fixtures exercise parsing compatibility, not full
+  runtime support. The old two-minor support table conflicted with the stated
+  full-drill floor and is superseded by the [support matrix](support-matrix.md).
+  A Strimzi installation using its historical `v0.19.1` default requires an
+  engine upgrade before it meets that floor.
 
 - **Explicit non-contracts.** The Rust crates in this workspace
   (`logweir-core`, `logweir-engine-oso`, `logweir-evidence`, `logweir-kafka`,
@@ -982,12 +639,11 @@ future bump has something to disagree with.
 
 ## Deliberately not in tag 1
 
-Two lists, taken verbatim from the specification's own out-of-scope section, so
-that "absent" is never read as "forgotten". **Later, named** is sixteen items
-that are wanted and are not here; **Never** is four that are not coming, and the
-difference between the two lists is a decision rather than a schedule.
+The original deferred scope is retained below with current status. Most items
+remain deferred; the Helm chart is now delivered and is marked accordingly.
+The separate **Never** list records product boundaries, not scheduled work.
 
-### Later, named — sixteen items
+### Later, named — original scope with current status
 
 | # | Item | Reason | Citation |
 |---|---|---|---|
@@ -999,7 +655,7 @@ difference between the two lists is a decision rather than a schedule.
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
 | 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
 | 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
-| 9 | **A Helm chart** | The install is kustomize sources and one rendered file. A chart is a second install path to keep correct, and the manifest-lint gate parses shipped YAML by `apiVersion`/`kind` — it would otherwise be parsing templates. | spec §11, §13 |
+| 9 | **A Helm chart — delivered** | The self-contained chart now ships alongside kustomize. `just chart-check` verifies copied assets and rendered manifests; `just helm-demo` exercises a cluster installation. This item is no longer deferred. | [Chart guide](../charts/logweir/README.md) |
 | 10 | **KMS / PKCS#11 signing** | `sign_detached` takes a concrete `&SigningKey` with **no trait seam**, so an external signer is a refactor and not a configuration option. | spec §13 |
 | 11 | **Key generation and rotation** | Tag 1 mints nothing and rotates nothing: the operator creates both keypairs with `openssl` and puts the public halves in the `TrustRoster`. `docs/keys.md` is the rotation story, not a rotation feature. | spec §13 |
 | 12 | **A PVC for the runner pod** | The runner streams and writes to an emptyDir; a large restore is bounded by that, and a persistent volume would be a new lifecycle to own. | spec §13 |
@@ -1019,9 +675,8 @@ These are not scheduled. They are refused.
 | 3 | **MSK ZK-to-KRaft migration, and the word "migration"** | Logweir is not a migration tool and the word is avoided on every surface, because a document that says "migration" is a document somebody will act on as though it were one. |
 | 4 | **Multi-cluster or fleet views, and the words** | One controller per cluster. There is no fleet object, no cross-cluster list and no aggregated view, and the vocabulary is kept out of the UI and the docs for the same reason as the previous row. |
 
-**Cited from** the specification's out-of-scope section; the two lists are
-reproduced whole rather than summarised, because a summarised list of what a
-product does not do is how an item quietly rejoins the roadmap.
+Historical specification references in this table refer to the planning corpus.
+The linked repository guides describe the implementation that ships here.
 
 ---
 

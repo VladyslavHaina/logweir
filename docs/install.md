@@ -1,9 +1,9 @@
 # Installing Logweir
 
-This is the **single install document**. `README.md`, `docs/quickstart.md` and
-`docs/kubernetes.md` all point here; nothing else in this tree carries install
-steps, so there is one path to keep correct rather than two to keep in
-agreement.
+Use this guide for image selection, cluster prerequisites, installation and
+uninstall. See [kubernetes.md](kubernetes.md) for operation and troubleshooting,
+and [the chart reference](../charts/logweir/README.md) for Helm values.
+Commands use `docker-desktop`; substitute your intended context explicitly.
 
 **Minimum Kubernetes: 1.29.** The six CRDs use CEL validation rules, which are
 GA at 1.29. The `ValidatingAdmissionPolicy` example is 1.30+ and ships
@@ -18,7 +18,7 @@ the floor and is reported `unsupported (lever-absent)`, never as a fault.
 
 ---
 
-## Two supported paths, and the caveat that decides which one you are on
+## Choose an image and installation path
 
 ### (a) Published digests
 
@@ -28,28 +28,20 @@ kubectl --context docker-desktop apply --server-side -f logweir.yaml
 
 using the `@sha256:` references the file carries.
 
-**This path requires that those digests have been pulled back from `docker.io`
-on a host that did not build them.** Until the release workflow has run, every
-digest row in this document, in `logweir.yaml`'s own header comment and in
-`docs/tag1-checklist.md` reads **`blocked: images not published`**, and this path is
-**documented but not yet exercised**.
+Release verification is still recorded as **`blocked: images not published`**
+in [tag1-checklist.md](tag1-checklist.md). Treat this as the checkout's release
+status, not a live registry check. A published installation requires pulling
+both image digests on a host that did not build them.
 
-| image | reference lives in | status |
-|---|---|---|
-| `docker.io/vladyslavhaina/weirkeeper` (controller) | `config/manager/deployment.yaml`, rendered into `logweir.yaml` | `blocked: images not published` |
-| `docker.io/vladyslavhaina/logweir` (runner) | `crates/weirkeeper/src/job.rs`, the constant `RUNNER_IMAGE` | `blocked: images not published` |
+| Image | Current reference |
+|---|---|
+| Controller | `config/manager/deployment.yaml`, rendered into `logweir.yaml` |
+| Runner | `crates/weirkeeper/src/job.rs`, constant `RUNNER_IMAGE` |
 
-**No digest value is written into this document, on purpose.** A locally built
-image's digest changes on **every build** — three builds of the same source
-produced three digests, the third a cached no-op — so a digest copied into
-prose is a measurement of one build that stops being true the next time
-anybody runs `just image`. Read the two references out of the checkout, from
-the two files named in the table above; those are the only places they live.
-
-Applying this file on a cluster with no such image is not an error you have to
-guess at: `kubectl apply` exits 0 without starting a pod, and the controller
-Deployment's pod sits in `ImagePullBackOff`. That is the recorded, expected
-result — [kubernetes.md](kubernetes.md) §13 carries the transcript.
+Read pins from those files rather than copying historical build digests.
+Local BuildKit provenance can change the digest even on a cached rebuild.
+`kubectl apply` can succeed while a pod remains in `ImagePullBackOff`; verify
+Deployment readiness separately.
 
 ### (b) Local build — **author-only**
 
@@ -57,40 +49,38 @@ result — [kubernetes.md](kubernetes.md) §13 carries the transcript.
 just image && just image-weirkeeper
 ```
 
-The runner image is `linux/amd64` (the engine binary is dynamically linked and
-amd64-only) and the controller image `linux/arm64` — built natively, never
-cross-compiled, and never emulated. Both are **loaded** into the local image
-store, which is why the overlay below sets `imagePullPolicy: Never`.
+The runner is `linux/amd64`. The controller recipe defaults to `linux/arm64`;
+on a native amd64 builder use `LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-weirkeeper`.
+The controller cannot be cross-compiled by the shipped Dockerfile. Images are
+loaded into the local Docker store; the cluster must be able to use that store.
 
-Then apply through the checked-in
-[../config/overlays/local-images](../config/overlays/local-images)
-kustomization, which rewrites the controller image reference to the locally
-loaded tag and sets `imagePullPolicy: Never`:
+Apply the controller overlay, then give the freshly built controller the local
+runner image explicitly. The overlay cannot rewrite a Rust constant:
 
 ```bash
 kubectl --context docker-desktop apply --server-side -k config/overlays/local-images
+kubectl --context docker-desktop -n logweir-system set env deployment/weirkeeper \
+  LOGWEIR_RUNNER_IMAGE=logweir:check LOGWEIR_RUNNER_PULL_POLICY=Never
 ```
 
-**One more author-only step, and it is not optional.** The kubelet keys images
-on the **whole reference**, not on the digest alone: a matching digest under a
-different repository name is `ErrImageNeverPull`. The runner image is a Rust
-constant compiled into the controller, so kustomize cannot rewrite it — tag
-the locally built image with the shipped name so the reference resolves:
+The overlay sets `imagePullPolicy: Never`. On kind, load both local tags into
+the nodes before using them. The amd64 runner requires compatible nodes.
+
+Older controllers without the environment override need the exact compiled
+runner digest present under its shipped repository name. The historical step
+was:
 
 ```bash
 docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
 docker inspect --format '{{json .RepoDigests}}' docker.io/vladyslavhaina/logweir:v0.1.0
 ```
 
-That was measured, both ways, in [kubernetes.md](kubernetes.md) §14.
+Retagging cannot make newly built bytes match an older compiled digest. Prefer
+a controller built from the checkout and the override above. See
+[kubernetes.md](kubernetes.md) §14 for the recorded image-resolution findings.
 
-**This path is `author-only` everywhere it appears and never satisfies spec
-§16 clause 1.** "Published" means a pull from a registry the author does not
-control. A locally built or locally loaded image is not a published one — the
-`registry:2` fallback included: it proves a pod starts from a repository
-digest, and it proves nothing about publication. An install proven this way
-proves the manifests are right and the binaries run, and says nothing at all
-about whether a stranger can install Logweir.
+A local build is **author-only** and **never satisfies spec §16 clause 1**,
+including a local `registry:2` fallback: it does not prove public pullability.
 
 ### (c) The Helm chart
 
@@ -98,67 +88,28 @@ about whether a stranger can install Logweir.
 helm install logweir charts/logweir -n logweir-system --create-namespace
 ```
 
-[`charts/logweir`](../charts/logweir/README.md) installs the same objects
-`logweir.yaml` carries — the six CRDs (from `crds/`, once; Helm never upgrades
-them), the RBAC, the controller Deployment, the NetworkPolicy — into the
-release namespace, with `values.yaml` documenting every knob and three optional
-components behind three flags: `minio.enabled`
-(an in-cluster archive with the two buckets and the `logweir-s3` Secret),
-`demoKafka.enabled` (two throwaway KRaft brokers, `orders` and `payments`
-seeded on the source, the marker topic on the target) and `ui.enabled` (the
-page served in-cluster by `kubectl proxy` with its **own** ServiceAccount's
-authority — the chart's README says exactly whose). `scripts/check-chart.sh`
-(`just chart-check`, in `just gate`) holds the chart's CRDs and UI files
-byte-identical to this tree and its rendered control plane to `logweir.yaml`.
+The [chart reference](../charts/logweir/README.md) documents all values and
+optional components, including MinIO, demo brokers, existing Kafka clusters
+and the UI. The chart's two Logweir images default to `latest`, with `Always`
+pull policies; base manifests remain digest-pinned. For reproducibility,
+override both images with published digests and set both pull policies
+explicitly. `just chart-check` checks its rendered resources and copied files.
 
-**The chart's two Logweir images are named by the `latest` TAG, and only in
-this chart.** That is the owner's decision of 2026-09-12: `controllerImage` and
-`runnerImage` default to the repository half of the tree's own two pins followed
-by `:latest`, while `config/manager/deployment.yaml`, `logweir.yaml` and the
-operator's compiled-in `weirkeeper::job::RUNNER_IMAGE` are untouched and still
-pin **digests** (Global Constraint 7), as do the chart's four third-party images.
-[`charts/logweir/README.md`](../charts/logweir/README.md) carries the whole
-trade-off — what a mutable tag gives up, and the `docker buildx imagetools
-inspect` recipe that pins the two back to digests together with `--set
-imagePullPolicy=IfNotPresent --set runnerImagePullPolicy=IfNotPresent`.
-(`values.yaml` itself is deliberately short: one line per knob, every knob
-visible, the prose in the README.) Because the reference is a tag, the
-chart's pull policies default to `Always` (Kubernetes' own default for
-`:latest`), and `runnerImagePullPolicy` is a second value that reaches the runner
-Jobs through the controller.
+The release caveat in path (a) also applies to the chart. For local images use
+`charts/logweir/examples/author-only.values.yaml`; recorded local and CI walks
+are **author-only**, not evidence of publication.
 
-**The same caveat as (a) and (b) still decides which world you are in.** Nothing
-has been pushed to `docker.io/vladyslavhaina/…` — `blocked: images not published` until
-`release.yml` has run on a pushed tag, and it never has — so `:latest` resolves
-in no registry and on a cluster with no access to that namespace the controller
-pod sits in `ImagePullBackOff` exactly as path (a) records. The tag changed the
-reference, not the fact: **the default path has never been exercised on any
-cluster, and nothing here claims it has.**
-`charts/logweir/examples/author-only.values.yaml` is path (b) as values —
-`weirkeeper:check`, `logweir:check`, `imagePullPolicy: Never`,
-`runnerImagePullPolicy: Never` — and it is **author-only** everywhere it
-appears: images you built and loaded yourself, **never** evidence for spec §16
-clause 1. The chart was walked end to end on the author's docker-desktop with
-those images on 2026-09-12 ([kubernetes.md](kubernetes.md) §19), which proves
-the chart's objects work together and proves nothing about publication.
-
-The five Secrets, the two keypairs, the `TrustRoster` and the per-namespace
-runner ServiceAccount below are the same on this path; the chart creates none
-of them except, with `minio.enabled`, the demo-only `logweir-s3`.
+The chart installs a runner ServiceAccount in its release namespace. Additional
+runner namespaces still need their own account, Secrets and policy. The chart
+creates no signing or approval keys; optional MinIO creates only demo archive
+credentials. Helm installs CRDs once and does not upgrade them automatically.
 
 ### (d) Bring your own registry
 
-Two facts make this the path that works today. **Nothing is published** —
-`blocked: images not published`, because `release.yml` has never run — so
-paths (a) and (c) pull references that resolve nowhere; and **the controller
-image cannot be cross-compiled**, because `Dockerfile.weirkeeper` builds
-`aws-lc-sys`, which reads the build host's own headers (plan erratum E19(c)),
-so an `amd64` cluster needs an `amd64` builder and an `arm64` cluster an
-`arm64` one — build on a machine of the cluster's architecture, or on a
-same-architecture CI runner, never under emulation. With those two understood,
-build the two images yourself, push them to any registry the cluster can pull
-from — Amazon ECR below, because that is where a cluster on EKS already has a
-credential — and point the chart at them:
+Build both images and publish them to a registry your nodes can pull from.
+Set `ACCOUNT` and `REGION` for this ECR example. The runner remains amd64;
+choose compatible runner nodes and build the controller natively for its nodes.
+For an amd64 controller, set `LOGWEIR_IMAGE_PLATFORM=linux/amd64` before its build.
 
 ```bash
 aws ecr create-repository --repository-name logweir/weirkeeper   # once, per image
@@ -174,7 +125,8 @@ helm upgrade --install logweir charts/logweir -n logweir-system --create-namespa
   --set controllerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0" \
   --set runnerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
   --set imagePullPolicy=IfNotPresent \
-  --set imagePullSecrets[0].name=my-regcred
+  --set runnerImagePullPolicy=IfNotPresent \
+  --set 'imagePullSecrets[0].name=my-regcred'
 ```
 
 `imagePullSecrets` is rendered onto the controller ServiceAccount **and the
@@ -182,18 +134,9 @@ runner ServiceAccount**, so the runner Jobs the operator creates inherit it
 without an operator change. On ECR with the node role already granted
 `ecr:GetAuthorizationToken` you can leave it off entirely.
 
-**When the release workflow does run, the registry is Docker Hub**, and three
-of its properties differ from GHCR's in ways that decide whether a pull works:
-
-* A Docker Hub repository **created by a push is public by default** — GHCR's
-  packages start private, which is the opposite default.
-* That default is the *account's* setting, and a repository auto-created by a
-  push takes it. A private one answers an anonymous pull with
-  `failed to fetch anonymous token: … 403 Forbidden` — the exact error this
-  task was raised for. Make the repository public, or set `imagePullSecrets`.
-* Anonymous Docker Hub pulls are **rate-limited per source IP**, and every node
-  behind one NAT shares that IP. So `imagePullSecrets` carrying a Docker Hub
-  login is useful on a public image too, not only on a private one.
+The release workflow targets Docker Hub. Ensure repositories are accessible
+to the cluster, and supply a registry Secret through `imagePullSecrets` when
+required. Repository visibility and pull quotas depend on the registry account.
 
 ---
 
@@ -216,9 +159,10 @@ is deliberately **not** part of `just apply-install`: the apply is specified
 against a clean cluster with no Secrets at all, and folding the check in would
 make the install refuse in exactly the state it is specified to succeed in.
 
-**Everything in this section happens before the first custom resource is
-created.** A `Backup` or a `Restore` created against a namespace missing its
-Secrets does not fail cleanly — see the silent-mint warning below.
+**Everything in this section happens before workload custom resources are
+created. On a fresh namespace the first preflight is expected to fail; repeat
+it after provisioning Secrets and before applying the workload samples.** Missing Secrets prevent successful execution. The preflight checks presence;
+it does not establish key provenance or validate a signed approval.
 
 ### 1. The two keypairs
 
@@ -231,16 +175,12 @@ P-256, because that is what `logweir-evidence` mints and verifies. Keep both
 private halves off the cluster except as the one Secret named below; the
 approver's private key never goes on the cluster at all.
 
-> **WARNING — an absent signing key is MINTED, silently.**
-> `SigningKey::load_or_generate` returns a **new** key when the path is absent
-> (`crates/logweir-evidence/src/keys.rs:81-92` — `if path.exists()` at `:82`,
-> then `let key = Self::generate_p256();` at `:85`). So a first run against an
-> empty or mis-keyed `logweir-signing-key` Secret does not fail. It
-> **succeeds**, and it signs its scorecard and its receipt with a key that is
-> in no `TrustRoster`, that nothing attests, and that disappears with the pod.
-> The evidence looks green and verifies against nothing. This is why
-> `just check-secrets <namespace>` exists and why it checks
-> `logweir-signing-key` first.
+> **Signing-key prerequisite.** `SigningKey::load_or_generate`
+> (`crates/logweir-evidence/src/keys.rs:81-92`) creates and saves a new key when
+> the requested path is absent and writable. That key is not automatically
+> trusted by a roster. An unreadable, malformed or unwritable path fails;
+> a missing required Kubernetes Secret or key can prevent the pod from starting.
+> Provision the expected `signing.pem` and run `just check-secrets` before jobs.
 
 ### 2. The cluster-scoped `TrustRoster`, whose name is fixed
 
@@ -257,7 +197,7 @@ metadata:
 spec:
   allowedClusterIds: []
   approverKeys:
-    - keyId: REPLACE-ME-sha256-of-approver.pub.pem
+    - keyId: REPLACE-ME-sha256-of-approver-DER-SPKI
       subject: approver@example.invalid
       notAfter: "2027-01-01T00:00:00Z"
       spkiPem: |
@@ -265,7 +205,7 @@ spec:
         REPLACE-ME paste the contents of approver.pub.pem here
         -----END PUBLIC KEY-----
   signingKeys:
-    - keyId: REPLACE-ME-sha256-of-signing.pub.pem
+    - keyId: REPLACE-ME-sha256-of-signing-DER-SPKI
       subject: logweir-runner@example.invalid
       notAfter: "2027-01-01T00:00:00Z"
       spkiPem: |
@@ -283,8 +223,17 @@ approval check, so every `Approval` reports `RosterNotFound`.
 `TrustRoster` is **cluster-scoped**, so this is a cluster-admin step. The UI
 surfaces this snippet and does **not** submit it. Fill in `spkiPem` from
 `approver.pub.pem` and `signing.pub.pem`, and each `keyId` from
-`shasum -a 256 <that file>`; a declared id that does not match its own key is
-`KeyIdNotInRoster`, naming both ids.
+the SHA-256 of its DER SubjectPublicKeyInfo, not the PEM file bytes:
+
+```bash
+openssl pkey -pubin -in approver.pub.pem -outform DER | openssl dgst -sha256
+openssl pkey -pubin -in signing.pub.pem -outform DER | openssl dgst -sha256
+```
+
+Use the lowercase hex digest as `keyId`. A declared id that does not match
+its key produces `KeyIdNotInRoster`. Fill the sample before applying it;
+`TrustRoster.spec` is immutable, so changing keys requires replacing the roster
+and temporarily interrupts approval checks.
 
 ### 3. The five Secrets
 
@@ -296,8 +245,8 @@ the code reads — not approximations of them.
 **1. `logweir-signing-key`** — the runner signs evidence with it. The data key
 is `signing.pem`, **not** `key.pem`: `SIGNING_KEY_SECRET_KEY` is
 `"signing.pem"` and the Job projects it to the *file* `key.pem` under
-`/signing`. A Secret keyed `key.pem` mounts a directory without the file the
-runner was told to read.
+`/signing`. A Secret missing the required data key prevents the volume
+projection from satisfying the Job.
 
 ```bash
 kubectl --context docker-desktop -n <namespace> create secret generic \
@@ -365,9 +314,8 @@ kubectl --context docker-desktop -n <namespace> \
 Runner Jobs run in the namespace of the `Backup`, `Restore` or `KafkaCluster`
 object that produced them, and every one of them names the ServiceAccount
 `logweir-runner`. That account is **not** in `logweir.yaml`, because
-`logweir.yaml` installs into `logweir-system` and no runner ever runs there —
-creating it in that one namespace would be creating it in the only namespace
-where it is useless. **Apply it once per namespace that will run jobs.** It is
+`logweir.yaml` installs into `logweir-system` and runner objects may live
+elsewhere. **Apply it once per namespace that will run jobs.** It is
 granted no verb on anything, it sets `automountServiceAccountToken: false`, and
 so does every runner PodSpec: `logweir backup run` makes zero Kubernetes API
 calls, and it is the process that holds the signing key.
@@ -399,7 +347,7 @@ different keys", and one person holding both keypairs satisfies it.
 
 ## The install itself
 
-Path (a) or path (b) above. The namespace is **not** created by hand:
+Use the selected installation path above. The namespace is **not** created by hand:
 `config/manager/namespace.yaml` is the first resource in
 `config/kustomization.yaml`, so `logweir-system` arrives with the install.
 
@@ -420,7 +368,7 @@ kubectl --context docker-desktop -n <namespace> apply -f config/samples/restore.
 ```
 
 The NetworkPolicy is namespaced and `logweir.yaml` installs it into
-`logweir-system`, where no runner ever runs. Apply it into each runner
+`logweir-system`; runners in other namespaces need a policy there too. Apply it into each runner
 namespace too — and read its `[UNVERIFIED]` mark in
 [kubernetes.md](kubernetes.md) before relying on it. The source manifest
 carries `namespace: logweir-system` (that is how it lands in `logweir.yaml`),
@@ -436,9 +384,8 @@ kubectl --context docker-desktop -n <namespace> \
 
 ## Serving the UI
 
-The UI is a directory of static files — `ui/` in this repository — and a
-Kubernetes API client. Nothing is installed onto the cluster: tag 1 ships no
-server-side UI component, no image, no sidecar and no HTTP surface of its own.
+The local UI serves `ui/` through a Kubernetes API proxy. The chart also
+offers an optional in-cluster UI; see its reference for that account's authority.
 
 ```bash
 kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
@@ -495,11 +442,15 @@ image's bundle.
 kubectl --context docker-desktop delete -f logweir.yaml
 ```
 
-removes the control plane — the Namespace, the six CRDs and every custom
-resource stored under them, the RBAC, the Deployment and the NetworkPolicy —
-and **deletes nothing else**. `kubectl delete -f logweir.yaml` removes only
-that first thing. Three more survive it, by design, and each is removed with
-its own command:
+The four cleanup scopes are the control plane, scratch topics, archive objects
+and evidence objects. `kubectl delete -f logweir.yaml` removes only that first thing:
+the Namespace and everything inside it, the six CRDs and all their custom
+resources across namespaces, RBAC, Deployment and NetworkPolicy. Deleting those
+resources can also collect their owned Jobs and ConfigMaps. Export records you
+need before uninstalling.
+
+Kafka topics and object-store data remain. Remove them separately only when
+intended, using the actual names and prefixes from the evidence:
 
 ```bash
 # scratch topics a `mode: scratch` restore created (phase 9 normally removes them)
@@ -512,16 +463,16 @@ aws s3 rm 's3://kafka-backups/logweir/<backup_id>/' --recursive
 aws s3 rm 's3://logweir-evidence/<prefix>/' --recursive
 ```
 
-Two cluster-scoped objects are **not** in `logweir.yaml` and survive the
-delete: the `TrustRoster` and any RoleBindings you created above.
+Deleting the CRDs also deletes all their custom resources, including the
+cluster-scoped `TrustRoster`. Export any records you need before uninstalling.
+RoleBindings are namespaced; bindings outside the removed `logweir-system`
+namespace survive and can be removed separately:
 
 ```bash
-kubectl --context docker-desktop delete trustroster default
 kubectl --context docker-desktop delete rolebinding logweir-viewer logweir-operator logweir-approver -n <namespace>
 ```
 
-The per-namespace runner ServiceAccount survives too, one per namespace you
-applied it into:
+Runner ServiceAccounts in surviving namespaces also remain:
 
 ```bash
 kubectl --context docker-desktop -n <namespace> delete serviceaccount logweir-runner

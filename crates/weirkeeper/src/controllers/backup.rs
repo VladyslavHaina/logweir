@@ -914,7 +914,7 @@ pub fn runner_argv(backup: &Backup) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(raw).ok()
 }
 
-/// The [`RunnerJobSpec`] one `Backup` produces.
+/// The [`RunnerJobSpec`] one `Backup` and its referenced source cluster produce.
 ///
 /// PURE, so the Job a test builds is byte-identical to the one the reconciler
 /// `POST`s and an assertion over this function is an assertion over the
@@ -924,8 +924,11 @@ pub fn runner_argv(backup: &Backup) -> Option<Vec<String>> {
 ///
 /// [`BackupError`] when the object carries no namespace or UID (both
 /// unreachable from the API server, both named rather than unwrapped) or no
-/// usable runner argv.
-pub fn runner_job_spec(backup: &Backup) -> Result<RunnerJobSpec, BackupError> {
+/// usable runner argv, or a SCRAM source has no usable Secret reference.
+pub fn runner_job_spec(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+) -> Result<RunnerJobSpec, BackupError> {
     let name = backup.name_any();
     let namespace = backup
         .namespace()
@@ -951,6 +954,19 @@ pub fn runner_job_spec(backup: &Backup) -> Result<RunnerJobSpec, BackupError> {
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = Vec::new();
+    if matches!(cluster.spec.auth.mode, AuthMode::ScramSha512) {
+        let credential = super::kafka_cluster::source_password_env(cluster).ok_or_else(|| {
+            BackupError::Refused(
+                TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+                format!(
+                    "the KafkaCluster {} uses scramSha512 but has no non-empty auth.secretRef.name; \
+                     reference a Secret in namespace {namespace} with a password key",
+                    cluster.name_any()
+                ),
+            )
+        })?;
+        env_from_secret.push(credential);
+    }
     if let Some(secret) = backup.spec.archive.secret_ref.as_ref() {
         env_from_secret.push(EnvFromSecret {
             name: ARCHIVE_ACCESS_KEY_ENV.to_string(),
@@ -1533,14 +1549,40 @@ async fn plan_source_cluster(
         })
 }
 
+/// Compare executable plan data, allowing only the probe's informational
+/// source cluster ID to change. Backup admission observes that ID directly
+/// from Kafka and never reads `allowed.source_cluster_id`.
+fn compatible_plan_data(existing: &ConfigMap, desired: &ConfigMap) -> bool {
+    let (Some(mut existing), Some(mut desired)) = (existing.data.clone(), desired.data.clone())
+    else {
+        return false;
+    };
+    let (Some(existing_allowed), Some(desired_allowed)) = (
+        existing.remove(PLAN_ALLOWED_CLUSTERS_KEY),
+        desired.remove(PLAN_ALLOWED_CLUSTERS_KEY),
+    ) else {
+        return false;
+    };
+    if existing != desired {
+        return false;
+    }
+    let (Ok(existing_allowed), Ok(desired_allowed)) = (
+        serde_json::from_str::<logweir_core::spec::AllowedClusters>(&existing_allowed),
+        serde_json::from_str::<logweir_core::spec::AllowedClusters>(&desired_allowed),
+    ) else {
+        return false;
+    };
+    existing_allowed.allowed_cluster_ids == desired_allowed.allowed_cluster_ids
+}
+
 /// `POST` the plan ConfigMap, and decide the 409.
 ///
-/// A 409 IS SUCCESS ONLY IF THE EXISTING OBJECT IS OURS. The ordinary 409 is
-/// this same reconcile's previous pass: the object is byte-identical, because
-/// it is rendered from an immutable spec by a pure function. A 409 on an
-/// object owned by something else is a plan document a stranger wrote, at the
-/// mount path of a pod that holds this `Backup`'s signing key, and it is
-/// terminal — see [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`].
+/// A 409 succeeds only when the existing object is ours and its data matches
+/// the desired executable plan. A referenced cluster can be deleted and recreated between
+/// retries even though its spec is immutable. Reusing old plan bytes with the
+/// current cluster's credential would connect with mismatched configuration.
+/// Refuse conflicting data rather than overwrite a plan another reconcile may
+/// already have mounted. Foreign ownership is also a terminal conflict.
 ///
 /// THE CONFIGMAP WRITE IS A KUBERNETES API WRITE, NOT AN ARCHIVE WRITE.
 /// `scripts/check-no-archive-write.sh` is unaffected: its control-plane token
@@ -1551,7 +1593,7 @@ async fn plan_source_cluster(
 /// # Errors
 ///
 /// Whatever [`plan_config_map`] refuses;
-/// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] for a foreign existing object;
+/// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] for foreign ownership or differing data;
 /// [`BackupError::Api`] for anything transient.
 async fn write_plan_config_map(
     backup: &Backup,
@@ -1595,12 +1637,22 @@ async fn write_plan_config_map(
                     )
                 })?;
             if is_owned_by(&existing, &uid) {
+                if !compatible_plan_data(&existing, &desired) {
+                    return Err(BackupError::Refused(
+                        TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+                        format!(
+                            "the ConfigMap {cm_name} belongs to this Backup but its data differs \
+                             from the current source configuration; refusing to combine a stale \
+                             plan with current credentials. Start a new Backup after checking \
+                             the referenced KafkaCluster"
+                        ),
+                    ));
+                }
                 debug!(
                     backup = %name,
                     namespace = %namespace,
                     config_map = %cm_name,
-                    "the plan ConfigMap already exists and is owned by this Backup; a rendered \
-                     plan is a pure function of an immutable spec, so it is the same bytes"
+                    "the existing plan ConfigMap is owned by this Backup and matches the desired data"
                 );
                 Ok(())
             } else {
@@ -1855,7 +1907,10 @@ async fn reconcile_backup_inner(
                 ttl_patched: false,
             });
         }
-        let mut spec = runner_job_spec(backup)?;
+        // Resolve once: the plan and credential must describe the same
+        // KafkaCluster used by the connection probe, including its Secret.
+        let cluster = plan_source_cluster(backup, client, &namespace).await?;
+        let mut spec = runner_job_spec(backup, &cluster)?;
         // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
         // policy). `None` in either leaves the compiled-in constant in place,
         // which is what every test that does not pass one sees.
@@ -1869,7 +1924,6 @@ async fn reconcile_backup_inner(
         // found every scheduled backup failing as an unexplained `NoExitCode`.
         // `the_plan_config_map_is_posted_before_the_job` asserts the order
         // over the recorded route table.
-        let cluster = plan_source_cluster(backup, client, &namespace).await?;
         write_plan_config_map(backup, client, &namespace, &cluster).await?;
 
         jobs.create(&PostParams::default(), &job::build(&spec))

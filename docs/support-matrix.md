@@ -48,22 +48,23 @@ so nobody quotes a projected verdict as a tested one.
 
 | Engine version | Status | Note |
 |---|---|---|
-| 0.20.x | **not yet run** | Inside the declared two-minor deprecation window in `docs/stability.md`. `engine-matrix.yml` covers it on its first run. |
-| 0.19.x (except v0.19.1, below) | **not yet run** | Same. |
+| 0.20.x | **unsupported by the full-drill floor; no recorded run** | Matrix compatibility probes do not override the 0.21.0 runtime floor. |
+| 0.19.x (except v0.19.1, below) | **unsupported by the full-drill floor; no recorded run** | Same floor as 0.20.x. |
 | **v0.19.1** | **`unsupported (lever-absent)`, by inspection — not by a run** | This is `strimzi-backup-operator`'s hard-coded `DEFAULT_BACKUP_IMAGE` [VERIFIED-SPEC `U/strimzi-backup-operator/src/engine.rs:17`]. It predates **both** levers and is **below** the 0.21.0 full-drill floor, so it **can never be green** and the matrix job runs it against a reduced row set (restore succeeds, `pass-degraded`, `integrity.level: consume-only`) rather than the full one. An operator whose default has not caught up — not a fault. |
 | 0.16.0 – 0.18.x | **unsupported**, by floor | Below the full-drill floor; only the unknown-key warning mechanism works. |
 | < 0.16.0 | **unsupported (lever-absent)**, by floor | The warning mechanism this project depends on does not exist. |
 
 ## Authentication modes, and what each one has actually been run against
 
-Task 6 made SASL/SCRAM-SHA-512 reachable end to end. The matrix rows above are
-all **PLAINTEXT** drills, and that is stated here rather than left to be
-inferred from a table that does not mention auth at all.
+The recorded matrix row above is a **PLAINTEXT** drill. Authentication test
+coverage is separate from that recorded result: the Compose stack now has
+SCRAM listeners and `e2e/tests/scram.rs` exercises both clients with real
+brokers when the `e2e` feature and its infrastructure are enabled.
 
 | `auth.mode` | Logweir's client | The engine's client | Exercised |
 |---|---|---|---|
 | `plaintext` (default) | `security.protocol: PLAINTEXT` | no `security:` block rendered — the engine's own default | **Yes**, by the 0.21.0 row above and by every e2e drill. |
-| `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Rendered bytes and engine config-load only.** The digest-pinned engine loads the rendered document with **no** unknown-key warning and **no** parse error; no automated gate completes a SCRAM handshake, because the compose stack's SASL listeners land in a later task (STANDING RULE 15). |
+| `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Automated e2e coverage exists.** `e2e/tests/scram.rs` exercises Logweir's librdkafka client and engine-backed backups against the Compose SCRAM listeners, plus an in-cluster pod. It requires the live stack and Kubernetes; it is not part of the default unit suite or an additional result row above. |
 | `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Rendered bytes only.** TLS is not exercised locally at all — the compose stack speaks no TLS — and `tls` flips exactly one match arm on each side. A private-CA adopter configures **two** trust stores (Global Constraint 29; `docs/stability.md`). |
 | OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered | **Not in tag 1.** |
 
@@ -84,18 +85,12 @@ tag in the declared window — the newest four minors plus `v0.19.1` — records
 of the five outcomes, and opens a PR when this file changes. It also carries the
 deleted-segment positive control described above.
 
-**That control was vacuous until 2026-09-05.** The step filtered `cargo test` on
-the string `dry_run_check_segments`, which is the name of a struct field and of a
-rendered-YAML key and has never been the name of a test: it matched **0 of the
-475 tests**, and `cargo test` exits 0 on a filter that matches nothing. So
-`fail(lever-not-honoured)` — the one outcome of the five that detects upstream
-accepting a lever and ignoring it — was unreachable by construction, and the
-weekly job would have published a green verdict about a check that never ran.
-Both filter-based steps now go through `scripts/run-named-tests.sh`, which
-resolves every name against `--list` first and **exits 1 on a name that matches
-nothing**.
+Filter-based checks use `scripts/run-named-tests.sh`, which resolves test
+names against `--list` and fails if a requested test does not exist. A bare
+`cargo test <filter>` can exit successfully after running zero tests.
 
-Until it has run, this file is short on purpose.
+Only recorded runs belong in the result table; workflow definitions and test
+coverage alone do not establish a green version or authentication combination.
 
 ---
 

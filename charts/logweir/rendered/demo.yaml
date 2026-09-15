@@ -4490,6 +4490,7 @@ data:
           ),
           target: {
             bootstrapServers: ((target || {}).spec || {}).bootstrapServers || [],
+            auth: targetAuth(target),
             mode: TARGET_MODES[1],
             topicPrefix: prefixFor(pointInTime),
             // UNREAD in `newTopic` mode and still required by the grammar (it has
@@ -4521,9 +4522,20 @@ data:
       };
     }
   
-    function bootstrapOf(state) {
+    // Copy public settings only. The controller projects the selected cluster's
+    // Secret into the runner; its reference and contents do not belong in a plan.
+    function targetAuth(cluster) {
+      const auth = ((cluster || {}).spec || {}).auth || {};
+      if (!auth.mode || auth.mode === "plaintext") {
+        return undefined;
+      }
+      return { mode: auth.mode, username: auth.username, tls: auth.tls === true };
+    }
+    export function selectTarget(state, name) {
+      state.targetClusterName = name;
       const cluster = targetCluster(state);
-      return ((cluster || {}).spec || {}).bootstrapServers || [];
+      state.fields.target.bootstrapServers = ((cluster || {}).spec || {}).bootstrapServers || [];
+      state.fields.target.auth = targetAuth(cluster);
     }
   
     /** The cluster step 4 preselects: one labelled `role: target` if the namespace
@@ -4571,8 +4583,7 @@ data:
           state.fields.target.topicPrefix = valueOf(prefix);
         }
         if (cluster !== null) {
-          state.targetClusterName = valueOf(cluster);
-          state.fields.target.bootstrapServers = bootstrapOf(state);
+          selectTarget(state, valueOf(cluster));
         }
         for (const block of [state.fields.source, state.fields.evidence]) {
           if (endpoint !== null) {
@@ -4915,6 +4926,10 @@ data:
         "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
         "<input id=\"schedule-archive\" name=\"archive\" required>" +
         "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p></div>" +
+        "<div class=\"field\"><label for=\"schedule-archive-secret\">archive credential (Secret name)</label>" +
+        "<input id=\"schedule-archive-secret\" name=\"archiveSecret\" value=\"logweir-s3\">" +
+        "<p class=\"help\">An existing Secret in this namespace, with access-key-id and secret-access-key. " +
+        "Only its name is sent. Leave blank only for anonymous or instance-role access.</p></div>" +
         "<div class=\"field-row\">" +
         "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
         "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\">" +
@@ -4940,6 +4955,10 @@ data:
         archive: { url: values.archive },
         suspend: false,
       };
+      const archiveSecret = String(values.archiveSecret || "").trim();
+      if (archiveSecret.length > 0) {
+        spec.archive.secretRef = { name: archiveSecret };
+      }
       const retention = {};
       if (values.keepLast !== "" && values.keepLast !== undefined && values.keepLast !== null) {
         retention.keepLast = Number(values.keepLast);
@@ -5012,6 +5031,7 @@ data:
           source: form.elements.source.value.trim(),
           topics: form.elements.topics.value,
           archive: form.elements.archive.value.trim(),
+          archiveSecret: form.elements.archiveSecret.value.trim(),
           keepLast: form.elements.keepLast.value,
           keepDays: form.elements.keepDays.value,
         };
@@ -5148,6 +5168,16 @@ data:
         requireList(target.bootstrapServers, "target.bootstrapServers"),
         quote,
       );
+      const auth = target.auth;
+      if (auth && auth.mode !== "plaintext") {
+        if (auth.mode !== "scramSha512") {
+          throw new TypeError("target.auth.mode must be plaintext or scramSha512");
+        }
+        out.push("  auth:");
+        out.push("    mode: " + quote(auth.mode));
+        out.push("    username: " + quote(needed(auth.username, "target.auth.username")));
+        out.push("    tls: " + (auth.tls === true ? "true" : "false"));
+      }
       out.push("  mode: " + quote(requireMode(target.mode)));
       out.push("  topic_naming:");
       out.push("    prefix: " + quote(needed(target.topicPrefix, "target.topicPrefix")));

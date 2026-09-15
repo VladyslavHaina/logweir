@@ -1,14 +1,14 @@
 # The Logweir UI
 
-A Kubernetes API client, served as static files, and nothing else.
+A Kubernetes API client built from static HTML, CSS and plain ES modules.
+There is no frontend build step, bundler, package manager or database: the
+shipped assets are the sources. API requests use the same origin as the page.
 
-There is no API server of its own between this page and `kube-apiserver`, no
-database, and no server-side component of any kind -- tag 1 ships no UI image,
-no sidecar and no HTTP surface. There is also **no build step**: plain ES
-modules, no bundler, no framework, no `package.json`, no `node_modules`, no
-minifier and no source maps. The shipped assets *are* the sources, so there is
-no build output that could differ from the bytes the gates scan, and there is
-nothing to fetch.
+For local use, `kubectl proxy` serves the files using your kubeconfig. The
+[Helm chart](../charts/logweir/README.md#the-uis-authority) optionally deploys
+an in-cluster `kubectl proxy` using its own ServiceAccount, with an init
+container that places these assets in a shared volume. The serving identity
+is different on those two paths; neither requires a credential in the browser.
 
 ## Serving it
 
@@ -35,10 +35,9 @@ and needs no granted header. `kubectl proxy`'s own defaults admit it: the shippe
 v1.35.0 client's `--reject-methods='^$'` is a regular expression that matches only
 the empty string, so POST, PUT and PATCH all pass.
 
-`kubectl port-forward` cannot serve this page. It forwards a port to a pod, gives
-the browser no credential, and leaves every call to the apiserver a cross-origin
-request to a server that sends no CORS headers unless it was started with
-`--cors-allowed-origins`, which no adopter has set.
+Port-forwarding a pod alone does not supply API authentication or serve these
+files. Port-forwarding the Helm chart's UI Service works because its backend
+is already a same-origin `kubectl proxy`; follow the chart guide for that path.
 
 ### It must be a secure context, and the supported address already is
 
@@ -277,8 +276,8 @@ in it: the approver runs `logweir drill approve` where their private key lives,
 and the approvals page takes the two files that command wrote -- as UTF-8 text,
 verbatim -- and refuses anything whose name ends `.pem` or `.key` or whose
 content carries a private-key header, with the message **this page never accepts
-a private key**. The roster is a cluster-admin step -- see install step 1b in
-[../docs/kubernetes.md](../docs/kubernetes.md) -- and the page surfaces that
+a private key**. The roster is a cluster-admin step -- see the trust-roster step in
+[the installation guide](../docs/install.md) -- and the page surfaces that
 snippet rather than submitting it.
 
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software

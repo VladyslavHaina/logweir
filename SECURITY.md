@@ -47,7 +47,9 @@ them; a report that one of them is true is not a vulnerability report.
 - **RBAC bounds the viewer, not the page.** The UI is served by
   `kubectl proxy` under the viewer's own kubeconfig, so the four shipped
   ClusterRoles bind the *user* and bind nothing at all about the page. A
-  cluster-admin kubeconfig gives the page cluster-admin.
+  cluster-admin kubeconfig gives the page cluster-admin. The optional Helm UI
+  proxy uses its ServiceAccount instead; everyone able to reach that proxy
+  receives that account's API authority.
 - **`self_attested: false` means only "two different keys".** One person
   holding both keypairs satisfies it. It is not evidence of an independent
   auditor, and a scorecard that carries it should not be read as one.
@@ -60,12 +62,15 @@ treated as high severity.
 
 ## Key material in this repository
 
-`e2e/fixtures/signed/signing.pem` and `public.pem` are **throwaway test
-fixtures**, checked in deliberately so the verifier paths have something real to
-exercise. They sign nothing outside this repository's own test suite, are
-regenerated on demand by `just fixtures-sign`, and must never be used to sign a
-real drill scorecard. `.gitignore` excludes `*.pem` everywhere else, and no
-private key material appears in any log line, test name, or error message.
+`e2e/fixtures/signed/signing.pem` and `public.pem`, and
+`ui/tests/fixtures/approver.pem` and `approver.pub.pem`, are **throwaway test
+fixtures**. They exercise signature verification and CLI/UI approval parity;
+never use them for real backups, drills or approvals. The fixture READMEs
+explain their regeneration and intended scope.
+
+`.gitignore` excludes other private key files. The separately tracked
+`third_party/org-root.pub.pem` is a public anchor, not a private signing key.
+No private key material belongs in logs, test names or error messages.
 
 Documentation is licensed [CC-BY-4.0](docs/LICENSE-docs).
 

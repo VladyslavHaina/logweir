@@ -22,9 +22,7 @@ echo "== files a release must carry =="
 for f in README.md LICENSE NOTICE TRADEMARKS.md SECURITY.md MAINTAINERS.md \
          CONTRIBUTING.md docs/stability.md docs/support-matrix.md \
          docs/quickstart.md docs/formats/drill-scorecard.md docs/kubernetes.md \
-         docs/adr/0001-no-core-link.md docs/adr/0002-shell-out.md \
-         docs/adr/0003-language.md docs/adr/0004-kafka-client.md \
-         docs/adr/0005-velocity.md docs/adr/0007-from-cluster-in-v0.1.md \
+         docs/architecture.md \
          dashboards/logweir.json examples/cronjob-drill.yaml \
          scripts/demo.sh scripts/demo-approve.sh scripts/check-links.sh \
          schemas/logweir-drill-scorecard-1.0.0.json \
@@ -340,7 +338,7 @@ note "  -> all three need a GitHub Actions run; no tag has been pushed and no sc
 note "just e2e (needs \`just e2e-up\` and a seeded stack)"
 note "./scripts/demo.sh (needs docker; run it, it is the task's own test)"
 note "cargo deny check (run it, or read the CI job)"
-note "cargo xtask sync-upstream --tag v0.21.0 (needs an upstream checkout)"
+note "cargo xtask sync-upstream --tag v0.21.0 --upstream /path/to/kafka-backup (needs a checkout at that tag)"
 # Task 29b. The blocked rows of the tag-1 checklist, echoed here rather than
 # counted above: a clause that cannot be closed from this tree is NOT a pass,
 # and the only honest place for it is the list of things this script did not

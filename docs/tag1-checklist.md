@@ -35,7 +35,7 @@ closer.
 | 7 | The drift gate covers the scorecard **and** the backup receipt, and both readers agree on each | `closed` | `crates/logweir-core/tests/schema_drift.rs` · `scripts/check-verifier-parity.sh` · `crates/logweir/tests/two_reader_parity.rs` · `crates/logweir/tests/two_reader_parity_receipt.rs` · `.github/workflows/ci.yml` |
 | 8 | The trademark position is cleared by counsel, or the name is explicitly a placeholder, with the registry namespace already fixed | `blocked: owner action` | `TRADEMARKS.md` · `crates/logweir/tests/doc_lint.rs` |
 | 9 | Every mark in the shipped docs is labelled in place, with what would verify it | `closed` | `bash scripts/check-unverified-labels.sh` · `crates/logweir/tests/label_gate.rs` |
-| 10 | The ADR-0002 amendment is landed: the ADR's Decision and GC3 both read four runtime engine commands | `closed` | `docs/adr/0002-shell-out.md` · `docs/adr/0008-mvp-constraint-amendments.md` · `crates/logweir/tests/engine_allowlist.rs` |
+| 10 | The ADR-0002 amendment is landed: the decision and GC3 both read four runtime engine commands | `closed` | `docs/architecture.md` (ADR 0002 and Amendment D) · `crates/logweir/tests/engine_allowlist.rs` |
 
 ## The notes, clause by clause
 
@@ -308,9 +308,9 @@ contradicted on its own line.
 
 ### 10 — the ADR-0002 amendment
 
-**`closed`.** `docs/adr/0002-shell-out.md`'s Decision reads four runtime engine
+**`closed`.** `docs/architecture.md#adr-0002-digest-pinned-subprocess-execution`'s Decision reads four runtime engine
 subcommands and carries its own dated **Amended** paragraph;
-`docs/adr/0008-mvp-constraint-amendments.md` records the amendment as
+`docs/architecture.md#adr-0008-mvp-constraint-amendments` records the amendment as
 Amendment D, with the reasoning stated once rather than restated at each site.
 `crates/logweir/tests/engine_allowlist.rs`'s `adr_0002_decision_reads_four_commands`
 and `adr_0008_records_all_four_amendments` hold both in the default test set.

@@ -97,7 +97,7 @@ pub struct SourceInfo {
     #[serde(default)]
     pub manifest_version_id: Option<String>,
     /// true ONLY under `--from-cluster`. `--from-cluster` is in v0.1 scope
-    /// (Global Constraint 18 / docs/adr/0007-from-cluster-in-v0.1.md); its
+    /// (Global Constraint 18 / docs/architecture.md#adr-0007-source-capture-scope); its
     /// execution path lands in a follow-up task, so nothing in the main task
     /// line yet sets this true. The invariant below is live regardless.
     pub captured_by_logweir: bool,

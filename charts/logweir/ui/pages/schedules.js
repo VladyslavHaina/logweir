@@ -207,6 +207,10 @@ export function renderScheduleForm() {
     "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
     "<input id=\"schedule-archive\" name=\"archive\" required>" +
     "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p></div>" +
+    "<div class=\"field\"><label for=\"schedule-archive-secret\">archive credential (Secret name)</label>" +
+    "<input id=\"schedule-archive-secret\" name=\"archiveSecret\" value=\"logweir-s3\">" +
+    "<p class=\"help\">An existing Secret in this namespace, with access-key-id and secret-access-key. " +
+    "Only its name is sent. Leave blank only for anonymous or instance-role access.</p></div>" +
     "<div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
     "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\">" +
@@ -232,6 +236,10 @@ export function scheduleBody(values) {
     archive: { url: values.archive },
     suspend: false,
   };
+  const archiveSecret = String(values.archiveSecret || "").trim();
+  if (archiveSecret.length > 0) {
+    spec.archive.secretRef = { name: archiveSecret };
+  }
   const retention = {};
   if (values.keepLast !== "" && values.keepLast !== undefined && values.keepLast !== null) {
     retention.keepLast = Number(values.keepLast);
@@ -304,6 +312,7 @@ function wire(node, ns, parse) {
       source: form.elements.source.value.trim(),
       topics: form.elements.topics.value,
       archive: form.elements.archive.value.trim(),
+      archiveSecret: form.elements.archiveSecret.value.trim(),
       keepLast: form.elements.keepLast.value,
       keepDays: form.elements.keepDays.value,
     };

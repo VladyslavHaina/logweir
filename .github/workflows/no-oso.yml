@@ -20,7 +20,7 @@ jobs:
         # absence is not an oversight: it takes `object_store` with Global
         # Constraint 9's ["aws","azure","gcp","http"] feature set, which pulls
         # `aws-*`, so it is outside the pure layer BY ADR — see
-        # docs/adr/0008-mvp-constraint-amendments.md §E and Global Constraint 1,
+        # docs/architecture.md#adr-0008-mvp-constraint-amendments §E and Global Constraint 1,
         # which names `crates/weirkeeper` and `crates/logweir-store` as outside
         # "by ADR, never by a quiet edit to the grep". Widening the grep below
         # to admit it would be exactly that quiet edit. The asymmetry between
@@ -37,7 +37,7 @@ jobs:
         # extended to `logweir-store`, and must not be:
         # `logweir-store` links `object_store` with the `aws` feature and would
         # fail this grep by construction. It is outside the pure layer by ADR
-        # (docs/adr/0008-mvp-constraint-amendments.md §E; Global Constraint 1).
+        # (docs/architecture.md#adr-0008-mvp-constraint-amendments §E; Global Constraint 1).
         run: |
           for c in logweir-core logweir-evidence logweir-kafka logweir-verify; do
             deps=$(cargo tree -p "$c" --no-default-features --prefix none --edges normal \

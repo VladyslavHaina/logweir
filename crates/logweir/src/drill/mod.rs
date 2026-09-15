@@ -1,6 +1,6 @@
 //! The eleven-phase orchestrator (-1..=9). Phase -1 is the `--from-cluster`
 //! source-side capture — Global Constraint 18 (reversed 2026-09-03) and
-//! docs/adr/0007-from-cluster-in-v0.1.md put it in v0.1 scope, and global
+//! docs/architecture.md#adr-0007-source-capture-scope put it in v0.1 scope, and global
 //! ruling GR4 Part B defers its execution path to Task 24, so it is NOT wired
 //! here. The slot domain is `-1..=9`; the ten modules below are phases 0
 //! through 9.

@@ -122,6 +122,16 @@ export function renderPlanBytes(fields) {
     requireList(target.bootstrapServers, "target.bootstrapServers"),
     quote,
   );
+  const auth = target.auth;
+  if (auth && auth.mode !== "plaintext") {
+    if (auth.mode !== "scramSha512") {
+      throw new TypeError("target.auth.mode must be plaintext or scramSha512");
+    }
+    out.push("  auth:");
+    out.push("    mode: " + quote(auth.mode));
+    out.push("    username: " + quote(needed(auth.username, "target.auth.username")));
+    out.push("    tls: " + (auth.tls === true ? "true" : "false"));
+  }
   out.push("  mode: " + quote(requireMode(target.mode)));
   out.push("  topic_naming:");
   out.push("    prefix: " + quote(needed(target.topicPrefix, "target.topicPrefix")));

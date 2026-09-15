@@ -1,271 +1,112 @@
 # Running Logweir on Kubernetes
 
-v0.1 **does not require Kubernetes** — `logweir drill run` is a CLI that spawns
-a local subprocess, and the demo runs on a laptop with `docker compose`. But a
-scheduled drill is the point of the tool, and a `CronJob` is how most people
-schedule one, so the facts below are part of the release rather than folklore.
+Operational reference for the CLI CronJob and the `weirkeeper` controller.
+Start with [install.md](install.md) for deployment or [quickstart.md](quickstart.md)
+for demos. The [CronJob example](../examples/cronjob-drill.yaml) schedules the CLI.
+Numbered sections remain stable for existing source and documentation references.
+Historical test results below describe the named environment and date, not a
+new validation of this checkout.
 
-Every fact on this page marked **verified** was checked on a live
-`docker-desktop` cluster. Facts that were *not* checked live are marked
-**unverified** and say so — please do not promote one to the other without
-running it.
+## 1. Reading a drill result
 
-There is a worked manifest at [../examples/cronjob-drill.yaml](../examples/cronjob-drill.yaml).
-
----
-
-## 1. The exit-code contract is nearly invisible in Kubernetes
-
-This is the most important thing on the page, because it silently destroys the
-signal Logweir exists to produce.
-
-Logweir's exit codes are a published interface
-([docs/stability.md](stability.md)):
+Kubernetes displays every non-zero container exit as `Error`; Job status does
+not carry the runner's exit code. The [exit-code contract](stability.md) is:
 
 | Code | Meaning |
 |---|---|
 | 0 | Pass. |
-| 1 | Operational — the drill could not be attempted or continued. **No artifact was written.** |
-| **2** | **A drill result that is not a pass. A scorecard WAS written and signed.** |
-| 3 | Refused by a guard, before anything ran. |
-| 4 | Signing or lock proof failed — and nothing was uploaded. |
+| 1 | Operational failure; no artifact. |
+| 2 | A measured result that did not pass; a scorecard was signed. |
+| 3 | A guard refused the run. |
+| 4 | Signing or lock proof failed; nothing was uploaded. |
 
-**Exit 2 is the most valuable result the tool produces**: the drill ran, it was
-measured, and your backup did not meet its objective. That is the finding you
-scheduled the drill to get.
-
-**Verified — and re-verified independently on 2026-09-05** with a job whose
-container simply `exit 2`s: `kubectl --context docker-desktop get pods` showed
-`Error` with no code, the Job's `.status` carried only `BackoffLimitExceeded`,
-and the exit code `2` was readable at exactly one path. In Kubernetes the code
-appears only at —
-
-```
-pod.status.containerStatuses[].state.terminated.exitCode
-```
-
-(or `.lastState.terminated.exitCode` after a restart). It is **not** in Job
-status, and `kubectl --context docker-desktop get pods` renders every non-zero
-exit as a generic `Error`. So to an operator glancing at the namespace, **exit 2 is
-indistinguishable from exit 1** — "your backup failed its drill" looks exactly
-like "the drill could not run".
-
-**The mitigation, verified working:**
-
-```yaml
-spec:
-  backoffLimit: 0          # do not retry
-  template:
-    spec:
-      restartPolicy: Never # exactly one pod, one attempt
-```
-
-That yields **exactly one pod** (re-verified: `kubectl --context docker-desktop get
-pods -l job-name=... | wc -l` returned 1), an immediate `Failed` Job condition, and a
-cleanly readable
-exit code at the path above:
+Use `backoffLimit: 0` and `restartPolicy: Never`. Retrying a legitimate exit 2
+repeats the restore; `OnFailure` can also lose the pod that carries its code.
+Read the named container: the CronJob example calls it `logweir`, while
+controller-created Jobs call it `runner`.
 
 ```bash
+# The standalone CronJob:
 kubectl --context docker-desktop get pod -l job-name=<job> \
-  -o jsonpath='{.items[0].status.containerStatuses[0].state.terminated.exitCode}'
+  -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="logweir")].state.terminated.exitCode}'
+# A controller-created Backup or Restore Job:
+kubectl --context docker-desktop get pod -l job-name=<job> \
+  -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="runner")].state.terminated.exitCode}'
 ```
 
-**The alternative is actively harmful, and worse than "buries the code".**
-`restartPolicy: OnFailure` with `backoffLimit > 0` **retries a drill that
-legitimately did not pass** — it runs your restore again, against the same
-archive, expecting a different answer.
+The controller copies this value to `Backup.status.exitCode` or
+`Restore.status.exitCode` (§10 and §12), before enabling Job cleanup.
+Controller-built Jobs also use `podFailurePolicy: FailJob` for disruption and
+exits 2, 3 and 4. A policy match was observed on docker-desktop v1.34.1 on
+2026-09-10. Its independent effect on retries with a positive `backoffLimit`
+has not been tested; the shipped limit remains zero.
 
-Re-verified on this machine's `docker-desktop` cluster on 2026-09-05, with a
-job whose container simply `exit 2`s (`backoffLimit: 2`, `restartPolicy:
-OnFailure`). What actually happened, in order:
+### 1b. Correlating logs, metrics and evidence
 
-```
-Warning  BackOff               Back-off restarting failed container probe in pod ...
-Normal   SuccessfulDelete      Deleted pod: logweir-onfailure-probe-79czs
-Warning  BackoffLimitExceeded  Job has reached the specified backoff limit
-```
+`drill run` writes JSON logs to stdout, at `info` by default. Logweir events
+carry `fields.run_id` or `span.run_id`; the same id appears in the scorecard
+and the metrics file's leading comment. Every terminal path logs
+`drill finished`, with `fields.exit_code` and `fields.meaning`.
 
-The container was restarted **in place**, and then the job controller
-**DELETED THE POD**. `kubectl --context docker-desktop get pods` afterwards:
-`No resources found`. Since
-the exit code lives only on the pod object, **it is not buried in `lastState` —
-it is gone**, and the Job records only `BackoffLimitExceeded`. A drill that
-found a real problem leaves behind no evidence of which problem it was.
-
-Do not use `OnFailure` for a drill.
-
-**Partly verified on 2026-09-10, and the remaining half is still a mark.**
-`podFailurePolicy` (GA) supports exit-code-specific Job actions and would
-express "code 2 is a real result, do not retry; code 1 may be retried"
-declaratively. Every Job the `Backup` reconciler creates now carries one (§10).
-
-**Verified live** on `docker-desktop` (server v1.34.1), with a controller-built
-Job whose runner exited **3**: the rule was **evaluated and matched**, and it
-changes the Job's own failure reason. The Job's conditions came back as —
-
-```
-FailureTarget, Failed   reason: PodFailurePolicy
-```
-
-— and **not** `BackoffLimitExceeded`, which is what a `backoffLimit: 0` Job
-without the field reports (§1's first transcript). So the field is **not inert
-in the sense of unobservable**: it is what makes `kubectl describe job` say "a
-policy rule matched this exit code" rather than "this Job ran out of retries",
-which are different facts about the same failure.
-
-**Still a mark:** the *no-retry* half. With `backoffLimit: 0` a single pod
-failure already fails the Job, so nothing here demonstrates that the rule
-prevents a retry. **The sentence that would verify it:** run a Job with
-`backoffLimit: 3`, `restartPolicy: Never`, the same `onExitCodes` rule and a
-container that `exit 2`s, and observe **exactly one** pod and no second attempt;
-then repeat with the rule removed and observe four. Until someone runs that,
-"code 1 may be retried" is a declaration and not a measured behaviour.
-
-### 1b. The log line is how you correlate a drill, and it works at the shipped default
-
-The mitigation above gets you the code off one pod. Tying that pod to the
-archive it read, to the metrics textfile it wrote (§5) and to the scorecard in
-the bucket is the log's job.
-
-`drill run` writes structured JSON to **stdout**, one object per line. The
-default level is **`info` even with `RUST_LOG` unset**, so a pod nobody
-configured still emits a correlatable log. Three facts follow:
-
-- **Every line Logweir emits at the default level carries the run id** — on the
-  event as `fields.run_id`, or on the entered span as `span.run_id`. It is the
-  same id as the scorecard's `run_id` and the same id the `--metrics-file`
-  textfile carries as a leading `# logweir run_id=…` comment, so one grep joins
-  all three. The scope is real: the default directive pins the dependencies
-  that emit `tracing` (`h2`, `hyper_util`, `object_store`, the `quinn` crates)
-  to `warn`, because they log from worker threads that never entered the run's
-  span and so could not carry the id. Setting `RUST_LOG` yourself replaces that
-  scoping — `RUST_LOG=debug` will show dependency lines with no run id.
-- Every terminal path emits `drill finished` with `fields.exit_code` and a
-  `fields.meaning` string. That line is the one place the §1 distinction —
-  "could not run" versus "ran and did not pass" — survives into a log
-  aggregator at all.
-- `RUST_LOG` overrides the default whenever it is set to anything non-blank.
-  `RUST_LOG=warn` keeps the error line and its run id and drops everything
-  else. A blank `value:` is treated as unset, not as "log nothing".
-
-`examples/cronjob-drill.yaml` pins `RUST_LOG: info` in the container's `env:`
-anyway. That is belt-and-braces rather than the mechanism: it holds the level
-where a cluster-wide policy or a base image might otherwise inject a quieter
-one, and it makes the level visible in
-`kubectl --context docker-desktop get cronjob -o yaml` without reading
-Logweir's source.
-
-Pulling the run id out of a failed pod, from your laptop:
+A non-blank `RUST_LOG` overrides the default. Dependency logging enabled by
+that override may lack the run id. The CronJob example explicitly sets `info`.
+Save logs without replacing the drill's exit status with a pipeline's status:
 
 ```bash
 kubectl --context docker-desktop logs job/<job> > drill.log
 jq -r 'select(.level=="ERROR") | .fields.run_id' drill.log
 ```
 
-`jq` is a laptop-side tool here — it is **not** in the runtime image (§2), and
-the redirect is deliberate: `kubectl --context docker-desktop logs … | jq`
-would work, but piping
-`logweir` itself into `jq` replaces the drill's exit code with `jq`'s, and §1
-is about not losing that code.
+`jq` runs on the operator's machine; it is not in the runtime image.
 
-## 2. The engine image is linux/amd64 only
+## 2. Image architecture
 
-**Verified.** Upstream publishes `osodevops/kafka-backup` for **linux/amd64
-only**; no arm64 manifest exists for any tag. On an arm64 node it runs under
-emulation, but **only after a host-side pre-pull**:
+The pinned engine and runner are `linux/amd64`. The controller must be built
+natively for its target architecture; `Dockerfile.weirkeeper` refuses
+cross-architecture builds because its `aws-lc-sys` build needs native headers.
+See [install.md](install.md) for the build and registry paths.
 
-```bash
-docker pull --platform linux/amd64 osodevops/kafka-backup@sha256:8ff5be…
-```
+Docker Desktop's local image store allowed the amd64 runner on the author's
+arm64 host after a host-side pull. This does not generalize to an arm64 `kind`
+node: its CRI image service did not expose the loaded amd64 image. Use amd64
+runner nodes for a deployment; the chart's node-placement values do not yet
+propagate to controller-created Jobs.
 
-Kubelet-side pulling fails with `no matching manifest`. Two consequences:
+For local images, `imagePullPolicy: Never` requires the exact reference to be
+loaded on the node. `ErrImageNeverPull` can mean a missing reference or an
+architecture mismatch. Image pruning can remove that prerequisite. Do not add
+an amd64 node selector to a cluster with no amd64 node.
 
-- **Use `imagePullPolicy: Never`.** A missing pre-pull then fails legibly as
-  `ErrImageNeverPull` rather than as an opaque pull error. This is the honest
-  trade: the pod cannot fetch what it needs, so make it say so.
-- **Never set `nodeSelector: kubernetes.io/arch: amd64`** on a single-arm64-node
-  cluster. The pod stays `Pending` **forever**, with no event that names the
-  real problem.
+## 3. Permissions and mounts
 
-**Verified, and it will bite you later:** `docker image prune` evicts the
-pre-pulled image, and drills silently start failing with **no code change and no
-manifest change**. If drills stop working after a routine Docker cleanup, this
-is why.
+Runner Jobs use `logweir-runner`, with `automountServiceAccountToken: false`.
+The runner makes no Kubernetes API calls and needs no Role or RoleBinding.
+Create the account in each runner namespace as described in [install.md](install.md).
 
-## 3. Registry, permissions and mounts
+The non-root container runs as uid/gid 65532. Projected signing Secrets need
+`fsGroup: 65532`, with `defaultMode: 0440`. The original docker-desktop probe
+on 2026-09-05 measured:
 
-All **verified** on `docker-desktop`:
+| Requested mode | fsGroup | Mounted owner/mode | Readable by uid 65532 |
+|---|---|---|---|
+| 0400 | absent | root:root 0400 | No |
+| 0440 | absent | root:root 0440 | No |
+| 0400 | 65532 | root:65532 0440 | Yes |
+| 0440 | 65532 | root:65532 0440 | Yes |
 
-- **No registry is needed.** Docker Desktop's kubelet shares the local Docker
-  image store, so a locally built `logweir:v0.1.0` is directly runnable.
-- **The default ServiceAccount has zero access.** A drill pod needs its own
-  ServiceAccount, Role and RoleBinding. `automountServiceAccountToken: false` is
-  appropriate for v0.1, which makes no Kubernetes API calls at all.
-- **The signing key needs `fsGroup`. Without it a non-root pod cannot read its
-  own key, and this page used to claim the Secret "mounts cleanly".** It does
-  not: kubelet writes Secret files owned by `root:root`, so a container running
-  as `runAsUser: 65532` — which the image sets and the manifest repeats — reads
-  nothing through the owner bits. `examples/cronjob-drill.yaml` shipped
-  `runAsUser: 65532`, `defaultMode: 0400` and **no `fsGroup` anywhere**, so
-  every scheduled drill would have died at phase 1 opening
-  `/etc/logweir-keys/signing.pem`.
+Changing the mode alone does not change group ownership. ConfigMaps use 0644
+and are readable without this group; credentials must remain Secrets.
 
-  **All four combinations run live on `docker-desktop`, 2026-09-05**, in one
-  pod shape with the manifest's own uid/gid, `busybox` doing `ls -lL` then
-  `cat`:
+The restore approval bundle mounts at `/approval`: `approval.json`,
+`approval.sig`, `approver.pub.pem`, and `allowed-clusters.json`. Keeping the
+allowlist in a Secret prevents a subject with only `patch configmaps` from
+widening a restore's target set. This does not constrain a cluster-admin.
+Use repeatable `--approver-key-ids` flags to restrict the accepted approver
+keys; the operator supplies the unexpired roster ids.
 
-  | `defaultMode` | `fsGroup` | file as mounted | `cat` |
-  |---|---|---|---|
-  | `0400` | none | `-r-------- root root` | **Permission denied** |
-  | `0440` | none | `-r--r----- root root` | **Permission denied** |
-  | `0400` | `65532` | `-r--r----- root 65532` | reads |
-  | `0440` | `65532` | `-r--r----- root 65532` | reads |
-
-  **`fsGroup` is the load-bearing half, and it is sufficient on its own.**
-  Two things happen when it is set: kubelet chowns the volume's group to that
-  GID, *and* it ORs group-read into the file mode — which is why row 3 lands on
-  disk as `0440` even though the manifest asked for `0400`. Widening the mode
-  without `fsGroup` (row 2) fixes nothing, because the group is still root's.
-
-  `examples/cronjob-drill.yaml` now sets `fsGroup: 65532` and writes
-  `defaultMode: 0440`, so the manifest states the permission that actually
-  lands rather than one kubelet silently widens.
-- **The ConfigMap was never the failing half, and that was checked, not
-  assumed.** The drill spec mounts as a ConfigMap; the manifest sets no
-  `defaultMode` there, so kubelet's `0644` applies. Verified live in the same
-  pod shape, with **no `fsGroup`**: `-rw-r--r-- root root drill.yaml`, `cat`
-  exit 0. The files are `root:root` for the same reason the Secret's are — the
-  group bits simply do not matter when the world bits are set. That is also why
-  the key is a Secret and not a ConfigMap.
-- **The approval bundle is a Secret, and reading it is a different RBAC verb.**
-  `approval.json`, `approval.sig`, `approver.pub.pem` and
-  `allowed-clusters.json` were all ConfigMap keys, projected at `/etc/logweir`;
-  they are now the four keys of the Secret `logweir-approval-bundle`, mounted at
-  **`/approval`** in `examples/cronjob-drill.yaml` exactly as the operator's
-  `Restore` Job mounts them (§12). The ConfigMap keeps `drill.yaml` and nothing
-  else — the plan is public and authorises nothing on its own, because every
-  topic, window and target it names is re-checked against the approval and the
-  allowlist before anything runs.
-
-  **The reason is one sentence**: a ConfigMap's `get`/`patch` and a Secret's are
-  *different RBAC verbs*, so the four files that decide WHO may authorise this
-  run and WHICH clusters it may write into are no longer replaceable by a
-  subject holding `patch configmaps` in the drill's namespace. The phase-0
-  `cluster_id ∈ allowedClusterIds` check itself was never the weak half — it
-  reads the cluster id from the broker, never from the spec; the FILE was.
-  **None of this stops a cluster-admin**, and that is stated rather than implied
-  — `docs/stability.md`, O0.
-- **Pin the approvers a run accepts with `--approver-key-ids`.** The flag is
-  repeatable — one flag per id, which is the shape the operator emits, one per
-  unexpired `TrustRoster` approver key — and an approval whose approver key id
-  is outside the set is refused with **exit 3 before phase 0 dials anything**.
-  Omitting it changes nothing at all, so it is additive for every existing
-  adopter. `logweir drill approve --subject-kind <Restore|Backup>` writes the
-  kind into the signed bytes for the controller's check 8 (§8); absent, the
-  runner reads it as `Restore`.
-- **`emptyDir` is verified** for the engine's scratch directory. **No PVC was
-  exercised.** The only StorageClass on the test cluster was `hostpath`.
-- **The metrics file must NOT be an `emptyDir`** — see §5.
+`emptyDir` is suitable for `/work` and the engine checkpoint. It is lost with
+the pod and cannot provide resumable recovery or persistent metrics. No PVC
+execution path was exercised in the recorded local probes.
 
 ## 4. What the pod still needs from you
 
@@ -278,136 +119,47 @@ The container image carries the engine; the environment does not carry itself:
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`, or an IRSA / Pod Identity setup | `object_store`'s own credential chain — **not** the AWS SDK's. `~/.aws/credentials`, `AWS_PROFILE` and SSO are unsupported. See [stability.md](stability.md). |
 | `TMPDIR` | Where the rendered `restore.yaml` and the restore checkpoint land. Point it at a writable volume; the checkpoint is pod-local and is never uploaded, so a crashed restore is not resumable in v0.1. |
 
-## 5. The metrics file is the only metrics surface, so where you mount it decides whether you get any
+## 5. Persisting metrics
 
-v0.1 has **no HTTP surface** — no `/metrics`, no `/healthz`, no `/readyz`. The
-Prometheus **textfile** written at `--metrics-file` is not one of two routes; it
-is the route. So the volume behind it is load-bearing.
+The CLI emits a Prometheus textfile at `--metrics-file`; it has no HTTP
+metrics endpoint. [metrics.md](metrics.md) is the metric and alert reference.
+Use [the CronJob example](../examples/cronjob-drill.yaml) for the mount shape.
 
-`examples/cronjob-drill.yaml` mounted it on an **`emptyDir`**, directly beneath
-its own comment telling the reader to mount node_exporter's textfile directory.
-An emptyDir is deleted with the pod. Every drill therefore wrote its metrics
-into a filesystem nothing would ever scrape and then destroyed it, and
-[../dashboards/logweir.json](../dashboards/logweir.json) stayed empty forever —
-which looks exactly like Logweir never running.
+The textfile must survive the pod and be visible to node_exporter's collector.
+An `emptyDir` meets neither requirement. The example uses a node-local
+`hostPath` with `type: Directory`; prepare it on every eligible node:
 
-**Verified live on `docker-desktop`, 2026-09-05.** One pod shape at
-`runAsUser: 65532` wrote `logweir.prom`; the pod was then **deleted**; a second
-pod mounted the same volume and read it back:
-
-```
-hostPath /var/lib/node_exporter/textfile   ->  logweir_drill_last_run_timestamp_seconds{cluster="unknown"} 1757000000
-emptyDir                                   ->  total 0
-                                               cat: can't open '/metrics/logweir.prom'
+```bash
+sudo install -d -m 0775 -g 65532 /var/lib/node_exporter/textfile
 ```
 
-The sample above is emitted by `crates/logweir/src/metrics.rs` — `write_textfile`
-on a drill result, `write_minimal_textfile` on exits 1, 3 and 4. The `cluster`
-label is always present: it is the scorecard's `target.cluster_id`, or the
-literal `unknown` on a terminal path that never learned it (see
-[metrics.md](metrics.md)). The value is that run's own `Utc::now().timestamp()`
-at emit time, never a constant.
+`DirectoryOrCreate` creates root-owned 0755 directories that uid 65532 cannot
+write. `fsGroup` does not change hostPath ownership. `Directory` instead fails
+at mount time when the directory is missing. Persistence and these permission
+cases were measured on docker-desktop on 2026-09-05.
 
-One series in that file is about the cluster this CronJob runs against rather
-than about the drill: `logweir_drill_teardown_topics_failed{cluster}` counts the
-scratch topics phase 9 created on the target and could not delete, because the
-broker refused. It is emitted on every scorecard-carrying path, `0` included, so
-`0` means phase 9 ran and cleaned up while *absence of the series inside a
-present file* means the run ended before a scorecard existed. A non-zero value
-leaves real topics on a real cluster and does not change the pod's exit code —
-phase 8 has already signed and uploaded by the time phase 9 runs — so this is
-the one series worth an alert even though the drill "passed". The full metric
-reference, including which names the failed topics are reported under, is
-[metrics.md](metrics.md).
-
-Three facts decide the shape, each of them run:
-
-- **`type: Directory`, not `DirectoryOrCreate`.** `DirectoryOrCreate` makes
-  kubelet create the path and it lands `drwxr-xr-x root root`, which uid 65532
-  cannot write: `can't create /metrics/logweir.prom: Permission denied`, at
-  phase 8, after the whole drill has already run. `Directory` fails at **mount**
-  time instead, before the container starts, with an event that names the path:
-
-  ```
-  Warning  FailedMount  MountVolume.SetUp failed for volume "metrics":
-                        hostPath type check failed: /var/lib/... is not a directory
-  ```
-
-  Loud beats silent.
-- **`fsGroup` does not apply to `hostPath`.** Ownership is host-side setup, not
-  manifest setup. Verified: the directory at `root:root 0755` refuses the write;
-  at `0775` with group 65532 it succeeds.
-
-  ```bash
-  sudo install -d -m 0775 -g 65532 /var/lib/node_exporter/textfile
-  ```
-
-- **A `hostPath` volume is forbidden by Pod Security `baseline` AND
-  `restricted`.** Verified by labelling the namespace and re-applying:
-
-  ```
-  Error from server (Forbidden): violates PodSecurity "baseline:latest":
-    hostPath volumes (volume "metrics")
-  ```
-
-  Everything else in the worked manifest satisfies `restricted`; the metrics
-  volume is the one thing that does not. In a namespace that enforces either
-  profile, **delete both the `--metrics-file` argument and the `metrics`
-  volume** rather than pointing the flag at an emptyDir. No metrics is an honest
-  state; a dashboard fed by a deleted file is not.
-
-  That is what the **`restricted` manifest variant** does: it ships without the
-  `hostPath` volume, without its mount and without `--metrics-file`. It
-  therefore emits **no textfile on any exit path** — not on a pass, not on a
-  drill result, and not on the exits 1, 3 and 4 that now write a minimal record
-  everywhere else. Nothing below rescues it: there is no PVC, no sidecar, no
-  push route and no HTTP surface in v0.1, so a `restricted` namespace gets its
-  drill results from the signed scorecard and the pod's exit code alone. This
-  gap is a known regression, recorded rather than fixed, and it is written up
-  with the hardened manifests; do not close it by adding a volume back.
+Pod Security `baseline` and `restricted` forbid hostPath. For either profile,
+remove the metrics volume, its mount and `--metrics-file` together. The
+restricted variant emits no textfile on any exit path. There is no shipped PVC,
+sidecar, Pushgateway or OTLP fallback; use the signed result and pod status.
 
 ### Is the drill still running at all?
 
-Every terminal path now writes the textfile, so the file's *existence* says
-nothing. Its **mtime** does:
+Use node_exporter's file mtime to detect a stale existing textfile; see
+[metrics.md](metrics.md#is-the-drill-still-running-at-all) for the query and
+its missing-file limitation. No alert rules ship with the repository.
 
-```promql
-time() - node_textfile_mtime_seconds{file=~".*logweir.*"} > 8d
-```
+## 6. Runtime boundaries
 
-This is mtime-based and not `time() - logweir_drill_last_run_timestamp_seconds{cluster=~".+"}`
-on purpose. A metric Logweir writes cannot report that Logweir did not run, and
-node_exporter's `node_textfile_mtime_seconds` carries **no Logweir label at
-all** — so it still matches on the terminal paths where the cluster id was never
-learned and every Logweir series is labelled `cluster="unknown"`. `8d` is one
-day of slack over the weekly schedule in `examples/cronjob-drill.yaml`; the
-dashboard's "Time since the last drill reported" panel thresholds at the same
-`691200` seconds. Full metric reference: [metrics.md](metrics.md).
+The repository includes the CLI, `weirkeeper`, six CRDs and an optional Helm
+UI deployment. The CLI runs the engine as a local subprocess inside its runner
+pod; the operator creates that Job. A scratch restore uses a marker topic and
+cluster allowlist, not namespace labels, to guard the target.
 
-**Unverified:** a shared PVC read by a node_exporter sidecar, and any push-based
-route (Pushgateway, OTLP). Neither was tested, and v0.1 emits nothing but the
-textfile.
-
-## 6. What is NOT here in v0.1
-
-Stated so nobody goes looking:
-
-- **No operator, no CRDs — in v0.1.** `weirkeeper` and `logweir.dev/v1alpha1`
-  are not in the v0.1 tag; §7 below is the kind list they ship as, and
-  `RestoreDrill` is not among them (Global Constraint 34 retires it for
-  `Restore`, and `MetadataSnapshot` stays reserved and unbuilt).
-- **No Kubernetes Job execution of the engine.** v0.1 spawns a local
-  subprocess inside the drill pod; it does not create a Job of its own.
-- **No namespace-label segregation proof.** v0.1 proves the target is a scratch
-  cluster with a **marker topic**, because a guard that needs a kubeconfig
-  cannot run in the unit suite.
-- **No `SubjectAccessReview`-verified approval.** Approval is a DSSE-signed
-  document checked against the approver's public key.
-- **No HTTP surface.** No `/metrics`, `/healthz` or `/readyz`. Metrics are a
-  Prometheus **textfile** written at `--metrics-file` and scraped through
-  node_exporter's textfile collector — see §5 for where that file has to live,
-  and [../dashboards/logweir.json](../dashboards/logweir.json) for the
-  dashboard it feeds.
+Approval is a DSSE signature checked against rostered public keys, not a
+`SubjectAccessReview`. Browser verification, resumable crashed restores and
+an HTTP metrics endpoint are not implemented. See [stability.md](stability.md)
+for the full limitations and deferred features.
 
 ## 7. The control plane: six kinds on `logweir.dev/v1alpha1`
 
@@ -461,7 +213,7 @@ an alternative expression of the same property, at cluster scope rather than
 per-CRD, and it is not a substitute: nothing in the shipped install depends on
 it, and uncommenting it on a 1.29 API server would fail to apply.
 
-## 8. The approval flow: five checks, in this order
+## 8. The approval flow
 
 An `Approval` object that exists is **not** an approval. An `Approval` whose
 status the controller set to `Verified=True` is. Creating the object is a
@@ -504,7 +256,7 @@ passed. A roster with one unparseable PEM is `Loaded=False` naming the `keyId`
 roster. Expiry is reported here so no consumer has to derive it from a clock it
 does not share with the controller.
 
-### The five checks
+### The checks
 
 Each `Approval` event resolves the roster, fetches the referent named by
 `spec.subjectRef`, reads its `spec.planBytes`, and runs the checks **in this
@@ -518,7 +270,7 @@ signature alike.
 |---|---|---|
 | 1 | `sidecarBytes.payloadType` is the approval payload type — **before any key is tried** | `PayloadTypeMismatch` (both strings, in full) |
 | 2 | **Every** `approverKeys[]` entry parses | `SignatureInvalid`, naming the `keyId` |
-| 3 | Each entry's declared `keyId` is the sha256 of its own `spkiPem` | `KeyIdNotInRoster`, naming both ids |
+| 3 | Each declared `keyId` is SHA-256 of the public key's DER SPKI | `KeyIdNotInRoster`, naming both ids |
 | 4 | Some `sidecarBytes.signatures[].keyid` is on `approverKeys` | `KeyIdNotInRoster`, naming the sidecar's key ids |
 | 5 | The signature verifies, under the **matched** key | `SignatureInvalid` |
 | 6 | The matched entry's `notAfter` is in the future | `KeyIdExpired` |
@@ -549,7 +301,7 @@ the `Restore` reconciler (§12) reads that reason, holds for thirty seconds and
 tries again rather than refusing — which is what makes minting both names
 before creating either object workable.
 
-Checks 1–6 are the "five checks" the roster and the signature answer; 7 and 8
+Checks 1–6 validate the roster and signature; 7 and 8
 are what bind the signature to a particular plan and a particular kind of
 object. **A key outside the roster is `KeyIdNotInRoster`, never
 `SignatureInvalid`** — the signature may verify perfectly; the signer is simply
@@ -878,7 +630,32 @@ collects the plan and a half-deleted `Backup` cannot orphan one:
 - **`allowed-clusters.json`** — the cluster allowlist, in the format the CLI's
   own reader parses.
 
-Two refusals live on this path, both **terminal and never a requeue**, because
+The source connection is configured once on `KafkaCluster`. The probe and each
+backup reuse that object's bootstrap servers, SCRAM username, TLS setting and
+`auth.secretRef`. For SCRAM, both project the Secret's `password` key into
+`LOGWEIR_SOURCE_PASSWORD` with `valueFrom.secretKeyRef`. The controller never
+reads the password, and it is not copied into the plan ConfigMap. Archive
+credentials remain separate, under `Backup.spec.archive.secretRef`.
+
+These Jobs open separate connections: a completed probe leaves no running
+client to share with a later backup or its engine subprocess. Each new pod
+resolves the same Secret reference, so password rotation applies to new Jobs
+without copying credentials into every Backup. A successful probe establishes
+reachability at that time; backup permissions and the engine's credential
+rendering restrictions are still checked by the backup runner.
+
+A SCRAM source with a missing or blank `auth.secretRef.name` now produces
+`CredentialNotRenderable` before a plan or Job is created. An absent Secret or
+missing `password` key is reported by Kubernetes when it starts the pod.
+
+If an older controller created a Job that failed with
+`LOGWEIR_SOURCE_PASSWORD is unset`, deploy the corrected **controller** image
+and start a new Backup (or wait for the next scheduled slot). Updating a
+Deployment does not change existing Job pod templates, and a terminal Backup
+is deliberately not rerun. No connection or Secret needs to be recreated when
+the existing `KafkaCluster` reference is valid.
+
+Other refusals on this path are **terminal and never a requeue**, because
 `Backup.spec` is CEL-immutable and the next pass would read the same spec:
 `spec.sourceRef` naming a `KafkaCluster` that does not exist is
 `ReferentNotFound`, and a topic carrying a glob metacharacter (`*`, `?`, `[`,
@@ -886,12 +663,14 @@ Two refusals live on this path, both **terminal and never a requeue**, because
 mandatory named allowlist, and the rail is the same one the runner uses.
 
 A **409** on the ConfigMap `POST` is success only when the existing object
-carries a controller owner reference with **this** `Backup`'s UID. That is the
-ordinary case — a previous pass of this same reconcile, whose bytes are
-identical because the plan is a pure function of an immutable spec. A 409 on
-somebody else's object is `PlanConfigMapConflict`: writing the Job then would
-mount a plan document a stranger wrote, at the mount path of the pod that holds
-the signing key.
+carries a controller owner reference with **this** `Backup`'s UID and its
+executable plan and target allowlist match the current plan. A newly observed
+source cluster ID is informational on this path and does not invalidate a retry.
+Foreign ownership or conflicting plan data produces
+`PlanConfigMapConflict`, before a Job is created. A cluster may have been
+deleted and recreated between retries; this check prevents old plan bytes
+from being combined with its new credentials. The controller does not overwrite
+an existing plan that another reconcile might already have mounted.
 
 **Why the allowlist is a ConfigMap key here when the drill path keeps its own in
 a Secret.** On the drill path `allowedClusterIds` authorises a restore
@@ -996,68 +775,14 @@ legacy unprefixed `job-name=<job>` when that returns nothing — both are set on
 name**, never by index, because an init container or a logging sidecar would put
 an unrelated `exitCode: 0` at index 0.
 
-### Verified live, 2026-09-10, `docker-desktop` v1.34.1
-
-A controller-built Job (the real output of `job::build`, applied into
-`logweir-t17`) whose runner was handed a plan the phase-−1 admission guard
-refuses. What the cluster actually showed:
-
-```
-$ kubectl --context docker-desktop -n logweir-t17 get pods -l batch.kubernetes.io/job-name=logweir-backup-t17-live
-NAME                            READY   STATUS   RESTARTS   AGE
-logweir-backup-t17-live-wf42j   0/1     Error    0          8s          # ONE pod; "Error", no code
-
-$ kubectl --context docker-desktop -n logweir-t17 get pod logweir-backup-t17-live-wf42j \
-    -o jsonpath='{range .status.containerStatuses[*]}{.name}={.state.terminated.exitCode}{"\n"}{end}'
-runner=3                                                                # the code, at the one path
-
-$ kubectl --context docker-desktop -n logweir-t17 get job logweir-backup-t17-live \
-    -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].reason}'
-FailureTarget Failed=PodFailurePolicy PodFailurePolicy                  # not BackoffLimitExceeded
-```
-
-Four other things were confirmed on the same pod: `spec.ttlSecondsAfterFinished`
-was **empty** at creation and took the 604800 patch afterwards; the pod's
-`securityContext` landed as `{fsGroup: 65532, runAsUser: 65532, runAsGroup:
-65532, runAsNonRoot: true, seccompProfile: RuntimeDefault}`; its volume list was
-exactly `signing`, `plan`, `work` with **no `kube-api-access-*` projection**, so
-`automountServiceAccountToken: false` really does keep a token out of the
-key-holding pod; and **both** job-name labels were present —
-`batch.kubernetes.io/job-name` and the legacy `job-name` — each selector
-returning the one pod, which is what the reconciler's prefixed-then-legacy
-fallback is written against.
-
 ### One surprise worth knowing: `refusal-reason=` is the last line of *stdout*, not of the pod log
 
 `logweir backup run` prints `refusal-reason=<TerminalState>` as its **final
 stdout line** for exit 3 — that is the CLI's contract and it holds. But a pod
 log is **stdout and stderr merged in nondeterministic order**, and `backup run`
-also writes the guard's full explanation to stderr. Measured **twice on
-`docker-desktop` v1.34.1, from the same refusal**, `kubectl logs` returned the
-discriminator in two different positions — second-to-last in one run:
-
-```
-refusal-reason=GuardRefused
-guard: plan refused by the admission guard: source topic `orders*` contains a glob metacharacter …
-```
-
-and last in the other:
-
-```
-guard: plan refused by the admission guard: source topic `orders*` contains a glob metacharacter …
-INFO backup finished
-refusal-reason=GuardRefused
-```
-
-So the position is not a rule, in either direction: **no controller-side reader
-may take "the last line of the pod log", and none may take the second-to-last
-either.** This is the practical consequence of the fact §1 already states — the
-pod log API has no stream selector — and it is why every reader in this
-controller scans a **bounded tail** and matches **by key name**
-(`controllers::backup::{evidence_keys, refusal_state}`, with
-`KEY_SCAN_TAIL_LINES = 8`). A reader written against a POSITION would have
-reported no terminal state at all on whichever of the two runs did not match
-it.
+also writes the guard's full explanation to stderr. The controller therefore scans the final eight non-empty log lines and
+matches by key name (`KEY_SCAN_TAIL_LINES = 8`). Missing evidence keys remain
+unset; a missing exit-3 discriminator becomes `GuardRefusedUnknownReason`.
 
 ### What a green `Backup` requires
 
@@ -1067,159 +792,40 @@ Both, and nothing else. A `Backup` carries **no `outcome`** — that field is
 with. Verification itself is not this reconciler's work; it records the two
 keys and leaves `evidence.verification` alone.
 
-## 11. Task 7 — the five-listener compose stack, and the one string CI overrides
+## 11. Compose listeners and Kubernetes access
 
-`e2e/compose/docker-compose.yml` has exactly one editor (STANDING RULE 15), and
-from Task 7 onward every task that brings the stack up gets a broker with
-**five listeners** plus a `scram-setup` step that must have exited 0 before any
-SASL client authenticates.
+The [compose stack](../e2e/compose/docker-compose.yml) exposes six listeners,
+including the KRaft controller listener:
 
-| listener | `listeners` | `advertised.listeners` | protocol | published | who reaches it |
-|---|---|---|---|---|---|
-| `PLAINTEXT` | `kafka-broker-1:9094` | `kafka-broker-1:9094` | PLAINTEXT | no | inter-broker; every in-network setup step |
-| `EXTERNAL` | `kafka-broker-1:9092` | `localhost:9092` | PLAINTEXT | `9092:9092` | the host-side e2e harness |
-| `CONTROLLER` | `kafka-broker-1:9093` | — | PLAINTEXT | no | the KRaft quorum |
-| `SASL` | `kafka-broker-1:9096` | `kafka-broker-1:9096` | SASL_PLAINTEXT | no | in-network SCRAM |
-| `SASLEXT` | `kafka-broker-1:9097` | `localhost:9097` | SASL_PLAINTEXT | `9097:9097` | host-side SCRAM |
-| `K8S` | `kafka-broker-1:9095` | `${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095` | PLAINTEXT | `9095:9095` | **a pod** |
+| Listener | Advertised address | Protocol | Consumer |
+|---|---|---|---|
+| PLAINTEXT | kafka-broker-1:9094 | PLAINTEXT | In-network setup/inter-broker |
+| EXTERNAL | localhost:9092 | PLAINTEXT | Host harness |
+| CONTROLLER | Not advertised | PLAINTEXT | KRaft quorum on 9093 |
+| SASL | kafka-broker-1:9096 | SASL_PLAINTEXT | In-network SCRAM |
+| SASLEXT | localhost:9097 | SASL_PLAINTEXT | Host SCRAM |
+| K8S | `${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095` | PLAINTEXT | Pods |
 
-`SASL` and `SASLEXT` are **one credential store advertised twice**, not two
-security configurations. A broker's metadata redirects a client to the
-*advertised* name whatever address it bootstrapped against, so a single
-`SASL://kafka-broker-1:9096` is unreachable from the host and a single
-`SASLEXT://localhost:9097` is the container's own loopback. Both, or neither
-client works.
+Kafka redirects clients to its advertised address after bootstrap. A pod given
+`localhost:9092` therefore attempts to reach itself. Docker Desktop resolves
+`host.docker.internal`; the kind demo installs a CoreDNS mapping (§18).
+Other harnesses can set `LOGWEIR_K8S_ADVERTISED_HOST` before starting compose.
 
-### `host.docker.internal:9095` is the pod bootstrap, and it is a Docker Desktop behaviour
+`just e2e-up` runs `scram-setup` after the broker is ready, using its PLAINTEXT
+listener to create the SCRAM credential. The setup is idempotent and its exit
+status must succeed before a SASL client runs.
 
-`KafkaCluster.spec.bootstrapServers` in Demo 1 is exactly
-`host.docker.internal:9095`. `EXTERNAL://localhost:9092` cannot serve a pod at
-all — the broker hands back `localhost:9092`, which inside a pod is the pod's
-own loopback — so the K8S listener exists for the Kubernetes path and nothing
-else.
+The Kafka image maps `___` to `-`, `__` to `_`, and `_` to `.` after removing
+`KAFKA_`. For example,
+`KAFKA_LISTENER_NAME_SASL_SCRAM___SHA___512_SASL_JAAS_CONFIG` becomes
+`listener.name.sasl.scram-sha-512.sasl.jaas.config`. Both SASL listeners need
+that property; the SCRAM test reads the running broker's properties to catch
+silent misspellings.
 
-**A published port is not the same claim as a resolvable name inside a pod.**
-`host.docker.internal` resolution inside pods comes from Docker Desktop, not
-from Kubernetes, so it is verified with a real pod:
-
-```
-kubectl --context docker-desktop create ns logweir-t7
-kubectl --context docker-desktop -n logweir-t7 run probe --rm -i --restart=Never \
-  --image=busybox -- sh -c 'nc -z host.docker.internal 9095'; echo "rc=$?"
-kubectl --context docker-desktop delete ns logweir-t7 --ignore-not-found
-```
-
-Measured on `docker-desktop` v1.34.1, 2026-09-10: **rc=0**. The same probe
-against the unpublished 9096 returns **rc=1**, which is what makes the 0 mean
-something. If the NAME does not resolve on some host, the fallback
-(`hostNetwork`, or the host's LAN address written into
-`KafkaCluster.spec.bootstrapServers`) is a controller decision, not an
-implementer's.
-
-### `LOGWEIR_K8S_ADVERTISED_HOST` is the one string a CI runner overrides
-
-`host.docker.internal` does not resolve inside a `kind` node on a Linux GitHub
-runner. The advertised K8S name is therefore a compose **parameter** with
-`host.docker.internal` as its default, which every local gate uses:
-
-```
-docker compose -f e2e/compose/docker-compose.yml config -q; echo "rc=$?"
-# rc=0 → K8S://host.docker.internal:9095
-
-LOGWEIR_K8S_ADVERTISED_HOST=172.18.0.1 \
-  docker compose -f e2e/compose/docker-compose.yml config -q; echo "rc=$?"
-# rc=0 → K8S://172.18.0.1:9095
-```
-
-Set it to the address the cluster's nodes can reach (on `kind`, the docker
-bridge gateway) and change nothing else. Without a parameter here, a later task
-would have to edit the compose file and break STANDING RULE 15 to get one.
-
-### `scram-setup` runs third, and its exit code is load-bearing
-
-In KRaft there is no ZooKeeper to pre-seed and no `--zookeeper` path: a SCRAM
-credential is a user config record in the metadata log, so it has to be written
-by a **client**, after the quorum is serving, **over the PLAINTEXT listener** —
-the credential being created is the credential a SASL client would need, so
-bootstrapping it over a SASL listener is circular and fails. `just e2e-up` runs
-it as a third foreground step and `just` checks its status:
-
-```
-docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm scram-setup
-# /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-broker-1:9094 --alter \
-#   --add-config 'SCRAM-SHA-512=[password=…]' --entity-type users --entity-name logweir
-# → Completed updating config for user logweir.
-```
-
-`--alter --add-config` is idempotent, so `just e2e-up` against a stack that is
-already up still exits 0.
-
-### The listener-scoped JAAS variable: the spelling, measured
-
-Spec §15's sixth `[UNVERIFIED]` mark was the exact spelling of the
-listener-scoped JAAS environment variable under the `apache/kafka` entrypoint.
-**It is closed by execution.** `kafka.docker.KafkaDockerWrapper` strips the
-`KAFKA_` prefix, lowercases, and then maps `___` → `-`, `__` → `_`, `_` → `.`,
-so the two variables
-
-```yaml
-KAFKA_LISTENER_NAME_SASL_SCRAM___SHA___512_SASL_JAAS_CONFIG:    'org.apache.kafka.common.security.scram.ScramLoginModule required;'
-KAFKA_LISTENER_NAME_SASLEXT_SCRAM___SHA___512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
-```
-
-produce these properties. Read back off the RUNNING broker with
-`docker compose -f e2e/compose/docker-compose.yml exec kafka-broker-1 cat /opt/kafka/config/server.properties`
-on 2026-09-10, `apache/kafka:3.7.1`:
-
-```
-listener.name.saslext.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
-listener.name.sasl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
-```
-
-and as the exit code the e2e row reads directly:
-
-```
-docker compose -f e2e/compose/docker-compose.yml exec kafka-broker-1 \
-  grep -q 'listener.name.sasl.scram-sha-512.sasl.jaas.config' /opt/kafka/config/server.properties; echo "rc=$?"
-# rc=0   (and rc=0 for listener.name.saslext.…)
-```
-
-The alternative form the procedure allowed for — a single
-`KAFKA_SASL_JAAS_CONFIG` plus `KAFKA_LISTENER_NAME_SASL_SASL_ENABLED_MECHANISMS`
-— was **not needed** and is not shipped.
-
-**Why this is asserted where it lands, and not by "the broker started".** A
-misspelled `KAFKA_…` variable is not an error under that entrypoint: the
-wrapper translates whatever it is given and the broker starts happily without
-the property. The failure then surfaces as an authentication error in some
-other test — the same silently-ignored-key shape as the rendered documents'
-`security:` block. So the property is checked in `server.properties`.
-
-### Both SCRAM clients, because they do not agree on the spelling
-
-`e2e/tests/scram.rs` exercises the two independent implementations:
-
-* **Logweir's** client is librdkafka — `sasl.mechanism=SCRAM-SHA-512`, two
-  hyphens, configured through `AuthConfig::from_spec`;
-* **the engine's** is a from-scratch RFC 5802 client —
-  `sasl_mechanism: "SCRAM-SHA512"`, ONE hyphen, configured by the four keys
-  under `security:`.
-
-One enabled broker mechanism (`sasl.enabled.mechanisms=SCRAM-SHA-512`) serves
-both. A wrong password fails as an **authentication** failure and never as
-`No available brokers`, which is what a silent PLAINTEXT downgrade against a
-SASL-only listener looks like:
-
-```
-librdkafka: Global error: Authentication (Local: Authentication failure):
-sasl_plaintext://localhost:9097/bootstrap: SASL authentication error: Authentication
-failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-512
-```
-
-The compose SCRAM password is a **fixture constant**, not key material: it
-authenticates to one throwaway broker on one developer machine. It appears in
-the compose file, the harness and the e2e config on purpose. No signing key
-appears anywhere in this repository.
+Logweir's librdkafka client calls the mechanism `SCRAM-SHA-512`; the engine's
+configuration calls it `SCRAM-SHA512`. Both are exercised by
+[e2e/tests/scram.rs](../e2e/tests/scram.rs). The compose password is a
+throwaway fixture, not a deployment credential.
 
 ## 12. A `Restore` runs only against a verified approval, and the hash is recomputed here
 
@@ -1249,10 +855,9 @@ it runs four checks, in this order:
 | 3 | `sha256(spec.planBytes)` equals the `plan_hash` **inside** `Approval.spec.approvalBytes` | `PlanHashMismatch`, terminal, naming both hashes |
 | 4 | `spec.target.clusterRef` resolves to a `KafkaCluster` with `status.reachable: true` | `ClusterNotReachable`, terminal |
 
-**An unapproved plan creates nothing at all** — no ConfigMap, no Job, zero
-`POST`s. So **exit 3 from a `Restore`'s pod now means only "a phase-0 admission
-guard refused"**, and the exit-code table of §10 reads the same way for both
-kinds.
+**An unapproved plan creates no ConfigMap or Job.** The runner still validates
+its mounted approval bundle and credentials, so an exit 3 requires reading
+`refusal-reason=` rather than assuming one particular guard fired.
 
 Check 1 and check 2 are different facts and are reported under different
 names. Check 1 is *you did not ask for authorisation*: the ref is empty, `spec`
@@ -1372,7 +977,7 @@ Interface **I8**'s three evidence keys are read the same way, by name:
 
 ```
 scorecard-key=logweir/drills/<run_id>.json
-sidecar-key=logweir/drills/<run_id>.json.sig
+sidecar-key=logweir/drills/<run_id>.sig
 offset-report-key=logweir/drills/<run_id>.offsets.json
 ```
 
@@ -1476,550 +1081,80 @@ code lives only on the pod.
 
 ---
 
-## 13. Where the install lives
+## 13. Install, RBAC and network policy
 
-**The install steps are in [install.md](install.md), and only there.** This
-document is the operational manual — the exit-code contract, the reconcilers,
-the listener stack, the RBAC reasoning and the recorded transcripts. It used to
-carry the install steps as well, which meant two documents could disagree about
-the one procedure a stranger performs without running a test first. Chain W's
-ruling is that the tree carries **one** install path; this section is the
-pointer that replaced the second copy.
+[install.md](install.md) is the installation and uninstall procedure. Older
+error messages saying “docs/kubernetes.md install step 1” refer to that guide's
+keypair, roster and Secret preparation. See §16, Serving the UI, for the local
+proxy and its authority.
 
-**What moved, exactly.** Five blocks of prose left this section for
-[install.md](install.md), unchanged in substance:
+`logweir-operator` grants ordinary `update` on BackupSchedules. CEL in the CRD,
+not RBAC, restricts mutation to `spec.suspend`. The controller has reads on the
+six kinds, status patches, Backup creation, Job create/read/patch, Pod and
+`pods/log` reads, and ConfigMap create/get. It has no Secret read, pod exec,
+pod attach or delete permission. Inspect [config/rbac](../config/rbac/) for
+the authoritative grants.
 
-| what was here | where it is now |
-|---|---|
-| the minimum-Kubernetes line, the one-command apply, what `logweir.yaml` is, "it does not start a pod", and the author-only local-images path | install.md, *Two supported paths* |
-| install step 1a — the two `openssl genpkey` keypair commands and the silent-mint warning | install.md, *1. The two keypairs* |
-| install step 1b — the cluster-scoped `TrustRoster` whose name is fixed at `default` | install.md, *2. The cluster-scoped `TrustRoster`* |
-| install step 1c — the five Secrets, their data keys, and `just check-secrets` | install.md, *3. The five Secrets* (the preflight moved ahead of them) |
-| install steps 1d and 1e — the per-namespace runner ServiceAccount and the three role bindings | install.md, *4.* and *5.* |
-| *Uninstall, and what it leaves behind* | install.md, *Uninstall* |
+Job creation still allows the controller to mount a signing Secret. No Secret
+read permission is not isolation from the signing key; see §15.
 
-**What did NOT move, and why.** The rest of this section is measurement, not
-instruction: the RBAC reasoning below, the NetworkPolicy's `[UNVERIFIED]` mark
-in place, the `ValidatingAdmissionPolicy` note, and the recorded X-APPLY
-transcript at the end. §14's X-DIGEST transcript and §16's UI section are the
-same kind of thing. A transcript is evidence of what happened on a named day on
-a named cluster; moving it would be rewriting it.
+`logweir-runner-egress` selects all Job pods in its namespace using
+`batch.kubernetes.io/job-name: Exists`. It permits DNS, the configured broker
+ports, and object-store ports 443/9000. The base installs it in
+`logweir-system`; apply it to each additional runner namespace using the
+command in [install.md](install.md).
 
-**"See `docs/kubernetes.md` install step 1" now means install.md step 1.** That
-sentence is baked into `just check-secrets`'s failure message and into two
-controller error strings (`approval.rs`, `trust_roster.rs`). They point at this
-section, and this section points on: the keypairs are step 1 of
-[install.md](install.md), the roster is step 2, the Secrets are step 3. Those
-three strings are owed a one-word edit by their next editor; the redirect is
-written here rather than left to be inferred.
+[UNVERIFIED — enforcement needs a kind cluster with Calico and a runner probe that times out to a disallowed address while reaching Kafka.]
+Docker Desktop did not enforce the policy in the recorded tests.
 
-### `update` on `backupschedules` is plain, and the `suspend` restriction is CEL
+The [ValidatingAdmissionPolicy example](../config/samples/validatingadmissionpolicy.yaml)
+is commented out, requires 1.30+, and is excluded from the install.
+[UNVERIFIED — needs a 1.30+ cluster to apply and exercise the policy.]
+The CRDs' own CEL rules remain the installed immutability control.
 
-`logweir-operator` grants a **plain `update`** on `backupschedules`. It cannot
-grant a restricted one: **an RBAC `rules[]` entry is
-`apiGroups`/`resources`/`verbs`/`resourceNames` and nothing else — there is no
-field in which a CEL expression could be written**, so "CEL-restricted `update`
-of `suspend`" is not expressible in a ClusterRole and must not be attempted.
+X-APPLY was recorded against docker-desktop v1.34.1: applying the manifest
+twice returned zero, while the controller remained in `ImagePullBackOff` for
+an unpublished image. A successful apply establishes object creation, not a
+working installation or publication. Release evidence is tracked in
+[tag1-checklist.md](tag1-checklist.md).
 
-The restriction exists one layer up, in the CRD.
-`config/crd/backupschedules.yaml` carries an object-level
-`x-kubernetes-validations` rule over `.spec` that seals `schedule`, `sourceRef`,
-`topics`, `archive` and `retention` — every field except `suspend` — with the
-message `only spec.suspend is mutable; create a new BackupSchedule instead`. The
-API server applies it to **every** subject, cluster-admin included, which is a
-stronger statement than any ClusterRole could make about any one of them.
+## 14. Image references and the org-root anchor
 
-### What the controller can read, and what it cannot
+The historical X-DIGEST probes on docker-desktop (2026-09-11) established that
+local images had repository digests and pods could start from those digests
+when the complete reference existed in the node's image store. The same digest
+under another repository produced `ErrImageNeverPull`. Retagging resolved that
+case only when the image bytes still matched the pinned digest.
 
-The `weirkeeper` ClusterRole is written by one rule: **every granted verb has a
-caller**. It carries `get/list/watch` on the six kinds; `create` on `backups`
-(that is how a `BackupSchedule` produces a run); `patch` on the six `/status`
-subresources and nothing else of the object; `create/get/list/watch/patch` on
-`batch/v1` Jobs; `get/list/watch` on Pods; **one rule naming `pods/log`, with
-`get`**; and `create/get` on ConfigMaps.
+BuildKit provenance changed the observed manifest-list digest even on a cached
+rebuild. Read current pins from `config/manager/deployment.yaml` and
+`crates/weirkeeper/src/job.rs`; historical build digests are not install values.
+The local-image path and the registry path are documented in [install.md](install.md).
+Local builds are **author-only** and do not establish public pullability.
 
-It has **no verb on `secrets`, anywhere**. The runner's signing key, approval
-bundle and SCRAM credential reach its pod because the **kubelet** projects them
-from references the controller writes into a PodSpec — writing a reference is not
-reading a value. **This bounds reads and not capability:** Job create in a
-namespace holding the signing key is equivalent to holding the key, because the
-controller can create a pod that mounts it. That is O1/O0 default (a), accepted,
-and it is said here rather than left to be inferred.
+The controller reads `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY`
+once at startup. Blank values use the compiled defaults: the pinned runner
+image and `Never`. Policy values are `Never`, `IfNotPresent`, or `Always`;
+any other value refuses startup. These overrides let a newly built controller
+use the runner image actually loaded or published for the deployment.
 
-It has **no `delete` on anything**. A finished Job is removed by the API server's
-TTL controller after the controller patches `ttlSecondsAfterFinished` — after the
-status write, because the TTL controller deletes the Job *and its pods*, and the
-exit code lives only on the pod. The plan ConfigMap and the probe Job are removed
-by ownerReference garbage collection.
-
-**`pods/log` is a subresource and `get` on `pods` does not grant it.** Without an
-explicit `resources: ["pods/log"]` rule the API server answers 403 for every
-`GET /api/v1/namespaces/<ns>/pods/<p>/log`, and the visible symptom is not a
-crash: it is every `status.evidence.*` key staying empty, forever, behind an
-error that looks transient. No rule anywhere names `pods/exec` or `pods/attach`.
-
-### The NetworkPolicy
-
-`logweir.yaml` ships `logweir-runner-egress`: default-deny egress on Job pods,
-with explicit allowances for DNS to `kube-system`, the five broker listener ports
-and the object store's 443/9000.
-
-`[UNVERIFIED — docker-desktop runs no CNI that enforces NetworkPolicy, so a deny
-is never observed here; only the kind+Calico probe would make this claim real,
-and it is backlogged]` The same mark is in
-[../config/manager/networkpolicy.yaml](../config/manager/networkpolicy.yaml),
-with the sentence that would verify it: create a `kind` cluster with Calico,
-install the policy, and show a runner pod's connection to a disallowed address
-timing out while the broker connection succeeds. Neither half has been run.
-
-Two honest caveats. A NetworkPolicy is **namespaced**, and `logweir.yaml`
-installs this one into `logweir-system`, where no runner ever runs — apply it
-into each runner namespace too. The source manifest carries
-`namespace: logweir-system` (that is how it lands in `logweir.yaml`), and
-`kubectl apply -n <namespace>` refuses a file whose own namespace disagrees,
-so drop that one line on the way in:
-
-```bash
-kubectl --context docker-desktop -n <namespace> \
-  apply -f <(sed '/^  namespace: logweir-system$/d' config/manager/networkpolicy.yaml)
-```
-
-And the selector is `batch.kubernetes.io/job-name: Exists`, because
-`job::build` gives runner pods no label of their own, so the policy also covers
-any other batch work in that namespace.
-
-### The `ValidatingAdmissionPolicy` example
-
-[../config/samples/validatingadmissionpolicy.yaml](../config/samples/validatingadmissionpolicy.yaml)
-ships **commented out** and labelled 1.30+, carrying
-`[UNVERIFIED — needs a 1.30+ cluster]` in place. It is not rendered into
-`logweir.yaml` by any kustomization: a `ValidatingAdmissionPolicy` document
-applied to a 1.29 cluster is rejected, and an install file carrying one would
-fail on the stated floor. `optionalOldSelf` is 1.30+, which is why immutability
-over an object with optional fields has to be an object-level rule there — the
-same shape `config/crd/backupschedules.yaml` already uses, inside the CRD, where
-it works on 1.29.
-
-### X-APPLY, recorded
-
-Spec §16 clause 1. Run on `docker-desktop` (client v1.35.0 with Kustomize v5.7.1
-built in, server v1.34.1) against a cluster that had never held a `logweir.dev`
-CRD — the pre-flight below is what establishes that.
-
-```bash
-crds=$(kubectl --context docker-desktop get crd -o name)
-echo "rc=$?"
-# rc=0
-printf '%s\n' "$crds" | grep -c 'logweir.dev'
-# 0
-```
-
-```bash
-kubectl --context docker-desktop apply --server-side -f logweir.yaml
-# namespace/logweir-system serverside-applied
-# customresourcedefinition.apiextensions.k8s.io/approvals.logweir.dev serverside-applied
-# customresourcedefinition.apiextensions.k8s.io/backups.logweir.dev serverside-applied
-# customresourcedefinition.apiextensions.k8s.io/backupschedules.logweir.dev serverside-applied
-# customresourcedefinition.apiextensions.k8s.io/kafkaclusters.logweir.dev serverside-applied
-# customresourcedefinition.apiextensions.k8s.io/restores.logweir.dev serverside-applied
-# customresourcedefinition.apiextensions.k8s.io/trustrosters.logweir.dev serverside-applied
-# serviceaccount/weirkeeper serverside-applied
-# clusterrole.rbac.authorization.k8s.io/logweir-approver serverside-applied
-# clusterrole.rbac.authorization.k8s.io/logweir-operator serverside-applied
-# clusterrole.rbac.authorization.k8s.io/logweir-viewer serverside-applied
-# clusterrole.rbac.authorization.k8s.io/weirkeeper serverside-applied
-# clusterrolebinding.rbac.authorization.k8s.io/weirkeeper serverside-applied
-# deployment.apps/weirkeeper serverside-applied
-# networkpolicy.networking.k8s.io/logweir-runner-egress serverside-applied
-echo "rc=$?"
-# rc=0
-
-kubectl --context docker-desktop apply --server-side -f logweir.yaml
-# (the same fifteen lines, all `serverside-applied`)
-echo "rc=$?"
-# rc=0
-```
-
-Fifteen documents, twice, `rc=0` both times — and the second run reports
-`serverside-applied` for all fifteen rather than erroring on a kind whose CRD is
-still establishing, because the file carries no custom resource.
-
-**The pod does not start, and X-APPLY does not claim it does:**
-
-```bash
-kubectl --context docker-desktop -n logweir-system get pods
-# NAME                          READY   STATUS             RESTARTS   AGE
-# weirkeeper-7ccb764bcd-bf8cc   0/1     ImagePullBackOff   0          22s
-echo "rc=$?"
-# rc=0
-```
-
-The waiting message is `Error response from daemon: error from registry:
-denied`. That is the expected and recorded result of Global Constraint 37: the
-image is referenced by tag, no such image has been pushed, and the install file's
-digest rows read `blocked: images not published`. **X-APPLY proves `kubectl apply` exits 0;
-it does not start a pod**, so on its own it can be ticked while the documented
-install works for nobody but the author. What closes spec §16 clause 1 is pulling
-the published digests back from a registry the author does not control, which is
-Task 30b's.
-
-The missing-Secret pre-flight, on a namespace holding none of the five:
-
-```bash
-just check-secrets logweir-t21; echo "rc=$?"
-# check-secrets: logweir-signing-key is absent from namespace logweir-t21
-# ...
-# rc=1
-```
-
-And the cleanup, which is how this transcript ends:
-
-```bash
-kubectl --context docker-desktop delete -f logweir.yaml; echo "rc=$?"
-kubectl --context docker-desktop delete ns logweir-system logweir-t21 --ignore-not-found; echo "rc=$?"
-```
-
-## 14. X-DIGEST, run: does a digest reference start a pod?
-
-**This section is a transcript, not an argument.** Spec §15's `[UNVERIFIED]`
-mark 2 said, of stage-2 Task 16's digest work: *build, reference by digest,
-apply on docker-desktop, see whether a pod starts.* It was run on **2026-09-11**
-against docker-desktop (client v1.35.0 / Kustomize v5.7.1, server v1.34.1), and
-this is what came back. Everything measured here is **author-only** (Global
-Constraint 37) and **none of it satisfies spec §16 clause 1**: "published"
-means a pull from a registry the author does not control, and every byte below
-lives on one laptop.
-
-### 14.1 The org-root anchor, and what it is the fingerprint OF
-
-`third_party/org-root.fingerprint` is one line — `sha256:` plus 64 lowercase
-hex — and both images `COPY` it to `/etc/logweir/org-root.fingerprint`
-(stage-2 Task 16's T1). The value is the **SHA-256 of the SubjectPublicKeyInfo
-DER encoding of the org root's PUBLIC key**, the same definition of
-"fingerprint" [keys.md](keys.md) gives for a signing key. The bytes it is the
-hash of are checked in beside it, so the number is reproducible rather than
-unfalsifiable:
+Both images embed `third_party/org-root.fingerprint` at
+`/etc/logweir/org-root.fingerprint`. It is SHA-256 of the public key's DER SPKI:
 
 ```bash
 openssl pkey -pubin -in third_party/org-root.pub.pem -outform DER | openssl dgst -sha256
-# SHA2-256(stdin)= 09238e462664c556f5baa653eef23255b6d62e8ef39d928d02cb7f336637b030
 cat third_party/org-root.fingerprint
-# sha256:09238e462664c556f5baa653eef23255b6d62e8ef39d928d02cb7f336637b030
+just check-org-root
 ```
 
-**No private key material is in this repository's `third_party/`.** The keypair
-was generated outside the tree with [keys.md](keys.md)'s own `openssl` recipe,
-the public half was checked in, and the private half was overwritten and
-removed in the same shell. That is deliberate and it is the honest shape for a
-shipped default: this anchor **authorises nothing**. An adopter replaces
-`third_party/org-root.pub.pem` and `third_party/org-root.fingerprint` with
-their own org root's and rebuilds both images — the fingerprint is baked at
-build time precisely so that whoever controls the cluster cannot change it
-without producing a different image.
-
-**Nothing reads it yet, and that is the point.** Phase 0 does not open
-`/etc/logweir/org-root.fingerprint` in tag 1 —
-`crates/logweir/tests/manifest_lint.rs`'s
-`the_fingerprint_is_not_read_at_runtime` asserts no code line under `crates/`
-names that path. The anchor ships so that it EXISTS before the control that
-verifies against it (G5's pod-side `--org-key` refusal, Phase 3).
-
-The gate over both images:
-
-```bash
-just image && just image-weirkeeper
-just check-org-root; echo "rc=$?"
-# check-org-root: logweir:check carries the checked-in org-root fingerprint, byte for byte.
-# check-org-root: weirkeeper:check carries the checked-in org-root fingerprint, byte for byte.
-# check-org-root: both images carry third_party/org-root.fingerprint at /etc/logweir/org-root.fingerprint.
-# rc=0
-```
-
-### 14.2 Does a locally built image carry a repository digest? **Yes.**
-
-```bash
-docker inspect --format '{{index .RepoDigests 0}}' logweir:check
-# logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692
-docker inspect --format '{{index .RepoDigests 0}}' weirkeeper:check
-# weirkeeper@sha256:eab22ebf3a001c9fce7f4ef21da74f894e630925eaee25d9ffb9c47c7c8dcae2
-```
-
-It is **not empty**. On this Docker Desktop (29.2.1, containerd image store) a
-locally built image is given a manifest-list digest, and `RepoDigests` reports
-it under the local repository name. The `registry:2` fallback the plan wrote
-down was therefore **not needed and was not taken** — no registry container
-was started and no `registry:2` install step is documented here.
-
-**But the digest is not stable, and that is the most important thing this gate
-found.** Three consecutive `just image` runs produced three different digests,
-and the third was a **fully cached, two-second, no-op rebuild**:
-
-| run | context | wall clock | reported digest |
-| --- | --- | --- | --- |
-| 1 | changed | 241 s | `sha256:0cda273d6b6f6e5a…` |
-| 2 | changed (a test file edited) | 281 s | `sha256:f06437048895f5c9…` |
-| 3 | **unchanged, 11 layers CACHED** | **2 s** | `sha256:3e9828d45aea3c5d…` |
-
-BuildKit attaches a provenance attestation to the manifest list and regenerates
-it on every build, so the list digest moves even when nothing about the image
-does. A locally built digest therefore names bytes that (a) exist on exactly one
-laptop and (b) **cannot be reproduced on that laptop**. This is the strongest
-argument in the tree for Global Constraint 37's `blocked: images not published`, and it is
-why the shipped digests are recorded as measured values rather than as pins
-anyone can re-derive. A published digest comes back from `release.yml`'s push
-(Task 30b) and is stable because the registry stores the bytes.
-
-### 14.3 Does a pod start from the digest? **Yes — and the repository name is load-bearing.**
-
-Namespace `logweir-t23`, two Pods differing only in the repository half of the
-reference, the same digest in both, `imagePullPolicy: Never` in both:
-
-```bash
-kubectl --context docker-desktop -n logweir-t23 get pods
-# NAME                   READY   STATUS              RESTARTS   AGE
-# xdigest-local-name     0/1     Completed           0          20s
-# xdigest-shipped-name   0/1     ErrImageNeverPull   0          20s
-```
-
-```bash
-kubectl --context docker-desktop -n logweir-t23 get pod xdigest-local-name \
-  -o jsonpath='{.status.containerStatuses[*].state}'
-# {"terminated":{"exitCode":0,"reason":"Completed",...}}
-kubectl --context docker-desktop -n logweir-t23 get pod xdigest-local-name \
-  -o jsonpath='{.status.containerStatuses[*].imageID}'
-# docker-pullable://logweir@sha256:3e9828d45aea3c5d71df0c1b138d0eb9384eaade15807ce4405e52aa5a333692
-
-kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
-  -o jsonpath='{.status.containerStatuses[*].state}'
-# {"waiting":{"message":"Container image \"docker.io/vladyslavhaina/logweir@sha256:3e9828d4…\" is not
-#   present with pull policy of Never","reason":"ErrImageNeverPull"}}
-```
-
-**The kubelet keys on the WHOLE reference, not on the digest.** A matching
-digest under a different repository name is `ErrImageNeverPull`. One local
-`docker tag` fixes it, and the same pod then starts:
-
-```bash
-docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
-docker inspect --format '{{json .RepoDigests}}' docker.io/vladyslavhaina/logweir:v0.1.0
-# ["logweir@sha256:3e9828d4…","docker.io/vladyslavhaina/logweir@sha256:3e9828d4…"]
-
-kubectl --context docker-desktop apply -f xdigest-shipped-name.yaml   # recreated
-kubectl --context docker-desktop -n logweir-t23 get pod xdigest-shipped-name \
-  -o jsonpath='{.status.containerStatuses[*].state}'
-# {"terminated":{"exitCode":0,"reason":"Completed",...}}
-```
-
-So the **shipped** reference `docker.io/vladyslavhaina/logweir@sha256:…` —
-`weirkeeper::job::RUNNER_IMAGE` — does start a pod on this cluster, under
-`imagePullPolicy: Never`, after that one `docker tag`. That command is the
-author-only step, and it is the reason
-[../config/overlays/local-images](../config/overlays/local-images) names it in
-its header.
-
-### 14.4 The control plane starts for the first time
-
-`logweir.yaml` now references `docker.io/vladyslavhaina/weirkeeper@sha256:…` with
-`imagePullPolicy: IfNotPresent`. Applied with **no** local image under that
-repository name, the pod does exactly what Task 21 recorded and spec §16 clause
-1 predicts:
-
-```bash
-kubectl --context docker-desktop apply --server-side -f logweir.yaml; echo "rc=$?"
-# ... serverside-applied  (15 documents)
-# rc=0
-kubectl --context docker-desktop -n logweir-system get pods
-# weirkeeper-5996dbffc-kc6jk   0/1   ImagePullBackOff   0   25s
-#   message: Back-off pulling image "docker.io/vladyslavhaina/weirkeeper@sha256:eab22ebf…":
-#            ErrImagePull: error from registry: denied
-```
-
-`denied`, because nothing has been pushed. Then the author-only step, and the
-**first `weirkeeper` pod ever to run in a cluster**:
-
-```bash
-docker tag weirkeeper:check docker.io/vladyslavhaina/weirkeeper:v0.1.0
-kubectl --context docker-desktop -n logweir-system delete pod --all
-kubectl --context docker-desktop -n logweir-system get pods
-# weirkeeper-5996dbffc-nzb5j   1/1   Running   0   31s
-kubectl --context docker-desktop -n logweir-system get pod weirkeeper-5996dbffc-nzb5j \
-  -o jsonpath='{.status.containerStatuses[*].imageID}'
-# docker-pullable://weirkeeper@sha256:eab22ebf3a001c9fce7f4ef21da74f894e630925eaee25d9ffb9c47c7c8dcae2
-```
-
-**Its first 84 seconds of log are one line, and zero restarts** — which is
-what Task 16b's hot-loop fix predicts for a cluster holding no custom resource.
-A reconcile storm here would have been a finding; there was none:
-
-```json
-{"timestamp":"2026-09-11T08:35:57.301198Z","level":"ERROR","fields":{"message":"the configured
- archive URL is not readable as an object-store location; this controller holds no archive handle
- and writes no retention report","env":"LOGWEIR_ARCHIVE_URL","error":"`` is not an object-store
- URL: it has no `://`"},"target":"weirkeeper"}
-```
-
-**One finding, recorded rather than fixed here:** that line is logged at
-`ERROR` for the SHIPPED default. `config/manager/deployment.yaml` sets
-`LOGWEIR_ARCHIVE_URL: ""` on purpose — retention reporting is opt-in — so the
-default install's only startup line tells an operator something is wrong when
-nothing is. The message itself says the behaviour is intended. Making the empty
-case a `warn!` (or silent) belongs to the next editor of
-`crates/weirkeeper/src/retention.rs` and `main.rs`; it is not an image or
-manifest change and was out of Task 23's Files block.
-
-The author-only overlay was applied over the same install and the pod restarted
-onto the local tag, with the same `imageID`:
-
-```bash
-kubectl --context docker-desktop apply --server-side -k config/overlays/local-images; echo "rc=$?"
-# ... serverside-applied  (15 documents)
-# rc=0
-kubectl --context docker-desktop -n logweir-system get pod weirkeeper-566c96d8bf-qmx8w \
-  -o jsonpath='{.spec.containers[*].image}'
-# weirkeeper:check
-# ... state: {"running":{...}}
-# ... imageID: docker-pullable://weirkeeper@sha256:eab22ebf…
-```
-
-### 14.5 The answer, in one paragraph
-
-**A locally built image DOES carry a repository digest on docker-desktop, and a
-pod DOES start from a digest reference — provided the image is present on the
-node under the same repository name.** No local registry was needed. What the
-gate does **not** show, and what no local run can show, is publication: the
-digests baked into `logweir.yaml` and into `weirkeeper::job::RUNNER_IMAGE` name
-bytes on one laptop, they change on every rebuild, and the install file's digest
-rows therefore still read **`blocked: images not published`** until `release.yml` has
-pushed to a registry the author does not control and the digests have been
-pulled back from it (spec §16 clause 1, Task 30b).
-
-**And on a cluster that did not build the pins, neither reference resolves at
-all — so the demo hands the controller the images that cluster HAS** (Task 33).
-A GitHub runner builds both images minutes before the walk, at digests nothing
-in the tree names, and nothing has been pushed to `docker.io/vladyslavhaina/…`
-yet, so it is not pullable; the fourth run of
-`.github/workflows/kind-demo.yml` (2026-09-12) therefore reached step 3, applied
-the shipped `logweir.yaml`, and then watched `rollout status deploy/weirkeeper`
-exit 1 — the Deployment was pointing at the laptop's pinned controller digest,
-and every runner Job the controller would have created would have named the
-laptop's pinned runner digest, which is a Rust constant no manifest can patch.
-The fix touches no shipped file: `weirkeeper` reads **`LOGWEIR_RUNNER_IMAGE`**
-once at startup and puts its value in every Job it creates (`imagePullPolicy`
-stays `Never` — the override exists for an image LOADED onto the node, which is
-exactly what `Never` is right for), and step 3 of `scripts/demo-steps.sh` sets
-that variable with `kubectl set env`, puts the author-only controller image back
-with `kubectl set image`, and restores the overlay's `imagePullPolicy: Never` —
-all three **after** X-APPLY, which a server-side apply of `logweir.yaml` had
-just taken back. **Task 37 gave the policy its own override.**
-`LOGWEIR_RUNNER_PULL_POLICY` is read the same way, once, through
-`job::configured_runner_pull_policy`, and the parenthesis above is now history:
-the compiled-in `job::IMAGE_PULL_POLICY` is still `Never` and an unset variable
-still means it — which is why this demo, `kind` and the laptop path are
-unchanged — but `charts/logweir` names its two Logweir images by the `latest`
-tag (the owner's decision of 2026-09-12) and a tag under a policy that never
-pulls is a Job no kubelet starts, so the chart renders the variable beside the
-image one. A value that is not one of `Never` / `IfNotPresent` / `Always` makes
-the controller refuse to start, because the API server would otherwise reject
-every runner Job it created. **The ninth run, 34700987743 on commit `a113dd2`, 2026-09-12,
-is green**: step 3 handed the cluster its own images, the rollout settled, and
-all twelve steps ran through to `PHASE C EXIT CRITERION MET`. The first fires whenever the run was handed a runner reference
-that is not the default — both install branches; the other two only under the
-author-only pull policy (`Never`), because only a cluster that LOADED
-`weirkeeper:check` has it to be put back to, and the published branch's cluster
-pulled its controller image by digest and keeps it. `logweir.yaml` itself is
-applied unedited and stays
-byte-identical (`scripts/render-install.sh --check`), and a laptop walk, which
-is handed nothing, touches none of it.
-
-### 14.6 The instability, demonstrated a second time — by this task
-
-The controller image was rebuilt once after the transcript above, because
-`Dockerfile.weirkeeper`'s cross-compilation branch was replaced by a **named
-refusal**. That branch had never worked: on this arm64 host,
-`LOGWEIR_IMAGE_PLATFORM=linux/amd64` with `gcc-x86-64-linux-gnu` installed and
-the per-target `CARGO_TARGET_*_LINKER` set died after 106 s in `aws-lc-sys
-v0.45.0`'s build script (`fatal error: sys/types.h: No such file or
-directory`) — `aws-lc-sys` is in the graph through
-`logweir-store` → `object_store` → `reqwest`, and its cmake/bindgen steps reach
-for the HOST `/usr/include` rather than a cross sysroot. A code path that has
-never worked does not ship pretending to, so the image now refuses a
-`TARGETARCH != BUILDARCH` build at second one with a message naming the reason.
-
-**Consequence for Task 30b, stated here because that is where it will be
-met:** one `docker buildx build --platform linux/amd64,linux/arm64` cannot
-build this image on a single machine. Multi-arch needs one native runner per
-architecture plus a `docker manifest` / `buildx imagetools create` merge — or a
-working cross sysroot for `aws-lc-sys`. QEMU is the forbidden third option
-(STANDING RULE 10).
-
-The rebuild took **296 s** and moved the controller digest from
-`sha256:eab22ebf…` to `sha256:767e3af2…`, so `config/manager/deployment.yaml`
-and `logweir.yaml` were re-pinned and the pod-start measurement re-run against
-the new value:
-
-```bash
-kubectl --context docker-desktop apply --server-side -f logweir.yaml; echo "rc=$?"   # rc=0, 15 documents
-kubectl --context docker-desktop -n logweir-system get pods
-# weirkeeper-7c6d5dccbd-9hnpw   1/1   Running   0   35s
-kubectl --context docker-desktop -n logweir-system get pod weirkeeper-7c6d5dccbd-9hnpw \
-  -o jsonpath='{.spec.containers[*].image}'
-# docker.io/vladyslavhaina/weirkeeper@sha256:767e3af22acfd6c1a7482d09ea512ab1ee821d800384a6fc336446089f0e7e53
-# ... imageID: docker-pullable://weirkeeper@sha256:767e3af2…   restartCount: 0 at 65 s
-```
-
-**This is the same finding as §14.2, happening to the task that recorded it.**
-Editing the image's own build definition changed the image's digest, and
-writing the new digest into the manifests changed the build context again — so
-the next `just image` or `just image-weirkeeper` will report yet another digest
-for bytes nobody asked to change. **A locally pinned digest is a measurement,
-not a reproducible pin.** The pin that closes spec §16 clause 1 is the one
-`release.yml` reads back from a registry (Task 30b), and until then these rows
-read `blocked: images not published`.
-
-The cleanup, which is how this transcript ends:
-
-```bash
-kubectl --context docker-desktop delete -f logweir.yaml; echo "rc=$?"
-kubectl --context docker-desktop delete ns logweir-system logweir-t23 --ignore-not-found; echo "rc=$?"
-```
-
-### 14.7 The digests above are Task 23's measurement, and Task 24 superseded them
-
-**Every digest in this section — `logweir@sha256:3e9828d4…` and
-`weirkeeper@sha256:767e3af2…` — is the value Task 23 measured, and it is no
-longer what the tree pins.** Task 24 rebuilt both images (the controller image
-at the previous commit contained no `verification.rs` at all, so Phase B could
-not run against it), and the current pins are
-**`logweir@sha256:6440a4a0…`** in `crates/weirkeeper/src/job.rs`,
-`examples/cronjob-drill.yaml` and `e2e/k8s/phase-b-demo.md`, and
-**`weirkeeper@sha256:d198c8e2…`** in `config/manager/deployment.yaml` and
-`logweir.yaml`. `scripts/check-dod.sh` compares the tree against those.
-
-And once more, before this task landed: the re-review of fix round 1 rebuilt the controller image from the fixed source to prove the crashed-path fix live, so `a5aa6dc1…` — built before the fix — was superseded by `d198c8e2…`, and the pins above were moved to it by the controller at landing. Same rule (E19a): a local digest is a measurement of the last build; the pinned files are the truth, this paragraph is history.
-
-And once more again, for Task 28a: the controller now writes `Backup.status.backupId` on the terminal status patch — the field the restore wizard reads and the laptop walkthrough had to `kubectl patch` in by hand — so the controller image was rebuilt from that source (240 s, native `arm64`, the runner image untouched) and `weirkeeper@sha256:d198c8e2…` was superseded by **`weirkeeper@sha256:e6e3384e…`** in `config/manager/deployment.yaml` and `logweir.yaml`.
-
-And a fourth time, for Task 30b: the release task's local dry run rebuilt the controller image to assert `scripts/check-image-weirkeeper.sh`'s new `--no-exec` arm against freshly produced bytes (182 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:e6e3384e…` was superseded by **`weirkeeper@sha256:6ab14111…`** in `config/manager/deployment.yaml` and `logweir.yaml` — the same rule, the fourth instance, and the reason clause 1 of the tag-1 checklist still reads blocked.
-
-And a fifth time, after the Helm chart landed (Task 35, 2026-09-12): the `weirkeeper:check` the tree pinned (`6ab14111…`, built 2026-09-11 for Task 30b's dry run) predates Task 33, so its binary carries no `LOGWEIR_RUNNER_IMAGE` at all — measured by the chart's walk on docker-desktop, whose runner Jobs sat in `ErrImageNeverPull` under the compiled-in runner reference until the runner image was tagged with that name (E19(b)), and confirmed by the review (`strings` over the image's binary: zero occurrences). The controller image was rebuilt from the tree at `1f77f79` (338 s, native `arm64`, the runner image untouched), so `weirkeeper@sha256:6ab14111…` was superseded by **`weirkeeper@sha256:51145a3f…`** in `config/manager/deployment.yaml`, `logweir.yaml`, `charts/logweir/values.yaml` and the chart's three digest-pinned rendered files — the fifth instance of the same rule.
-
-And a sixth time, for Task 37 (2026-09-12): the chart's images are now named by the `latest` tag and the runner Jobs' pull policy follows, which means the controller reads a variable — `LOGWEIR_RUNNER_PULL_POLICY` — that `51145a3f…` was built before and therefore does not know. A walk against that image would have proven nothing about the value it was supposed to prove. The controller image was rebuilt from this branch (**223 s**, native `arm64`, the runner image untouched, `bash scripts/check-image-weirkeeper.sh weirkeeper:check` ok on all four checks), and `grep -ao LOGWEIR_RUNNER_PULL_POLICY /usr/local/bin/weirkeeper | wc -l` inside the image answered **2** — the constant and its use in the refusal message — against **0** for the image it replaced. So `weirkeeper@sha256:51145a3f…` was superseded by **`weirkeeper@sha256:fa0060bd…`** in `config/manager/deployment.yaml` and `logweir.yaml` (`./scripts/render-install.sh` then `--check` rc=0), and in **nothing else**: `charts/logweir/values.yaml` no longer carries a controller digest to move, and the chart's rendered files name `<repository>:latest`, so the re-pin does not touch them at all. The sixth instance of the same rule, and the first one whose blast radius the tag ruling shrank.
-
-This section is **not** edited to match, and that is deliberate: it is a
-transcript of commands that were run and the values they printed on the day
-they were run, and rewriting a measurement to agree with a later one destroys
-the only thing it was worth keeping (plan erratum **E19(a)**). Read it as
-history. The §14.6 paragraph immediately above says why any of these numbers
-move at all: **a locally pinned digest is a measurement, not a reproducible
-pin**, and editing anything in an image's build context — including writing a
-digest into a manifest — changes it again. Task 24's rebuild is the fourth
-instance of exactly that, and `blocked: images not published` still stands until
-`release.yml` reads a digest back from a registry (Task 30b).
+The shipped public key's private half was not retained in the repository.
+Adopters can replace the public key and fingerprint and rebuild both images.
+**No runtime code reads this anchor yet**: it is not an authorization control.
+See [keys.md](keys.md) for key identity and attestation.
 
 ## 15. The evidence credential, the verdict, and the signing-oracle residual
 
-**Task 24, chain W slot 17.** `weirkeeper` verifies the evidence the UI renders
-— and renders only a verdict that actually happened.
+`weirkeeper` verifies evidence for the UI using read-only object-store access.
 
 ### 15.1 The fifth Secret, and the documented switch
 
@@ -2136,13 +1271,10 @@ graph), and the *capability* to sign is unbroken while the controller holds Job
 CRUD over the signing key's namespace. Both halves are true at once and the
 second is not softened by the first.
 
-**The hardened layout is documented, not mandated.** Putting
-`logweir-signing-key` in a namespace where `weirkeeper` has no Job CRUD removes
-the oracle — and it also splits the single-namespace install that the "a
-stranger applies one file" decision rests on, so it is an adopter's choice and
-not a requirement. An adopter who takes it runs a second, namespace-scoped
-RoleBinding for the runner and keeps `logweir.yaml`'s ClusterRole away from
-that namespace's Jobs.
+To remove that capability, the signing key must live beyond the controller's
+Job-create authority and a separate trusted execution mechanism must perform
+the signing. Merely adding a namespace-scoped RoleBinding does not narrow the
+shipped cluster-wide grant. This split is not implemented by the default install.
 
 None of this stops a cluster-admin — `docs/stability.md`, **O0**.
 
@@ -2168,17 +1300,9 @@ it was before.
 
 ## 16. Serving the UI
 
-The UI is a directory of static files -- `ui/` in this repository -- and a
-Kubernetes API client. It is not installed onto the cluster: tag 1 ships **no
-server-side UI component at all**, no `weirkeeper-ui` image, no sidecar and no
-HTTP surface of its own (§11). Nothing below changes what is running in
-`logweir-system`; it changes only what is running on the operator's laptop.
-
-Everything in this section follows the install in §13: the CRDs, the RBAC and
-the controller are already applied, and the cluster-scoped `TrustRoster` of
-install step 1b already exists. The page surfaces that snippet and does not
-submit it -- a `TrustRoster` is cluster-scoped and admin-only, and no page may
-write one.
+The local UI serves static files from `ui/` through `kubectl proxy` after the
+install and roster setup in [install.md](install.md). The optional Helm UI is
+an in-cluster alternative with a different credential boundary (§19).
 
 Serve the directory and the Kubernetes API from one process:
 
@@ -2317,7 +1441,7 @@ The rule is therefore: **mint both `metadata.name`s from the plan bytes first.**
     approval-<the same 8 hex>
 
 Create the `Restore` **first**, with `spec.approvalRef.name` set to an approval
-that does not exist yet. The reconciler sets `Verified=False` with reason
+that does not exist yet. The reconciler sets `Admitted=False` with reason
 `ApprovalNotVerified` and **requeues every 30 s** until the `Approval` arrives;
 it creates no Job in the meantime. Create the `Approval` second. Neither name is
 ever edited, because neither spec can be -- and the shared suffix is what lets
@@ -2453,742 +1577,65 @@ approval binds bytes, and these are different bytes.
 
 ## 18. Demo 1 in CI
 
-Spec §16 clause 2 asks for Demo 1 — the walk `e2e/k8s/laptop-demo.md` records
-on this laptop — to run **end to end in CI, on a `kind` cluster the workflow
-creates**, with the compose broker reached over the published `K8S` listener.
-This section is what that workflow is, why its one hard problem is solved the
-way it is, and exactly what state the clause is in today.
+[scripts/demo-steps.sh](../scripts/demo-steps.sh) defines the twelve-step walk
+shared by the laptop and kind drivers. The kind driver sets
+`LOGWEIR_KUBE_CONTEXT=kind-logweir`, discovers the Docker network's IPv4
+gateway, installs an idempotent CoreDNS `hosts` mapping for
+`host.docker.internal` with `fallthrough`, and probes Kafka from a pod before
+starting the walk. The bootstrap stays `host.docker.internal:9095`.
+`extraPortMappings` maps the opposite direction and does not solve this path.
 
-**The clause is `closed`, by run
-<https://github.com/VladyslavHaina/logweir/actions/runs/34700987743> — one green
-run of `.github/workflows/kind-demo.yml` on commit `a113dd2`, 2026-09-12, on a
-`kind` cluster that run created, all twelve steps.** It was red on its first
-eight runs; the ninth is the artefact the row named, and
-`docs/tag1-checklist.md` row 2 now names it with the date.
+The workflow selects `LOGWEIR_INSTALL_PATH` from the dispatch input, repository
+variable, or `author-only` default. The author-only branch loads locally built
+images. The published branch instead uses
+`vars.LOGWEIR_PUBLISHED_RUNNER_REF` and waits for the pulled controller to
+become Ready. After checking the unmodified install, the demo supplies
+`LOGWEIR_RUNNER_IMAGE`; local image and pull-policy overrides affect only the
+live Deployment.
 
-**That run took the AUTHOR-ONLY install branch, and closes clause 2 only.** Both
-images were built by the run and loaded onto the node, never pulled, so Global
-Constraint 37 is untouched: clause 1's digest rows still read
-`blocked: images not published`, and nothing in this section may be read as
-evidence that an image was published. The PUBLISHED branch of §18.3 has still
-never run, because `release.yml` has never run, because no tag has been pushed.
+Recorded evidence: [kind demo run 34700987743](https://github.com/VladyslavHaina/logweir/actions/runs/34700987743),
+commit `a113dd2`, 2026-09-12, completed all twelve steps using author-only
+images. It closed the CI demo requirement, not the image-publication requirement.
+The earlier local arm64 kind probe established DNS and host-port access but
+could not start the amd64 runner; it is not a full demo pass.
 
-### 18.1 The twelve steps are defined once
-
-Before Task 31 the walk lived in `scripts/laptop-demo.sh`. A second copy in a CI
-script would have been two walks drifting apart while the checklist went on
-claiming that CI runs the one this document records. So the thirteen step
-functions (`step_01` … `step_09`, `step_10a`, `step_10b`, `step_11`, `step_12`
-— twelve numbered steps, step 10 having two halves), the helpers and the
-teardown moved verbatim into **`scripts/demo-steps.sh`**, which is sourced and
-never executed, and both demos became drivers:
-
-| driver | sets | runs |
-|---|---|---|
-| `scripts/laptop-demo.sh` | `LOGWEIR_KUBE_CONTEXT=docker-desktop` | `demo_run` |
-| `scripts/kind-demo.sh` | `LOGWEIR_KUBE_CONTEXT=kind-logweir` | three pre-steps, then `demo_run` |
-
-Three variables parameterise the steps and nothing else does:
-`LOGWEIR_KUBE_CONTEXT` (default `docker-desktop`), `LOGWEIR_DEMO_IMAGE_REF`
-(default `docker.io/vladyslavhaina/logweir:v0.1.0`) and `LOGWEIR_DEMO_PULL_POLICY`
-(default `Never`). Every `kubectl` line in both files reads
-`kubectl --context "$LOGWEIR_KUBE_CONTEXT" …` — STANDING RULE 12 is satisfied by
-the context always being passed, never by the literal being spelt out — and each
-driver prints the cluster it resolved as its first line of output.
-`crates/logweir/tests/laptop_demo_lint.rs` holds all of it:
-`the_two_demo_scripts_share_their_steps` refuses a step function defined outside
-`demo-steps.sh`, and `laptop_demo_names_every_kubectl_context` refuses a
-`kubectl` that omits the variable **and** a driver that fails to set it.
-
-### 18.2 The one hard problem: resolve the name, not the address
-
-The demo's broker is the compose stack on the runner's **host**; the Logweir
-runner is a **pod**. Three things follow, and only the third is a solution.
-
-* **An address cannot be substituted.** A Kafka client that connects to a
-  bootstrap address is then redirected by the broker's metadata response to the
-  **advertised** listener, which STANDING RULE 15 fixes at
-  `K8S://host.docker.internal:9095` and which only Task 7 may change. Computing
-  the kind gateway and passing it as `--bootstrap` fixes the first packet and
-  nothing after it.
-* **`extraPortMappings` is the wrong direction.** It maps host → node, inbound.
-  This is a pod reaching out to a host service. `e2e/k8s/kind-config.yaml`
-  carries none, and says so in a comment with that reason.
-* **So the NAME is made to resolve.** After the cluster is created,
-  `scripts/kind-demo.sh` reads the kind network's IPv4 gateway and adds a
-  CoreDNS `hosts` block for `host.docker.internal` inside the cluster's own DNS.
-  The advertised listener then resolves in every pod and **the bootstrap string
-  stays the literal `host.docker.internal:9095` in both demos** — byte-identical
-  to spec §2. What was three substitutions becomes two.
-
-The three pre-steps, in order, every exit code on its own line and nothing piped
-(STANDING RULE 20):
-
-1. **the gateway**, printed and asserted non-empty. There is **no fallback to
-   `localhost`**: inside a pod `localhost` is the pod, so a silent fallback
-   would dial the runner itself and surface eleven steps later as a `Backup`
-   that never finished. The script reads **every** gateway and takes the first
-   IPv4 one — see §18.5, where the authorised run measured why.
-2. **the CoreDNS patch**: read the `coredns` ConfigMap's `Corefile`; rewrite it
-   with the `hosts` block inside the `.:53` server block, carrying
-   `fallthrough` so the `hosts` plugin does not answer NXDOMAIN for every name
-   it does not hold; render the new ConfigMap to a **file** and `apply -f` that
-   file as two commands, never
-   `… --dry-run=client -o yaml | kubectl apply -f -`, because that pipe reports
-   `kubectl apply`'s status and swallows the render's; then `rollout restart`
-   and `rollout status … --timeout=120s`.
-3. **the probe** (interface register I14, Task 15c), from inside the cluster and
-   before step 1 runs:
-   `kubectl run bootstrap-probe --restart=Never --image=… -- cluster-probe --bootstrap host.docker.internal:9095`,
-   the pod polled to termination, the container's exit code read from the
-   pod's own status, its two lines read with `kubectl logs` — the container
-   log, which the kubelet keeps whether or not anyone attached (`--rm
-   --attach` lost both lines on the tenth CI run while `kubectl` exited 0) —
-   and the pod deleted; exit 0 and `reachable=true` are step 1's precondition.
-   `logweir doctor` is not used: it makes `--allowed-clusters` and
-   `--approver-key` mandatory and hard-codes `Plaintext`.
-
-`kind_demo_patches_coredns_before_the_first_step` asserts that order, and that
-the ConfigMap apply is two commands;
-`kind_demo_asserts_a_non_empty_bootstrap_address` runs the script with a stub
-`docker` whose `network inspect` prints nothing and requires exit **1**.
-
-### 18.3 Two install branches, and only one of them is evidence
-
-Global Constraint 37: a locally built or locally loaded image is **author-only**
-and never satisfies spec §16 clause 1, the `registry:2` fallback included. So a
-green `kind-demo` means one of two quite different things, and the workflow's own
-step names are the record of which:
-
-* **`install (author-only images; NOT evidence for §16 clause 1)`** — the
-  default, and the only branch that can run today. `kind load docker-image`
-  puts the locally built tags into the node under `imagePullPolicy: Never`. It
-  proves the code path and proves nothing about publication.
-* **`install (published digests, pulled by the cluster)`** — once a remote
-  exists and `release.yml` has pushed. No `kind load` at all: the cluster
-  **pulls** `docker.io/vladyslavhaina/logweir@sha256:…`, and the
-  `rollout status deploy/weirkeeper --timeout=180s` that follows is the
-  assertion X-APPLY cannot make — a pod pulled the shipped digest from a
-  registry the author does not control and reached Ready. With `release.yml`'s
-  `pullback:` job that is what moves clause 1 off `blocked`.
-
-Which branch runs is `env.LOGWEIR_INSTALL_PATH`: the `install_path` input of a
-`workflow_dispatch` run, else the repository variable `vars.LOGWEIR_INSTALL_PATH`,
-else `author-only`. On the published branch `vars.LOGWEIR_PUBLISHED_RUNNER_REF`
-carries the runner reference — the full `@sha256:` form, never a tag (Global
-Constraint 7). `workflow_lint_kind_demo_names_the_install_branch` finds the
-install step by the command it runs and then holds its name to account, and
-requires the `rollout status` after the published form.
-
-The author-only branch carries one extra line that the laptop path also needs,
-for plan erratum E19b's reason: the kubelet keys images on the **whole**
-reference, so `weirkeeper::job::RUNNER_IMAGE` — a Rust constant kustomize cannot
-reach — is `ErrImageNeverPull` on a node holding the same digest under a
-different name. On the laptop one `docker tag` fixes it because the daemon and
-the kubelet share an image store; a kind node has an image store of its own, so
-the tag is made on the host and the **tagged name** is loaded. `docker save`
-preserves the manifest digest — measured 2026-09-11, the saved index carries
-`sha256:6440a4a0…`, the digest the constant pins — so the reference resolves
-inside the node.
-
-Both branches hand the demo a runner reference that is **not** the one
-`scripts/demo-steps.sh` defaults to, and that is what makes step 3 pass it on to
-the controller as `LOGWEIR_RUNNER_IMAGE` (Task 33): the author-only branch hands
-`logweir:check`, and the published branch hands
-`vars.LOGWEIR_PUBLISHED_RUNNER_REF`, so on that branch the override carries the
-**published** digest into every Job, which is what the branch means. The
-controller image is put back to `weirkeeper:check` only on the author-only
-branch, whose cluster loaded it; the published branch's cluster pulled its
-controller image and keeps it. The shipped
-`logweir.yaml` is applied unedited on both and `render-install.sh --check` says
-so; only the live Deployment is touched, and only after X-APPLY has finished
-with it.
-
-### 18.4 X-UIWRITE in CI is the mechanical half, and the step name says so
-
-Spec §10's gate is a `create` of a `Restore` **from the page**, and `curl` is not
-the page. A runner has no browser. So the workflow's demo step is named
-
-> `Demo 1, all twelve steps — X-UIWRITE (mechanical half only; the browser half is recorded on the laptop, see e2e/k8s/laptop-demo.md)`
-
-and `x_uiwrite_in_ci_is_labelled_mechanical_only` finds that step by the script
-it runs and then requires both the phrase and the citation. The half spec §10
-actually asks for is in `e2e/k8s/laptop-demo.md` §10, under its own
-`in-browser create` heading, proven by `"manager": "logweir-ui"` in the created
-object's `metadata.managedFields` — a string `curl` cannot produce.
-
-### 18.5 The authorised local proving run, 2026-09-11
-
-**Proven locally on author-only images (STANDING RULE 16 exception, authorised
-2026-09-11): the cluster from the pinned config, the install, the gateway, the
-CoreDNS patch and, from a pod, that the advertised name resolves and the
-published listener answers. Not proven here: the probe and the twelve steps,
-because an arm64 `kind` node cannot start the amd64-only runner image (below).
-The twelve steps then ran on `kind` in CI on 2026-09-12, on an amd64 runner, in
-run <https://github.com/VladyslavHaina/logweir/actions/runs/34700987743>, which
-is what closed clause 2 — this local run remains the record of what it, and only
-it, proved.** STANDING RULE 16 makes `kind` a CI-only
-cluster with one exception — a single local proving run explicitly authorised by
-the controller at dispatch, deleting its cluster in the same session. This is
-that run. **It is not evidence for spec §16 clause 1 or clause 2**, and the
-checklist row is unchanged by it.
-
-The cluster, from the digest-pinned config, and the install:
-
-```
-$ kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
- ✓ Ensuring node image (kindest/node) 🖼
- ✓ Preparing nodes 📦
- ✓ Starting control-plane 🕹️
- ✓ Installing CNI 🔌
- ✓ Installing StorageClass 💾
-Set kubectl context to "kind-logweir"
-kind create cluster  14.65s total
-rc=0
-$ docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0
-rc=0
-$ kind load docker-image logweir:check weirkeeper:check docker.io/vladyslavhaina/logweir:v0.1.0 --name logweir
-Image: "logweir:check" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
-Image: "weirkeeper:check" with ID "sha256:6ab14111…" not yet present on node "logweir-control-plane", loading...
-Image: "docker.io/vladyslavhaina/logweir:v0.1.0" with ID "sha256:6440a4a0…" not yet present on node "logweir-control-plane", loading...
-rc=0
-$ bash scripts/render-install.sh --check
-render-install: logweir.yaml is what config/ renders to (no drift).
-rc=0
-$ kubectl --context kind-logweir apply --server-side -k config/overlays/local-images
-rc=0   (15 documents serverside-applied)
-```
-
-The two pre-steps that are the mechanism:
-
-```
-$ bash scripts/kind-demo.sh
-kind-demo: kubectl context kind-logweir (STANDING RULE 12)
-
-==> pre 1/3 the kind network's IPv4 gateway
-    rc=0  (docker network inspect kind -f '{{range .IPAM.Config}}{{println .Gateway}}{{end}}')
-    gateways: fc00:f853:ccd:e793::1 172.22.0.1
-    the IPv4 gateway -> 172.22.0.1
-
-==> pre 2/3 CoreDNS resolves host.docker.internal to 172.22.0.1
-    rc=0  (kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')
-    rc=0  (awk: replace any block this script wrote before, then insert the hosts block into the .:53 server block)
-    the patched Corefile:
-        .:53 {
-            # logweir-kind-demo: BEGIN — the compose stack is on the host
-            hosts {
-                172.22.0.1 host.docker.internal
-                fallthrough
-            }
-            # logweir-kind-demo: END
-            errors
-            …
-        }
-    rc=0  (kubectl -n kube-system create configmap coredns --from-file=Corefile=... --dry-run=client -o yaml > .demo/kind/coredns-configmap.yaml)
-    rc=0  (kubectl -n kube-system apply -f .demo/kind/coredns-configmap.yaml)
-    rc=0  (kubectl -n kube-system rollout restart deployment/coredns)
-    rc=0  (kubectl -n kube-system rollout status deployment/coredns --timeout=120s)
-deployment "coredns" successfully rolled out
-```
-
-And the property the patch exists for, asked of a pod:
-
-```
-$ kubectl --context kind-logweir run dnsproof --rm --attach --restart=Never \
-    --image=weirkeeper:check --image-pull-policy=Never --command -- bash -c '…'
-+ getent hosts host.docker.internal
-172.22.0.1      host.docker.internal
-+ exec 3<>/dev/tcp/host.docker.internal/9095
-TCP host.docker.internal:9095 OPEN
-+ getent hosts kubernetes.default.svc.cluster.local
-10.96.0.1       kubernetes.default.svc.cluster.local
-rc=0
-```
-
-The advertised listener's **name** resolves inside the cluster, the compose
-stack's published `K8S` listener **answers** on it from inside a pod, and
-`fallthrough` left the rest of cluster DNS working. That is mechanism (a),
-measured.
-
-**Two things this run found, both now fixed in the script.**
-
-* **`index .IPAM.Config 0` is not the IPv4 entry.** kind's network is
-  dual-stack and the order is not fixed: here entry 0 was
-  `fc00:f853:ccd:e793::1` and the IPv4 gateway `172.22.0.1` was second. A
-  `hosts` block carrying the IPv6 gateway resolves and then fails to connect,
-  because docker publishes `9095` and `9000` on IPv4 — the silent-wrong-address
-  failure the no-fallback rule exists to prevent. The script now reads every
-  gateway, takes the first IPv4 one, and refuses if there is none.
-* **The patch was not idempotent.** A second pass inserted a second `hosts`
-  block, and CoreDNS refuses a server block that declares one plugin twice: the
-  new pods never became ready and `rollout status` timed out 120 s later saying
-  only that coredns had not become ready. The patch now brackets its own block
-  with `# logweir-kind-demo: BEGIN/END` markers and removes any previous one
-  before writing — and, because an older form of this script wrote its block
-  UNMARKED, it also drops any `hosts { … }` block whose body names
-  `host.docker.internal`, printing what it replaced. Only a reused local cluster
-  can be in that state; a CI run creates the cluster it patches. (The cluster was deleted and recreated once, in the same
-  session, to recover from the Corefile that second pass had produced.)
-
-**What this run could NOT prove on this host, and why it is not a defect in the
-workflow.** The pre-step-3 probe and every runner Job need the **runner image**,
-which is `linux/amd64` only — the engine binary is dynamically linked and has no
-arm64 manifest (Global Constraint 10). This development host is arm64, so the
-kind node is arm64, and the image is refused before it is ever executed:
-
-```
-$ kubectl --context kind-logweir run imgcheck --restart=Never --image=logweir:check --image-pull-policy=Never …
-NAME       READY   STATUS               RESTARTS   AGE
-imgcheck   0/1     ErrImageNeverPull    0          6s
-  Warning  ErrImageNeverPull  kubelet  Container image "logweir:check" is not present with pull policy of Never
-```
-
-The bytes are on the node — `ctr -n k8s.io images ls` lists all three names at
-the digests the tree pins — but containerd's CRI image service does not surface
-an image whose platform is not the node's, so the kubelet cannot see it. This is
-not emulation being slow; it is the image being invisible, and no wall clock was
-measurable for it. **One thing that follows is unproven here**: whether a kind
-node resolves `docker.io/vladyslavhaina/logweir@sha256:…` when it holds that digest under
-the tag `docker.io/vladyslavhaina/logweir:v0.1.0` (plan erratum E19b, transposed to a kind
-node) — an arm64 node cannot surface the amd64 image at all, so the question was
-untestable on this host, and the amd64 runner's own green run of
-`.github/workflows/kind-demo.yml` is what would answer it. Setting the node's
-`[plugins.'io.containerd.runtime.v2.task'] platforms` to include `linux/amd64`
-changed the runtime's list and not the image service's, and was reverted with
-the cluster.
-
-**On a GitHub runner none of this exists**: the runner is amd64, the runner
-image is amd64 (Global Constraint 10), and `just image-weirkeeper` is given
-`LOGWEIR_IMAGE_PLATFORM: linux/amd64` so the controller image is amd64 too and
-is compiled **natively** — STANDING RULE 10 forbids emulating that compile, and
-`docs/stability.md` measures an emulated cargo layer at 33x. So the twelve steps
-themselves are evidenced here by Task 28a's recorded walkthrough
-(`e2e/k8s/laptop-demo.md`) and by the dry proof below, and by the CI run that
-cannot yet happen — not by this one.
-
-The teardown, in the same session:
-
-```
-$ kind delete cluster --name logweir
-rc=0
-$ just e2e-down
-rc=0
-$ kind get clusters
-No kind clusters found.
-rc=0
-logweir-e2e containers: 0
-```
-
-### 18.6 The dry proof
-
-With a `kubectl` shim that logs its argv and answers the four reads the
-pre-steps make, a `docker` shim that answers `network inspect`, and the twelve
-steps replaced by tracers in a **copy** of `demo-steps.sh`, `scripts/kind-demo.sh`
-runs the real pre-steps and the real `demo_run`:
-
-```
-==> pre 1/3 the kind network's IPv4 gateway      -> 172.18.0.1
-==> pre 2/3 CoreDNS resolves host.docker.internal to 172.18.0.1   (five kubectl, every rc=0)
-==> pre 3/3 cluster-probe --bootstrap host.docker.internal:9095, from a pod
-    reachable=true — the advertised listener resolves in-cluster.
-TRACE step_01 … step_09, step_10a, step_10b, step_11, step_12, on_exit (teardown)
-rc=0
-```
-
-and with the gateway empty:
-
-```
-==> pre 1/3 the kind network's IPv4 gateway      -> <none>
-kind-demo: could not resolve an IPv4 gateway of the docker network `kind` … there is
-deliberately no fallback to localhost: inside a pod, localhost is the pod.
-rc=1
-kubectl invocations after the refusal: 0
-```
-
-**The tracers are the gap, and one step is now walked without them.** A tracer
-proves the ORDER and nothing about the step it stands for: the first version of
-`step_01` compared the kubeconfig's current context against the literal
-`docker-desktop`, so the real step refused the `kind` cluster at 1/12 — under
-this very proof, invisibly, because the step that refused had been replaced.
-`crates/logweir/tests/laptop_demo_lint.rs::kind_demo_passes_its_first_step_on_its_own_context`
-now runs `scripts/kind-demo.sh` over an UNCHANGED copy of `scripts/demo-steps.sh`
-with stubs on `$PATH`, and asserts that the real `step_01` reads the context,
-accepts it, prints no `refusing:` line, and walks on to the next precondition it
-cannot satisfy under stubs (`docker compose ps`, which the stub refuses). The
-other eleven steps are evidenced by `e2e/k8s/laptop-demo.md` and, since
-2026-09-12, by the CI run that has now happened: run 34700987743 walked all
-twelve on a `kind` cluster, with no tracer anywhere
-(<https://github.com/VladyslavHaina/logweir/actions/runs/34700987743>).
-
-`bash -n` exits 0 on all three scripts.
+CI exercises the mechanical half of X-UIWRITE using the page's own request
+emitter. The actual browser interaction is recorded in
+[e2e/k8s/laptop-demo.md](../e2e/k8s/laptop-demo.md). A `fieldManager=logweir-ui`
+value alone is not proof of browser interaction: an API client can supply it.
 
 ## 19. The Helm chart
 
-**One chart, `charts/logweir`, installs the control plane `logweir.yaml`
-ships and — behind three flags, all off by default — its own backend, two
-throwaway Kafka clusters and the UI.** Task 35, post-plan. The chart is
-DERIVED from `config/` and `ui/`, never the other way round, and two checks
-keep it derived: `scripts/check-chart.sh` (`just chart-check`, a line of
-`just gate`) and `crates/logweir/tests/chart_lint.rs`.
-[install.md](install.md) path (c) is the install pointer;
-[../charts/logweir/README.md](../charts/logweir/README.md) is the chart's own
-document; this section is the operational record — what the objects are, what
-the checks hold, and the transcript of the one validation that has run.
+[charts/logweir/README.md](../charts/logweir/README.md) is the canonical chart
+reference, including all values, registry overrides, optional Kafka resources,
+MinIO, demo brokers and the in-cluster UI. [install.md](install.md) path (c)
+connects it to the same key, Secret and roster prerequisites as the manifests.
 
-### 19.1 The objects
+The chart derives its CRDs and UI files from `config/` and `ui/`.
+`just chart-check` checks byte parity, rendered manifests, schema and Helm lint;
+`chart_lint.rs` checks the control-plane contract. Helm installs CRDs from
+`crds/` but does not upgrade or delete them; manage CRD changes separately.
 
-| object | when | from |
-|---|---|---|
-| the six CRDs | always, from `crds/` — installed **once**; Helm never upgrades or deletes that directory | byte-identical copies of `config/crd/*.yaml` (`cmp`) |
-| `ServiceAccount`/`ClusterRole`/`ClusterRoleBinding` `weirkeeper`, `ClusterRole`s `logweir-viewer`/`-operator`/`-approver` (unbound) | always | `config/rbac/`, rule for rule, compared as sets |
-| `Deployment` `weirkeeper` | always | `config/manager/deployment.yaml`, with `controllerImage`, `imagePullPolicy`, `runnerImage` → `LOGWEIR_RUNNER_IMAGE` (Task 33), `runnerImagePullPolicy` → `LOGWEIR_RUNNER_PULL_POLICY` (Task 37) and `archive.*` → the `k8s-demo` overlay's env |
-| `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | always, in the release namespace | `config/manager/networkpolicy.yaml`, `config/rbac/backup-runner-serviceaccount.yaml` |
-| MinIO `Deployment`/`Service`/PVC, `Secret`s `<release>-minio-root` and `logweir-s3`, seed `Job` (hook `post-install,post-upgrade`) | `minio.enabled` | the compose stack's two quay.io digests, copied |
-| two KRaft `StatefulSet`s with headless + ClusterIP `Service`s, seed `Job` (hook `post-install`) | `demoKafka.enabled` | `apache/kafka:3.7.1` by manifest-list digest, resolved once (2026-09-12) |
-| UI `Deployment`/`Service`/`ConfigMap`/`ServiceAccount`/`ClusterRole`s/`RoleBinding` | `ui.enabled` | `registry.k8s.io/kubectl:v1.34.1` by digest, resolved once (2026-09-12); the fourteen UI files from the chart's byte copy |
+The two Logweir images default to mutable `latest` tags with `Always` pull
+policies. The base manifests and compiled runner default remain digest-pinned;
+third-party chart images remain pinned too. The author-only values use locally
+loaded tags with `Never`. Runner pull policy reaches Jobs through
+`LOGWEIR_RUNNER_PULL_POLICY` (§14).
 
-Every namespaced object renders into `.Release.Namespace`; the control plane
-keeps the names the install file uses, the optional components are
-`<release>-`-prefixed. Under the defaults the render is the install file's
-fifteen documents minus the Namespace (`--create-namespace` makes it) plus the
-runner ServiceAccount, and `chart_lint_default_render_agrees_with_the_install_file`
-holds the Deployment's args, env, both security contexts and ServiceAccount, the
-four ClusterRoles' rules, the CRD specs and the NetworkPolicy spec to
-`logweir.yaml`. Since Task 37 that test permits **exactly four** differences,
-each asserted rather than waved through: the controller image (the SAME
-repository, `:latest` here against the install file's digest — which the test
-also asserts is still a digest), `imagePullPolicy` (`Always` here,
-`IfNotPresent` there), and the two envs the chart renders that the install file
-does not — `LOGWEIR_RUNNER_IMAGE`, whose default is the `runnerImage`
-repository at `:latest`, and `LOGWEIR_RUNNER_PULL_POLICY`, whose default is
-`Always`. §19.5 says why.
+The optional UI uses its own ServiceAccount, not the viewer's kubeconfig.
+Anyone who can reach its Service acts with that account's authority. The
+proxy restricts paths to `/ui/` and the Logweir API; the chart has no Ingress.
+The chart reference documents bindings and the port-forward command. For the
+laptop proxy's distinct authority, see §16, Serving the UI.
 
-### 19.2 The three flags, and the UI's authority
-
-`minio.enabled` brings the archive (buckets `kafka-backups` and
-`logweir-evidence`, the `logweir-s3` Secret minted from the root pair — demo
-only, the root user is not a read-only principal) and points the controller at
-it when `archive.*` is empty. `demoKafka.enabled` brings two single-broker
-KRaft clusters — PLAINTEXT, emptyDir, the demo's transport and not a
-recommendation — each with its own cluster id, `orders` and `payments` seeded
-on the source and the marker topic `logweir.scratch` on the target.
-`ui.enabled` brings one pod running `kubectl proxy --www=/ui --www-prefix=/ui/
---address=0.0.0.0 --port=8001 --accept-hosts='.*'
---accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'`. **Anyone who can
-reach that Service acts with the `<release>-ui` ServiceAccount's authority**:
-the proxy attaches that account's credential to every request it forwards, the
-page holds none, the path filter admits only what the page uses (measured from
-`ui/api.js` and `ui/pages/*.js` — no `/api/v1` path at all), the account holds
-exactly the verbs the page issues (`get`/`list` on the five namespaced kinds,
-`create` on approvals, kafkaclusters, backupschedules, restores, `patch` on
-backupschedules, `list` on trustrosters), and there is no Ingress. It is
-reached with `kubectl port-forward svc/<release>-ui 8001:8001`.
-
-### 19.3 The checks
-
-* `scripts/check-chart.sh` (`just chart-check`, in `just gate` right after
-  `just crds-check`; mirrored in `ci.yml` with Helm pinned to v4.0.1):
-  `crds/` and `ui/` byte-identical to the tree (`cmp`); `helm lint` for the
-  defaults and every example; `helm template` regenerated into
-  `charts/logweir/rendered/` with the `crds-check` drift idiom (porcelain
-  empty); every rendered image a digest EXCEPT the two Logweir images, which
-  must be exactly `<repository>:latest` (Task 37) — `rendered/author-only.yaml`
-  exempt BY NAME, its premise being a locally built tag (E19(a)), and `:latest`
-  on any OTHER image still refused; the values schema refusing
-  `--set demoKafka.enabled=yes`; `values.yaml` naming the tree's own
-  REPOSITORIES at `:latest`, derived from `config/manager/deployment.yaml` and
-  `weirkeeper::job::RUNNER_IMAGE` and never spelt in the script, so a namespace
-  change in the tree propagates instead of drifting. Refuses without Helm >= 4,
-  naming it.
-* `crates/logweir/tests/chart_lint.rs` (file-reading, Global Constraint 22):
-  the parity above; nothing optional under the defaults; each flag's named
-  objects under the demo example, the marker topic in the seed's command, the
-  two cluster ids distinct, `--accept-paths` measured and never `.*`, the
-  ConfigMap holding the fourteen files byte for byte and no key material, the
-  RoleBinding to the chart's own role and never `cluster-admin`, no Ingress.
-* `workflow_lint.rs` holds `.github/workflows/helm-demo.yml` to its shape;
-  `gate_lint.rs` holds `just chart-check` to its place and `just helm-demo`
-  to the stack/cluster table.
-
-### 19.4 Proven on the author's docker-desktop with author-only images, 2026-09-12
-
-**Author-only, and NOT evidence for spec §16 clause 1** (Global Constraint
-37): the images were `logweir:check` and `weirkeeper:check`, built on this
-host and never pulled, and no checklist row moves on this section's account.
-The transcript is `scripts/helm-demo.sh` over the release
-`examples/author-only.values.yaml` installed with all three flags on.
-
-The install, from the worktree at the commit this section lands in, with the
-local `docker tag logweir:check docker.io/vladyslavhaina/logweir:v0.1.0` of path (b)
-already in place (finding 2, below):
-
-```
-$ helm install logweir charts/logweir -n logweir-system --create-namespace \
-    --kube-context docker-desktop -f charts/logweir/examples/author-only.values.yaml \
-    --set demoKafka.enabled=true --set minio.enabled=true --set ui.enabled=true \
-    --wait --timeout 10m
-# started 2026-09-12T20:00:46Z; NOTES printed; helm install rc=0; returned 2026-09-12T20:02:07Z
-```
-
-Then the walk — `bash scripts/helm-demo.sh`, every exit code on its own line
-(the full 229-line log is in the task report; this is every `rc=`, every
-phase, every wall clock and every HTTP code, unedited):
-
-```
-helm-demo: kubectl context docker-desktop, release logweir in namespace logweir-system (STANDING RULE 12)
-==> 0/10 preflight: tools, the release, the brokers, MinIO, the UI, the seeds' effects
-    rc=0  (helm status logweir -n logweir-system -o json)
-    release status: deployed
-    rc=0  (kubectl rollout status deploy/weirkeeper --timeout=300s)
-    rc=0  (kubectl rollout status statefulset/logweir-kafka-source --timeout=300s)
-    rc=0  (kubectl rollout status statefulset/logweir-kafka-target --timeout=300s)
-    rc=0  (kubectl rollout status deploy/logweir-minio --timeout=300s)
-    rc=0  (kubectl rollout status deploy/logweir-ui --timeout=300s)
-    rc=0  (kubectl get jobs — a succeeded seed Job is deleted by its hook policy, so this lists leftovers only)
-    rc=0  (kafka-topics.sh --list on the source, via kubectl exec) -> orders payments
-    rc=0  (kafka-topics.sh --list on the target, via kubectl exec) -> logweir.scratch
-    rc=1  (kubectl get ns logweir-helm — must NOT exist yet: check-then-take)
-    rc=0  (kubectl get secret logweir-minio-root -o json)
-    the chart's MinIO root user: minioadmin (demo-only; the JSON it was read from is not kept)
-==> 1/10 minting the signing and approver keypairs into .demo/helm/
-    signing key id:  7e24b5fffe672660d42994c0601f0f2a2bb59eb470fc913fa9d47cea906d246b
-    approver key id: 0770cabcbe1619fadd231a5670a0bb56c9d472de14e7c1cee3b563c9ef93a553
-==> 2/10 namespace logweir-helm, the five Secrets, the runner ServiceAccount, then just check-secrets logweir-helm
-    rc=0  (kubectl create namespace logweir-helm)
-    rc=0  (secret/logweir-signing-key, data key signing.pem)
-    rc=0  (secret/logweir-approval-bundle, four keys — approval.json/.sig and the allowlist replaced at step 7)
-    rc=0  (secret/kafka-scram, data key password)
-    rc=0  (kubectl get secret logweir-s3 -n logweir-system — the chart's)
-    rc=0  (secret/logweir-s3 in logweir-helm — the chart's data, copied)
-    rc=0  (secret/logweir-evidence-ro, in logweir-system)
-    rc=0  (kubectl rollout restart deploy/weirkeeper — env is fixed at container start)
-    rc=0  (kubectl rollout status deploy/weirkeeper, after the evidence Secret)
-    rc=0  (kubectl apply -f config/rbac/backup-runner-serviceaccount.yaml -n logweir-helm)
-    rc=0  (kubectl create rolebinding logweir-ui --clusterrole=logweir-ui --serviceaccount=logweir-system:logweir-ui -n logweir-helm)
-    rc=0  (just check-secrets logweir-helm)
-==> 3/10 TrustRoster default — the approver key id and the signing key MATERIAL
-    rc=0  (kubectl apply -f trustroster.yaml — cluster-scoped, name 'default')
-==> 4/10 KafkaCluster source (logweir-kafka-source.logweir-system.svc.cluster.local:9092) and target (logweir-kafka-target.logweir-system.svc.cluster.local:9092) -> status.reachable
-    rc=0  (kubectl apply -f kafkaclusters.yaml — source and target, PLAINTEXT: the demo's transport, not a recommendation)
-    rc=0  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/source --timeout=300s)
-    rc=0  (kubectl wait --for=jsonpath={.status.reachable}=true kafkacluster/target --timeout=300s)
-    rc=0  source status.clusterId: EdaYkCkyT2ONrlUc3uKpSw
-    rc=0  target status.clusterId: tQmDMMCERvy6yIB-vuOZCQ
-    two clusters, two ids: source EdaYkCkyT2ONrlUc3uKpSw, target tQmDMMCERvy6yIB-vuOZCQ
-==> 5/10 BackupSchedule */2 * * * * over orders and payments into s3://kafka-backups/helm-demo, and the Backup it fires
-    rc=0  (kubectl apply -f backupschedule.yaml, schedule */2 * * * *)
-    rc=0  (kubectl get backups -o name)
-    the schedule fired: Backup/logweir-backup-helm-20260912-200200
-    rc=0  (kubectl get backup logweir-backup-helm-20260912-200200 -o jsonpath={.status.phase}, polled up to 5 min)
-    phase: Succeeded   wall clock from the schedule's apply: 21 s
-    rc=0  status.exitCode: 0
-    rc=0  status.evidence.receiptKey: logweir/backups/01f6003c-7d6e-4a69-a2e7-c57f5527da55-20260912-200200/01M2BKE24MSTD4GW084CC5DP9J.receipt.json
-    rc=0  status.backupId: 01f6003c-7d6e-4a69-a2e7-c57f5527da55-20260912-200200
-    rc=0  (kubectl get backup logweir-backup-helm-20260912-200200 -o jsonpath={.status.evidence.verification.result})
-    rc=0  (kubectl patch backupschedule helm spec.suspend=true — the ONE mutable field)
-==> 6/10 the Restore: the page's own emitter renders the plan bytes; kubectl create -f the body
-    recovery point: 2026-09-12T20:03:03Z   sample window from: 2026-09-11T20:02:59Z (the seed ran at install time)
-    rc=0  (node ui/tests/emit-restore-body.js --out .demo/helm/)
-plan-hash=sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
-restore-name=restore-d77ed61d
-approval-name=approval-d77ed61d
-    rc=0  (kubectl create -f restore-body.json — Restore/restore-d77ed61d, approvalRef -> approval-d77ed61d, which does not exist yet)
-==> 7/10 logweir drill approve on the HOST, the real approval bundle, then the Approval object
-    rc=0  (logweir drill approve --subject-kind Restore --out .demo/helm/approval.json)
-  plan_hash  sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
-    plan_hash from the CLI : sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
-    plan-hash from the page: sha256:d77ed61d79a793feddaa9c2babf131e1b43ef1a199309f33ff77c3184318c154
-    rc=0  (kubectl delete secret logweir-approval-bundle — the placeholder)
-    rc=0  (secret/logweir-approval-bundle, the real four keys; allowlist = [tQmDMMCERvy6yIB-vuOZCQ], source EdaYkCkyT2ONrlUc3uKpSw)
-    rc=0  (kubectl create -f approval-object.yaml — Approval/approval-d77ed61d over Restore/restore-d77ed61d)
-    rc=0  (kubectl wait --for=jsonpath={.status.verified}=true approval/approval-d77ed61d)
-    rc=0  status.matchedKeyId: 0770cabcbe1619fadd231a5670a0bb56c9d472de14e7c1cee3b563c9ef93a553
-==> 8/10 the Restore's terminal status (outcome pass), then BOTH readers over the scorecard
-    rc=0  (kubectl get restore restore-d77ed61d -o jsonpath={.status.phase}, polled up to 10 min)
-    phase: Succeeded   wall clock from the Restore's create: 56 s
-    rc=0  status.exitCode: 0
-    rc=0  status.outcome: pass
-    rc=0  status.integrity.level: byte-fingerprint
-    rc=0  status.evidence.scorecardKey: logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.json
-    rc=0  status.evidence.sidecarKey: logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.sig
-    rc=0  (kubectl get restore restore-d77ed61d -o jsonpath={.status.evidence.verification.result}) -> Valid
-    rc=0  (kubectl run mc-cat-5501 --image=<the chart's mc digest> -- mc cat kafka-backups/logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.json)
-    phase=Succeeded  (kubectl get pod mc-cat-5501 -o jsonpath={.status.phase}, polled up to 120 s)
-    rc=0  (container exit 0)
-    rc=0  (kubectl logs mc-cat-5501 > .demo/helm/scorecard.json)
-    rc=0  (kubectl delete pod mc-cat-5501)
-    rc=0  (kubectl run mc-cat-11838 --image=<the chart's mc digest> -- mc cat kafka-backups/logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.sig)
-    phase=Succeeded  (kubectl get pod mc-cat-11838 -o jsonpath={.status.phase}, polled up to 120 s)
-    rc=0  (container exit 0)
-    rc=0  (kubectl logs mc-cat-11838 > .demo/helm/scorecard.sig)
-    rc=0  (kubectl delete pod mc-cat-11838)
-    rc=0  (logweir drill verify --payload-type scorecard)
-    rc=0  (python3 docs/verify_scorecard.py --payload-type scorecard)
-==> 9/10 the UI: kubectl port-forward svc/logweir-ui 8001:8001, then three fetches
-    rc=0  (kubectl port-forward svc/logweir-ui 8001:8001, backgrounded; pid 62185 — killed by the trap)
-    rc=0  (curl http://127.0.0.1:8001/ui/ — the readiness poll, up to 30 s)
-    WHOSE AUTHORITY: the page is served by kubectl proxy in the logweir-ui pod, and the proxy
-    attaches THAT ServiceAccount's credential to every request it forwards — anyone who can
-    reach the Service acts with logweir-ui's authority. The page holds no credential.
-    rc=0  HTTP 200  the page itself
-    rc=0  HTTP 200  the router
-    served ui/app.js sha256 ad2291d755895f42e803a2865916a51e4eb8a70cff7b29bfe2364d4ac577d739
-    tree   ui/app.js sha256 ad2291d755895f42e803a2865916a51e4eb8a70cff7b29bfe2364d4ac577d739
-    rc=0  HTTP 200  the API, same origin, the logweir-ui ServiceAccount's authority
-    the Backup list names logweir-backup-helm-20260912-200200
-    rc=0  HTTP 403  a Pod exec path — refused by the proxy's path filter
-    rc=0  HTTP 403  the core API — refused by the proxy's path filter
-==> HELM DEMO EXIT CRITERION MET
-                          receiptKey=logweir/backups/01f6003c-7d6e-4a69-a2e7-c57f5527da55-20260912-200200/01M2BKE24MSTD4GW084CC5DP9J.receipt.json   wall clock 21 s from the schedule's apply
-                          scorecardKey=logweir/drills/01M2BKFPDN89H06T0B0JB7K40J.json
-                          verification=Valid   wall clock 56 s from the create
-==> 10/10 teardown
-    stopped the kubectl port-forward (pid 62185)
-    rc=0  (kubectl delete trustroster default)
-    rc=0  (kubectl delete ns logweir-helm)
-    rc=0  (helm uninstall logweir -n logweir-system)
-    rc=0  (kubectl delete ns logweir-system)
-    rc=0  (kubectl delete crd <the six logweir.dev kinds>)
-    removed .demo/helm/*.pem (both keypairs this run minted)
-    rc=0  (kubectl get ns -o name) -> logweir-* namespaces left: 0
-helm-demo rc=0
-helm-demo rc=0
-2026-09-12T20:04:24Z
-```
-
-And the cluster after it, read back separately: `kubectl --context
-docker-desktop get ns -o name` → rc 0, `logweir-*` namespaces **0**;
-`get crd` → `logweir.dev` CRDs **0**; `get clusterrole,clusterrolebinding`
-naming `logweir`/`weirkeeper` **0**; `helm list -A` → **0** releases; no
-`port-forward` process left.
-
-**What it proved**: the runner reached both brokers by their advertised
-Service names (`status.reachable: true` on both, two distinct cluster ids);
-the scheduled `Backup` reached `Succeeded` with `exitCode: 0` **21 s** after
-the schedule was applied and its receipt verified `Valid` against the chart's
-MinIO through the controller's read-only handle; the `Restore` — plan bytes
-from the page's own emitter, a scratch drill onto the target with the seed's
-marker topic, approved on the host with `logweir drill approve` — reached
-`Succeeded` with `outcome: pass` and `integrity: byte-fingerprint` **56 s**
-after its create, its scorecard verified `Valid` by the controller and then by
-BOTH readers (`logweir drill verify` rc 0, `docs/verify_scorecard.py` rc 0)
-over bytes fetched out of the chart's MinIO; the in-cluster UI answered **200**
-for the page, served `ui/app.js` at the tree's own sha256, **200** for the
-`Backup` list under the `logweir-ui` ServiceAccount's authority naming the
-Backup, and **403** for a Pod exec path and for the core API — refused by the
-proxy's path filter; and the teardown left no `logweir-*` namespace.
-
-**Two things the walk found by running, both fixed in the chart before the
-run above.** (1) The apache/kafka image's default `CLUSTER_ID`
-(`/etc/kafka/docker/configureDefaults`: `5L6g3nShT-eMCtK--X86sw`) is ONE
-fixed value for every broker started without one — the compose stack's
-single broker never exposed it — so two brokers reported the same cluster id
-and the walk's own rail refused before phase 0 would have; the chart now
-hands each broker a minted id (`demoKafka.clusterIds`) and refuses equal
-ones. (2) The local `weirkeeper:check` at the tree's pin (`6ab14111…`, built
-2026-09-11) predates Task 33's `LOGWEIR_RUNNER_IMAGE`, so its runner Jobs
-named the compiled-in digest and sat in `ErrImageNeverPull`; the brief forbade
-a rebuild, and the remedy was path (b)'s own author-only step, `docker tag
-logweir:check docker.io/vladyslavhaina/logweir:v0.1.0` (E19(b), §14.3), made on the
-host before the run. A controller built from the current source — every CI
-run — honours the override and needs no tag.
-
-`.github/workflows/helm-demo.yml` runs the same script on a `kind` cluster it
-creates, with no compose stack at all. **It executed green on its first run** —
-[34718123956](https://github.com/VladyslavHaina/logweir/actions/runs/34718123956), commit `1f77f79`, 2026-09-12, 19 minutes end to end: both
-images built by the run, the chart installed with all three flags on, the
-`Backup` at `Succeeded` 10 s after the schedule's apply, the `Restore` at
-`Succeeded` with `status.outcome: pass` 41 s after its create, both readers
-`VALID`, the UI 200/200/200 on its own paths and 403/403 on a Pod exec path
-and the core API, no `logweir-*` namespace left before `kind delete cluster`.
-Author-only images, built by the run and never pulled — so, like the kind
-demo's run, it is not evidence for clause 1.
-
-After the chart landed, the controller image was rebuilt from the tree that
-carries Task 33 (§14.7, the fifth instance) and this walk was run again on
-docker-desktop with the rebuilt controller and **without** the host tag:
-`helm install` 48 s, the walk 113 s with every step `rc=0`, the `Backup` at
-`Succeeded` 10 s after the apply, the `Restore` at `Succeeded` with outcome
-`pass` 51 s after its create, both readers `VALID`, the same five HTTP codes,
-teardown clean. The override is what the runner Jobs used; the tag is gone.
-
-### 19.5 The two Logweir images are named by `latest`, and the pull policies follow — walked twice, 2026-09-12
-
-**The owner decided, 2026-09-12, that the chart's defaults name the two Logweir
-images by the `latest` tag instead of a digest** (Task 37):
-`controllerImage: docker.io/vladyslavhaina/weirkeeper:latest`,
-`runnerImage: docker.io/vladyslavhaina/logweir:latest`. Both repositories are the
-TREE's — `check-chart.sh` and `chart_lint.rs` derive them from
-`config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE` rather than
-spelling them — so a namespace change in the tree moves the chart with it.
-Nothing else in the tree moved: `config/`, `logweir.yaml`,
-`weirkeeper::job::RUNNER_IMAGE` and the chart's four third-party images
-(apache/kafka, MinIO, mc, kubectl) are all still pinned by digest.
-
-**What that forces.** A mutable tag under a pull policy that never pulls is a
-chart that cannot work, so both policies follow the tag. The controller's
-default `imagePullPolicy` becomes `Always` — Kubernetes' own default for
-`:latest`, and the only policy under which a moving tag ever moves. The runner
-Jobs get their own knob, because they are created by the operator and not by
-Helm: a new value `runnerImagePullPolicy` (schema enum
-`Never`/`IfNotPresent`/`Always`, required, default `Always`) renders on the
-Deployment as `LOGWEIR_RUNNER_PULL_POLICY`, beside `LOGWEIR_RUNNER_IMAGE`;
-`main` reads it ONCE through the pure predicate
-`job::configured_runner_pull_policy` and logs ONE line naming the policy and
-its source; an unset or blank variable leaves the compiled-in
-`job::IMAGE_PULL_POLICY` (`Never`) in place, which is why the laptop demo,
-`kind` and every unit test are untouched; and a value outside the three makes
-the controller **refuse to start** rather than create Jobs the API server would
-reject one at a time. `examples/author-only.values.yaml` sets `Never` for both.
-`charts/logweir/values.yaml`'s header carries the trade-off and the command
-that pins the pair back to digests.
-
-**Walked twice on docker-desktop, author-only both times** (Global Constraint
-37 — `logweir:check` and `weirkeeper:check`, built and loaded on this host,
-never pulled; **no checklist row moves**), against a controller image rebuilt
-from this branch because the previously pinned one predated the variable
-(§14.7, the sixth instance):
-
-| | (i) `runnerImagePullPolicy: Never` | (ii) `--set imagePullPolicy=IfNotPresent --set runnerImagePullPolicy=IfNotPresent` |
-|---|---|---|
-| `helm install … --wait --timeout 10m` | rc=0, **29 s** | rc=0, **28 s** |
-| `bash scripts/helm-demo.sh` | rc=0, **85 s** | rc=0, **86 s** |
-| `rc=` lines | **75**, one of them rc=1 — the intended `get ns logweir-helm … check-then-take` refusal | **75**, the same single rc=1 |
-| `Backup` | `Succeeded`, exitCode 0, verification `Valid`, **10 s** from the schedule's apply | the same, **10 s** |
-| `Restore` | `Succeeded`, exitCode 0, outcome `pass`, integrity `byte-fingerprint`, **41 s** from its create | the same, **41 s** |
-| both readers | `logweir drill verify` rc 0, `docs/verify_scorecard.py` rc 0 | rc 0, rc 0 |
-| the UI's five codes | **200, 200, 200, 403, 403** | **200, 200, 200, 403, 403** |
-| teardown | six rc=0, `logweir-*` namespaces left **0** | six rc=0, left **0** |
-
-A line-by-line diff of the two transcripts' `rc=` lines differs only in
-run-specific names — the Backup's timestamp, the Restore and Approval ids, the
-ULIDs, the `mc-cat-*` pod names and the port-forward's pid.
-
-**That the policy reaches the Jobs** was read three ways in each walk: from the
-render (`LOGWEIR_RUNNER_PULL_POLICY: "Never"` / `"IfNotPresent"`); from the
-controller's own log, one line and only one —
-`"the runner pull policy every Job this controller creates will carry",
-runner_pull_policy: "Never" | "IfNotPresent", source: "LOGWEIR_RUNNER_PULL_POLICY"`;
-and from a **live Job the operator created**, whose
-`spec.template.spec.containers[0].imagePullPolicy` read `Never` in walk (i) and
-`IfNotPresent` in walk (ii). In walk (ii) every `reason=Pulled` event in the
-namespace said "already present on machine" for all seven images — the policy
-resolved locally and **nothing was pulled**.
-
-**What was NOT proven, and is not claimed.** The DEFAULT path — `:latest` under
-`Always` — cannot be exercised on any cluster today, because
-`docker.io/vladyslavhaina/weirkeeper:latest` and `docker.io/vladyslavhaina/logweir:latest` exist
-in no registry: `release.yml` has never run, `blocked: images not published`,
-exactly as install path (a)'s digests could not be pulled either. A cluster
-given the chart's defaults today leaves the controller pod in
-`ImagePullBackOff`. And no runner Job inside the walk's own `logweir-helm`
-namespace was read: `helm-demo.sh` is one foreground command whose teardown
-deletes that namespace, and reading a Job there would have needed a poll running
-beside the walk. The live readings above were taken in a throwaway namespace
-outside the `logweir-*` glob, from the same operator process, on a Job built by
-one of the only three lines in the tree that set the field —
-`kafka_cluster.rs`, `restore.rs` and `backup.rs`, identical to one another and
-all feeding the single `job::build`.
+Recorded evidence from 2026-09-12: the local Helm walk and
+[CI run 34718123956](https://github.com/VladyslavHaina/logweir/actions/runs/34718123956)
+(commit `1f77f79`) completed a scheduled Backup, a scratch Restore, both
+independent verifiers and UI checks (200 for its three allowed requests;
+403 for pod exec and core API). Local follow-ups exercised `Never` and
+`IfNotPresent` runner policies. These used author-only images and do not prove
+that the chart's default registry references are published. Consult
+[tag1-checklist.md](tag1-checklist.md) for release gates.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

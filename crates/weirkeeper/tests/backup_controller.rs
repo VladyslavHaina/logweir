@@ -240,19 +240,11 @@ fn create_routes(configmap_status: u16, existing_configmap: String) -> Vec<Route
 /// A plan ConfigMap as the API server would hand it back, owned by `owner_uid`
 /// with `controller: true`.
 fn existing_plan_config_map(owner_uid: &str) -> String {
-    format!(
-        r#"{{
-  "apiVersion": "v1", "kind": "ConfigMap",
-  "metadata": {{
-    "name": "{NAME}-plan", "namespace": "{NS}",
-    "ownerReferences": [{{
-      "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup", "name": "{NAME}",
-      "uid": "{owner_uid}", "controller": true, "blockOwnerDeletion": true
-    }}]
-  }},
-  "data": {{ "backup.yaml": "already here", "allowed-clusters.json": "{{}}" }}
-}}"#
-    )
+    let cluster = serde_json::from_str(&kafka_cluster_json()).unwrap();
+    let cm = weirkeeper::controllers::backup::plan_config_map(&backup(), &cluster).unwrap();
+    let mut cm = serde_json::to_value(cm).unwrap();
+    cm["metadata"]["ownerReferences"][0]["uid"] = serde_json::json!(owner_uid);
+    cm.to_string()
 }
 
 /// A 404 `Status`, the shape `Api::get_opt` reads as "absent".
@@ -781,7 +773,11 @@ fn an_empty_runner_image_override_is_unset() {
 /// KILLS: a `build` that reaches for the override when there is none.
 #[test]
 fn the_runner_image_defaults_to_the_shipped_pin() {
-    let spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    let spec = runner_job_spec(
+        &backup(),
+        &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+    )
+    .expect("the fixture yields a spec");
     assert_eq!(
         spec.image, None,
         "`runner_job_spec` is a pure function of the custom resource and builds NO image: the \
@@ -812,7 +808,11 @@ fn the_runner_image_defaults_to_the_shipped_pin() {
 /// rather than as a pull against a namespace that resolves to nothing.
 #[test]
 fn the_runner_image_override_does_not_touch_the_pull_policy() {
-    let mut spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    let mut spec = runner_job_spec(
+        &backup(),
+        &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+    )
+    .expect("the fixture yields a spec");
     spec.image = Some("logweir:check".to_string());
     let built = job::build(&spec);
     let container = built
@@ -948,7 +948,11 @@ fn an_empty_runner_pull_policy_override_is_unset() {
 /// failure policy, the security context, the deadline …).
 #[test]
 fn a_runner_pull_policy_override_moves_only_the_policy() {
-    let default_spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    let default_spec = runner_job_spec(
+        &backup(),
+        &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+    )
+    .expect("the fixture yields a spec");
     assert_eq!(
         default_spec.image_pull_policy, None,
         "`runner_job_spec` is a pure function of the custom resource and builds NO pull policy: \
@@ -1002,7 +1006,11 @@ fn a_runner_pull_policy_override_moves_only_the_policy() {
 /// The Job's name is the CR's name, with no prefix added.
 #[test]
 fn the_job_name_is_the_cr_name() {
-    let spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    let spec = runner_job_spec(
+        &backup(),
+        &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+    )
+    .expect("the fixture yields a spec");
     assert_eq!(
         spec.name, NAME,
         "`metadata.name = backup.name_any()`, VERBATIM. A scheduled `Backup` is already \
@@ -1028,7 +1036,8 @@ fn the_job_name_is_the_cr_name() {
 fn the_argv_is_the_annotation_verbatim() {
     let b = backup();
     let from_annotation = runner_argv(&b).expect("the fixture carries a parseable argv");
-    let spec = runner_job_spec(&b).expect("the fixture yields a spec");
+    let spec = runner_job_spec(&b, &serde_json::from_str(&kafka_cluster_json()).unwrap())
+        .expect("the fixture yields a spec");
     assert_eq!(
         spec.args, from_annotation,
         "the argv is READ from `logweir.dev/runner-argv` and PASSED THROUGH. Rebuilding one here \
@@ -1065,7 +1074,11 @@ fn the_argv_is_the_annotation_verbatim() {
     let mut without = backup();
     without.metadata.annotations = None;
     assert!(
-        runner_job_spec(&without).is_err(),
+        runner_job_spec(
+            &without,
+            &serde_json::from_str(&kafka_cluster_json()).unwrap()
+        )
+        .is_err(),
         "a `Backup` with no runner argv is an error to REPORT, never an argv to invent"
     );
 }
@@ -1101,7 +1114,11 @@ fn the_engine_env_mirrors_the_dockerfile() {
          Global Constraint 8 fixes the floor at that value"
     );
 
-    let spec = runner_job_spec(&backup()).expect("the fixture yields a spec");
+    let spec = runner_job_spec(
+        &backup(),
+        &serde_json::from_str(&kafka_cluster_json()).unwrap(),
+    )
+    .expect("the fixture yields a spec");
     let job = job::build(&spec);
     let env = job
         .spec
@@ -2030,6 +2047,165 @@ async fn create_pass(routes: Vec<Route>) -> (Vec<weirkeeper::testing::SeenReques
     (seen, bodies)
 }
 
+/// A successful probe and a backup of the same cluster must project the same
+/// credential. Inspect the actual POST, not just the pure Job builder.
+#[tokio::test]
+async fn scram_backups_reuse_the_probed_cluster_connection_configuration() {
+    for tls in [false, true] {
+        for secret_name in ["prod-sasl", "rotated-source-sasl"] {
+            let mut cluster: Value = serde_json::from_str(&kafka_cluster_json()).unwrap();
+            cluster["spec"]["auth"]["tls"] = serde_json::json!(tls);
+            cluster["spec"]["auth"]["secretRef"]["name"] = serde_json::json!(secret_name);
+            let mut routes = create_routes(201, existing_plan_config_map(UID));
+            routes
+                .iter_mut()
+                .find(|r| r.path_suffix == "/kafkaclusters/prod")
+                .unwrap()
+                .body = cluster.to_string();
+            let (seen, bodies) = create_pass(routes).await;
+            let posted = bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+                .unwrap();
+            let job: Value = serde_json::from_str(&posted.body).unwrap();
+            let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .unwrap();
+            let passwords: Vec<_> = env
+                .iter()
+                .filter(|e| e["name"] == "LOGWEIR_SOURCE_PASSWORD")
+                .collect();
+            assert_eq!(
+                passwords.len(),
+                1,
+                "backup must project the source password exactly once"
+            );
+            assert_eq!(
+                passwords[0]["valueFrom"]["secretKeyRef"]["name"],
+                secret_name
+            );
+            assert_eq!(passwords[0]["valueFrom"]["secretKeyRef"]["key"], "password");
+            assert_ne!(passwords[0]["valueFrom"]["secretKeyRef"]["optional"], true);
+            assert!(
+                passwords[0].get("value").is_none(),
+                "never copy a password into a Job literal"
+            );
+
+            let cluster = serde_json::from_value(cluster).unwrap();
+            let probe = job::build(
+                &weirkeeper::controllers::kafka_cluster::runner_job_spec(&cluster).unwrap(),
+            );
+            let probe = serde_json::to_value(probe).unwrap();
+            let probe_env = probe["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                passwords[0],
+                probe_env
+                    .iter()
+                    .find(|e| e["name"] == "LOGWEIR_SOURCE_PASSWORD")
+                    .unwrap()
+            );
+            assert_eq!(job["metadata"]["namespace"], probe["metadata"]["namespace"]);
+            assert!(!env.iter().any(|e| e["name"] == "LOGWEIR_TARGET_PASSWORD"));
+            for name in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
+                let archive = env.iter().find(|e| e["name"] == name).unwrap();
+                assert_eq!(archive["valueFrom"]["secretKeyRef"]["name"], "logweir-s3");
+            }
+
+            let cm = posted_config_map(&bodies);
+            let plan: logweir_core::spec::BackupSpec =
+                serde_yaml::from_str(cm["data"]["backup.yaml"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                plan.source.bootstrap_servers,
+                cluster.spec.bootstrap_servers
+            );
+            assert_eq!(
+                plan.source.auth,
+                logweir_core::spec::AuthSpec::ScramSha512 {
+                    username: "logweir".to_string(),
+                    tls
+                }
+            );
+            assert!(
+                !cm.to_string().contains(secret_name),
+                "the plan carries identity, not credentials"
+            );
+            assert!(
+                !seen.iter().any(|r| path(&r.uri).contains("/secrets")),
+                "the controller must not read Secret values"
+            );
+            assert_eq!(
+                seen.iter()
+                    .filter(|r| r.method == "GET" && path(&r.uri).ends_with("/kafkaclusters/prod"))
+                    .count(),
+                1,
+                "plan and credential must use one cluster snapshot"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn plaintext_backups_do_not_project_an_incidental_source_secret() {
+    let mut routes = create_routes(201, existing_plan_config_map(UID));
+    let route = routes
+        .iter_mut()
+        .find(|r| r.path_suffix == "/kafkaclusters/prod")
+        .unwrap();
+    let mut cluster: Value = serde_json::from_str(&route.body).unwrap();
+    cluster["spec"]["auth"]["mode"] = serde_json::json!("plaintext");
+    route.body = cluster.to_string();
+    let (_, bodies) = create_pass(routes).await;
+    let posted = bodies
+        .iter()
+        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+        .unwrap();
+    let job: Value = serde_json::from_str(&posted.body).unwrap();
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .unwrap();
+    assert!(!env
+        .iter()
+        .any(|e| e["name"] == "LOGWEIR_SOURCE_PASSWORD" || e["name"] == "LOGWEIR_TARGET_PASSWORD"));
+}
+
+#[tokio::test]
+async fn scram_backup_without_a_source_secret_is_refused_before_creating_resources() {
+    for secret_ref in [
+        Value::Null,
+        serde_json::json!({"name": ""}),
+        serde_json::json!({"name": " "}),
+    ] {
+        let mut routes = create_routes(201, existing_plan_config_map(UID));
+        let route = routes
+            .iter_mut()
+            .find(|r| r.path_suffix == "/kafkaclusters/prod")
+            .unwrap();
+        let mut cluster: Value = serde_json::from_str(&route.body).unwrap();
+        cluster["spec"]["auth"]["secretRef"] = secret_ref;
+        route.body = cluster.to_string();
+        let (client, seen, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("CredentialNotRenderable")
+        );
+        assert!(!seen.lock().unwrap().iter().any(|r| r.method == "POST"));
+        let statuses = patched_statuses(&bodies.lock().unwrap());
+        assert_eq!(statuses[0]["phase"], "Failed");
+        assert!(statuses[0].to_string().contains("auth.secretRef"));
+    }
+}
+
 /// `backup.yaml` **parses back as the type the CLI parses**, field by field.
 ///
 /// ERRATA **E5a**, review finding HIGH-1: nothing in the plan rendered this
@@ -2514,18 +2690,13 @@ async fn the_plan_config_map_is_owned_by_the_backup_with_both_flags() {
     );
 }
 
-/// A 409 on the ConfigMap `POST` is success **only** when the existing object
-/// is ours.
-///
-/// The ordinary 409 is this same reconcile's previous pass, and the object is
-/// byte-identical because a rendered plan is a pure function of an immutable
-/// spec. A 409 on a FOREIGN object is a plan document a stranger wrote, at the
-/// mount path of the pod that holds this `Backup`'s signing key.
+/// An unchanged plan can be reused only when the existing object is ours.
+/// Foreign ownership must fail even when all plan data matches.
 ///
 /// KILLS: treating every 409 as success; keying the check on the name instead
 /// of the UID.
 #[tokio::test]
-async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
+async fn a_conflicting_plan_config_map_checks_ownership_even_when_data_matches() {
     // ARM 1 — 409, and the existing object IS ours. The Job is still created.
     let (client, seen, _bodies) =
         mock_client_recording_bodies(create_routes(409, existing_plan_config_map(UID)));
@@ -2594,6 +2765,78 @@ async fn a_conflicting_plan_config_map_is_terminal_only_when_it_is_not_ours() {
             "PlanConfigMapConflict".to_string()
         )]
     );
+}
+
+#[tokio::test]
+async fn a_probe_observation_does_not_invalidate_an_owned_backup_plan_retry() {
+    let mut cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_str(&kafka_cluster_json()).unwrap();
+    cluster.status = None;
+    let cm = weirkeeper::controllers::backup::plan_config_map(&backup(), &cluster).unwrap();
+    let (client, seen, _) =
+        mock_client_recording_bodies(create_routes(409, serde_json::to_string(&cm).unwrap()));
+    let outcome = reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .unwrap();
+    assert!(
+        outcome.created,
+        "a probe's new clusterId is not a connection change"
+    );
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.method == "POST" && path(&r.uri).ends_with("/jobs")));
+}
+
+#[tokio::test]
+async fn an_owned_stale_backup_plan_is_refused_before_creating_a_job() {
+    for changed_key in ["backup.yaml", "allowed-clusters.json", "allowed-target-ids"] {
+        let cluster = serde_json::from_str(&kafka_cluster_json()).unwrap();
+        let cm = weirkeeper::controllers::backup::plan_config_map(&backup(), &cluster).unwrap();
+        let mut existing = serde_json::to_value(cm).unwrap();
+        if changed_key == "allowed-target-ids" {
+            existing["data"]["allowed-clusters.json"] =
+                serde_json::json!(r#"{"allowed_cluster_ids":["unexpected-target"]}"#);
+        } else {
+            existing["data"][changed_key] = serde_json::json!("a previous cluster configuration");
+        }
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(create_routes(409, existing.to_string()));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("PlanConfigMapConflict")
+        );
+        assert!(!outcome.created);
+        let seen = seen.lock().unwrap();
+        assert!(!seen
+            .iter()
+            .any(|r| r.method == "POST" && path(&r.uri).ends_with("/jobs")));
+        assert!(
+            !seen
+                .iter()
+                .any(|r| ["PATCH", "PUT", "DELETE"].contains(&r.method.as_str())
+                    && path(&r.uri).contains("/configmaps")),
+            "never rewrite a plan another reconcile may already have mounted"
+        );
+        let statuses = patched_statuses(&bodies.lock().unwrap());
+        assert_eq!(statuses[0]["phase"], "Failed");
+    }
 }
 
 /// `spec.sourceRef` naming a `KafkaCluster` that does not exist is

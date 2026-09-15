@@ -92,8 +92,8 @@ fn line_of(text: &str, offset: usize) -> usize {
 
 /// **The two marks that were defective before this task are closed, in place.**
 ///
-/// `docs/adr/0004-kafka-client.md` carried a bare `[UNVERIFIED]` with no
-/// description at all, quoted out of a task brief; `docs/stability.md` carried
+/// ADR 0004, now consolidated in `docs/architecture.md`, carried a bare
+/// `[UNVERIFIED]` with no description, quoted out of a task brief; `docs/stability.md` carried
 /// a mark with no dash and a fifteen-character description. Neither was a
 /// label: a mark with nothing behind it is a claim that something is unproven,
 /// with no statement of what would prove it, which is exactly what spec §16
@@ -103,7 +103,7 @@ fn line_of(text: &str, offset: usize) -> usize {
 /// so a later edit that reverts either one fails here as well as in `just lint`.
 #[test]
 fn the_two_pre_existing_marks_are_closed() {
-    for relative in ["docs/adr/0004-kafka-client.md", "docs/stability.md"] {
+    for relative in ["docs/architecture.md", "docs/stability.md"] {
         let text = read(relative);
 
         let dashed = format!("{TOKEN} \u{2014}");
