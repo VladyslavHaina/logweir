@@ -64,11 +64,12 @@
  *             scheduleSetSuspension: boolean, schedulesRead: boolean,
  *             topicDiscovery: boolean}} Capabilities */
 
-/** @typedef {{name: string, capabilities: Capabilities}} NamespaceGrant */
+/** @typedef {{name: string, capabilities: Capabilities, roles: string[]}} NamespaceGrant */
 
 /** @typedef {{actor: {id: string, issuer: string, subject: string,
  *                     displayName: string},
- *             authenticationMode: string, capabilities: Capabilities,
+ *             authenticationMode: string, bindingRevision: string,
+ *             capabilities: Capabilities,
  *             namespaces: NamespaceGrant[], csrfToken: (string|null),
  *             expiresAt: (string|null), requestId: string}} Session */
 
@@ -305,13 +306,29 @@ const ACTOR = shapeOf("ActorView", {
   id: str, issuer: str, subject: str, displayName: str,
 });
 
-const GRANT = shapeOf("NamespaceGrant", { name: str, capabilities: objectOf(CAPABILITIES) });
+/** The four PRODUCT roles (PLAT-17.2). They are Logweir's own: they are not
+ *  Kubernetes roles, they are not granted by cluster RBAC, and holding one
+ *  says nothing about what the console ServiceAccount may do. The set is
+ *  empty in localAdmin mode, which has no roles -- so an empty list is a
+ *  mode, not a missing field, and the field itself is required. */
+export const ROLES = Object.freeze(["viewer", "operator", "approver", "administrator"]);
+
+const GRANT = shapeOf("NamespaceGrant", {
+  name: str,
+  capabilities: objectOf(CAPABILITIES),
+  roles: listOf(oneOf(ROLES)),
+});
 
 const SESSION = shapeOf(
   "SessionResponse",
   {
     actor: objectOf(ACTOR),
     authenticationMode: str,
+    // THE REVISION OF THE BINDING TABLE THAT PRODUCED THESE GRANTS. It is in
+    // every audit line the product API writes, so a decision can be tied to
+    // the configuration that made it; this page carries it so a reader can
+    // name that configuration too. Empty in localAdmin mode.
+    bindingRevision: str,
     capabilities: objectOf(CAPABILITIES),
     namespaces: listOf(objectOf(GRANT)),
     requestId: str,
@@ -769,6 +786,7 @@ export const CONSOLE_ENUMS = Object.freeze({
   ConnectionRole: CONNECTION_ROLES,
   ConcurrencyPolicy: CONCURRENCY_POLICIES,
   RestoreMode: RESTORE_MODES,
+  Role: ROLES,
 });
 
 /** @returns {Decoded} */

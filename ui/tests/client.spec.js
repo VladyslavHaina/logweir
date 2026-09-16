@@ -17,6 +17,8 @@ import {
   LEGACY,
   LIST_PAGE_BUDGET,
   apiClient,
+  bindingRevision,
+  rolesFor,
   applyGrants,
   granted,
   grantedNamespaces,
@@ -888,4 +890,52 @@ test("every_request_body_this_client_builds_satisfies_the_published_request_shap
   } finally {
     wire.restore();
   }
+});
+
+
+test("the_session_s_roles_and_binding_revision_are_carried_and_never_guessed", async () => {
+  // PLAT-17.2 added both to `SessionResponse`, and the drift arm in
+  // `contract.spec.js` is what found it. The page must CARRY them, not derive
+  // them: inferring "this actor is an operator" from which capability flags
+  // happen to be true would be inventing an authorisation decision the server
+  // already made -- and would invent a different one the moment a domain's
+  // route lands and flips a flag from `implemented && allowed` to true.
+  const localAdmin = SESSION();
+  await console_(localAdmin);
+  assert.deepEqual(
+    rolesFor("team-a"), [],
+    "localAdmin mode has no roles at all, and empty is that mode -- not 'none of the above'",
+  );
+  assert.equal(bindingRevision(), "", "and no binding table produced its grants");
+
+  const shared = SESSION();
+  shared.bindingRevision = "rev-17";
+  shared.namespaces[0].roles = ["approver", "operator"];
+  await console_(shared);
+  assert.deepEqual(rolesFor("team-a"), ["approver", "operator"], "what the binding table said");
+  assert.equal(bindingRevision(), "rev-17");
+  assert.deepEqual(rolesFor("team-b"), [], "a namespace with no grant holds no roles");
+  assert.equal(
+    granted("team-a", "restoreCreate"),
+    shared.namespaces[0].capabilities.restoreCreate,
+    "and the FLAGS are still what decides whether a call is made; a role decides nothing here",
+  );
+
+  await legacy();
+  assert.deepEqual(rolesFor("team-a"), [], "legacy mode has no product roles");
+  assert.equal(bindingRevision(), "", "and no binding table: the API server's RBAC is the story");
+});
+
+test("a_session_grant_that_omits_its_roles_is_a_contract_failure", async () => {
+  resetMode();
+  const broken = SESSION();
+  delete broken.namespaces[0].roles;
+  const record = await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: broken }),
+  });
+  assert.equal(
+    record.mode,
+    LEGACY,
+    "a session document that is not one leaves the page in legacy mode rather than half-read",
+  );
 });

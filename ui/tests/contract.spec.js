@@ -367,7 +367,7 @@ test("every_closed_set_this_client_holds_is_the_schema_s_own", () => {
     );
     checked += 1;
   }
-  assert.equal(checked, 9, "this arm compared " + String(checked) + " sets");
+  assert.equal(checked, 10, "this arm compared " + String(checked) + " sets");
 });
 
 test("the_plan_module_s_target_modes_and_the_product_api_s_restore_modes_agree", () => {

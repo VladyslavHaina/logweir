@@ -6,6 +6,7 @@
     "subject": "admin"
   },
   "authenticationMode": "localAdmin",
+  "bindingRevision": "",
   "capabilities": {
     "approvalPacketRead": true,
     "approvalSubmit": false,
@@ -50,7 +51,8 @@
         "schedulesRead": true,
         "topicDiscovery": false
       },
-      "name": "team-a"
+      "name": "team-a",
+      "roles": []
     }
   ],
   "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"

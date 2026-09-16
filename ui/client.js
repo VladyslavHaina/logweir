@@ -133,6 +133,26 @@ export function grantedNamespaces() {
   return decided === null ? [] : decided.namespaces.slice();
 }
 
+/** The PRODUCT roles the actor holds in `ns`, as the session reported them.
+ *
+ *  Empty in legacy mode and in localAdmin mode, and empty is not "none of the
+ *  above": it is a mode with no roles at all. Nothing on this page branches on
+ *  a role -- `granted` below is what decides whether a call is made, because a
+ *  capability flag is `implemented && allowed` and a role is neither. This is
+ *  here so a view can SAY who the actor is without guessing it from the flags. */
+export function rolesFor(ns) {
+  const held = decided === null ? undefined : decided.roles[ns];
+  return held === undefined ? [] : held.slice();
+}
+
+/** The revision of the administrator's binding table that produced the current
+ *  grants, or the empty string when there is none (legacy and localAdmin). The
+ *  product API records it in every audit line; carrying it here is what lets a
+ *  reader tie what this page shows to the configuration that allowed it. */
+export function bindingRevision() {
+  return decided === null ? "" : decided.bindingRevision;
+}
+
 /** Whether `flag` is granted for `ns`. In legacy mode every capability is
  *  "granted" here and the API server's RBAC is the gate, which is the whole
  *  authorisation story of that mode. */
@@ -231,6 +251,10 @@ function legacyRecord() {
     session: null,
     namespaces: Object.freeze([]),
     grants: Object.freeze(Object.create(null)),
+    roles: Object.freeze(Object.create(null)),
+    // Legacy mode has no product roles and no binding table: the API server's
+    // own RBAC is the whole authorisation story there.
+    bindingRevision: "",
     token: null,
     unknown: Object.freeze([]),
   });
@@ -238,9 +262,18 @@ function legacyRecord() {
 
 function consoleRecord(document, unknown) {
   const grants = Object.create(null);
+  const roles = Object.create(null);
   const names = [];
   for (const grant of document.namespaces) {
     grants[grant.name] = grant.capabilities;
+    // THE ROLES COME FROM THE SESSION AND ARE NEVER DERIVED HERE (PLAT-17.2).
+    // A page that inferred "this actor is an operator" from which capability
+    // flags happen to be true would be inventing an authorisation decision the
+    // server already made, and would invent a different one the moment a
+    // domain's route lands. `roles` is what the binding table said; the flags
+    // remain what this page BRANCHES on, because a flag is `implemented &&
+    // allowed` and a role is not.
+    roles[grant.name] = Object.freeze(grant.roles.slice());
     names.push(grant.name);
   }
   return Object.freeze({
@@ -248,6 +281,9 @@ function consoleRecord(document, unknown) {
     session: document,
     namespaces: Object.freeze(names),
     grants: Object.freeze(grants),
+    roles: Object.freeze(roles),
+    // Empty in localAdmin mode, which has no binding table.
+    bindingRevision: document.bindingRevision,
     // IN MEMORY, FOR THE LIFE OF THE LOADED PAGE, AND NOWHERE ELSE.
     token: typeof document.csrfToken === "string" ? document.csrfToken : null,
     unknown: Object.freeze(unknown.slice()),
