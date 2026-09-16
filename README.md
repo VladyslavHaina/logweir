@@ -145,6 +145,7 @@ package and fixture READMEs stay beside the files they describe.
 | Run a backup, restore, or drill | [Quickstart](docs/quickstart.md) |
 | Operate controllers, jobs, approvals and retention | [Kubernetes](docs/kubernetes.md) |
 | Use or develop the static UI | [UI guide](ui/README.md) |
+| Use the bounded product API (`logweir-api`) | [Product API](docs/api.md) |
 | Verify signed evidence | [Auditor guide](docs/verify-a-scorecard.md) |
 | Generate, pin and rotate keys | [Signing keys](docs/keys.md) |
 | Collect metrics | [Metrics](docs/metrics.md) |

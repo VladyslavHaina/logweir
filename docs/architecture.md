@@ -19,6 +19,7 @@ and the [support matrix](support-matrix.md).
 | `logweir-evidence` | Signing keys and signing API; re-exports the verification API. |
 | `logweir-verify` | DSSE envelope types, PAE and signature verification. |
 | `weirkeeper` | Kubernetes reconciliation and runner Jobs; links storage and verification without linking the engine wrapper or signing API. |
+| `logweir-api` | The bounded product API: serves the static UI and `/api/v1` on one origin and creates the existing custom resources through one Kubernetes adapter. Not a proxy, not an execution authority, not yet packaged. See [the product API](api.md). |
 | `ui` | Static interface displaying controller state and verification results. |
 | `xtask`, `e2e` | Upstream synchronization and integration validation. |
 
