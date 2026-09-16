@@ -13,11 +13,17 @@ broker and no object store.
 
 ## What ships today, and what does not
 
-This is the first stage. **Only `mode: localAdmin` exists**: a loopback-only
-listener, the configured administrator as the actor, and namespaces from
-configuration alone. There is no OIDC, no session cookie, no CSRF token and no
-role matrix yet — those are the identity stage, and they plug into the
-`Authenticator` and `Authorizer` seams without changing a route.
+**Two modes, and the configuration file must name one.** There is no default:
+a file that forgets to say which mode it wants is refused rather than read as
+the more permissive one.
+
+* `mode: localAdmin` — a loopback-only listener, the configured administrator
+  as the actor, and namespaces from configuration alone. Not SSO, not a shared
+  console.
+* `mode: shared` — the SSO console: OpenID Connect identity, a short-lived
+  encrypted session cookie, a synchronizer CSRF token on every unsafe method,
+  exact role and namespace bindings, and one audit record per request. It
+  refuses a non-HTTPS `publicBaseUrl` before it binds anything.
 
 `logweir-api` is **not packaged or deployed**. No image builds it, the Helm
 chart has no `console` template or value, and `publish = false` keeps it out of
@@ -25,6 +31,14 @@ the release archives. It runs from a local build against a kubeconfig context.
 Nothing about an existing installation changes when this crate is present, so
 there is nothing to upgrade, migrate or roll back: removing the crate removes
 the feature. The chart, image, ingress and NetworkPolicy work is a later stage.
+
+**Shared mode is therefore not a supported deployment yet.** It is implemented
+and tested, and it runs from a local build behind a TLS terminator, but the
+console image, the chart's `console.*` templates, the ingress, the
+NetworkPolicy, the API's own ServiceAccount and its per-namespace RoleBindings
+do not exist. Until they do, the API runs with whatever Kubernetes identity its
+kubeconfig carries, which may be cluster-admin: the closed adapter is a
+**source-level** bound on what it can reach, not an RBAC one.
 
 A domain whose routes do not exist yet has **no route at all** — no stub and no
 `501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
@@ -216,6 +230,216 @@ normalisation or directory index, so `/ui/../Cargo.toml` is a `404` rather than
 a traversal to defeat. The bytes a browser receives are the bytes the process
 read at startup; no request performs file-system I/O.
 
+## Shared mode
+
+### Configuration
+
+```yaml
+# console.yaml
+mode: shared
+listen: "0.0.0.0:8484"                       # any address; TLS terminates in front
+publicBaseUrl: "https://console.example.com" # EXACT, HTTPS, no path, no trailing slash
+uiDirectory: /srv/ui
+oidc:
+  issuer: https://idp.example.com/realms/logweir   # EXACT, as the discovery document states it
+  clientId: logweir-console                        # EXACT; also the expected audience
+  clientSecretFile: /var/run/secrets/oidc/clientSecret
+  allowedAlgorithms: [RS256, ES256]                # the two this service verifies
+  scopes: [openid, profile, groups]                # must contain `openid`
+  groupsClaim: groups                              # the EXACT claim name
+  displayNameClaim: name                           # presentation only
+  tokenAuthMethod: clientSecretBasic               # or clientSecretPost
+roles:
+  revision: "2026-09-16.1"                         # recorded in every audit line
+  bindings:
+    - role: viewer                                 # viewer|operator|approver|administrator
+      namespace: team-a                            # must appear in `namespaces` below
+      groups: ["logweir-team-a-viewers"]           # EXACT strings; no wildcard, no regex
+    - role: operator
+      namespace: team-a
+      groups: ["logweir-team-a-operators"]
+    - role: approver
+      namespace: team-a
+      subjects: ["https://idp.example.com/realms/logweir#3f0c…"]
+sessionKey:
+  file: /var/run/secrets/session/key               # versioned key file
+  expectedVersion: 1
+cursorKey:
+  file: /var/run/secrets/cursor/key
+  expectedVersion: 1
+sessionMaxAgeSeconds: 900                          # 60…900
+trustedProxyCidrs: ["10.0.0.0/8"]                  # transport LOGGING only
+namespaces: [team-a, team-b]
+kubernetes:
+  source: inCluster
+```
+
+A key file is two lines:
+
+```console
+$ printf 'version: 1\nkey: "%s"\n' "$(openssl rand -base64 32)" > session.key.yaml
+```
+
+### What startup refuses, before it binds a socket
+
+Every one of these is exit 2 with the field named. A console that comes up on
+plain HTTP, or with a key someone rewrote underneath it, is worse than one that
+does not come up at all, because the first two look like they are working.
+
+| refusal | why |
+|---|---|
+| `publicBaseUrl` is not `https://` | TLS at the shared entry point is required, not recommended |
+| `publicBaseUrl` has a path, a trailing slash, userinfo or no host | the redirect URI is this value plus `/auth/callback`; a mismatch is a login that cannot complete |
+| `publicOrigin` is present | shared mode derives the origin from `publicBaseUrl`, so the origin checked and the redirect URI registered cannot disagree |
+| a key file is missing, malformed, or under 32 bytes | there is no default key and no generated one |
+| a key file's `version` is not `expectedVersion` | an **unexpected rotation**. Bumping both is a deliberate act that ends every live session; bumping neither means the file changed behind the service's back |
+| the client-secret file is missing or empty | |
+| an `allowedAlgorithms` entry is not `RS256` or `ES256` | `none` cannot be on the list, so an `alg: none` token has no matching entry |
+| `oidc.issuer` ends in `/`, or carries a query, fragment or userinfo | the issuer is compared for exact equality with the token's `iss` |
+| a plain-HTTP issuer without `oidc.insecureLoopbackIssuer` | and that flag is accepted only for a loopback host, for a local mock provider in development |
+| a role binding names a role that is not one of the four | |
+| a role binding names a namespace outside `namespaces` | |
+| a role binding has neither `groups` nor `subjects` | |
+| a binding string contains `*` or `?` | bindings are EXACT: a `*` would match nothing, so it is refused by name rather than silently granting nothing |
+| `roles.revision` is empty | it is the provenance of every decision in the audit log |
+| `sessionMaxAgeSeconds` outside 60…900 | a stateless session cannot be revoked before it expires |
+
+### Sign-in
+
+`GET /auth/login` starts an Authorization Code flow with PKCE S256, `state` and
+`nonce`, and answers `303` to the provider's authorization endpoint. The three
+per-login secrets travel in a sealed, `HttpOnly`, ten-minute
+`__Host-logweir_login` cookie rather than in process memory, so a login begun on
+one replica finishes on another.
+
+`GET /auth/callback` compares `state` in constant time, exchanges the code with
+the verifier, and validates the ID token: allowed `alg`, JWKS key by exact
+`kid`, signature, exact `iss`, exact audience (`azp` required when there is more
+than one), `exp`, `iat` (bounded skew, bounded age) and this login's `nonce`.
+**The browser never receives a provider token**: the token response is
+deserialised into a struct with one field, `id_token`, so no access or refresh
+token exists in the process to leak.
+
+JWKS are cached. An unknown `kid` provokes at most one refetch per minute —
+that is what makes a provider's key rotation work without a restart, and what
+stops an attacker-chosen `kid` from becoming a request amplifier. While the
+provider is unreachable the cached keys keep working for a day, then validation
+fails closed.
+
+### The session and the CSRF token
+
+| | |
+|---|---|
+| cookie | `__Host-logweir_session`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, **no `Domain`** |
+| contents | session id, issuer, subject, display claim, group claims, issued/expiry/auth times, key version — **never** a provider token |
+| protection | ChaCha20-Poly1305, with the cookie's own name and the key version as associated data |
+| lifetime | at most 15 minutes; there is no refresh token and no server-side session table |
+| CSRF token | `HMAC-SHA-256(session key, session id)`, returned by `GET /api/v1/session`, required in `X-CSRF-Token` on every unsafe method |
+| logout | `POST /api/v1/session/logout` — an unsafe method, so it needs the exact `Origin`, `application/json` and the token like any other mutation |
+
+Because the session is stateless, a restart or a second replica does not log
+anyone out and nothing has to be replicated. What that costs is that revocation
+before expiry is bounded by the expiry: removing an identity at the provider
+takes effect within fifteen minutes. **Roles are not in the cookie** — they are
+re-derived per request from the claims plus the current binding table — so
+removing a role binding takes effect on the *next request*.
+
+### What can never be an identity
+
+`X-Remote-User`, `X-Remote-Group(s)`, `X-Remote-Extra-*`, `X-Forwarded-User`,
+`X-Forwarded-Email`, `X-Forwarded-Groups`, `X-Forwarded-Preferred-Username` and
+`X-Auth-Request-*` are **stripped from the request before routing** and recorded
+in the audit line by name only. Stripping rather than ignoring is deliberate:
+ignoring is a property of every reader and a future route can lose it, removing
+is a property of the request. `Impersonate-*` is not ignored — it is refused
+outright with `400 header_not_allowed` naming the header.
+
+No callback URL and no authorization decision derives from `Host`, `Forwarded`
+or `X-Forwarded-*`. A forwarded client address reaches exactly one audit field,
+`forwardedFor`, and only when the immediate socket peer falls inside a
+`trustedProxyCidrs` range.
+
+There is no CORS layer: no response carries `Access-Control-Allow-Origin` or
+`Access-Control-Allow-Credentials`.
+
+### Roles
+
+Actor identity is exactly `(issuer, sub)`. Group claims and subjects map by
+**exact string** to bindings; multiple bindings union.
+
+| action | viewer | operator | approver | administrator |
+|---|:--:|:--:|:--:|:--:|
+| read connections / schedules | ✓ | ✓ | | ✓ |
+| create connection, test, credentials, discovery, preflight, destinations | | ✓ | | ✓ |
+| create schedule, set suspension | | ✓ | | ✓ |
+| read backups / restores / approvals / operations | ✓ | ✓ | ✓ | ✓ |
+| create manual backup, create restore | | ✓ | | ✓ |
+| read the approval packet | | ✓ | ✓ | ✓ |
+| submit a governed approval | | | ✓ | |
+
+**Administrator is deliberately absent from the last row.** An administrator who
+must approve is bound as an Approver as well, and the separation-of-duties check
+then still compares `(issuer, sub)` — not display names, not email claims, not
+key ids. Administrator is not a self-approval bypass.
+
+The governed-approval **route** is PLAT-19.2 and does not exist yet;
+`capabilities.approvalSubmit` is `false` and no path serves it. The
+**decision** exists and is tested now.
+
+### Enumeration resistance
+
+In shared mode an ungranted namespace answers exactly what a nonexistent object
+answers — `404 not_found`, byte for byte apart from the request id — and the
+namespace is checked **before** any Kubernetes call, so the answer never depends
+on cluster state the actor may not see. In localAdmin mode the more informative
+`403 namespace_forbidden` is kept: there is one actor, it is the administrator,
+and there is nothing to enumerate.
+
+The audit record carries the real reason either way. Hiding a namespace from a
+caller must not also hide an authorization problem from the operator reading the
+log.
+
+### The audit record
+
+One JSON object per request on the `logweir_api::audit` tracing target, emitted
+by the middleware so no handler can forget one:
+
+`auditId` (= `X-Request-ID`), `method`, `path`, `authenticationMode`,
+`actorId`, `displayClaim` (kept separate because it is never an authorization
+input), `sessionIdHash`, `bindingRevision`, `roles`, `namespace`, `action`,
+`resource`, `decision`, `policyDigest`, `idempotencyKeyHash`, `requestHash`,
+`planHash`, `objectName`, `objectUid`, `objectResourceVersion`, `httpStatus`,
+`latencyMs`, `failureCode`, `peer`, `forwardedFor`, `ignoredIdentityHeaders`.
+
+A record that reaches no decision point defaults to `deny`. Never logged:
+cookies, bearer/authorization-code/refresh tokens, CSRF tokens, the raw
+`Idempotency-Key`, Secret values, kubeconfig, approval or sidecar bytes, plan
+bytes, raw pod logs, and object-store URLs carrying userinfo.
+
+This is **attribution, not proof.** Annotations on a created object and lines on
+stdout are correlation; the tamper-evident requester/approver record is the DSSE
+document PLAT-19 owns, and Kubernetes audit supplies the complementary fact that
+the `logweir-api` ServiceAccount made the API call. Retaining these lines is a
+deployment responsibility: stdout alone is not durable evidence.
+
+Dependency log targets (`kube_client`, `kube`, `hyper`, `hyper_util`, `rustls`,
+`tower`, `h2`) are pinned at `warn` **regardless of `RUST_LOG`**, because
+`kube_client` logs the upstream error body verbatim at `debug` — the exact text
+this service redacts before logging it.
+
+### Rate limits
+
+`/auth/login` and `/auth/callback` are the only routes an unauthenticated caller
+can reach that do work, so they carry a per-peer limit of 20 requests a minute
+(`429` with `Retry-After`). The key is the **immediate socket peer**, never a
+forwarded header: behind one ingress that makes it a global limit, which is the
+correct conservative behaviour for a service whose per-user limits live behind
+authentication.
+
+There is no event stream yet: `capabilities.operationEvents` is `false` and no
+path serves one, authenticated or not. The per-actor, per-namespace connection
+slots it will need are implemented and tested.
+
 ## Local administrator mode is not a shared console
 
 This mode uses the selected kubeconfig identity and may be cluster-admin. It is
@@ -223,9 +447,10 @@ an explicit administrator mode, not SSO and not per-user authorization: the
 namespace grants come from the configuration file, and every actor of this
 process is the same actor. It must not bind a routable address, must not get an
 Ingress, and adding a login in front of it would not create per-user
-authorization. Shared operation requires the identity stage — OIDC, validated
-sessions, the role matrix, audit attribution and a TLS ingress — and until then
-the supported shared posture is no shared console at all.
+authorization. Shared operation uses `mode: shared`, which is a different
+listener, a different authenticator and a different authorizer — never this one
+with a login bolted in front. Ordinary confirmation is unavailable through this
+mode; it keeps the legacy governed approval behaviour.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

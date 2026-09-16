@@ -1248,6 +1248,108 @@ mod tests {
         );
     }
 
+    /// **The shared-mode configuration in `docs/api.md` is one this code
+    /// accepts, and its refusal table is not aspirational.**
+    ///
+    /// Same reasoning as the localAdmin example above (review finding R2): a
+    /// documented example that cannot start sends the reader to debug their
+    /// cluster instead of the line they copied. The block is parsed out of the
+    /// document rather than retyped, so the two cannot drift, and the derived
+    /// redirect URI is asserted because it is the one value an administrator
+    /// must also register at the identity provider.
+    #[test]
+    fn the_documented_shared_configuration_parses() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/logweir-api sits two levels under the workspace root")
+            .join("docs/api.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/api.md is readable");
+        let block = text
+            .split("```yaml")
+            .find(|rest| rest.trim_start().starts_with("# console.yaml"))
+            .and_then(|rest| rest.split("```").next())
+            .expect("docs/api.md has a ```yaml block starting `# console.yaml`");
+
+        let config = Config::parse(block, Path::new("/etc/logweir"))
+            .expect("the documented shared example is a configuration this code accepts");
+        let shared = config.shared().expect("it is shared mode");
+        assert_eq!(config.public_origin, "https://console.example.com");
+        assert_eq!(
+            shared.redirect_uri,
+            "https://console.example.com/auth/callback"
+        );
+        assert_eq!(
+            config.allowed_hosts,
+            vec!["console.example.com".to_string()]
+        );
+        assert_eq!(shared.session_max_age_seconds, 900);
+        assert_eq!(shared.roles.bindings.len(), 3);
+        assert_eq!(shared.roles.revision, "2026-09-16.1");
+        assert_eq!(shared.session_key.expected_version, 1);
+        assert_eq!(config.kubernetes, KubeSource::InCluster);
+        assert!(
+            shared.trusted_proxy_cidrs[0].contains("10.4.5.6".parse().expect("a literal address"))
+        );
+        assert!(!shared.trusted_proxy_cidrs[0]
+            .contains("192.0.2.1".parse().expect("a literal address")));
+        assert!(!shared.oidc.insecure_loopback_issuer);
+
+        // AND THE REFUSALS THE DOCUMENT TABULATES ARE REAL. Each row below
+        // changes exactly one line of the accepted example.
+        let refusals: [(&str, &str, &str); 8] = [
+            (
+                "publicBaseUrl: \"https://console.example.com\"",
+                "publicBaseUrl: \"http://console.example.com\"",
+                "publicBaseUrl",
+            ),
+            (
+                "publicBaseUrl: \"https://console.example.com\"",
+                "publicBaseUrl: \"https://console.example.com/\"",
+                "publicBaseUrl",
+            ),
+            (
+                "issuer: https://idp.example.com/realms/logweir",
+                "issuer: https://idp.example.com/realms/logweir/",
+                "oidc.issuer",
+            ),
+            (
+                "issuer: https://idp.example.com/realms/logweir",
+                "issuer: http://idp.example.com/realms/logweir",
+                "oidc.issuer",
+            ),
+            (
+                "allowedAlgorithms: [RS256, ES256]",
+                "allowedAlgorithms: [HS256]",
+                "oidc.allowedAlgorithms",
+            ),
+            (
+                "groups: [\"logweir-team-a-viewers\"]",
+                "groups: [\"*\"]",
+                "roles.bindings",
+            ),
+            ("namespace: team-a", "namespace: team-zzz", "roles.bindings"),
+            (
+                "sessionMaxAgeSeconds: 900",
+                "sessionMaxAgeSeconds: 86400",
+                "sessionMaxAgeSeconds",
+            ),
+        ];
+        for (from, to, expected_field) in refusals {
+            let broken = block.replacen(from, to, 1);
+            assert_ne!(broken, block, "the example no longer contains `{from}`");
+            match Config::parse(&broken, Path::new("/etc/logweir")) {
+                Err(ConfigError::Field { field, .. }) => {
+                    assert_eq!(
+                        field, expected_field,
+                        "`{to}` was refused by the wrong field"
+                    )
+                }
+                other => panic!("`{to}` was not refused: {other:?}"),
+            }
+        }
+    }
+
     /// A leading `~` is a directory name here, not a home reference. Pinned so
     /// that the sentence in `docs/api.md` stays true, and so that adding
     /// expansion later is a deliberate change rather than a silent one.
@@ -1344,6 +1446,184 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The two modes do not share fields, and the file has to pick one.
+    #[test]
+    fn a_field_belonging_to_the_other_mode_is_refused_by_name() {
+        let local = text("127.0.0.1:8484", "http://127.0.0.1:8484");
+        for (line, field) in [
+            ("publicBaseUrl: \"https://c.example\"\n", "publicBaseUrl"),
+            ("sessionMaxAgeSeconds: 600\n", "sessionMaxAgeSeconds"),
+            ("trustedProxyCidrs: [\"10.0.0.0/8\"]\n", "trustedProxyCidrs"),
+        ] {
+            let t = local.clone() + line;
+            match Config::parse(&t, Path::new(".")) {
+                Err(ConfigError::Field { field: got, .. }) => assert_eq!(got, field),
+                other => panic!("`{line}` was accepted in localAdmin mode: {other:?}"),
+            }
+        }
+    }
+
+    /// Shared mode needs every one of its blocks, and says which is missing.
+    #[test]
+    fn shared_mode_names_the_block_it_is_missing() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/logweir-api sits two levels under the workspace root")
+            .join("docs/api.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/api.md is readable");
+        let block = text
+            .split("```yaml")
+            .find(|rest| rest.trim_start().starts_with("# console.yaml"))
+            .and_then(|rest| rest.split("```").next())
+            .expect("the console example is present")
+            .to_string();
+
+        // Removing a whole block, by the indentation its keys carry.
+        let without = |heading: &str| -> String {
+            let mut out = String::new();
+            let mut skipping = false;
+            for line in block.lines() {
+                if skipping && (line.starts_with(' ') || line.starts_with('-')) {
+                    continue;
+                }
+                skipping = false;
+                if line.starts_with(heading) {
+                    skipping = true;
+                    continue;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            out
+        };
+        for (heading, field) in [
+            ("oidc:", "oidc"),
+            ("roles:", "roles"),
+            ("sessionKey:", "sessionKey"),
+            ("cursorKey:", "cursorKey"),
+        ] {
+            let t = without(heading);
+            match Config::parse(&t, Path::new(".")) {
+                Err(ConfigError::Field { field: got, .. }) => {
+                    assert_eq!(got, field, "removing `{heading}`")
+                }
+                other => panic!("shared mode started without `{heading}`: {other:?}"),
+            }
+        }
+
+        // A localAdmin-only field in shared mode, and the unversioned cursor
+        // key, are refused by name rather than ignored.
+        for (line, field) in [
+            ("localAdmin:\n  subject: admin\n", "localAdmin"),
+            ("cursorKeyFile: ./cursor.key\n", "cursorKeyFile"),
+            (
+                "publicOrigin: \"https://console.example.com\"\n",
+                "publicOrigin",
+            ),
+        ] {
+            let t = block.clone() + line;
+            match Config::parse(&t, Path::new(".")) {
+                Err(ConfigError::Field { field: got, .. }) => assert_eq!(got, field),
+                other => panic!("`{line}` was accepted in shared mode: {other:?}"),
+            }
+        }
+    }
+
+    /// A loopback issuer over plain HTTP is a development affordance, and it is
+    /// bounded to loopback in both directions.
+    #[test]
+    fn an_insecure_issuer_is_confined_to_loopback() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/logweir-api sits two levels under the workspace root")
+            .join("docs/api.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/api.md is readable");
+        let block = text
+            .split("```yaml")
+            .find(|rest| rest.trim_start().starts_with("# console.yaml"))
+            .and_then(|rest| rest.split("```").next())
+            .expect("the console example is present")
+            .to_string();
+
+        // Loopback + the flag: accepted.
+        let ok = block.replace(
+            "issuer: https://idp.example.com/realms/logweir",
+            "issuer: http://127.0.0.1:18399/realms/logweir\n  insecureLoopbackIssuer: true",
+        );
+        let config = Config::parse(&ok, Path::new(".")).expect("a loopback mock issuer is allowed");
+        assert!(config.shared().unwrap().oidc.insecure_loopback_issuer);
+
+        // The flag WITHOUT a loopback host: refused, so it cannot be left on
+        // in a production file by accident.
+        let hostile = block.replace(
+            "issuer: https://idp.example.com/realms/logweir",
+            "issuer: https://idp.example.com/realms/logweir\n  insecureLoopbackIssuer: true",
+        );
+        assert!(matches!(
+            Config::parse(&hostile, Path::new(".")),
+            Err(ConfigError::Field {
+                field: "oidc.insecureLoopbackIssuer",
+                ..
+            })
+        ));
+
+        // And plain HTTP on loopback WITHOUT the flag is still refused.
+        let unflagged = block.replace(
+            "issuer: https://idp.example.com/realms/logweir",
+            "issuer: http://127.0.0.1:18399/realms/logweir",
+        );
+        assert!(matches!(
+            Config::parse(&unflagged, Path::new(".")),
+            Err(ConfigError::Field {
+                field: "oidc.issuer",
+                ..
+            })
+        ));
+
+        // publicBaseUrl stays HTTPS in every one of those cases.
+        let downgraded = ok.replace(
+            "publicBaseUrl: \"https://console.example.com\"",
+            "publicBaseUrl: \"http://127.0.0.1:8484\"",
+        );
+        assert!(matches!(
+            Config::parse(&downgraded, Path::new(".")),
+            Err(ConfigError::Field {
+                field: "publicBaseUrl",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cidrs_parse_and_match_only_their_own_range() {
+        let v4 = Cidr::parse("10.0.0.0/8").unwrap();
+        assert!(v4.contains("10.255.1.2".parse().unwrap()));
+        assert!(!v4.contains("11.0.0.1".parse().unwrap()));
+        // An IPv4-mapped IPv6 peer is the IPv4 address it maps to.
+        assert!(v4.contains("::ffff:10.1.2.3".parse().unwrap()));
+        assert!(!v4.contains("fd00::1".parse().unwrap()));
+
+        let v6 = Cidr::parse("fd00::/8").unwrap();
+        assert!(v6.contains("fd12::9".parse().unwrap()));
+        assert!(!v6.contains("fe80::1".parse().unwrap()));
+        assert!(!v6.contains("10.0.0.1".parse().unwrap()));
+
+        let all = Cidr::parse("0.0.0.0/0").unwrap();
+        assert!(all.contains("203.0.113.9".parse().unwrap()));
+
+        for bad in [
+            "10.0.0.0",
+            "10.0.0.0/33",
+            "10.0.0.0/x",
+            "not-an-ip/8",
+            "fd00::/129",
+        ] {
+            assert!(Cidr::parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
