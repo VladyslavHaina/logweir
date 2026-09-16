@@ -88,7 +88,6 @@ import {
   matchesQuery,
   pointHaystack,
   recoveryPoints,
-  refreshBackups,
   renderNoCompletedBackup,
   preparePlan,
   preparePlanOrProblem,
@@ -104,6 +103,7 @@ import {
   restoreRouteParams,
   restoreSelectorRoute,
   stepStates,
+  WINDOW_REFUSAL_SENTENCE,
   submitRestore,
   validateRestore,
   wizardDraftValues,
@@ -1217,14 +1217,25 @@ test("the_client_side_window_check_is_labelled_a_convenience", () => {
   );
   assert.equal(out.indexOf("Invalid Date"), -1);
   assert.equal(out.indexOf("1788782400000"), -1, "the raw integers are never printed");
+  // THE SENTENCE FOLLOWS THE BEHAVIOUR (PLAT-11.1). Step 3 used to print
+  // `CONVENIENCE_SENTENCE` -- "this check is a convenience and never the gate"
+  // -- under a field that only complained. It now REFUSES, so the note says
+  // that, and still says what this page cannot see: the archive's own manifest,
+  // which is what guard G-WIN reads.
+  assert.ok(out.includes(WINDOW_REFUSAL_SENTENCE), "the page says what it does: " + out);
   assert.ok(
-    out.includes(
-      "this check is a convenience and never the gate: the controller and phase 0 " +
-        "are the gate, and they read the bytes you submit.",
-    ),
-    "the page says what the gate actually is",
+    out.includes("refuses a point outside the coverage above before anything is sent"),
+    "…that nothing is sent",
   );
-  assert.ok(out.includes(CONVENIENCE_SENTENCE));
+  assert.ok(
+    out.includes("guard G-WIN refuses a point it does not cover"),
+    "…and that the runner's manifest check is still the last word",
+  );
+  assert.equal(
+    out.indexOf(CONVENIENCE_SENTENCE),
+    -1,
+    "and the old sentence is gone, because it is no longer true of this field",
+  );
 
   // A point outside the window complains, and a point inside does not.
   const outside = wizardState();
@@ -1733,8 +1744,9 @@ test("the_wizard_binds_to_the_recovery_point_the_route_names_and_picks_none_itse
 test("a_newer_backup_arriving_mid_wizard_does_not_move_the_selection", async () => {
   // THE ACCEPTANCE SENTENCE OF PLAT-11.1: "an older selected backup remains
   // selected throughout review and submission". The list is read again — which
-  // is what `refreshBackups` is, and what every re-mount of the page does —
-  // and a run that completed in between must not become the chosen one.
+  // is what every re-mount of this page does, and the ONLY way it ever looks at
+  // the namespace again — and a run that completed in between must not become
+  // the chosen one.
   const clusters = fixture("wizard-clusters-source-only.json");
   const before = fixture("wizard-backups-schedule-running.json");
   const older = pointNamed(before, "logweir-backup-laptop-20260911-183400");
@@ -1758,24 +1770,34 @@ test("a_newer_backup_arriving_mid_wizard_does_not_move_the_selection", async () 
     "the new run IS the newest completion (control): a page that searched would take it",
   );
 
-  assert.equal(refreshBackups(state, after), "selected", "the re-read still resolves the point");
-  assert.equal(state.pointUid, older.uid, "and it is the SAME point, by uid");
-  assert.equal(state.fields.backupSetRef, "01M28ZAAAAAAAAAAAAAAAAAAAA", "…and the same set");
-  const planAfter = await preparePlan(state);
+  // THE RE-READ IS `initialState` OVER THE SAME SELECTION, because that is the
+  // only way this page ever looks at the namespace again: `mountRestoreWizard`
+  // lists, then builds a state from the list it just read and the identity in
+  // the route. A reload, a route change and back, and the re-mount that
+  // discarding a draft performs all arrive here.
+  const reread = initialState("logweir-t28", clusters, after, state.selection);
+  assert.equal(reread.pointState, "selected", "the re-read still resolves the point");
+  assert.equal(reread.pointUid, older.uid, "and it is the SAME point, by uid");
+  assert.equal(reread.fields.backupSetRef, "01M28ZAAAAAAAAAAAAAAAAAAAA", "…and the same set");
+  const planAfter = await preparePlan(reread);
   assert.equal(planAfter.hash, planBefore.hash, "so the plan under review did not change");
   assert.equal(planAfter.restoreName, planBefore.restoreName, "nor either minted name");
   assert.equal(planAfter.approvalName, planBefore.approvalName);
 
-  // AND A RE-READ THAT NO LONGER HOLDS THE POINT SAYS SO. The list is the
-  // authority on every read, not the object the state happens to be holding:
-  // a point deleted since becomes a refusal on the next render rather than a
+  // AND A RE-READ THAT NO LONGER HOLDS THE POINT SAYS SO. The list it was just
+  // handed is the authority, not the object the previous state was holding: a
+  // point deleted since becomes a refusal on the next render rather than a
   // stale object the page keeps drawing a plan from.
   const deleted = fixture("wizard-backups-schedule-running.json");
   deleted.items = deleted.items.filter((b) => b.metadata.uid !== older.uid);
-  assert.equal(refreshBackups(state, deleted), "missing", "the point is gone, and the re-read says so");
-  assert.equal(state.point, null, "and the state stops holding the object it had");
-  refreshBackups(state, after);
-  assert.equal(state.pointState, "selected", "…and finds it again when it comes back (control)");
+  const gone = initialState("logweir-t28", clusters, deleted, state.selection);
+  assert.equal(gone.pointState, "missing", "the point is gone, and the re-read says so");
+  assert.equal(gone.point, null, "and the rebuilt state holds no object at all");
+  assert.equal(
+    initialState("logweir-t28", clusters, after, state.selection).pointState,
+    "selected",
+    "…and it is found again when it comes back (control)",
+  );
 
   // AND THE PLAN IS A FUNCTION OF THE POINT, which is what makes a swap
   // invalidate a review rather than silently restore from something else.

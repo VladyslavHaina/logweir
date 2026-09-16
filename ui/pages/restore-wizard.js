@@ -82,7 +82,6 @@ import {
   watchMutation,
 } from "../lifecycle.js";
 import {
-  CONVENIENCE_SENTENCE,
   COPY_CAVEAT,
   RESTORE_IMMUTABLE_SENTENCE,
   UNVERIFIED,
@@ -822,7 +821,7 @@ export function renderPointInTimeStep(state) {
     "<p class=\"window\">" + windowMessage(covered.fromMs, covered.toMs) + "</p>" +
     "</div>" +
     (complaint === null ? "" : "<p class=\"complaint\">" + complaint + "</p>") +
-    "<p class=\"note\">" + CONVENIENCE_SENTENCE + "</p>" +
+    "<p class=\"note\">" + WINDOW_REFUSAL_SENTENCE + "</p>" +
     "</section>"
   );
 }
@@ -855,6 +854,20 @@ export const SCRATCH_MARKER_WARNING =
   "this cluster's spec declares no markerTopic, and mode scratch is refused at phase 0 " +
   "unless the target proves it is scratch by carrying one. The runner checks the broker; " +
   "this line only checks the object.";
+
+/** Printed under step 3, in place of the convenience sentence it used to carry.
+ *
+ *  The old sentence said the client-side window check was a convenience and
+ *  never the gate, which was true of a check that only complained. Since
+ *  PLAT-11.1 this page REFUSES a point outside the disclosed coverage and sends
+ *  nothing, so the sentence had to change with the behaviour -- but the second
+ *  half of it is still true and still worth saying: the archive's own manifest
+ *  is what guard G-WIN reads, and this page has never seen one. */
+export const WINDOW_REFUSAL_SENTENCE =
+  "This page refuses a point outside the coverage above before anything is sent, and keeps " +
+  "every value you typed. It is not the last word: the runner reads the archive's own " +
+  "manifest and guard G-WIN refuses a point it does not cover, which is a narrower window " +
+  "than this one when the archive holds less than the run recorded.";
 
 /** Step 4 -- target and naming. EVERY `KafkaCluster` in the namespace with its
  *  role beside it, the two modes `TargetMode` accepts and nothing else, and
@@ -1152,13 +1165,15 @@ export function stepStates(state) {
   const target = targetCluster(s);
   const targetStatus = (target || {}).status || {};
   const targetSpec = (target || {}).spec || {};
+  // A CHOSEN POINT ALWAYS CARRIES A SET. `isRecoveryPoint` requires a non-empty
+  // `status.backupId`, and `resolvePoint` hands back a point only when that
+  // holds, so `state.point !== null` implies this. It is still read rather than
+  // assumed, because step 2 is `todo` for a state with no point at all -- which
+  // is what the selector and the refusal pages render over.
   const setChosen =
     chosen !== null &&
     typeof ((chosen.status || {}).backupId) === "string" &&
     chosen.status.backupId.length > 0;
-  // A wizard with no point never renders this stepper -- the selector does --
-  // so `attention` on step 2 is the case where the point is here and its set
-  // is not, which is a run whose status the controller has not finished.
   const whole = [
     typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
     setChosen,
@@ -1171,7 +1186,12 @@ export function stepStates(state) {
   ];
   const attention = [
     false,
-    chosen !== null && !setChosen,
+    // Step 2 has no `attention` state: a point either resolved -- in which case
+    // it carries a set and the step is done -- or it did not, in which case
+    // this stepper is not on screen. The arm that used to stand here described
+    // a chosen run with no backup set, which `isRecoveryPoint` no longer lets
+    // through.
+    false,
     !whole[2],
     target !== null &&
       targetFields.mode === "scratch" &&
@@ -1292,9 +1312,17 @@ export async function preparePlanOrProblem(state) {
 }
 
 /** The page's own checks on the values a Restore is created from, by input.
- *  A point OUTSIDE the covered window is not here: that check is a convenience
- *  and never the gate (see `CONVENIENCE_SENTENCE`). A point that is not an
- *  instant at all is, because the API server refuses it (`format: date-time`). */
+ *
+ *  A point that is not an instant at all is here, because the API server
+ *  refuses it (`format: date-time`) -- and so, SINCE PLAT-11.1, is a point
+ *  outside the coverage the selected recovery point discloses. That second one
+ *  used to be a grey complaint on the reasoning that the client-side checks are
+ *  a convenience and never the gate. They still are not the gate: guard G-WIN
+ *  in the runner refuses a point the archive does not cover, against the
+ *  manifest, and this function cannot see a manifest. What changed is that the
+ *  page now refuses to spend an approver's signature on a document phase 0 was
+ *  always going to refuse -- so the check is a REFUSAL THIS PAGE MAKES FIRST,
+ *  not a second gate, and nothing is sent when it fires. */
 export function validateRestore(state) {
   const s = state || {};
   const fields = s.fields || {};
@@ -1841,7 +1869,17 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
  *
  *  `selection` is the route's identity -- `{uid, backup}` from
  *  [`restoreRouteParams`] -- and it is the only thing that decides which point
- *  this state is bound to. Absent, `pointState` is `none` and the mount half
+ *  this state is bound to.
+ *
+ *  THIS IS ALSO THE RE-READ, and there is no other one: every fresh look at
+ *  the namespace -- a reload, a route change and back, the re-mount that
+ *  discarding a draft performs -- comes back through `mountRestoreWizard` into
+ *  this function with the SAME `selection`, and `resolvePoint` resolves it
+ *  against the list that was just read rather than against the object the
+ *  previous state happened to be holding. So a Backup that completed since does not
+ *  become the choice, and a point DELETED since resolves to `missing` -- a
+ *  refusal on the next render -- instead of a stale object the page keeps
+ *  drawing a plan from. Absent, `pointState` is `none` and the mount half
  *  renders the selector; present and unresolvable, it is `missing` or
  *  `unusable` and the mount half renders a refusal. In neither case is a plan
  *  built, and in NO case does this function look for "the newest one instead":
@@ -1932,30 +1970,6 @@ export function initialState(ns, clusters, backups, selection) {
       ),
     },
   };
-}
-
-/** A FRESH READ OF THE SAME NAMESPACE, WITHOUT MOVING THE SELECTION.
- *
- *  This is the property PLAT-11.1 is about, in one function: a later `list`
- *  brings newer `Backup` objects, and the point stays the one whose UID the
- *  route names. It re-resolves rather than trusting the old object, so a point
- *  that has been DELETED since becomes `missing` here -- a refusal on the next
- *  render -- instead of a stale object the page keeps drawing a plan from.
- *
- *  The plan fields are deliberately left alone: they were derived from this
- *  point when the state was built and, apart from the operator's own edits,
- *  are still that derivation. Returns the new `pointState`. */
-export function refreshBackups(state, backups) {
-  const s = state || {};
-  const resolved = resolvePoint(backups, s.selection);
-  s.backups = backups;
-  s.point = resolved.point;
-  s.pointState = resolved.state;
-  s.pointUid = resolved.uid;
-  s.pointName = resolved.name;
-  s.pointPhase = resolved.phase;
-  s.pointRenamed = resolved.renamed;
-  return resolved.state;
 }
 
 // Copy public settings only. The controller projects the selected cluster's
