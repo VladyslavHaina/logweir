@@ -2169,6 +2169,29 @@ author asked for. The new controller therefore also refuses an object carrying
 a field it does not implement (`ConnectionFieldUnsupported`, naming the
 field) instead of resolving a connection whose meaning it does not know.
 
+**Before you upgrade: four existing shapes stop being accepted.** The API
+server never validated any of them, so an object written under an earlier
+release can carry one and has been running. Each becomes a named refusal on the
+first reconcile after the upgrade, with `status.reachable` cleared and no probe
+Job created. **`KafkaCluster.spec` is CEL-immutable, so every one of them is
+fixed by delete-and-recreate, not by an edit** — and a `Backup` or `Restore`
+whose referent is refused goes terminal, because its own `spec` is immutable
+too. Audit for them first:
+
+| What the object carries | What the operator sees | Why it is refused rather than dialled |
+|---|---|---|
+| a `bootstrapServers` **entry** that is empty, or carries a comma or whitespace — e.g. the single entry `"b0:9092, b1:9092"` | `Reachable=Unknown`, reason **`ConnectionConfigInvalid`**, message naming `spec.bootstrapServers[<i>]` | the probe joins the list with commas and a backup plan keeps it as a list, so one such entry is **two different dials on two paths**. The old probe happened to work; the plan the backup ran did not name the same brokers |
+| an `auth.secretRef.name` that is not a DNS-1123 subdomain, or an `auth.secretRef.passwordKey` outside `[-._a-zA-Z0-9]+` | `Reachable=Unknown`, reason **`ConnectionReferenceInvalid`**, message naming the field | the kubelet could never resolve it, so the pod would fail at container start with no controller-side explanation |
+| `auth.mode: plaintext` with `auth.tls: true` | `Reachable=Unknown`, reason **`ConnectionConfigInvalid`**, message naming `spec.auth.tls` | earlier releases **dialled it in the clear**. Refusing is the only answer that is not a silent downgrade |
+| `auth.mode: scramSha512` with no `auth.username`, or no `auth.secretRef.name` | `Reachable=Unknown`, reason **`CredentialNotRenderable`**, message naming the field | it used to produce a Job with no credential variable that reported `reachable: false` — a configuration mistake reported as a fact about somebody's cluster |
+
+`ConnectionConfigInvalid`, `ConnectionReferenceInvalid` and
+`ConnectionFieldUnsupported` are **not terminal on the `KafkaCluster` itself**:
+they are re-evaluated on every reconcile, so rolling a controller that
+understands the object forward clears them with no edit. They **are** terminal
+for a `Backup` or `Restore` that references such an object, whose `spec` and
+referent cannot change. The full refusal table is §20.4.
+
 **Rollback: the CRD may stay ahead of the controller, and a TLS-CA object
 fails closed.** Roll the controller Deployment back to the previous image and
 leave the CRD in place. Then:
@@ -2239,6 +2262,14 @@ recognisable values and grepping every rendered output
 The CA **certificate** is public by nature and may be held in a ConfigMap. A
 CA **private key** has no place in this contract, in any object Logweir reads,
 or in a ConfigMap (§9).
+
+**Prefer `auth.tlsCa.configMapKeyRef` to `secretKeyRef`** unless something else
+already keeps the certificate in a Secret. Both are equally safe — a name is
+not a grant, and reading the plan confers nothing on the referenced object —
+but a Secret-backed CA is the one case where a Secret's name and key appear in
+a plan ConfigMap (§20.6), and an adopter whose policy is "no Secret name in a
+ConfigMap" gets that for free by putting the certificate where public material
+belongs.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
