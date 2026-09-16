@@ -271,6 +271,14 @@ renders before it returns.
   and the bytes submitted are one object. In console mode the `planHash` the
   product API takes beside `planBytes` comes from that object; bytes this page
   never prepared are refused before anything is sent.
+* **A list holds the namespace.** The product API pages and `kubectl proxy`
+  does not, so the console client asks for the maximum page size and **follows
+  the cursor to the end**: the same table shows the same rows in both modes. A
+  namespace larger than 25 pages (5 000 rows) is **refused by name** --
+  `ListTooLarge`, naming how many were read and saying to use `kubectl` -- and
+  never shown as a prefix pretending to be the whole. A "showing the first N,
+  more exist" line beside the table would be better, and belongs to PLAT-18.2,
+  which owns the table, its footer and its copy.
 
 ### What console mode cannot show, named
 
@@ -305,7 +313,25 @@ The `TrustRoster` has **no product route at all**: it is cluster-scoped and
 admin-only, and the `#/keys` page says so by name in console mode instead of
 asking for a route that does not exist.
 
+### The wizard machine is a test-time invariant
+
+`workflow.js` declares the six restore steps as a machine with named moves, and
+the suite walks it over the page's own derived step states. **The page does not
+enforce it.** `stepStates` (which wants a reachable target) and
+`validateRestore` (which does not) legitimately disagree today, so enforcing the
+walk at render time would change what the wizard accepts -- which PLAT-18.1 must
+not. PLAT-18.2 owns the stepper and is where the two are reconciled. The
+mutation machine, by contrast, **is** wired in: every write this page makes goes
+through it.
+
 ### Where a contract failure comes from
+
+**Including the second read a detail view makes.** A `Backup` or `Restore`
+detail also reads its operation, and an approval also reads its packet; a 403 or
+a 404 there means "this view does not get that extra" and the object is rendered
+without it, but a contract failure or a 5xx is raised rather than turned into an
+empty evidence block -- which is indistinguishable from "the controller recorded
+nothing", and is the exact cell this whole module exists to prevent.
 
 A response that is not what the contract says it is -- a required field absent,
 a field of the wrong type, an enum member the contract does not declare -- is an

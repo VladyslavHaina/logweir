@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import {
   CONSOLE,
   LEGACY,
+  LIST_PAGE_BUDGET,
   apiClient,
   applyGrants,
   granted,
@@ -41,7 +42,7 @@ import {
   clusterBody,
 } from "../pages/clusters.js";
 import { preparePlanDocument } from "../plan.js";
-import { isContractFailure } from "../contract.js";
+import { decodeRequest, isContractFailure } from "../contract.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -194,7 +195,7 @@ test("console_mode_lists_through_api_v1_and_projects_onto_the_resource_the_page_
   const wire = transport(() => ({ status: 200, body: fixture("console/connections-list.json") }));
   try {
     const collection = await apiClient().list("team-a", "kafkaclusters");
-    assert.equal(wire.seen[0].url, "/api/v1/namespaces/team-a/connections");
+    assert.equal(wire.seen[0].url, "/api/v1/namespaces/team-a/connections?limit=200");
     assert.equal(wire.seen[0].init.method, "GET");
     assert.equal(collection.items.length, 2);
     const first = collection.items[0];
@@ -721,6 +722,167 @@ test("every_page_s_mount_half_reads_through_the_one_client_and_renders", async (
       assert.ok(
         request.url.indexOf("/apis/logweir.dev/v1alpha1/") === 0,
         "and every one of them addressed the mode that was selected: " + request.url,
+      );
+    }
+  } finally {
+    wire.restore();
+  }
+});
+
+
+// =========================== the second read of a detail, and the whole list
+
+test("a_drifted_operation_dto_is_a_rendered_contract_failure_and_not_an_empty_evidence_block", async () => {
+  // THE HOLE THE REVIEW FOUND. `enrich` swallowed every failure of the
+  // operation route, contract failures included, so a server that renamed
+  // `verification.state` produced a backup detail with NO evidence block and
+  // no error -- indistinguishable from "the controller recorded nothing",
+  // which is the exact cell `ui/contract.js`'s header says this client exists
+  // to stop and `ui/README.md` promises is never absorbed.
+  await console_();
+  const drifted = fixture("console/operation-backup.json");
+  drifted.item.verification.verdict = drifted.item.verification.state;
+  delete drifted.item.verification.state;
+  const wire = transport((u) =>
+    u.indexOf("/operations/") !== -1
+      ? { status: 200, body: drifted }
+      : { status: 200, body: fixture("console/backup.json") });
+  try {
+    await assert.rejects(
+      () => apiClient().get("team-a", "backups", "orders-hourly-20260912-080000"),
+      (error) => {
+        assert.ok(isContractFailure(error), "it is a contract failure");
+        assert.equal(error.contract.dto, "OperationVerification");
+        assert.equal(error.contract.path, "item.verification.state");
+        return true;
+      },
+    );
+  } finally {
+    wire.restore();
+  }
+});
+
+test("a_detail_s_second_read_that_is_merely_refused_still_renders_the_object", async () => {
+  await console_();
+  for (const status of [403, 404]) {
+    const wire = transport((u) =>
+      u.indexOf("/operations/") !== -1
+        ? { status: status, body: { type: "t", title: "t", status: status, code: "not_found",
+          detail: "no such operation", requestId: "r", retryable: false } }
+        : { status: 200, body: fixture("console/backup.json") });
+    try {
+      const object = await apiClient().get("team-a", "backups", "orders-hourly-20260912-080000");
+      assert.equal(object.metadata.name, "orders-hourly-20260912-080000",
+        String(status) + ": the detail view stands without the extra");
+      assert.equal(object.status.evidence, undefined, "and no evidence was invented");
+    } finally {
+      wire.restore();
+    }
+  }
+});
+
+test("a_console_list_follows_its_cursor_instead_of_showing_a_prefix", async () => {
+  // A console list that stopped at the API's page size would show fewer rows
+  // than the legacy mode shows, in the same table, with nothing on screen
+  // saying so -- and `#/history` is what somebody reads during an incident.
+  await console_();
+  const first = fixture("console/connections-list.json");
+  first.page = { limit: 200, nextCursor: "opaque-cursor-1", snapshot: "60219" };
+  const second = fixture("console/connections-list.json");
+  second.items = [second.items[0]];
+  second.items[0].name = "orders-third";
+  second.items[0].uid = "3b2c3d4e-5f60-4718-8293-a4b5c6d7e8fb";
+  second.page = { limit: 200, nextCursor: null, snapshot: "60219" };
+  let page = 0;
+  const wire = transport(() => ({ status: 200, body: page++ === 0 ? first : second }));
+  try {
+    const collection = await apiClient().list("team-a", "kafkaclusters");
+    assert.equal(wire.seen.length, 2, "the second page was asked for");
+    assert.equal(wire.seen[0].url,
+      "/api/v1/namespaces/team-a/connections?limit=200",
+      "and the first asked for the API's maximum page size");
+    assert.equal(wire.seen[1].url,
+      "/api/v1/namespaces/team-a/connections?limit=200&cursor=opaque-cursor-1",
+      "echoing the cursor exactly as it arrived");
+    assert.equal(collection.items.length, 3, "every row is in the table");
+    assert.equal(collection.items[2].metadata.name, "orders-third");
+    assert.equal(collection.__page.nextCursor, null, "and the list is complete");
+  } finally {
+    wire.restore();
+  }
+});
+
+test("a_namespace_larger_than_the_budget_is_refused_by_name_and_never_truncated", async () => {
+  await console_();
+  const endless = fixture("console/connections-list.json");
+  endless.page = { limit: 200, nextCursor: "always-more", snapshot: "1" };
+  const wire = transport(() => ({ status: 200, body: endless }));
+  try {
+    await assert.rejects(
+      () => apiClient().list("team-a", "kafkaclusters"),
+      (error) => {
+        assert.equal(error.reason, "ListTooLarge");
+        assert.match(error.message, /is not showing you the first/);
+        return true;
+      },
+      "showing a prefix as if it were the whole namespace is the failure this refuses",
+    );
+    assert.equal(wire.seen.length, LIST_PAGE_BUDGET, "it stopped at its own budget");
+  } finally {
+    wire.restore();
+  }
+});
+
+test("every_request_body_this_client_builds_satisfies_the_published_request_shape", async () => {
+  // THE OTHER HALF OF THE CONTRACT, checked on the bytes that actually go out.
+  await console_();
+  const sent = [];
+  const wire = transport((u, init) => {
+    if (init.method !== "POST") {
+      return { status: 200, body: fixture("console/schedule.json") };
+    }
+    sent.push({ url: u, body: JSON.parse(init.body) });
+    return { status: 201, body: u.indexOf("/connections") !== -1
+      ? fixture("console/connection.json")
+      : (u.indexOf("/restores") !== -1
+        ? fixture("console/restore.json")
+        : fixture("console/schedule.json")) };
+  });
+  const reviewed = await preparePlanDocument(fixture("plan-fields.json"));
+  try {
+    const api = apiClient();
+    await api.create("team-a", "kafkaclusters", clusterBody(VALUES));
+    await api.create("team-a", "backupschedules", {
+      apiVersion: "logweir.dev/v1alpha1", kind: "BackupSchedule",
+      metadata: { name: "orders-hourly" },
+      spec: {
+        schedule: "0 * * * *", sourceRef: { name: "orders-prod" }, topics: ["orders"],
+        archive: { url: "s3://kafka-backups/orders", secretRef: { name: "logweir-s3" } },
+        suspend: false, concurrencyPolicy: "Forbid", retention: { keepLast: 3 },
+      },
+    });
+    await api.create("team-a", "restores", {
+      apiVersion: "logweir.dev/v1alpha1", kind: "Restore",
+      metadata: { name: reviewed.restoreName },
+      spec: {
+        planBytes: reviewed.bytes, approvalRef: { name: reviewed.approvalName },
+        sourceArchive: { url: "s3://kafka-backups/orders" },
+        backupSetRef: "01JB7Z0000000000000000000B", pointInTime: "2026-09-11T12:00:00Z",
+        target: { clusterRef: { name: "orders-scratch" }, mode: "scratch",
+          topicNaming: { prefix: "drill-" } },
+        deadlineSeconds: 3600,
+      },
+    });
+    await api.patchSuspend("team-a", "orders-hourly", true);
+    assert.equal(sent.length, 4);
+    const routes = ["connections", "schedules", "restores", "schedules:set-suspension"];
+    for (let i = 0; i < routes.length; i += 1) {
+      const decoded = decodeRequest(routes[i], sent[i].body);
+      assert.deepEqual(
+        decoded.unknown,
+        [],
+        routes[i] + ": a mutation input carrying a field the schema does not name is a 422 " +
+          "from the product API, not a tolerated extra",
       );
     }
   } finally {

@@ -27,7 +27,7 @@ import {
   transitionError,
 } from "../workflow.js";
 import { createMutation } from "../lifecycle.js";
-import { initialState, resolvePoint, selectTarget, stepStates } from "../pages/restore-wizard.js";
+import { initialState, stepStates } from "../pages/restore-wizard.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
@@ -170,15 +170,6 @@ test("every_machine_state_publishes_a_phase_the_pages_already_render", () => {
 
 // ========================================================== the restore wizard
 
-/** A wizard state standing on the newest recovery point of a fixture. */
-function wizardState() {
-  const backups = fixture("wizard-backups.json");
-  const clusters = fixture("wizard-clusters.json");
-  const point = resolvePoint(backups, { uid: backups.items[0].metadata.uid });
-  const state = initialState("team-a", backups, clusters, point);
-  return state;
-}
-
 test("the_wizard_s_six_steps_are_the_machine_s_six_states_in_one_order", () => {
   assert.equal(WIZARD_STEPS.length, 6);
   assert.equal(WIZARD_EVENTS.length, 6);
@@ -190,20 +181,37 @@ test("the_wizard_s_six_steps_are_the_machine_s_six_states_in_one_order", () => {
   assert.equal(at, "submitted");
 });
 
-test("the_wizard_s_own_derivation_walks_the_machine_and_stops_where_it_says_it_is", () => {
-  const state = wizardState();
-  const steps = stepStates(state);
-  const walked = replayWizard(steps);
-  assert.ok(WIZARD_STEPS.concat(["submitted"]).indexOf(walked.current) !== -1);
-  for (let i = 0; i < walked.events.length; i += 1) {
-    assert.equal(walked.events[i], WIZARD_EVENTS[i], "the moves are taken in order");
+test("the_wizard_s_own_derivation_walks_the_machine_over_four_real_states", () => {
+  // FOUR STATES THE PAGE ACTUALLY PRODUCES, each landing on a different step,
+  // with the step NAMED here rather than recomputed from `replayWizard`'s own
+  // rule -- which is what an earlier version of this arm did, and why it
+  // asserted almost nothing.
+  const backups = fixture("wizard-backups.json");
+  const clusters = fixture("wizard-clusters.json");
+  const uid = backups.items[0].metadata.uid;
+  const build = (selection, edit) => {
+    const state = initialState("team-a", clusters, backups, selection);
+    if (typeof edit === "function") {
+      edit(state);
+    }
+    return state;
+  };
+  const cases = [
+    ["no recovery point chosen", build({}), "archive", []],
+    ["a point outside the window it discloses",
+      build({ uid: uid }, (s) => { s.fields.pointInTime = "1999-01-01T00:00:00Z"; }),
+      "pointInTime", ["describeArchive", "choosePoint"]],
+    ["a target with no topic prefix",
+      build({ uid: uid }, (s) => { s.fields.target.topicPrefix = ""; }),
+      "target", ["describeArchive", "choosePoint", "setPointInTime"]],
+    ["every input whole", build({ uid: uid, backup: backups.items[0].metadata.name }),
+      "submitted", WIZARD_EVENTS.slice()],
+  ];
+  for (const [said, state, current, events] of cases) {
+    const walked = replayWizard(stepStates(state));
+    assert.equal(walked.current, current, said + ": the walk stopped on the wrong step");
+    assert.deepEqual(walked.events, events, said + ": the wrong moves were taken");
   }
-  const blocked = steps.findIndex((step) => step.status !== "done" && step.status !== "ready");
-  assert.equal(
-    walked.events.length,
-    blocked === -1 ? 6 : blocked,
-    "the walk stops at the first step the wizard has not finished",
-  );
 });
 
 /** Six step entries, as the wizard's own derivation shapes them. */
@@ -214,33 +222,21 @@ function derived(statuses, currentAt) {
   }));
 }
 
-test("a_derivation_that_skipped_a_step_cannot_be_walked", () => {
-  // The archive and the recovery point are done, the point in time is not, and
-  // the TARGET step -- which comes after it -- claims to be finished anyway.
-  assert.throws(
-    () => replayWizard(derived(["done", "done", "attention", "done", "todo", "todo"], 2)),
-    (error) => {
-      assert.ok(isTransitionError(error));
-      assert.equal(error.machine, "restore-wizard");
-      assert.equal(error.from, "pointInTime", "the walk stopped where the derivation blocked");
-      assert.equal(error.event, "resume:target", "and the step it skipped to is named");
-      return true;
-    },
-    "a stepper that lets a viewer past a step it also calls unfinished is a stepper that has " +
-      "stopped describing the wizard, and this is where that is caught",
-  );
-});
-
 test("a_derivation_whose_current_step_is_not_the_step_it_blocked_on_cannot_be_walked", () => {
   assert.throws(
     () => replayWizard(derived(["done", "todo", "todo", "todo", "todo", "todo"], 4)),
     (error) => {
       assert.ok(isTransitionError(error));
-      assert.equal(error.from, "recoveryPoint");
-      assert.equal(error.event, "resume:recoveryPoint");
+      assert.equal(error.from, "recoveryPoint", "the walk stopped where the derivation blocked");
+      assert.equal(error.event, "resume:preflight", "and the step it pointed at is named");
       return true;
     },
     "the stepper cannot point a viewer at a step the same derivation says is not reachable",
+  );
+  assert.throws(
+    () => replayWizard(derived(["todo", "todo", "todo", "todo", "todo", "todo"], -1)),
+    /resume:nowhere/,
+    "and it must point somewhere",
   );
 });
 
@@ -249,9 +245,59 @@ test("a_whole_derivation_walks_all_six_moves_and_lands_on_submitted", () => {
   assert.deepEqual(walked.events, WIZARD_EVENTS.slice());
   assert.equal(walked.state, "submitted");
   assert.equal(walked.current, "submitted");
+  assert.throws(
+    () => replayWizard(derived(["done", "done", "done", "done", "done", "ready"], 2)),
+    /resume:pointInTime/,
+    "a derivation with nothing left must say so by standing on the last step",
+  );
+});
+
+test("a_later_step_may_be_finished_while_an_earlier_one_is_not", () => {
+  // NOT A SKIP, AND THE REAL PAGE DOES THIS. All six sections are on screen at
+  // once and each reports its own completeness: a wizard with no recovery
+  // point chosen still has a reachable target cluster, so step 5 reads `done`
+  // while step 1 does not. An earlier rule here forbade that and was wrong
+  // about the page; driving the arm below over the real derivation is what
+  // found it.
+  const walked = replayWizard(derived(["todo", "todo", "attention", "todo", "done", "todo"], 0));
+  assert.equal(walked.current, "archive");
+  assert.deepEqual(walked.events, []);
 });
 
 test("a_derivation_that_is_not_six_steps_is_refused", () => {
   assert.throws(() => replayWizard([]), /the restore wizard has 6 steps; the derivation gave 0/);
   assert.throws(() => replayWizard(null), /the derivation gave 0/);
+});
+
+test("a_timed_out_attempt_whose_route_left_returns_to_idle_instead_of_throwing", async () => {
+  // REPRODUCED FROM THE REVIEW. A submit that passes the timeout and THEN
+  // finds its route gone settles as abandoned: `submitRestore` returns `null`
+  // and the wizard turns that into `{outcome: "abandoned"}`. `unanswered` had
+  // no `abandon`, so that late answer raised a TransitionError from inside a
+  // promise nobody awaits -- an unhandled rejection in the browser -- and left
+  // the record `unanswered` for good.
+  let fire = null;
+  const record = createMutation({
+    timeoutMs: 10, setTimer: (fn) => { fire = fn; return 1; }, clearTimer: () => {},
+  });
+  let settle = null;
+  const attempt = record.run(() => new Promise((resolve) => { settle = resolve; }));
+  fire();
+  await attempt;
+  assert.equal(record.machineState, "unanswered");
+  settle({ outcome: "abandoned" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(record.machineState, "idle", "the record went back where the operator left it");
+  assert.equal(record.state.phase, "idle");
+  assert.deepEqual(record.transitions, ["start", "timeout", "abandon"]);
+});
+
+test("a_settle_that_cannot_move_the_record_leaves_it_alone_and_does_not_throw", () => {
+  // The exported `send` still throws for a caller that can catch it -- the
+  // arms above assert that -- but `run()`'s settle handlers publish from a
+  // promise chain nobody awaits, so an illegal move there must not become an
+  // unhandled rejection.
+  const record = createMutation();
+  assert.throws(() => record.send("succeed"), (error) => isTransitionError(error));
+  assert.equal(record.machineState, "idle");
 });

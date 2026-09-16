@@ -15,6 +15,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  CONSOLE_ENUMS,
+  CONSOLE_REQUESTS,
   CONSOLE_SHAPES,
   CONTRACT_REASON,
   decodeConsoleItem,
@@ -26,6 +28,7 @@ import {
   decodeSession,
   isContractFailure,
 } from "../contract.js";
+import { TARGET_MODES } from "../plan.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const SCHEMA = JSON.parse(
@@ -173,7 +176,11 @@ test("every_console_decoder_requires_exactly_what_the_schema_requires", () => {
     }
     checked += 1;
   }
-  assert.ok(checked >= 25, "this arm compared " + String(checked) + " shapes, which is too few");
+  assert.ok(
+    checked >= 50,
+    "this arm compared " + String(checked) + " shapes; it covers every response DTO, every list " +
+      "and single-item envelope, and every request body the client builds",
+  );
 });
 
 test("a_required_field_that_is_absent_is_a_contract_failure_and_not_an_empty_cell", () => {
@@ -333,5 +340,72 @@ test("every_shipped_legacy_fixture_satisfies_its_own_contract", () => {
   for (const [plural, name] of kinds) {
     const decoded = decodeLegacyList(plural, fixture(name));
     assert.ok(decoded.value.items.length > 0, name + " has items");
+  }
+});
+
+
+// ------------------------------------- the closed sets and the request shapes
+
+test("every_closed_set_this_client_holds_is_the_schema_s_own", () => {
+  // THE ENUMS WERE HAND-COPIED, AND A HAND-COPIED LIST DRIFTS. A server that
+  // adds an eleventh `OperationState` turns every console list of that kind
+  // into a whole-page contract failure; nothing went red first until this arm.
+  let checked = 0;
+  for (const name of Object.keys(CONSOLE_ENUMS)) {
+    const published = DEFINITIONS[name];
+    assert.ok(published !== undefined, name + " is published in the OpenAPI document");
+    assert.ok(Array.isArray(published.oneOf), name + " is an enumeration there");
+    const members = [];
+    for (const option of published.oneOf) {
+      members.push(...(option.enum || []));
+    }
+    assert.deepEqual(
+      CONSOLE_ENUMS[name].slice(),
+      members,
+      name + ": the members this client accepts are not the members the schema declares, in " +
+        "that order.",
+    );
+    checked += 1;
+  }
+  assert.equal(checked, 9, "this arm compared " + String(checked) + " sets");
+});
+
+test("the_plan_module_s_target_modes_and_the_product_api_s_restore_modes_agree", () => {
+  // `ui/plan.js` holds the RUNNER's `TargetMode`; `CONSOLE_ENUMS.RestoreMode`
+  // holds the product API's. They are equal by agreement between two
+  // components, not by construction, so the agreement is asserted rather than
+  // assumed -- and `plan.js` keeps its own copy, because importing the product
+  // API's contract into the plan emitter would be the wrong dependency.
+  assert.deepEqual(TARGET_MODES.slice(), CONSOLE_ENUMS.RestoreMode.slice());
+});
+
+test("the_two_problem_codes_this_client_branches_on_are_published_codes", () => {
+  const members = [];
+  for (const option of DEFINITIONS.ProblemCode.oneOf) {
+    members.push(...(option.enum || []));
+  }
+  for (const code of ["idempotency_conflict", "state_conflict", "validation_failed"]) {
+    assert.ok(members.indexOf(code) !== -1, code + " is a published problem code");
+  }
+});
+
+test("every_request_shape_this_client_builds_is_the_schema_s_own", () => {
+  // THE OTHER HALF OF THE CONTRACT. `ui/client.js` hand-writes the body of
+  // every product-API create; a field that becomes required there was a 422 in
+  // front of an operator and not a red test.
+  const routes = {
+    connections: "CreateConnectionRequest",
+    schedules: "CreateScheduleRequest",
+    restores: "CreateRestoreRequest",
+    "schedules:set-suspension": "SetSuspensionRequest",
+  };
+  for (const route of Object.keys(routes)) {
+    assert.ok(CONSOLE_REQUESTS[route] !== undefined, route + " has a declared request shape");
+    assert.equal(CONSOLE_REQUESTS[route].name, routes[route]);
+  }
+  for (const name of ["ArchiveRequest", "ConnectionAuthRequest", "CreateConnectionRequest",
+    "RetentionRequest", "CreateScheduleRequest", "TopicNamingRequest", "RestoreTargetRequest",
+    "CreateRestoreRequest", "SetSuspensionRequest"]) {
+    assert.ok(CONSOLE_SHAPES[name] !== undefined, name + " is in the compared surface");
   }
 });
