@@ -21,10 +21,10 @@ use logweir_core::check_contract::{
     TOPIC_INVENTORY_FORMAT,
 };
 use logweir_kafka::inventory::{
-    assemble, classify_create_code, classify_error_code, collect, escalate, fault_rank,
-    is_certificate_trust_reason, missing_expected, relay_cost, CheckFailure, FaultLog, Inventory,
-    InventoryProbe, InventoryRequest, ListedTopic, Listing, ProbeTimeouts, RDKafkaErrorCode,
-    TopicCreateOutcome, TopicPresence,
+    assemble, classification_codes, classify_create_code, classify_error_code, collect, escalate,
+    fault_rank, is_certificate_trust_reason, missing_expected, relay_cost, CheckFailure, FaultLog,
+    Inventory, InventoryProbe, InventoryRequest, ListedTopic, Listing, ProbeTimeouts,
+    RDKafkaErrorCode, TopicCreateOutcome, TopicPresence,
 };
 use logweir_kafka::reader::NewTopicSpec;
 
@@ -287,19 +287,25 @@ fn the_relay_cost_is_the_frame_prefix_plus_the_canonical_line() {
     // budget from "~24 characters of flags and separators", i.e. 283 bytes of
     // line and 303 bytes relayed. That understates it: the flag field carries
     // `internal,expected,error:<Code>`, and the longest code this module can
-    // put there is `ClusterAuthorizationFailed` (26). The arithmetic is
-    // DERIVED from that code set, so a longer Kafka code added to the
-    // vocabulary moves this number instead of quietly invalidating the table.
-    let kafka_codes = [
-        CheckCode::BrokerUnreachable,
-        CheckCode::AuthenticationFailed,
-        CheckCode::TlsHandshakeFailed,
-        CheckCode::TlsTrustFailed,
-        CheckCode::MetadataTimeout,
-        CheckCode::ClusterAuthorizationFailed,
-        CheckCode::TopicAuthorizationFailed,
-        CheckCode::UnknownTopicOrPartition,
-    ];
+    // put there is `ClusterAuthorizationFailed` (26).
+    //
+    // The code set is DERIVED from `classify_error_code` itself — it is the
+    // sweep over librdkafka's own error-code space, not a list retyped here —
+    // so a ninth, longer code added to the classifier moves this arithmetic
+    // instead of quietly invalidating the table the relay budget is built on.
+    // A hand-maintained array is what an independent review flagged; this is
+    // the fix.
+    let kafka_codes = classification_codes();
+    assert!(
+        kafka_codes.len() >= 6,
+        "the sweep found only {} codes; it has gone quiet: {kafka_codes:?}",
+        kafka_codes.len()
+    );
+    assert!(
+        kafka_codes.contains(&CheckCode::TlsTrustFailed)
+            && kafka_codes.contains(&CheckCode::ClusterAuthorizationFailed),
+        "the sweep must reach both reason-dependent arms: {kafka_codes:?}"
+    );
     let longest = kafka_codes
         .iter()
         .max_by_key(|c| c.as_str().len())
@@ -1012,5 +1018,186 @@ fn a_failing_call_serves_the_event_queue_before_it_classifies() {
     assert!(
         code.contains("fn drain_events(&self)") && code.contains("self.consumer.poll("),
         "the drain is what makes the capturing context do anything at all"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H3 — the three-way per-topic decision (D2 §5.4 signal (ii))
+// ---------------------------------------------------------------------------
+
+/// **The arm an independent review's mutant survived in.**
+///
+/// `TopicAuthorizationFailed ⇒ NotAuthorized` is signal (ii) of D2 §5.4 — the
+/// only thing that turns an ACL-limited principal into visibility `limited`
+/// rather than `unknown`, and "permission-limited" is a named PLAT-09.1
+/// distinguishable outcome. It used to live inside `describe_topic`, where it
+/// was reachable only from a broker with real ACLs; the compose stack has
+/// none, so a planted `=> Unknown` passed all 33 tests and the whole crate
+/// suite. The decision is now `TopicPresence::of_error`, and this is its table.
+#[test]
+fn a_per_topic_error_maps_to_exactly_one_presence() {
+    assert_eq!(
+        TopicPresence::of_error(CheckCode::TopicAuthorizationFailed),
+        TopicPresence::NotAuthorized,
+        "the broker returns TOPIC_AUTHORIZATION_FAILED whether or not the topic exists, so it \
+         says nothing about existence and everything about visibility"
+    );
+    assert_eq!(
+        TopicPresence::of_error(CheckCode::UnknownTopicOrPartition),
+        TopicPresence::NotFound
+    );
+    // EVERYTHING ELSE IS `Unknown`, AND NEVER `NotFound`. A leader election, a
+    // transient broker state or a code this build does not model are all "I
+    // could not tell", and rendering that as "it is not there" is the softer
+    // and wrong direction.
+    for code in [
+        CheckCode::BrokerUnreachable,
+        CheckCode::MetadataTimeout,
+        CheckCode::AuthenticationFailed,
+        CheckCode::TlsTrustFailed,
+        CheckCode::TlsHandshakeFailed,
+        CheckCode::ClusterAuthorizationFailed,
+        CheckCode::Authenticated,
+    ] {
+        assert_eq!(
+            TopicPresence::of_error(code),
+            TopicPresence::Unknown,
+            "{code} must not be read as a statement about the topic's existence"
+        );
+    }
+
+    // And the consequence the visibility policy depends on, end to end.
+    assert_eq!(
+        TopicPresence::of_error(CheckCode::TopicAuthorizationFailed).expected_state(),
+        ExpectedTopicState::NotAuthorized
+    );
+    assert_ne!(
+        TopicPresence::of_error(CheckCode::TopicAuthorizationFailed).expected_state(),
+        ExpectedTopicState::Unknown,
+        "an ACL-restricted cluster reported as merely unknown is the defect this guards"
+    );
+}
+
+/// The one place the rdkafka arm may make that decision is
+/// `TopicPresence::of_error`. A second copy inside `describe_topic` is how the
+/// reviewer's mutant became possible in the first place.
+#[test]
+fn describe_topic_delegates_the_presence_decision_to_the_pure_table() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/inventory.rs"),
+    )
+    .expect("the module this crate ships");
+    let code = strip_comments(&src);
+    let start = code
+        .find("fn describe_topic(&self, name: &str) -> Result<TopicPresence, CheckFailure> {")
+        .expect("the rdkafka targeted probe");
+    let end = code[start..]
+        .find("\n        }")
+        .map(|i| start + i)
+        .expect("a closing brace");
+    let body = &code[start..end];
+    assert!(
+        body.contains("TopicPresence::of_error("),
+        "describe_topic no longer delegates the three-way decision: {body}"
+    );
+    assert!(
+        !body.contains("TopicPresence::NotAuthorized") && !body.contains("TopicPresence::NotFound"),
+        "describe_topic names a presence arm directly, so the decision has two homes again: \
+         {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H2 — the admin half of [VERIFY U5]
+// ---------------------------------------------------------------------------
+
+/// **An empty fault log cannot escalate, which is why `fail` dials first.**
+///
+/// In rdkafka 0.36 the admin client's `CapturingContext` is never consulted
+/// (`FaultLog`'s header carries the crate-source citations), so on an
+/// admin-first failure — `topic_configs` or `validate_create_topics` as the
+/// FIRST call on a fresh connection, which the `InventoryProbe` seam permits —
+/// the consumer has never dialled and this log is empty. This is that
+/// sequence, over the log itself: empty means the base code stands, which is
+/// exactly the `MetadataTimeout`-for-a-refused-credential defect. Populated —
+/// which is what dialling the consumer achieves — means the refusal wins.
+#[test]
+fn an_admin_first_failure_has_nothing_to_escalate_until_the_consumer_has_dialled() {
+    let log = FaultLog::new();
+    assert!(log.is_empty(), "a fresh connection has observed nothing");
+    let before = log.explain(CheckCode::MetadataTimeout, "validate-only CreateTopics");
+    assert_eq!(
+        before.code,
+        CheckCode::MetadataTimeout,
+        "with nothing observed there is nothing to escalate with — this is the admin-half \
+         defect, reproduced"
+    );
+
+    // What `dial_consumer_if_silent` + the drain achieve: the consumer's own
+    // error callback fills the log, and the SAME call now classifies correctly.
+    log.record(
+        CheckCode::AuthenticationFailed,
+        "SASL SCRAM-SHA-512 authentication failed",
+    );
+    let after = log.explain(CheckCode::MetadataTimeout, "validate-only CreateTopics");
+    assert_eq!(after.code, CheckCode::AuthenticationFailed);
+    assert!(
+        after.message.contains("MetadataTimeout"),
+        "the message still records what the CALL said: {}",
+        after.message
+    );
+}
+
+/// The always-on half of the fix: `fail` dials the consumer when nothing has,
+/// and `broker_configs` was already safe because it issues its own consumer
+/// `fetch_metadata` first. A double cannot express either — both are about
+/// what a real librdkafka handle has done — so the guard is over the source,
+/// and `tests/live.rs::an_admin_first_refusal_is_authentication_failed` is the
+/// behavioural regression.
+#[test]
+fn an_admin_failure_dials_the_consumer_before_it_classifies() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/inventory.rs"),
+    )
+    .expect("the module this crate ships");
+    let code = strip_comments(&src);
+
+    let start = code
+        .find("fn fail(&self, base: CheckCode, what: &str) -> CheckFailure {")
+        .expect("`fail` is the one place a Kafka call's code is decided");
+    let end = code[start..]
+        .find("\n        }")
+        .map(|i| start + i)
+        .expect("a closing brace");
+    let body = &code[start..end];
+    assert!(
+        body.contains("self.dial_consumer_if_silent()"),
+        "`fail` no longer dials the consumer, so an admin-first SASL refusal is reported as a \
+         timeout: {body}"
+    );
+    assert!(
+        body.contains("self.drain_events()"),
+        "`fail` no longer serves the event queue: {body}"
+    );
+
+    let dial_start = code
+        .find("fn dial_consumer_if_silent(&self) {")
+        .expect("the dial helper");
+    let dial_end = code[dial_start..]
+        .find("\n        }")
+        .map(|i| dial_start + i)
+        .expect("a closing brace");
+    let dial = &code[dial_start..dial_end];
+    assert!(
+        dial.contains("self.faults.is_empty()"),
+        "the dial must be skipped when the log already has the answer: {dial}"
+    );
+    assert!(
+        dial.contains(".consumer") && dial.contains("fetch_metadata"),
+        "only a CONSUMER request can fill the log in rdkafka 0.36: {dial}"
+    );
+    assert!(
+        dial.contains("self.timeouts.targeted_metadata"),
+        "the dial must be bounded by the shortest timeout this struct carries: {dial}"
     );
 }

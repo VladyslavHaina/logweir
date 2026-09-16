@@ -240,3 +240,66 @@ fn a_refused_scram_credential_is_authentication_failed_and_not_a_timeout() {
         c.faults().codes()
     );
 }
+
+/// **The ADMIN half of D2 §4.2's `[VERIFY U5]`, against a real broker.**
+///
+/// `validate_create_topics` is the FIRST call on a fresh `KafkaInventory` —
+/// which the `InventoryProbe` seam permits, and which W4's
+/// `target.topicCreate` and W9's `target.timestampBound` both do. In rdkafka
+/// 0.36 the admin client's `CapturingContext` is never consulted
+/// (`FaultLog`'s header carries the crate-source citations), so without
+/// `KafkaInventory::dial_consumer_if_silent` the consumer has never dialled,
+/// the fault log is empty, and a refused credential is reported as
+/// `MetadataTimeout`/`BrokerUnreachable` — the defect the consumer-side drain
+/// removed, surviving on the admin half.
+///
+/// The consumer is deliberately NOT touched before the admin call: that is the
+/// whole point of the case.
+#[test]
+fn an_admin_first_refusal_is_authentication_failed_and_not_a_timeout() {
+    let bs =
+        std::env::var("LOGWEIR_TEST_SASL_BOOTSTRAP").unwrap_or_else(|_| "localhost:9097".into());
+    let c = KafkaInventory::connect(&ConnectionSettings {
+        bootstrap_servers: vec![bs],
+        auth: AuthConfig::from_spec(
+            &logweir_core::spec::AuthSpec::ScramSha512 {
+                username: "no-such-principal".to_string(),
+                tls: false,
+            },
+            Some("not-the-password".to_string()),
+        )
+        .expect("interface I1 builds the auth"),
+        ca_file: None,
+        timeouts: ProbeTimeouts::for_budget(Duration::from_secs(20)),
+    })
+    .expect("the client builds; nothing has dialled yet");
+    assert!(
+        c.faults().is_empty(),
+        "nothing may have been observed before the first call: {:?}",
+        c.faults().codes()
+    );
+
+    let err = c
+        .validate_create_topics(&[NewTopicSpec {
+            name: "lw-admin-first-probe".to_string(),
+            num_partitions: 1,
+            replication_factor: 1,
+            configs: Vec::new(),
+        }])
+        .expect_err("a principal the broker does not know cannot validate a CreateTopics");
+    assert_eq!(
+        err.code,
+        CheckCode::AuthenticationFailed,
+        "an admin-FIRST refusal must still classify as authentication; got {err:?}"
+    );
+    assert!(
+        !err.message.contains("not-the-password"),
+        "the projected password reached a check message: {}",
+        err.message
+    );
+    // The same property through the other admin entry point.
+    let err = c
+        .topic_configs("test-topic")
+        .expect_err("DescribeConfigs is refused too");
+    assert_eq!(err.code, CheckCode::AuthenticationFailed);
+}

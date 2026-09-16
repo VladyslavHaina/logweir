@@ -142,11 +142,32 @@ pub fn escalate(base: CheckCode, observed: Option<CheckCode>) -> CheckCode {
 
 /// Everything librdkafka's error callback said, classified as it arrived.
 ///
-/// Shared between the consumer and the admin client of one [`KafkaInventory`],
-/// because a SASL refusal observed on either handle is a fact about the same
-/// connection. It holds at most [`FaultLog::MAX_ENTRIES`] entries: the callback
-/// fires per retry, and an unbounded log would grow for the whole budget of a
-/// check against a broker that is down.
+/// # ONLY THE CONSUMER EVER FILLS THIS, AND THAT IS AN rdkafka 0.36 FACT
+///
+/// The log is shared by both handles of one [`KafkaInventory`] because a SASL
+/// refusal is a fact about the same connection whichever handle saw it. But in
+/// rdkafka 0.36.2 the **admin client's context is inert**:
+/// `ClientContext::error` is invoked only from `Client::poll_event`
+/// (`src/client.rs:281`, `:292`, `:334`), which is reached only from
+/// `BaseConsumer::poll_queue` (`src/consumer/base_consumer.rs:131`) and
+/// `BaseProducer::poll` (`src/producer/base_producer.rs:365`);
+/// `AdminClient::from_config_and_context` (`src/admin.rs:344-365`) registers no
+/// events on its context at all, and its polling thread routes the raw
+/// `NativeQueue` by event opaque without ever consulting it. rdkafka registers
+/// no native `error_cb` anywhere, so there is no third path.
+///
+/// So nothing an ADMIN call does can ever fill this log directly. What saves
+/// an admin-first failure — `topic_configs` or `validate_create_topics` as the
+/// FIRST call on a fresh connection, which the [`InventoryProbe`] seam permits
+/// — is that librdkafka connects the CONSUMER handle to its bootstrap brokers
+/// eagerly at `rd_kafka_new`, so the consumer's callback observes the same
+/// refusal and [`KafkaInventory::fail`]'s drain serves it. That is measured,
+/// not assumed: see `KafkaInventory::dial_consumer_if_silent`, which removes
+/// the dependence on that timing and records what each half is worth.
+///
+/// It holds at most [`FaultLog::MAX_ENTRIES`] entries: the callback fires per
+/// retry, and an unbounded log would grow for the whole budget of a check
+/// against a broker that is down.
 #[derive(Debug, Default)]
 pub struct FaultLog {
     inner: std::sync::Mutex<Vec<(CheckCode, String)>>,
@@ -270,6 +291,34 @@ pub enum TopicPresence {
 }
 
 impl TopicPresence {
+    /// The answer a per-topic metadata error carries — **pure**, and the only
+    /// place that decision is made.
+    ///
+    /// # Why this is a function and not three arms inside `describe_topic`
+    ///
+    /// The `TopicAuthorizationFailed` arm is signal (ii) of D2 §5.4: it is the
+    /// ONLY thing that turns an ACL-limited principal into visibility
+    /// `limited` rather than `unknown`, and "permission-limited" is a named
+    /// PLAT-09.1 distinguishable outcome. Inside `describe_topic` it was
+    /// reachable only from a real broker with real ACLs, which the compose
+    /// stack does not have — an independent review planted
+    /// `TopicAuthorizationFailed => Unknown` there and it **survived the whole
+    /// suite**. A regression in that direction reports an ACL-restricted
+    /// cluster as merely unknown, which is the softer and wrong answer.
+    ///
+    /// Everything else — a leader election, a transient broker state, a code
+    /// this build does not model — is [`TopicPresence::Unknown`] and never
+    /// [`TopicPresence::NotFound`]: "I could not tell" must not be rendered as
+    /// "it is not there".
+    #[must_use]
+    pub fn of_error(code: CheckCode) -> Self {
+        match code {
+            CheckCode::TopicAuthorizationFailed => Self::NotAuthorized,
+            CheckCode::UnknownTopicOrPartition => Self::NotFound,
+            _ => Self::Unknown,
+        }
+    }
+
     /// The contract's spelling of this answer.
     #[must_use]
     pub fn expected_state(self) -> ExpectedTopicState {
@@ -789,6 +838,35 @@ mod client {
         }
     }
 
+    /// Every [`CheckCode`] [`classify_error_code`] can return, **derived by
+    /// sweeping librdkafka's own error-code space** rather than listed.
+    ///
+    /// `crates/logweir-kafka/tests/inventory.rs` computes D2 §5.5's worst-case
+    /// relayed line from this set. A hand-written list would let a ninth,
+    /// longer code be added to the classifier without moving the arithmetic
+    /// that the relay budget is built on — which is the quiet invalidation the
+    /// worst-case test exists to prevent.
+    ///
+    /// Both reason forms are swept, because `SSL` splits on the reason text and
+    /// `TlsTrustFailed` is reachable only through the certificate wording.
+    #[must_use]
+    pub fn classification_codes() -> std::collections::BTreeSet<CheckCode> {
+        use std::convert::TryFrom as _;
+        // librdkafka's local codes run from -200 up and its broker codes to
+        // about 100; the window is generous on both sides and `try_from`
+        // discards everything that is not a real code.
+        (-250i32..=250)
+            .filter_map(|i| rdkafka::types::RDKafkaRespErr::try_from(i).ok())
+            .map(RDKafkaErrorCode::from)
+            .flat_map(|code| {
+                [
+                    classify_error_code(code, ""),
+                    classify_error_code(code, "certificate verify failed"),
+                ]
+            })
+            .collect()
+    }
+
     /// Whether an `SSL` error's reason text names a certificate-verification
     /// failure rather than any other handshake problem.
     ///
@@ -1069,11 +1147,65 @@ mod client {
             }
         }
 
+        /// Dial the consumer when nothing has yet, so the error callback has
+        /// something to report — the ADMIN half of D2 §4.2's `[VERIFY U5]`.
+        ///
+        /// [`FaultLog`]'s header has the crate-source citations: the admin
+        /// client's `CapturingContext` is never consulted in rdkafka 0.36, so
+        /// the only handle that can fill the log is the consumer, and the only
+        /// thing that makes the consumer dial is a request. On an admin-first
+        /// failure the consumer has never dialled, the log is empty, and
+        /// [`FaultLog::explain`] has nothing to escalate with — the exact
+        /// defect the drain was added to remove, surviving on the admin half.
+        ///
+        /// **Bounded, and only on the failure path.** It runs only when the log
+        /// is empty (a populated log already has the answer), under
+        /// [`ProbeTimeouts::targeted_metadata`] — two seconds by default, the
+        /// shortest timeout this struct carries — and its result is discarded:
+        /// the metadata is not wanted, the CONNECTION ATTEMPT is.
+        ///
+        /// # What it is worth, measured
+        ///
+        /// It is belt-and-braces, and saying so is more useful than implying
+        /// otherwise. MEASURED against the compose broker's SASL listener with
+        /// `validate_create_topics` as the very first call: removing this
+        /// function alone leaves
+        /// `tests/live.rs::an_admin_first_refusal_is_authentication_failed_and_not_a_timeout`
+        /// GREEN, because librdkafka 2.12 connects a consumer handle to its
+        /// bootstrap brokers eagerly at `rd_kafka_new` — so by the time a
+        /// ten-second admin call has failed, the consumer's own error callback
+        /// has already queued the refusal and [`drain_events`] serves it.
+        /// Removing the DRAIN turns the same test red
+        /// (`BrokerUnreachable`), with or without this function.
+        ///
+        /// It stays because that greenness rests on a librdkafka timing
+        /// assumption this code does not control: a shorter admin timeout, a
+        /// build that connects lazily, or a `metadata.refresh` change would
+        /// restore the empty-log case the reviewer identified, and the cost of
+        /// covering it is one skipped call on a path that has already failed.
+        /// `an_admin_failure_dials_the_consumer_before_it_classifies` is the
+        /// always-on guard, and
+        /// `an_admin_first_failure_has_nothing_to_escalate_until_the_consumer_has_dialled`
+        /// is the unit row for the state it removes.
+        ///
+        /// [`drain_events`]: KafkaInventory::drain_events
+        fn dial_consumer_if_silent(&self) {
+            if !self.faults.is_empty() {
+                return;
+            }
+            let _ = self
+                .consumer
+                .fetch_metadata(None, self.timeouts.targeted_metadata);
+        }
+
         /// A failing call's code, with the error callback's observation applied.
         ///
-        /// Drains first: the events that explain the failure are queued by the
-        /// time the call returns, and nothing else would ever serve them.
+        /// Dials the consumer if nothing has (so an admin-first failure has a
+        /// fault to find), then drains: the events that explain the failure are
+        /// queued by the time the call returns, and nothing else would ever
+        /// serve them.
         fn fail(&self, base: CheckCode, what: &str) -> CheckFailure {
+            self.dial_consumer_if_silent();
             self.drain_events();
             self.faults.explain(base, what)
         }
@@ -1151,11 +1283,14 @@ mod client {
                 return Ok(TopicPresence::Unknown);
             };
             match t.error() {
-                Some(err) => Ok(match classify_error_code(RDKafkaErrorCode::from(err), "") {
-                    CheckCode::TopicAuthorizationFailed => TopicPresence::NotAuthorized,
-                    CheckCode::UnknownTopicOrPartition => TopicPresence::NotFound,
-                    _ => TopicPresence::Unknown,
-                }),
+                // THE THREE-WAY DECISION IS `TopicPresence::of_error`'s, not
+                // this function's: the authorization arm is unreachable from
+                // the compose stack (no ACLs), so a mutant in it survived the
+                // whole suite until the rule moved to the pure layer.
+                Some(err) => Ok(TopicPresence::of_error(classify_error_code(
+                    RDKafkaErrorCode::from(err),
+                    "",
+                ))),
                 None => Ok(TopicPresence::Present {
                     partitions: t.partitions().len() as u32,
                 }),
@@ -1276,6 +1411,7 @@ mod client {
 
 #[cfg(feature = "client")]
 pub use client::{
-    classify_create_code, classify_error_code, is_certificate_trust_reason, CapturingContext,
-    ConnectionSettings, KafkaInventory, RDKafkaErrorCode, CHECK_CLIENT_ID, CHECK_GROUP_ID,
+    classification_codes, classify_create_code, classify_error_code, is_certificate_trust_reason,
+    CapturingContext, ConnectionSettings, KafkaInventory, RDKafkaErrorCode, CHECK_CLIENT_ID,
+    CHECK_GROUP_ID,
 };
