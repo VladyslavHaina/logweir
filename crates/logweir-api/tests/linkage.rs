@@ -359,6 +359,18 @@ fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
         path.display()
     );
 
+    // A TURBOFISH IS THE ONE SPELLING THE BINDING SCAN CANNOT SEE. `let handle =
+    // Api::<T>::namespaced(…)` builds a handle with no `: Api<T>` annotation, so
+    // `api_binding_names` never learns the name `handle` and the verb allowlist
+    // below scans nothing for it. An independent reviewer planted exactly that
+    // and the suite stayed green; refusing the spelling closes it.
+    assert!(
+        !code_lines(&text).any(|(_, line)| line.contains("Api::<")),
+        "{}: build every handle as `let api: Api<T> = Api::namespaced(…)`, never \
+         with a turbofish; the binding-name scan above cannot see `Api::<T>::…`",
+        path.display()
+    );
+
     assert_eq!(
         methods_called_on(&text, "Api::"),
         BTreeSet::from(["namespaced".to_string()]),
