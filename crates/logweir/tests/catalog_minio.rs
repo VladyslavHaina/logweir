@@ -395,7 +395,11 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
         .expect("the backup succeeds");
     let id = point_id(&evidence.get(&outcome.receipt_key).unwrap().0);
 
-    let rows = logweir::catalog::cli::list_with(
+    // The DAY SHARD WALK against a real backend (review finding F5): the fixture
+    // engine reports a capture on 2026-09-15, so a window anchored on that day
+    // reaches the point in one shard listing rather than by walking the whole
+    // log prefix.
+    let report = logweir::catalog::cli::list_with(
         &ListArgs {
             location: Location {
                 url: format!("s3://{}", bucket()),
@@ -406,19 +410,28 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
             },
             since: None,
             max: 200,
+            days: 1,
         },
         &evidence,
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap(),
     )
     .expect("the index lists");
+    assert_eq!(report.days_searched, 1);
+    assert_eq!(report.oldest_day_searched, "2026-09-15");
     assert!(
-        rows.iter().any(|e| e.point_id == id),
+        report.rows.iter().any(|e| e.point_id == id),
         "the point this run wrote is in the listing"
     );
-    // Newest first, over whatever else the shared bucket holds.
-    let mut descending = rows.clone();
+    // Per-entry skipping is REPORTED even against a bucket other runs have
+    // written to: a short page must never read as "these are all the points".
+    assert_eq!(report.inconsistent, 0, "{report:?}");
+    // Newest first, over whatever else the bucket holds.
+    let mut descending = report.rows.clone();
     descending.sort_by(|a, b| b.recovery_point_at_ms.cmp(&a.recovery_point_at_ms));
     assert_eq!(
-        rows.iter()
+        report
+            .rows
+            .iter()
             .map(|e| e.recovery_point_at_ms)
             .collect::<Vec<_>>(),
         descending
@@ -429,7 +442,7 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
     );
     // Every row names a record that is really there — the index is a pointer,
     // and a pointer nothing follows is worth nothing.
-    for e in rows.iter().filter(|e| e.point_id == id) {
+    for e in report.rows.iter().filter(|e| e.point_id == id) {
         assert!(evidence.get(&e.record_key).is_ok(), "{}", e.record_key);
     }
 }

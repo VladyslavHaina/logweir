@@ -510,28 +510,63 @@ fn absent_optional_fields_read_as_unknown_never_zero() {
         p.topics[0].partitions, None,
         "a backup receipt records no partition count, so the record must say UNKNOWN"
     );
+
+    // **The `execution` block carries exactly what the writer had in hand**
+    // (review finding F4). The Backup Job's argv passes the runner no
+    // namespace, name, UID or `inputsSha256`, so those stay UNKNOWN — but
+    // `triggered_by` is in the receipt and dropping it was discarding
+    // provenance the writer held.
+    let execution = p
+        .execution
+        .as_ref()
+        .expect("the receipt's triggered_by is carried");
+    assert_eq!(execution.triggered_by.as_deref(), Some("schedule"));
+    assert_eq!(execution.namespace, None);
+    assert_eq!(execution.name, None);
+    assert_eq!(execution.uid, None);
+    assert_eq!(execution.kind, None);
+    assert_eq!(execution.schedule, None);
     assert_eq!(
-        p.execution, None,
-        "a Backup Job carries no execution-contract environment on this build, so \
-         provenance is unknown rather than defaulted (D-SEAMS S4: this record may cite \
-         inputs_sha256 and may never redefine it)"
+        execution.inputs_sha256, None,
+        "D-SEAMS S4: this record may CITE PLAT-06.1's inputs_sha256 and may never \
+         invent one — the Backup Job's argv does not carry it"
+    );
+    assert_eq!(
+        execution.execution_id, None,
+        "`backup_id` happens to equal the execution id on a controller-driven run, but the \
+         runner cannot tell an execution id from a schedule slot, and a field that is right \
+         on one path and a fabrication on the other is worse than an absent one"
     );
 
     // And the absent fields are ABSENT from the bytes, not `null`: a reader in
     // another language must see nothing, not a value.
     let text = String::from_utf8(p.canonical_bytes().unwrap()).unwrap();
     assert!(!text.contains("partitions"), "{text}");
-    assert!(!text.contains("execution"), "{text}");
+    assert!(!text.contains("inputs_sha256"), "{text}");
+    assert!(!text.contains("namespace"), "{text}");
 
     // Round-tripping keeps them unknown rather than filling them in.
     match reader::read_record(p.canonical_bytes().unwrap().as_slice()) {
         RecordVerdict::Point(back) => {
             assert_eq!(back.topics[0].partitions, None);
-            assert_eq!(back.execution, None);
+            assert_eq!(back.execution, p.execution);
             assert_eq!(back.topics[0].records, 1234, "a KNOWN count still reads");
         }
         other => panic!("{other:?}"),
     }
+
+    // A receipt that says nothing about what triggered it leaves the WHOLE
+    // block absent. `""` is "the operator said nothing", and writing it would
+    // turn an absence into a value — and an object of eight nulls is not
+    // "unknown" written down, it is an empty object pretending to be a fact.
+    let dir = tempfile::tempdir().unwrap();
+    let (_, key, _) = signer_in(dir.path());
+    let mut untriggered = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    untriggered.triggered_by = String::new();
+    let bare = point_for(&untriggered, "s3://kafka-backups/prod", &key);
+    assert_eq!(bare.execution, None);
+    let text = String::from_utf8(bare.canonical_bytes().unwrap()).unwrap();
+    assert!(!text.contains("execution"), "{text}");
 }
 
 #[test]
@@ -754,7 +789,19 @@ fn a_record_whose_id_is_not_its_digest_is_never_signed() {
     point.point_id = "lwp1-".to_string() + &"0".repeat(32);
     let err = writer::put_point(&point, &CatalogLogEntry::of(&point), &signer, &store)
         .expect_err("a record whose id contradicts its digest must be refused");
-    assert!(err.contains("is not the one its receipt digest"), "{err}");
+    assert!(
+        err.nothing_was_uploaded(),
+        "a refusal that precedes every put may truthfully say nothing was uploaded: {err:?}"
+    );
+    assert!(
+        matches!(err, writer::PutError::SelfContradicting(_)),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("is not the one its receipt digest"),
+        "{err}"
+    );
     assert!(
         store.list_keys("logweir/catalog/").unwrap().is_empty(),
         "the refusal happens before any put"
@@ -1229,16 +1276,22 @@ fn list_returns_the_newest_points_first() {
     )
     .unwrap();
 
-    let rows = logweir::catalog::cli::list_with(
-        &ListArgs {
-            location: sync_args(0, None).location,
-            since: None,
-            max: 10,
-        },
-        &store,
-    )
-    .unwrap();
-    let days: Vec<String> = rows
+    // `today` is a PARAMETER, so this walks the same window on every machine
+    // and on every future date. The seeded captures are 2026-09-15..17.
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+    let report = logweir::catalog::cli::list_with(&list_args(10, None), &store, today).unwrap();
+    assert_eq!(
+        (
+            report.unsupported_format,
+            report.unreadable,
+            report.inconsistent
+        ),
+        (0, 0, 0),
+        "a clean catalog skips nothing"
+    );
+    assert!(!report.truncated, "ten rows asked for, three exist");
+    let days: Vec<String> = report
+        .rows
         .iter()
         .map(|e| {
             chrono::DateTime::from_timestamp_millis(e.recovery_point_at_ms)
@@ -1255,22 +1308,49 @@ fn list_returns_the_newest_points_first() {
 
     // …and `--max` really bounds the page, keeping the NEWEST rows rather than
     // the first ones the backend happened to stream.
-    let one = logweir::catalog::cli::list_with(
+    let one = logweir::catalog::cli::list_with(&list_args(1, None), &store, today).unwrap();
+    assert_eq!(one.rows.len(), 1);
+    assert_eq!(one.rows[0].point_id, report.rows[0].point_id);
+    assert!(
+        one.truncated,
+        "a page that filled with days still unlooked-at must say so, or a short listing reads \
+         as `these are all the points`"
+    );
+
+    // THE WINDOW IS REPORTED, so an empty page says which window it is empty
+    // for. A one-day lookback from a day with nothing in it finds nothing —
+    // and says how far it looked.
+    let narrow = logweir::catalog::cli::list_with(
         &ListArgs {
-            location: sync_args(0, None).location,
-            since: None,
-            max: 1,
+            days: 1,
+            ..list_args(10, None)
         },
         &store,
+        today,
     )
     .unwrap();
-    assert_eq!(one.len(), 1);
-    assert_eq!(one[0].point_id, rows[0].point_id);
+    assert!(narrow.rows.is_empty());
+    assert_eq!(narrow.days_searched, 1);
+    assert_eq!(narrow.oldest_day_searched, "2026-09-18");
+    assert!(
+        !narrow.truncated,
+        "the lookback ran out rather than the page filling; `truncated` is about `--max`"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // The URL guard and the CLI's exit codes
 // ---------------------------------------------------------------------------
+
+/// `ListArgs` over the in-memory fixture store, with the full default window.
+fn list_args(max: usize, since: Option<&str>) -> ListArgs {
+    ListArgs {
+        location: sync_args(0, None).location,
+        since: since.map(str::to_string),
+        max,
+        days: 400,
+    }
+}
 
 fn location(url: &str) -> Location {
     Location {
@@ -1387,6 +1467,7 @@ fn the_catalog_commands_exit_with_the_existing_contract_and_no_new_variant() {
             location: location("s3://kafka-backups/prod"),
             since: None,
             max: 10,
+            days: 1,
         }),
         ExitCode::Operational
     );
@@ -1454,5 +1535,355 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     assert!(
         checked_in.contains(r"^1\\.[0-9]+\\.[0-9]+$"),
         "the schema must pin format_version's major"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review fix round (2026-09-16)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_store_failure_on_the_first_point_is_operational_and_never_signing() {
+    // **Review finding F1.** Global Constraint 11's exit 4 means "signing or
+    // lock-proof failed — and NOTHING was uploaded". A denied PUT under
+    // `logweir/catalog/*`, or a 503 on the first point of a walk, is neither:
+    // the record was signed before any put was attempted, and part of the
+    // point may already be in the bucket. Reporting 4 sends an operator to
+    // rotate signing material over a bucket policy.
+    //
+    // THE INJECTION IS THE REVIEWER'S OWN WORST SUB-CASE, one object further
+    // along: the record and its sidecar land and the INDEX ENTRY is refused. A
+    // regular FILE is planted where the day shard's directory would go, so the
+    // first two create-only puts succeed and the third fails with a store error
+    // that is not `AlreadyExists`. The bucket really does end up holding two of
+    // this point's three objects — exactly the state exit 4's "nothing was
+    // uploaded" would have denied.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("archive");
+    // `LocalFileSystem` canonicalises its root, so the directory has to exist
+    // before the handle is built.
+    std::fs::create_dir_all(&root).unwrap();
+    let store =
+        Store::from_url(&logweir_core::engine::StorageUrl::Filesystem { path: root.clone() })
+            .unwrap();
+
+    let (signer, key, _) = signer_in(dir.path());
+    let r = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    let (_, receipt_bytes) = seed_receipt(&store, &r, &key);
+    let id = point_id(&receipt_bytes);
+    let log = logweir::catalog::record::log_key(r.started_at, &id);
+    let shard_dir = root.join(&log).parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(shard_dir.parent().unwrap()).unwrap();
+    std::fs::write(&shard_dir, b"not a directory").unwrap();
+
+    let err = logweir::catalog::cli::sync_with(
+        &sync_args(100, None),
+        &store,
+        &signer,
+        &[key.verifying_key()],
+        ts("2026-09-16T00:00:00Z"),
+        "s3://kafka-backups/prod",
+    )
+    .expect_err("a refused catalog put must fail the sync");
+
+    assert_eq!(
+        logweir::exit::ExitCode::from(&err),
+        logweir::exit::ExitCode::Operational,
+        "a STORE failure is exit 1; exit 4 asserts `nothing was uploaded`, which is false \
+         here and points an operator at the wrong thing entirely: {err:?}"
+    );
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("says nothing about the signing key"),
+        "the message must say what did NOT fail: {msg}"
+    );
+    assert!(
+        msg.contains("--since"),
+        "and how to resume, because nothing under `logweir/` is ever rewritten: {msg}"
+    );
+    // The state exit 4 would have denied: two of the three objects ARE in the
+    // bucket, and the record verifies.
+    assert!(
+        store.get(&record_key(&id)).is_ok(),
+        "the record landed before the index entry was refused, so `nothing was uploaded` \
+         is false and exit 4 would have said it"
+    );
+    assert!(store.get(&record_sidecar_key(&id)).is_ok());
+    assert!(
+        store.get(&log).is_err(),
+        "the index entry is the object that was refused"
+    );
+}
+
+#[test]
+fn a_put_error_knows_whether_anything_was_uploaded() {
+    // The predicate the exit-code decision is made on, in isolation. The
+    // mutant it kills is `nothing_was_uploaded()` returning `true` for
+    // `Store`, which puts the old defect straight back.
+    use logweir::catalog::writer::PutError;
+    assert!(PutError::Signing("x".into()).nothing_was_uploaded());
+    assert!(PutError::SelfContradicting("x".into()).nothing_was_uploaded());
+    assert!(
+        !PutError::Store {
+            key: "logweir/catalog/v1/points/lwp1-x/record.sig".into(),
+            detail: "403".into(),
+        }
+        .nothing_was_uploaded(),
+        "record.json may already have landed when record.sig is refused, so this variant \
+         can never claim nothing was uploaded"
+    );
+}
+
+#[test]
+fn the_published_schema_carries_the_algorithm_vocabulary_as_an_enum() {
+    // **Review finding F2.** The checked-in schema is the one artifact that
+    // exists to publish this vocabulary, and it documented `p256` — the
+    // spelling this record deliberately rejects — with no `enum` or `pattern`
+    // for anything mechanical to catch the drift. A consumer generating its
+    // type from it would have matched on a value no record carries.
+    let schema: serde_json::Value =
+        serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
+    let algorithm = &schema["definitions"]["RecordSigning"]["properties"]["algorithm"];
+    let values: Vec<&str> = algorithm["enum"]
+        .as_array()
+        .expect("`algorithm` publishes an enum, not a free string")
+        .iter()
+        .map(|v| v.as_str().expect("enum values are strings"))
+        .collect();
+    assert_eq!(values, vec!["ecdsa-p256-sha256", "ed25519"]);
+    assert_eq!(algorithm["type"], "string");
+    assert!(
+        !values.contains(&"p256"),
+        "`p256` is decision D3 §5.2's illustrative spelling and is not a value this \
+         product writes: {values:?}"
+    );
+
+    // THE VOCABULARY IS DERIVED FROM THE WRITER, not typed twice. A mutant
+    // that changed `algorithm_name` without the schema — or the other way —
+    // fails here rather than shipping a schema no record satisfies.
+    for key in [
+        SigningKey::generate_p256().verifying_key(),
+        SigningKey::generate_ed25519().verifying_key(),
+    ] {
+        let written = logweir::catalog::algorithm_name(&key);
+        assert!(
+            values.contains(&written),
+            "the writer emits {written:?}, which the published schema's enum does not \
+             allow: {values:?}"
+        );
+    }
+}
+
+/// Write one index entry under a day shard, bypassing the writer, so the
+/// listing rows below are about bytes a foreign or future producer could have
+/// left there.
+fn seed_index_entry(store: &Store, day: &str, ms: i64, body: &[u8]) -> String {
+    let key = format!(
+        "logweir/catalog/v1/log/{day}/{ms:013}-lwp1-{}.json",
+        "0".repeat(32)
+    );
+    store.put_create_only(&key, body).unwrap();
+    key
+}
+
+#[test]
+fn one_bad_index_entry_is_skipped_and_counted_never_fatal_to_the_listing() {
+    // **Review finding F3.** `docs/formats/catalog-point.md` promises
+    // "refusal is per entry, not per catalog". That was implemented for
+    // `record.json` and NOT for the day-sharded index, where one unreadable
+    // object aborted the whole listing with exit 1 — exactly the wholesale
+    // failure the promise rules out.
+    let dir = tempfile::tempdir().unwrap();
+    let (signer, key, _) = signer_in(dir.path());
+    let store = Store::in_memory("logweir/");
+    let mut r = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    r.started_at = ts("2026-09-15T03:00:00Z");
+    r.finished_at = ts("2026-09-15T03:04:00Z");
+    seed_receipt(&store, &r, &key);
+    logweir::catalog::cli::sync_with(
+        &sync_args(100, None),
+        &store,
+        &signer,
+        &[key.verifying_key()],
+        ts("2026-09-16T00:00:00Z"),
+        "s3://kafka-backups/prod",
+    )
+    .unwrap();
+
+    // Four objects a v1 reader cannot use, in the SAME shard as the good one.
+    seed_index_entry(
+        &store,
+        "2026/09/15",
+        1_757_980_800_001,
+        br#"{"format_version":"2.0.0","whatever":{"a":[1]}}"#,
+    );
+    seed_index_entry(&store, "2026/09/15", 1_757_980_800_002, b"not json at all");
+    seed_index_entry(
+        &store,
+        "2026/09/15",
+        1_757_980_800_003,
+        br#"{"format_version":"1.0.0"}"#,
+    );
+    // **Review finding F6**: a well-formed entry whose `record_key` is not the
+    // one its own `point_id` implies. The log prefix is create-only but not
+    // append-restricted, so anyone who can write a NEW key there could publish
+    // a row attributing an arbitrary record to a chosen identity.
+    let forged = serde_json::json!({
+        "format_version": "1.0.0",
+        "point_id": format!("lwp1-{}", "a".repeat(32)),
+        "backup_id": "nightly-20260915",
+        "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+        "recovery_point_at_ms": 1_757_980_800_004_i64,
+        "covered": {"from_ms": 1, "to_ms": 2},
+        "record_key": format!("logweir/catalog/v1/points/lwp1-{}/record.json", "b".repeat(32)),
+        "receipt_key": "logweir/backups/x/y.receipt.json",
+        "receipt_sha256": format!("sha256:{}", "c".repeat(64)),
+    });
+    seed_index_entry(
+        &store,
+        "2026/09/15",
+        1_757_980_800_004,
+        serde_json::to_string(&forged).unwrap().as_bytes(),
+    );
+
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+    let report = logweir::catalog::cli::list_with(&list_args(50, None), &store, today).unwrap();
+
+    assert_eq!(
+        report.rows.len(),
+        1,
+        "the ONE good row still lists: {:?}",
+        report.rows
+    );
+    assert_eq!(report.unsupported_format, 1, "the major-2 entry (rule 1)");
+    assert_eq!(
+        report.unreadable, 2,
+        "the non-JSON and the wrong-shape entry"
+    );
+    assert_eq!(report.inconsistent, 1, "the forged record_key (F6)");
+
+    // …and the reader's own verdicts, so the counts above are not the only
+    // thing standing between a forged row and a printed one.
+    match reader::read_log_entry(serde_json::to_string(&forged).unwrap().as_bytes()) {
+        reader::LogEntryVerdict::Inconsistent(m) => {
+            assert!(m.contains("is not the key `point_id`"), "{m}")
+        }
+        other => panic!("a forged record_key must be Inconsistent, got {other:?}"),
+    }
+    match reader::read_log_entry(br#"{"format_version":"2.0.0"}"#) {
+        reader::LogEntryVerdict::UnsupportedFormat { format_version } => {
+            assert_eq!(format_version, "2.0.0")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_malformed_point_id_in_an_index_entry_is_refused() {
+    // The other half of F6: `record_key` and `point_id` can also be made to
+    // agree on a value that is not an identity at all.
+    let entry = serde_json::json!({
+        "format_version": "1.0.0",
+        "point_id": "lwp1-NOTHEX",
+        "backup_id": "b",
+        "run_id": "r",
+        "recovery_point_at_ms": 1,
+        "covered": {"from_ms": 1, "to_ms": 2},
+        "record_key": "logweir/catalog/v1/points/lwp1-NOTHEX/record.json",
+        "receipt_key": "logweir/backups/x/y.receipt.json",
+        "receipt_sha256": "sha256:0",
+    });
+    match reader::read_log_entry(serde_json::to_string(&entry).unwrap().as_bytes()) {
+        reader::LogEntryVerdict::Inconsistent(m) => {
+            assert!(m.contains("32 lowercase hex"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // UPPERCASE hex is refused too: `point_id` emits lowercase, and two
+    // spellings of one identity is what the id's own doc comment argues
+    // against.
+    assert!(!reader::is_point_id(&format!("lwp1-{}", "A".repeat(32))));
+    assert!(reader::is_point_id(&format!("lwp1-{}", "a".repeat(32))));
+    assert!(!reader::is_point_id(&format!("lwp2-{}", "a".repeat(32))));
+}
+
+#[test]
+fn a_listing_walks_days_backwards_and_stops_once_the_page_is_full() {
+    // **Review finding F5.** The first version paged forward over the whole
+    // log prefix keeping a ring of the newest keys — correct, and O(n²/page)
+    // object-metadata reads, which also made the day shard buy nothing. This
+    // walks days newest-first and stops the moment `--max` is held, so the
+    // shard structure is what bounds the work.
+    //
+    // Measured as OBSERVABLE work: with three days seeded and `--max 1`, the
+    // listing must report having searched exactly ONE day.
+    let dir = tempfile::tempdir().unwrap();
+    let (signer, key, _) = signer_in(dir.path());
+    let store = Store::in_memory("logweir/");
+    for (day, run) in [("15", "5A"), ("16", "5B"), ("17", "5C")] {
+        let mut r = receipt(
+            &format!("nightly-202609{day}"),
+            &format!("01J9X2QK7C4V0R8YB3ZP6MTS{run}"),
+        );
+        r.started_at = ts(&format!("2026-09-{day}T03:00:00Z"));
+        r.finished_at = ts(&format!("2026-09-{day}T03:04:00Z"));
+        seed_receipt(&store, &r, &key);
+    }
+    logweir::catalog::cli::sync_with(
+        &sync_args(100, None),
+        &store,
+        &signer,
+        &[key.verifying_key()],
+        ts("2026-09-18T00:00:00Z"),
+        "s3://kafka-backups/prod",
+    )
+    .unwrap();
+
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 17).unwrap();
+    let one = logweir::catalog::cli::list_with(&list_args(1, None), &store, today).unwrap();
+    assert_eq!(one.rows.len(), 1);
+    assert_eq!(
+        one.days_searched, 1,
+        "a full page must stop the backward walk: searching further is work an operator \
+         pays for and never sees"
+    );
+    assert_eq!(one.oldest_day_searched, "2026-09-17");
+
+    // All three need three shards, and the walk reports that honestly.
+    let all = logweir::catalog::cli::list_with(&list_args(10, None), &store, today).unwrap();
+    assert_eq!(all.rows.len(), 3);
+    assert_eq!(
+        all.days_searched, 400,
+        "nothing filled the page, so the window ran out"
+    );
+    assert!(!all.truncated);
+
+    // `--since` stops the walk at its own day rather than walking the whole
+    // lookback for rows it would drop anyway.
+    let since = all.rows[1].clone();
+    let after = logweir::catalog::cli::list_with(
+        &list_args(
+            10,
+            Some(&logweir::catalog::record::log_key(
+                chrono::DateTime::from_timestamp_millis(since.recovery_point_at_ms).unwrap(),
+                &since.point_id,
+            )),
+        ),
+        &store,
+        today,
+    )
+    .unwrap();
+    assert_eq!(
+        after
+            .rows
+            .iter()
+            .map(|e| e.point_id.clone())
+            .collect::<Vec<_>>(),
+        vec![all.rows[0].point_id.clone()],
+        "only rows NEWER than the cursor"
+    );
+    assert_eq!(
+        after.days_searched, 2,
+        "the backward walk stops at the cursor's own day: {after:?}"
     );
 }
