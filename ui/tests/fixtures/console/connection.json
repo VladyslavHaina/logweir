@@ -1,0 +1,30 @@
+{
+  "item": {
+    "auth": {
+      "credentialRef": {
+        "name": "orders-scram"
+      },
+      "mode": "scramSha512",
+      "tls": true,
+      "username": "logweir-reader"
+    },
+    "bootstrapServers": [
+      "kafka-0.orders.svc:9093",
+      "kafka-1.orders.svc:9093"
+    ],
+    "createdAt": "2026-09-04T08:55:00Z",
+    "markerTopic": "logweir.scratch",
+    "name": "orders-prod",
+    "namespace": "team-a",
+    "reachability": {
+      "clusterId": "MkU3NEVCTTlSM0FCQVRMQQ",
+      "observedAt": "2026-09-12T09:14:31Z",
+      "reason": "Reachable",
+      "state": "reachable"
+    },
+    "resourceVersion": "60110",
+    "role": "source",
+    "uid": "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9"
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

@@ -1,0 +1,37 @@
+{
+  "item": {
+    "approvalBytesLength": 210,
+    "approver": "incident-commander",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-11T12:41:04Z",
+        "message": "verified against approver key 24f4f5a02694bdf2e800a471545287d2c5d4b4b361212bb270ab4a4722921cdd",
+        "reason": "Verified",
+        "status": "True",
+        "type": "Verified"
+      }
+    ],
+    "createdAt": "2026-09-04T08:55:00Z",
+    "matchedKeyId": "24f4f5a02694bdf2e800a471545287d2c5d4b4b361212bb270ab4a4722921cdd",
+    "name": "orders-drill-approval",
+    "namespace": "team-a",
+    "planHash": "sha256:f8584333e6bea8c693dbaa97f7adfeb843abf393d86669bb9baf9c2d5d7999d1",
+    "resourceVersion": "60110",
+    "selfAttestedRisk": true,
+    "sidecarBytesLength": 180,
+    "subjectRef": {
+      "kind": "Restore",
+      "name": "orders-drill-20260911"
+    },
+    "ticket": "INC-4471",
+    "uid": "5f607182-93a4-4b5c-96d7-e8f901234561",
+    "verified": true,
+    "verifiedSubject": {
+      "kind": "Restore",
+      "name": "orders-drill-20260911",
+      "namespace": "team-a",
+      "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c11"
+    }
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

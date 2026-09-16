@@ -1,0 +1,21 @@
+{
+  "code": "validation_failed",
+  "detail": "One or more fields are invalid.",
+  "errors": [
+    {
+      "code": "invalid_port",
+      "field": "bootstrapServers[0]",
+      "message": "must be host:port with no scheme or userinfo"
+    },
+    {
+      "code": "required",
+      "field": "auth.username",
+      "message": "scramSha512 requires a username"
+    }
+  ],
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W",
+  "retryable": false,
+  "status": 422,
+  "title": "Request validation failed",
+  "type": "https://logweir.dev/problems/validation-failed"
+}

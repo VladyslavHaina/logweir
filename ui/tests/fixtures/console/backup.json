@@ -1,0 +1,45 @@
+{
+  "item": {
+    "archive": {
+      "credentialRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/orders"
+    },
+    "backupId": "01JB7X00000000000000000009",
+    "createdAt": "2026-09-04T08:55:00Z",
+    "deadlineSeconds": 1800,
+    "manifestKey": "orders/01JB7X00000000000000000009/manifest.json",
+    "name": "orders-hourly-20260912-080000",
+    "namespace": "team-a",
+    "observedAuth": {
+      "mode": "scramSha512",
+      "username": "logweir-reader"
+    },
+    "operation": {
+      "state": "succeeded",
+      "stateReason": "Ok",
+      "terminal": true,
+      "verificationState": "valid",
+      "verifiedSuccess": true
+    },
+    "records": 118200,
+    "resourceVersion": "60110",
+    "schedule": "orders-hourly",
+    "slot": "20260912-080000",
+    "sourceRef": {
+      "name": "orders-prod"
+    },
+    "topics": [
+      "orders",
+      "orders-dlq"
+    ],
+    "triggeredBy": "schedule",
+    "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e51",
+    "windowCovered": {
+      "fromMs": 1789196400000,
+      "toMs": 1789200000000
+    }
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

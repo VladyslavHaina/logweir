@@ -1,0 +1,47 @@
+{
+  "items": [
+    {
+      "approvalRef": {
+        "name": "orders-drill-approval"
+      },
+      "backupSetRef": "01JB7Z0000000000000000000B",
+      "createdAt": "2026-09-04T08:55:00Z",
+      "deadlineSeconds": 1800,
+      "name": "orders-drill-20260911",
+      "namespace": "team-a",
+      "newTopics": [
+        "drill-20260911-orders"
+      ],
+      "operation": {
+        "state": "succeeded",
+        "stateReason": "Ok",
+        "terminal": true,
+        "verificationState": "valid",
+        "verifiedSuccess": true
+      },
+      "planBytesLength": 1542,
+      "planHash": "sha256:f8584333e6bea8c693dbaa97f7adfeb843abf393d86669bb9baf9c2d5d7999d1",
+      "pointInTime": "2026-09-11T12:00:00Z",
+      "resourceVersion": "60110",
+      "sourceArchive": {
+        "credentialRef": {
+          "name": "logweir-s3"
+        },
+        "url": "s3://kafka-backups/orders"
+      },
+      "target": {
+        "clusterRef": {
+          "name": "orders-scratch"
+        },
+        "mode": "scratch",
+        "topicPrefix": "drill-20260911-"
+      },
+      "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c11"
+    }
+  ],
+  "page": {
+    "limit": 50,
+    "snapshot": "60311"
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

@@ -1,0 +1,9 @@
+{
+  "code": "idempotency_conflict",
+  "detail": "This idempotency key was already used with a different request body.",
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W",
+  "retryable": false,
+  "status": 409,
+  "title": "Idempotency key reused with a different request",
+  "type": "https://logweir.dev/problems/idempotency-conflict"
+}
