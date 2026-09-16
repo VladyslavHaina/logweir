@@ -112,6 +112,12 @@ pub const MAX_STARTING_DEADLINE_SECONDS: i64 = 604_800;
 /// constant the scheduler has always copied into a scheduled run.
 pub const DEFAULT_ACTIVE_DEADLINE_SECONDS: i64 = 3600;
 
+/// The narrowest `spec.activeDeadlineSeconds` the CRD accepts (D1 §4.1).
+pub const MIN_ACTIVE_DEADLINE_SECONDS: i64 = 60;
+
+/// The widest `spec.activeDeadlineSeconds` the CRD accepts — one day.
+pub const MAX_ACTIVE_DEADLINE_SECONDS: i64 = 86_400;
+
 /// `spec.retry.delaySeconds` when `retry` is present without it (D1 §4.1).
 pub const DEFAULT_RETRY_DELAY_SECONDS: i64 = 300;
 
@@ -179,18 +185,25 @@ const GAP_SEARCH_MINUTES: i64 = 48 * 60;
 /// past the first hit is what makes "the first hit is the earliest hit" true
 /// rather than merely usual.
 ///
-/// UNLIKE [`MAX_OFFSET_HOURS`], THIS ONE HAS NO MEASURED EFFECT, AND THAT IS
-/// RECORDED RATHER THAN LEFT AS A GUESS. Setting it to 3, 2, 1 and 0 and
-/// re-running a 60 480-point sweep — twelve zones from `Etc/GMT+12` through
-/// `Pacific/Kiritimati`, seven expressions, hourly starts across the Apia
-/// date-line crossing and both DST directions in both hemispheres — changed
-/// not one answer. It stays at four because it is slack against a tz amendment
-/// this sweep cannot have seen (a gap wider than the ones in the database
-/// today), it costs four extra date probes per walk, and a constant sized from
-/// [`MAX_OFFSET_HOURS`] + [`GAP_SEARCH_MINUTES`] is a number a reader can
-/// check. A mutant of it therefore SURVIVES the suite by construction; that is
-/// what "no measured effect" means, and inventing an assertion to kill it would
-/// be a test of this constant rather than of the product.
+/// IT IS LOAD-BEARING, AND SETTING IT TO ZERO LOSES A WHOLE FIRING. The case is
+/// `America/Sitka` on 1867-10-18 — the Alaska purchase, when the territory
+/// moved from the Russian calendar at +14:59 to the American one at −09:01 and
+/// lived the same local day TWICE, a 24-hour repeated day. For `0 0 * * *`,
+/// [`Cadence::fire_at_or_before`]`(1867-10-19T01:00Z)` is 1867-10-18T09:01:13Z,
+/// and that instant comes from local date 1867-10-**19** — one local date
+/// AFTER the local date of the argument, because at +14:59 a local midnight
+/// lands most of a day earlier in UTC. A walk that started at the argument's
+/// own local date would never visit it and would answer 1867-10-17T09:01:13Z,
+/// a whole slot too early. `America/Juneau`, `America/Metlakatla` and
+/// `America/Anchorage` carry the same day.
+///
+/// An earlier round of this module recorded the opposite — "no measured effect"
+/// — on the strength of a sweep that covered only the eastward, gap-shaped
+/// direction (`Pacific/Apia` 2011, `Pacific/Kiritimati`) and no 24-hour fall
+/// back, which is precisely where the walk's START date decides the answer.
+/// The claim was false and the review that found it is why this paragraph
+/// exists: `tests/cadence.rs::a_twenty_four_hour_repeated_day_needs_the_edge_slack`
+/// now holds the case, so the constant cannot be inlined away as dead slack.
 const EDGE_DAYS: i64 = 4;
 
 /// The bound on how many local dates either direction of a zoned walk visits.
@@ -356,6 +369,28 @@ impl Adjustment {
     }
 }
 
+/// Whether a firing at the SAME instant replaces the one already held.
+///
+/// ONE TIE-BREAK, THREE CALLERS, AND THAT IS THE WHOLE POINT OF THIS FUNCTION.
+/// [`Cadence::fire_at_or_before`], [`Cadence::fire_after`] and [`record`] all
+/// reduce several matched local times to one firing, and they reach the same
+/// instant from three different directions — backwards through local dates,
+/// forwards through them, and collected into a map. Each of them once had its
+/// own spelling of "which of these is the answer", and only the map's applied
+/// [`Adjustment::rank`]. The consequence was measurable and reached the wire:
+/// `Pacific/Apia`, `0 0 * * *`, `fire_after(2011-12-29T10:00Z)` reported
+/// 2011-12-30T10:00Z as [`Adjustment::NonexistentLocalTimeShifted`] while
+/// `next_runs` reported the SAME instant as unadjusted — so a
+/// `BackupSchedule.status` written from both could contradict itself about one
+/// slot, in the one module D1 §4.4 exists to make single-valued.
+///
+/// STRICTLY LESS, NOT LESS-OR-EQUAL: an equal rank means the two markers are
+/// equally truthful, and keeping the one already held makes the answer
+/// independent of the order the walk happened to visit the local dates in.
+fn marker_supersedes(candidate: Option<Adjustment>, held: Option<Adjustment>) -> bool {
+    Adjustment::rank(candidate) < Adjustment::rank(held)
+}
+
 /// One firing: the UTC instant, and what the local clock did to reach it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fire {
@@ -496,6 +531,91 @@ impl RetryPolicy {
     }
 }
 
+/// Why a deadline field is not usable (D1 §4.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeadlineProblem {
+    /// `startingDeadlineSeconds` outside
+    /// [`MIN_STARTING_DEADLINE_SECONDS`]`..=`[`MAX_STARTING_DEADLINE_SECONDS`].
+    StartingOutOfRange {
+        /// The value that was written.
+        got: i64,
+        /// The lowest accepted value.
+        min: i64,
+        /// The highest accepted value.
+        max: i64,
+    },
+    /// `activeDeadlineSeconds` outside
+    /// [`MIN_ACTIVE_DEADLINE_SECONDS`]`..=`[`MAX_ACTIVE_DEADLINE_SECONDS`].
+    ActiveOutOfRange {
+        /// The value that was written.
+        got: i64,
+        /// The lowest accepted value.
+        min: i64,
+        /// The highest accepted value.
+        max: i64,
+    },
+}
+
+impl fmt::Display for DeadlineProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StartingOutOfRange { got, min, max } => write!(
+                f,
+                "spec.startingDeadlineSeconds is {got}; accepted values are {min}..={max}"
+            ),
+            Self::ActiveOutOfRange { got, min, max } => write!(
+                f,
+                "spec.activeDeadlineSeconds is {got}; accepted values are {min}..={max}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeadlineProblem {}
+
+/// Whether the two deadline fields are inside the ranges D1 §4.1 states.
+///
+/// THE SAME "TWO GATES, ONE TABLE" ARGUMENT [`RetryPolicy::validate`] MAKES,
+/// AND IT HAS TO HOLD FOR THESE TWO AS WELL. D1 §4.5 step 0 re-validates the
+/// whole policy fail-closed precisely because an object created against an
+/// older CRD, or read after the API server pruned a field it does not declare,
+/// reaches the scheduler without having passed the OpenAPI ranges. Exporting
+/// [`MIN_STARTING_DEADLINE_SECONDS`] and friends but leaving the comparison to
+/// the controller is how the CRD and the scheduler come to disagree about what
+/// "one week" means.
+///
+/// `None` IS ALWAYS VALID: an absent field is the documented default
+/// ([`DEFAULT_STARTING_DEADLINE_SECONDS`], [`DEFAULT_ACTIVE_DEADLINE_SECONDS`]),
+/// and a default this module chose cannot be out of a range this module states.
+///
+/// # Errors
+///
+/// [`DeadlineProblem`], naming the field, the value and the accepted range.
+pub fn validate_deadlines(
+    starting_deadline_seconds: Option<i64>,
+    active_deadline_seconds: Option<i64>,
+) -> Result<(), DeadlineProblem> {
+    if let Some(got) = starting_deadline_seconds {
+        if !(MIN_STARTING_DEADLINE_SECONDS..=MAX_STARTING_DEADLINE_SECONDS).contains(&got) {
+            return Err(DeadlineProblem::StartingOutOfRange {
+                got,
+                min: MIN_STARTING_DEADLINE_SECONDS,
+                max: MAX_STARTING_DEADLINE_SECONDS,
+            });
+        }
+    }
+    if let Some(got) = active_deadline_seconds {
+        if !(MIN_ACTIVE_DEADLINE_SECONDS..=MAX_ACTIVE_DEADLINE_SECONDS).contains(&got) {
+            return Err(DeadlineProblem::ActiveOutOfRange {
+                got,
+                min: MIN_ACTIVE_DEADLINE_SECONDS,
+                max: MAX_ACTIVE_DEADLINE_SECONDS,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// What the deadline and catch-up policy say about one due slot (D1 §4.5 step
 /// 7, truth-table rows 17–21).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +660,19 @@ pub enum MissedReason {
 ///
 /// `starting_deadline_seconds` is the resolved value — the caller supplies
 /// [`DEFAULT_STARTING_DEADLINE_SECONDS`] for an absent field.
+///
+/// # Precondition
+///
+/// **`slot <= now`.** This function answers "may the slot that came due still
+/// run", and D1 §4.5 step 5 produces its only correct argument —
+/// [`Cadence::latest_due_slot`], which is `last_fire_at_or_before(now)` and so
+/// never returns a future instant. A `slot` AFTER `now` has a negative age,
+/// falls into the first arm and comes back [`SlotAdmission::Scheduled`]: this
+/// function would tell a caller to run a backup before its slot. It is stated
+/// here rather than guarded because a guard would need a fifth outcome that D1
+/// §4.7's table has no row for, and because the value belongs to the caller's
+/// step 5 — `admit_slot_is_documented_for_a_future_slot` pins the answer so it
+/// is a contract and not an accident.
 #[must_use]
 pub fn admit_slot(
     slot: DateTime<Utc>,
@@ -665,8 +798,20 @@ pub enum RetryAdmission {
     Exhausted {
         /// The highest attempt that exists.
         attempt: u32,
-        /// The policy's cap.
+        /// The policy's cap. Zero both when `spec.retry` is absent and when it
+        /// is present with `maxRetries: 0`, which is why the field below
+        /// exists.
         max_retries: u32,
+        /// Whether `spec.retry` was set at all.
+        ///
+        /// THE DECISION IS THE SAME AND THE REASON IS NOT (D1 §4.7 row 10).
+        /// A schedule that configured retries and used them up reports
+        /// `RetryExhausted`; a schedule that never asked for retries reports
+        /// `RunFailed`, because "exhausted" would name a budget it never had.
+        /// `max_retries: 0` alone cannot tell the two apart, so a caller
+        /// reading only this variant would have to go back to the spec — which
+        /// is how the two reasons come to drift.
+        retry_configured: bool,
     },
     /// Retryable and under the cap, but the delay has not elapsed (row 11).
     Pending {
@@ -726,6 +871,7 @@ pub fn admit_retry(
         return RetryAdmission::Exhausted {
             attempt,
             max_retries,
+            retry_configured: policy.is_some(),
         };
     }
     let delay = policy.map_or(DEFAULT_RETRY_DELAY_SECONDS, |p| p.delay_seconds);
@@ -746,6 +892,22 @@ pub struct SkippedSlots {
     /// Whether the walk stopped at the cap, so `count` is a floor and not the
     /// total.
     pub capped: bool,
+    /// Whether the walk stopped at the ten-year [`horizon_date`] instead of
+    /// reaching `before`, so `count` is a floor for a SECOND reason.
+    ///
+    /// THE UNDERCOUNT THIS FIELD EXISTS TO STOP BEING SILENT. A downtime longer
+    /// than [`WALK_DAYS`] under an expression too sparse to reach `cap` first —
+    /// `0 0 1 1 *` and twelve years, say — runs out of window before it runs
+    /// out of slots, and without this flag `capped: false` would present that
+    /// floor as an exact total. `status.missedSlots.count` would then read as
+    /// "twelve slots were skipped" for a schedule that skipped more.
+    ///
+    /// It is a separate flag from [`SkippedSlots::capped`] because the two are
+    /// different facts about the answer and an operator acts on them
+    /// differently: `capped` means "stop counting, there are thousands", and
+    /// this one means "this product cannot name a slot that far out at all" —
+    /// the same ten-year blindness [`Cron`] has had since PLAT-04.1.
+    pub horizon_reached: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +985,13 @@ impl Cadence {
     }
 
     /// The most recent firing at or before `t`, with its DST marker.
+    ///
+    /// THE MARKER IS THE ONE [`Cadence::next_runs`] GIVES THE SAME INSTANT.
+    /// Several matched local times can collapse onto one instant, and the
+    /// answer must not depend on which of this module's three walks a caller
+    /// happened to use — see [`marker_supersedes`], and
+    /// `tests/cadence.rs::every_walk_agrees_on_the_marker_for_an_instant`,
+    /// which measures it over a corpus rather than asserting it.
     #[must_use]
     pub fn fire_at_or_before(&self, t: DateTime<Utc>) -> Option<Fire> {
         let Zone::Named(tz) = self.zone else {
@@ -840,7 +1009,7 @@ impl Cadence {
                 }
             }
             for fire in self.fires_on_local_date(tz, date) {
-                if fire.at <= t && best.is_none_or(|b| fire.at > b.at) {
+                if fire.at <= t && best.is_none_or(|b| later_or_better(fire, b)) {
                     best = Some(fire);
                 }
             }
@@ -855,6 +1024,9 @@ impl Cadence {
     /// produce no duplicates: each entry is the argument for the next call, and
     /// the sequence is strictly increasing even where several matched local
     /// times collapsed onto one instant.
+    ///
+    /// The marker is the one [`Cadence::next_runs`] gives the same instant; see
+    /// [`Cadence::fire_at_or_before`].
     #[must_use]
     pub fn fire_after(&self, t: DateTime<Utc>) -> Option<Fire> {
         let Zone::Named(tz) = self.zone else {
@@ -872,7 +1044,7 @@ impl Cadence {
                 }
             }
             for fire in self.fires_on_local_date(tz, date) {
-                if fire.at > t && best.is_none_or(|b| fire.at < b.at) {
+                if fire.at > t && best.is_none_or(|b| earlier_or_better(fire, b)) {
                     best = Some(fire);
                 }
             }
@@ -914,7 +1086,7 @@ impl Cadence {
     /// 3.15 ms per `fire_after` for `* * * * *`, so 63 ms for one preview
     /// request and 3.1 s for a capped [`Cadence::skipped_slots`] walk.
     fn fires_after(&self, after: DateTime<Utc>, count: usize) -> Vec<Fire> {
-        self.fires_after_bounded(after, count, None)
+        self.fires_after_bounded(after, count, None).fires
     }
 
     /// [`Cadence::fires_after`], additionally stopping once the walk has passed
@@ -931,25 +1103,29 @@ impl Cadence {
         after: DateTime<Utc>,
         count: usize,
         until: Option<DateTime<Utc>>,
-    ) -> Vec<Fire> {
+    ) -> Walk {
         if count == 0 {
-            return Vec::new();
+            return Walk::default();
         }
         let Zone::Named(tz) = self.zone else {
             // The UTC path stays the legacy call, iterated: each step is a
             // bitset walk over UTC dates with no zone lookup at all, so there
             // is nothing here for a single pass to save.
             let horizon = horizon_date(after.date_naive());
-            let mut out = Vec::with_capacity(count.min(MAX_PREVIEW_COUNT));
+            let mut walk = Walk {
+                fires: Vec::with_capacity(count.min(MAX_PREVIEW_COUNT)),
+                horizon_reached: false,
+            };
             let mut cursor = after;
             for _ in 0..count {
                 let Some(at) = self.cron.next_fire_after(cursor) else {
                     break;
                 };
                 if at.date_naive() > horizon {
+                    walk.horizon_reached = true;
                     break;
                 }
-                out.push(Fire {
+                walk.fires.push(Fire {
                     at,
                     adjustment: None,
                 });
@@ -958,16 +1134,18 @@ impl Cadence {
                     break;
                 }
             }
-            return out;
+            return walk;
         };
         let horizon = horizon_date(after.with_timezone(&tz).date_naive());
         let mut found: BTreeMap<DateTime<Utc>, Option<Adjustment>> = BTreeMap::new();
         let mut date = after.with_timezone(&tz).date_naive() - Duration::days(EDGE_DAYS);
+        let mut horizon_reached = false;
         for _ in 0..MAX_DATE_STEPS {
             // The walk answers for exactly the window `slot.rs` answers for,
             // and the UTC branch above applies the SAME bound — see
             // [`horizon_date`].
             if date > horizon {
+                horizon_reached = true;
                 break;
             }
             // Stop once `count` firings are held AND no later local date could
@@ -990,11 +1168,14 @@ impl Cadence {
             let Some(next) = date.succ_opt() else { break };
             date = next;
         }
-        found
-            .into_iter()
-            .take(count)
-            .map(|(at, adjustment)| Fire { at, adjustment })
-            .collect()
+        Walk {
+            fires: found
+                .into_iter()
+                .take(count)
+                .map(|(at, adjustment)| Fire { at, adjustment })
+                .collect(),
+            horizon_reached,
+        }
     }
 
     /// How many slots fall strictly between `after` and `before`, up to `cap`
@@ -1016,19 +1197,23 @@ impl Cadence {
         // ran out of slots or ran out of budget, and
         // `status.missedSlots.countCapped` is exactly the field an operator
         // reads to tell "1000 slots were skipped" from "at least 1000 were".
-        let fires = self.fires_after_bounded(after, cap.saturating_add(1), Some(before));
+        let walk = self.fires_after_bounded(after, cap.saturating_add(1), Some(before));
         let mut count = 0usize;
-        for fire in fires {
+        for fire in walk.fires {
             if fire.at >= before {
+                // A slot at or past `before` was reached, so the interval was
+                // walked end to end: neither bound truncated the answer.
                 return SkippedSlots {
                     count,
                     capped: false,
+                    horizon_reached: false,
                 };
             }
             if count == cap {
                 return SkippedSlots {
                     count,
                     capped: true,
+                    horizon_reached: false,
                 };
             }
             count += 1;
@@ -1036,6 +1221,7 @@ impl Cadence {
         SkippedSlots {
             count,
             capped: false,
+            horizon_reached: walk.horizon_reached,
         }
     }
 
@@ -1100,6 +1286,22 @@ impl Cadence {
     }
 }
 
+/// One pass of [`Cadence::fires_after_bounded`]: the firings it found, and
+/// whether [`horizon_date`] is what stopped it.
+///
+/// A STRUCT RATHER THAN A `Vec` BECAUSE "I RAN OUT OF SLOTS" AND "I RAN OUT OF
+/// WINDOW" ARE DIFFERENT ANSWERS and only the caller can tell which one matters
+/// to it. [`Cadence::next_runs`] does not care — a preview that stops at ten
+/// years is a preview that stops — but [`Cadence::skipped_slots`] reports a
+/// COUNT, and a count truncated by the window is a floor presented as a total.
+#[derive(Clone, Debug, Default)]
+struct Walk {
+    /// The firings, ascending, at most the `count` asked for.
+    fires: Vec<Fire>,
+    /// Whether the walk stopped because it reached [`horizon_date`].
+    horizon_reached: bool,
+}
+
 /// Keep the most truthful marker when two matched local times land on one
 /// instant — see [`Adjustment::rank`].
 fn record(
@@ -1107,12 +1309,26 @@ fn record(
     at: DateTime<Utc>,
     adjustment: Option<Adjustment>,
 ) {
-    match found.get(&at) {
-        Some(existing) if Adjustment::rank(*existing) <= Adjustment::rank(adjustment) => {}
-        _ => {
-            found.insert(at, adjustment);
-        }
+    if found
+        .get(&at)
+        .is_none_or(|held| marker_supersedes(adjustment, *held))
+    {
+        found.insert(at, adjustment);
     }
+}
+
+/// Whether `candidate` beats `held` for [`Cadence::fire_at_or_before`]: a later
+/// instant, or the same instant with a better marker ([`marker_supersedes`]).
+fn later_or_better(candidate: Fire, held: Fire) -> bool {
+    candidate.at > held.at
+        || (candidate.at == held.at && marker_supersedes(candidate.adjustment, held.adjustment))
+}
+
+/// Whether `candidate` beats `held` for [`Cadence::fire_after`]: an earlier
+/// instant, or the same instant with a better marker ([`marker_supersedes`]).
+fn earlier_or_better(candidate: Fire, held: Fire) -> bool {
+    candidate.at < held.at
+        || (candidate.at == held.at && marker_supersedes(candidate.adjustment, held.adjustment))
 }
 
 /// The UTC instant of the first real local minute at or after `local`, when
@@ -1342,15 +1558,7 @@ pub mod presets {
         PresetSpec {
             kind: "everyNHours",
             cron_template: "{minute} */{n} * * *",
-            parameters: &[
-                PresetParameter {
-                    name: "n",
-                    min: 2,
-                    max: 12,
-                    values: Some(&EVERY_N_HOURS_VALUES),
-                },
-                MINUTE,
-            ],
+            parameters: &[EVERY_N_HOURS_N, MINUTE],
         },
         PresetSpec {
             kind: "daily",
@@ -1360,37 +1568,43 @@ pub mod presets {
         PresetSpec {
             kind: "weekly",
             cron_template: "{minute} {hour} * * {dayOfWeek}",
-            parameters: &[
-                PresetParameter {
-                    name: "dayOfWeek",
-                    min: 0,
-                    max: 6,
-                    values: None,
-                },
-                HOUR,
-                MINUTE,
-            ],
+            parameters: &[DAY_OF_WEEK, HOUR, MINUTE],
         },
         PresetSpec {
             kind: "monthly",
             cron_template: "{minute} {hour} {dayOfMonth} * *",
-            parameters: &[
-                // 28 AND NOT 31: a `0 3 31 * *` schedule does not run in
-                // February, April, June, September or November, which is a
-                // monthly backup that silently happens seven times a year. The
-                // ADVANCED CRON field still accepts 29, 30 and 31 — the form
-                // just does not hand an adopter that hole by default.
-                PresetParameter {
-                    name: "dayOfMonth",
-                    min: 1,
-                    max: 28,
-                    values: None,
-                },
-                HOUR,
-                MINUTE,
-            ],
+            parameters: &[DAY_OF_MONTH, HOUR, MINUTE],
         },
     ];
+
+    /// The `n` parameter of `everyNHours`.
+    const EVERY_N_HOURS_N: PresetParameter = PresetParameter {
+        name: "n",
+        min: 2,
+        max: 12,
+        values: Some(&EVERY_N_HOURS_VALUES),
+    };
+
+    /// The `dayOfWeek` parameter of `weekly`; 0 is Sunday.
+    const DAY_OF_WEEK: PresetParameter = PresetParameter {
+        name: "dayOfWeek",
+        min: 0,
+        max: 6,
+        values: None,
+    };
+
+    /// The `dayOfMonth` parameter of `monthly`.
+    ///
+    /// 28 AND NOT 31: a `0 3 31 * *` schedule does not run in February, April,
+    /// June, September or November, which is a monthly backup that silently
+    /// happens seven times a year. The ADVANCED CRON field still accepts 29, 30
+    /// and 31 — the form just does not hand an adopter that hole by default.
+    const DAY_OF_MONTH: PresetParameter = PresetParameter {
+        name: "dayOfMonth",
+        min: 1,
+        max: 28,
+        values: None,
+    };
 
     /// The `hour` parameter, shared by three presets.
     const HOUR: PresetParameter = PresetParameter {
@@ -1418,6 +1632,13 @@ pub mod presets {
     /// would otherwise compile to `0 25 * * *`, which [`Cron::parse`] refuses
     /// at a point where the error names the cron field instead of the form
     /// field the user filled in.
+    ///
+    /// EACH CHECK NAMES ITS PARAMETER CONSTANT, NEVER `CATALOGUE[i]`. An
+    /// earlier spelling reached in by index — `CATALOGUE[1].parameters[0]` for
+    /// `n`, `[3]` for `dayOfWeek`, `[4]` for `dayOfMonth` — so reordering the
+    /// catalogue would have validated `everyNHours` against `weekly`'s range,
+    /// and the generated fixture, regenerated in the same commit as the
+    /// documented workflow says, would have agreed with the mistake.
     pub fn compile(preset: &Preset) -> Result<String, PresetError> {
         match *preset {
             Preset::Hourly { minute } => {
@@ -1425,7 +1646,7 @@ pub mod presets {
                 Ok(format!("{minute} * * * *"))
             }
             Preset::EveryNHours { n, minute } => {
-                check("everyNHours", CATALOGUE[1].parameters[0], n)?;
+                check("everyNHours", EVERY_N_HOURS_N, n)?;
                 check("everyNHours", MINUTE, minute)?;
                 Ok(format!("{minute} */{n} * * *"))
             }
@@ -1439,7 +1660,7 @@ pub mod presets {
                 hour,
                 minute,
             } => {
-                check("weekly", CATALOGUE[3].parameters[0], day_of_week)?;
+                check("weekly", DAY_OF_WEEK, day_of_week)?;
                 check("weekly", HOUR, hour)?;
                 check("weekly", MINUTE, minute)?;
                 Ok(format!("{minute} {hour} * * {day_of_week}"))
@@ -1449,7 +1670,7 @@ pub mod presets {
                 hour,
                 minute,
             } => {
-                check("monthly", CATALOGUE[4].parameters[0], day_of_month)?;
+                check("monthly", DAY_OF_MONTH, day_of_month)?;
                 check("monthly", HOUR, hour)?;
                 check("monthly", MINUTE, minute)?;
                 Ok(format!("{minute} {hour} {day_of_month} * *"))
