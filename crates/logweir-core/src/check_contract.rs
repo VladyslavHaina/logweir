@@ -1228,10 +1228,24 @@ impl CheckRelay {
         self.streams.get(&s).map(Vec::as_slice)
     }
 
-    /// The `result` stream, parsed. `None` when the check relayed none (an
-    /// evidence fetch does not).
-    pub fn result(&self) -> Option<Result<CheckResult, serde_json::Error>> {
-        self.stream(Stream::Result).map(serde_json::from_slice)
+    /// The `result` stream, parsed, bounds-checked and REDACTED. `None` when
+    /// the check relayed none (an evidence fetch does not).
+    ///
+    /// The error type is [`FrameError`], not `serde_json::Error`, so the
+    /// "every malformation is `ResultUnreadable`" property that
+    /// `FrameError::code()` guarantees for the frames also holds for the
+    /// document inside them — the caller gets one code instead of having to
+    /// re-establish it. And the document is sanitised before it is returned,
+    /// so a controller cannot forget: the decoded fields are whatever the
+    /// runner wrote, and nothing else in the pure layer redacts them.
+    pub fn result(&self) -> Option<Result<CheckResult, FrameError>> {
+        self.stream(Stream::Result).map(|bytes| {
+            let mut doc: CheckResult = serde_json::from_slice(bytes)
+                .map_err(|_| FrameError::ResultDocument(CheckResultError::Parse))?;
+            doc.validate().map_err(FrameError::ResultDocument)?;
+            doc.sanitise();
+            Ok(doc)
+        })
     }
 }
 
@@ -1283,6 +1297,8 @@ pub enum FrameError {
     BudgetExceeded(usize),
     #[error("a part frame does not decode as base64")]
     Base64,
+    #[error("the relayed result document is unusable: {0}")]
+    ResultDocument(#[from] CheckResultError),
 }
 
 impl FrameError {
@@ -1775,6 +1791,52 @@ impl CheckResult {
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, crate::det_json::DetJsonError> {
         crate::det_json::to_deterministic_json(self)
     }
+
+    /// D2 §6.4's "≤ 64 entries", ENFORCED rather than declared.
+    ///
+    /// [`MAX_CHECK_ENTRIES`] existed as a constant with no reader, so a W4 or
+    /// W9 bug that emitted 400 outcomes would have written a half-megabyte
+    /// status and nothing would have refused it. A declared bound is not a
+    /// bound.
+    pub fn validate(&self) -> Result<(), CheckResultError> {
+        if self.checks.len() > MAX_CHECK_ENTRIES {
+            return Err(CheckResultError::TooManyChecks(self.checks.len()));
+        }
+        if self.contract != CHECK_RESULT_CONTRACT {
+            return Err(CheckResultError::Contract(self.contract.clone()));
+        }
+        Ok(())
+    }
+
+    /// Redacts and caps every message, remedy and fact IN PLACE.
+    ///
+    /// The fields of [`CheckOutcome`] are public and `Deserialize`d directly,
+    /// so a document decoded from a relay carries whatever the runner wrote:
+    /// `redact` and `cap` run inside `with_message` / `with_remedy` /
+    /// `with_fact`, which a decoder never calls. D2 §4.1 applies redaction "to
+    /// every relayed status message", i.e. on the controller side too, so the
+    /// controller needs ONE call here rather than a hand-rolled walk in
+    /// `weirkeeper::check::relay`. `CheckRelay::result` already calls it.
+    pub fn sanitise(&mut self) {
+        for c in &mut self.checks {
+            c.message = redact(&c.message);
+            c.remedy = redact(&c.remedy);
+            for v in c.facts.values_mut() {
+                *v = redact(v);
+            }
+        }
+    }
+}
+
+/// Why a decoded `result` document was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CheckResultError {
+    #[error("the result document declares {0} checks, over the {MAX_CHECK_ENTRIES} cap")]
+    TooManyChecks(usize),
+    #[error("the result document's contract `{0}` is not `{CHECK_RESULT_CONTRACT}`")]
+    Contract(String),
+    #[error("the result document does not parse")]
+    Parse,
 }
 
 // ---------------------------------------------------------------- redaction
@@ -1906,16 +1968,38 @@ fn redact_s3_xml(s: &str) -> String {
     // <RequestId>…</RequestId><HostId>…</HostId></Error>`. Only `<Code>` is
     // kept: `Message`, `RequestId` and `HostId` carry the request's own
     // identifiers and sometimes the key, and no remedy needs them.
-    let Some(start) = s.find("<Error>") else {
-        return s.to_string();
-    };
-    let end = match s[start..].find("</Error>") {
-        Some(i) => start + i + "</Error>".len(),
-        None => s.len(),
-    };
-    let body = &s[start..end];
-    let code = body
-        .find("<Code>")
+    //
+    // EVERY block, not the first. S3 and MinIO return several `<Error>`
+    // elements in one body for `DeleteObjects` and multipart completion, and
+    // the first version of this rule re-emitted everything after the first
+    // `</Error>` untouched.
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<Error>") {
+        // A leading `<?xml …?>` declaration belongs to the body.
+        let head = &rest[..start];
+        let head_end = head.rfind("<?xml").unwrap_or(start);
+        out.push_str(&rest[..head_end]);
+        let tail = &rest[start..];
+        let (body, after) = match tail.find("</Error>") {
+            Some(i) => tail.split_at(i + "</Error>".len()),
+            None => (tail, ""),
+        };
+        out.push_str(&format!(
+            "<Error><Code>{}</Code></Error>",
+            s3_error_code(body)
+        ));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `<Code>` of one `<Error>` block, or `Unknown`. Restricted to
+/// alphanumerics and a sane length so a hostile body cannot smuggle text
+/// through the one element this rule keeps.
+fn s3_error_code(body: &str) -> &str {
+    body.find("<Code>")
         .and_then(|i| {
             let after = &body[i + "<Code>".len()..];
             after.find("</Code>").map(|j| &after[..j])
@@ -1923,14 +2007,7 @@ fn redact_s3_xml(s: &str) -> String {
         .filter(|c| {
             !c.is_empty() && c.len() <= 64 && c.chars().all(|ch| ch.is_ascii_alphanumeric())
         })
-        .unwrap_or("Unknown");
-    // A leading `<?xml …?>` declaration is part of the body for our purposes.
-    let head_end = s[..start].rfind("<?xml").unwrap_or(start);
-    format!(
-        "{}<Error><Code>{code}</Code></Error>{}",
-        &s[..head_end],
-        &s[end..]
-    )
+        .unwrap_or("Unknown")
 }
 
 fn redact_url_userinfo(s: &str) -> String {
@@ -1955,81 +2032,140 @@ fn redact_url_userinfo(s: &str) -> String {
     out
 }
 
-/// The keyword set of D2 §4.1: `aws_secret_access_key`,
-/// `secret[_-]?access[_-]?key`, `password`, `sasl.password`, `token`.
+/// Where a keyword may appear before its value is redacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeywordForm {
+    /// `k=v`, `k: v`, `k => v`, `"k": "v"`, `k v`.
+    Any,
+    /// The quoted-key form ONLY: `"k": v` / `'k': v`. Used for the bare word
+    /// `secret`, which in prose names a Kubernetes Secret — D2 §6.5 says a
+    /// Secret NAME may appear in a message, so `secret \`logweir-s3\` key
+    /// \`access-key-id\`` must survive while `{"secret":"…"}` must not.
+    QuotedKeyOnly,
+}
+
+/// The keyword set of D2 §4.1 — `aws_secret_access_key`,
+/// `secret[_-]?access[_-]?key`, `password`, `sasl.password`, `token` — plus
+/// the bare `secret` in its quoted-key form, ordered LONGEST FIRST so the more
+/// specific spelling wins.
+const SECRET_KEYWORDS: [(&str, KeywordForm); 8] = [
+    ("aws_secret_access_key", KeywordForm::Any),
+    ("secret_access_key", KeywordForm::Any),
+    ("secret-access-key", KeywordForm::Any),
+    ("secretaccesskey", KeywordForm::Any),
+    ("sasl.password", KeywordForm::Any),
+    ("password", KeywordForm::Any),
+    ("token", KeywordForm::Any),
+    ("secret", KeywordForm::QuotedKeyOnly),
+];
+
+/// Removes the VALUE after any of [`SECRET_KEYWORDS`], case-insensitively,
+/// in every quoting and spacing shape a real error uses.
 ///
-/// Matched case-insensitively against the identifier immediately before a
-/// `=`, `:` or `=>`, so `password=hunter2`, `password: hunter2`,
-/// `sasl.password="hunter2"` and `--token hunter2` all lose their value.
+/// # The shapes, and why each one is here
+///
+/// - `password=hunter2`, `password: hunter2`, `password => hunter2` — config
+///   and log forms.
+/// - `{"password":"hunter2"}`, `"sasl.password": "hunter2"` — JSON and
+///   quoted-key YAML. **This is the form the first version missed**: it
+///   skipped only spaces and tabs after the keyword and then required a
+///   separator, so the `"` between the two abandoned the match and the value
+///   was copied verbatim. W5's `waiting.rs` relays an admission-webhook or
+///   API-server body — which is JSON — through `redact` into a status message,
+///   so a short password in that body reached the `Preflight` status, the
+///   details `ConfigMap`, the API and the UI. Values of 40+ base64/hex
+///   characters were still caught by the long-run rule; `password` and
+///   `sasl.password` are exactly the short ones.
+/// - `--token hunter2` — a bare whitespace separator, argv form.
+/// - `sessionToken=abcdef` — the keyword as a SUFFIX of a longer identifier.
+///   The first version required the preceding byte to be non-alphanumeric and
+///   its comment claimed `mypassword` was caught; it was not. Matching a
+///   suffix over-redacts (`notoken=1` loses its `1`), which is the safe
+///   direction.
+///
+/// The keyword must NOT be a prefix of a longer identifier — `tokenizer` is a
+/// word, not a key — which is what keeps `the tokenizer failed` intact.
 fn redact_key_values(s: &str) -> String {
-    const KEYWORDS: [&str; 7] = [
-        "aws_secret_access_key",
-        "secret_access_key",
-        "secret-access-key",
-        "secretaccesskey",
-        "sasl.password",
-        "password",
-        "token",
-    ];
     let lower = s.to_ascii_lowercase();
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
     'outer: while i < bytes.len() {
-        for kw in KEYWORDS {
-            if lower[i..].starts_with(kw) {
-                // The keyword must start at an identifier boundary, so
-                // `mypassword` is caught but `crossword` is not.
-                let boundary = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-                if !boundary {
-                    continue;
-                }
-                let mut j = i + kw.len();
-                // Optional whitespace, then a separator.
-                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                    j += 1;
-                }
-                let sep = if lower[j..].starts_with("=>") {
-                    2
-                } else if j < bytes.len() && (bytes[j] == b'=' || bytes[j] == b':') {
-                    1
-                } else if j > i + kw.len() {
-                    // `--token hunter2`: whitespace alone separates them.
-                    0
-                } else {
-                    continue;
-                };
-                let mut k = j + sep;
-                while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
-                    k += 1;
-                }
-                let quote = bytes.get(k).copied();
-                let (value_start, terminator): (usize, fn(u8) -> bool) = match quote {
-                    Some(b'"') => (k + 1, |c| c == b'"'),
-                    Some(b'\'') => (k + 1, |c| c == b'\''),
-                    _ => (k, |c| {
-                        c == b' ' || c == b'\t' || c == b'\n' || c == b',' || c == b';' || c == b'&'
-                    }),
-                };
-                let mut e = value_start;
-                while e < bytes.len() && !terminator(bytes[e]) {
-                    e += 1;
-                }
-                if e == value_start {
-                    // Nothing to redact after the separator.
-                    out.push_str(&s[i..j + sep]);
-                    i = j + sep;
-                    continue 'outer;
-                }
-                out.push_str(&s[i..value_start]);
-                out.push_str(REDACTED);
-                // Keep the closing quote so the text stays readable.
-                i = e;
+        for (kw, form) in SECRET_KEYWORDS {
+            if !lower[i..].starts_with(kw) {
+                continue;
+            }
+            let mut p = i + kw.len();
+            // A keyword that is the PREFIX of a longer identifier is a word,
+            // not a key: `tokenizer`, `password_file`.
+            if bytes
+                .get(p)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            {
+                continue;
+            }
+            // An optional closing quote: `"password"` / `'password'`.
+            let quoted_key = matches!(bytes.get(p), Some(b'"') | Some(b'\''));
+            if quoted_key {
+                p += 1;
+            }
+            if form == KeywordForm::QuotedKeyOnly && !quoted_key {
+                continue;
+            }
+            let before_ws = p;
+            while matches!(bytes.get(p), Some(b' ') | Some(b'\t')) {
+                p += 1;
+            }
+            let had_ws = p > before_ws;
+            let sep = if lower[p..].starts_with("=>") {
+                2
+            } else if matches!(bytes.get(p), Some(b'=') | Some(b':')) {
+                1
+            } else if had_ws && !quoted_key && form == KeywordForm::Any {
+                // `--token hunter2`: whitespace alone separates them.
+                0
+            } else {
+                continue;
+            };
+            p += sep;
+            while matches!(bytes.get(p), Some(b' ') | Some(b'\t')) {
+                p += 1;
+            }
+            let (value_start, terminator): (usize, fn(u8) -> bool) = match bytes.get(p) {
+                Some(b'"') => (p + 1, |c| c == b'"'),
+                Some(b'\'') => (p + 1, |c| c == b'\''),
+                _ => (p, |c| {
+                    matches!(
+                        c,
+                        b' ' | b'\t'
+                            | b'\n'
+                            | b'\r'
+                            | b','
+                            | b';'
+                            | b'&'
+                            | b'}'
+                            | b']'
+                            | b')'
+                            | b'"'
+                    )
+                }),
+            };
+            let mut e = value_start;
+            while e < bytes.len() && !terminator(bytes[e]) {
+                e += 1;
+            }
+            if e == value_start {
+                // Nothing between the separator and the terminator.
+                out.push_str(&s[i..p]);
+                i = p;
                 continue 'outer;
             }
+            out.push_str(&s[i..value_start]);
+            out.push_str(REDACTED);
+            i = e;
+            continue 'outer;
         }
-        // Not a keyword start: copy one character (by char, not by byte, so
-        // UTF-8 survives).
+        // Not a keyword start: copy one CHARACTER, so UTF-8 survives.
         let ch = s[i..].chars().next().expect("i is a char boundary");
         out.push(ch);
         i += ch.len_utf8();
@@ -2493,7 +2629,18 @@ pub fn stale_reasons(
             .map_or_else(String::new, |a| a.uid.clone());
         out.push(StaleReason::ReferentChanged(format!("Approval/{uid}")));
     }
-    if recorded.ca_bundles != current.ca_bundles {
+    // Sorted on BOTH sides, exactly as `inputs_digest` sorts them. Comparing
+    // positionally made two bindings with the same digest report
+    // `caBundleChanged` forever: a two-destination restore preflight where the
+    // controller resolved source-then-evidence and the API recomputed from a
+    // map got the other order, so every GET answered `stale` and the restore
+    // could never be approved from the UI. It failed safe and was undiagnosable.
+    let sorted = |v: &[CaBundleRef]| {
+        let mut c: Vec<CaBundleRef> = v.to_vec();
+        c.sort_by(|a, b| a.destination_uid.cmp(&b.destination_uid));
+        c
+    };
+    if sorted(&recorded.ca_bundles) != sorted(&current.ca_bundles) {
         out.push(StaleReason::CaBundleChanged);
     }
     if recorded.policy_digest != current.policy_digest {
