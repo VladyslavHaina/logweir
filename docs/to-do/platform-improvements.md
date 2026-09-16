@@ -122,6 +122,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-07.1 | Done | plat07-finish, plat07-integrate, plat07-review, plat07-live | Completion record under PLAT-07.1. Integrated into main as `6c534b2..199020a` plus the live harness `50e641f`. | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
+| PLAT-18.1 | Done | ui-typed-client, ui-typed-client-review | Completion record under PLAT-18.1; D0 stage 6 (static client migration) done for its own scope. Integrated into main as `fa73824..48d5ec0`. |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. |
@@ -1277,7 +1278,7 @@ authorization. Supply threat-boundary, RBAC and deployment migration decisions.
 
 ## PLAT-18 — Strengthen UI structure without a speculative rewrite
 
-**Priority P2 · Proposed.** Scope: contracts, state, reusable interactions and
+**Priority P2 · In progress (18.1 Done).** Scope: contracts, state, reusable interactions and
 accessibility. Keep static packaging; choose a framework only against concrete
 maintenance and interaction requirements.
 
@@ -1294,6 +1295,53 @@ field loss; plan review and submission use the same bytes. **Tests:** Contract
 fixtures, optional fields, state transition errors, plan/hash round trip,
 navigation disposal and server validation disagreement. **Dependencies:**
 PLAT-17.1 contract; can begin current-API typing before API deployment.
+
+**Completion record — Done (2026-09-16), PLAT-18.1, with D0 stage 6 (the static
+UI client migration) done for its own scope.** Landed in main as `fa73824`
+(typed client contract, one mode decided at boot, named transitions), `2ad4356`
+(contract-against-schema tests in both modes), `f3c20a1` (docs), `715e183` and
+`48d5ec0` (review fixes). Contract (`ui/README.md`): four new modules —
+`ui/contract.js` (JSDoc types and strict decoders for every DTO in the legacy
+direct-CR mode and the console `/api/v1` mode: a missing required field or an
+undeclared enum member is a rendered `contractFailure` naming DTO and JSON path,
+an unknown field is tolerated and recorded, legacy decoders return the same
+object so nothing is dropped in transit; a node test compares enum sets,
+envelopes and request shapes against `schemas/logweir-api-v1.openapi.json`),
+`ui/client.js` (one `GET /api/v1/session` at boot decides the mode once and
+synchronously; any failure is legacy; namespaces from `/session` in console
+mode; the synchroniser token lives only in module memory and rides
+`X-CSRF-Token`; console lists follow the cursor to the end and render
+`ListTooLarge` rather than truncate), `ui/validate.js` (one check set and one
+field-path vocabulary so problem+json field errors land beside the right input
+in both modes) and `ui/workflow.js` (declared machines with named transitions;
+`pending` has no `start`, which is the duplicate-submit guard; `unanswered` is
+its own state that a late answer settles or `abandon` closes); `ui/plan.js`
+returns one frozen plan document so review and submission are one object and
+the plan golden is byte-identical. Pages changed only at their adapter call
+site. The shipped asset set is now twenty files, moved consistently in
+`Dockerfile.ui`, `scripts/check-image-ui.sh`, `chart_lint`, `ui_lint` and the
+API's `boundary` suite. Verified at `48d5ec0`: `check-ui-behaviour.sh` 166/166
+(contract 14, client 22, workflow 15 and the review's added rows), offline gate
+twenty files, `ui_lint` 26, `chart_lint` 28, `doc_lint` 12, `gate_lint` 13,
+logweir-api 106 across twelve targets, `chart-check`, the image gate; eleven
+mutants killed (one equivalent mutant recorded as such; one — a mount calling a
+bare import — was not hypothetical and is now guarded). Live docker-desktop:
+legacy mode 14/15 of the existing Playwright journeys (the 15th is the shared
+lab controller image, and a control run of `main`'s own `ui/` fails it
+identically) and console mode 3/3 against a locally run `logweir-api` in
+localAdmin mode with exactly one `/api/v1/session` request and zero direct
+`/apis/logweir.dev/` requests, a problem+json field error rendered beside the
+field with the draft kept, and the corrected create read back by UID; both
+namespaces deleted after owner-label and UID checks. Independent review
+`claude/ui-typed-client.review.md`: ACCEPT-WITH-FIXES (one high: the API's
+boundary suite still asserted sixteen files) then ACCEPT. Migration: none for
+operators (static assets; deep links unchanged; the legacy `kubectl proxy` mode
+is untouched and remains the default when no `/api/v1/session` answers).
+Limitations: the wizard machine is a test-time invariant, not enforced at
+runtime (PLAT-18.2 owns the stepper); the CSRF header name is provisional
+until PLAT-17.2 lands; no page surfaces cursor paging controls (PLAT-18.2);
+`approvals`/`backups` creates are refused by name in console mode until their
+routes exist.
 
 ### PLAT-18.2 — Make dense workflows accessible and scalable
 
