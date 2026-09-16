@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from typing import Any, Callable
 
 
@@ -38,10 +37,36 @@ REPORT_PATH = OUT / "report.json"
 NS = os.environ.get("LOGWEIR_BACKEND_LIVE_NS", "logweir-backend-live-20260915")
 FIXTURE_NS = "logweir-scram-local"
 RUN_LABEL = os.environ.get("LOGWEIR_BACKEND_LIVE_RUN_LABEL", "20260915t0330z")
-CURRENT_RUNNER = "logweir:backend-live-20260915"
-OLD_RUNNER = "logweir:pre-handshake-92e02097"
-CURRENT_CONTROLLER = "weirkeeper:backend-live-20260915"
-OLD_CONTROLLER = "weirkeeper:pre-handshake-92e02097"
+# Every image and source root is a parameter so evidence is regenerated against
+# the exact images built for the commit under test, never a stale default tag.
+CURRENT_RUNNER = os.environ.get(
+    "LOGWEIR_BACKEND_LIVE_CURRENT_RUNNER", "logweir:backend-live-20260915"
+)
+OLD_RUNNER = os.environ.get(
+    "LOGWEIR_BACKEND_LIVE_OLD_RUNNER", "logweir:pre-handshake-92e02097"
+)
+CURRENT_CONTROLLER = os.environ.get(
+    "LOGWEIR_BACKEND_LIVE_CURRENT_CONTROLLER", "weirkeeper:backend-live-20260915"
+)
+OLD_CONTROLLER = os.environ.get(
+    "LOGWEIR_BACKEND_LIVE_OLD_CONTROLLER", "weirkeeper:pre-handshake-92e02097"
+)
+SOURCE_ROOT = pathlib.Path(
+    os.environ.get(
+        "LOGWEIR_BACKEND_LIVE_SOURCE_ROOT", "/tmp/logweir-backend-live-20260915T0330Z/src"
+    )
+)
+OLD_SOURCE_ROOT = pathlib.Path(
+    os.environ.get(
+        "LOGWEIR_BACKEND_LIVE_OLD_SOURCE_ROOT", "/tmp/logweir-backend-live-20260915T0330Z/old"
+    )
+)
+SOURCE_COMMIT = os.environ.get("LOGWEIR_BACKEND_LIVE_SOURCE_COMMIT", "")
+OLD_COMMIT = os.environ.get(
+    "LOGWEIR_BACKEND_LIVE_OLD_COMMIT", "92e02097540c39ff8565283a38ee592499b95020"
+)
+# The worker-rules ownership label, carried in addition to the run label.
+TEST_OWNER = os.environ.get("LOGWEIR_BACKEND_LIVE_TEST_OWNER", "")
 KUBECTL = ["kubectl", "--context", "docker-desktop"]
 K = KUBECTL + ["-n", NS]
 KF = KUBECTL + ["-n", FIXTURE_NS]
@@ -76,13 +101,26 @@ REQUIRED_CASES = {
     "post_start_projected_plan_replacement",
     "live_plan_directed_network_observation",
     "mid_run_signer_rotation",
+    "runner_refuses_missing_bundle_member",
+    "runner_refuses_tampered_bundle_member",
+    "restores_mount_only_their_own_bundles",
 }
-KNOWN_UNRUN_CASES = {
-    "exact_old_controller_job_observation",
-    "controller_upgrade_drain_rollback_during_restore",
-    "post_start_projected_plan_replacement",
-    "live_plan_directed_network_observation",
-    "mid_run_signer_rotation",
+# Cases that cannot be exercised live and are therefore classified with a
+# justification instead of being counted as passed or silently omitted.
+UNSUPPORTED_LIVE_CASES = {
+    "post_parse_software_signing_failure": (
+        "A parsed P-256/Ed25519 software signer has no reachable post-parse signing error; "
+        "the readiness seam is proven by the source-matched unit test named in the report."
+    ),
+    "mutating_admission_webhook_rewrite": (
+        "No mutating webhook is installed in the shared lab; API immutability, exact owner/UID "
+        "collision refusal and runner digest binding are exercised instead. This does not claim "
+        "defence against a malicious cluster administrator."
+    ),
+    "networkpolicy_enforcement": (
+        "Docker Desktop does not enforce NetworkPolicy; notification absence is proven by owned "
+        "receivers, never by policy."
+    ),
 }
 if STATE_PATH.exists():
     STATE: dict[str, Any] = json.loads(STATE_PATH.read_text())
@@ -123,17 +161,27 @@ def acceptance_gate(
     *,
     require_cleanup: bool,
     required_cases: set[str] = REQUIRED_CASES,
+    lab_state: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, list[str]]]:
     failed = sorted(name for name in required_cases if cases.get(name) == "failed")
     unrun = sorted(name for name in required_cases if cases.get(name) == "unrun")
     missing = sorted(name for name in required_cases if name not in cases)
+    unknown = sorted(
+        name
+        for name in required_cases
+        if name in cases and cases[name] not in {"passed", "failed", "unrun"}
+    )
     cleanup_failures: list[str] = []
     if require_cleanup and cleanup_state.get("result") != "deleted":
         cleanup_failures.append(
             f"required cleanup result is {cleanup_state.get('result', 'missing')!r}"
         )
+    if lab_state and lab_state.get("recorded") and lab_state.get("restore_exact") is not True:
+        cleanup_failures.append(
+            f"shared lab controller restore_exact is {lab_state.get('restore_exact')!r}"
+        )
     failures = {
-        "failed": failed,
+        "failed": failed + unknown,
         "unrun": unrun,
         "missing": missing,
         "cleanup": cleanup_failures,
@@ -141,9 +189,19 @@ def acceptance_gate(
     return (1 if any(failures.values()) else 0), failures
 
 
+def lab_gate_state() -> dict[str, Any]:
+    return {
+        "recorded": STATE.get("lab_controller_original") is not None,
+        "restore_exact": STATE.get("lab_controller_restore_exact"),
+    }
+
+
 def terminal_exit_status(*, require_cleanup: bool) -> int:
     status, reasons = acceptance_gate(
-        STATE.get("cases", {}), STATE.get("cleanup", {}), require_cleanup=require_cleanup
+        STATE.get("cases", {}),
+        STATE.get("cleanup", {}),
+        require_cleanup=require_cleanup,
+        lab_state=lab_gate_state() if require_cleanup else None,
     )
     STATE["acceptance_gate"] = {"exit_code": status, **reasons}
     save_state()
@@ -236,6 +294,7 @@ def delete_with_uid_precondition(
     api_version: str,
     namespace: str | None = NS,
     timeout: int = 180,
+    propagation: str = "Foreground",
 ) -> None:
     """Delete an exact object incarnation through the raw Kubernetes API."""
     if api_version == "v1":
@@ -256,7 +315,7 @@ def delete_with_uid_precondition(
         "apiVersion": "v1",
         "kind": "DeleteOptions",
         "preconditions": {"uid": uid},
-        "propagationPolicy": "Foreground",
+        "propagationPolicy": propagation,
     }
     run(
         KUBECTL + ["delete", "--raw", uri, "-f", "-"],
@@ -323,11 +382,18 @@ def copy_secret(name: str, source_name: str | None = None) -> None:
     )
 
 
+def namespace_labels() -> dict[str, str]:
+    labels = {"backend-live.logweir.dev/run": RUN_LABEL}
+    if TEST_OWNER:
+        labels["logweir.dev/test-owner"] = TEST_OWNER
+    return labels
+
+
 def setup_namespace() -> None:
     ns = get_optional("namespace", NS, cluster_scoped=True)
     if ns is not None:
         labels = ns["metadata"].get("labels", {})
-        if labels.get("backend-live.logweir.dev/run") != RUN_LABEL:
+        if any(labels.get(key) != value for key, value in namespace_labels().items()):
             raise RuntimeError(f"refusing pre-existing unowned namespace {NS}")
         if STATE.get("namespace_uid") != ns["metadata"]["uid"]:
             raise RuntimeError("owned namespace UID does not match saved run state")
@@ -337,7 +403,7 @@ def setup_namespace() -> None:
             "kind": "Namespace",
             "metadata": {
                 "name": NS,
-                "labels": {"backend-live.logweir.dev/run": RUN_LABEL},
+                "labels": namespace_labels(),
             },
         }
         run(KUBECTL + ["apply", "-f", "-"], stdin=json.dumps(ns))
@@ -1070,6 +1136,83 @@ def scale_any_controller(replicas: int) -> None:
         raise RuntimeError(f"controller did not converge to one Ready pod: {identity!r}")
 
 
+LAB_ORIGINAL = "lab_controller_original"
+
+
+def lab_switch() -> None:
+    """Record the shared lab controller exactly once, then run the images under test."""
+    deployment = controller_deployment()
+    if STATE.get(LAB_ORIGINAL) is None:
+        save_artifact("lab-controller-original-deployment.json", deployment)
+        STATE[LAB_ORIGINAL] = {
+            **controller_identity(deployment),
+            "replicas": deployment["spec"].get("replicas"),
+            "template_annotations": deployment["spec"]["template"]["metadata"].get(
+                "annotations"
+            ),
+            "containers": deployment["spec"]["template"]["spec"]["containers"],
+        }
+        save_state()
+    set_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
+    assert_single_controller()
+    STATE["lab_controller_under_test"] = controller_identity(controller_deployment())
+    save_state()
+    log(f"lab controller switched to {CURRENT_CONTROLLER} / {CURRENT_RUNNER}")
+
+
+def lab_restore() -> None:
+    """Restore the recorded lab controller spec, replicas and pod-template annotations."""
+    original = STATE.get(LAB_ORIGINAL)
+    if original is None:
+        raise RuntimeError("refusing lab restore: no recorded original controller spec")
+    current = controller_deployment()
+    if current["metadata"]["uid"] != original["deployment_uid"]:
+        raise RuntimeError("refusing lab restore: controller Deployment UID changed")
+    patch: list[dict[str, Any]] = [
+        {"op": "replace", "path": "/spec/replicas", "value": original["replicas"]},
+        {
+            "op": "replace",
+            "path": "/spec/template/spec/containers",
+            "value": original["containers"],
+        },
+    ]
+    if original["template_annotations"] is None:
+        if current["spec"]["template"]["metadata"].get("annotations") is not None:
+            patch.append({"op": "remove", "path": "/spec/template/metadata/annotations"})
+    else:
+        patch.append(
+            {
+                "op": "add",
+                "path": "/spec/template/metadata/annotations",
+                "value": original["template_annotations"],
+            }
+        )
+    run(KF + ["patch", "deployment", "weirkeeper", "--type=json", "-p", json.dumps(patch)])
+    run(
+        KF + ["rollout", "status", "deployment/weirkeeper", "--timeout=240s"],
+        timeout=260,
+    )
+    deadline = time.monotonic() + 120
+    restored = controller_identity(controller_deployment())
+    while time.monotonic() < deadline and len(restored["ready_pods"]) != original["replicas"]:
+        time.sleep(2)
+        restored = controller_identity(controller_deployment())
+    exact = (
+        restored["deployment_uid"] == original["deployment_uid"]
+        and restored["image"] == original["image"]
+        and restored["runner_image"] == original["runner_image"]
+        and restored["spec_sha256"] == original["spec_sha256"]
+        and len(restored["ready_pods"]) == original["replicas"]
+    )
+    STATE["lab_controller_restored"] = restored
+    STATE["lab_controller_restore_exact"] = exact
+    save_artifact("lab-controller-restored-deployment.json", controller_deployment())
+    save_state()
+    if not exact:
+        raise RuntimeError(f"lab controller did not restore exactly: {restored!r}")
+    log("lab controller restored to its recorded spec, replicas and pod-template annotations")
+
+
 def wait_restore_terminal(name: str, seconds: int = 300) -> dict[str, Any]:
     return wait_for(
         "restore",
@@ -1160,7 +1303,10 @@ def premount_substitution() -> None:
         current = get("configmap", f"{name}-approval-bundle")
         if current["metadata"]["uid"] != original_uid:
             raise RuntimeError("bundle UID changed before precise delete")
-        run(K + ["delete", "configmap", f"{name}-approval-bundle", "--wait=true"])
+        delete_with_uid_precondition(
+            "configmap", f"{name}-approval-bundle", original_uid, api_version="v1"
+        )
+        wait_absent("configmap", f"{name}-approval-bundle")
         replacement = {
             "apiVersion": "v1",
             "kind": "ConfigMap",
@@ -1219,7 +1365,10 @@ def missing_bundle_before_mount() -> None:
             bundle_uid = bundle["metadata"]["uid"]
             if get("configmap", f"{name}-approval-bundle")["metadata"]["uid"] != bundle_uid:
                 raise RuntimeError("bundle UID changed before missing-bundle delete")
-            run(K + ["delete", "configmap", f"{name}-approval-bundle", "--wait=true"])
+            delete_with_uid_precondition(
+                "configmap", f"{name}-approval-bundle", bundle_uid, api_version="v1"
+            )
+            wait_absent("configmap", f"{name}-approval-bundle")
     finally:
         remove_pod_quota()
     deadline = time.monotonic() + 90
@@ -1409,7 +1558,8 @@ def job_collision_matrix() -> None:
     # Previous incarnation UID.
     name = "backend-live-job-olduid"
     _plan, old_uid = create_restore_shell(name, "missing-olduid-approval", "backend-live-olduid-")
-    run(K + ["delete", "restore", name, "--wait=true"])
+    delete_with_uid_precondition("restore", name, old_uid, api_version="logweir.dev/v1alpha1")
+    wait_absent("restore", name)
     collision = create_collision_job(
         name,
         [owner_reference("Restore", name, old_uid, controller=True)],
@@ -1611,7 +1761,8 @@ def configmap_owner_matrix() -> None:
     _plan, old_uid = create_restore_shell(
         name, approval_name, "backend-live-bundle-olduid-old-"
     )
-    run(K + ["delete", "restore", name, "--wait=true"])
+    delete_with_uid_precondition("restore", name, old_uid, api_version="logweir.dev/v1alpha1")
+    wait_absent("restore", name)
     plan, new_uid = create_restore_shell(
         name, approval_name, "backend-live-bundle-olduid-new-"
     )
@@ -1732,7 +1883,13 @@ def injected_subject_replay_matrix() -> None:
     # Remove the intentionally stuck missing-bundle Restore before fencing.
     missing = get_optional("restore", "backend-live-missing-bundle")
     if missing is not None:
-        run(K + ["delete", "restore", missing["metadata"]["name"], "--wait=true"])
+        delete_with_uid_precondition(
+            "restore",
+            missing["metadata"]["name"],
+            missing["metadata"]["uid"],
+            api_version="logweir.dev/v1alpha1",
+        )
+        wait_absent("restore", missing["metadata"]["name"])
     running = [
         item["metadata"]["name"]
         for item in json.loads(run(K + ["get", "restores", "-o", "json"]).stdout)["items"]
@@ -2196,7 +2353,10 @@ def legacy_same_uid_observation() -> None:
     current = get("restore", name)
     if current["metadata"]["uid"] != uid:
         raise RuntimeError("legacy Restore UID changed before precise GC delete")
-    run(K + ["delete", "restore", name, "--wait=true"])
+    delete_with_uid_precondition(
+        "restore", name, uid, api_version="logweir.dev/v1alpha1", propagation="Background"
+    )
+    wait_absent("restore", name)
     wait_absent("job", name)
     STATE["cases"]["legacy_same_uid_inflight_observation"] = "passed"
     save_state()
@@ -2260,7 +2420,7 @@ def legacy_prejob_transition() -> None:
         save_state()
         log("legitimate archived-shape mutable pre-Job plan was refused before Job creation")
         return
-    result = verify_restore(name, prefix)
+    result = verify_restore(name, prefix, plan_state="legacy")
     transitioned = get("configmap", plan_name)
     if transitioned["metadata"]["uid"] != legacy_uid:
         raise RuntimeError("pre-Job transition replaced the same-UID legacy plan ConfigMap")
@@ -2415,7 +2575,14 @@ def rbac_and_gc() -> None:
     )
     if restore["metadata"]["uid"] != expected_uid:
         raise RuntimeError("positive Restore UID changed before GC test")
-    run(K + ["delete", "restore", restore["metadata"]["name"], "--wait=true"])
+    delete_with_uid_precondition(
+        "restore",
+        restore["metadata"]["name"],
+        expected_uid,
+        api_version="logweir.dev/v1alpha1",
+        propagation="Background",
+    )
+    wait_absent("restore", restore["metadata"]["name"])
     wait_absent("job", "backend-live-restore-a")
     wait_absent("configmap", "backend-live-restore-a-plan")
     wait_absent("configmap", "backend-live-restore-a-approval-bundle")
@@ -2519,328 +2686,106 @@ def sha256_file(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def report() -> None:
-    critical = [
-        "crates/logweir-core/src/execution_contract.rs",
-        "crates/logweir/src/cli.rs",
-        "crates/logweir/src/drill/mod.rs",
-        "crates/logweir/src/drill/phase1_approval.rs",
-        "crates/logweir/src/signer.rs",
-        "crates/logweir/src/backup/mod.rs",
-        "crates/logweir/src/backup/phase_run.rs",
-        "crates/weirkeeper/src/controllers/restore.rs",
-        "crates/weirkeeper/src/controllers/approval.rs",
-        "crates/weirkeeper/src/job.rs",
-        "config/crd/approvals.yaml",
-    ]
-    snapshot_root = pathlib.Path("/tmp/logweir-backend-live-20260915T0330Z/src")
-    source_hashes = {
-        path: {
-            "snapshot": sha256_file(snapshot_root / path),
-            "working_tree_now": sha256_file(ROOT / path),
-        }
-        for path in critical
-    }
-    images: dict[str, Any] = {}
-    platforms = {
-        CURRENT_CONTROLLER: "linux/arm64",
-        CURRENT_RUNNER: "linux/amd64",
-        OLD_RUNNER: "linux/amd64",
-    }
-    binaries = {
-        CURRENT_CONTROLLER: "/usr/local/bin/weirkeeper",
-        CURRENT_RUNNER: "/usr/local/bin/logweir",
-        OLD_RUNNER: "/usr/local/bin/logweir",
-    }
-    for image, platform in platforms.items():
-        inspected = json.loads(
-            run(DOCKER + ["image", "inspect", image, "--format", "{{json .}}"] ).stdout
-        )
-        binary_hash = run(
-            DOCKER
-            + [
-                "run",
-                "--rm",
-                "--platform",
-                platform,
-                "--entrypoint",
-                "sha256sum",
-                image,
-                binaries[image],
-            ]
-        ).stdout.split()[0]
-        images[image] = {
-            "id": inspected["Id"],
-            "architecture": inspected["Architecture"],
-            "created": inspected["Created"],
-            "binary": binaries[image],
-            "binary_sha256": binary_hash,
-        }
-    images[CURRENT_RUNNER]["engine_binary"] = "/usr/local/bin/kafka-backup"
-    images[CURRENT_RUNNER]["engine_binary_sha256"] = run(
-        DOCKER
-        + [
-            "run",
-            "--rm",
-            "--platform",
-            platforms[CURRENT_RUNNER],
-            "--entrypoint",
-            "sha256sum",
-            CURRENT_RUNNER,
-            "/usr/local/bin/kafka-backup",
+def sha256_prefixed(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def assert_only_own_inputs(
+    name: str,
+    restore: dict[str, Any],
+    approval: dict[str, Any],
+    job: dict[str, Any],
+    bundle: dict[str, Any],
+    plan_cm: dict[str, Any],
+    *,
+    plan_state: str = "immutable",
+    instrumentation_volumes: frozenset[tuple[str, str, str]] = frozenset(),
+) -> None:
+    """The Job mounts exactly its own plan/bundle and pins their exact digests."""
+    pod_spec = job["spec"]["template"]["spec"]
+    volumes = []
+    for volume in pod_spec["volumes"]:
+        if "configMap" in volume:
+            volumes.append((volume["name"], "configMap", volume["configMap"]["name"]))
+        elif "secret" in volume:
+            volumes.append((volume["name"], "secret", volume["secret"]["secretName"]))
+        elif "emptyDir" in volume:
+            volumes.append((volume["name"], "emptyDir", ""))
+        else:
+            volumes.append((volume["name"], "other", json.dumps(volume, sort_keys=True)))
+    expected_volumes = sorted(
+        [
+            ("approval", "configMap", f"{name}-approval-bundle"),
+            ("plan", "configMap", f"{name}-plan"),
+            ("signing", "secret", "logweir-signing-key"),
+            ("work", "emptyDir", ""),
+            *instrumentation_volumes,
         ]
-    ).stdout.split()[0]
-    deployment = json.loads(
-        run(KF + ["get", "deployment", "weirkeeper", "-o", "json"]).stdout
     )
-    crd = json.loads(
-        run(KUBECTL + ["get", "crd", "approvals.logweir.dev", "-o", "json"]).stdout
-    )
-    owned_namespace = run(
-        KUBECTL + ["get", "namespace", NS, "-o", "name"], check=False
-    )
-    artifact_hashes = {
-        path.name: sha256_file(path)
-        for path in sorted(OUT.iterdir())
-        if path.is_file() and path.name not in {REPORT_PATH.name}
+    if sorted(volumes) != expected_volumes:
+        raise RuntimeError(f"Job/{name} volumes are not exactly its own inputs: {volumes!r}")
+    for container in pod_spec["containers"] + pod_spec.get("initContainers", []):
+        if container.get("envFrom"):
+            raise RuntimeError(f"Job/{name} unexpectedly imports environment wholesale")
+    runner_env = {
+        entry["name"]: entry.get("value") for entry in pod_spec["containers"][0]["env"]
     }
-    passed = sorted(
-        name for name, result in STATE.get("cases", {}).items() if result == "passed"
-    )
-    failed = sorted(
-        name for name, result in STATE.get("cases", {}).items() if result == "failed"
-    )
-    unrun = [
-        "post-start projected ConfigMap substitution with live webhook A/B observation",
-        "live plan-directed notification transport on pre-authentication failure",
-        "mid-run projected signer rotation after the pod proves its mounted file changed",
-        "post-parse software signing capability failure (intrinsically unreachable for current software keys)",
-        "mutating-admission webhook rewrite (API immutability was exercised; no mutating webhook was installed)",
-        "automatic identity bootstrap and default/full-chart install or reinstall (owned by separate review)",
-        "UI/browser behavior and unrelated scheduler behavior",
-    ]
-    structured = {
-        "context": "docker-desktop",
-        "docker_context": "desktop-linux",
-        "source_snapshot": str(snapshot_root),
-        "old_source": {
-            "commit": "92e02097540c39ff8565283a38ee592499b95020",
-            "cli_rs_sha256": sha256_file(
-                pathlib.Path(
-                    "/tmp/logweir-backend-live-20260915T0330Z/old/crates/logweir/src/cli.rs"
-                )
-            ),
-        },
-        "source_hashes": source_hashes,
-        "images": images,
-        "passed": passed,
-        "failed": failed,
-        "product_failures": STATE.get("product_failures", []),
-        "unrun": unrun,
-        "harness_iteration_errors": STATE.get("errors", []),
-        "rbac": STATE.get("rbac", {}),
-        "positive_restores": STATE.get("positive_restores", []),
-        "retained_signer": STATE.get("retained_signer", {}),
-        "approval_crd": {
-            "uid": crd["metadata"]["uid"],
-            "resource_version": crd["metadata"]["resourceVersion"],
-            "stored_versions": crd["status"]["storedVersions"],
-            "established": any(
-                condition.get("type") == "Established"
-                and condition.get("status") == "True"
-                for condition in crd["status"]["conditions"]
-            ),
-        },
-        "restored_shared_deployment": {
-            "image": deployment["spec"]["template"]["spec"]["containers"][0]["image"],
-            "runner_image": next(
-                item["value"]
-                for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-                if item["name"] == "LOGWEIR_RUNNER_IMAGE"
-            ),
-            "ready_replicas": deployment["status"].get("readyReplicas", 0),
-        },
-        "cleanup": {
-            **STATE.get("cleanup", {}),
-            "owned_namespace_absent": owned_namespace.returncode != 0,
-            "approval_crd_retained": True,
-            "signed_archive_evidence_retained": True,
-        },
-        "artifact_hashes": artifact_hashes,
-    }
-    REPORT_PATH.write_text(json.dumps(structured, indent=2, sort_keys=True) + "\n")
-    REPORT_PATH.chmod(0o600)
-    restore_by_name = {
-        item["name"]: item for item in STATE.get("positive_restores", [])
-    }
-    restore_a = restore_by_name.get("backend-live-restore-a", {})
-    restore_b = restore_by_name.get("backend-live-restore-b", {})
-    failure = next(
-        (
-            item
-            for item in STATE.get("product_failures", [])
-            if item.get("case") == "legacy_mutable_prejob_transition"
+    data = bundle["data"]
+    pinned = {
+        "LOGWEIR_EXECUTION_PLAN_SHA256": sha256_prefixed(restore["spec"]["planBytes"]),
+        "LOGWEIR_EXECUTION_APPROVAL_SHA256": sha256_prefixed(data["approval.json"]),
+        "LOGWEIR_EXECUTION_APPROVAL_SIDECAR_SHA256": sha256_prefixed(data["approval.sig"]),
+        "LOGWEIR_EXECUTION_APPROVER_KEY_SHA256": sha256_prefixed(data["approver.pub.pem"]),
+        "LOGWEIR_EXECUTION_ALLOWED_CLUSTERS_SHA256": sha256_prefixed(
+            data["allowed-clusters.json"]
         ),
-        {},
-    )
-    lines = [
-        "# PLAT-01 / PLAT-02.2 Docker Desktop live acceptance",
-        "",
-        f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
-        f"Evidence directory: `{OUT}`",
-        f"Machine report: `{REPORT_PATH}`",
-        "",
-        "## Verdict",
-        "",
-        f"Passed: {len(passed)}; failed: {len(failed)}; explicitly unrun: {len(unrun)}.",
-        "",
-        "Passed cases:",
-        *[f"- {name}" for name in passed],
-        "",
-        "Failed cases:",
-        *([f"- {name}" for name in failed] or ["- none"]),
-        "",
-        "Unrun/limited cases:",
-        *[f"- {name}" for name in unrun],
-        "",
-        "## Live runtime evidence",
-        "",
-        "- A fresh backup ran against the preserved SCRAM-SHA-512 source. The signed receipt "
-        "contains exact topic counts `orders=100` and `payments=100`, source authentication "
-        "metadata `mode=scramSha512` / `username=scram-user`, the live source cluster ID, and "
-        "the selected topic names. Source and S3 credential-reference propagation was checked "
-        "without printing secret values. The Rust verifier and an independent Python verifier "
-        "both accepted the receipt and detached signature.",
-        "- Two Restore objects ran concurrently after a real ResourceQuota scheduling barrier "
-        "and controller restart. Both Jobs existed before either pod was allowed to start; their "
-        "actual run intervals overlapped. The target was read independently after completion: "
-        "each restore produced exactly 100 `orders-record-NNN` and 100 `payments-record-NNN` "
-        "records, with one partition per topic and end offset 100. Each signed scorecard was "
-        "accepted by both verifiers and reported a 50/50 sampled restore window.",
-        f"- Restore A: Restore UID `{restore_a.get('uid')}`, Job UID "
-        f"`{restore_a.get('job_uid')}`, bundle UID `{restore_a.get('bundle_uid')}`, "
-        f"bundle-data SHA-256 `{restore_a.get('bundle_data_sha256')}`.",
-        f"- Restore B: Restore UID `{restore_b.get('uid')}`, Job UID "
-        f"`{restore_b.get('job_uid')}`, bundle UID `{restore_b.get('bundle_uid')}`, "
-        f"bundle-data SHA-256 `{restore_b.get('bundle_data_sha256')}`.",
-        "- The current controller/current reviewed runner succeeded. With the controller unchanged "
-        "and the runner replaced by the actual binary built from commit "
-        "`92e02097540c39ff8565283a38ee592499b95020`, the Job retained the mandatory "
-        "handshake arguments and the old runner rejected `--execution-contract-version` before "
-        "data actions. Kafka topics and the recursive archive listing were byte-for-byte unchanged.",
-        "- Approval cross-use and replay with a wrong namespace, wrong kind, and recreated Restore "
-        "UID were rejected without Jobs. Wrong-kind/namespace provenance used controlled status "
-        "fault injection while the singleton controller was fenced, then exercised the real "
-        "Approval and Restore controllers after restart.",
-        "- Ownerless, foreign-owner, stale-UID, and secondary-owner Job/ConfigMap collisions were "
-        "terminal. Pre-mount bundle replacement failed the runner's `allowed-clusters` digest "
-        "check with exit 3. A deleted bundle produced a kubelet `FailedMount` event with an "
-        "unstarted container and empty image ID. These cases left Kafka, archive listings, and "
-        "evidence paths unchanged.",
-        "- Missing, malformed, and unreadable signer inputs each produced runner exit 4, redacted "
-        "diagnostics, `logweir_drill_exit_code{cluster=\"unknown\"} 4`, no runs-total metric, "
-        "and no engine sentinel, scorecard, offsets file, Kafka change, or archive change.",
-        "- A legitimate same-UID legacy in-flight Job was observed unchanged and was owner-GC'd "
-        "when its Restore was deleted. Current completed Job, plan, and approval bundle remained "
-        "available until explicit Restore deletion and were then owner-GC'd. Historical backup "
-        "and restore evidence was re-fetched and independently reverified.",
-        "- Live RBAC checks: controller may create Jobs/ConfigMaps but may not get Secrets; runner "
-        "may not get Secrets/ConfigMaps or create Jobs. Runner Jobs disabled automatic service-account "
-        "token mounting.",
-        "",
-        "## Product failure",
-        "",
-        f"`legacy_mutable_prejob_transition` failed with `{failure.get('reason')}`: "
-        f"{failure.get('message')}",
-        "",
-        "The fixture used the exact live Restore UID, exact plan bytes and digest, exact binding "
-        "annotations, and one exact owner reference; only `immutable: false` represented the "
-        "documented legitimate pre-Job legacy state. The controller rejected it before Job creation. "
-        "Reproduction artifacts are `legacy-prejob-failed-restore.json` and "
-        "`legacy-prejob-mutable-plan.json` in the evidence directory. No product code was changed.",
-        "",
-        "## Source and image identity",
-        "",
-        *[
-            f"- `{name}`: image `{value['id']}`, {value['architecture']}, "
-            f"binary SHA-256 `{value['binary_sha256']}`"
-            + (
-                f", engine SHA-256 `{value['engine_binary_sha256']}`"
-                if "engine_binary_sha256" in value
-                else ""
-            )
-            for name, value in images.items()
-        ],
-        "",
-        "Critical snapshot hashes:",
-        *[
-            f"- `{path}`: `{values['snapshot']}`"
-            + (
-                ""
-                if values["snapshot"] == values["working_tree_now"]
-                else f" (working tree later changed to `{values['working_tree_now']}`)"
-            )
-            for path, values in source_hashes.items()
-        ],
-        "",
-        "The tested images are pinned to the listed snapshot. A separately owned bootstrap change "
-        "later changed only the working-tree `cli.rs` hash shown above; the Restore controller, "
-        "Approval controller, execution-contract, signer, and CRD hashes remained identical. "
-        "Accordingly, this report claims applicability only for the pinned image IDs and those "
-        "unchanged critical hashes.",
-        "",
-        "## Exact primary commands",
-        "",
-        "```text",
-        "# working directory: /tmp/logweir-backend-live-20260915T0330Z/src",
-        "cargo vendor --offline --versioned-dirs vendor >/dev/null",
-        "docker --context desktop-linux build --load --platform linux/arm64 -f Dockerfile.weirkeeper -t weirkeeper:backend-live-20260915 /tmp/logweir-backend-live-20260915T0330Z/src",
-        "docker --context desktop-linux build --load --platform linux/amd64 -f Dockerfile -t logweir:backend-live-20260915 /tmp/logweir-backend-live-20260915T0330Z/src",
-        "git archive 92e02097540c39ff8565283a38ee592499b95020 | tar -x -C /tmp/logweir-backend-live-20260915T0330Z/old",
-        "docker --context desktop-linux build --load --platform linux/amd64 -f /tmp/logweir-backend-live-20260915T0330Z/old/Dockerfile -t logweir:pre-handshake-92e02097 /tmp/logweir-backend-live-20260915T0330Z/old",
-        "kubectl --context docker-desktop apply -f config/crd/approvals.yaml",
-        "kubectl --context docker-desktop wait --for=condition=Established crd/approvals.logweir.dev --timeout=60s",
-        "LOGWEIR_PYTHON=/usr/bin/python3 python3 scripts/test-plat01-02-live.py positive",
-        "LOGWEIR_PYTHON=/usr/bin/python3 python3 scripts/test-plat01-02-live.py negative",
-        "LOGWEIR_PYTHON=/usr/bin/python3 python3 scripts/test-plat01-02-live.py finalize",
-        "LOGWEIR_PYTHON=/usr/bin/python3 python3 scripts/test-plat01-02-live.py cleanup",
-        "```",
-        "",
-        "## Cleanup",
-        "",
-        f"Owned namespace `{NS}` UID `{STATE.get('namespace_uid')}` deleted: "
-        f"{structured['cleanup']['owned_namespace_absent']}.",
-        f"Shared deployment restored to `{structured['restored_shared_deployment']['image']}` / "
-        f"`{structured['restored_shared_deployment']['runner_image']}` with "
-        f"{structured['restored_shared_deployment']['ready_replicas']} Ready replica.",
-        f"Approval CRD UID `{structured['approval_crd']['uid']}` remains additive and Established.",
-        "Four owned target topics were deleted; original SCRAM topics were retained. Signed archive evidence was retained.",
-        "",
-        "## Limitations and resolved harness iterations",
-        "",
-        "The seven items listed as unrun above are not credited from unit or fake-API evidence. "
-        "In particular, this run does not claim automatic bootstrap/full-chart acceptance, live "
-        "notification delivery, post-start projected-volume substitution, or signer-file rotation.",
-        "",
-        "Harness iterations were retained in the machine report rather than erased. They were: an "
-        "initial attempt to exec into a completed shared mc pod (replaced by an owned mc fixture); "
-        "a Homebrew Python without `cryptography` (rerun with `/usr/bin/python3`); an incorrect "
-        "expectation of 200 scorecard samples instead of the configured 50 (full Kafka reads still "
-        "proved 200 records per restore); a missing-bundle expectation refined to the observed "
-        "kubelet `FailedMount`; a stale-owner fixture GC race held with a test-only finalizer; and "
-        "a `kubectl auth can-i` return-code expectation corrected for its documented `no` result. "
-        "The legacy mutable pre-Job failure remained reproducible and is the product failure above.",
-        "",
-        "The machine report records SHA-256 values for every retained evidence file. No historical "
-        "`report.json` or old deployed image was treated as current acceptance evidence.",
-    ]
-    markdown_path = pathlib.Path("/tmp/logweir-backend-live-acceptance.md")
-    markdown_path.write_text("\n".join(lines) + "\n")
-    markdown_path.chmod(0o600)
-    log(f"reports written: {REPORT_PATH} and {markdown_path}")
+    }
+    for variable, digest in pinned.items():
+        if runner_env.get(variable) != digest:
+            raise RuntimeError(f"Job/{name} {variable} does not pin its own mounted bytes")
+    if data["approval.json"] != approval["spec"]["approvalBytes"]:
+        raise RuntimeError(f"bundle for {name} does not carry its own Approval bytes")
+    if data["approval.sig"] != approval["spec"]["sidecarBytes"]:
+        raise RuntimeError(f"bundle for {name} does not carry its own Approval sidecar")
+    annotations = bundle["metadata"].get("annotations", {})
+    expected_annotations = {
+        "logweir.dev/restore-uid": restore["metadata"]["uid"],
+        "logweir.dev/plan-hash": sha256_prefixed(restore["spec"]["planBytes"]),
+        "logweir.dev/approval-name": approval["metadata"]["name"],
+        "logweir.dev/approval-uid": approval["metadata"]["uid"],
+    }
+    for key, value in expected_annotations.items():
+        if annotations.get(key) != value:
+            raise RuntimeError(f"bundle for {name} annotation {key} is not bound to it")
+    if plan_state == "substituted-after-start":
+        # The harness deliberately replaced this object after the runner had
+        # captured its bytes; the pinned digest above is the binding that
+        # matters, and the replacement is asserted by the calling case.
+        return
+    if plan_cm.get("data") != {"restore.yaml": restore["spec"]["planBytes"]}:
+        raise RuntimeError(f"plan ConfigMap for {name} does not carry exact planBytes")
+    if plan_state == "legacy":
+        # The adopted pre-PLAT-01 plan stays mutable and unannotated; the new
+        # Job pins its exact digest instead (asserted above), so a later
+        # replacement is refused by the runner before any client exists.
+        if plan_cm.get("immutable") is True or {
+            "logweir.dev/restore-uid",
+            "logweir.dev/plan-hash",
+        }.intersection(plan_cm["metadata"].get("annotations") or {}):
+            raise RuntimeError(f"legacy plan ConfigMap for {name} was rewritten")
+    elif plan_state != "immutable":
+        raise RuntimeError(f"unknown plan_state {plan_state!r}")
+    elif plan_cm.get("immutable") is not True:
+        raise RuntimeError(f"plan ConfigMap for {name} is not immutable")
 
 
-def verify_restore(name: str, prefix: str) -> dict[str, Any]:
+def verify_restore(
+    name: str,
+    prefix: str,
+    *,
+    plan_state: str = "immutable",
+    instrumentation_volumes: frozenset[tuple[str, str, str]] = frozenset(),
+) -> dict[str, Any]:
     restore = wait_for(
         "restore",
         name,
@@ -2917,6 +2862,16 @@ def verify_restore(name: str, prefix: str) -> dict[str, Any]:
         raise RuntimeError("job did not mount its exact per-Restore bundle name")
     if volume_maps.get("plan") != plan_cm["metadata"]["name"]:
         raise RuntimeError("job did not mount its exact plan ConfigMap")
+    assert_only_own_inputs(
+        name,
+        restore,
+        approval,
+        job,
+        bundle,
+        plan_cm,
+        plan_state=plan_state,
+        instrumentation_volumes=instrumentation_volumes,
+    )
     for topic in ["orders", "payments"]:
         target_topic = prefix + topic
         offsets = broker_target(
@@ -3031,6 +2986,38 @@ def concurrent_restores() -> None:
             "metadata"
         ]["uid"]:
             raise RuntimeError("cross-Restore approval UID appeared in execution contract")
+        other_env = {
+            entry["name"]: entry.get("value")
+            for entry in results[other]["job"]["spec"]["template"]["spec"]["containers"][0][
+                "env"
+            ]
+        }
+        for variable in [
+            "LOGWEIR_EXECUTION_PLAN_SHA256",
+            "LOGWEIR_EXECUTION_APPROVAL_SHA256",
+            "LOGWEIR_EXECUTION_APPROVAL_SIDECAR_SHA256",
+        ]:
+            if env[variable] == other_env[variable]:
+                raise RuntimeError(f"concurrent Restores pinned the same {variable}")
+    save_artifact(
+        "concurrent-restores-mounted-input-binding.json",
+        [
+            {
+                "restore": item["restore"]["metadata"]["name"],
+                "restore_uid": item["restore"]["metadata"]["uid"],
+                "approval_uid": item["approval"]["metadata"]["uid"],
+                "bundle": item["bundle"]["metadata"]["name"],
+                "bundle_uid": item["bundle"]["metadata"]["uid"],
+                "pinned_digests": {
+                    entry["name"]: entry.get("value")
+                    for entry in item["job"]["spec"]["template"]["spec"]["containers"][0]["env"]
+                    if entry["name"].startswith("LOGWEIR_EXECUTION_")
+                },
+                "volumes": item["job"]["spec"]["template"]["spec"]["volumes"],
+            }
+            for item in results
+        ],
+    )
     intervals = []
     for item in results:
         status = item["job"]["status"]
@@ -3067,6 +3054,7 @@ def concurrent_restores() -> None:
     STATE["cases"]["two_simultaneous_restores"] = "passed"
     STATE["cases"]["controller_restart_in_flight"] = "passed"
     STATE["cases"]["bundle_immutability"] = "passed"
+    STATE["cases"]["restores_mount_only_their_own_bundles"] = "passed"
     save_state()
     log("two simultaneous Restores passed with distinct exact-input bundles and records")
 
@@ -3098,27 +3086,53 @@ def negative() -> None:
         injected_subject_replay_matrix()
     if STATE["cases"].get("distinct_approval_cross_use") != "passed":
         cross_restore_approval_use()
-    if STATE["cases"].get("signer_missing_malformed_unreadable") != "passed":
+    # The signer cases were renamed when the directory case stopped being
+    # counted as an unreadable file; rerun unless both current names passed.
+    if (
+        STATE["cases"].get("signer_missing_malformed_wrong_path_type") != "passed"
+        or STATE["cases"].get("signer_permission_denied_regular_file") != "passed"
+    ):
         signer_prerequisite_jobs()
     if STATE["cases"].get("legacy_same_uid_inflight_observation") != "passed":
         legacy_same_uid_observation()
-    if STATE["cases"].get("legacy_mutable_prejob_transition") is None:
+    if STATE["cases"].get("legacy_mutable_prejob_transition") != "passed":
         legacy_prejob_transition()
 
 
+class PrerequisiteUnavailable(RuntimeError):
+    """A case could not start because a case it depends on did not pass."""
+
+
+def requires(*case_names: str) -> None:
+    missing = [name for name in case_names if STATE["cases"].get(name) != "passed"]
+    if missing:
+        raise PrerequisiteUnavailable(f"prerequisite case(s) did not pass: {missing}")
+
+
 def execute_independent(case_names: list[str], action: Callable[[], None]) -> None:
+    """Run one case group, preserving its failure and continuing the matrix.
+
+    A group must classify every case it owns. Returning without doing so is a
+    failure, never an implicit pass; a missing prerequisite leaves the cases
+    `unrun` with a recorded reason, which the terminal gate still rejects.
+    """
     for case_name in case_names:
         STATE["cases"][case_name] = "unrun"
     save_state()
     try:
         action()
-        for case_name in case_names:
-            if STATE["cases"].get(case_name) == "unrun":
-                STATE["cases"][case_name] = "passed"
+        unclassified = [name for name in case_names if STATE["cases"].get(name) == "unrun"]
+        if unclassified:
+            raise RuntimeError(f"case group returned without classifying {unclassified}")
+    except PrerequisiteUnavailable as exc:
+        message = redact(str(exc))
+        STATE.setdefault("unrun_reasons", {}).update({name: message for name in case_names})
+        log(f"cases left unrun for {case_names}: {message}")
     except Exception as exc:  # noqa: BLE001 - independent cases must continue
         message = redact(f"{type(exc).__name__}: {exc}")
         for case_name in case_names:
-            STATE["cases"][case_name] = "failed"
+            if STATE["cases"].get(case_name) != "passed":
+                STATE["cases"][case_name] = "failed"
         STATE.setdefault("case_failures", []).append(
             {"cases": case_names, "error": message}
         )
@@ -3126,32 +3140,63 @@ def execute_independent(case_names: list[str], action: Callable[[], None]) -> No
     save_state()
 
 
-def targeted() -> None:
-    """Run only review gaps; accepted broad positive paths are not repeated."""
-    original = controller_deployment()
-    original_identity = controller_identity(original)
-    save_artifact("shared-controller-before-targeted.json", original)
-    STATE["shared_controller_original"] = original_identity
+def matrix() -> None:
+    """One authoritative, ordered run of every PLAT-01 / PLAT-02.2 live case."""
+    STATE["matrix_started"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    STATE["images_under_test"] = {
+        "current_runner": CURRENT_RUNNER,
+        "current_controller": CURRENT_CONTROLLER,
+        "old_runner": OLD_RUNNER,
+        "old_controller": OLD_CONTROLLER,
+        "source_commit": SOURCE_COMMIT,
+        "old_commit": OLD_COMMIT,
+    }
     save_state()
+    lab_switch()
     try:
-        set_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
-        assert_single_controller()
         setup_namespace()
+        if "baseline_target_topics" not in STATE:
+            STATE["baseline_target_topics"] = sorted(target_topics())
+            save_state()
+        save_artifact("baseline-target-topics.json", STATE["baseline_target_topics"])
         create_clusters()
+        backup = "fresh_scram_backup"
+        restores = "two_simultaneous_restores"
+        execute_independent([backup], fresh_backup)
+
+        def after(prerequisites: list[str], action: Callable[[], None]) -> Callable[[], None]:
+            def guarded() -> None:
+                requires(*prerequisites)
+                action()
+
+            return guarded
+
         execute_independent(
-            ["legacy_mutable_prejob_transition"], legacy_prejob_transition
+            [
+                restores,
+                "controller_restart_in_flight",
+                "bundle_immutability",
+                "restores_mount_only_their_own_bundles",
+            ],
+            after([backup], concurrent_restores),
         )
         execute_independent(
-            ["signer_permission_denied_regular_file"],
-            lambda: signer_prerequisite_jobs({"permission_denied"}),
+            ["current_controller_actual_old_runner_handshake"],
+            after([backup], old_runner_handshake),
         )
-        execute_independent(["job_collision_owner_matrix"], job_collision_matrix)
+        execute_independent(
+            ["configmap_substitution_before_mount"], after([backup], premount_substitution)
+        )
+        execute_independent(
+            ["missing_bundle_before_mount"], after([backup], missing_bundle_before_mount)
+        )
+        execute_independent(["job_collision_owner_matrix"], after([backup], job_collision_matrix))
         execute_independent(
             ["ownerless_plan_configmap_collision", "approval_recreated_uid_replay"],
-            configmap_collision_and_recreated_uid,
+            after([backup], configmap_collision_and_recreated_uid),
         )
         execute_independent(
-            ["configmap_collision_owner_matrix"], configmap_owner_matrix
+            ["configmap_collision_owner_matrix"], after([backup], configmap_owner_matrix)
         )
         collision_cases = [
             "job_collision_owner_matrix",
@@ -3165,58 +3210,47 @@ def targeted() -> None:
             else "failed"
         )
         save_state()
-    finally:
-        set_controller_images(
-            original_identity["image"], original_identity["runner_image"]
-        )
-        restored = controller_deployment()
-        restored_identity = controller_identity(restored)
-        save_artifact("shared-controller-after-targeted.json", restored)
-        STATE["shared_controller_restored"] = restored_identity
-        STATE["shared_controller_restore_exact"] = (
-            restored_identity["deployment_uid"]
-            == original_identity["deployment_uid"]
-            and restored_identity["image"] == original_identity["image"]
-            and restored_identity["runner_image"] == original_identity["runner_image"]
-            and restored_identity["spec_sha256"] == original_identity["spec_sha256"]
-        )
-        save_state()
-        if not STATE["shared_controller_restore_exact"]:
-            raise RuntimeError(
-                "shared controller image/runner/spec did not restore exactly"
-            )
-
-
-def signer_permission() -> None:
-    """Rerun only the regular-file permission-denied signer gap."""
-    original = controller_deployment()
-    original_identity = controller_identity(original)
-    save_artifact("shared-controller-before-signer-permission.json", original)
-    try:
-        set_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
-        assert_single_controller()
-        setup_namespace()
         execute_independent(
-            ["signer_permission_denied_regular_file"],
-            lambda: signer_prerequisite_jobs({"permission_denied"}),
+            ["approval_wrong_namespace_replay", "approval_wrong_kind_replay"],
+            after([restores], injected_subject_replay_matrix),
+        )
+        execute_independent(
+            ["distinct_approval_cross_use"], after([restores], cross_restore_approval_use)
+        )
+        execute_independent(
+            ["signer_missing_malformed_wrong_path_type", "signer_permission_denied_regular_file"],
+            after([restores], signer_prerequisite_jobs),
+        )
+        execute_independent(
+            ["legacy_same_uid_inflight_observation"],
+            after([backup], legacy_same_uid_observation),
+        )
+        execute_independent(
+            ["legacy_mutable_prejob_transition"], after([backup], legacy_prejob_transition)
+        )
+        execute_independent(
+            ["controller_runner_rbac", "retained_then_owner_gc"], after([restores], rbac_and_gc)
+        )
+        execute_independent(["retained_old_archive_evidence"], verify_retained_archive_evidence)
+        execute_independent(["additive_crd_drain_fence_restart"], additive_drain_fence)
+        execute_independent(
+            ["exact_old_controller_job_observation"], after([backup], exact_old_controller_job)
+        )
+        execute_independent(
+            [
+                "runner_refuses_tampered_bundle_member",
+                "runner_refuses_missing_bundle_member",
+                "controller_upgrade_drain_rollback_during_restore",
+                "post_start_projected_plan_replacement",
+                "live_plan_directed_network_observation",
+                "mid_run_signer_rotation",
+            ],
+            after([backup], runtime_gap_matrix),
         )
     finally:
-        set_controller_images(
-            original_identity["image"], original_identity["runner_image"]
-        )
-        restored = controller_deployment()
-        restored_identity = controller_identity(restored)
-        save_artifact("shared-controller-after-signer-permission.json", restored)
-        exact = (
-            restored_identity["deployment_uid"] == original_identity["deployment_uid"]
-            and restored_identity["image"] == original_identity["image"]
-            and restored_identity["runner_image"] == original_identity["runner_image"]
-            and restored_identity["spec_sha256"] == original_identity["spec_sha256"]
-        )
-        STATE["shared_controller_restore_exact_after_signer"] = exact
+        STATE["matrix_finished"] = dt.datetime.now(dt.timezone.utc).isoformat()
         save_state()
-        if not exact:
-            raise RuntimeError("shared controller was not exactly restored after signer case")
+        lab_restore()
 
 
 def exact_old_controller_job() -> None:
@@ -3477,13 +3511,74 @@ def wait_runner_termination(job_name: str, seconds: int = 300) -> tuple[dict[str
     raise RuntimeError(f"runner for Job/{job_name} did not terminate")
 
 
+def exec_runner(pod_name: str, argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Observe the live single-container runner Pod without adding a sidecar."""
+    return run(K + ["exec", pod_name, "-c", "runner", "--"] + argv, check=check)
+
+
+def assert_job_uid_unchanged(name: str, uid: str, event: str) -> dict[str, Any]:
+    job = get("job", name)
+    if job["metadata"]["uid"] != uid:
+        raise RuntimeError(f"{event}: Job/{name} was replaced during execution")
+    return {"event": event, "job_uid": job["metadata"]["uid"], **controller_identity(controller_deployment())}
+
+
+def preauth_negative_job(
+    name: str,
+    emitted_job: dict[str, Any],
+    emitted_bundle: dict[str, Any],
+    *,
+    label: str,
+    mutate: Callable[[dict[str, Any]], None],
+    remove_item: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Run the controller-emitted runner spec against a controlled bundle copy."""
+    bundle_name = f"{name}-{label}-bundle"
+    bundle = copy.deepcopy(emitted_bundle)
+    bundle["metadata"] = owned_metadata(bundle_name)
+    bundle["immutable"] = True
+    mutate(bundle["data"])
+    apply(bundle)
+    spec = sanitized_job_spec(emitted_job, case=f"preauth-{label}")
+    for volume in spec["template"]["spec"]["volumes"]:
+        if volume["name"] == "approval":
+            volume["configMap"]["name"] = bundle_name
+            if remove_item is not None:
+                volume["configMap"]["items"] = [
+                    item for item in volume["configMap"]["items"] if item["key"] != remove_item
+                ]
+    job_name = f"{name}-preauth-{label}"
+    apply(
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": owned_metadata(job_name),
+            "spec": spec,
+        }
+    )
+    pod, status = wait_runner_termination(job_name, 240)
+    logs_proc = run(K + ["logs", pod["metadata"]["name"], "-c", "runner"], check=False, timeout=60)
+    logs = logs_proc.stdout + logs_proc.stderr
+    save_artifact(f"runtime-gap-preauth-{label}-pod.json", pod)
+    save_artifact(f"runtime-gap-preauth-{label}-bundle.json", get("configmap", bundle_name))
+    save_artifact(f"runtime-gap-preauth-{label}-logs.txt", logs)
+    return pod, status, logs
+
+
 def runtime_gap_matrix() -> None:
-    """Controlled real-runner timing for projected inputs, network, and rollout."""
+    """Real-runner timing for projected inputs, network, rollout and revalidation.
+
+    The instrumented Job keeps the controller's single-container contract so
+    the unmodified controller still finalizes the Restore from `pods/log`.
+    Observations use `kubectl exec` into the paused runner container instead of
+    a sidecar (a second container makes the controller's log read ambiguous).
+    """
     original = controller_deployment()
     original_identity = controller_identity(original)
     name = "backend-live-runtime-gap-retained"
     approval_name = "backend-live-runtime-gap-retained-approval"
     prefix = "backend-live-runtime-gap-retained-"
+    wrapper_name = "backend-live-runtime-gap-wrapper"
     controller_running = True
     private_path: pathlib.Path | None = None
     try:
@@ -3495,6 +3590,8 @@ def runtime_gap_matrix() -> None:
         url_b = f"http://backend-live-receiver-b.{NS}.svc.cluster.local:8080/hook"
         if receiver_count("a") != 0 or receiver_count("b") != 0:
             raise RuntimeError("notification receivers were not fresh")
+        before_topics = target_topics()
+        before_archive = archive_listing()
 
         set_pod_quota("0")
         point = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=10)).strftime(
@@ -3503,9 +3600,7 @@ def runtime_gap_matrix() -> None:
         parsed = json.loads(restore_plan(prefix, point))
         parsed["notifications"]["webhooks"] = [url_a]
         plan = json.dumps(parsed, indent=2) + "\n"
-        plan, restore_uid = create_restore_with_plan(
-            name, approval_name, prefix, plan, point
-        )
+        plan, restore_uid = create_restore_with_plan(name, approval_name, prefix, plan, point)
         approve_restore(name, approval_name, plan)
         emitted_job = wait_for("job", name, lambda _item: True, seconds=180)
         emitted_plan = get("configmap", f"{name}-plan")
@@ -3513,48 +3608,74 @@ def runtime_gap_matrix() -> None:
         save_artifact("runtime-gap-controller-job.json", emitted_job)
         save_artifact("runtime-gap-original-plan.json", emitted_plan)
         save_artifact("runtime-gap-original-bundle.json", emitted_bundle)
+        if len(emitted_job["spec"]["template"]["spec"]["containers"]) != 1:
+            raise RuntimeError("controller-emitted Restore Job is not single-container")
 
+        # Fence the controller so the emitted Job can be replaced by an
+        # instrumented copy of the same spec; no Pod ran for the original.
         scale_any_controller(0)
         controller_running = False
         delete_with_uid_precondition(
             "job", name, emitted_job["metadata"]["uid"], api_version="batch/v1"
         )
         wait_absent("job", name)
-
-        tampered = copy.deepcopy(emitted_bundle)
-        tampered_name = f"{name}-tampered-bundle"
-        tampered["metadata"] = owned_metadata(tampered_name)
-        tampered["immutable"] = True
-        tampered["data"]["allowed-clusters.json"] += " "
-        apply(tampered)
-        negative_spec = sanitized_job_spec(emitted_job, case="preauth-network-negative")
-        negative_runner = negative_spec["template"]["spec"]["containers"][0]
-        for volume in negative_spec["template"]["spec"]["volumes"]:
-            if volume["name"] == "approval":
-                volume["configMap"]["name"] = tampered_name
-        negative_name = f"{name}-preauth-negative"
-        apply(
-            {
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": owned_metadata(negative_name),
-                "spec": negative_spec,
-            }
-        )
         remove_pod_quota()
-        negative_pod, negative_status = wait_runner_termination(negative_name, 180)
-        if negative_status["state"]["terminated"]["exitCode"] != 3:
-            raise RuntimeError("pre-auth network negative did not exit 3")
-        if receiver_count("a") != 0 or receiver_count("b") != 0:
-            raise RuntimeError("pre-auth refusal reached a plan-directed receiver")
-        save_artifact("runtime-gap-preauth-negative-pod.json", negative_pod)
-        save_artifact(
-            "runtime-gap-preauth-receiver-observation.json",
-            {"receiver_a_posts": 0, "receiver_b_posts": 0},
+
+        # Runner revalidation before any client: a substituted member and a
+        # missing member, each with owned receivers watching for traffic.
+        _pod, tampered_status, tampered_logs = preauth_negative_job(
+            name,
+            emitted_job,
+            emitted_bundle,
+            label="tampered-member",
+            mutate=lambda data: data.__setitem__(
+                "allowed-clusters.json", data["allowed-clusters.json"] + " "
+            ),
+            remove_item=None,
         )
+        tampered_exit = tampered_status["state"]["terminated"]["exitCode"]
+        if tampered_exit != 3 or "allowed-clusters bytes hash to" not in tampered_logs or (
+            "no data operation was started" not in tampered_logs
+        ):
+            raise RuntimeError(
+                f"tampered bundle member was not refused by digest: exit={tampered_exit}"
+            )
+        _pod, missing_status, missing_logs = preauth_negative_job(
+            name,
+            emitted_job,
+            emitted_bundle,
+            label="missing-member",
+            mutate=lambda data: data.pop("approval.sig"),
+            remove_item="approval.sig",
+        )
+        missing_exit = missing_status["state"]["terminated"]["exitCode"]
+        if missing_exit == 0 or "approval sidecar" not in missing_logs or (
+            "No such file or directory" not in missing_logs
+        ):
+            raise RuntimeError(
+                f"missing bundle member was not refused before data work: exit={missing_exit}"
+            )
+        preauth_observation = {
+            "receiver_a_posts": receiver_count("a"),
+            "receiver_b_posts": receiver_count("b"),
+            "tampered_member_exit": tampered_exit,
+            "missing_member_exit": missing_exit,
+            "target_topics_unchanged": target_topics() == before_topics,
+            "archive_listing_unchanged": archive_listing() == before_archive,
+        }
+        save_artifact("runtime-gap-preauth-receiver-observation.json", preauth_observation)
+        if (
+            preauth_observation["receiver_a_posts"] != 0
+            or preauth_observation["receiver_b_posts"] != 0
+            or not preauth_observation["target_topics_unchanged"]
+            or not preauth_observation["archive_listing_unchanged"]
+        ):
+            raise RuntimeError(f"pre-authentication refusal had side effects: {preauth_observation!r}")
+        STATE["cases"]["runner_refuses_tampered_bundle_member"] = "passed"
+        STATE["cases"]["runner_refuses_missing_bundle_member"] = "passed"
+        save_state()
 
         set_pod_quota("0")
-        wrapper_name = "backend-live-runtime-gap-wrapper"
         apply(
             {
                 "apiVersion": "v1",
@@ -3568,9 +3689,7 @@ def runtime_gap_matrix() -> None:
         instrumented = sanitized_job_spec(emitted_job, case="runtime-gap-instrumented")
         pod_spec = instrumented["template"]["spec"]
         runner = pod_spec["containers"][0]
-        runner["env"].append(
-            {"name": "LOGWEIR_ENGINE_BIN", "value": "/instrument/engine"}
-        )
+        runner["env"].append({"name": "LOGWEIR_ENGINE_BIN", "value": "/instrument/engine"})
         runner["volumeMounts"].append(
             {"name": "instrument", "mountPath": "/instrument", "readOnly": True}
         )
@@ -3584,59 +3703,26 @@ def runtime_gap_matrix() -> None:
                 },
             }
         )
-        observer = {
-            "name": "observer",
-            "image": CURRENT_RUNNER,
-            "imagePullPolicy": "Never",
-            "command": ["/bin/sh", "-c"],
-            "args": ["while [ ! -f /work/STOP ]; do sleep 1; done"],
-            "securityContext": copy.deepcopy(runner["securityContext"]),
-            "volumeMounts": [
-                {"name": "work", "mountPath": "/work"},
-                {"name": "plan", "mountPath": "/plan", "readOnly": True},
-                {"name": "signing", "mountPath": "/signing", "readOnly": True},
-            ],
-        }
-        pod_spec["containers"].append(observer)
         metadata = owned_metadata(name)
         metadata["ownerReferences"] = [
             owner_reference("Restore", name, restore_uid, controller=True)
         ]
-        apply(
-            {
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": metadata,
-                "spec": instrumented,
-            }
-        )
+        apply({"apiVersion": "batch/v1", "kind": "Job", "metadata": metadata, "spec": instrumented})
+        instrumented_job = get("job", name)
+        job_uid = instrumented_job["metadata"]["uid"]
+        save_artifact("runtime-gap-instrumented-job.json", instrumented_job)
         remove_pod_quota()
         pod = pod_for_job(name, seconds=180)
         pod_name = pod["metadata"]["name"]
-        deadline = time.monotonic() + 180
+        deadline = time.monotonic() + 240
         while time.monotonic() < deadline:
-            started = run(
-                K
-                + ["exec", pod_name, "-c", "observer", "--", "test", "-f", "/work/ENGINE_STARTED"],
-                check=False,
-            )
-            if started.returncode == 0:
+            if exec_runner(pod_name, ["test", "-f", "/work/ENGINE_STARTED"], check=False).returncode == 0:
                 break
             time.sleep(1)
         else:
             raise RuntimeError("instrumented real runner never reached engine execution")
-        before_hashes = run(
-            K
-            + [
-                "exec",
-                pod_name,
-                "-c",
-                "observer",
-                "--",
-                "sha256sum",
-                "/plan/restore.yaml",
-                "/signing/key.pem",
-            ]
+        before_hashes = exec_runner(
+            pod_name, ["sha256sum", "/plan/restore.yaml", "/signing/key.pem"]
         ).stdout
         save_artifact("runtime-gap-projected-before-sha256.txt", before_hashes)
 
@@ -3644,21 +3730,25 @@ def runtime_gap_matrix() -> None:
         configure_controller_images(OLD_CONTROLLER, OLD_RUNNER)
         scale_any_controller(1)
         controller_running = True
-        transitions.append({"event": "rollback_to_archived", **controller_identity(controller_deployment())})
+        transitions.append(assert_job_uid_unchanged(name, job_uid, "rollback_to_archived"))
         set_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
-        transitions.append({"event": "upgrade_to_current", **controller_identity(controller_deployment())})
+        transitions.append(assert_job_uid_unchanged(name, job_uid, "upgrade_to_current"))
         scale_any_controller(0)
         controller_running = False
-        transitions.append({"event": "drain_current", **controller_identity(controller_deployment())})
+        transitions.append(assert_job_uid_unchanged(name, job_uid, "drain_current"))
         configure_controller_images(OLD_CONTROLLER, OLD_RUNNER)
         scale_any_controller(1)
         controller_running = True
-        transitions.append({"event": "rollback_during_execution", **controller_identity(controller_deployment())})
+        transitions.append(assert_job_uid_unchanged(name, job_uid, "rollback_during_execution"))
         set_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
-        transitions.append({"event": "reupgrade_during_execution", **controller_identity(controller_deployment())})
+        transitions.append(assert_job_uid_unchanged(name, job_uid, "reupgrade_during_execution"))
         scale_any_controller(0)
         controller_running = False
-        transitions.append({"event": "final_drain_before_input_replacement", **controller_identity(controller_deployment())})
+        transitions.append(
+            assert_job_uid_unchanged(name, job_uid, "final_drain_before_input_replacement")
+        )
+        if exec_runner(pod_name, ["test", "-f", "/work/ENGINE_STARTED"], check=False).returncode:
+            raise RuntimeError("runner Pod did not survive the controller transitions")
         save_artifact("runtime-gap-controller-transitions.json", transitions)
 
         replacement = copy.deepcopy(parsed)
@@ -3666,10 +3756,7 @@ def runtime_gap_matrix() -> None:
         replacement["objectives"]["rto_seconds"] = 3599
         replacement_bytes = json.dumps(replacement, indent=2) + "\n"
         delete_with_uid_precondition(
-            "configmap",
-            f"{name}-plan",
-            emitted_plan["metadata"]["uid"],
-            api_version="v1",
+            "configmap", f"{name}-plan", emitted_plan["metadata"]["uid"], api_version="v1"
         )
         wait_absent("configmap", f"{name}-plan")
         apply(
@@ -3685,6 +3772,7 @@ def runtime_gap_matrix() -> None:
                 "data": {"restore.yaml": replacement_bytes},
             }
         )
+        save_artifact("runtime-gap-replacement-plan.json", get("configmap", f"{name}-plan"))
 
         original_public = FIXTURE_KEYS / "signing.pub.pem"
         (OUT / "original-signing.pub.pem").write_bytes(original_public.read_bytes())
@@ -3692,6 +3780,7 @@ def runtime_gap_matrix() -> None:
             prefix="logweir-runtime-gap-", suffix=".pem", delete=False
         ) as private_file:
             private_path = pathlib.Path(private_file.name)
+        private_path.chmod(0o600)
         run(
             [
                 "openssl",
@@ -3705,11 +3794,10 @@ def runtime_gap_matrix() -> None:
             ]
         )
         rotated_public = OUT / "rotated-signing.pub.pem"
-        public_proc = run(
-            ["openssl", "pkey", "-in", str(private_path), "-pubout"]
-        )
-        rotated_public.write_text(public_proc.stdout)
+        rotated_public.write_text(run(["openssl", "pkey", "-in", str(private_path), "-pubout"]).stdout)
         rotated_bytes = private_path.read_bytes()
+        private_path.unlink()
+        private_path = None
         run(
             K
             + [
@@ -3718,66 +3806,58 @@ def runtime_gap_matrix() -> None:
                 "logweir-signing-key",
                 "--type=merge",
                 "-p",
-                json.dumps(
-                    {"data": {"signing.pem": base64.b64encode(rotated_bytes).decode()}}
-                ),
+                json.dumps({"data": {"signing.pem": base64.b64encode(rotated_bytes).decode()}}),
             ]
         )
-        private_path.unlink()
-        private_path = None
-
-        expected_plan_hash = hashlib.sha256(replacement_bytes.encode()).hexdigest()
         expected_signer_hash = hashlib.sha256(rotated_bytes).hexdigest()
-        original_plan_hash = before_hashes.splitlines()[0].split()[0]
-        deadline = time.monotonic() + 130
+        del rotated_bytes
+        original_plan_hash, original_signer_hash = [
+            line.split()[0] for line in before_hashes.splitlines()
+        ]
+        deadline = time.monotonic() + 180
         after_hashes = ""
-        plan_projection = "unknown"
         while time.monotonic() < deadline:
-            after_hashes = run(
-                K
-                + [
-                    "exec",
-                    pod_name,
-                    "-c",
-                    "observer",
-                    "--",
-                    "sha256sum",
-                    "/plan/restore.yaml",
-                    "/signing/key.pem",
-                ]
+            after_hashes = exec_runner(
+                pod_name, ["sha256sum", "/plan/restore.yaml", "/signing/key.pem"]
             ).stdout
-            plan_hash = after_hashes.splitlines()[0].split()[0]
-            signer_hash = after_hashes.splitlines()[1].split()[0]
-            if plan_hash == expected_plan_hash and signer_hash == expected_signer_hash:
-                plan_projection = "replacement-propagated"
+            signer_now = after_hashes.splitlines()[1].split()[0]
+            if signer_now == expected_signer_hash:
                 break
-            time.sleep(2)
+            time.sleep(3)
         else:
-            plan_hash = after_hashes.splitlines()[0].split()[0]
-            signer_hash = after_hashes.splitlines()[1].split()[0]
-            if signer_hash != expected_signer_hash:
-                raise RuntimeError("in-place Secret signer rotation did not propagate")
-            if plan_hash == original_plan_hash:
-                plan_projection = "original-retained-after-configmap-delete-recreate"
-            else:
-                raise RuntimeError(
-                    f"projected plan reached an unexpected third digest {plan_hash}"
-                )
+            raise RuntimeError("in-place Secret signer rotation did not reach the running Pod")
+        plan_now = after_hashes.splitlines()[0].split()[0]
+        replacement_hash = hashlib.sha256(replacement_bytes.encode()).hexdigest()
+        if plan_now == original_plan_hash:
+            plan_projection = "original-retained-after-configmap-delete-recreate"
+        elif plan_now == replacement_hash:
+            plan_projection = "replacement-propagated-to-mount"
+        else:
+            raise RuntimeError(f"projected plan reached an unexpected third digest {plan_now}")
         save_artifact("runtime-gap-projected-after-sha256.txt", after_hashes)
-        run(K + ["exec", pod_name, "-c", "observer", "--", "touch", "/work/CONTINUE"])
+
+        # Restore the current controller before release so it observes and
+        # finalizes the single-container Job exactly as in production.
+        configure_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
+        scale_any_controller(1)
+        controller_running = True
+        transitions.append(assert_job_uid_unchanged(name, job_uid, "current_controller_before_release"))
+        save_artifact("runtime-gap-controller-transitions.json", transitions)
+        exec_runner(pod_name, ["touch", "/work/CONTINUE"])
         finished_pod, runner_status = wait_runner_termination(name, 720)
         termination = runner_status["state"]["terminated"]
         if termination["exitCode"] != 0:
             raise RuntimeError(f"instrumented real runner exited {termination['exitCode']}")
-        scorecard = run(
-            K + ["exec", pod_name, "-c", "observer", "--", "cat", "/work/scorecard.json"]
-        ).stdout
-        signature = run(
-            K + ["exec", pod_name, "-c", "observer", "--", "cat", "/work/scorecard.sig"]
-        ).stdout
-        scorecard_path = save_artifact("runtime-gap-scorecard.json", scorecard)
-        signature_path = save_artifact("runtime-gap-scorecard.sig", signature)
-        verify_signed_document(scorecard_path, signature_path, "scorecard")
+        result = verify_restore(
+            name,
+            prefix,
+            plan_state="substituted-after-start",
+            instrumentation_volumes=frozenset({("instrument", "configMap", wrapper_name)}),
+        )
+        if get("job", name)["metadata"]["uid"] != job_uid:
+            raise RuntimeError("controller replaced the instrumented Job before finalizing")
+        scorecard_path = OUT / f"{name}-scorecard.json"
+        signature_path = OUT / f"{name}-scorecard.sig"
         rotated_verdict = run(
             [
                 os.environ.get("LOGWEIR_PYTHON", sys.executable),
@@ -3790,17 +3870,19 @@ def runtime_gap_matrix() -> None:
             ],
             check=False,
         )
+        save_artifact(
+            "runtime-gap-rotated-key-verdict.txt",
+            f"rc={rotated_verdict.returncode}\n{rotated_verdict.stdout}{rotated_verdict.stderr}",
+        )
         if rotated_verdict.returncode != 1:
             raise RuntimeError("rotated key unexpectedly verified the retained-signer scorecard")
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and receiver_count("a") != 1:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and receiver_count("a") < 1:
             time.sleep(1)
         receiver_observation = {
             "receiver_a_posts": receiver_count("a"),
             "receiver_b_posts": receiver_count("b"),
         }
-        if receiver_observation != {"receiver_a_posts": 1, "receiver_b_posts": 0}:
-            raise RuntimeError(f"notification routing changed after parse: {receiver_observation!r}")
         save_artifact("runtime-gap-receiver-observation.json", receiver_observation)
         save_artifact(
             "runtime-gap-receiver-a-logs.txt",
@@ -3810,18 +3892,34 @@ def runtime_gap_matrix() -> None:
             "runtime-gap-receiver-b-logs.txt",
             run(K + ["logs", "backend-live-receiver-b", "-c", "receiver"]).stdout,
         )
+        if receiver_observation != {"receiver_a_posts": 1, "receiver_b_posts": 0}:
+            raise RuntimeError(f"notification routing changed after parse: {receiver_observation!r}")
         save_artifact("runtime-gap-runner-pod.json", finished_pod)
-        run(K + ["exec", pod_name, "-c", "observer", "--", "touch", "/work/STOP"])
-        configure_controller_images(CURRENT_CONTROLLER, CURRENT_RUNNER)
-        scale_any_controller(1)
-        controller_running = True
-        result = verify_restore(name, prefix)
-        if result["restore"]["status"].get("phase") != "Succeeded":
-            raise RuntimeError("runtime-gap Restore did not succeed")
-        STATE.setdefault("owned_target_topics", []).extend(
-            [prefix + "orders", prefix + "payments"]
-        )
+        STATE.setdefault("owned_target_topics", []).extend([prefix + "orders", prefix + "payments"])
         STATE["owned_target_topics"] = sorted(set(STATE["owned_target_topics"]))
+        STATE["runtime_gap"] = {
+            "restore_uid": restore_uid,
+            "job_uid": job_uid,
+            "runner_image_id": runner_status.get("imageID"),
+            "runner_exit_code": termination["exitCode"],
+            "restore_phase": result["restore"]["status"].get("phase"),
+            "restore_verification": result["restore"]["status"]
+            .get("evidence", {})
+            .get("verification", {})
+            .get("result"),
+            "original_plan_sha256": original_plan_hash,
+            "replacement_plan_sha256": replacement_hash,
+            "plan_projection_observation": plan_projection,
+            "original_signer_sha256": original_signer_hash,
+            "rotated_signer_sha256": expected_signer_hash,
+            "notification": receiver_observation,
+            "preauth": preauth_observation,
+            "controller_transitions": [item["event"] for item in transitions],
+            "controlled_instrumentation": (
+                "controller-emitted Job replaced by the same single-container spec plus an engine "
+                "wrapper that pauses after startup validation and then execs the real kafka-backup"
+            ),
+        }
         for case_name in [
             "controller_upgrade_drain_rollback_during_restore",
             "post_start_projected_plan_replacement",
@@ -3829,19 +3927,8 @@ def runtime_gap_matrix() -> None:
             "mid_run_signer_rotation",
         ]:
             STATE["cases"][case_name] = "passed"
-        STATE["runtime_gap"] = {
-            "restore_uid": restore_uid,
-            "job_uid": get("job", name)["metadata"]["uid"],
-            "runner_image_id": runner_status.get("imageID"),
-            "runner_exit_code": termination["exitCode"],
-            "original_plan_sha256": hashlib.sha256(plan.encode()).hexdigest(),
-            "replacement_plan_sha256": expected_plan_hash,
-            "plan_projection_observation": plan_projection,
-            "rotated_signer_sha256": expected_signer_hash,
-            "notification": receiver_observation,
-            "controlled_instrumentation": "engine wrapper paused after startup validation and before the real kafka-backup exec",
-        }
         save_state()
+        log("runtime gap matrix passed with controller finalization of the instrumented Job")
     finally:
         if private_path is not None and private_path.exists():
             private_path.unlink()
@@ -3851,9 +3938,7 @@ def runtime_gap_matrix() -> None:
             )
             scale_any_controller(1)
         else:
-            set_controller_images(
-                original_identity["image"], original_identity["runner_image"]
-            )
+            set_controller_images(original_identity["image"], original_identity["runner_image"])
         restored = controller_identity(controller_deployment())
         exact = (
             restored["deployment_uid"] == original_identity["deployment_uid"]
@@ -3862,180 +3947,68 @@ def runtime_gap_matrix() -> None:
             and restored["spec_sha256"] == original_identity["spec_sha256"]
         )
         STATE["shared_controller_restore_exact_after_runtime_gap"] = exact
-        save_artifact("shared-controller-after-runtime-gap.json", controller_deployment())
         save_state()
         if not exact:
-            raise RuntimeError("shared controller was not exactly restored after runtime-gap case")
-
-
-def runtime_gap_finalize_evidence() -> None:
-    """Finalize the completed controlled run without requiring sidecar log collection."""
-    name = "backend-live-runtime-gap-retained"
-    prefix = "backend-live-runtime-gap-retained-"
-    pod = pod_for_job(name)
-    runner_status = next(
-        status
-        for status in pod.get("status", {}).get("containerStatuses", [])
-        if status["name"] == "runner"
-    )
-    termination = runner_status.get("state", {}).get("terminated", {})
-    if termination.get("exitCode") != 0 or not runner_status.get("imageID"):
-        raise RuntimeError("completed runtime-gap runner lacks exit-0/imageID evidence")
-    preauth_pod = json.loads((OUT / "runtime-gap-preauth-negative-pod.json").read_text())
-    preauth_runner = next(
-        status
-        for status in preauth_pod.get("status", {}).get("containerStatuses", [])
-        if status["name"] == "runner"
-    )
-    if preauth_runner["state"]["terminated"]["exitCode"] != 3:
-        raise RuntimeError("retained pre-auth negative is not exit 3")
-    if json.loads((OUT / "runtime-gap-preauth-receiver-observation.json").read_text()) != {
-        "receiver_a_posts": 0,
-        "receiver_b_posts": 0,
-    }:
-        raise RuntimeError("pre-auth receiver absence evidence changed")
-    receiver_observation = {
-        "receiver_a_posts": receiver_count("a"),
-        "receiver_b_posts": receiver_count("b"),
-    }
-    if receiver_observation != {"receiver_a_posts": 1, "receiver_b_posts": 0}:
-        raise RuntimeError(f"retained notification receiver evidence changed: {receiver_observation!r}")
-
-    before = (OUT / "runtime-gap-projected-before-sha256.txt").read_text().splitlines()
-    after = (OUT / "runtime-gap-projected-after-sha256.txt").read_text().splitlines()
-    before_plan, before_signer = [line.split()[0] for line in before]
-    after_plan, after_signer = [line.split()[0] for line in after]
-    if before_plan != after_plan or before_signer == after_signer:
-        raise RuntimeError("projected plan retention/signer rotation evidence is inconsistent")
-    transitions = json.loads((OUT / "runtime-gap-controller-transitions.json").read_text())
-    events = [item["event"] for item in transitions]
-    expected_events = [
-        "rollback_to_archived",
-        "upgrade_to_current",
-        "drain_current",
-        "rollback_during_execution",
-        "reupgrade_during_execution",
-        "final_drain_before_input_replacement",
-    ]
-    if events != expected_events:
-        raise RuntimeError(f"controller transition evidence is incomplete: {events!r}")
-
-    scorecard_path = OUT / "runtime-gap-scorecard.json"
-    signature_path = OUT / "runtime-gap-scorecard.sig"
-    verify_signed_document(scorecard_path, signature_path, "scorecard")
-    rotated_verdict = run(
-        [
-            os.environ.get("LOGWEIR_PYTHON", sys.executable),
-            "docs/verify_scorecard.py",
-            "--payload-type",
-            "scorecard",
-            str(scorecard_path),
-            str(signature_path),
-            str(OUT / "rotated-signing.pub.pem"),
-        ],
-        check=False,
-    )
-    if rotated_verdict.returncode != 1:
-        raise RuntimeError("rotated public key did not reject the retained-signer signature")
-
-    for topic in ["orders", "payments"]:
-        target_topic = prefix + topic
-        offsets = broker_target(
-            f"/opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 "
-            f"--topic {target_topic} --time -1\n"
-        ).strip().splitlines()
-        if offsets != [f"{target_topic}:0:100"]:
-            raise RuntimeError(f"runtime-gap target offsets changed: {offsets!r}")
-        data = broker_target(
-            f"/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 "
-            f"--topic {target_topic} --from-beginning --max-messages 100 --timeout-ms 15000\n",
-            timeout=60,
-        )
-        records = data.strip().splitlines()
-        expected = [f"{topic}-record-{number:03}" for number in range(1, 101)]
-        if sorted(records) != expected:
-            raise RuntimeError(f"runtime-gap record mismatch for {target_topic}")
-        save_artifact(f"runtime-gap-{topic}.txt", data)
-
-    restore = get("restore", name)
-    save_artifact("runtime-gap-controlled-boundary-restore.json", restore)
-    controller_logs = run(
-        KF + ["logs", "deployment/weirkeeper", "--since=15m"], check=False
-    ).stdout.splitlines()
-    bounded = [line for line in controller_logs if name in line][-20:]
-    save_artifact("runtime-gap-controlled-boundary-controller.txt", "\n".join(bounded) + "\n")
-    STATE.setdefault("owned_target_topics", []).extend(
-        [prefix + "orders", prefix + "payments"]
-    )
-    STATE["owned_target_topics"] = sorted(set(STATE["owned_target_topics"]))
-    for case_name in [
-        "controller_upgrade_drain_rollback_during_restore",
-        "post_start_projected_plan_replacement",
-        "live_plan_directed_network_observation",
-        "mid_run_signer_rotation",
-    ]:
-        STATE["cases"][case_name] = "passed"
-    STATE["runtime_gap"] = {
-        "restore_uid": restore["metadata"]["uid"],
-        "job_uid": get("job", name)["metadata"]["uid"],
-        "runner_image_id": runner_status["imageID"],
-        "runner_exit_code": 0,
-        "original_plan_sha256": before_plan,
-        "projected_plan_after_sha256": after_plan,
-        "plan_projection_observation": "original-retained-after-configmap-delete-recreate",
-        "original_signer_sha256": before_signer,
-        "rotated_signer_sha256": after_signer,
-        "notification": receiver_observation,
-        "controller_status_boundary": (
-            "controlled observer sidecar made controller log collection ambiguous; "
-            "runner/Job/records/signature/transport were verified directly"
-        ),
-        "controlled_instrumentation": (
-            "engine wrapper paused after startup validation and before exec of the real kafka-backup"
-        ),
-    }
-    save_state()
-
-
-def vendor_manifest_sha256(root: pathlib.Path) -> str:
-    """Hash a reproducible relative-path/content manifest for a vendor tree."""
-    digest = hashlib.sha256()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        relative = path.relative_to(root).as_posix()
-        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        digest.update(f"{content_hash}  {relative}\n".encode())
-    return digest.hexdigest()
+            raise RuntimeError("controller under test was not restored after runtime-gap case")
 
 
 def report() -> None:
-    """Write the corrected bounded machine report and Markdown handoff."""
-    snapshot_root = pathlib.Path("/tmp/logweir-backend-live-20260915T0330Z/src")
-    old_root = pathlib.Path("/tmp/logweir-backend-live-20260915T0330Z/old")
+    """Write the machine report and Markdown handoff for the authoritative run."""
     public_key = OUT / "verifier-signing.pub.pem"
     public_key.write_bytes((FIXTURE_KEYS / "signing.pub.pem").read_bytes())
     public_key.chmod(0o600)
 
-    seam = subprocess.run(
-        [
-            "cargo",
-            "test",
-            "--offline",
-            "-p",
-            "logweir",
-            "signer::tests::readiness_rejects_a_real_signature_that_does_not_verify_over_its_probe",
-            "--",
-            "--exact",
-        ],
-        cwd=snapshot_root,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
+    # The live-unreachable post-parse signing failure is covered by the
+    # source-matched seam test and the binary subprocess suite, run from the
+    # checkout whose crates are byte-identical to the tested source commit.
+    head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    # Name what the working tree changed since the tested commit rather than
+    # answering yes/no: a harness or test edit is not a runtime difference, and
+    # the critical-file hashes below say so file by file.
+    changed_crate_files = sorted(
+        line.strip()
+        for line in run(
+            ["git", "diff", "--name-only", SOURCE_COMMIT or "HEAD", "--", "crates", "Cargo.lock", "Cargo.toml"],
+            check=False,
+        ).stdout.splitlines()
+        if line.strip()
     )
-    seam_output = seam.stdout + seam.stderr
-    save_artifact("signer-readiness-seam-test.txt", seam_output[-12000:])
-    if seam.returncode != 0 or "1 passed; 0 failed" not in seam_output:
-        raise RuntimeError("source-matched signer readiness seam test did not pass")
+    seam_tests: dict[str, Any] = {}
+    for label, argv in [
+        (
+            "signer_readiness_seam",
+            [
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "logweir",
+                "--lib",
+                "signer::tests::readiness_rejects_a_real_signature_that_does_not_verify_over_its_probe",
+                "--",
+                "--exact",
+            ],
+        ),
+        ("signing_startup_subprocess", ["cargo", "test", "--locked", "-p", "logweir", "--test", "signing_startup"]),
+    ]:
+        proc = subprocess.run(
+            argv, cwd=ROOT, capture_output=True, text=True, timeout=1800, check=False
+        )
+        output = proc.stdout + proc.stderr
+        save_artifact(f"{label}-test.txt", output[-16000:])
+        summary = [line for line in output.splitlines() if line.startswith("test result:")]
+        seam_tests[label] = {
+            "command": " ".join(argv),
+            "exit_code": proc.returncode,
+            "summary": summary,
+        }
+    if seam_tests["signer_readiness_seam"]["exit_code"] != 0 or not any(
+        "1 passed; 0 failed" in line for line in seam_tests["signer_readiness_seam"]["summary"]
+    ):
+        STATE["cases"]["signer_unit_seam_for_unreachable_live_failure"] = "failed"
+    else:
+        STATE["cases"]["signer_unit_seam_for_unreachable_live_failure"] = "passed"
+    save_state()
 
     python_bin = os.environ.get("LOGWEIR_PYTHON", sys.executable)
     python_version = run([python_bin, "--version"]).stdout.strip()
@@ -4043,15 +4016,7 @@ def report() -> None:
         [python_bin, "-c", "import cryptography; print(cryptography.__version__)"]
     ).stdout.strip()
     runner_version_proc = run(
-        DOCKER
-        + [
-            "run",
-            "--rm",
-            "--platform",
-            "linux/amd64",
-            CURRENT_RUNNER,
-            "--version",
-        ],
+        DOCKER + ["run", "--rm", "--platform", "linux/amd64", CURRENT_RUNNER, "--version"],
         check=False,
     )
     runner_version = (runner_version_proc.stdout + runner_version_proc.stderr).strip()
@@ -4059,6 +4024,7 @@ def report() -> None:
     critical = [
         "crates/logweir-core/src/execution_contract.rs",
         "crates/logweir/src/cli.rs",
+        "crates/logweir/src/identity.rs",
         "crates/logweir/src/drill/mod.rs",
         "crates/logweir/src/drill/phase1_approval.rs",
         "crates/logweir/src/drill/phase8_score.rs",
@@ -4067,11 +4033,18 @@ def report() -> None:
         "crates/weirkeeper/src/controllers/approval.rs",
         "crates/weirkeeper/src/job.rs",
         "config/crd/approvals.yaml",
+        "config/crd/restores.yaml",
+        "Dockerfile",
+        "Dockerfile.weirkeeper",
+        "Cargo.lock",
     ]
     source_hashes = {
         path: {
-            "tested_snapshot": sha256_file(snapshot_root / path),
-            "working_tree_at_report": sha256_file(ROOT / path),
+            "tested_source_root": sha256_file(SOURCE_ROOT / path),
+            "worktree_at_report": sha256_file(ROOT / path),
+            "old_source_root": sha256_file(OLD_SOURCE_ROOT / path)
+            if (OLD_SOURCE_ROOT / path).is_file()
+            else None,
         }
         for path in critical
     }
@@ -4085,25 +4058,19 @@ def report() -> None:
     images: dict[str, Any] = {}
     for image, (platform, binary) in image_specs.items():
         inspected = json.loads(
-            run(DOCKER + ["image", "inspect", image, "--format", "{{json .}}"] ).stdout
+            run(DOCKER + ["image", "inspect", image, "--format", "{{json .}}"]).stdout
         )
         binary_hash = run(
             DOCKER
-            + [
-                "run",
-                "--rm",
-                "--platform",
-                platform,
-                "--entrypoint",
-                "sha256sum",
-                image,
-                binary,
-            ]
+            + ["run", "--rm", "--platform", platform, "--entrypoint", "sha256sum", image, binary]
         ).stdout.split()[0]
         images[image] = {
             "id": inspected["Id"],
             "architecture": inspected["Architecture"],
             "created": inspected["Created"],
+            "revision_label": (inspected.get("Config", {}).get("Labels") or {}).get(
+                "org.opencontainers.image.revision"
+            ),
             "binary": binary,
             "binary_sha256": binary_hash,
         }
@@ -4120,46 +4087,17 @@ def report() -> None:
             "/usr/local/bin/kafka-backup",
         ]
     ).stdout.split()[0]
-
-    build_inputs = {}
-    for label, root in [("current", snapshot_root), ("archived_old", old_root)]:
-        build_inputs[label] = {
-            "root": str(root),
-            "Dockerfile_sha256": sha256_file(root / "Dockerfile"),
-            "Dockerfile_weirkeeper_sha256": sha256_file(root / "Dockerfile.weirkeeper"),
-            "Cargo_lock_sha256": sha256_file(root / "Cargo.lock"),
-            "cargo_config_sha256": sha256_file(root / ".cargo/config.toml"),
-            "vendor_manifest_sha256": vendor_manifest_sha256(root / "vendor"),
-            "vendor_manifest_algorithm": (
-                "SHA-256 of sorted lines '<file-sha256>  <vendor-relative-path>\\n'"
-            ),
-            "rust_toolchain_selector": "absent in test snapshot",
-            "dockerignore": "absent so checksum-listed vendored *.tar.gz files enter build context",
-        }
-    build_provenance = {
-        "scope": "test-specific images only; not an ordinary shipping/release workflow proof",
-        "transformations": [
-            "export source snapshot; for archived build use git archive 92e02097540c39ff8565283a38ee592499b95020",
-            "remove rust-toolchain.toml selector; Dockerfiles still pin rust:1.89-bookworm",
-            "install scripts/backend-live-cargo-config.toml as .cargo/config.toml",
-            "cargo vendor --offline --versioned-dirs vendor >/dev/null",
-            "remove .dockerignore because its patterns excluded checksum-listed vendor tar files",
-        ],
-        "commands": [
-            "docker --context desktop-linux build --load --platform linux/arm64 -f Dockerfile.weirkeeper -t weirkeeper:backend-live-20260915 <current-snapshot>",
-            "docker --context desktop-linux build --load --platform linux/amd64 -f Dockerfile -t logweir:backend-live-20260915 <current-snapshot>",
-            "docker --context desktop-linux build --load --platform linux/arm64 -f /tmp/logweir-backend-live-20260915T0330Z/old/Dockerfile.weirkeeper -t weirkeeper:pre-handshake-92e02097 /tmp/logweir-backend-live-20260915T0330Z/old",
-            "docker --context desktop-linux build --load --platform linux/amd64 -f <old-snapshot>/Dockerfile -t logweir:pre-handshake-92e02097 <old-snapshot>",
-        ],
-        "inputs": build_inputs,
-        "shipping_workflow": (
-            "Not exercised here. Standard unmodified Dockerfile/just release proof remains separate release work."
-        ),
-    }
+    build_record_path = os.environ.get("LOGWEIR_BACKEND_LIVE_BUILD_RECORD", "")
+    build_record = (
+        json.loads(pathlib.Path(build_record_path).read_text()) if build_record_path else {}
+    )
 
     cases = STATE.get("cases", {})
     gate_exit, gate_reasons = acceptance_gate(
-        cases, STATE.get("cleanup", {}), require_cleanup=True
+        cases,
+        STATE.get("cleanup", {}),
+        require_cleanup=True,
+        lab_state=lab_gate_state(),
     )
     classifications = {
         "required": {name: cases.get(name, "missing") for name in sorted(REQUIRED_CASES)},
@@ -4167,18 +4105,15 @@ def report() -> None:
         "failed": gate_reasons["failed"],
         "unrun": gate_reasons["unrun"],
         "missing": gate_reasons["missing"],
+        "unrun_reasons": STATE.get("unrun_reasons", {}),
+        "unsupported_live": UNSUPPORTED_LIVE_CASES,
         "supplemental": {
-            name: result
-            for name, result in sorted(cases.items())
-            if name not in REQUIRED_CASES
+            name: result for name, result in sorted(cases.items()) if name not in REQUIRED_CASES
         },
     }
     namespace = get_optional("namespace", NS, cluster_scoped=True)
-    deployment = controller_deployment()
-    deployment_identity = controller_identity(deployment)
-    crd = json.loads(
-        run(KUBECTL + ["get", "crd", "approvals.logweir.dev", "-o", "json"]).stdout
-    )
+    deployment_identity = controller_identity(controller_deployment())
+    crd = json.loads(run(KUBECTL + ["get", "crd", "approvals.logweir.dev", "-o", "json"]).stdout)
     artifact_hashes = {
         path.name: sha256_file(path)
         for path in sorted(OUT.iterdir())
@@ -4191,57 +4126,51 @@ def report() -> None:
         "context": "docker-desktop",
         "docker_context": "desktop-linux",
         "namespace": {"name": NS, "uid": STATE.get("namespace_uid")},
+        "matrix_window": {
+            "started": STATE.get("matrix_started"),
+            "finished": STATE.get("matrix_finished"),
+        },
         "classifications": classifications,
         "gate_reasons": gate_reasons,
-        "core_accepted_evidence": {
-            "backup_records": {"orders": 100, "payments": 100, "total": 200},
-            "restore_a_full_records": 200,
-            "restore_b_full_records": 200,
+        "evidence": {
+            "backup_id": STATE.get("backup_id"),
+            "positive_restores": STATE.get("positive_restores", []),
+            "restart_job_uids": STATE.get("restart_job_uids"),
+            "legacy_prejob": STATE.get("legacy_prejob", {}),
+            "exact_old_controller": STATE.get("exact_old_controller", {}),
+            "runtime_gap": STATE.get("runtime_gap", {}),
+            "signer_cases": STATE.get("signer_cases", {}),
+            "rbac": STATE.get("rbac", {}),
+            "gc_dependents": STATE.get("gc_dependents", {}),
+            "retained_signer": STATE.get("retained_signer", {}),
+            "old_runner_exit_code": STATE.get("old_runner_exit_code"),
             "scorecard_sample": {
                 "configured_records_per_partition": 25,
                 "partitions": 2,
                 "expected": 50,
-                "restored": 50,
             },
         },
-        "legacy_prejob": STATE.get("legacy_prejob", {}),
-        "exact_old_controller": STATE.get("exact_old_controller", {}),
-        "runtime_gap": STATE.get("runtime_gap", {}),
-        "signer_cases": STATE.get("signer_cases", {}),
-        "collision_evidence": {
-            "retained": cases.get("collision_matrix_evidence_retained") == "passed",
-            "artifact_prefix": "collision-",
-        },
         "signer_post_parse_failure": {
-            "live_classification": "not_reachable_for_valid_parsed_current_software_signers",
-            "reason": (
-                "P-256 and Ed25519 sign_detached branches are infallible after parse; the parsed signer is retained in memory."
-            ),
-            "meaningful_seam": (
-                "signer::tests::readiness_rejects_a_real_signature_that_does_not_verify_over_its_probe"
-            ),
-            "seam_test_exit_code": seam.returncode,
-            "seam_artifact": "signer-readiness-seam-test.txt",
+            "live_classification": "unsupported_live",
+            "reason": UNSUPPORTED_LIVE_CASES["post_parse_software_signing_failure"],
+            "tests": seam_tests,
         },
-        "admission_boundary": (
-            "Live checks cover API immutability, exact owner/UID collision refusal, and runner hash binding. "
-            "They do not claim protection from a fully malicious cluster administrator."
-        ),
-        "separate_owners_not_counted": [
-            "bootstrap/identity and full-chart install/reinstall",
-            "UI/browser behavior",
-            "scheduler behavior (this review remained read-only)",
-        ],
         "source_applicability": {
-            "current_tested_snapshot": str(snapshot_root),
-            "archived_commit": "92e02097540c39ff8565283a38ee592499b95020",
+            "source_commit": SOURCE_COMMIT,
+            "old_commit": OLD_COMMIT,
+            "source_root": str(SOURCE_ROOT),
+            "old_source_root": str(OLD_SOURCE_ROOT),
+            "worktree_head": head,
+            "worktree_changed_crate_files_since_source_commit": changed_crate_files,
+            "worktree_changed_runtime_sources": [
+                path
+                for path in changed_crate_files
+                if "/tests/" not in path and not path.endswith("Cargo.lock")
+            ],
             "critical_hashes": source_hashes,
-            "note": (
-                "Runtime claims apply to the listed image IDs and tested snapshot bytes. Later shared-working-tree bootstrap/CLI/chart changes are not included."
-            ),
         },
         "images": images,
-        "build_provenance": build_provenance,
+        "build_record": build_record,
         "verifiers": {
             "public_key_artifact": public_key.name,
             "public_key_sha256": sha256_file(public_key),
@@ -4254,77 +4183,66 @@ def report() -> None:
         "cleanup": {
             **STATE.get("cleanup", {}),
             "namespace_absent": namespace is None,
-            "shared_controller": deployment_identity,
-            "shared_controller_exact_restores": {
-                "targeted": STATE.get("shared_controller_restore_exact"),
-                "signer": STATE.get("shared_controller_restore_exact_after_signer"),
-                "old_controller": STATE.get("shared_controller_restore_exact_after_old_controller"),
-                "runtime_gap": STATE.get("shared_controller_restore_exact_after_runtime_gap"),
+            "lab_controller_original": {
+                key: value
+                for key, value in (STATE.get(LAB_ORIGINAL) or {}).items()
+                if key != "containers"
             },
+            "lab_controller_restored": STATE.get("lab_controller_restored"),
+            "lab_controller_restore_exact": STATE.get("lab_controller_restore_exact"),
+            "lab_controller_now": deployment_identity,
             "approval_crd_uid": crd["metadata"]["uid"],
             "approval_crd_established": any(
                 item.get("type") == "Established" and item.get("status") == "True"
                 for item in crd.get("status", {}).get("conditions", [])
             ),
         },
-        "harness_fault_controls": "harness-fault-controls.json",
         "harness_iterations": STATE.get("case_failures", []) + STATE.get("errors", []),
         "artifact_hashes": artifact_hashes,
-        "reproducible_commands": [
-            "LOGWEIR_BACKEND_LIVE_OUT=<out> LOGWEIR_BACKEND_LIVE_NS=<owned-ns> LOGWEIR_BACKEND_LIVE_RUN_LABEL=<label> LOGWEIR_BACKEND_LIVE_BASELINE_STATE=/tmp/logweir-backend-live-20260915T0330Z/run/state.json LOGWEIR_PYTHON=/usr/bin/python3 python3 scripts/test-plat01-02-live.py harness-selftest",
-            "... python3 scripts/test-plat01-02-live.py targeted",
-            "... python3 scripts/test-plat01-02-live.py signer-permission",
-            "... python3 scripts/test-plat01-02-live.py exact-old-controller-job",
-            "... python3 scripts/test-plat01-02-live.py runtime-gap-matrix",
-            "... python3 scripts/test-plat01-02-live.py runtime-gap-finalize-evidence",
-            "... python3 scripts/test-plat01-02-live.py cleanup",
-            "... python3 scripts/test-plat01-02-live.py report",
-        ],
     }
     REPORT_PATH.write_text(json.dumps(structured, indent=2, sort_keys=True) + "\n")
     REPORT_PATH.chmod(0o600)
 
     passed = classifications["passed"]
+    runtime = STATE.get("runtime_gap", {})
+    old = STATE.get("exact_old_controller", {})
+    legacy = STATE.get("legacy_prejob", {})
     lines = [
-        "# PLAT-01 / PLAT-02.2 backend live acceptance — corrected close",
+        "# PLAT-01 / PLAT-02.2 live matrix",
         "",
         f"Verdict: **{structured['verdict']}** (terminal exit `{gate_exit}`).",
-        f"Required: {len(REQUIRED_CASES)}; passed: {len(passed)}; failed: {len(classifications['failed'])}; unrun: {len(classifications['unrun'])}; missing: {len(classifications['missing'])}.",
+        f"Required: {len(REQUIRED_CASES)}; passed: {len(passed)}; failed: "
+        f"{len(classifications['failed'])}; unrun: {len(classifications['unrun'])}; "
+        f"missing: {len(classifications['missing'])}.",
+        f"Source `{SOURCE_COMMIT}`; old `{OLD_COMMIT}`; images: "
+        + ", ".join(f"`{name}`=`{value['id']}`" for name, value in images.items()),
         "",
-        "## Corrected targeted evidence",
+        "## Cases",
         "",
-        f"- True archived-shape mutable pre-Job transition passed: Restore UID `{STATE.get('legacy_prejob', {}).get('restore_uid')}`, ConfigMap UID `{STATE.get('legacy_prejob', {}).get('configmap_uid')}`, exit `0`, runner `{STATE.get('legacy_prejob', {}).get('runner_image_id')}`. Before/after ConfigMaps and resulting Restore/Job/Pod are retained.",
-        f"- Exact archived controller Job passed and was adopted unchanged by the current controller: Job UID `{STATE.get('exact_old_controller', {}).get('job_uid')}`, old controller `{STATE.get('exact_old_controller', {}).get('controller_image_id')}`, old runner `{STATE.get('exact_old_controller', {}).get('runner_image_id')}`, exit `0`.",
-        "- The regular-file signer case dereferenced to `regular file 400 0 0`; UID/GID 65532 had `test -r` exit 1. The runner reported `Permission denied`, exited 4, wrote only `metrics.prom`, and did not touch the engine sentinel. The directory case remains separately classified as wrong-path-type coverage.",
-        "- Every Job/ConfigMap collision object was saved immediately before reconcile with complete ownerReferences/finalizers; each resulting reason and checked no-Job/no-plan observation has a unique artifact.",
-        f"- During a real current-runner execution, controller rollback/upgrade/drain/re-upgrade transitions were observed. The ConfigMap delete/recreate retained the original projected plan digest `{STATE.get('runtime_gap', {}).get('original_plan_sha256')}` in the running Pod, while the in-place Secret rotation changed its signer digest. The signed result verified under the original public key and failed verification under the rotated public key.",
-        "- A plan-authentication failure produced exit 3 while both owned receivers observed zero POSTs. The authenticated retained plan later sent exactly one POST to receiver A; replacement-plan receiver B observed zero. Absence is receiver-observed, not inferred from empty configuration or Kafka state.",
-        "- Controlled instrumentation boundary: an observer sidecar and pre-engine wrapper were added after the controller emitted the production Job. The wrapper paused only after startup validation and then exec'd the real kafka-backup. The multi-container Job prevents the unmodified controller from choosing a logs container, so runner/Job/records/signature/transport evidence was verified directly; no product defect is claimed.",
+        *[f"- `{name}`: {result}" for name, result in classifications["required"].items()],
         "",
-        "## Preserved core assertions",
+        "Unsupported live (classified, not counted as passed):",
+        *[f"- `{name}`: {reason}" for name, reason in UNSUPPORTED_LIVE_CASES.items()],
         "",
-        "- Backup receipt: 100 orders + 100 payments = 200 exact records.",
-        "- Both accepted Restore targets retain full 200-record proofs. The independent scorecard sample remains correctly configured at 25 records × 2 partitions = 50/50; neither assertion replaces the other.",
+        "## Key observations",
         "",
-        "## Signer and admission boundaries",
+        f"- Legacy mutable pre-Job plan: Restore `{legacy.get('restore_uid')}`, ConfigMap "
+        f"`{legacy.get('configmap_uid')}` retained, runner exit `{legacy.get('exit_code')}`.",
+        f"- Archived controller Job `{old.get('job_uid')}` adopted unchanged; old runner exit "
+        f"`{old.get('runner_exit_code')}`, result `{old.get('result_phase')}`.",
+        f"- Runtime gap: transitions `{runtime.get('controller_transitions')}`, plan projection "
+        f"`{runtime.get('plan_projection_observation')}`, receivers `{runtime.get('notification')}`, "
+        f"pre-auth `{runtime.get('preauth')}`, controller verification "
+        f"`{runtime.get('restore_verification')}`.",
         "",
-        "A valid parsed P-256/Ed25519 software signer has no reachable post-parse signing-error branch today. The source-matched readiness seam used a real non-verifying signature and passed; no fake live failure is claimed. Admission evidence covers actual API immutability, owner/UID collision checks, and runner hash binding—not a fully malicious cluster administrator.",
-        "",
-        "## Provenance and cleanup",
-        "",
-        "Test-specific builds used the recorded offline vendor transformation (toolchain selector removal, offline Cargo config/vendor, and `.dockerignore` removal). Dockerfile, lock, vendor-manifest, and Cargo-config hashes are in `report.json`. This is separate from the unmodified standard shipping Dockerfile/release workflow, which remains release work.",
-        f"Public verifier key `{public_key.name}` SHA-256 `{sha256_file(public_key)}` is included; no private key is in evidence. Verifiers: `{runner_version}`, `{python_version}`, cryptography `{cryptography_version}`.",
-        f"Owned namespace `{NS}` UID `{STATE.get('namespace_uid')}` absent: `{namespace is None}`. Shared controller restored to `{deployment_identity['image']}` / `{deployment_identity['runner_image']}` with one Ready pod. Cleanup result: `{STATE.get('cleanup', {}).get('result')}`.",
-        "Bootstrap/full-chart, UI, and scheduler belong to separate owners and are not counted as missing here.",
+        f"Cleanup: namespace absent `{namespace is None}`; lab controller restore exact "
+        f"`{STATE.get('lab_controller_restore_exact')}`; cleanup result "
+        f"`{STATE.get('cleanup', {}).get('result')}`.",
         "",
         f"Machine report: `{REPORT_PATH}`",
-        f"Evidence directory: `{OUT}`",
     ]
     markdown_path = pathlib.Path(
-        os.environ.get(
-            "LOGWEIR_BACKEND_LIVE_MARKDOWN",
-            "/tmp/logweir-backend-live-close-acceptance.md",
-        )
+        os.environ.get("LOGWEIR_BACKEND_LIVE_MARKDOWN", str(OUT / "report.md"))
     )
     markdown_path.write_text("\n".join(lines) + "\n")
     markdown_path.chmod(0o600)
@@ -4334,7 +4252,7 @@ def report() -> None:
         "exit_code": gate_exit,
     }
     save_state()
-    log(f"corrected reports written: {REPORT_PATH} and {markdown_path}")
+    log(f"reports written: {REPORT_PATH} and {markdown_path}")
 
 
 def gate_probe() -> None:
@@ -4344,11 +4262,13 @@ def gate_probe() -> None:
         payload.get("cleanup", {}),
         require_cleanup=True,
         required_cases=set(payload.get("required", [])),
+        lab_state=payload.get("lab"),
     )
     raise SystemExit(status)
 
 
 def harness_selftest() -> None:
+    """Bounded local controls proving the harness can fail; no cluster access."""
     empty = subprocess.CompletedProcess(["kubectl"], 0, "", "")
     if optional_json_from_result(empty, description="NotFound control") is not None:
         raise RuntimeError("empty exit-0 optional get did not classify as absent")
@@ -4372,7 +4292,25 @@ def harness_selftest() -> None:
     probes = [
         ({"cases": {"a": "failed"}, "cleanup": {"result": "deleted"}}, 1),
         ({"cases": {}, "cleanup": {"result": "deleted"}}, 1),
+        ({"cases": {"a": "unrun"}, "cleanup": {"result": "deleted"}}, 1),
+        ({"cases": {"a": "skipped"}, "cleanup": {"result": "deleted"}}, 1),
         ({"cases": {"a": "passed"}, "cleanup": {"result": "failed"}}, 1),
+        (
+            {
+                "cases": {"a": "passed"},
+                "cleanup": {"result": "deleted"},
+                "lab": {"recorded": True, "restore_exact": False},
+            },
+            1,
+        ),
+        (
+            {
+                "cases": {"a": "passed"},
+                "cleanup": {"result": "deleted"},
+                "lab": {"recorded": True, "restore_exact": True},
+            },
+            0,
+        ),
         ({"cases": {"a": "passed"}, "cleanup": {"result": "deleted"}}, 0),
     ]
     results = []
@@ -4394,6 +4332,42 @@ def harness_selftest() -> None:
                 f"{proc.stderr}"
             )
         results.append({"input": payload, "exit_code": proc.returncode})
+
+    # execute_independent must never turn an unclassified or blocked group into a pass.
+    saved_cases = copy.deepcopy(STATE.get("cases", {}))
+    saved_failures = copy.deepcopy(STATE.get("case_failures", []))
+    saved_unrun = copy.deepcopy(STATE.get("unrun_reasons", {}))
+    try:
+        execute_independent(["selftest_silent_return"], lambda: None)
+        silent = STATE["cases"].get("selftest_silent_return")
+        execute_independent(
+            ["selftest_blocked"], lambda: requires("selftest_prerequisite_never_passed")
+        )
+        blocked = STATE["cases"].get("selftest_blocked")
+
+        def raising() -> None:
+            raise RuntimeError("controlled failure")
+
+        execute_independent(["selftest_raises"], raising)
+        raised = STATE["cases"].get("selftest_raises")
+    finally:
+        STATE["cases"] = saved_cases
+        STATE["case_failures"] = saved_failures
+        STATE["unrun_reasons"] = saved_unrun
+        save_state()
+    if (silent, blocked, raised) != ("failed", "unrun", "failed"):
+        raise RuntimeError(
+            f"execute_independent classification controls wrong: {(silent, blocked, raised)!r}"
+        )
+    results.append(
+        {
+            "execute_independent": {
+                "silent_return": silent,
+                "missing_prerequisite": blocked,
+                "raises": raised,
+            }
+        }
+    )
     save_artifact("harness-fault-controls.json", results)
     STATE["harness_selftest"] = "passed"
     save_state()
@@ -4415,10 +4389,23 @@ def cleanup() -> None:
     ns = existing
     labels = ns["metadata"].get("labels", {})
     expected_uid = STATE.get("namespace_uid")
-    if labels.get("backend-live.logweir.dev/run") != RUN_LABEL:
+    if any(labels.get(key) != value for key, value in namespace_labels().items()):
         raise RuntimeError("refusing cleanup: namespace ownership label changed")
     if ns["metadata"]["uid"] != expected_uid:
         raise RuntimeError("refusing cleanup: namespace UID changed")
+    # Topics this run created: recorded names plus any harness-prefixed topic
+    # that was absent from the baseline listing taken before the first case.
+    baseline_topics = STATE.get("baseline_target_topics")
+    if baseline_topics is not None:
+        discovered = sorted(
+            topic
+            for topic in target_topics()
+            if topic.startswith("backend-live-") and topic not in set(baseline_topics)
+        )
+        STATE["owned_target_topics"] = sorted(
+            set(STATE.get("owned_target_topics", [])) | set(discovered)
+        )
+        save_state()
     for topic in STATE.get("owned_target_topics", []):
         if not topic.startswith("backend-live-"):
             raise RuntimeError(f"refusing cleanup of non-owned topic {topic!r}")
@@ -4451,13 +4438,13 @@ def main() -> int:
     parser.add_argument(
         "phase",
         choices=[
+            "matrix",
+            "lab-switch",
+            "lab-restore",
             "positive",
             "negative",
-            "targeted",
-            "signer-permission",
             "exact-old-controller-job",
             "runtime-gap-matrix",
-            "runtime-gap-finalize-evidence",
             "finalize",
             "cleanup",
             "report",
@@ -4478,12 +4465,10 @@ def main() -> int:
     if args.phase in {"cleanup", "report"}:
         return terminal_exit_status(require_cleanup=True)
     if args.phase in {
+        "matrix",
         "negative",
-        "targeted",
-        "signer-permission",
         "exact-old-controller-job",
         "runtime-gap-matrix",
-        "runtime-gap-finalize-evidence",
     }:
         return terminal_exit_status(require_cleanup=False)
     return 0
