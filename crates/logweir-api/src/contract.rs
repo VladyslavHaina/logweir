@@ -16,7 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthenticationMode;
-use crate::authz::Capabilities;
+use crate::authz::{Capabilities, Role};
 
 // ======================================================================
 // Shared pieces
@@ -109,6 +109,9 @@ pub struct ActorView {
 pub struct NamespaceGrant {
     /// The namespace name.
     pub name: String,
+    /// The product roles the actor holds here, sorted and unioned across every
+    /// binding that matched. Empty in localAdmin mode, which has no roles.
+    pub roles: Vec<Role>,
     /// What the actor may do there. Domains without a route are `false`.
     pub capabilities: Capabilities,
 }
@@ -129,6 +132,10 @@ pub struct SessionResponse {
     /// The CSRF token for unsafe requests; `null` in localAdmin mode, which
     /// relies on the loopback listener and the exact Origin check.
     pub csrf_token: Option<String>,
+    /// The revision of the administrator's role-binding table that produced
+    /// these grants. It is recorded in every audit line, so a decision can be
+    /// tied to the configuration that made it. Empty in localAdmin mode.
+    pub binding_revision: String,
     /// The explicitly granted namespaces.
     pub namespaces: Vec<NamespaceGrant>,
     /// The union of the grants' capabilities.

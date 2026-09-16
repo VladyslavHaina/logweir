@@ -83,7 +83,43 @@ pub fn authorize(
     namespace: &str,
     action: Action,
 ) -> Result<(), ApiError> {
-    authz::authorize(state.authorizer(), actor, namespace, action)
+    let authorizer = state.authorizer();
+    let outcome = authz::authorize(authorizer, actor, namespace, action);
+    // THE DECISION IS ATTRIBUTED WHERE IT IS MADE. The audit record keeps the
+    // REAL reason even when the response hides it: an ungranted namespace
+    // answers 404 in shared mode so a caller cannot enumerate, and this line is
+    // where `namespace_forbidden` is still written down.
+    let roles: Vec<String> = authorizer
+        .roles(actor, namespace)
+        .iter()
+        .map(|role| role.as_str().to_string())
+        .collect();
+    actor.audit.set_decision(
+        namespace,
+        action.name(),
+        &roles,
+        &authorizer.binding_revision(),
+        if outcome.is_ok() {
+            crate::audit::Decision::Allow
+        } else {
+            crate::audit::Decision::Deny
+        },
+    );
+    if let Err(error) = &outcome {
+        actor.audit.set_failure(error.code.as_str());
+    }
+    outcome
+}
+
+/// Record the object a route touched, for the audit line.
+fn note_object<K: ProductResource>(actor: &Actor, object: &K) {
+    let meta = object.meta();
+    actor.audit.set_object(
+        &K::kind(&()),
+        meta.name.as_deref().unwrap_or_default(),
+        meta.uid.as_deref().unwrap_or_default(),
+        meta.resource_version.as_deref().unwrap_or_default(),
+    );
 }
 
 /// A resource name that cannot exist is `not_found`, without a Kubernetes
@@ -302,6 +338,9 @@ where
         )
     })?;
     let identity = idempotency::identity(actor, namespace, route, prefix, key, &canonical);
+    actor
+        .audit
+        .set_create_hashes(&identity.scope_hash, &identity.request_hash);
     let object = build(
         identity.name.clone(),
         idempotency::annotations(&identity, request_id, actor),
@@ -322,6 +361,7 @@ where
                     actor = %actor.id(),
                     "created"
                 );
+                note_object(actor, &created);
                 return Ok(Created {
                     object: created,
                     replayed: false,
@@ -336,10 +376,14 @@ where
             Err(other) => return Err(other.into_api_error()),
         };
         return match idempotency::compare(Some(existing.annotations()), &identity) {
-            ReplayVerdict::Replay => Ok(Created {
-                object: existing,
-                replayed: true,
-            }),
+            ReplayVerdict::Replay => {
+                note_object(actor, &existing);
+                actor.audit.note("replayed", "true");
+                Ok(Created {
+                    object: existing,
+                    replayed: true,
+                })
+            }
             ReplayVerdict::DifferentRequest => Err(ApiError::new(
                 ProblemCode::IdempotencyConflict,
                 "This Idempotency-Key was already used with a different request. Use a new key \
@@ -365,15 +409,21 @@ where
 /// `not_found` or the adapter's failure.
 pub async fn get_object<K: ProductResource>(
     state: &AppState,
+    actor: &Actor,
     namespace: &str,
     name: &str,
 ) -> Result<K, ApiError> {
     check_name(name)?;
-    state
+    let object = state
         .kube()
         .get::<K>(namespace, name)
         .await
-        .map_err(KubeFailure::into_api_error)
+        .map_err(KubeFailure::into_api_error)?;
+    // The read is attributed to the exact object, with its UID and
+    // resourceVersion, so an audit reader can tell WHICH object was seen and
+    // not merely which name was asked for.
+    note_object(actor, &object);
+    Ok(object)
 }
 
 #[cfg(test)]

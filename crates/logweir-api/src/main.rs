@@ -24,10 +24,11 @@ use hyper_util::service::TowerToHyperService;
 use tokio::sync::Semaphore;
 
 const HELP: &str = "logweir-api — the bounded Logweir product API. Serves the static UI at /ui/ \
-and a typed JSON API at /api/v1 on one loopback origin, and creates Logweir custom resources \
-through one Kubernetes adapter. It is not a Kubernetes proxy. Usage: `logweir-api --config \
-<file>`; `--version` prints the version, `--help` prints this. Only `mode: localAdmin` is \
-accepted in this release, and it binds loopback addresses only.";
+and a typed JSON API at /api/v1 on one origin, and creates Logweir custom resources through one \
+Kubernetes adapter. It is not a Kubernetes proxy. Usage: `logweir-api --config <file>`; \
+`--version` prints the version, `--help` prints this. `mode: localAdmin` binds loopback \
+addresses only; `mode: shared` requires an HTTPS publicBaseUrl, an OIDC issuer, mounted \
+session and cursor keys, and exact role bindings.";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -94,7 +95,13 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
-    let state = logweir_api::state_from_parts(&config, preflight, client);
+    let state = match logweir_api::state_from_parts(&config, preflight, client) {
+        Ok(state) => state,
+        Err(reason) => {
+            tracing::error!(%reason, "refusing to start");
+            return ExitCode::FAILURE;
+        }
+    };
     let listener = match tokio::net::TcpListener::bind(config.listen).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -105,9 +112,12 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
     tracing::info!(
         listen = %config.listen,
         public_origin = %config.public_origin,
-        mode = "localAdmin",
+        mode = config.mode.as_str(),
         namespaces = config.namespaces.len(),
         ui_assets = state.assets().paths().len(),
+        role_bindings = config.shared().map_or(0, |s| s.roles.bindings.len()),
+        binding_revision = config.shared().map_or("", |s| s.roles.revision.as_str()),
+        issuer = config.shared().map_or("", |s| s.oidc.issuer.as_str()),
         "logweir-api started"
     );
     serve(listener, logweir_api::app::router(state)).await
@@ -176,9 +186,9 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
             },
             () = &mut shutdown => break,
         };
-        let stream = tokio::select! {
+        let (stream, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _peer)) => stream,
+                Ok((stream, peer)) => (stream, peer),
                 Err(error) => {
                     // A per-connection accept error (a descriptor limit, a
                     // client that vanished between SYN and accept) is not a
@@ -192,7 +202,25 @@ async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> ExitC
             () = &mut shutdown => break,
         };
 
-        let service = TowerToHyperService::new(router.clone().into_service::<Incoming>());
+        // THE PEER ADDRESS, PER CONNECTION. It is the only client address this
+        // service ever trusts: the rate limiter keys on it and the audit line
+        // records it, while `X-Forwarded-For` is recorded only when this peer
+        // is inside a configured trusted-proxy range and is read by no decision
+        // anywhere.
+        let peer_ip = peer.ip();
+        let router_for_connection = router.clone();
+        let service = TowerToHyperService::new(tower::service_fn(
+            move |mut request: hyper::Request<Incoming>| {
+                request
+                    .extensions_mut()
+                    .insert(logweir_api::http::PeerAddr(peer_ip));
+                let router = router_for_connection.clone();
+                async move {
+                    use tower::ServiceExt as _;
+                    router.into_service::<Incoming>().oneshot(request).await
+                }
+            },
+        ));
         // `into_owned` ends the borrow of `builder`, so the connection can be
         // moved into a task while the loop keeps configuring the next one.
         let connection = builder

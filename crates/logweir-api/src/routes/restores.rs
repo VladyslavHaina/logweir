@@ -228,7 +228,7 @@ pub async fn get_one(
 ) -> Result<Response, ApiError> {
     authorize(&state, &actor, &ns, Action::ReadRestores)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Restore>(&state, &ns, &name).await?;
+    let object = get_object::<Restore>(&state, &actor, &ns, &name).await?;
     Ok(json(
         StatusCode::OK,
         &RestoreResponse {

@@ -18,6 +18,7 @@ pub fn grants(state: &AppState, actor: &Actor) -> Vec<NamespaceGrant> {
         .into_iter()
         .map(|name| NamespaceGrant {
             capabilities: Capabilities::for_namespace(state.authorizer(), actor, &name),
+            roles: state.authorizer().roles(actor, &name),
             name,
         })
         .collect()
@@ -47,6 +48,7 @@ pub async fn get_session(
             },
             expires_at: authenticator.session_expiry(&parts),
             csrf_token: authenticator.csrf_token(&parts, &actor),
+            binding_revision: state.authorizer().binding_revision(),
             namespaces,
             capabilities,
         },

@@ -185,13 +185,18 @@ fn origin() -> Value {
 fn operation(op: &Op<'_>) -> Value {
     let mut responses = Map::new();
     for (status, description, schema) in &op.success {
-        responses.insert(
-            (*status).to_string(),
+        // An empty schema name means a response with NO body: a 204, or a 303
+        // whose only payload is `Location` and `Set-Cookie`. Emitting
+        // `$ref: #/components/schemas/` for those would be an invalid document.
+        let response = if schema.is_empty() {
+            json!({ "description": description })
+        } else {
             json!({
                 "description": description,
                 "content": { "application/json": { "schema": schema_ref(schema) } }
-            }),
-        );
+            })
+        };
+        responses.insert((*status).to_string(), response);
     }
     responses.insert(
         "default".to_string(),
@@ -291,11 +296,68 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "getSession",
-                summary: "The actor, explicit namespace grants and capability flags.",
+                summary: "The actor, its roles and explicit namespace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method.",
                 parameters: vec![],
                 request: None,
                 success: vec![("200", "The session.", "SessionResponse")],
                 problems: all_codes(&[COMMON]),
+            }],
+        ),
+        (
+            "/api/v1/session/logout",
+            vec![Op {
+                method: "post",
+                operation_id: "logout",
+                summary: "Clear the session cookie. Shared mode only; it is an unsafe method, so it requires the exact Origin, application/json and the synchronizer token like every other mutation.",
+                parameters: vec![origin()],
+                request: None,
+                success: vec![("204", "The session cookie is cleared.", "")],
+                problems: all_codes(&[COMMON, &[ProblemCode::OriginMismatch, ProblemCode::UnsupportedMediaType, ProblemCode::NotFound]]),
+            }],
+        ),
+        (
+            "/auth/login",
+            vec![Op {
+                method: "get",
+                operation_id: "authLogin",
+                summary: "Begin an OpenID Connect Authorization Code + PKCE S256 sign-in. Shared mode only; answers 303 to the provider's authorization endpoint and sets the short-lived __Host-logweir_login cookie holding state, nonce and the PKCE verifier.",
+                parameters: vec![param(
+                    "next",
+                    "query",
+                    "Where to land after signing in. Only a path under /ui/ on this origin; anything else is ignored.",
+                    json!({ "type": "string" }),
+                    false,
+                )],
+                request: None,
+                success: vec![("303", "Redirect to the identity provider.", "")],
+                problems: all_codes(&[&[
+                    ProblemCode::HeaderNotAllowed,
+                    ProblemCode::MisdirectedRequest,
+                    ProblemCode::NotFound,
+                    ProblemCode::RateLimited,
+                    ProblemCode::KubernetesUnavailable,
+                ]]),
+            }],
+        ),
+        (
+            "/auth/callback",
+            vec![Op {
+                method: "get",
+                operation_id: "authCallback",
+                summary: "Finish a sign-in. Shared mode only; validates state, exchanges the code with PKCE, validates the ID token (exact issuer, audience, allowed algorithm, JWKS signature, exp, iat, nonce) and sets __Host-logweir_session. The browser never receives a provider token.",
+                parameters: vec![
+                    param("code", "query", "The authorization code.", json!({ "type": "string" }), false),
+                    param("state", "query", "The state this service issued.", json!({ "type": "string" }), false),
+                ],
+                request: None,
+                success: vec![("303", "Redirect to the console.", "")],
+                problems: all_codes(&[&[
+                    ProblemCode::HeaderNotAllowed,
+                    ProblemCode::MisdirectedRequest,
+                    ProblemCode::NotFound,
+                    ProblemCode::RateLimited,
+                    ProblemCode::Unauthenticated,
+                ]]),
             }],
         ),
         (

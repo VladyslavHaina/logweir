@@ -13,6 +13,33 @@
 //! a capability as `true` only when [`Action::implemented`] is true AND the
 //! authorizer allows it, so a domain whose route is absent can never be
 //! advertised, and a role that denies an action hides it.
+//!
+//! ROLES ARE A TABLE, NOT A TREE. [`Role::allows`] is one `match` per action,
+//! written out so that reading it is reading the policy. There is no
+//! inheritance and no "administrator implies everything": Administrator is
+//! absent from [`Action::SubmitApproval`] on purpose, because D0 says an
+//! administrator may submit a governed approval only when separately bound as
+//! an Approver, and a `_ => true` arm for administrators is exactly the bug
+//! that would erase that.
+//!
+//! BINDINGS ARE EXACT STRINGS, RE-READ PER REQUEST. [`RoleBindings`] maps exact
+//! group claims and exact `issuer#subject` strings to `(role, namespace)`
+//! pairs. No regex, no wildcard, no email-domain inference and no default
+//! namespace. [`SharedAuthorizer`] holds them behind an `RwLock`, so replacing
+//! the table takes effect on the next request rather than on the next restart,
+//! and the session cookie carries only the raw claims — never the derived
+//! roles — so a removed binding cannot be replayed from a cookie.
+//!
+//! ENUMERATION RESISTANCE IS A MODE, NOT A GUESS. In shared mode an ungranted
+//! namespace answers exactly what a nonexistent object answers — 404
+//! `not_found` — so a caller cannot map which namespaces exist. In localAdmin
+//! mode the more informative 403 `namespace_forbidden` is kept: there is one
+//! actor, it is the administrator, and there is nothing to enumerate.
+//! [`Authorizer::hides_unbound_namespaces`] is the switch, and the audit record
+//! keeps the real reason either way.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::RwLock;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -66,6 +93,36 @@ pub enum Action {
 }
 
 impl Action {
+    /// The stable name this action carries in the audit record.
+    ///
+    /// It is the PRODUCT action, `<domain>.<verb>`, not the HTTP method and not
+    /// the Kubernetes verb: an audit reader should be able to answer "who
+    /// created a restore in team-a last week" without knowing either.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Action::ReadConnections => "connection.read",
+            Action::CreateConnection => "connection.create",
+            Action::TestConnection => "connection.test",
+            Action::WriteCredential => "credential.write",
+            Action::DiscoverTopics => "topicDiscovery.start",
+            Action::RunPreflight => "preflight.start",
+            Action::ManageDestinations => "destination.manage",
+            Action::ReadSchedules => "schedule.read",
+            Action::CreateSchedule => "schedule.create",
+            Action::SetScheduleSuspension => "schedule.setSuspension",
+            Action::ReadBackups => "backup.read",
+            Action::CreateManualBackup => "backup.create",
+            Action::ReadRestores => "restore.read",
+            Action::CreateRestore => "restore.create",
+            Action::ReadApprovals => "approval.read",
+            Action::ReadApprovalPacket => "approval.readPacket",
+            Action::SubmitApproval => "approval.submit",
+            Action::ReadOperations => "operation.read",
+            Action::StreamOperationEvents => "operation.stream",
+        }
+    }
+
     /// Whether this build serves a route for the action. Everything `false`
     /// here has NO route: no stub, no 501.
     #[must_use]
@@ -91,6 +148,355 @@ pub trait Authorizer: Send + Sync + 'static {
 
     /// Whether `actor` may perform `action` in the granted `namespace`.
     fn allows(&self, actor: &Actor, namespace: &str, action: Action) -> bool;
+
+    /// The roles `actor` holds in `namespace`, sorted, for the audit record.
+    fn roles(&self, _actor: &Actor, _namespace: &str) -> Vec<Role> {
+        Vec::new()
+    }
+
+    /// The administrator-declared revision of the binding table that decided
+    /// this request. It goes in the audit record so a decision can be tied to
+    /// the configuration that made it.
+    fn binding_revision(&self) -> String {
+        String::new()
+    }
+
+    /// Whether an ungranted namespace must be indistinguishable from a
+    /// nonexistent one. See the module documentation.
+    fn hides_unbound_namespaces(&self) -> bool {
+        false
+    }
+}
+
+// ======================================================================
+// Roles
+// ======================================================================
+
+/// The four product roles. They are LOGWEIR roles: they are not Kubernetes
+/// roles, they are not granted by cluster RBAC, and holding one says nothing
+/// about what the console ServiceAccount may do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Role {
+    /// Reads, never mutates.
+    Viewer,
+    /// Creates and runs operations. Never submits a governed approval and
+    /// never changes trust or policy.
+    Operator,
+    /// Submits governed approvals in approver-bound namespaces. Cannot create
+    /// an execution.
+    Approver,
+    /// Administers bound namespaces. Is STILL the requester when it operates,
+    /// and is not an approver unless separately bound as one.
+    Administrator,
+}
+
+impl Role {
+    /// Every role, in declaration order.
+    pub const ALL: [Role; 4] = [
+        Role::Viewer,
+        Role::Operator,
+        Role::Approver,
+        Role::Administrator,
+    ];
+
+    /// The exact string an administrator writes in the configuration.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Operator => "operator",
+            Role::Approver => "approver",
+            Role::Administrator => "administrator",
+        }
+    }
+
+    /// Parse the configured spelling.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Role> {
+        Role::ALL.into_iter().find(|r| r.as_str() == value)
+    }
+
+    /// THE DECISION TABLE. One arm per action per role, written out.
+    ///
+    /// Read it as the matrix in D0 §"Application role and namespace matrix":
+    /// Viewer never mutates; Operator never submits a governed approval and
+    /// never changes trust or policy; Approver cannot create an execution and
+    /// sees only what a governed approval needs; Administrator administers its
+    /// bound namespaces but is NOT an approver.
+    #[must_use]
+    pub const fn allows(self, action: Action) -> bool {
+        match self {
+            Role::Viewer => matches!(
+                action,
+                Action::ReadConnections
+                    | Action::ReadSchedules
+                    | Action::ReadBackups
+                    | Action::ReadRestores
+                    | Action::ReadApprovals
+                    | Action::ReadOperations
+                    | Action::StreamOperationEvents
+            ),
+            Role::Operator => matches!(
+                action,
+                Action::ReadConnections
+                    | Action::CreateConnection
+                    | Action::TestConnection
+                    | Action::WriteCredential
+                    | Action::DiscoverTopics
+                    | Action::RunPreflight
+                    | Action::ManageDestinations
+                    | Action::ReadSchedules
+                    | Action::CreateSchedule
+                    | Action::SetScheduleSuspension
+                    | Action::ReadBackups
+                    | Action::CreateManualBackup
+                    | Action::ReadRestores
+                    | Action::CreateRestore
+                    | Action::ReadApprovals
+                    | Action::ReadApprovalPacket
+                    | Action::ReadOperations
+                    | Action::StreamOperationEvents
+            ),
+            // The approver sees the governed approval subject and its plan,
+            // and nothing that would let it prepare one: no connections, no
+            // schedules, no discovery, no creates.
+            Role::Approver => matches!(
+                action,
+                Action::ReadBackups
+                    | Action::ReadRestores
+                    | Action::ReadApprovals
+                    | Action::ReadApprovalPacket
+                    | Action::ReadOperations
+                    | Action::StreamOperationEvents
+                    | Action::SubmitApproval
+            ),
+            // Everything an operator may do, plus the reads an approver has —
+            // and DELIBERATELY NOT `SubmitApproval`. An administrator who must
+            // approve is bound as an Approver as well, and the
+            // separation-of-duties check then still compares principals.
+            Role::Administrator => matches!(
+                action,
+                Action::ReadConnections
+                    | Action::CreateConnection
+                    | Action::TestConnection
+                    | Action::WriteCredential
+                    | Action::DiscoverTopics
+                    | Action::RunPreflight
+                    | Action::ManageDestinations
+                    | Action::ReadSchedules
+                    | Action::CreateSchedule
+                    | Action::SetScheduleSuspension
+                    | Action::ReadBackups
+                    | Action::CreateManualBackup
+                    | Action::ReadRestores
+                    | Action::CreateRestore
+                    | Action::ReadApprovals
+                    | Action::ReadApprovalPacket
+                    | Action::ReadOperations
+                    | Action::StreamOperationEvents
+            ),
+        }
+    }
+}
+
+/// One administrator-written binding: a role in one exact namespace for exact
+/// group strings and exact subjects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleBinding {
+    /// The role granted.
+    pub role: Role,
+    /// The exact namespace. Never a pattern, never a default.
+    pub namespace: String,
+    /// Exact group claim strings.
+    pub groups: Vec<String>,
+    /// Exact `issuer#subject` actor IDs.
+    pub subjects: Vec<String>,
+}
+
+impl RoleBinding {
+    /// Whether this binding matches an actor. Exact string comparison only.
+    #[must_use]
+    pub fn matches(&self, actor: &Actor) -> bool {
+        let actor_id = actor.id();
+        self.subjects.iter().any(|s| s == &actor_id)
+            || self
+                .groups
+                .iter()
+                .any(|g| actor.groups.iter().any(|claim| claim == g))
+    }
+}
+
+/// The whole binding table, with the revision an administrator declared.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoleBindings {
+    /// The administrator's revision string, recorded in every audit line.
+    pub revision: String,
+    /// The bindings, in configuration order.
+    pub bindings: Vec<RoleBinding>,
+}
+
+impl RoleBindings {
+    /// Every `(namespace, roles)` pair for an actor, unioned across bindings.
+    #[must_use]
+    pub fn roles_by_namespace(&self, actor: &Actor) -> BTreeMap<String, BTreeSet<Role>> {
+        let mut out: BTreeMap<String, BTreeSet<Role>> = BTreeMap::new();
+        for binding in &self.bindings {
+            if binding.matches(actor) {
+                out.entry(binding.namespace.clone())
+                    .or_default()
+                    .insert(binding.role);
+            }
+        }
+        out
+    }
+}
+
+/// The shared-mode authorizer: exact bindings, re-read per request.
+pub struct SharedAuthorizer {
+    bindings: RwLock<std::sync::Arc<RoleBindings>>,
+}
+
+impl SharedAuthorizer {
+    /// An authorizer over a binding table.
+    #[must_use]
+    pub fn new(bindings: RoleBindings) -> Self {
+        Self {
+            bindings: RwLock::new(std::sync::Arc::new(bindings)),
+        }
+    }
+
+    /// Replace the binding table. The next request uses the new one; no
+    /// session is invalidated, because sessions carry claims and never roles.
+    pub fn replace(&self, bindings: RoleBindings) {
+        *self
+            .bindings
+            .write()
+            .expect("the binding lock is never poisoned") = std::sync::Arc::new(bindings);
+    }
+
+    /// The current table.
+    #[must_use]
+    pub fn bindings(&self) -> std::sync::Arc<RoleBindings> {
+        std::sync::Arc::clone(
+            &self
+                .bindings
+                .read()
+                .expect("the binding lock is never poisoned"),
+        )
+    }
+}
+
+impl Authorizer for SharedAuthorizer {
+    fn namespaces(&self, actor: &Actor) -> Vec<String> {
+        self.bindings()
+            .roles_by_namespace(actor)
+            .into_keys()
+            .collect()
+    }
+
+    fn allows(&self, actor: &Actor, namespace: &str, action: Action) -> bool {
+        if !action.implemented() {
+            return false;
+        }
+        self.bindings()
+            .roles_by_namespace(actor)
+            .get(namespace)
+            .is_some_and(|roles| roles.iter().any(|role| role.allows(action)))
+    }
+
+    fn roles(&self, actor: &Actor, namespace: &str) -> Vec<Role> {
+        self.bindings()
+            .roles_by_namespace(actor)
+            .remove(namespace)
+            .map(|roles| roles.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    fn binding_revision(&self) -> String {
+        self.bindings().revision.clone()
+    }
+
+    fn hides_unbound_namespaces(&self) -> bool {
+        true
+    }
+}
+
+// ======================================================================
+// Separation of duties
+// ======================================================================
+
+/// An identity, as authorization compares them: issuer and subject, never a
+/// display name, an email or a key id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Principal {
+    /// The issuer.
+    pub issuer: String,
+    /// The subject.
+    pub subject: String,
+}
+
+impl Principal {
+    /// The principal of an actor.
+    #[must_use]
+    pub fn of(actor: &Actor) -> Self {
+        Self {
+            issuer: actor.issuer.clone(),
+            subject: actor.subject.clone(),
+        }
+    }
+
+    /// The stable id, `<issuer>#<subject>`.
+    #[must_use]
+    pub fn id(&self) -> String {
+        format!("{}#{}", self.issuer, self.subject)
+    }
+}
+
+/// Whether an approver is independent of a requester.
+///
+/// IT COMPARES `(issuer, subject)`. Comparing display names, email claims or
+/// key ids is not separation of duties: one person holds several keys and may
+/// change their display name, and D0 says so in as many words.
+#[must_use]
+pub fn independent_principals(requester: &Principal, approver: &Principal) -> bool {
+    requester != approver
+}
+
+/// The governed-approval decision, ahead of the PLAT-19.2 route.
+///
+/// This is the decision the route WILL call. It exists now, tested, because
+/// the tracker's acceptance is "an operator cannot assume approver rights" and
+/// "admin is not a self-approval bypass" — properties of the decision, not of
+/// the transport. The route is absent and `approvalSubmit` is advertised
+/// `false`; when PLAT-19.2 adds it, it calls this.
+///
+/// # Errors
+///
+/// `forbidden` when the actor holds no Approver binding in the namespace, or
+/// when the approver is the requester.
+pub fn authorize_governed_approval(
+    authorizer: &dyn Authorizer,
+    approver: &Actor,
+    namespace: &str,
+    requester: &Principal,
+) -> Result<(), ApiError> {
+    if !authorizer
+        .roles(approver, namespace)
+        .contains(&Role::Approver)
+    {
+        return Err(ApiError::new(
+            ProblemCode::Forbidden,
+            "Submitting a governed approval requires an Approver binding in this namespace.",
+        ));
+    }
+    if !independent_principals(requester, &Principal::of(approver)) {
+        return Err(ApiError::new(
+            ProblemCode::Forbidden,
+            "A governed approval requires an approver who is not the requester.",
+        ));
+    }
+    Ok(())
 }
 
 /// The local administrator may perform every implemented action in every
@@ -131,10 +537,16 @@ pub fn authorize(
     action: Action,
 ) -> Result<(), ApiError> {
     if !authorizer.namespaces(actor).iter().any(|n| n == namespace) {
-        return Err(ApiError::new(
-            ProblemCode::NamespaceForbidden,
-            "The namespace is not granted to this actor.",
-        ));
+        return Err(if authorizer.hides_unbound_namespaces() {
+            // Byte-for-byte what a nonexistent object answers. The audit
+            // record still carries `namespace_forbidden` as the failure code.
+            ApiError::not_found()
+        } else {
+            ApiError::new(
+                ProblemCode::NamespaceForbidden,
+                "The namespace is not granted to this actor.",
+            )
+        });
     }
     if !action.implemented() || !authorizer.allows(actor, namespace, action) {
         return Err(ApiError::new(
@@ -281,11 +693,7 @@ mod tests {
     use super::*;
 
     fn actor() -> Actor {
-        Actor {
-            issuer: "i".into(),
-            subject: "s".into(),
-            display_name: "d".into(),
-        }
+        Actor::new("i", "s", "d")
     }
 
     #[test]

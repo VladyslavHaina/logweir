@@ -48,6 +48,9 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/healthz",
             "/readyz",
             "/api/v1/session",
+            "/api/v1/session/logout",
+            "/auth/login",
+            "/auth/callback",
             "/api/v1/namespaces",
             "/api/v1/namespaces/{ns}/connections",
             "/api/v1/namespaces/{ns}/connections/{name}",
@@ -75,22 +78,47 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    assert_eq!(operation_ids.len(), 20);
+    assert_eq!(operation_ids.len(), 23);
 }
+
+/// Three documented paths exist only in shared mode: the two `/auth` routes and
+/// the logout command. In localAdmin mode they are ABSENT from the route table
+/// — 404, not 501 and not a stub — so the probe below runs each documented path
+/// against the mode that serves it, and separately asserts that localAdmin does
+/// not serve the shared three.
+const SHARED_ONLY_PATHS: [&str; 3] = ["/auth/login", "/auth/callback", "/api/v1/session/logout"];
 
 #[tokio::test]
 async fn every_documented_operation_is_routed() {
     let app = TestApp::new();
+    let shared = support::SharedApp::new(
+        support::FakeKube::new(),
+        support::idp::MockIdp::new(support::ISSUER, &[]),
+        support::SharedOptions {
+            bindings: support::default_bindings(),
+            ..support::SharedOptions::default()
+        },
+    );
+    let cookie = shared.session_cookie("u-op", &["lw-a-operators"]);
+    let csrf = shared.csrf_for("u-op");
+
     for (path, item) in document()["paths"].as_object().unwrap() {
         let concrete = path
             .replace("{ns}", support::NS_A)
             .replace("{kind}", "backup")
             .replace("{name}", "absent-object");
+        let shared_only = SHARED_ONLY_PATHS.contains(&path.as_str());
         for (method, _) in item.as_object().unwrap() {
-            let response = match method.as_str() {
-                "get" => app.get(&concrete).await,
-                "post" => app.post(&concrete, Some("documented-route-01"), "{}").await,
-                other => panic!("undocumented method {other}"),
+            let response = match (method.as_str(), shared_only) {
+                ("get", false) => app.get(&concrete).await,
+                ("post", false) => app.post(&concrete, Some("documented-route-01"), "{}").await,
+                ("get", true) => shared.get(&concrete, &cookie).await,
+                ("post", true) => {
+                    shared
+                        .post(&concrete, &cookie, Some(&csrf), None, "{}")
+                        .await
+                }
+                (other, _) => panic!("undocumented method {other}"),
             };
             assert_ne!(
                 response.status.as_u16(),
@@ -98,8 +126,32 @@ async fn every_documented_operation_is_routed() {
                 "{method} {concrete} is documented and not routed"
             );
             assert_ne!(response.status.as_u16(), 500, "{method} {concrete}");
+            if shared_only {
+                assert_ne!(
+                    response.status.as_u16(),
+                    404,
+                    "{method} {concrete} is documented and not routed in shared mode"
+                );
+            }
         }
     }
+
+    // And the three shared-only paths are not served at all in localAdmin mode.
+    assert_eq!(app.get("/auth/login").await.status.as_u16(), 404);
+    assert_eq!(
+        app.get("/auth/callback?code=x&state=y")
+            .await
+            .status
+            .as_u16(),
+        404
+    );
+    assert_eq!(
+        app.post("/api/v1/session/logout", None, "{}")
+            .await
+            .status
+            .as_u16(),
+        404
+    );
 }
 
 fn walk<'a>(

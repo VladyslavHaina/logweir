@@ -29,8 +29,12 @@ pub async fn get_one(
     authorize(&state, &actor, &ns, Action::ReadOperations)?;
     crate::http::parse_query(uri.query(), &[])?;
     let item = match kind.as_str() {
-        "backup" => status::backup_operation(&get_object::<Backup>(&state, &ns, &name).await?),
-        "restore" => status::restore_operation(&get_object::<Restore>(&state, &ns, &name).await?),
+        "backup" => {
+            status::backup_operation(&get_object::<Backup>(&state, &actor, &ns, &name).await?)
+        }
+        "restore" => {
+            status::restore_operation(&get_object::<Restore>(&state, &actor, &ns, &name).await?)
+        }
         _ => return Err(ApiError::not_found()),
     };
     Ok(json(

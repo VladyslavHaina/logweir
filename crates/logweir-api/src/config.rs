@@ -1,21 +1,37 @@
 //! The configuration file, and the refusals that happen before any socket.
 //!
-//! ONE MODE IN THIS STAGE, AND IT MUST BE NAMED. `mode: localAdmin` is an
-//! explicit administrator mode: the listener must be a loopback address, the
-//! actor is the configured local administrator, and the namespaces are the
-//! configured list and nothing discovered. There is no default mode, so a
-//! file that forgets to say which mode it wants is refused rather than read as
-//! the most permissive one. OIDC/shared mode is PLAT-17.2 and is refused here
-//! by name.
+//! TWO MODES, AND THE FILE MUST NAME ONE. There is no default mode, so a file
+//! that forgets to say which it wants is refused rather than read as the more
+//! permissive one.
+//!
+//! `mode: localAdmin` is an explicit administrator mode: the listener must be a
+//! loopback address, the actor is the configured local administrator, and the
+//! namespaces are the configured list and nothing discovered. It is not SSO and
+//! it is not a shared console.
+//!
+//! `mode: shared` is the SSO console. It refuses a non-HTTPS `publicBaseUrl`
+//! outright — TLS at the shared entry point is not a recommendation — derives
+//! the exact OIDC redirect URI from that one administrator value, reads the
+//! client secret and the session and cursor keys from mounted files, and takes
+//! role and namespace bindings as EXACT strings. There is no regex, no
+//! wildcard, no email-domain inference and no default namespace: `*` is refused
+//! by name rather than silently matching nothing.
+//!
+//! WHAT `trustedProxyCidrs` IS FOR, AND WHAT IT IS NOT. Forwarded client
+//! addresses are recorded in the audit line when the IMMEDIATE peer is inside
+//! one of these ranges. No authentication, authorization, redirect or callback
+//! decision reads a forwarded header, whatever the peer is. It is transport
+//! logging, exactly as D0 says.
 //!
 //! EVERY REFUSAL IS A [`ConfigError`] NAMING THE FIELD, and `main` exits 2 on
 //! any of them before it builds a Kubernetes client or binds a socket.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::auth::oidc::{TokenAuthMethod, SUPPORTED_ALGORITHMS};
 use crate::validate;
 
 /// The smallest cursor key this service accepts, in bytes.
@@ -30,13 +46,31 @@ pub const MAX_NAMESPACES: usize = 256;
 struct ConfigFile {
     mode: String,
     listen: String,
-    public_origin: String,
+    #[serde(default)]
+    public_origin: Option<String>,
+    #[serde(default)]
+    public_base_url: Option<String>,
+    #[serde(default)]
+    allowed_hosts: Option<Vec<String>>,
     ui_directory: PathBuf,
     #[serde(default)]
     local_admin: Option<LocalAdminFile>,
+    #[serde(default)]
+    oidc: Option<OidcFile>,
+    #[serde(default)]
+    roles: Option<RolesFile>,
+    #[serde(default)]
+    session_key: Option<KeyRefFile>,
+    #[serde(default)]
+    session_max_age_seconds: Option<i64>,
+    #[serde(default)]
+    trusted_proxy_cidrs: Option<Vec<String>>,
     namespaces: Vec<String>,
     kubernetes: KubernetesFile,
-    cursor_key_file: PathBuf,
+    #[serde(default)]
+    cursor_key_file: Option<PathBuf>,
+    #[serde(default)]
+    cursor_key: Option<KeyRefFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +79,51 @@ struct LocalAdminFile {
     subject: String,
     #[serde(default)]
     display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct KeyRefFile {
+    file: PathBuf,
+    expected_version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct OidcFile {
+    issuer: String,
+    client_id: String,
+    client_secret_file: PathBuf,
+    #[serde(default)]
+    allowed_algorithms: Option<Vec<String>>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+    #[serde(default)]
+    groups_claim: Option<String>,
+    #[serde(default)]
+    display_name_claim: Option<String>,
+    #[serde(default)]
+    token_auth_method: Option<String>,
+    #[serde(default)]
+    insecure_loopback_issuer: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RolesFile {
+    revision: String,
+    bindings: Vec<RoleBindingFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RoleBindingFile {
+    role: String,
+    namespace: String,
+    #[serde(default)]
+    groups: Vec<String>,
+    #[serde(default)]
+    subjects: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,26 +161,209 @@ pub struct LocalAdmin {
     pub display_name: String,
 }
 
+/// A versioned key file and the version the configuration expects it to carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRef {
+    /// The mounted file.
+    pub file: PathBuf,
+    /// The version the file must declare. A mismatch is a startup refusal.
+    pub expected_version: u32,
+}
+
+/// Where the cursor MAC key comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CursorKeySource {
+    /// localAdmin mode: a file of raw random bytes, unversioned. Unchanged
+    /// from the first release so an existing administrator setup keeps working.
+    RawFile(PathBuf),
+    /// shared mode: a versioned key file, like the session key.
+    Versioned(KeyRef),
+}
+
+/// The validated OIDC block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OidcConfig {
+    /// The exact issuer, with no trailing slash.
+    pub issuer: String,
+    /// The exact client ID, which is also the expected audience.
+    pub client_id: String,
+    /// The mounted client-secret file.
+    pub client_secret_file: PathBuf,
+    /// The allowed JWS algorithms, a non-empty subset of the two this service
+    /// verifies.
+    pub allowed_algorithms: Vec<String>,
+    /// The scopes requested. Always contains `openid`.
+    pub scopes: Vec<String>,
+    /// The exact claim name carrying group membership.
+    pub groups_claim: String,
+    /// The exact claim name carrying a display name.
+    pub display_name_claim: String,
+    /// How the client authenticates at the token endpoint.
+    pub token_auth_method: TokenAuthMethod,
+    /// Whether a plain-HTTP loopback issuer is permitted. For a local mock
+    /// provider in development and tests; refused for any non-loopback host.
+    pub insecure_loopback_issuer: bool,
+}
+
+/// The validated role-binding table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RolesConfig {
+    /// The administrator's revision string, recorded in every audit line.
+    pub revision: String,
+    /// The bindings, in configuration order.
+    pub bindings: Vec<crate::authz::RoleBinding>,
+}
+
+/// Everything shared mode adds.
+#[derive(Clone, Debug)]
+pub struct SharedConfig {
+    /// The exact HTTPS base URL, with no path and no trailing slash. It is the
+    /// public origin and the root of the redirect URI.
+    pub public_base_url: String,
+    /// The exact redirect URI, `<publicBaseUrl>/auth/callback`.
+    pub redirect_uri: String,
+    /// The OIDC block.
+    pub oidc: OidcConfig,
+    /// The session key file and its expected version.
+    pub session_key: KeyRef,
+    /// The session lifetime in seconds, at most fifteen minutes.
+    pub session_max_age_seconds: i64,
+    /// The role bindings.
+    pub roles: RolesConfig,
+    /// Proxy ranges whose forwarded headers may be recorded in the transport
+    /// log. Never an authorization input.
+    pub trusted_proxy_cidrs: Vec<Cidr>,
+}
+
+/// Which mode the file asked for, with that mode's settings.
+#[derive(Clone, Debug)]
+pub enum Mode {
+    /// The explicit loopback administrator mode.
+    LocalAdmin(LocalAdmin),
+    /// The SSO console.
+    Shared(Box<SharedConfig>),
+}
+
+impl Mode {
+    /// The mode's name, as written in the file and logged at startup.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Mode::LocalAdmin(_) => "localAdmin",
+            Mode::Shared(_) => "shared",
+        }
+    }
+
+    /// The shared settings, if this is shared mode.
+    #[must_use]
+    pub fn shared(&self) -> Option<&SharedConfig> {
+        match self {
+            Mode::Shared(shared) => Some(shared),
+            Mode::LocalAdmin(_) => None,
+        }
+    }
+}
+
 /// A validated configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The loopback socket address to bind.
+    /// The socket address to bind. Loopback only in localAdmin mode.
     pub listen: SocketAddr,
-    /// The exact origin unsafe requests must carry, e.g.
-    /// `http://127.0.0.1:8484`.
+    /// The exact origin unsafe requests must carry.
     pub public_origin: String,
     /// `Host` header values this listener serves.
     pub allowed_hosts: Vec<String>,
     /// The static UI directory.
     pub ui_directory: PathBuf,
-    /// The configured local administrator.
-    pub local_admin: LocalAdmin,
+    /// The mode and its settings.
+    pub mode: Mode,
     /// The explicitly granted namespaces, in configuration order.
     pub namespaces: Vec<String>,
     /// The Kubernetes client source.
     pub kubernetes: KubeSource,
-    /// The cursor MAC key file.
-    pub cursor_key_file: PathBuf,
+    /// Where the cursor MAC key comes from.
+    pub cursor_key: CursorKeySource,
+}
+
+impl Config {
+    /// The local administrator, when this is localAdmin mode.
+    #[must_use]
+    pub fn local_admin(&self) -> Option<&LocalAdmin> {
+        match &self.mode {
+            Mode::LocalAdmin(admin) => Some(admin),
+            Mode::Shared(_) => None,
+        }
+    }
+
+    /// The shared settings, when this is shared mode.
+    #[must_use]
+    pub fn shared(&self) -> Option<&SharedConfig> {
+        self.mode.shared()
+    }
+}
+
+/// An IPv4 or IPv6 CIDR range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cidr {
+    base: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    /// Parse `a.b.c.d/len` or `addr::/len`.
+    ///
+    /// # Errors
+    ///
+    /// A short reason.
+    pub fn parse(value: &str) -> Result<Cidr, &'static str> {
+        let (address, prefix) = value.split_once('/').ok_or("a CIDR needs a `/<length>`")?;
+        let base: IpAddr = address.parse().map_err(|_| "not an IP address")?;
+        let prefix: u8 = prefix.parse().map_err(|_| "not a prefix length")?;
+        let max = match base {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix > max {
+            return Err("the prefix length is longer than the address");
+        }
+        Ok(Cidr { base, prefix })
+    }
+
+    /// Whether an address falls in this range.
+    #[must_use]
+    pub fn contains(&self, address: IpAddr) -> bool {
+        match (self.base, address) {
+            (IpAddr::V4(base), IpAddr::V4(other)) => {
+                masked_v4(base, self.prefix) == masked_v4(other, self.prefix)
+            }
+            (IpAddr::V6(base), IpAddr::V6(other)) => {
+                masked_v6(base, self.prefix) == masked_v6(other, self.prefix)
+            }
+            // An IPv4-mapped IPv6 peer is the IPv4 address it maps to.
+            (IpAddr::V4(_), IpAddr::V6(other)) => other
+                .to_ipv4_mapped()
+                .is_some_and(|v4| self.contains(IpAddr::V4(v4))),
+            (IpAddr::V6(_), IpAddr::V4(_)) => false,
+        }
+    }
+}
+
+fn masked_v4(address: Ipv4Addr, prefix: u8) -> u32 {
+    let bits = u32::from(address);
+    if prefix == 0 {
+        0
+    } else {
+        bits & (u32::MAX << (32 - prefix))
+    }
+}
+
+fn masked_v6(address: Ipv6Addr, prefix: u8) -> u128 {
+    let bits = u128::from(address);
+    if prefix == 0 {
+        0
+    } else {
+        bits & (u128::MAX << (128 - prefix))
+    }
 }
 
 /// A refusal, naming the field.
@@ -160,25 +422,44 @@ impl Config {
         let file: ConfigFile =
             serde_yaml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
-        match file.mode.as_str() {
-            "localAdmin" => {}
-            "shared" | "oidc" => {
-                return Err(field(
-                    "mode",
-                    "shared OIDC mode is not implemented in this release (PLAT-17.2); only \
-                     `localAdmin` is accepted",
-                ))
-            }
-            other => {
-                return Err(field(
-                    "mode",
-                    format!("`{other}` is not a mode; the only accepted value is `localAdmin`"),
-                ))
-            }
-        }
+        let namespaces = check_namespaces(&file.namespaces)?;
+        let kubernetes = kube_source(base, &file.kubernetes)?;
 
+        match file.mode.as_str() {
+            "localAdmin" => Config::local_admin_mode(file, base, namespaces, kubernetes),
+            "shared" => Config::shared_mode(file, base, namespaces, kubernetes),
+            other => Err(field(
+                "mode",
+                format!(
+                    "`{other}` is not a mode; the accepted values are `localAdmin` (an explicit \
+                     loopback administrator listener) and `shared` (the SSO console)"
+                ),
+            )),
+        }
+    }
+
+    fn local_admin_mode(
+        file: ConfigFile,
+        base: &Path,
+        namespaces: Vec<String>,
+        kubernetes: KubeSource,
+    ) -> Result<Config, ConfigError> {
         let listen = parse_loopback_listen(&file.listen)?;
-        let public_origin = parse_local_origin(&file.public_origin, listen.port())?;
+        let public_origin = file.public_origin.clone().ok_or_else(|| {
+            field(
+                "publicOrigin",
+                "localAdmin mode requires the exact loopback origin the browser uses",
+            )
+        })?;
+        let public_origin = parse_local_origin(&public_origin, listen.port())?;
+        refuse_shared_only_fields(&file)?;
+        if file.allowed_hosts.is_some() {
+            return Err(field(
+                "allowedHosts",
+                "localAdmin mode derives the served Host values from `publicOrigin` and the \
+                 listen port",
+            ));
+        }
         let allowed_hosts = allowed_hosts(&public_origin, listen.port());
 
         let local_admin = match file.local_admin {
@@ -210,77 +491,536 @@ impl Config {
             }
         };
 
-        if file.namespaces.is_empty() {
+        let cursor_key_file = file.cursor_key_file.ok_or_else(|| {
+            field(
+                "cursorKeyFile",
+                "localAdmin mode requires `cursorKeyFile`, a file of at least 32 random bytes",
+            )
+        })?;
+        if file.cursor_key.is_some() {
             return Err(field(
-                "namespaces",
-                "at least one namespace must be granted explicitly; this service never lists \
-                 core Namespace objects",
+                "cursorKey",
+                "`cursorKey` is the shared-mode versioned form; localAdmin mode uses \
+                 `cursorKeyFile`",
             ));
         }
-        if file.namespaces.len() > MAX_NAMESPACES {
-            return Err(field(
-                "namespaces",
-                format!("at most {MAX_NAMESPACES} namespaces may be granted"),
-            ));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for ns in &file.namespaces {
-            if !validate::is_dns_label(ns) {
-                return Err(field(
-                    "namespaces",
-                    format!("`{ns}` is not a DNS-1123 label"),
-                ));
-            }
-            if !seen.insert(ns.as_str()) {
-                return Err(field("namespaces", format!("`{ns}` is listed twice")));
-            }
-        }
-
-        let kubernetes = match file.kubernetes.source.as_str() {
-            "inCluster" => {
-                if file.kubernetes.kubeconfig.is_some() || file.kubernetes.context.is_some() {
-                    return Err(field(
-                        "kubernetes",
-                        "`source: inCluster` takes neither `kubeconfig` nor `context`",
-                    ));
-                }
-                KubeSource::InCluster
-            }
-            "kubeconfig" => {
-                let context = match file.kubernetes.context {
-                    Some(context) if !context.trim().is_empty() => context,
-                    _ => {
-                        return Err(field(
-                            "kubernetes.context",
-                            "`source: kubeconfig` requires an explicit `context`; the \
-                             kubeconfig's current-context is never used",
-                        ))
-                    }
-                };
-                KubeSource::Kubeconfig {
-                    path: file.kubernetes.kubeconfig.map(|p| resolve(base, &p)),
-                    context,
-                }
-            }
-            other => {
-                return Err(field(
-                    "kubernetes.source",
-                    format!("`{other}` is not a source; use `inCluster` or `kubeconfig`"),
-                ))
-            }
-        };
 
         Ok(Config {
             listen,
             public_origin,
             allowed_hosts,
             ui_directory: resolve(base, &file.ui_directory),
-            local_admin,
-            namespaces: file.namespaces,
+            mode: Mode::LocalAdmin(local_admin),
+            namespaces,
             kubernetes,
-            cursor_key_file: resolve(base, &file.cursor_key_file),
+            cursor_key: CursorKeySource::RawFile(resolve(base, &cursor_key_file)),
         })
     }
+
+    fn shared_mode(
+        file: ConfigFile,
+        base: &Path,
+        namespaces: Vec<String>,
+        kubernetes: KubeSource,
+    ) -> Result<Config, ConfigError> {
+        if file.local_admin.is_some() {
+            return Err(field(
+                "localAdmin",
+                "shared mode has no local administrator; every actor is an authenticated OIDC \
+                 subject",
+            ));
+        }
+        if file.public_origin.is_some() {
+            return Err(field(
+                "publicOrigin",
+                "shared mode derives the origin from `publicBaseUrl`, so that the origin the \
+                 browser is checked against and the redirect URI the provider is given cannot \
+                 disagree",
+            ));
+        }
+        let listen: SocketAddr = file.listen.parse().map_err(|_| {
+            field(
+                "listen",
+                format!(
+                    "`{}` is not an IP:port socket address (hostnames are refused)",
+                    file.listen
+                ),
+            )
+        })?;
+        if listen.port() == 0 {
+            return Err(field("listen", "an explicit, non-zero port is required"));
+        }
+
+        let raw_base = file.public_base_url.clone().ok_or_else(|| {
+            field(
+                "publicBaseUrl",
+                "shared mode requires the exact HTTPS URL the browser uses; the redirect URI is \
+                 derived from it and nothing reads Host or X-Forwarded-*",
+            )
+        })?;
+        let public_base_url = parse_public_base_url(&raw_base)?;
+        let redirect_uri = format!("{public_base_url}{}", crate::auth::login::CALLBACK_SUFFIX);
+
+        let mut allowed = vec![authority_of(&public_base_url)];
+        for extra in file.allowed_hosts.unwrap_or_default() {
+            validate::check_single_line(&extra, 253).map_err(|code| field("allowedHosts", code))?;
+            if !allowed.iter().any(|h| h == &extra) {
+                allowed.push(extra);
+            }
+        }
+
+        let oidc_file = file
+            .oidc
+            .ok_or_else(|| field("oidc", "shared mode requires the `oidc` block"))?;
+        let oidc = parse_oidc(base, oidc_file)?;
+
+        let session_key = file.session_key.ok_or_else(|| {
+            field(
+                "sessionKey",
+                "shared mode requires `sessionKey.file` and `sessionKey.expectedVersion`; the \
+                 version travels in the cookie and a mismatch is a startup refusal",
+            )
+        })?;
+        let cursor_key = file.cursor_key.ok_or_else(|| {
+            field(
+                "cursorKey",
+                "shared mode requires `cursorKey.file` and `cursorKey.expectedVersion`",
+            )
+        })?;
+        if file.cursor_key_file.is_some() {
+            return Err(field(
+                "cursorKeyFile",
+                "`cursorKeyFile` is the localAdmin unversioned form; shared mode uses \
+                 `cursorKey.{file,expectedVersion}`",
+            ));
+        }
+
+        let session_max_age_seconds = file
+            .session_max_age_seconds
+            .unwrap_or(crate::auth::session::MAX_SESSION_SECONDS);
+        if !(60..=crate::auth::session::MAX_SESSION_SECONDS).contains(&session_max_age_seconds) {
+            return Err(field(
+                "sessionMaxAgeSeconds",
+                format!(
+                    "must be between 60 and {} seconds; a stateless session cannot be revoked \
+                     before it expires, so its maximum is fixed",
+                    crate::auth::session::MAX_SESSION_SECONDS
+                ),
+            ));
+        }
+
+        let roles = parse_roles(
+            file.roles.ok_or_else(|| {
+                field(
+                    "roles",
+                    "shared mode requires `roles.revision` and at least one `roles.bindings` \
+                     entry; there is no default namespace and no implicit grant",
+                )
+            })?,
+            &namespaces,
+        )?;
+
+        let mut trusted_proxy_cidrs = Vec::new();
+        for raw in file.trusted_proxy_cidrs.unwrap_or_default() {
+            trusted_proxy_cidrs.push(
+                Cidr::parse(&raw)
+                    .map_err(|reason| field("trustedProxyCidrs", format!("`{raw}`: {reason}")))?,
+            );
+        }
+
+        Ok(Config {
+            listen,
+            public_origin: public_base_url.clone(),
+            allowed_hosts: allowed,
+            ui_directory: resolve(base, &file.ui_directory),
+            mode: Mode::Shared(Box::new(SharedConfig {
+                public_base_url,
+                redirect_uri,
+                oidc,
+                session_key: KeyRef {
+                    file: resolve(base, &session_key.file),
+                    expected_version: session_key.expected_version,
+                },
+                session_max_age_seconds,
+                roles,
+                trusted_proxy_cidrs,
+            })),
+            namespaces,
+            kubernetes,
+            cursor_key: CursorKeySource::Versioned(KeyRef {
+                file: resolve(base, &cursor_key.file),
+                expected_version: cursor_key.expected_version,
+            }),
+        })
+    }
+}
+
+fn refuse_shared_only_fields(file: &ConfigFile) -> Result<(), ConfigError> {
+    for (present, name) in [
+        (file.public_base_url.is_some(), "publicBaseUrl"),
+        (file.oidc.is_some(), "oidc"),
+        (file.roles.is_some(), "roles"),
+        (file.session_key.is_some(), "sessionKey"),
+        (
+            file.session_max_age_seconds.is_some(),
+            "sessionMaxAgeSeconds",
+        ),
+        (file.trusted_proxy_cidrs.is_some(), "trustedProxyCidrs"),
+    ] {
+        if present {
+            return Err(field(
+                name,
+                "this field belongs to `mode: shared`; localAdmin mode has no session, no \
+                 identity provider and no role bindings",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_namespaces(namespaces: &[String]) -> Result<Vec<String>, ConfigError> {
+    if namespaces.is_empty() {
+        return Err(field(
+            "namespaces",
+            "at least one namespace must be granted explicitly; this service never lists \
+             core Namespace objects",
+        ));
+    }
+    if namespaces.len() > MAX_NAMESPACES {
+        return Err(field(
+            "namespaces",
+            format!("at most {MAX_NAMESPACES} namespaces may be granted"),
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for ns in namespaces {
+        if !validate::is_dns_label(ns) {
+            return Err(field(
+                "namespaces",
+                format!("`{ns}` is not a DNS-1123 label"),
+            ));
+        }
+        if !seen.insert(ns.as_str()) {
+            return Err(field("namespaces", format!("`{ns}` is listed twice")));
+        }
+    }
+    Ok(namespaces.to_vec())
+}
+
+fn kube_source(base: &Path, file: &KubernetesFile) -> Result<KubeSource, ConfigError> {
+    match file.source.as_str() {
+        "inCluster" => {
+            if file.kubeconfig.is_some() || file.context.is_some() {
+                return Err(field(
+                    "kubernetes",
+                    "`source: inCluster` takes neither `kubeconfig` nor `context`",
+                ));
+            }
+            Ok(KubeSource::InCluster)
+        }
+        "kubeconfig" => {
+            let context = match file.context.clone() {
+                Some(context) if !context.trim().is_empty() => context,
+                _ => {
+                    return Err(field(
+                        "kubernetes.context",
+                        "`source: kubeconfig` requires an explicit `context`; the \
+                         kubeconfig's current-context is never used",
+                    ))
+                }
+            };
+            Ok(KubeSource::Kubeconfig {
+                path: file.kubeconfig.as_deref().map(|p| resolve(base, p)),
+                context,
+            })
+        }
+        other => Err(field(
+            "kubernetes.source",
+            format!("`{other}` is not a source; use `inCluster` or `kubeconfig`"),
+        )),
+    }
+}
+
+/// `https://host[:port]`, nothing else. The refusal of `http` in shared mode
+/// is the TLS requirement, enforced before a socket exists.
+fn parse_public_base_url(value: &str) -> Result<String, ConfigError> {
+    let refuse = |reason: &str| field("publicBaseUrl", format!("`{value}`: {reason}"));
+    let (scheme, rest) = value
+        .split_once("://")
+        .ok_or_else(|| refuse("must be https://host[:port]"))?;
+    if scheme == "http" {
+        return Err(refuse(
+            "shared mode refuses a non-HTTPS public URL; TLS at the shared entry point is \
+             required, and terminating it at the supported ingress controller is the \
+             documented deployment",
+        ));
+    }
+    if scheme != "https" {
+        return Err(refuse("the scheme must be https"));
+    }
+    if rest.is_empty() || rest.contains('/') || rest.contains('?') || rest.contains('#') {
+        return Err(refuse(
+            "the base URL carries no path, query or fragment (no trailing slash); the redirect \
+             URI is this value plus /auth/callback",
+        ));
+    }
+    if rest.contains('@') {
+        return Err(refuse("a URL used as an origin carries no userinfo"));
+    }
+    if rest.contains(char::is_whitespace) || rest.chars().any(char::is_control) {
+        return Err(refuse("the authority carries no whitespace"));
+    }
+    let host = rest.split(':').next().unwrap_or("");
+    if host.is_empty() {
+        return Err(refuse("the authority carries no host"));
+    }
+    Ok(value.to_string())
+}
+
+fn authority_of(url: &str) -> String {
+    url.split_once("://")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| url.to_string())
+}
+
+fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
+    let issuer = file.issuer.trim().to_string();
+    let insecure_loopback_issuer = file.insecure_loopback_issuer.unwrap_or(false);
+    let (scheme, rest) = issuer
+        .split_once("://")
+        .ok_or_else(|| field("oidc.issuer", "must be an absolute URL"))?;
+    if issuer.ends_with('/') {
+        return Err(field(
+            "oidc.issuer",
+            "must be the issuer EXACTLY as the provider states it in its discovery document, \
+             which never ends in a slash",
+        ));
+    }
+    if rest.contains('?') || rest.contains('#') || rest.contains('@') {
+        return Err(field(
+            "oidc.issuer",
+            "carries no query, fragment or userinfo",
+        ));
+    }
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .rsplit_once(':')
+        .map_or_else(
+            || rest.split('/').next().unwrap_or("").to_string(),
+            |(h, _)| h.to_string(),
+        );
+    let loopback_host = host == "localhost"
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .map(is_loopback)
+            .unwrap_or(false);
+    match scheme {
+        "https" => {}
+        "http" if insecure_loopback_issuer && loopback_host => {}
+        "http" => {
+            return Err(field(
+                "oidc.issuer",
+                "a plain-HTTP issuer is accepted only for a loopback host and only with \
+                 `oidc.insecureLoopbackIssuer: true`, which exists for a local mock provider \
+                 in development and tests",
+            ))
+        }
+        other => {
+            return Err(field(
+                "oidc.issuer",
+                format!("`{other}` is not a scheme an issuer may use"),
+            ))
+        }
+    }
+    if insecure_loopback_issuer && !loopback_host {
+        return Err(field(
+            "oidc.insecureLoopbackIssuer",
+            "may be set only when the issuer's host is a loopback address",
+        ));
+    }
+
+    validate::check_single_line(&file.client_id, 256)
+        .map_err(|code| field("oidc.clientId", code))?;
+    if file.client_id.trim().is_empty() {
+        return Err(field("oidc.clientId", "must not be empty"));
+    }
+
+    let allowed_algorithms = file.allowed_algorithms.unwrap_or_else(|| {
+        SUPPORTED_ALGORITHMS
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect()
+    });
+    if allowed_algorithms.is_empty() {
+        return Err(field(
+            "oidc.allowedAlgorithms",
+            "at least one algorithm must be allowed",
+        ));
+    }
+    for algorithm in &allowed_algorithms {
+        if !SUPPORTED_ALGORITHMS.contains(&algorithm.as_str()) {
+            return Err(field(
+                "oidc.allowedAlgorithms",
+                format!(
+                    "`{algorithm}` is not verified by this service; the supported values are {}",
+                    SUPPORTED_ALGORITHMS.join(", ")
+                ),
+            ));
+        }
+    }
+
+    let scopes = file.scopes.unwrap_or_else(|| {
+        ["openid", "profile", "groups"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    });
+    if !scopes.iter().any(|s| s == "openid") {
+        return Err(field(
+            "oidc.scopes",
+            "must contain `openid`; without it the provider issues no ID token",
+        ));
+    }
+    for scope in &scopes {
+        if scope.is_empty() || scope.contains(char::is_whitespace) {
+            return Err(field("oidc.scopes", "a scope carries no whitespace"));
+        }
+    }
+
+    let groups_claim = file.groups_claim.unwrap_or_else(|| "groups".to_string());
+    let display_name_claim = file
+        .display_name_claim
+        .unwrap_or_else(|| "name".to_string());
+    for (value, name) in [
+        (&groups_claim, "oidc.groupsClaim"),
+        (&display_name_claim, "oidc.displayNameClaim"),
+    ] {
+        validate::check_single_line(value, 64).map_err(|code| field(name, code))?;
+        if value.trim().is_empty() {
+            return Err(field(name, "must not be empty"));
+        }
+    }
+
+    let token_auth_method = match file.token_auth_method.as_deref() {
+        None | Some("clientSecretBasic") => TokenAuthMethod::ClientSecretBasic,
+        Some("clientSecretPost") => TokenAuthMethod::ClientSecretPost,
+        Some(other) => {
+            return Err(field(
+                "oidc.tokenAuthMethod",
+                format!("`{other}` is not a method; use `clientSecretBasic` or `clientSecretPost`"),
+            ))
+        }
+    };
+
+    Ok(OidcConfig {
+        issuer,
+        client_id: file.client_id,
+        client_secret_file: resolve(base, &file.client_secret_file),
+        allowed_algorithms,
+        scopes,
+        groups_claim,
+        display_name_claim,
+        token_auth_method,
+        insecure_loopback_issuer,
+    })
+}
+
+fn parse_roles(file: RolesFile, namespaces: &[String]) -> Result<RolesConfig, ConfigError> {
+    validate::check_single_line(&file.revision, 128)
+        .map_err(|code| field("roles.revision", code))?;
+    if file.revision.trim().is_empty() {
+        return Err(field(
+            "roles.revision",
+            "must name the revision of this binding table; it is recorded in every audit line",
+        ));
+    }
+    if file.bindings.is_empty() {
+        return Err(field(
+            "roles.bindings",
+            "at least one binding is required; an empty table grants nothing to anyone",
+        ));
+    }
+    let mut bindings = Vec::with_capacity(file.bindings.len());
+    for (index, binding) in file.bindings.into_iter().enumerate() {
+        let at = |what: &str| format!("roles.bindings[{index}]: {what}");
+        let role = crate::authz::Role::parse(&binding.role).ok_or_else(|| {
+            field(
+                "roles.bindings",
+                at(&format!(
+                    "`{}` is not a role; the roles are viewer, operator, approver, administrator",
+                    binding.role
+                )),
+            )
+        })?;
+        if !namespaces.iter().any(|n| n == &binding.namespace) {
+            return Err(field(
+                "roles.bindings",
+                at(&format!(
+                    "namespace `{}` is not in `namespaces`; a binding cannot grant a namespace \
+                     this service does not manage",
+                    binding.namespace
+                )),
+            ));
+        }
+        if binding.groups.is_empty() && binding.subjects.is_empty() {
+            return Err(field(
+                "roles.bindings",
+                at("a binding needs at least one exact `groups` or `subjects` entry"),
+            ));
+        }
+        for group in &binding.groups {
+            check_exact(group, "groups", &at)?;
+        }
+        for subject in &binding.subjects {
+            check_exact(subject, "subjects", &at)?;
+            if !subject.contains('#') {
+                return Err(field(
+                    "roles.bindings",
+                    at(&format!(
+                        "`{subject}` is not an actor id; a subject binding is the exact \
+                         `<issuer>#<subject>` string the session reports"
+                    )),
+                ));
+            }
+        }
+        bindings.push(crate::authz::RoleBinding {
+            role,
+            namespace: binding.namespace,
+            groups: binding.groups,
+            subjects: binding.subjects,
+        });
+    }
+    Ok(RolesConfig {
+        revision: file.revision,
+        bindings,
+    })
+}
+
+fn check_exact(value: &str, what: &str, at: &impl Fn(&str) -> String) -> Result<(), ConfigError> {
+    validate::check_single_line(value, 320)
+        .map_err(|code| field("roles.bindings", at(&format!("{what}: {code}"))))?;
+    if value.trim().is_empty() {
+        return Err(field(
+            "roles.bindings",
+            at(&format!(
+                "{what}: an empty string matches nothing and is refused"
+            )),
+        ));
+    }
+    if value.contains('*') || value.contains('?') {
+        return Err(field(
+            "roles.bindings",
+            at(&format!(
+                "{what}: `{value}` looks like a pattern. Bindings are EXACT strings: there is \
+                 no wildcard, no regex and no domain inference, so a `*` here would match \
+                 nothing rather than everything"
+            )),
+        ));
+    }
+    Ok(())
 }
 
 fn resolve(base: &Path, path: &Path) -> PathBuf {
@@ -494,8 +1234,8 @@ mod tests {
         // prose under the block says.
         assert_eq!(config.ui_directory, PathBuf::from("/etc/logweir/ui"));
         assert_eq!(
-            config.cursor_key_file,
-            PathBuf::from("/etc/logweir/cursor.key")
+            config.cursor_key,
+            CursorKeySource::RawFile(PathBuf::from("/etc/logweir/cursor.key"))
         );
         // The example omits `kubeconfig`, so the client library's own
         // KUBECONFIG/home lookup applies — the only place `~` expansion belongs.
@@ -613,7 +1353,8 @@ mod tests {
             Config::parse(&t, Path::new(".")),
             Err(ConfigError::Parse(_))
         ));
-        let t = text("127.0.0.1:8484", "http://127.0.0.1:8484").replace("localAdmin\n", "shared\n");
+        let t = text("127.0.0.1:8484", "http://127.0.0.1:8484")
+            .replace("localAdmin\n", "proxyEverything\n");
         assert!(matches!(
             Config::parse(&t, Path::new(".")),
             Err(ConfigError::Field { field: "mode", .. })

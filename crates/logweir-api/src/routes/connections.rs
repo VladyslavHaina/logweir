@@ -67,7 +67,7 @@ pub async fn get_one(
 ) -> Result<Response, ApiError> {
     authorize(&state, &actor, &ns, Action::ReadConnections)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<KafkaCluster>(&state, &ns, &name).await?;
+    let object = get_object::<KafkaCluster>(&state, &actor, &ns, &name).await?;
     Ok(json(
         StatusCode::OK,
         &ConnectionResponse {

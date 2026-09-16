@@ -17,6 +17,8 @@
 
 #![allow(dead_code)]
 
+pub mod idp;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,7 +29,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use http::{Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
-use logweir_api::app::{AppState, Clock, Settings};
+use logweir_api::app::{AppState, Clock, Settings, SharedMode};
 use logweir_api::auth::{Authenticator, LocalAdminAuthenticator};
 use logweir_api::authz::{Authorizer, LocalAdminAuthorizer};
 use logweir_api::cursor::CursorKey;
@@ -37,6 +39,12 @@ use tower::ServiceExt as _;
 
 pub const ORIGIN: &str = "http://127.0.0.1:8484";
 pub const HOST: &str = "127.0.0.1:8484";
+/// The shared-mode origin, host and issuer used by every identity test.
+pub const SHARED_ORIGIN: &str = "https://console.test";
+pub const SHARED_HOST: &str = "console.test";
+pub const ISSUER: &str = "https://idp.test/realms/logweir";
+pub const CLIENT_ID: &str = "logweir-console";
+pub const REDIRECT_URI: &str = "https://console.test/auth/callback";
 pub const NS_A: &str = "team-a";
 pub const NS_B: &str = "team-b";
 pub const PLURALS: [&str; 5] = [
@@ -597,6 +605,9 @@ pub struct Options {
     pub deadline: Duration,
     pub ui_dir: PathBuf,
     pub cursor_key: Vec<u8>,
+    pub public_origin: String,
+    pub allowed_hosts: Vec<String>,
+    pub shared: Option<Arc<SharedMode>>,
 }
 
 impl Default for Options {
@@ -608,6 +619,13 @@ impl Default for Options {
             deadline: Duration::from_secs(10),
             ui_dir: repo_root().join("ui"),
             cursor_key: vec![0x5a; 32],
+            public_origin: ORIGIN.to_string(),
+            allowed_hosts: vec![
+                "127.0.0.1:8484".into(),
+                "localhost:8484".into(),
+                "[::1]:8484".into(),
+            ],
+            shared: None,
         }
     }
 }
@@ -704,15 +722,12 @@ impl TestApp {
             kube: KubeAdapter::with_deadline(fake.client(), options.deadline),
             cursor_key: CursorKey::new(options.cursor_key),
             clock: clock.clone() as Arc<dyn Clock>,
-            public_origin: ORIGIN.to_string(),
-            allowed_hosts: vec![
-                "127.0.0.1:8484".into(),
-                "localhost:8484".into(),
-                "[::1]:8484".into(),
-            ],
+            public_origin: options.public_origin.clone(),
+            allowed_hosts: options.allowed_hosts.clone(),
             assets: logweir_api::assets::StaticAssets::load(&options.ui_dir)
                 .expect("the UI directory loads"),
             readiness_namespace: options.namespaces[0].clone(),
+            shared: options.shared.clone(),
         });
         Self {
             router: logweir_api::app::router(state),
@@ -825,4 +840,238 @@ pub fn fixture(name: &str) -> Value {
         &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
     )
     .expect("fixtures are JSON")
+}
+
+// ------------------------------------------------------- shared-mode harness
+
+use logweir_api::auth::keys::{CookieKeys, VersionedKey};
+use logweir_api::auth::oidc::{OidcSettings, Provider, Secret, TokenAuthMethod};
+use logweir_api::auth::ratelimit::{RateLimiter, StreamSlots};
+use logweir_api::auth::session::{self, SessionClaims};
+use logweir_api::auth::shared::SessionAuthenticator;
+use logweir_api::authz::{Role, RoleBinding, RoleBindings, SharedAuthorizer};
+
+/// How a shared-mode test app is put together.
+pub struct SharedOptions {
+    /// The role-binding table.
+    pub bindings: RoleBindings,
+    /// The session key's version.
+    pub key_version: u32,
+    /// The session key bytes.
+    pub key_bytes: Vec<u8>,
+    /// The session lifetime.
+    pub session_max_age_seconds: i64,
+    /// The allowed JWS algorithms.
+    pub allowed_algorithms: Vec<String>,
+    /// Peer ranges whose forwarded headers may be recorded.
+    pub trusted_proxy_cidrs: Vec<logweir_api::config::Cidr>,
+    /// The login rate limiter.
+    pub login_limiter: Option<RateLimiter>,
+}
+
+impl Default for SharedOptions {
+    fn default() -> Self {
+        Self {
+            bindings: RoleBindings::default(),
+            key_version: 1,
+            key_bytes: vec![0x7e; 32],
+            session_max_age_seconds: 900,
+            allowed_algorithms: vec!["RS256".into(), "ES256".into()],
+            trusted_proxy_cidrs: Vec::new(),
+            login_limiter: None,
+        }
+    }
+}
+
+/// One binding, for the table a test declares.
+pub fn binding(role: Role, namespace: &str, groups: &[&str]) -> RoleBinding {
+    RoleBinding {
+        role,
+        namespace: namespace.to_string(),
+        groups: groups.iter().map(|g| (*g).to_string()).collect(),
+        subjects: Vec::new(),
+    }
+}
+
+/// One binding by exact subject.
+pub fn subject_binding(role: Role, namespace: &str, subjects: &[&str]) -> RoleBinding {
+    RoleBinding {
+        role,
+        namespace: namespace.to_string(),
+        groups: Vec::new(),
+        subjects: subjects.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+/// The default two-namespace table the matrix tests use.
+pub fn default_bindings() -> RoleBindings {
+    RoleBindings {
+        revision: "rev-1".into(),
+        bindings: vec![
+            binding(Role::Viewer, NS_A, &["lw-a-viewers"]),
+            binding(Role::Operator, NS_A, &["lw-a-operators"]),
+            binding(Role::Approver, NS_A, &["lw-a-approvers"]),
+            binding(Role::Administrator, NS_A, &["lw-a-admins"]),
+            binding(Role::Viewer, NS_B, &["lw-b-viewers"]),
+            binding(Role::Operator, NS_B, &["lw-b-operators"]),
+            binding(Role::Approver, NS_B, &["lw-b-approvers"]),
+            binding(Role::Administrator, NS_B, &["lw-b-admins"]),
+        ],
+    }
+}
+
+/// A shared-mode app, its provider double and its session keys.
+pub struct SharedApp {
+    pub app: TestApp,
+    pub idp: idp::MockIdp,
+    pub keys: Arc<CookieKeys>,
+    pub authorizer: Arc<SharedAuthorizer>,
+}
+
+impl SharedApp {
+    /// Build one over a fake cluster and a provider double.
+    pub fn new(fake: FakeKube, idp: idp::MockIdp, options: SharedOptions) -> Self {
+        let clock = TestClock::new();
+        Self::with_clock(fake, idp, options, clock)
+    }
+
+    pub fn with_clock(
+        fake: FakeKube,
+        idp: idp::MockIdp,
+        options: SharedOptions,
+        clock: Arc<TestClock>,
+    ) -> Self {
+        let keys = Arc::new(CookieKeys::new(&VersionedKey::from_parts(
+            options.key_version,
+            options.key_bytes.clone(),
+        )));
+        let authorizer = Arc::new(SharedAuthorizer::new(options.bindings.clone()));
+        let provider = Provider::new(
+            OidcSettings {
+                issuer: ISSUER.to_string(),
+                client_id: CLIENT_ID.to_string(),
+                client_secret: Secret::new("a-client-secret".into()),
+                redirect_uri: REDIRECT_URI.to_string(),
+                allowed_algorithms: options.allowed_algorithms.clone(),
+                scopes: vec!["openid".into(), "profile".into(), "groups".into()],
+                groups_claim: "groups".into(),
+                display_name_claim: "name".into(),
+                token_auth_method: TokenAuthMethod::ClientSecretBasic,
+            },
+            Box::new(idp.clone()),
+        );
+        let shared = Arc::new(SharedMode {
+            provider,
+            keys: Arc::clone(&keys),
+            login_limiter: options.login_limiter.unwrap_or_else(RateLimiter::for_login),
+            streams: StreamSlots::new(),
+            session_max_age_seconds: options.session_max_age_seconds,
+            trusted_proxy_cidrs: options.trusted_proxy_cidrs.clone(),
+        });
+        let app = TestApp::with_clock(
+            fake,
+            Options {
+                authenticator: Some(Arc::new(SessionAuthenticator::new(
+                    Arc::clone(&keys),
+                    clock.clone() as Arc<dyn Clock>,
+                ))),
+                authorizer: Some(Arc::clone(&authorizer) as Arc<dyn Authorizer>),
+                public_origin: SHARED_ORIGIN.to_string(),
+                allowed_hosts: vec![SHARED_HOST.to_string()],
+                shared: Some(shared),
+                ..Options::default()
+            },
+            clock,
+        );
+        Self {
+            app,
+            idp,
+            keys,
+            authorizer,
+        }
+    }
+
+    /// A sealed session cookie for an identity, without going through login.
+    ///
+    /// The login flow is exercised end to end in its own tests; the matrix and
+    /// CSRF tests want a session without repeating it thirty times.
+    pub fn session_cookie(&self, subject: &str, groups: &[&str]) -> String {
+        self.session_cookie_with("sid-".to_string() + subject, subject, groups, 900)
+    }
+
+    pub fn session_cookie_with(
+        &self,
+        session_id: String,
+        subject: &str,
+        groups: &[&str],
+        lifetime: i64,
+    ) -> String {
+        let identity = logweir_api::auth::oidc::Identity {
+            issuer: ISSUER.to_string(),
+            subject: subject.to_string(),
+            display_name: format!("{subject} display"),
+            groups: groups.iter().map(|g| (*g).to_string()).collect(),
+            auth_time: self.app.clock.now(),
+        };
+        let claims = SessionClaims::issue(
+            &identity,
+            session_id,
+            self.keys.version(),
+            self.app.clock.now(),
+            lifetime,
+        );
+        session::set_cookie(&self.keys, &claims, self.app.clock.now())
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The synchronizer token for a session cookie made by
+    /// [`Self::session_cookie`].
+    pub fn csrf_for(&self, subject: &str) -> String {
+        self.keys.csrf_token(&format!("sid-{subject}"))
+    }
+
+    /// A GET carrying a session cookie.
+    pub async fn get(&self, path: &str, cookie: &str) -> TestResponse {
+        self.app
+            .send(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header("host", SHARED_HOST)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+    }
+
+    /// A POST carrying a session cookie, an idempotency key and a CSRF token.
+    pub async fn post(
+        &self,
+        path: &str,
+        cookie: &str,
+        csrf: Option<&str>,
+        key: Option<&str>,
+        body: &str,
+    ) -> TestResponse {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", SHARED_HOST)
+            .header("origin", SHARED_ORIGIN)
+            .header("content-type", "application/json")
+            .header("cookie", cookie);
+        if let Some(csrf) = csrf {
+            builder = builder.header("x-csrf-token", csrf);
+        }
+        if let Some(key) = key {
+            builder = builder.header("idempotency-key", key);
+        }
+        self.app
+            .send(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+    }
 }

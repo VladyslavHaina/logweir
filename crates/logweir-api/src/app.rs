@@ -15,8 +15,12 @@ use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
 use crate::assets::StaticAssets;
+use crate::auth::keys::CookieKeys;
+use crate::auth::oidc::Provider;
+use crate::auth::ratelimit::{RateLimiter, StreamSlots};
 use crate::auth::Authenticator;
 use crate::authz::Authorizer;
+use crate::config::Cidr;
 use crate::cursor::CursorKey;
 use crate::kube::KubeAdapter;
 
@@ -35,6 +39,28 @@ impl Clock for SystemClock {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
     }
+}
+
+/// Everything shared mode adds to the state.
+///
+/// Its presence is what makes `/auth/login` and `/auth/callback` exist at all:
+/// [`router`] adds them only when it is `Some`, so in localAdmin mode they are
+/// not in the route table and answer 404 like any other unserved path.
+pub struct SharedMode {
+    /// The OIDC provider, its caches and its HTTP client.
+    pub provider: Provider,
+    /// The session/CSRF key and its version.
+    pub keys: Arc<CookieKeys>,
+    /// The per-peer limit on the unauthenticated login surface.
+    pub login_limiter: RateLimiter,
+    /// Per-actor, per-namespace concurrent stream slots. No route uses one
+    /// yet; see `crate::auth::ratelimit`.
+    pub streams: Arc<StreamSlots>,
+    /// The session lifetime in seconds.
+    pub session_max_age_seconds: i64,
+    /// Proxy ranges whose forwarded headers may be RECORDED. Never read by a
+    /// decision.
+    pub trusted_proxy_cidrs: Vec<Cidr>,
 }
 
 /// Everything a request handler needs.
@@ -57,6 +83,8 @@ pub struct Settings {
     pub assets: StaticAssets,
     /// The namespace the readiness probe lists in.
     pub readiness_namespace: String,
+    /// Shared mode's extras, absent in localAdmin mode.
+    pub shared: Option<Arc<SharedMode>>,
 }
 
 struct Inner {
@@ -131,6 +159,12 @@ impl AppState {
     #[must_use]
     pub fn assets(&self) -> &StaticAssets {
         &self.inner.settings.assets
+    }
+
+    /// Shared mode's extras, when this process is in shared mode.
+    #[must_use]
+    pub fn shared(&self) -> Option<&Arc<SharedMode>> {
+        self.inner.settings.shared.as_ref()
     }
 
     /// Readiness, cached for [`READINESS_CACHE`].
@@ -208,6 +242,37 @@ pub fn router(state: AppState) -> Router {
             crate::http::unsafe_request_guard,
         ));
 
+    // SHARED MODE'S THREE EXTRA ROUTES. `/auth/login` and `/auth/callback` are
+    // the only paths an unauthenticated caller reaches that do work, so they
+    // carry their own rate limit; the logout command is an UNSAFE method under
+    // the same Origin/JSON/CSRF guard as every other mutation.
+    let api = match state.shared() {
+        None => api,
+        Some(_) => api.merge(
+            Router::new()
+                .route(
+                    "/api/v1/session/logout",
+                    axum::routing::post(crate::auth::login::logout),
+                )
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::http::unsafe_request_guard,
+                )),
+        ),
+    };
+    let auth = match state.shared() {
+        None => Router::new(),
+        Some(_) => Router::new()
+            .route(
+                crate::auth::login::LOGIN_PATH,
+                get(crate::auth::login::login),
+            )
+            .route(
+                crate::auth::login::CALLBACK_PATH,
+                get(crate::auth::login::callback),
+            ),
+    };
+
     Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
@@ -216,6 +281,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ui/", get(crate::assets::serve))
         .route("/ui/{*path}", get(crate::assets::serve))
         .merge(api)
+        .merge(auth)
         .fallback(fallback)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -74,7 +74,7 @@
     "/api/v1/session": {
       "get": {
         "operationId": "getSession",
-        "summary": "The actor, explicit namespace grants and capability flags.",
+        "summary": "The actor, its roles and explicit namespace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method.",
         "responses": {
           "200": {
             "description": "The session.",
@@ -103,6 +103,136 @@
           "method_not_allowed",
           "misdirected_request",
           "session_expired",
+          "unauthenticated"
+        ]
+      }
+    },
+    "/api/v1/session/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "Clear the session cookie. Shared mode only; it is an unsafe method, so it requires the exact Origin, application/json and the synchronizer token like every other mutation.",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The session cookie is cleared."
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "internal_error",
+          "method_not_allowed",
+          "misdirected_request",
+          "not_found",
+          "origin_mismatch",
+          "session_expired",
+          "unauthenticated",
+          "unsupported_media_type"
+        ]
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "operationId": "authLogin",
+        "summary": "Begin an OpenID Connect Authorization Code + PKCE S256 sign-in. Shared mode only; answers 303 to the provider's authorization endpoint and sets the short-lived __Host-logweir_login cookie holding state, nonce and the PKCE verifier.",
+        "parameters": [
+          {
+            "name": "next",
+            "in": "query",
+            "required": false,
+            "description": "Where to land after signing in. Only a path under /ui/ on this origin; anything else is ignored.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to the identity provider."
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "kubernetes_unavailable",
+          "misdirected_request",
+          "not_found",
+          "rate_limited"
+        ]
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "operationId": "authCallback",
+        "summary": "Finish a sign-in. Shared mode only; validates state, exchanges the code with PKCE, validates the ID token (exact issuer, audience, allowed algorithm, JWKS signature, exp, iat, nonce) and sets __Host-logweir_session. The browser never receives a provider token.",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "description": "The authorization code.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "The state this service issued.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to the console."
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "misdirected_request",
+          "not_found",
+          "rate_limited",
           "unauthenticated"
         ]
       }
@@ -1689,10 +1819,17 @@
         "description": "How the current actor was authenticated.",
         "oneOf": [
           {
-            "description": "The explicit loopback administrator mode of this stage.",
+            "description": "The explicit loopback administrator mode.",
             "type": "string",
             "enum": [
               "localAdmin"
+            ]
+          },
+          {
+            "description": "A validated OpenID Connect session.",
+            "type": "string",
+            "enum": [
+              "oidc"
             ]
           }
         ]
@@ -2397,7 +2534,8 @@
         "type": "object",
         "required": [
           "capabilities",
-          "name"
+          "name",
+          "roles"
         ],
         "properties": {
           "capabilities": {
@@ -2407,6 +2545,13 @@
           "name": {
             "description": "The namespace name.",
             "type": "string"
+          },
+          "roles": {
+            "description": "The product roles the actor holds here, sorted and unioned across every binding that matched. Empty in localAdmin mode, which has no roles.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            }
           }
         }
       },
@@ -3510,6 +3655,39 @@
           }
         }
       },
+      "Role": {
+        "description": "The four product roles. They are LOGWEIR roles: they are not Kubernetes roles, they are not granted by cluster RBAC, and holding one says nothing about what the console ServiceAccount may do.",
+        "oneOf": [
+          {
+            "description": "Reads, never mutates.",
+            "type": "string",
+            "enum": [
+              "viewer"
+            ]
+          },
+          {
+            "description": "Creates and runs operations. Never submits a governed approval and never changes trust or policy.",
+            "type": "string",
+            "enum": [
+              "operator"
+            ]
+          },
+          {
+            "description": "Submits governed approvals in approver-bound namespaces. Cannot create an execution.",
+            "type": "string",
+            "enum": [
+              "approver"
+            ]
+          },
+          {
+            "description": "Administers bound namespaces. Is STILL the requester when it operates, and is not an approver unless separately bound as one.",
+            "type": "string",
+            "enum": [
+              "administrator"
+            ]
+          }
+        ]
+      },
       "Schedule": {
         "description": "A saved schedule.",
         "type": "object",
@@ -3683,6 +3861,7 @@
         "required": [
           "actor",
           "authenticationMode",
+          "bindingRevision",
           "capabilities",
           "namespaces",
           "requestId"
@@ -3695,6 +3874,10 @@
           "authenticationMode": {
             "description": "How the actor was authenticated.",
             "$ref": "#/components/schemas/AuthenticationMode"
+          },
+          "bindingRevision": {
+            "description": "The revision of the administrator's role-binding table that produced these grants. It is recorded in every audit line, so a decision can be tied to the configuration that made it. Empty in localAdmin mode.",
+            "type": "string"
           },
           "capabilities": {
             "description": "The union of the grants' capabilities.",

@@ -308,17 +308,11 @@ fn a_context_that_is_not_in_the_kubeconfig_is_refused() {
 }
 
 #[test]
-fn shared_mode_and_a_short_cursor_key_are_refused() {
+fn a_short_cursor_key_is_refused() {
     let fixture = Fixture::new("mode");
     let port = free_port();
     let listen = format!("127.0.0.1:{port}");
     let origin = format!("http://127.0.0.1:{port}");
-    let shared = config_text(&fixture, &listen, &origin, "fixture")
-        .replace("mode: localAdmin", "mode: shared");
-    let out = run(&fixture.config(&shared), "shared mode");
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("PLAT-17.2"));
-
     std::fs::write(fixture.0.join("cursor.key"), b"too-short").unwrap();
     let out = run(
         &fixture.config(&config_text(&fixture, &listen, &origin, "fixture")),
@@ -327,6 +321,135 @@ fn shared_mode_and_a_short_cursor_key_are_refused() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("cursorKeyFile"), "{stderr}");
+}
+
+/// **The shipped binary refuses every shared-mode configuration D0 says it
+/// must, before it binds a socket or builds a Kubernetes client.**
+///
+/// These are the refusals whose whole value is that they happen at STARTUP: a
+/// console that comes up on plain HTTP, or with a key file someone rewrote
+/// without telling it, or with a `*` in a role binding, is worse than one that
+/// does not come up at all, because the first two look like they are working.
+/// Exit 2 is the configuration-refusal code, and it is asserted separately from
+/// the message so that a refusal cannot degrade into a generic failure.
+#[test]
+fn shared_mode_refuses_plain_http_a_rotated_key_and_a_wildcard_binding() {
+    let fixture = Fixture::new("shared");
+    let port = free_port();
+    write_shared_material(&fixture, 1);
+
+    let base = |url: &str| shared_config_text(&fixture, &format!("127.0.0.1:{port}"), url);
+
+    // 1. TLS at the shared entry point is not a recommendation.
+    let out = run(
+        &fixture.config(&base("http://console.example")),
+        "plain http",
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("publicBaseUrl") && stderr.contains("HTTPS"),
+        "{stderr}"
+    );
+
+    // A trailing slash or a path would make the derived redirect URI disagree
+    // with the one registered at the provider.
+    let out = run(
+        &fixture.config(&base("https://console.example/")),
+        "trailing slash",
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("publicBaseUrl"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 2. The session key file carries version 1; the configuration below will
+    //    say 9. That is the "unexpectedly rotated" refusal.
+    let rotated =
+        base("https://console.example").replace("expectedVersion: 1", "expectedVersion: 9");
+    let out = run(&fixture.config(&rotated), "rotated session key");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("version 1") && stderr.contains("expects 9"),
+        "{stderr}"
+    );
+
+    // 3. A missing session key file.
+    std::fs::remove_file(fixture.0.join("session.key.yaml")).unwrap();
+    let out = run(
+        &fixture.config(&base("https://console.example")),
+        "missing key",
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("session.key.yaml"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    write_shared_material(&fixture, 1);
+
+    // 4. Bindings are exact strings. A `*` would match nothing, so it is
+    //    refused by name rather than silently granting nothing.
+    let wildcard = base("https://console.example").replace("[lw-viewers]", "[\"*\"]");
+    let out = run(&fixture.config(&wildcard), "wildcard binding");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("roles.bindings") && stderr.contains("EXACT"),
+        "{stderr}"
+    );
+
+    // 5. An empty client secret file.
+    std::fs::write(fixture.0.join("client.secret"), "\n").unwrap();
+    let out = run(
+        &fixture.config(&base("https://console.example")),
+        "empty secret",
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("client.secret"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The session key, cursor key and client secret a shared-mode fixture mounts.
+fn write_shared_material(fixture: &Fixture, version: u32) {
+    let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    std::fs::write(
+        fixture.0.join("session.key.yaml"),
+        format!("version: {version}\nkey: \"{key}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.0.join("cursor.key.yaml"),
+        format!("version: {version}\nkey: \"{key}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(fixture.0.join("client.secret"), "a-client-secret\n").unwrap();
+}
+
+fn shared_config_text(fixture: &Fixture, listen: &str, public_base_url: &str) -> String {
+    format!(
+        "mode: shared\nlisten: \"{listen}\"\npublicBaseUrl: \"{public_base_url}\"\n\
+         uiDirectory: {ui}\n\
+         oidc:\n  issuer: https://idp.example/realms/logweir\n  clientId: logweir-console\n  \
+         clientSecretFile: {secret}\n\
+         roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    namespace: team-a\n    \
+         groups: [lw-viewers]\n\
+         sessionKey:\n  file: {session}\n  expectedVersion: 1\n\
+         cursorKey:\n  file: {cursor}\n  expectedVersion: 1\n\
+         namespaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  kubeconfig: {kubeconfig}\n  \
+         context: fixture\n",
+        ui = repo_root().join("ui").display(),
+        secret = fixture.path("client.secret"),
+        session = fixture.path("session.key.yaml"),
+        cursor = fixture.path("cursor.key.yaml"),
+        kubeconfig = fixture.path("kubeconfig.yaml"),
+    )
 }
 
 #[test]

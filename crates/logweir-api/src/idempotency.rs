@@ -237,11 +237,7 @@ mod tests {
     use super::*;
 
     fn actor(subject: &str) -> Actor {
-        Actor {
-            issuer: "urn:logweir:local-admin".into(),
-            subject: subject.into(),
-            display_name: "x".into(),
-        }
+        Actor::new("urn:test", subject, "Test")
     }
 
     fn key(k: &str) -> IdempotencyKey {

@@ -42,6 +42,7 @@ path = "src/main.rs"
 # no `matched-path`. `http1` + `tokio` are what `axum::serve` needs.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64.workspace = true
+bytes = "1"
 chrono.workspace = true
 hex.workspace = true
 # Already in Cargo.lock (0.12.1); the cursor MAC.
@@ -64,10 +65,26 @@ hyper-util = { version = "0.1", features = [
     "service",
     "tokio",
 ] }
+# THE PLAT-17.2 CRYPTO AND OIDC STACK — THREE DIRECT NAMES, ZERO NEW PACKAGES.
+# All three are already resolved in `Cargo.lock` (rustls 0.23 pulls `ring`;
+# `kube-client`'s `rustls-tls` pulls `hyper-rustls` and `rustls`), so declaring
+# them turns on features of crates the workspace already builds and leaves the
+# package set and `THIRD_PARTY_NOTICES.md` byte-identical.
+# `tests/linkage.rs` asserts that.
+#
+# `ring` is the ONE primitive provider: ChaCha20-Poly1305 for the session and
+# login cookies, RSA PKCS#1 and ECDSA P-256 VERIFICATION for the OIDC ID token
+# (never signing), and `SystemRandom` for session ids, `state`, `nonce` and the
+# PKCE verifier. It is on `scripts/check-one-signer.sh`'s deliberate
+# not-checked list (a TLS primitive), and this crate names no `SigningKey` and
+# no `sign_detached`.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12"] }
 k8s-openapi = { version = "0.24", features = ["v1_29"] }
 # A subset of weirkeeper's feature list; the resolved feature set is the union.
 kube = { version = "0.99", default-features = false, features = ["client", "rustls-tls"] }
 logweir-core = { path = "../logweir-core" }
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -52,7 +52,7 @@ pub async fn get_one(
 ) -> Result<Response, ApiError> {
     authorize(&state, &actor, &ns, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Approval>(&state, &ns, &name).await?;
+    let object = get_object::<Approval>(&state, &actor, &ns, &name).await?;
     Ok(json(
         StatusCode::OK,
         &ApprovalResponse {
@@ -73,7 +73,7 @@ pub async fn packet(
 ) -> Result<Response, ApiError> {
     authorize(&state, &actor, &ns, Action::ReadApprovalPacket)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Approval>(&state, &ns, &name).await?;
+    let object = get_object::<Approval>(&state, &actor, &ns, &name).await?;
     tracing::info!(namespace = %ns, name = %name, actor = %actor.id(), "approval packet read");
     Ok(json(
         StatusCode::OK,

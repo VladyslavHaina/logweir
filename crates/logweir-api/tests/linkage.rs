@@ -233,7 +233,15 @@ fn no_source_here_names_a_forbidden_kubernetes_api() {
         "api.replace(",
         ".replace_status(",
         ".patch_status(",
-        ".entry(",
+        // `kube::Api::entry`, the read-modify-write helper, in the same
+        // receiver-qualified spelling `api.replace(` uses. The bare `.entry(`
+        // that stood here matched every `BTreeMap`/`HashMap` in the crate, so
+        // it could not survive the first module that needed a map — and the
+        // property it guards is already carried by
+        // `the_adapter_calls_only_the_four_permitted_kubernetes_verbs`, which
+        // pins the exact verb set called on an `Api` handle rather than
+        // enumerating the ones it forbids.
+        "api.entry(",
         "Patch::Json",
         "Patch::Apply",
         "Patch::Strategic",

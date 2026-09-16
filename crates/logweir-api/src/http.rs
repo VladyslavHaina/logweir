@@ -5,19 +5,30 @@
 //! 1. [`request_context`] — a fresh request ID (client-supplied IDs are
 //!    ignored), `X-Request-ID`, the security headers on EVERY response,
 //!    `Cache-Control: no-store` unless a static asset set its own, the
-//!    problem+json rendering of every error, and one log line per request
-//!    (method, path, status, latency — never a query string, header value or
-//!    body).
-//! 2. [`boundary_guard`] — refuses any `Impersonate-*` header and any `Host`
-//!    this listener does not serve, before routing.
+//!    problem+json rendering of every error, one log line per request (method,
+//!    path, status, latency — never a query string, header value or body), and
+//!    the per-request [`crate::audit::AuditContext`], emitted once at the end.
+//! 2. [`boundary_guard`] — refuses any `Impersonate-*` header, STRIPS the
+//!    identity-claiming header family (`X-Remote-User`, `X-Forwarded-User`,
+//!    `X-Auth-Request-*` and friends) so that nothing downstream can read one
+//!    even by mistake, and refuses any `Host` this listener does not serve,
+//!    before routing.
 //! 3. The router. Under `/api/v1`, [`unsafe_request_guard`] runs as a route
 //!    layer on every matched route: an unsafe method must carry `Origin`
 //!    exactly equal to the configured public origin and
 //!    `Content-Type: application/json`, before any handler or extractor runs.
-//!    PLAT-17.2 adds its CSRF token check through
-//!    `Authenticator::verify_unsafe`, not by editing a route.
+//!    The session's synchronizer CSRF token is checked after that, by
+//!    `Authenticator::verify_unsafe` inside the `Actor` extractor.
+//!
+//! THERE IS NO CORS LAYER, AND THAT IS THE POINT. No response carries
+//! `Access-Control-Allow-Origin` or `Access-Control-Allow-Credentials`, so a
+//! browser will not let another origin read one; and because the exact-`Origin`
+//! check refuses unsafe methods outright, a cross-origin write is refused even
+//! when the attacker does not care about reading the answer.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
@@ -31,6 +42,7 @@ use http_body_util::BodyExt as _;
 use serde::de::DeserializeOwned;
 
 use crate::app::AppState;
+use crate::audit::AuditContext;
 use crate::problem::{
     self, ApiError, FieldError, PendingProblem, ProblemCode, PROBLEM_CONTENT_TYPE,
 };
@@ -69,6 +81,69 @@ pub fn is_safe_method(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
+/// The immediate peer's address, inserted per connection by the server loop.
+///
+/// It is the SOCKET peer, which behind an ingress is the ingress. Nothing here
+/// ever trusts `X-Forwarded-For` for it: see [`forwarded_client`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerAddr(pub IpAddr);
+
+/// The forwarded client address, but ONLY when the immediate peer is inside a
+/// configured trusted-proxy range.
+///
+/// It is used for the audit line's `forwardedFor` field and for nothing else.
+/// No authentication, authorization, rate-limit key, redirect or callback reads
+/// it, whatever the peer is — a forged `X-Forwarded-For` from a client can
+/// therefore change one log field's presence and nothing about a decision.
+#[must_use]
+pub fn forwarded_client(
+    state: &AppState,
+    parts_headers: &http::HeaderMap,
+    peer: Option<IpAddr>,
+) -> Option<String> {
+    let shared = state.shared()?;
+    let peer = peer?;
+    if !shared.trusted_proxy_cidrs.iter().any(|c| c.contains(peer)) {
+        return None;
+    }
+    let value = parts_headers
+        .get(HeaderName::from_static("x-forwarded-for"))?
+        .to_str()
+        .ok()?;
+    let first = value.split(',').next()?.trim();
+    (!first.is_empty()).then(|| crate::validate::bounded(first, 64))
+}
+
+/// The per-peer limit on `/auth/login` and `/auth/callback`.
+///
+/// # Errors
+///
+/// `rate_limited` with a `Retry-After`.
+pub fn check_login_rate(state: &AppState, parts: &Parts) -> Result<(), ApiError> {
+    let Some(shared) = state.shared() else {
+        return Ok(());
+    };
+    let Some(PeerAddr(peer)) = parts.extensions.get::<PeerAddr>().copied() else {
+        // No peer address means no connection-level information — an
+        // in-process test router. There is nothing to key a limit on, and
+        // inventing one would make the limit a coin toss.
+        return Ok(());
+    };
+    match shared.login_limiter.check(peer) {
+        crate::auth::ratelimit::Decision::Allowed => Ok(()),
+        crate::auth::ratelimit::Decision::Limited {
+            retry_after_seconds,
+        } => {
+            let mut error = ApiError::new(
+                ProblemCode::RateLimited,
+                "Too many sign-in attempts from this address. Try again shortly.",
+            );
+            error.retry_after_seconds = Some(retry_after_seconds);
+            Err(error)
+        }
+    }
+}
+
 /// Layer 1. See the module documentation.
 pub async fn request_context(mut req: Request, next: Next) -> Response {
     let started = Instant::now();
@@ -76,6 +151,8 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let path = crate::validate::bounded(req.uri().path(), 256);
     req.extensions_mut().insert(RequestId(request_id.clone()));
+    let audit = Arc::new(AuditContext::new(&request_id, method.as_str(), &path));
+    req.extensions_mut().insert(Arc::clone(&audit));
 
     let mut response = next.run(req).await;
 
@@ -128,12 +205,18 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
     }
 
     let status = response.status().as_u16();
-    let latency_ms = started.elapsed().as_millis();
+    let latency = started.elapsed();
+    let latency_ms = latency.as_millis();
     if status >= 500 {
         tracing::warn!(request_id = %request_id, method = %method, path = %path, status, latency_ms, "request");
     } else {
         tracing::info!(request_id = %request_id, method = %method, path = %path, status, latency_ms, "request");
     }
+    // ONE AUDIT RECORD PER REQUEST, EMITTED HERE, so no handler can forget.
+    crate::audit::emit(
+        &audit.finish(status, latency.as_millis().min(u128::from(u64::MAX)) as u64),
+        &audit.notes(),
+    );
     response
 }
 
@@ -186,7 +269,11 @@ pub const HOST_EXEMPT_PATHS: [&str; 2] = ["/healthz", "/readyz"];
 ///
 /// The `Impersonate-*` refusal below is NOT exempted. It costs one header scan
 /// and there is no reason a probe would carry one.
-pub async fn boundary_guard(State(state): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn boundary_guard(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     if let Some(name) = req
         .headers()
         .keys()
@@ -203,6 +290,21 @@ pub async fn boundary_guard(State(state): State<AppState>, req: Request, next: N
         ));
         return axum::response::IntoResponse::into_response(error);
     }
+    // THE IDENTITY-CLAIMING HEADERS ARE REMOVED, NOT MERELY IGNORED. Ignoring
+    // them is a property of every reader; removing them is a property of the
+    // request, and it is the one a future route cannot undo by accident. Their
+    // NAMES go into the audit record; their values are never read.
+    let stripped = strip_identity_headers(req.headers_mut());
+    let peer = req.extensions().get::<PeerAddr>().copied();
+    if let Some(audit) = req.extensions().get::<Arc<AuditContext>>().cloned() {
+        let forwarded = forwarded_client(&state, req.headers(), peer.map(|p| p.0));
+        audit.set_transport(
+            &peer.map(|p| p.0.to_string()).unwrap_or_default(),
+            forwarded.as_deref(),
+            &stripped,
+        );
+    }
+
     // An EXACT path match, against the router's own paths. No prefix and no
     // normalisation, so `/healthz/../api/v1/session` is not exempt — it is not
     // a route either, and the fallback answers it 404.
@@ -226,6 +328,27 @@ pub async fn boundary_guard(State(state): State<AppState>, req: Request, next: N
         ));
     }
     next.run(req).await
+}
+
+/// Remove every identity-claiming header, returning the names removed.
+///
+/// `Impersonate-*` is NOT in this set: [`boundary_guard`] answers those 400
+/// before reaching here, because a client sending one is asking this service to
+/// do something it will never do, and a silent strip would hide that.
+#[must_use]
+pub fn strip_identity_headers(headers: &mut http::HeaderMap) -> Vec<String> {
+    let doomed: Vec<HeaderName> = headers
+        .keys()
+        .filter(|name| crate::audit::is_ignored_identity_header(name.as_str()))
+        .cloned()
+        .collect();
+    let mut removed = Vec::with_capacity(doomed.len());
+    for name in doomed {
+        headers.remove(&name);
+        removed.push(name.as_str().to_string());
+    }
+    removed.sort();
+    removed
 }
 
 /// Layer 3, on every matched `/api/v1` route. See the module documentation.

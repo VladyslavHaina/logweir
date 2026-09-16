@@ -14,11 +14,14 @@
 //! precondition. Inbound `Impersonate-*` headers are refused and nothing is
 //! ever impersonated.
 //!
-//! THIS STAGE'S IDENTITY MODE. Only `localAdmin`: a loopback-only listener,
-//! the configured administrator as the actor, and namespaces from
-//! configuration alone ([`config`]). OIDC, sessions, CSRF tokens, roles and
-//! audit are PLAT-17.2 and plug into [`auth::Authenticator`] and
-//! [`authz::Authorizer`] without changing a route.
+//! TWO IDENTITY MODES, NAMED IN THE CONFIGURATION. `localAdmin` is a
+//! loopback-only listener with the configured administrator as the actor and
+//! namespaces from configuration alone. `shared` is the SSO console: OpenID
+//! Connect Authorization Code + PKCE, a short-lived authenticated and encrypted
+//! stateless session cookie, a synchronizer CSRF token on every unsafe method,
+//! exact group-to-role and namespace bindings, and one structured audit record
+//! per request ([`auth`], [`authz`], [`audit`]). Both plug into the same two
+//! trait objects, so no route knows which mode it is serving.
 //!
 //! MODULE MAP.
 //!
@@ -27,6 +30,7 @@
 //!   `Impersonate-*`, Origin and Content-Type guards, strict JSON and query
 //!   parsing.
 //! * [`auth`], [`authz`] — the identity and authorization seam.
+//! * [`audit`] — the structured attribution record and its redaction.
 //! * [`kube`] — the only Kubernetes adapter, 10-second deadlines.
 //! * [`routes`] — one module per product resource.
 //! * [`idempotency`] — deterministic names and replay comparison.
@@ -39,6 +43,7 @@
 
 pub mod app;
 pub mod assets;
+pub mod audit;
 pub mod auth;
 pub mod authz;
 pub mod config;
@@ -56,48 +61,168 @@ pub mod validate;
 
 use std::sync::Arc;
 
+use crate::auth::keys::CookieKeys;
+
 /// What the configuration alone decides, loaded before any Kubernetes client
 /// exists so that a refusal here is a configuration refusal (exit 2) rather
 /// than a startup failure.
+///
+/// EVERY KEY AND SECRET IS READ HERE. A missing, malformed, short or
+/// unexpectedly rotated key file, and an empty client-secret file, all refuse
+/// the process before a socket exists — which is the only point at which
+/// refusing is free.
 pub struct Preflight {
     /// The cursor MAC key.
     pub cursor_key: Vec<u8>,
     /// The static UI allowlist.
     pub assets: assets::StaticAssets,
+    /// Shared mode's key material.
+    pub shared: Option<SharedPreflight>,
 }
 
-/// Read the cursor key and the static assets.
+/// The session key and client secret of shared mode.
+pub struct SharedPreflight {
+    /// The session/CSRF keys, carrying the version that goes in the cookie.
+    pub session_keys: Arc<CookieKeys>,
+    /// The OIDC client secret.
+    pub client_secret: auth::oidc::Secret,
+}
+
+/// Read the keys, the client secret and the static assets.
 ///
 /// # Errors
 ///
 /// A reason naming the file or directory.
 pub fn preflight(config: &config::Config) -> Result<Preflight, String> {
+    let cursor_key = match &config.cursor_key {
+        config::CursorKeySource::RawFile(path) => {
+            config::read_cursor_key(path).map_err(|e| e.to_string())?
+        }
+        config::CursorKeySource::Versioned(key) => {
+            auth::keys::read_versioned_key(&key.file, key.expected_version)
+                .map_err(|e| e.to_string())?
+                .bytes()
+                .to_vec()
+        }
+    };
+    let shared = match config.shared() {
+        None => None,
+        Some(shared) => {
+            let session_key = auth::keys::read_versioned_key(
+                &shared.session_key.file,
+                shared.session_key.expected_version,
+            )
+            .map_err(|e| e.to_string())?;
+            let secret = std::fs::read_to_string(&shared.oidc.client_secret_file).map_err(|e| {
+                format!(
+                    "cannot read the OIDC client secret file {}: {e}",
+                    shared.oidc.client_secret_file.display()
+                )
+            })?;
+            let secret = secret.trim().to_string();
+            if secret.is_empty() {
+                return Err(format!(
+                    "the OIDC client secret file {} is empty",
+                    shared.oidc.client_secret_file.display()
+                ));
+            }
+            Some(SharedPreflight {
+                session_keys: Arc::new(CookieKeys::new(&session_key)),
+                client_secret: auth::oidc::Secret::new(secret),
+            })
+        }
+    };
     Ok(Preflight {
-        cursor_key: config::read_cursor_key(&config.cursor_key_file).map_err(|e| e.to_string())?,
+        cursor_key,
         assets: assets::StaticAssets::load(&config.ui_directory)?,
+        shared,
     })
 }
 
+/// What a mode contributes to the application state: an authenticator, an
+/// authorizer, and shared mode's extras.
+type ModeParts = (
+    Arc<dyn auth::Authenticator>,
+    Arc<dyn authz::Authorizer>,
+    Option<Arc<app::SharedMode>>,
+);
+
 /// Build the application state from a validated configuration, its preflight
 /// and a built Kubernetes client.
-#[must_use]
+///
+/// # Errors
+///
+/// A reason, when shared mode's HTTPS client for the identity provider cannot
+/// be initialised.
 pub fn state_from_parts(
     config: &config::Config,
     preflight: Preflight,
     client: ::kube::Client,
-) -> app::AppState {
-    app::AppState::new(app::Settings {
-        authenticator: Arc::new(auth::LocalAdminAuthenticator::new(
-            &config.local_admin.subject,
-            &config.local_admin.display_name,
-        )),
-        authorizer: Arc::new(authz::LocalAdminAuthorizer::new(config.namespaces.clone())),
+) -> Result<app::AppState, String> {
+    let clock: Arc<dyn app::Clock> = Arc::new(app::SystemClock);
+    let (authenticator, authorizer, shared): ModeParts = match (&config.mode, preflight.shared) {
+        (config::Mode::LocalAdmin(admin), _) => (
+            Arc::new(auth::LocalAdminAuthenticator::new(
+                &admin.subject,
+                &admin.display_name,
+            )),
+            Arc::new(authz::LocalAdminAuthorizer::new(config.namespaces.clone())),
+            None,
+        ),
+        (config::Mode::Shared(settings), Some(material)) => {
+            let http = auth::oidc::HyperHttpClient::new(settings.oidc.insecure_loopback_issuer)?;
+            let provider = auth::oidc::Provider::new(
+                auth::oidc::OidcSettings {
+                    issuer: settings.oidc.issuer.clone(),
+                    client_id: settings.oidc.client_id.clone(),
+                    client_secret: material.client_secret,
+                    redirect_uri: settings.redirect_uri.clone(),
+                    allowed_algorithms: settings.oidc.allowed_algorithms.clone(),
+                    scopes: settings.oidc.scopes.clone(),
+                    groups_claim: settings.oidc.groups_claim.clone(),
+                    display_name_claim: settings.oidc.display_name_claim.clone(),
+                    token_auth_method: settings.oidc.token_auth_method,
+                },
+                Box::new(http),
+            );
+            (
+                Arc::new(auth::shared::SessionAuthenticator::new(
+                    Arc::clone(&material.session_keys),
+                    Arc::clone(&clock),
+                )),
+                Arc::new(authz::SharedAuthorizer::new(authz::RoleBindings {
+                    revision: settings.roles.revision.clone(),
+                    bindings: settings.roles.bindings.clone(),
+                })),
+                Some(Arc::new(app::SharedMode {
+                    provider,
+                    keys: material.session_keys,
+                    login_limiter: auth::ratelimit::RateLimiter::for_login(),
+                    streams: auth::ratelimit::StreamSlots::new(),
+                    session_max_age_seconds: settings.session_max_age_seconds,
+                    trusted_proxy_cidrs: settings.trusted_proxy_cidrs.clone(),
+                })),
+            )
+        }
+        (config::Mode::Shared(_), None) => {
+            return Err(
+                "shared mode needs its session key and client secret, which the preflight did \
+                 not produce"
+                    .to_string(),
+            )
+        }
+    };
+
+    Ok(app::AppState::new(app::Settings {
+        authenticator,
+        authorizer,
         kube: kube::KubeAdapter::new(client),
         cursor_key: cursor::CursorKey::new(preflight.cursor_key),
-        clock: Arc::new(app::SystemClock),
+        clock,
         public_origin: config.public_origin.clone(),
         allowed_hosts: config.allowed_hosts.clone(),
         assets: preflight.assets,
         readiness_namespace: config.namespaces[0].clone(),
-    })
+        shared,
+    }))
 }
