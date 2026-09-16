@@ -928,16 +928,55 @@ fn a_key_from_another_family_is_named() {
 /// logging the endpoint verbatim; printing the routing key in a diagnostic.
 #[test]
 fn no_surface_carries_a_routing_key_or_an_unredacted_sink_url() {
-    for sink in [
-        RecordingSink::default(),
-        RecordingSink::failing(&[
-            "https://events.pagerduty.com/v2/enqueue",
-            TEST_WEBHOOK_URL,
-            TEST_SLACK_URL,
-        ]),
+    // A claim in `summary`, so the claim-refusal branch composes a diagnostic
+    // too — every branch that writes a sentence has to be walked, not just the
+    // two obvious ones. A leak on the arm nobody enumerated is still a leak,
+    // and that is exactly how the first version of this row let a mutant
+    // through: it drove only the default routes, so the SILENCED-endpoint
+    // branch — the one that has the routing key in scope — was never reached.
+    let mut claiming = stale_event();
+    claiming.summary = "orders-prod: fully verified".to_string();
+
+    for (arm, event, routes, sink) in [
+        (
+            "every sink accepts",
+            stale_event(),
+            all_three(),
+            RecordingSink::default(),
+        ),
+        (
+            "every sink refuses",
+            stale_event(),
+            all_three(),
+            RecordingSink::failing(&[
+                "https://events.pagerduty.com/v2/enqueue",
+                TEST_WEBHOOK_URL,
+                TEST_SLACK_URL,
+            ]),
+        ),
+        (
+            "the PagerDuty endpoint is refused before a request",
+            stale_event(),
+            routes(&[
+                (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+                (
+                    PAGERDUTY_ENDPOINT_ENV,
+                    "http://events.pagerduty.example/v2/enqueue",
+                ),
+                (WEBHOOK_URL_ENV, TEST_WEBHOOK_URL),
+                (SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+            ]),
+            RecordingSink::default(),
+        ),
+        (
+            "the body is refused for claiming an exhaustive check",
+            claiming,
+            all_three(),
+            RecordingSink::default(),
+        ),
     ] {
-        let out = deliver_with(&stale_event(), &all_three(), &sink);
-        let surfaces = everything(&out);
+        let out = deliver_with(&event, &routes, &sink);
+        let surfaces = format!("{arm}\n{}", everything(&out));
         for secret in [
             TEST_ROUTING_KEY,
             "T00SECRET",
@@ -949,7 +988,8 @@ fn no_surface_carries_a_routing_key_or_an_unredacted_sink_url() {
         ] {
             assert!(
                 !surfaces.contains(secret),
-                "`{secret}` reached a surface a human or a log aggregator reads:\n{surfaces}"
+                "{arm}: `{secret}` reached a surface a human or a log aggregator \
+                 reads:\n{surfaces}"
             );
         }
         // …while the sink is still IDENTIFIABLE, which is the whole diagnostic
@@ -958,8 +998,8 @@ fn no_surface_carries_a_routing_key_or_an_unredacted_sink_url() {
             assert!(
                 surfaces.contains("hooks.slack.example")
                     || surfaces.contains("sink.example")
-                    || surfaces.contains("pagerduty.com"),
-                "a failure an operator cannot attribute to a sink is not a \
+                    || surfaces.contains("pagerduty"),
+                "{arm}: a failure an operator cannot attribute to a sink is not a \
                  diagnostic:\n{surfaces}"
             );
         }
