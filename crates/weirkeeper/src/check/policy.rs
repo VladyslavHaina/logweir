@@ -225,14 +225,29 @@ impl Policy {
         }
     }
 
+    /// This policy with **no attestation and no identity allowlist** — the
+    /// two collections that could turn a listing into a completeness claim or
+    /// an unlisted bucket into an allowed one.
+    ///
+    /// A METHOD ON A VALUE, not a constant. [`Policy::fail_closed`] is
+    /// `defaults().closed()`, and today the two are observationally equal
+    /// because both collections already default to empty — which is exactly
+    /// why a reviewer's `fail_closed() -> defaults()` mutant was a no-op and
+    /// survived. Taking `self` gives the rule something to do and therefore
+    /// something to test: `fail_closed_clears_the_two_collections_whatever_the_defaults_hold`
+    /// hands it a policy that carries both and asserts they are gone.
+    #[must_use]
+    pub fn closed(mut self) -> Self {
+        self.discovery.visibility_attestations.clear();
+        self.evidence.controller_identity_locations.clear();
+        self
+    }
+
     /// The defaults with **no attestation and no identity allowlist** — the
     /// fail-closed object a malformed policy produces.
     #[must_use]
     pub fn fail_closed() -> Self {
-        let mut p = Self::defaults();
-        p.discovery.visibility_attestations.clear();
-        p.evidence.controller_identity_locations.clear();
-        p
+        Self::defaults().closed()
     }
 
     /// `sha256:<hex>` over the policy's canonical JSON — the value every check

@@ -22,8 +22,8 @@ use logweir_core::check_contract::{
 };
 use serde_json::{json, Value};
 use weirkeeper::check::{
-    self, job as cjob, pod as cpod, policy, relay, waiting, CheckPhase, EventFact, Input,
-    Projections, Waiting,
+    self, chunks, job as cjob, limits, plan, pod as cpod, policy, relay, waiting, CheckPhase,
+    EventFact, Input, Projections, Waiting,
 };
 use weirkeeper::job::{RunnerOwner, SecretMount};
 use weirkeeper::testing::{mock_client_recording_bodies, Route};
@@ -41,6 +41,8 @@ const JOB_UID: &str = "1a2b3c4d-0000-4000-8000-0000000000b2";
 const OTHER_JOB_UID: &str = "deadbeef-0000-4000-8000-0000000000c3";
 const PLAN_SHA: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const POD: &str = "lwc-td-9ab-xyz12";
+/// The `KafkaCluster` this check dials — `limits`' per-connection ceiling.
+const CONNECTION_UID: &str = "c0ffee00-0000-4000-8000-0000000000d4";
 /// The `pods/log` path suffix for [`POD`]. A `&'static str`, because
 /// [`Route::path_suffix`] is one.
 const POD_LOG_PATH: &str = "/pods/lwc-td-9ab-xyz12/log";
@@ -49,6 +51,8 @@ const POD_LOG_PATH: &str = "/pods/lwc-td-9ab-xyz12/log";
 /// there. `a_check_job_name_is_a_pure_function_of_the_kind_and_the_owner_uid`
 /// holds the two together.
 const JOB_PATH: &str = "/jobs/lwc-td-288fecc03251c1c31851";
+/// The plan `ConfigMap`'s path suffix, spelled out for the same reason.
+const PLAN_PATH: &str = "/configmaps/lwc-td-288fecc03251c1c31851-plan";
 
 fn utc(h: u32, m: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 16, h, m, s)
@@ -64,6 +68,15 @@ fn job_name() -> String {
     cjob::check_job_name(CheckPlanKind::TopicInventory, SUBJECT_UID)
 }
 
+fn owner() -> RunnerOwner {
+    RunnerOwner {
+        api_version: "logweir.dev/v1alpha1".to_string(),
+        kind: "TopicDiscovery".to_string(),
+        name: "orders-discovery".to_string(),
+        uid: SUBJECT_UID.to_string(),
+    }
+}
+
 fn expectations() -> FrameExpectations {
     FrameExpectations {
         plan_sha256: PLAN_SHA.to_string(),
@@ -75,12 +88,8 @@ fn spec() -> cjob::CheckJobSpec {
     cjob::CheckJobSpec {
         kind: CheckPlanKind::TopicInventory,
         namespace: NS.to_string(),
-        owner: RunnerOwner {
-            api_version: "logweir.dev/v1alpha1".to_string(),
-            kind: "TopicDiscovery".to_string(),
-            name: "orders-discovery".to_string(),
-            uid: SUBJECT_UID.to_string(),
-        },
+        owner: owner(),
+        connection_uid: Some(CONNECTION_UID.to_string()),
         plan_config_map: format!("{}-plan", job_name()),
         plan_sha256: PLAN_SHA.to_string(),
         subject_uid: SUBJECT_UID.to_string(),
@@ -1478,4 +1487,930 @@ fn no_check_module_reads_a_clock() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The plan ConfigMap — D2 §4.3, §12 "Framework / security additions"
+// ---------------------------------------------------------------------------
+
+fn documents() -> plan::PlanDocuments {
+    plan::PlanDocuments {
+        check_plan: br#"{"contract":"logweir.dev/check-plan/v1"}"#.to_vec(),
+        source_ca: Some(b"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----\n".to_vec()),
+        ..plan::PlanDocuments::default()
+    }
+}
+
+fn plan_object() -> k8s_openapi::api::core::v1::ConfigMap {
+    plan::build(&job_name(), NS, &owner(), &documents()).expect("UTF-8 documents")
+}
+
+#[test]
+fn a_plan_config_map_is_immutable_owned_and_digest_pinned() {
+    let cm = plan_object();
+    assert_eq!(
+        cm.metadata.name.as_deref(),
+        Some(format!("{}-plan", job_name()).as_str())
+    );
+    assert_eq!(
+        cm.immutable,
+        Some(true),
+        "a plan a second pass could rewrite is a document a running pod already mounted"
+    );
+    let owner_ref = &cm.metadata.owner_references.as_ref().expect("owners")[0];
+    assert_eq!(owner_ref.uid, SUBJECT_UID);
+    assert_eq!(owner_ref.controller, Some(true));
+    assert_eq!(
+        owner_ref.block_owner_deletion,
+        Some(true),
+        "the owner cascade is the delete; nothing in this crate calls Api::delete"
+    );
+    let data = cm.data.as_ref().expect("data");
+    assert_eq!(
+        data.keys().cloned().collect::<Vec<_>>(),
+        vec!["check-plan.json".to_string(), "source-ca.pem".to_string()],
+        "a CA the check does not have is ABSENT, not empty"
+    );
+    // The annotation and the Job's pinned env are ONE value.
+    let digest = documents().check_plan_sha256();
+    assert_eq!(
+        cm.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(plan::DIGEST_ANNOTATION))
+            .map(String::as_str),
+        Some(digest.as_str())
+    );
+    assert!(digest.starts_with("sha256:"));
+
+    // A document that is not UTF-8 is named, not mangled.
+    let bad = plan::PlanDocuments {
+        check_plan: b"{}".to_vec(),
+        archive_ca: Some(vec![0xff, 0xfe]),
+        ..plan::PlanDocuments::default()
+    };
+    let e = plan::build(&job_name(), NS, &owner(), &bad).expect_err("invalid UTF-8");
+    assert_eq!(e, plan::PlanError::NotUtf8("archive-ca.pem".to_string()));
+    assert_eq!(e.code(), CheckCode::CheckPlanConflict);
+}
+
+/// D2 §12's framework row `plan::foreign_owner_409_is_conflict`.
+///
+/// A 409 is the HEALTHY duplicate-reconcile case and is adopted — but only when
+/// the object there is the same document, owned by the same subject, and still
+/// immutable. Each of the three failures is terminal, because retrying cannot
+/// fix "two different plans want one name" and running the other one would
+/// check inputs this pass never rendered.
+#[tokio::test]
+async fn plan_foreign_owner_409_is_conflict() {
+    let digest = documents().check_plan_sha256();
+    let cm = plan_object();
+
+    // 1. THE HAPPY 409: identical document, same owner, immutable ⇒ adopted.
+    let routes = vec![
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 409,
+            body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                "message":"configmaps \"x\" already exists","reason":"AlreadyExists","code":409}"#
+                .to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: PLAN_PATH,
+            status: 200,
+            body: serde_json::to_string(&cm).unwrap(),
+        },
+    ];
+    let (client, _, _) = mock_client_recording_bodies(routes);
+    assert_eq!(
+        plan::ensure(&client, NS, &cm, SUBJECT_UID, &digest)
+            .await
+            .expect("an identical plan is adopted"),
+        plan::PlanOutcome::Adopted
+    );
+
+    // 2-4. Each of the three ways it is NOT this check's plan.
+    let mut foreign = cm.clone();
+    foreign.metadata.owner_references.as_mut().unwrap()[0].uid = OTHER_JOB_UID.to_string();
+    let mut wrong_digest = cm.clone();
+    wrong_digest.metadata.annotations.as_mut().unwrap().insert(
+        plan::DIGEST_ANNOTATION.to_string(),
+        "sha256:ffff".to_string(),
+    );
+    let mut mutable = cm.clone();
+    mutable.immutable = Some(false);
+    let mut uncontrolled = cm.clone();
+    uncontrolled.metadata.owner_references.as_mut().unwrap()[0].controller = Some(false);
+
+    for (existing, why) in [
+        (foreign, "another subject's UID"),
+        (wrong_digest, "a different plan document"),
+        (mutable, "an object that could still be rewritten"),
+        (uncontrolled, "a non-controller owner reference"),
+    ] {
+        assert!(
+            plan::accepts_existing(&existing, SUBJECT_UID, &digest).is_err(),
+            "{why} was adopted"
+        );
+        let routes = vec![
+            Route {
+                method: "POST",
+                path_suffix: "/configmaps",
+                status: 409,
+                body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                    "message":"already exists","reason":"AlreadyExists","code":409}"#
+                    .to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: PLAN_PATH,
+                status: 200,
+                body: serde_json::to_string(&existing).unwrap(),
+            },
+        ];
+        let (client, _, _) = mock_client_recording_bodies(routes);
+        let e = plan::ensure(&client, NS, &cm, SUBJECT_UID, &digest)
+            .await
+            .expect_err(why);
+        match e {
+            plan::EnsureError::Plan(p) => assert_eq!(
+                p.code(),
+                CheckCode::CheckPlanConflict,
+                "{why} must be terminal, not a requeue"
+            ),
+            plan::EnsureError::Api(e) => panic!("{why} was reported as transport: {e}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_plan_that_did_not_exist_is_created_and_nothing_is_read() {
+    let cm = plan_object();
+    let routes = vec![Route {
+        method: "POST",
+        path_suffix: "/configmaps",
+        status: 201,
+        body: serde_json::to_string(&cm).unwrap(),
+    }];
+    let (client, recorder, _) = mock_client_recording_bodies(routes);
+    assert_eq!(
+        plan::ensure(
+            &client,
+            NS,
+            &cm,
+            SUBJECT_UID,
+            &documents().check_plan_sha256()
+        )
+        .await
+        .expect("created"),
+        plan::PlanOutcome::Created
+    );
+    let seen = recorder.lock().unwrap();
+    assert_eq!(seen.len(), 1, "the happy path reads nothing: {seen:?}");
+    assert_eq!(seen[0].method, "POST");
+}
+
+// ---------------------------------------------------------------------------
+// Result chunks — D2 §4.3, §5.5, §12
+// ---------------------------------------------------------------------------
+
+/// D2 §12's PLAT-09.1 unit row `chunks::size_bounds_worst_case_names`.
+#[test]
+fn chunks_size_bounds_worst_case_names() {
+    // Worst-case shape: a 249-character name, six digits of partitions and the
+    // full flag set with the longest code this pipeline can carry.
+    let worst = |i: usize| {
+        let mut e = TopicEntry::new(&format!("{i:09}{}", "n".repeat(240)), 999_999);
+        e.internal = true;
+        e.expected = true;
+        e.error = Some(CheckCode::ClusterAuthorizationFailed);
+        e
+    };
+    let entries: Vec<TopicEntry> = (0..6_000).map(worst).collect();
+    let split = chunks::split(&entries);
+    assert!(
+        split.len() >= 2,
+        "6,000 worst-case entries is more than one chunk"
+    );
+    for c in &split {
+        assert!(
+            c.lines <= chunks::MAX_CHUNK_LINES,
+            "chunk {} carries {} lines",
+            c.index,
+            c.lines
+        );
+        assert!(
+            c.data.len() <= chunks::MAX_CHUNK_BYTES,
+            "chunk {} is {} bytes, over the 768 KiB bound",
+            c.index,
+            c.data.len()
+        );
+        assert!(
+            c.data.len() < 1024 * 1024,
+            "a chunk must stay under the API server's 1 MiB ConfigMap limit"
+        );
+        assert_eq!(
+            c.sha256,
+            logweir_core::ids::sha256_prefixed(c.data.as_bytes())
+        );
+    }
+    // NOTHING IS LOST AND NOTHING IS DUPLICATED.
+    assert_eq!(
+        split.iter().map(|c| c.lines).sum::<usize>(),
+        entries.len(),
+        "every entry lands in exactly one chunk"
+    );
+    let rejoined: String = split.iter().map(|c| c.data.as_str()).collect();
+    assert_eq!(
+        rejoined,
+        logweir_core::check_contract::topic_tsv(&entries),
+        "the chunks concatenate back to the canonical TSV, in order"
+    );
+    // Indices are dense, zero-based and lexically ordered by name.
+    for (i, c) in split.iter().enumerate() {
+        assert_eq!(c.index, i);
+    }
+    assert_eq!(chunks::chunk_name("lwc-td-x", 0), "lwc-td-x-r000");
+    assert_eq!(chunks::chunk_name("lwc-td-x", 19), "lwc-td-x-r019");
+    assert!(
+        chunks::chunk_name("j", 2) < chunks::chunk_name("j", 10),
+        "lexical order"
+    );
+
+    // The typical shape D2 §5.5 tabulates: 5,003 entries ⇒ 3 chunks.
+    let typical: Vec<TopicEntry> = (0..5_003)
+        .map(|i| TopicEntry::new(&format!("orders-{i:05}"), 6))
+        .collect();
+    let split = chunks::split(&typical);
+    assert_eq!(split.len(), 3, "5,003 typical entries at 2,500 lines each");
+    assert_eq!(split[2].lines, 3);
+
+    assert!(
+        chunks::split(&[]).is_empty(),
+        "an empty inventory writes no chunk"
+    );
+
+    // THE BYTE BOUND, EXERCISED ON ITS OWN. With Kafka's 249-character name
+    // limit the LINE bound always bites first — 2,500 × 308 B is 770,000 B,
+    // just under the 786,432 B ceiling — so nothing in the legal-name fixture
+    // above can reach the byte bound, and dropping it changed no assertion in
+    // this file. It is defence against a raised `MAX_CHUNK_LINES` or a longer
+    // flag set, and `TopicEntry` does not enforce Kafka's limit, so this
+    // reaches it directly.
+    // Which bound bites at legal Kafka names, computed rather than asserted on
+    // constants — `clippy::assertions_on_constants` refuses the latter, and it
+    // is right to: a constant comparison is optimised out and guards nothing.
+    // Feeding the real `split` a full chunk's worth of worst-case entries is
+    // the same claim, made against the code.
+    let full: Vec<TopicEntry> = (0..chunks::MAX_CHUNK_LINES).map(worst).collect();
+    let split = chunks::split(&full);
+    assert_eq!(
+        split.len(),
+        1,
+        "{} worst-case legal entries still fit one chunk, so the LINE bound is the one that \
+         bites at Kafka's 249-character name limit; the byte bound below is defence against a \
+         raised MAX_CHUNK_LINES and is unreachable from the fixture above",
+        chunks::MAX_CHUNK_LINES
+    );
+    assert!(split[0].data.len() <= chunks::MAX_CHUNK_BYTES);
+    let fat: Vec<TopicEntry> = (0..3)
+        .map(|i| TopicEntry::new(&format!("{i}{}", "n".repeat(400 * 1024)), 1))
+        .collect();
+    let split = chunks::split(&fat);
+    assert_eq!(
+        split.len(),
+        3,
+        "three 400 KiB entries are three chunks: the byte bound splits what the line bound \
+         would have left as one"
+    );
+    for c in &split {
+        assert_eq!(c.lines, 1);
+        assert!(c.data.len() <= chunks::MAX_CHUNK_BYTES);
+    }
+    // A single entry larger than the whole bound lands alone rather than
+    // looping forever or being dropped.
+    let huge = [TopicEntry::new(&"n".repeat(chunks::MAX_CHUNK_BYTES + 1), 1)];
+    let split = chunks::split(&huge);
+    assert_eq!(split.len(), 1);
+    assert_eq!(split[0].lines, 1);
+}
+
+/// D2 §12's framework row `chunks::immutable_false_is_conflict`.
+#[test]
+fn chunks_immutable_false_is_conflict() {
+    let entries = [TopicEntry::new("orders", 6)];
+    let split = chunks::split(&entries);
+    let cm = chunks::build_chunk(&job_name(), NS, &owner(), &split[0], split.len());
+    assert_eq!(cm.immutable, Some(true));
+    assert_eq!(
+        cm.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(chunks::CHUNK_ANNOTATION))
+            .map(String::as_str),
+        Some("1/1"),
+        "the chunk annotation is one-based i/n"
+    );
+    assert_eq!(
+        cm.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(chunks::FORMAT_ANNOTATION))
+            .map(String::as_str),
+        Some("logweir.dev/topic-inventory/v1")
+    );
+
+    assert!(chunks::accepts_existing(&cm, SUBJECT_UID, &split[0].sha256).is_ok());
+
+    // THE ROW: an object that is not immutable is never adopted, because a
+    // result an API response already served could still change under it.
+    let mut mutable = cm.clone();
+    mutable.immutable = Some(false);
+    let e = chunks::accepts_existing(&mutable, SUBJECT_UID, &split[0].sha256)
+        .expect_err("a mutable result is a conflict");
+    assert_eq!(e.code(), CheckCode::ResultStorageConflict);
+    assert!(e.to_string().contains("immutable"), "{e}");
+
+    let mut absent = cm.clone();
+    absent.immutable = None;
+    assert!(chunks::accepts_existing(&absent, SUBJECT_UID, &split[0].sha256).is_err());
+
+    // And the other two halves of the rule.
+    let mut foreign = cm.clone();
+    foreign.metadata.owner_references.as_mut().unwrap()[0].uid = OTHER_JOB_UID.to_string();
+    assert!(chunks::accepts_existing(&foreign, SUBJECT_UID, &split[0].sha256).is_err());
+    assert!(
+        chunks::accepts_existing(&cm, SUBJECT_UID, "sha256:ffff").is_err(),
+        "a different digest at the same name is a conflict"
+    );
+
+    // The details document takes the same shape with its own format.
+    let details = chunks::build_details(&job_name(), NS, &owner(), "{\"missing\":1}\n");
+    assert_eq!(details.immutable, Some(true));
+    assert_eq!(
+        details.metadata.name.as_deref(),
+        Some(format!("{}-details", job_name()).as_str())
+    );
+    assert!(details
+        .metadata
+        .annotations
+        .as_ref()
+        .is_some_and(|a| !a.contains_key(chunks::CHUNK_ANNOTATION)));
+}
+
+#[tokio::test]
+async fn every_chunk_is_written_before_the_caller_can_commit() {
+    let entries = [TopicEntry::new("orders", 6)];
+    let split = chunks::split(&entries);
+    let objects = vec![chunks::build_chunk(&job_name(), NS, &owner(), &split[0], 1)];
+    let routes = vec![Route {
+        method: "POST",
+        path_suffix: "/configmaps",
+        status: 201,
+        body: serde_json::to_string(&objects[0]).unwrap(),
+    }];
+    let (client, recorder, _) = mock_client_recording_bodies(routes);
+    let written = chunks::write_all(&client, NS, SUBJECT_UID, &objects)
+        .await
+        .expect("written");
+    assert_eq!(written, vec![chunks::chunk_name(&job_name(), 0)]);
+    let seen = recorder.lock().unwrap();
+    assert!(
+        seen.iter().all(|r| r.method == "POST"),
+        "writing chunks patches no status: the commit is the CALLER's next act: {seen:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency limits — D2 §4.3, §4.4, §12
+// ---------------------------------------------------------------------------
+
+fn labelled_job(namespace: &str, kind: &str, connection: Option<&str>, finished: bool) -> Job {
+    let mut labels = serde_json::Map::new();
+    labels.insert("app.kubernetes.io/component".to_string(), json!("check"));
+    labels.insert("logweir.dev/check-kind".to_string(), json!(kind));
+    if let Some(c) = connection {
+        labels.insert("logweir.dev/check-connection-uid".to_string(), json!(c));
+    }
+    let status = if finished {
+        json!({"conditions":[{"type":"Complete","status":"True",
+            "lastProbeTime":"2026-09-16T11:59:00Z","lastTransitionTime":"2026-09-16T11:59:00Z"}]})
+    } else {
+        json!({})
+    };
+    serde_json::from_value(json!({
+        "apiVersion":"batch/v1","kind":"Job",
+        "metadata":{"name":format!("lwc-{kind}-{namespace}-{finished}"),
+                    "namespace":namespace,"labels":Value::Object(labels)},
+        "spec":{"template":{"spec":{"containers":[],"restartPolicy":"Never"}}},
+        "status":status
+    }))
+    .expect("the fixture is a Job")
+}
+
+/// D2 §12's framework row `limits::queues_over_namespace_cap`.
+#[test]
+fn limits_queues_over_namespace_cap() {
+    let policy = policy::ChecksPolicy::default(); // 4 / 20 / 1 / 4
+    let active = |n: usize| -> Vec<Job> {
+        (0..n)
+            .map(|i| {
+                let mut j = labelled_job(NS, "operationReadiness", None, false);
+                j.metadata.name = Some(format!("lwc-rd-{i}"));
+                j
+            })
+            .collect()
+    };
+
+    // Under the cap: admitted.
+    let counts = limits::count(&active(3), NS, None);
+    assert_eq!(counts.namespace, 3);
+    assert_eq!(counts.total, 3);
+    assert_eq!(
+        limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness),
+        limits::Admission::Admit
+    );
+
+    // AT the cap: queued, with the one reason D2 gives every ceiling.
+    let counts = limits::count(&active(4), NS, None);
+    assert_eq!(
+        limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness),
+        limits::Admission::Queued(CheckCode::ConcurrencyLimited)
+    );
+    assert!(!limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness).is_admitted());
+
+    // A FINISHED Job occupies no slot. Counted from the Job's own conditions
+    // and not from a CR phase, which is this controller's own writing.
+    let mut jobs = active(3);
+    jobs.push(labelled_job(NS, "operationReadiness", None, true));
+    jobs.push(labelled_job(NS, "operationReadiness", None, true));
+    let counts = limits::count(&jobs, NS, None);
+    assert_eq!(counts.namespace, 3, "two finished Jobs hold nothing");
+    assert!(limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness).is_admitted());
+
+    // ANOTHER NAMESPACE spends the total pool but not this namespace's.
+    let mut jobs = active(2);
+    jobs.extend((0..5).map(|i| {
+        let mut j = labelled_job("other-ns", "operationReadiness", None, false);
+        j.metadata.name = Some(format!("lwc-rd-other-{i}"));
+        j
+    }));
+    let counts = limits::count(&jobs, NS, None);
+    assert_eq!(counts.namespace, 2);
+    assert_eq!(counts.total, 7);
+    assert!(limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness).is_admitted());
+    // …until the TOTAL cap bites.
+    let tight = policy::ChecksPolicy {
+        max_active_total: 7,
+        ..policy
+    };
+    assert_eq!(
+        limits::admit(&counts, &tight, CheckPlanKind::OperationReadiness),
+        limits::Admission::Queued(CheckCode::ConcurrencyLimited)
+    );
+}
+
+#[test]
+fn one_discovery_per_connection_and_a_separate_evidence_pool() {
+    let policy = policy::ChecksPolicy::default();
+
+    // D2 §4.4's `maxActiveDiscoveriesPerConnection: 1`.
+    let jobs = vec![labelled_job(
+        NS,
+        "topicInventory",
+        Some(CONNECTION_UID),
+        false,
+    )];
+    let counts = limits::count(&jobs, NS, Some(CONNECTION_UID));
+    assert_eq!(counts.per_connection, 1);
+    assert_eq!(
+        limits::admit(&counts, &policy, CheckPlanKind::TopicInventory),
+        limits::Admission::Queued(CheckCode::ConcurrencyLimited)
+    );
+    // A discovery against ANOTHER connection is unaffected.
+    let counts = limits::count(&jobs, NS, Some(OTHER_JOB_UID));
+    assert_eq!(counts.per_connection, 0);
+    assert!(limits::admit(&counts, &policy, CheckPlanKind::TopicInventory).is_admitted());
+    // And the per-connection cap is a DISCOVERY rule: a readiness check against
+    // the same cluster is not queued by it.
+    let counts = limits::count(&jobs, NS, Some(CONNECTION_UID));
+    assert!(limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness).is_admitted());
+
+    // THE SEPARATE EVIDENCE POOL. Four interactive checks fill the namespace
+    // pool; an evidence fetch is still admitted, because verification must not
+    // be starved by interactive checks (D2 §4.3).
+    let busy: Vec<Job> = (0..4)
+        .map(|i| {
+            let mut j = labelled_job(NS, "topicInventory", None, false);
+            j.metadata.name = Some(format!("lwc-td-{i}"));
+            j
+        })
+        .collect();
+    let counts = limits::count(&busy, NS, None);
+    assert_eq!(counts.namespace, 4);
+    assert_eq!(counts.evidence_namespace, 0);
+    assert_eq!(
+        limits::admit(&counts, &policy, CheckPlanKind::TopicInventory),
+        limits::Admission::Queued(CheckCode::ConcurrencyLimited)
+    );
+    assert!(
+        limits::admit(&counts, &policy, CheckPlanKind::EvidenceFetch).is_admitted(),
+        "an evidence fetch spends its own pool and nothing else"
+    );
+
+    // And an evidence fetch does not spend the general pools either.
+    let evidence: Vec<Job> = (0..4)
+        .map(|i| {
+            let mut j = labelled_job(NS, "evidenceFetch", None, false);
+            j.metadata.name = Some(format!("lwc-ev-{i}"));
+            j
+        })
+        .collect();
+    let counts = limits::count(&evidence, NS, None);
+    assert_eq!(counts.namespace, 0);
+    assert_eq!(counts.total, 0);
+    assert_eq!(counts.evidence_namespace, 4);
+    assert!(limits::admit(&counts, &policy, CheckPlanKind::TopicInventory).is_admitted());
+    assert_eq!(
+        limits::admit(&counts, &policy, CheckPlanKind::EvidenceFetch),
+        limits::Admission::Queued(CheckCode::ConcurrencyLimited)
+    );
+}
+
+#[test]
+fn the_active_count_selects_only_check_jobs_and_a_job_this_build_cannot_name_still_holds_a_slot() {
+    assert_eq!(
+        limits::check_selector(),
+        "app.kubernetes.io/component=check"
+    );
+    assert_eq!(limits::QUEUED_REQUEUE_SECS, 10);
+
+    // A check Job whose kind label this build does not recognise counts against
+    // the general pools and against no kind-specific one — the safe direction
+    // for a ceiling.
+    let unknown = labelled_job(NS, "somethingNew", None, false);
+    let counts = limits::count(&[unknown], NS, Some(CONNECTION_UID));
+    assert_eq!(counts.namespace, 1);
+    assert_eq!(counts.total, 1);
+    assert_eq!(counts.per_connection, 0);
+    assert_eq!(counts.evidence_namespace, 0);
+
+    assert!(limits::is_active(&labelled_job(
+        NS,
+        "topicInventory",
+        None,
+        false
+    )));
+    assert!(!limits::is_active(&labelled_job(
+        NS,
+        "topicInventory",
+        None,
+        true
+    )));
+}
+
+#[tokio::test]
+async fn the_active_count_lists_by_the_component_label_and_nothing_else() {
+    let routes = vec![Route {
+        method: "GET",
+        path_suffix: "/jobs",
+        status: 200,
+        body: serde_json::to_string(&json!({
+            "apiVersion":"batch/v1","kind":"JobList","metadata":{},
+            "items":[labelled_job(NS, "topicInventory", Some(CONNECTION_UID), false)]
+        }))
+        .unwrap(),
+    }];
+    let (client, recorder, _) = mock_client_recording_bodies(routes);
+    let jobs = limits::check_jobs(&client).await.expect("listed");
+    assert_eq!(jobs.len(), 1);
+    let seen = recorder.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0]
+            .uri
+            .contains("labelSelector=app.kubernetes.io%2Fcomponent%3Dcheck"),
+        "the count must not list every Job in the cluster: {}",
+        seen[0].uri
+    );
+    assert!(
+        !seen[0].uri.contains("/namespaces/"),
+        "the total pool is installation-wide: {}",
+        seen[0].uri
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H4 — a finished Job whose pod never wrote a log
+// ---------------------------------------------------------------------------
+
+/// **`observe` must reach `classify`'s `DeadlineExceeded` branch.**
+///
+/// A check pod that sat in `ImagePullBackOff` — which is NOT in
+/// `Waiting::is_terminal`, so it is not cancelled early — reaches its
+/// `activeDeadlineSeconds` without ever starting its `runner` container. The
+/// API server then answers `pods/log` with **400** ("container \"runner\" … is
+/// waiting to start"). While `observe` propagated that with `?`, every
+/// reconcile returned `Err` and requeued: no status was ever committed, so no
+/// TTL was ever patched, and the operator saw a spinner instead of
+/// `DeadlineExceeded`.
+#[tokio::test]
+async fn a_finished_job_whose_pod_never_started_is_classified_not_requeued() {
+    let never_started = json!({"phase":"Failed","containerStatuses":[{
+        "name":"runner","image":"x","imageID":"","ready":false,"restartCount":0,
+        "state":{"waiting":{"reason":"ImagePullBackOff","message":"back-off pulling image"}}
+    }]});
+    for (code, body) in [
+        (
+            400,
+            r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                "message":"container \"runner\" in pod \"lwc-td-9ab-xyz12\" is waiting to start: trying and failing to pull image",
+                "reason":"BadRequest","code":400}"#,
+        ),
+        (
+            404,
+            r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                "message":"pods \"lwc-td-9ab-xyz12\" not found","reason":"NotFound","code":404}"#,
+        ),
+    ] {
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/pods",
+                status: 200,
+                body: pod_list(vec![pod_object(
+                    Some(("Job", JOB_UID, true)),
+                    never_started.clone(),
+                )]),
+            },
+            Route {
+                method: "GET",
+                path_suffix: POD_LOG_PATH,
+                status: code,
+                body: body.to_string(),
+            },
+        ];
+        let (client, _, _) = mock_client_recording_bodies(routes);
+        let observation = check::observe(
+            &client,
+            NS,
+            &job_object(Some("Failed"), Some("DeadlineExceeded")),
+            &[],
+            &expectations(),
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a {code} on pods/log must not abort the pass: {e}"));
+        assert_eq!(observation.phase, CheckPhase::Failed);
+        assert_eq!(
+            observation.reason,
+            CheckCode::RunnerImagePullFailed,
+            "a finished Job whose pod never started must report WHAT it was waiting for, not \
+             `ResultUnreadable` (the symptom) and not `DeadlineExceeded` (the clock) ({code})"
+        );
+        assert!(observation.relay.is_none());
+    }
+
+    // And the pure deadline shape: a pod with no container status at all, so
+    // there is no more specific waiting row to report.
+    let routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pod_list(vec![pod_object(
+                Some(("Job", JOB_UID, true)),
+                json!({"phase": "Failed"}),
+            )]),
+        },
+        Route {
+            method: "GET",
+            path_suffix: POD_LOG_PATH,
+            status: 400,
+            body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                "message":"waiting to start","reason":"BadRequest","code":400}"#
+                .to_string(),
+        },
+    ];
+    let (client, _, _) = mock_client_recording_bodies(routes);
+    let observation = check::observe(
+        &client,
+        NS,
+        &job_object(Some("Failed"), Some("DeadlineExceeded")),
+        &[],
+        &expectations(),
+        now(),
+    )
+    .await
+    .expect("a 400 on pods/log must not abort the pass");
+    assert_eq!(
+        observation.reason,
+        CheckCode::DeadlineExceeded,
+        "the branch written for a pod that never wrote a relay must be reachable"
+    );
+
+    // A transport-class failure is still a requeue: a verdict published from a
+    // control-plane failure would be a claim about somebody's cluster.
+    assert!(check::is_log_absent(&kube::Error::Api(
+        kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "waiting to start".into(),
+            reason: "BadRequest".into(),
+            code: 400,
+        }
+    )));
+    for code in [401, 403, 429, 500, 503] {
+        assert!(
+            !check::is_log_absent(&kube::Error::Api(kube::core::ErrorResponse {
+                status: "Failure".into(),
+                message: "x".into(),
+                reason: "y".into(),
+                code,
+            })),
+            "{code} is a control-plane failure, not an absent log"
+        );
+    }
+    let routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pod_list(vec![pod_object(
+                Some(("Job", JOB_UID, true)),
+                never_started,
+            )]),
+        },
+        Route {
+            method: "GET",
+            path_suffix: POD_LOG_PATH,
+            status: 500,
+            body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                "message":"internal","reason":"InternalError","code":500}"#
+                .to_string(),
+        },
+    ];
+    let (client, _, _) = mock_client_recording_bodies(routes);
+    assert!(
+        check::observe(
+            &client,
+            NS,
+            &job_object(Some("Failed"), Some("DeadlineExceeded")),
+            &[],
+            &expectations(),
+            now(),
+        )
+        .await
+        .is_err(),
+        "a 500 must still requeue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// L5 — a FailedCreate event must name THIS Job
+// ---------------------------------------------------------------------------
+
+#[test]
+fn another_workloads_failed_create_never_cancels_this_check() {
+    let theirs = EventFact {
+        reason: "FailedCreate".to_string(),
+        message: "Error creating: pods \"someone-else-x\" is forbidden: exceeded quota: compute"
+            .to_string(),
+        involved_kind: "Job".to_string(),
+        involved_name: "someone-elses-job".to_string(),
+    };
+    let at = |events: &[EventFact]| {
+        waiting::classify(&waiting::Observed {
+            job: &job_object(None, None),
+            pod: None,
+            events,
+            now: now(),
+        })
+    };
+    assert_eq!(
+        at(std::slice::from_ref(&theirs)),
+        None,
+        "a `FailedCreate` for another Job is not this check's finding — and \
+         `PodCreateRejected` is in the early-cancel set, so taking it would CANCEL a healthy \
+         check Job because of somebody else's ResourceQuota"
+    );
+    // A pod-scoped FailedCreate is not this Job's either.
+    let pod_scoped = EventFact {
+        involved_kind: "Pod".to_string(),
+        involved_name: job_name(),
+        ..theirs.clone()
+    };
+    assert_eq!(at(&[pod_scoped]), None);
+    // Ours still is, and it is still found when it is not first.
+    let ours = EventFact {
+        involved_name: job_name(),
+        ..theirs.clone()
+    };
+    assert_eq!(
+        at(&[theirs, ours]).map(|w| w.code),
+        Some(CheckCode::PodCreateRejected)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// L6 — the redaction chokepoint holds for a relay refusal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relay_refusal_reason_goes_through_the_redaction_chokepoint() {
+    // `RelayRefusal::reason` reaches `Observation.message` and from there a
+    // status condition. No `FrameError` variant reachable from `decode`
+    // carries runner bytes today, but `CheckRelay::result()` — which W8 and W9
+    // must call — produces one whose `CheckResultError::Contract(String)`
+    // quotes the runner's own field verbatim. A chokepoint is only a
+    // chokepoint if every path through it calls it.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/check/relay.rs"),
+    )
+    .expect("the relay module");
+    let code = code_only(&src);
+    assert!(
+        code.contains("reason: redact(&error.to_string())"),
+        "a relay refusal's reason must be redacted and capped like every other relayed string"
+    );
+    // And a long reason is capped, which `redact` does.
+    let long = "x".repeat(10_000);
+    assert!(
+        logweir_core::check_contract::redact(&long).chars().count()
+            <= logweir_core::check_contract::MESSAGE_MAX_CHARS,
+        "redact caps, and that cap is what this path now inherits"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Q9 — fail_closed is defence in depth, and it has a guard of its own
+// ---------------------------------------------------------------------------
+
+/// `Policy::fail_closed()` is observationally equal to `Policy::defaults()`
+/// TODAY, because both default collections are already empty — which is why a
+/// reviewer's `fail_closed() -> defaults()` mutant was a no-op rather than a
+/// weak guard. This is the guard it lacked: whatever the defaults come to hold,
+/// a policy nobody can read clears the two collections that could turn a
+/// listing into a completeness claim.
+#[test]
+fn fail_closed_clears_the_two_collections_whatever_the_defaults_hold() {
+    let mut generous = policy::Policy::defaults();
+    generous.discovery.visibility_attestations.push(
+        serde_json::from_value(json!({
+            "id": "att-from-a-future-default",
+            "namespace": NS,
+            "kafkaCluster": "source",
+            "clusterId": "M29I2S7FQPyHBEX12Vx7XA",
+            "principal": "User:backup",
+            "attestedBy": "platform-admin@example.invalid",
+            "attestedAt": "2026-09-15T00:00:00Z",
+            "expiresAt": "2026-12-15T00:00:00Z",
+            "statement": "a default nobody should inherit"
+        }))
+        .expect("an Attestation"),
+    );
+    generous
+        .evidence
+        .controller_identity_locations
+        .push(policy::IdentityLocation {
+            endpoint: "https://elsewhere:9000".to_string(),
+            region: String::new(),
+            bucket: "not-ours".to_string(),
+        });
+    assert!(!generous.discovery.visibility_attestations.is_empty());
+
+    // `closed()` takes a VALUE, so the rule can be observed on a policy that
+    // actually carries both collections. `fail_closed()` is
+    // `defaults().closed()`, and the two are equal only because the defaults
+    // are empty today — which is why a reviewer's `fail_closed() -> defaults()`
+    // mutant was a no-op rather than a weak guard.
+    let closed = generous.clone().closed();
+    assert!(
+        closed.discovery.visibility_attestations.is_empty(),
+        "a policy nobody can read must never be the reason a listing is reported as complete"
+    );
+    assert!(
+        closed.evidence.controller_identity_locations.is_empty(),
+        "nor the reason an unlisted object-store location is treated as allowlisted"
+    );
+    assert_ne!(
+        closed, generous,
+        "if this ever passes vacuously the guard has stopped guarding"
+    );
+    assert_eq!(
+        policy::Policy::fail_closed(),
+        policy::Policy::defaults().closed(),
+        "the constant and the rule are one thing"
+    );
+    let closed = policy::Policy::fail_closed();
+    assert!(closed.discovery.visibility_attestations.is_empty());
+    assert!(closed.evidence.controller_identity_locations.is_empty());
+    // The LIMITS keep their defaults, so checks keep running.
+    assert_eq!(
+        closed.checks,
+        policy::ChecksPolicy::default(),
+        "failing closed must not stop every check in the installation"
+    );
+    assert_eq!(closed.discovery.hard_max_topics, 50_000);
 }

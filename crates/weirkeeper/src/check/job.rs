@@ -53,6 +53,16 @@ pub const LABEL_CHECK_KIND: &str = "logweir.dev/check-kind";
 /// because a label is writable by anything that can create a pod.
 pub const LABEL_CHECK_OWNER_UID: &str = "logweir.dev/check-owner-uid";
 
+/// The UID of the `KafkaCluster` this check dials, when it dials one.
+///
+/// Present ONLY so [`super::limits`] can enforce D2 §4.4's
+/// `maxActiveDiscoveriesPerConnection` — one active discovery per connection —
+/// without reading every check's plan `ConfigMap` to find out which cluster it
+/// names. Absent for a kind that has no connection (`destinationAccess`,
+/// `evidenceFetch`), and absent is counted as "no connection", never as a
+/// wildcard.
+pub const LABEL_CHECK_CONNECTION_UID: &str = "logweir.dev/check-connection-uid";
+
 /// Where the check plan `ConfigMap` is mounted.
 ///
 /// `/check`, NOT [`crate::job::PLAN_MOUNT_PATH`]. D2 §4.2's argv is
@@ -111,14 +121,26 @@ pub fn check_job_name(kind: CheckPlanKind, owner_uid: &str) -> String {
 }
 
 /// The labels on a check Job and on its pod template — the same map, on both.
+///
+/// `connection_uid` is `None` for a kind that dials no cluster; the key is then
+/// ABSENT rather than empty, because an empty label value is a value a
+/// selector can match.
 #[must_use]
-pub fn labels(kind: CheckPlanKind, owner_uid: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+pub fn labels(
+    kind: CheckPlanKind,
+    owner_uid: &str,
+    connection_uid: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::from([
         (LABEL_MANAGED_BY.to_string(), MANAGED_BY.to_string()),
         (LABEL_COMPONENT.to_string(), COMPONENT_CHECK.to_string()),
         (LABEL_CHECK_KIND.to_string(), kind.as_str().to_string()),
         (LABEL_CHECK_OWNER_UID.to_string(), owner_uid.to_string()),
-    ])
+    ]);
+    if let Some(uid) = connection_uid.filter(|u| !u.trim().is_empty()) {
+        out.insert(LABEL_CHECK_CONNECTION_UID.to_string(), uid.to_string());
+    }
+    out
 }
 
 /// Everything one check Job needs.
@@ -137,6 +159,9 @@ pub struct CheckJobSpec {
     pub namespace: String,
     /// The owning custom resource.
     pub owner: RunnerOwner,
+    /// The `KafkaCluster` UID this check dials, for
+    /// [`LABEL_CHECK_CONNECTION_UID`]. `None` for a kind that dials none.
+    pub connection_uid: Option<String>,
     /// The plan `ConfigMap`'s name, mounted at [`CHECK_MOUNT_PATH`].
     pub plan_config_map: String,
     /// `sha256:<hex>` of the plan document, pinned into the environment so the
@@ -174,7 +199,13 @@ impl CheckJobSpec {
     /// This check's labels.
     #[must_use]
     pub fn labels(&self) -> BTreeMap<String, String> {
-        labels(self.kind, &self.owner.uid)
+        labels(self.kind, &self.owner.uid, self.connection_uid.as_deref())
+    }
+
+    /// This check's plan `ConfigMap` name — [`super::plan::plan_config_map_name`].
+    #[must_use]
+    pub fn plan_name(&self) -> String {
+        super::plan::plan_config_map_name(&self.job_name())
     }
 }
 

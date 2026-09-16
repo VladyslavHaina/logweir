@@ -29,7 +29,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 
 use logweir_core::check_contract::{
-    frames::Decoder, CheckCode, CheckRelay, FrameExpectations, DEFAULT_RELAY_BUDGET_BYTES,
+    frames::Decoder, redact, CheckCode, CheckRelay, FrameExpectations, DEFAULT_RELAY_BUDGET_BYTES,
 };
 
 use crate::controllers::backup::{tail_lines, REFUSAL_REASON_PREFIX};
@@ -96,7 +96,16 @@ impl RelayRefusal {
     fn new(error: &logweir_core::check_contract::FrameError) -> Self {
         Self {
             code: error.code(),
-            reason: error.to_string(),
+            // REDACTED AND CAPPED, even though no `FrameError` variant reachable
+            // from `decode` carries runner bytes today. `FrameError::
+            // ResultDocument`, whose `CheckResultError::Contract(String)`
+            // quotes the runner's own `contract` field verbatim, arises from
+            // `CheckRelay::result()` — which W8 and W9 must call, and which
+            // `CheckResult::sanitise` exists for. This string reaches
+            // `Observation.message` and from there a status condition, and
+            // `check_contract`'s redaction chokepoint is only a chokepoint if
+            // every path through it actually calls it.
+            reason: redact(&error.to_string()),
         }
     }
 }

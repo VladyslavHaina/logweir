@@ -188,7 +188,7 @@ pub fn classify(observed: &Observed<'_>) -> Option<Waiting> {
             }
         }
     } else if age(observed.job.creation_timestamp_utc(), observed.now) >= Some(POD_CREATE_GRACE) {
-        if let Some(w) = from_failed_create(observed.events) {
+        if let Some(w) = from_failed_create(observed.events, &observed.job.name_any()) {
             return Some(w);
         }
     }
@@ -334,8 +334,18 @@ fn from_failed_mount(events: &[EventFact], pod_name: &str) -> Option<Waiting> {
 }
 
 /// The `FailedCreate` row, split on whether the ServiceAccount is the cause.
-fn from_failed_create(events: &[EventFact]) -> Option<Waiting> {
-    let e = events.iter().find(|e| e.reason == "FailedCreate")?;
+///
+/// **It must name THIS Job.** `FailedCreate` is a common event in a namespace
+/// with a `ResourceQuota` or a restrictive PodSecurity level, and a controller
+/// that took the first one it saw would report an unrelated workload's quota
+/// failure as this check's — and `PodCreateRejected` is in
+/// [`Waiting::is_terminal`], so it would CANCEL a healthy check Job because of
+/// somebody else's event. `from_failed_mount` already matched on the involved
+/// object; this row did not.
+fn from_failed_create(events: &[EventFact], job_name: &str) -> Option<Waiting> {
+    let e = events.iter().find(|e| {
+        e.reason == "FailedCreate" && e.involved_kind == "Job" && e.involved_name == job_name
+    })?;
     if e.message.contains("serviceaccount ") && e.message.contains("not found") {
         return Some(Waiting::of(
             CheckCode::RunnerServiceAccountMissing,

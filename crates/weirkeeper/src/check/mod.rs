@@ -15,6 +15,9 @@
 //! | module | what it decides |
 //! |---|---|
 //! | [`job`] | the Job's name, labels, deadline, TTL and projections |
+//! | [`plan`] | the immutable, owned, digest-pinned plan `ConfigMap` and its 409 rule |
+//! | [`chunks`] | the immutable result `ConfigMap`s, their size bounds and the commit point |
+//! | [`limits`] | D2 §4.4's four concurrency ceilings, counted from Jobs |
 //! | [`pod`] | which pod belongs to that Job — by controller-owner UID, never by label (D-SEAMS **S6**) |
 //! | [`waiting`] | what a pod that has not run yet is waiting for, as a code |
 //! | [`relay`] | the verified frames, and the runner's contract refusal |
@@ -34,26 +37,40 @@
 //!
 //! # What is deliberately not here yet
 //!
-//! D2 §4.3 also lists `plan.rs`, `chunks.rs`, `cancel.rs`, `limits.rs` and
-//! `gc.rs`. Each of those writes or deletes an object owned by one of the three
-//! kinds D2 §13.2 gives to **W6a**, which has not landed: a plan `ConfigMap`'s
-//! 409 rule is about the owner UID of a `TopicDiscovery` or a `Preflight`, and
-//! `gc.rs` needs `DeleteParams` preconditions over the same. They are W8/W9's
-//! to land with the controllers that own those objects, on top of what is here.
-//! [`ttl_patch`] and [`cancel_patch`] — the two Job patches the ordering rules
-//! are about — ARE here, because they are properties of the check Job and not
-//! of any CR.
-
+//! One module of D2 §4.3's ten: **`gc.rs`**. It deletes a terminal
+//! `TopicDiscovery` when `now > observedAt + retentionSeconds` or when it falls
+//! outside the newest `keepPerConnection` terminal discoveries for a connection,
+//! and a terminal `Preflight` when `now > expiresAt + retentionSeconds`, always
+//! with `DeleteParams { preconditions: { uid } }`. Every one of those reads a
+//! field on a kind **W6a has not landed** — `TopicDiscovery.status.observedAt`
+//! and `Preflight.status.expiresAt` — so there is nothing to type the function
+//! against. It also needs an RBAC decision rather than a grant:
+//! `crates/logweir/tests/manifest_lint.rs` asserts twice, with the reason
+//! recorded in `config/rbac/role.yaml`'s header, that `delete` appears in NO
+//! rule and that `Api::delete`/`delete_opt` is called NOWHERE under
+//! `crates/weirkeeper/src/`. `gc.rs` belongs to W8/W9 with W11.
+//!
+//! Everything else in §4.3 is here. `plan.rs`, `chunks.rs` and `limits.rs`
+//! needed only [`crate::job::RunnerOwner`] — four strings — and a label
+//! selector, never a W6a type, and leaving them out would have meant W8 and W9
+//! each writing their own plan-`ConfigMap` 409 rule, their own chunk bounds and
+//! their own commit point: exactly the "four slightly different answers" this
+//! module's header says it exists to prevent.
+//!
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use serde_json::{json, Value};
+use tracing::debug;
 
 use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOutcome, CheckRelay, FrameExpectations, OverallState,
 };
 
+pub mod chunks;
 pub mod job;
+pub mod limits;
+pub mod plan;
 pub mod pod;
 pub mod policy;
 pub mod relay;
@@ -188,15 +205,19 @@ pub fn classify(input: &Input<'_>) -> Observation {
         .pod
         .and_then(crate::controllers::backup::terminated_exit_code);
 
-    // A finished Job whose deadline fired, or that was disrupted, says what
-    // happened rather than reporting an unreadable relay for a pod that never
-    // wrote one.
-    if let Some(w) = waiting.as_ref().filter(|w| {
-        matches!(
-            w.code,
-            CheckCode::DeadlineExceeded | CheckCode::DisruptedMidCheck
-        )
-    }) {
+    // A FINISHED JOB WITH A WAITING STATE SAYS WHAT IT WAS WAITING FOR.
+    //
+    // Any waiting state, not only the deadline and the disruption this used to
+    // filter for. A check whose pod sat in `ImagePullBackOff` — which is NOT in
+    // `Waiting::is_terminal`, so it is not cancelled early — reaches its
+    // `activeDeadlineSeconds` having never started its `runner` container, and
+    // there is no relay because there was never a process to write one.
+    // `RunnerImagePullFailed` is what the operator has to act on;
+    // `ResultUnreadable` would name the symptom and bury the cause, and
+    // `DeadlineExceeded` would name only the clock. The waiting classification
+    // is already ordered most-specific-first, so whatever it returns is the
+    // best answer available.
+    if let Some(w) = waiting.as_ref() {
         return Observation {
             phase: CheckPhase::Failed,
             reason: w.code,
@@ -482,6 +503,20 @@ pub async fn cancel(
     Ok(true)
 }
 
+/// Whether a `pods/log` failure means "there is no log", rather than "the API
+/// server could not be reached".
+///
+/// **400 and 404 only.** 400 is what the API server answers for a container
+/// that is waiting to start or was never created; 404 is the pod having gone.
+/// Both are facts about the pod that [`classify`] already has a branch for.
+/// Every other status — 401, 403, 429, 5xx — and every transport error is a
+/// reason to requeue, because a verdict published from one of those would be a
+/// claim about somebody's cluster derived from a control-plane failure.
+#[must_use]
+pub fn is_log_absent(error: &kube::Error) -> bool {
+    matches!(error, kube::Error::Api(response) if response.code == 400 || response.code == 404)
+}
+
 /// One whole observation pass — **the seam W8 and W9 call**.
 ///
 /// It finds the owned pod (never a label match), reads the relay **only** when
@@ -512,7 +547,34 @@ pub async fn observe(
     let log = match (finished, owned.as_ref()) {
         (true, Some(p)) => {
             let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
-            Some(pods.logs(&p.name_any(), &relay::log_params()).await?)
+            match pods.logs(&p.name_any(), &relay::log_params()).await {
+                Ok(log) => Some(log),
+                // THERE IS NO LOG, AND THAT IS AN ANSWER. A finished Job whose
+                // pod never started its `runner` container has no stdout to
+                // read, and the API server says so with 400 ("container
+                // \"runner\" … is waiting to start") or 404. Propagating that
+                // with `?` made `classify`'s DeadlineExceeded branch
+                // unreachable from here: a check whose pod sat in
+                // `ImagePullBackOff` — which is NOT in `Waiting::is_terminal`,
+                // so it is not cancelled early — reaches its deadline, and
+                // every reconcile from then on returned `Err` and requeued. No
+                // status was ever committed, so no TTL was ever patched, and
+                // the operator watched a spinner instead of reading
+                // `DeadlineExceeded`.
+                Err(e) if is_log_absent(&e) => {
+                    debug!(
+                        namespace = %namespace,
+                        pod = %p.name_any(),
+                        error = %e,
+                        "the check pod has no readable `runner` log; classifying from the Job \
+                         and the pod status instead of failing the pass"
+                    );
+                    None
+                }
+                // Everything else is transport-class and really is a reason to
+                // requeue rather than to publish a verdict.
+                Err(e) => return Err(e),
+            }
         }
         _ => None,
     };
