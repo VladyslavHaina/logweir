@@ -276,8 +276,8 @@ spec:
                   topicPrefix:
                     description: The topic-name prefix. Rendered as `<prefix><uid-first-8>-`, so it is unique per schedule object and inside the runner's deletion guard.
                     maxLength: 40
-                    minLength: 11
-                    pattern: ^rehearsal-[a-z0-9-]*-$
+                    minLength: 10
+                    pattern: ^rehearsal-[a-z0-9-]*$
                     type: string
                 required:
                 - clusterRef

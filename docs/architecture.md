@@ -288,6 +288,28 @@ forward, `state` moves `Active → Retired` and `Active|Retired → Revoked` and
 never back, and the revocation instants are write-once. Public material is never
 removed, because old archives still need it.
 
+Two of Amendment G's rules were reshaped by a live API server rather than by
+review, and the shapes are recorded here because the reasons are not obvious
+from the text:
+
+- `TrustPolicy`'s monotonicity was first written as four object-level rules,
+  each a quadratic walk over `spec.keys` comparing every field including
+  `spkiPem` at `maxLength: 4096`. `kubectl --context docker-desktop apply`
+  refused the whole CRD — *estimated rule cost exceeds budget by factor of more
+  than 100x*, and *cost total for entire OpenAPIv3 schema exceeds budget by
+  factor of 51.6x*. The shipped form keeps ONE object-level rule (a key that was
+  removed has no `self` to attach a rule to, so "still present" cannot be asked
+  of an item) comparing 64-character key ids alone, and moves every per-key
+  check to a transition rule on one item of the associative list, which the API
+  server correlates by `keyId`. `keyId` carries an explicit `maxLength`, without
+  which the estimator prices the walk against the largest string a request could
+  carry and the CRD still will not install.
+- `RehearsalSchedule.spec.target.topicPrefix` carries `^rehearsal-[a-z0-9-]*$`,
+  not the `^rehearsal-[a-z0-9-]*-$` D3 §4.1 quotes. That grammar is stated
+  "after rendering": the controller appends `<schedule-uid-first-8>-`. Applied
+  to the spec field it refuses the decision's own example, `rehearsal-`, because
+  RE2 needs one more character before `-$` once the leading literal is consumed.
+
 `Approval.spec.subjectRef.kind` gains `RehearsalSchedule`, additively, so one
 signed standing document can authorise every slot of one sealed schedule.
 `Restore.spec.approvalRef` becomes optional and `Restore.spec.authorization`

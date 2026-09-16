@@ -894,6 +894,9 @@ pub fn render_all() -> Vec<Rendered> {
             for (path, rule, message) in trust_policy::NESTED_RULES {
                 attach_rule(&mut crd, path, rule, message);
             }
+            for (path, rule, message) in trust_policy::KEY_TRANSITION_RULES {
+                attach_transition_rule(&mut crd, path, rule, message);
+            }
             crd
         },
         &trust_policy::SPEC_RULES,

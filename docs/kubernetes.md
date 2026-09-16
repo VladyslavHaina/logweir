@@ -280,8 +280,15 @@ only thing that permits plaintext.
 validation rule (`point.requireVerifiedEvidence` must be `true` in v1).
 `RecoveryCatalog` seals everything but `spec.syncRequest`. `RetentionPolicy`
 seals `destinationRef`, `catalogRef` and `scope` and ties `mode` to its block.
-`TrustPolicy` is not sealed at all — see its row above for the four rules that
-make it monotonic instead. `ProtectionPolicy` carries no `.spec` rule, and that
+`TrustPolicy` is not sealed at all. One object-level rule says an existing
+`keyId` may not be removed; everything else about a key — its public material,
+its `notAfter`, its `state` and its revocation instants — is a **transition
+rule on one item** of `spec.keys`, which is an associative list keyed by
+`keyId`, so the API server correlates each entry with its own previous value and
+a NEWLY added key is simply not evaluated. That shape is what makes the rules
+installable at all: the quadratic form was refused by a live API server for
+exceeding the CEL cost budget, and `spec.keys[].keyId` carries an explicit
+`maxLength` for the same reason. `ProtectionPolicy` carries no `.spec` rule, and that
 is the decision rather than an omission.
 
 `TopicDiscovery` and `Preflight` seal a REQUIRED sub-object, `spec.request`,

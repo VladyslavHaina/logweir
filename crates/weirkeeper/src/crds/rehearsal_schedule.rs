@@ -32,11 +32,37 @@ use serde::{Deserialize, Serialize};
 
 use super::{Condition, LocalRef, SpecRule, Time};
 
-/// The rendered topic prefix grammar. The controller appends the first eight
-/// characters of this object's UID, so two schedules can never map to the same
-/// topic name, and the result still satisfies the runner's `with_scratch_prefix`
-/// deletion guard.
-pub const TOPIC_PREFIX_PATTERN: &str = "^rehearsal-[a-z0-9-]*-$";
+/// What `spec.target.topicPrefix` may be.
+///
+/// # This is NOT the pattern D3 §4.1 quotes, and the difference is measured
+///
+/// The decision states the grammar `^rehearsal-[a-z0-9-]*-$` **"after
+/// rendering"** (§4.4): the controller appends `<schedule-uid-first-8>-`, so
+/// the RENDERED prefix is `rehearsal-3f2a91c7-` and that is what has to end in
+/// a hyphen. Putting the rendered pattern on the spec field refuses the
+/// decision's own example — a live `kubectl apply` on 2026-09-16 rejected
+/// `topicPrefix: "rehearsal-"` with
+/// *should match '^rehearsal-[a-z0-9-]*-$'*, because RE2 needs one more
+/// character before the trailing `-$` after the literal has been consumed.
+///
+/// So the spec field carries [`TOPIC_PREFIX_PATTERN`] and the rendered value
+/// carries [`RENDERED_TOPIC_PREFIX_PATTERN`]; the rendering step is what turns
+/// one into the other, and
+/// `the_rendered_rehearsal_prefix_satisfies_the_decisions_grammar` asserts it
+/// rather than trusting it.
+pub const TOPIC_PREFIX_PATTERN: &str = "^rehearsal-[a-z0-9-]*$";
+
+/// The grammar the RENDERED prefix satisfies — D3 §4.1's text, verbatim.
+///
+/// It is what keeps teardown inside the runner's `with_scratch_prefix`
+/// deletion guard, and what makes two schedules' topic names unmixable: the
+/// UID fragment is unique per schedule object.
+pub const RENDERED_TOPIC_PREFIX_PATTERN: &str = "^rehearsal-[a-z0-9-]*-$";
+
+/// What the controller appends to [`RehearsalTarget::topic_prefix`] to render
+/// the per-schedule prefix: the first eight characters of this object's UID,
+/// then a hyphen.
+pub const RENDERED_PREFIX_SUFFIX_LEN: usize = 9;
 
 /// The Kafka topic-name grammar.
 pub const TOPIC_NAME_PATTERN: &str = super::topic_discovery::TOPIC_NAME_PATTERN;
@@ -172,7 +198,10 @@ pub struct RehearsalTarget {
     pub cluster_ref: LocalRef,
     /// The topic-name prefix. Rendered as `<prefix><uid-first-8>-`, so it is
     /// unique per schedule object and inside the runner's deletion guard.
-    #[schemars(regex(path = "TOPIC_PREFIX_PATTERN"), length(min = 11, max = 40))]
+    // TEN IS THE SHORTEST: `rehearsal-` itself, which is D3 §4.1's example and
+    // was refused by a live API server while this field carried the RENDERED
+    // grammar. See `TOPIC_PREFIX_PATTERN` for the measurement.
+    #[schemars(regex(path = "TOPIC_PREFIX_PATTERN"), length(min = 10, max = 40))]
     pub topic_prefix: String,
     /// The marker topic that proves this is a scratch cluster.
     #[schemars(regex(path = "TOPIC_NAME_PATTERN"))]

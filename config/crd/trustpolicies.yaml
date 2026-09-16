@@ -48,6 +48,7 @@ spec:
               allowedTargetClusterIds:
                 description: 'The cluster ids a restore may target. Replaces `TrustRoster.spec.allowedClusterIds`, at the same scope and with the same semantics: a namespace tenant must not be able to widen it.'
                 items:
+                  maxLength: 253
                   type: string
                 maxItems: 64
                 nullable: true
@@ -68,7 +69,12 @@ spec:
                       - ed25519
                       type: string
                     keyId:
-                      description: The sha256 of the DER SPKI, lowercase hex. The merge key of this list and the id every verdict is recorded against.
+                      description: |-
+                        The sha256 of the DER SPKI, lowercase hex. The merge key of this list and the id every verdict is recorded against.
+
+                        `length` IS LOAD-BEARING AND NOT REDUNDANT WITH THE PATTERN. The CEL cost estimator reads `maxLength` and nothing else: with only a regex here it assumes the largest string a request could carry, and G1's quadratic walk over this field was refused live for exceeding the cost budget by more than 100x. A 64-character bound makes the same rule cost about 29,000 units against a 10,000,000 budget.
+                      maxLength: 64
+                      minLength: 64
                       pattern: ^[0-9a-f]{64}$
                       type: string
                     notAfter:
@@ -160,6 +166,14 @@ spec:
                     rule: (self.state != 'Revoked' || (has(self.revokedAt) && has(self.revocationEffectiveFrom))) && (self.state != 'Retired' || has(self.retiredAt))
                   - message: notBefore must be before notAfter
                     rule: self.notBefore < self.notAfter
+                  - message: a key's spkiPem, algorithm, usages, principal.id and notBefore are immutable; issue a new keyId instead
+                    rule: self.spkiPem == oldSelf.spkiPem && self.algorithm == oldSelf.algorithm && self.usages == oldSelf.usages && self.principal.id == oldSelf.principal.id && self.notBefore == oldSelf.notBefore
+                  - message: a key's notAfter may only be brought forward, never extended
+                    rule: self.notAfter <= oldSelf.notAfter
+                  - message: a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards
+                    rule: 'oldSelf.state == ''Active'' ? true : (oldSelf.state == ''Retired'' ? self.state != ''Active'' : self.state == ''Revoked'')'
+                  - message: revokedAt and revocationEffectiveFrom are immutable once written
+                    rule: (!has(oldSelf.revokedAt) || (has(self.revokedAt) && self.revokedAt == oldSelf.revokedAt)) && (!has(oldSelf.revocationEffectiveFrom) || (has(self.revocationEffectiveFrom) && self.revocationEffectiveFrom == oldSelf.revocationEffectiveFrom))
                 maxItems: 64
                 type: array
                 x-kubernetes-list-map-keys:
@@ -168,6 +182,7 @@ spec:
               namespaces:
                 description: 'The namespaces this policy governs, by exact name. Never a pattern: a pattern is how a new namespace silently inherits a trust decision nobody made for it.'
                 items:
+                  maxLength: 63
                   pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                   type: string
                 maxItems: 256
@@ -177,14 +192,8 @@ spec:
             - keys
             type: object
             x-kubernetes-validations:
-            - message: 'spec.keys is append-only: an existing keyId must remain, with the same spkiPem, algorithm, usages, principal.id and notBefore — old archives still need the public material that signed them'
-              rule: oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId && n.spkiPem == o.spkiPem && n.algorithm == o.algorithm && n.usages == o.usages && n.principal.id == o.principal.id && n.notBefore == o.notBefore))
-            - message: a key's notAfter may only be brought forward, never extended
-              rule: oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || n.notAfter <= o.notAfter))
-            - message: a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards
-              rule: 'oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || (o.state == ''Active'' ? true : (o.state == ''Retired'' ? n.state != ''Active'' : n.state == ''Revoked''))))'
-            - message: revokedAt and revocationEffectiveFrom are immutable once written
-              rule: oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || ((!has(o.revokedAt) || (has(n.revokedAt) && n.revokedAt == o.revokedAt)) && (!has(o.revocationEffectiveFrom) || (has(n.revocationEffectiveFrom) && n.revocationEffectiveFrom == o.revocationEffectiveFrom)))))
+            - message: 'spec.keys is append-only: an existing keyId may not be removed — old archives still need the public material that signed them'
+              rule: oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId))
           status:
             description: '`TrustPolicy.status`.'
             nullable: true

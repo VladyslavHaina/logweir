@@ -1002,6 +1002,9 @@ fn expected_nested_rules(file: &str) -> Vec<(Vec<String>, String, String)> {
             for (path, rule, message) in crds::trust_policy::NESTED_RULES {
                 push(path, rule, message);
             }
+            for (path, rule, message) in crds::trust_policy::KEY_TRANSITION_RULES {
+                push(path, rule, message);
+            }
         }
         "protectionpolicies.yaml" => {
             for (path, rule, message) in crds::protection_policy::NESTED_RULES {
@@ -1150,11 +1153,37 @@ fn a_transition_rule_below_spec_sits_on_a_required_property() {
             if r.path == ["spec"] || !r.rule.contains("oldSelf") {
                 continue;
             }
-            // Walk to the rule's PARENT and read its `required` list.
+            // Walk to the rule's PARENT.
             let mut node = spec_schema(&doc);
             let last = r.path.last().expect("a non-empty path");
             for key in &r.path[1..r.path.len() - 1] {
-                node = at(node, &["properties", key.as_str()]);
+                node = if key == "[]" {
+                    at(node, &["items"])
+                } else {
+                    at(node, &["properties", key.as_str()])
+                };
+            }
+            if last == "[]" {
+                // A LIST ITEM IS THE SECOND SOUND PLACE, and only when the
+                // list is an ASSOCIATIVE list. The API server correlates
+                // `oldSelf` with the entry that has the same key, so the rule
+                // is evaluated once per existing item and simply not evaluated
+                // for a newly added one — which is what makes
+                // `TrustPolicy`'s per-key immutability append-only rather than
+                // a bar on adding keys. On a PLAIN list the correlation is by
+                // INDEX, so inserting an entry at the front would compare
+                // every later item against its neighbour's old value, and the
+                // rule would mean something nobody wrote.
+                assert_eq!(
+                    node.get("x-kubernetes-list-type").and_then(Value::as_str),
+                    Some("map"),
+                    "{file}: the transition rule at {:?} sits on the items of a list that is \
+                     not `x-kubernetes-list-type: map`. Without a merge key the API server \
+                     correlates oldSelf BY INDEX, and an insertion would compare each item \
+                     against a different entry's previous value.",
+                    r.path
+                );
+                continue;
             }
             assert!(
                 required(node).contains(last),
@@ -2724,141 +2753,229 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
 
 /// A `TrustPolicy` key list is append-only and its lifecycle is one-way.
 ///
-/// A TABLE OVER THE RULES THE CRD ACTUALLY CARRIES. Each case is a real
-/// administrator edit, and the ones expected `false` are the edits that would
-/// make an archive unverifiable or un-revoke a compromised key.
+/// # Two rule shapes, because one of them could not be installed
+///
+/// G1 — "every keyId that existed still exists" — is object-level, because a
+/// REMOVED key has no `self` to attach a rule to. Everything else is a
+/// TRANSITION RULE ON ONE ITEM of an associative list, which the API server
+/// correlates by `keyId`.
+///
+/// That split is not a preference. The first shape put every comparison inside
+/// the quadratic walk and a live API server refused the whole CRD for
+/// exceeding the CEL cost budget by more than 100x; the measurement is quoted
+/// at `trust_policy::G1_KEYS_ARE_APPEND_ONLY_RULE`. This test therefore
+/// evaluates each rule with the operands the API server would give it: the
+/// whole `.spec` for G1, and one key entry for the rest.
 #[test]
 fn a_trust_policy_key_is_append_only_and_its_state_is_one_way() {
     use weirkeeper::crds::trust_policy as tp;
 
     let key = |id: &str, pem: &str, state: &str, not_after: &str, extra: &str| {
         format!(
-            "- keyId: {id}\n  spkiPem: {pem}\n  algorithm: p256\n  usages: [EvidenceSigning]\n  \
-             principal:\n    id: install:one\n  notBefore: '2026-01-01T00:00:00Z'\n  \
-             notAfter: '{not_after}'\n  state: {state}\n{extra}"
+            "keyId: {id}\nspkiPem: {pem}\nalgorithm: p256\nusages: [EvidenceSigning]\n\
+             principal:\n  id: install:one\nnotBefore: '2026-01-01T00:00:00Z'\n\
+             notAfter: '{not_after}'\nstate: {state}\n{extra}"
         )
     };
-    let spec = |keys: &str| yaml(&format!("keys:\n{keys}"));
+    let entry = |id: &str, pem: &str, state: &str, not_after: &str, extra: &str| {
+        yaml(&key(id, pem, state, not_after, extra))
+    };
+    let spec = |entries: &[Value]| {
+        let mut m = serde_yaml::Mapping::new();
+        m.insert(
+            Value::String("keys".into()),
+            Value::Sequence(entries.to_vec()),
+        );
+        Value::Mapping(m)
+    };
 
-    let base = key("aa", "PEM-A", "Active", "2027-01-01T00:00:00Z", "");
-    let old = spec(&base);
+    let active = entry("aa", "PEM-A", "Active", "2027-01-01T00:00:00Z", "");
+    let old_spec = spec(std::slice::from_ref(&active));
 
-    /// One administrator edit, the rules it is checked against, and whether
-    /// the API server should accept it.
-    type LifecycleCase<'a> = (&'a str, Value, &'a [(&'a str, &'a str)], bool);
+    // ---- G1, object-level: a key may be ADDED but never REMOVED ----------
+    let second = entry("bb", "PEM-B", "Active", "2028-01-01T00:00:00Z", "");
+    assert!(
+        eval(
+            tp::G1_KEYS_ARE_APPEND_ONLY_RULE,
+            &spec(&[active.clone(), second.clone()]),
+            &old_spec
+        ),
+        "appending a key is the routine edit"
+    );
+    assert!(
+        eval(tp::G1_KEYS_ARE_APPEND_ONLY_RULE, &old_spec, &old_spec),
+        "and an unchanged list is accepted"
+    );
+    assert!(
+        !eval(
+            tp::G1_KEYS_ARE_APPEND_ONLY_RULE,
+            &spec(std::slice::from_ref(&second)),
+            &old_spec
+        ),
+        "REMOVING the only key must be refused: a receipt signed in March must still verify in \
+         December, and a policy that could drop the key would make every archive it signed \
+         unverifiable in one `kubectl apply`"
+    );
 
-    let cases: Vec<LifecycleCase<'_>> = vec![
-        (
-            "nothing changes",
-            spec(&base),
-            &[
-                ("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE),
-                ("G2", tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE),
-                ("G3", tp::G3_STATE_IS_MONOTONIC_RULE),
-                ("G4", tp::G4_REVOCATION_IS_WRITE_ONCE_RULE),
-            ],
-            true,
-        ),
-        (
-            "a second key is appended",
-            spec(&format!(
-                "{base}{}",
-                key("bb", "PEM-B", "Active", "2028-01-01T00:00:00Z", "")
-            )),
-            &[("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE)],
-            true,
-        ),
-        (
-            "the only key is REMOVED — every archive it signed becomes unverifiable",
-            spec(&key("bb", "PEM-B", "Active", "2028-01-01T00:00:00Z", "")),
-            &[("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE)],
-            false,
-        ),
-        (
-            "the public material under an existing keyId is swapped",
-            spec(&key("aa", "PEM-EVIL", "Active", "2027-01-01T00:00:00Z", "")),
-            &[("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE)],
-            false,
-        ),
-        (
-            "notAfter is brought forward",
-            spec(&key("aa", "PEM-A", "Active", "2026-06-01T00:00:00Z", "")),
-            &[("G2", tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE)],
-            true,
-        ),
-        (
-            "notAfter is EXTENDED",
-            spec(&key("aa", "PEM-A", "Active", "2030-01-01T00:00:00Z", "")),
-            &[("G2", tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE)],
-            false,
-        ),
-        (
-            "Active becomes Retired",
-            spec(&key(
-                "aa",
-                "PEM-A",
-                "Retired",
-                "2027-01-01T00:00:00Z",
-                "  retiredAt: '2026-05-01T00:00:00Z'\n",
-            )),
-            &[("G3", tp::G3_STATE_IS_MONOTONIC_RULE)],
-            true,
-        ),
-    ];
-    for (name, new, rules, expected) in cases {
-        for (id, rule) in rules {
-            assert_eq!(
-                eval(rule, &new, &old),
-                expected,
-                "case `{name}` against {id}:\n{rule}\nold: {old:?}\nnew: {new:?}"
-            );
-        }
-    }
+    // ---- the per-key transition rules, one entry at a time ---------------
+    let case = |id: &str, rule: &str, new: &Value, old: &Value, expected: bool| {
+        assert_eq!(
+            eval(rule, new, old),
+            expected,
+            "case `{id}`:\n{rule}\nold: {old:?}\nnew: {new:?}"
+        );
+    };
 
-    // The backwards transitions, each from its own starting state.
-    let retired = spec(&key(
+    case(
+        "material unchanged",
+        tp::G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
+        &active,
+        &active,
+        true,
+    );
+    case(
+        "public material swapped under an existing keyId",
+        tp::G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
+        &entry("aa", "PEM-EVIL", "Active", "2027-01-01T00:00:00Z", ""),
+        &active,
+        false,
+    );
+    case(
+        "the usage set widened in place",
+        tp::G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
+        &yaml(
+            &key("aa", "PEM-A", "Active", "2027-01-01T00:00:00Z", "").replace(
+                "usages: [EvidenceSigning]",
+                "usages: [EvidenceSigning, GovernedApproval]",
+            ),
+        ),
+        &active,
+        false,
+    );
+    case(
+        "notAfter brought forward",
+        tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE,
+        &entry("aa", "PEM-A", "Active", "2026-06-01T00:00:00Z", ""),
+        &active,
+        true,
+    );
+    case(
+        "notAfter EXTENDED",
+        tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE,
+        &entry("aa", "PEM-A", "Active", "2030-01-01T00:00:00Z", ""),
+        &active,
+        false,
+    );
+
+    let retired = entry(
         "aa",
         "PEM-A",
         "Retired",
         "2027-01-01T00:00:00Z",
-        "  retiredAt: '2026-05-01T00:00:00Z'\n",
-    ));
-    let active = spec(&base);
-    assert!(
-        !eval(tp::G3_STATE_IS_MONOTONIC_RULE, &active, &retired),
-        "Retired must not go back to Active: a retired key that can be reactivated is a key \
-         whose retirement proves nothing"
+        "retiredAt: '2026-05-01T00:00:00Z'\n",
+    );
+    let revoked = entry(
+        "aa",
+        "PEM-A",
+        "Revoked",
+        "2027-01-01T00:00:00Z",
+        "retiredAt: '2026-05-01T00:00:00Z'\nrevokedAt: '2026-06-01T00:00:00Z'\n\
+         revocationEffectiveFrom: '2026-06-01T00:00:00Z'\nrevocationReason: KeyCompromise\n",
+    );
+    case(
+        "Active -> Retired",
+        tp::G3_STATE_IS_MONOTONIC_RULE,
+        &retired,
+        &active,
+        true,
+    );
+    case(
+        "Retired -> Revoked",
+        tp::G3_STATE_IS_MONOTONIC_RULE,
+        &revoked,
+        &retired,
+        true,
+    );
+    case(
+        "Retired -> Active: a retirement that can be undone proves nothing",
+        tp::G3_STATE_IS_MONOTONIC_RULE,
+        &active,
+        &retired,
+        false,
+    );
+    case(
+        "Revoked -> Retired: un-revoking a compromised key is the edit an attacker most wants",
+        tp::G3_STATE_IS_MONOTONIC_RULE,
+        &retired,
+        &revoked,
+        false,
     );
 
-    let revoked = spec(&key(
+    let moved = entry(
         "aa",
         "PEM-A",
         "Revoked",
         "2027-01-01T00:00:00Z",
-        "  retiredAt: '2026-05-01T00:00:00Z'\n  revokedAt: '2026-06-01T00:00:00Z'\n  \
-         revocationEffectiveFrom: '2026-06-01T00:00:00Z'\n  revocationReason: KeyCompromise\n",
-    ));
-    assert!(
-        !eval(tp::G3_STATE_IS_MONOTONIC_RULE, &retired, &revoked),
-        "Revoked is terminal: un-revoking a compromised key is the one edit an attacker who \
-         reached the API server would most want"
+        "retiredAt: '2026-05-01T00:00:00Z'\nrevokedAt: '2026-06-01T00:00:00Z'\n\
+         revocationEffectiveFrom: '2026-12-01T00:00:00Z'\nrevocationReason: KeyCompromise\n",
     );
-    let moved = spec(&key(
-        "aa",
-        "PEM-A",
-        "Revoked",
-        "2027-01-01T00:00:00Z",
-        "  retiredAt: '2026-05-01T00:00:00Z'\n  revokedAt: '2026-06-01T00:00:00Z'\n  \
-         revocationEffectiveFrom: '2026-12-01T00:00:00Z'\n  revocationReason: KeyCompromise\n",
-    ));
-    assert!(
-        !eval(tp::G4_REVOCATION_IS_WRITE_ONCE_RULE, &moved, &revoked),
-        "revocationEffectiveFrom is write-once: moving it later moves it PAST an attacker's \
-         signature, which is exactly what it exists to exclude"
+    case(
+        "revocationEffectiveFrom moved later, PAST an attacker's signature",
+        tp::G4_REVOCATION_IS_WRITE_ONCE_RULE,
+        &moved,
+        &revoked,
+        false,
+    );
+    case(
+        "the instants unchanged",
+        tp::G4_REVOCATION_IS_WRITE_ONCE_RULE,
+        &revoked,
+        &revoked,
+        true,
+    );
+    case(
+        "a key that was never revoked may have the instants written now",
+        tp::G4_REVOCATION_IS_WRITE_ONCE_RULE,
+        &revoked,
+        &retired,
+        true,
+    );
+
+    // ---- and the lifecycle fields a state requires ----------------------
+    case(
+        "Revoked with no instants",
+        tp::G5_LIFECYCLE_FIELDS_RULE,
+        &entry(
+            "aa",
+            "PEM-A",
+            "Revoked",
+            "2027-01-01T00:00:00Z",
+            "retiredAt: '2026-05-01T00:00:00Z'\n",
+        ),
+        &active,
+        false,
+    );
+    case(
+        "Retired with no retiredAt",
+        tp::G5_LIFECYCLE_FIELDS_RULE,
+        &entry("aa", "PEM-A", "Retired", "2027-01-01T00:00:00Z", ""),
+        &active,
+        false,
+    );
+    case(
+        "validity backwards",
+        tp::G6_VALIDITY_ORDER_RULE,
+        &yaml(
+            "notBefore: '2027-01-01T00:00:00Z'\nnotAfter: '2026-01-01T00:00:00Z'\nstate: Active\n",
+        ),
+        &active,
+        false,
     );
 
     // And the key list is an associative list, so the API server itself
-    // refuses a duplicate keyId — no quadratic CEL self-join for it.
+    // refuses a duplicate keyId — no quadratic CEL self-join for it — and the
+    // per-item transition rules are correlated by that key rather than by
+    // index.
     let doc = crd("trustpolicies.yaml");
     let keys = at(spec_schema(&doc), &["properties", "keys"]);
     assert_eq!(
@@ -2872,6 +2989,26 @@ fn a_trust_policy_key_is_append_only_and_its_state_is_one_way() {
             .map(|v| v.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
         Some(vec!["keyId"]),
         "the merge key is keyId"
+    );
+
+    // THE COST BOUND IS PART OF THE RULE. The CEL estimator reads `maxLength`
+    // and nothing else; without it the quadratic G1 walk is priced against the
+    // largest string a request could carry and the API server refuses to
+    // install the CRD at all.
+    assert_eq!(
+        at(keys, &["items", "properties", "keyId", "maxLength"]).as_u64(),
+        Some(64),
+        "keyId must carry a maxLength, not merely a pattern: it is what makes G1's estimated \
+         cost finite, and a live API server refused this CRD without it"
+    );
+    assert_eq!(
+        at(keys, &["items", "properties", "spkiPem", "maxLength"]).as_u64(),
+        Some(4096),
+    );
+    assert_eq!(
+        keys.get("maxItems").and_then(Value::as_u64),
+        Some(64),
+        "and the list itself is bounded, for the same reason"
     );
 }
 
@@ -3094,7 +3231,52 @@ fn a_rehearsal_schedule_seals_everything_but_suspend() {
         )
         .as_str(),
         Some(weirkeeper::crds::rehearsal_schedule::TOPIC_PREFIX_PATTERN),
-        "the prefix grammar is what keeps teardown inside the runner's deletion guard"
+        "the SPEC field carries the pre-rendering grammar"
+    );
+    assert_eq!(
+        at(
+            spec,
+            &[
+                "properties",
+                "target",
+                "properties",
+                "topicPrefix",
+                "minLength"
+            ]
+        )
+        .as_u64(),
+        Some(10),
+        "ten is `rehearsal-` itself, D3 §4.1's own example"
+    );
+
+    // THE TWO GRAMMARS ARE DIFFERENT, AND THAT IS THE POINT. The decision
+    // states `^rehearsal-[a-z0-9-]*-$` "after rendering": the controller
+    // appends `<uid8>-`, and it is the RENDERED value that has to end in a
+    // hyphen. Putting the rendered pattern on the spec field refused
+    // `rehearsal-` — measured live on 2026-09-16, because RE2 needs one more
+    // character before `-$` once the leading literal is consumed. This walks
+    // the same rendering the controller performs and checks the result,
+    // instead of trusting that the two patterns relate.
+    let rendered_ok = |prefix: &str| {
+        let rendered = format!("{prefix}3f2a91c7-");
+        rendered.starts_with("rehearsal-")
+            && rendered.ends_with('-')
+            && rendered[10..]
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    for prefix in ["rehearsal-", "rehearsal-eu-", "rehearsal-team-a-"] {
+        assert!(
+            rendered_ok(prefix),
+            "`{prefix}` must render into something matching {}",
+            weirkeeper::crds::rehearsal_schedule::RENDERED_TOPIC_PREFIX_PATTERN
+        );
+    }
+    assert_ne!(
+        weirkeeper::crds::rehearsal_schedule::RENDERED_TOPIC_PREFIX_PATTERN,
+        weirkeeper::crds::rehearsal_schedule::TOPIC_PREFIX_PATTERN,
+        "the two grammars are deliberately different; collapsing them is exactly what the live \
+         probe caught"
     );
 
     // And v1 refuses a rehearsal that would accept unverified evidence — which

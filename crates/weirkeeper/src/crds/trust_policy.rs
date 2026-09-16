@@ -16,7 +16,8 @@
 //! retires and revokes keys on a live policy — and an object-level CEL rule
 //! makes every change one-way instead:
 //!
-//! - every `keyId` that existed still exists, with identical public material;
+//! - every `keyId` that existed still exists (one object-level rule), with
+//!   identical public material (one per-key rule);
 //! - `notAfter` may only move earlier;
 //! - `state` moves `Active → Retired`, `Active|Retired → Revoked`, nowhere else;
 //! - `revokedAt` and `revocationEffectiveFrom` are write-once.
@@ -36,9 +37,15 @@
 //! server error is quoted in that module's header, and this file does not
 //! repeat it.
 //!
-//! `spec.keys` is declared `x-kubernetes-list-type: map` keyed by `keyId`, so
-//! the API server itself refuses a duplicate key id. The CEL alternative is a
-//! quadratic self-join to enforce something the server already enforces.
+//! `spec.keys` is declared `x-kubernetes-list-type: map` keyed by `keyId`, and
+//! that does two jobs. The API server itself refuses a duplicate key id — the
+//! CEL alternative is a quadratic self-join to enforce something the server
+//! already enforces. And it lets the PER-KEY rules be transition rules: the
+//! server correlates `oldSelf` with the entry that has the same key, so
+//! [`G7_KEY_MATERIAL_IS_IMMUTABLE_RULE`] and the three lifecycle rules are
+//! evaluated once per item instead of inside a quadratic walk. That is not an
+//! optimisation: the quadratic form was REFUSED by a live API server for
+//! exceeding the CEL cost budget, and the measurement is quoted at G1.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -51,35 +58,72 @@ pub const KEY_ID_PATTERN: &str = "^[0-9a-f]{64}$";
 /// A namespace name — a DNS-1123 label.
 pub const NAMESPACE_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
 
-/// G1 — every key that existed still exists, with identical public material.
+/// G1 — every key that existed still exists.
 ///
-/// `usages`, `algorithm`, `spkiPem`, `principal.id` and `notBefore` are all
-/// compared: a key whose usage set could be widened in place would let an
-/// evidence-signing key become an approval key without anybody issuing a new
-/// one.
-pub const G1_KEYS_ARE_APPEND_ONLY_RULE: &str = "oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId && n.spkiPem == o.spkiPem && n.algorithm == o.algorithm && n.usages == o.usages && n.principal.id == o.principal.id && n.notBefore == o.notBefore))";
+/// # Why this is the ONLY object-level rule, and why it compares key ids alone
+///
+/// It is the only one that cannot be asked of an item: a key that has been
+/// REMOVED has no `self` to attach a rule to. So it is a quadratic walk, and
+/// the only thing it compares is the 64-character `keyId` — the per-key
+/// material checks moved to [`G7_KEY_MATERIAL_IS_IMMUTABLE_RULE`], which the
+/// API server evaluates once per item.
+///
+/// MEASURED, NOT GUESSED. The first shape of this rule did every comparison
+/// inside the quadratic walk, including `spkiPem` at `maxLength: 4096`, and a
+/// live `kubectl --context docker-desktop apply` on 2026-09-16 refused the
+/// whole CRD:
+///
+/// ```text
+/// spec.validation.openAPIV3Schema.properties[spec].x-kubernetes-validations[0].rule:
+///   Forbidden: estimated rule cost exceeds budget by factor of more than 100x
+/// spec.validation.openAPIV3Schema: Forbidden: x-kubernetes-validations estimated
+///   rule cost total for entire OpenAPIv3 schema exceeds budget by factor of 51.6x
+/// ```
+///
+/// A CRD the API server will not install is a CRD that seals nothing, which is
+/// the same failure the map-form rule in
+/// [`super::backup_schedule`]'s header records. The split below is what makes
+/// it installable.
+pub const G1_KEYS_ARE_APPEND_ONLY_RULE: &str =
+    "oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId))";
 /// G1's message.
-pub const G1_KEYS_ARE_APPEND_ONLY_MESSAGE: &str = "spec.keys is append-only: an existing keyId must remain, with the same spkiPem, algorithm, usages, principal.id and notBefore — old archives still need the public material that signed them";
+pub const G1_KEYS_ARE_APPEND_ONLY_MESSAGE: &str = "spec.keys is append-only: an existing keyId may not be removed — old archives still need the public material that signed them";
 
-/// G2 — `notAfter` may only move earlier.
-pub const G2_NOT_AFTER_ONLY_SHORTENS_RULE: &str =
-    "oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || n.notAfter <= o.notAfter))";
+/// G7 — a key's public material and identity are immutable.
+///
+/// A TRANSITION RULE ON ONE ITEM OF AN ASSOCIATIVE LIST. `spec.keys` is
+/// `x-kubernetes-list-type: map` keyed by `keyId`, so the API server
+/// correlates `oldSelf` with the entry that has the same key and evaluates
+/// this once per item — O(n) rather than the O(n²) it replaced. A NEWLY added
+/// key has no `oldSelf` and the rule is simply not evaluated for it, which is
+/// exactly the append-only semantics wanted.
+///
+/// `usages` is compared because a usage set that could be widened in place
+/// would let an evidence-signing key become an approval key without anybody
+/// issuing a new one.
+pub const G7_KEY_MATERIAL_IS_IMMUTABLE_RULE: &str = "self.spkiPem == oldSelf.spkiPem && self.algorithm == oldSelf.algorithm && self.usages == oldSelf.usages && self.principal.id == oldSelf.principal.id && self.notBefore == oldSelf.notBefore";
+/// G7's message.
+pub const G7_KEY_MATERIAL_IS_IMMUTABLE_MESSAGE: &str = "a key's spkiPem, algorithm, usages, principal.id and notBefore are immutable; issue a new keyId instead";
+
+/// G2 — `notAfter` may only move earlier. Per item, like G7.
+pub const G2_NOT_AFTER_ONLY_SHORTENS_RULE: &str = "self.notAfter <= oldSelf.notAfter";
 /// G2's message.
 pub const G2_NOT_AFTER_ONLY_SHORTENS_MESSAGE: &str =
     "a key's notAfter may only be brought forward, never extended";
 
 /// G3 — `state` is monotonic: `Active → Retired`, `Active|Retired → Revoked`.
-pub const G3_STATE_IS_MONOTONIC_RULE: &str = "oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || (o.state == 'Active' ? true : (o.state == 'Retired' ? n.state != 'Active' : n.state == 'Revoked'))))";
+/// Per item, like G7.
+pub const G3_STATE_IS_MONOTONIC_RULE: &str = "oldSelf.state == 'Active' ? true : (oldSelf.state == 'Retired' ? self.state != 'Active' : self.state == 'Revoked')";
 /// G3's message.
 pub const G3_STATE_IS_MONOTONIC_MESSAGE: &str =
     "a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards";
 
-/// G4 — the revocation instants are write-once.
+/// G4 — the revocation instants are write-once. Per item, like G7.
 ///
 /// `revocationEffectiveFrom` is what decides whether stored evidence signed
 /// before a compromise is still trusted (§7.4). A field that could be moved
 /// later is a field that can be moved past an attacker's signature.
-pub const G4_REVOCATION_IS_WRITE_ONCE_RULE: &str = "oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || ((!has(o.revokedAt) || (has(n.revokedAt) && n.revokedAt == o.revokedAt)) && (!has(o.revocationEffectiveFrom) || (has(n.revocationEffectiveFrom) && n.revocationEffectiveFrom == o.revocationEffectiveFrom)))))";
+pub const G4_REVOCATION_IS_WRITE_ONCE_RULE: &str = "(!has(oldSelf.revokedAt) || (has(self.revokedAt) && self.revokedAt == oldSelf.revokedAt)) && (!has(oldSelf.revocationEffectiveFrom) || (has(self.revocationEffectiveFrom) && self.revocationEffectiveFrom == oldSelf.revocationEffectiveFrom))";
 /// G4's message.
 pub const G4_REVOCATION_IS_WRITE_ONCE_MESSAGE: &str =
     "revokedAt and revocationEffectiveFrom are immutable once written";
@@ -96,24 +140,13 @@ pub const G6_VALIDITY_ORDER_RULE: &str = "self.notBefore < self.notAfter";
 /// G6's message.
 pub const G6_VALIDITY_ORDER_MESSAGE: &str = "notBefore must be before notAfter";
 
-/// The rules on `.spec`.
-pub const SPEC_RULES: [SpecRule; 4] = [
-    SpecRule::new(
-        G1_KEYS_ARE_APPEND_ONLY_RULE,
-        G1_KEYS_ARE_APPEND_ONLY_MESSAGE,
-    ),
-    SpecRule::new(
-        G2_NOT_AFTER_ONLY_SHORTENS_RULE,
-        G2_NOT_AFTER_ONLY_SHORTENS_MESSAGE,
-    ),
-    SpecRule::new(G3_STATE_IS_MONOTONIC_RULE, G3_STATE_IS_MONOTONIC_MESSAGE),
-    SpecRule::new(
-        G4_REVOCATION_IS_WRITE_ONCE_RULE,
-        G4_REVOCATION_IS_WRITE_ONCE_MESSAGE,
-    ),
-];
+/// The rules on `.spec`: exactly the one that cannot be asked of an item.
+pub const SPEC_RULES: [SpecRule; 1] = [SpecRule::new(
+    G1_KEYS_ARE_APPEND_ONLY_RULE,
+    G1_KEYS_ARE_APPEND_ONLY_MESSAGE,
+)];
 
-/// The rules attached below `.spec`, on one key entry.
+/// The NON-transition rules attached to one key entry.
 pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
     (
         &["keys", "[]"],
@@ -124,6 +157,31 @@ pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
         &["keys", "[]"],
         G6_VALIDITY_ORDER_RULE,
         G6_VALIDITY_ORDER_MESSAGE,
+    ),
+];
+
+/// The TRANSITION rules attached to one key entry, which the API server
+/// correlates by `keyId` because the list is an associative list.
+pub const KEY_TRANSITION_RULES: [(&[&str], &str, &str); 4] = [
+    (
+        &["keys", "[]"],
+        G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
+        G7_KEY_MATERIAL_IS_IMMUTABLE_MESSAGE,
+    ),
+    (
+        &["keys", "[]"],
+        G2_NOT_AFTER_ONLY_SHORTENS_RULE,
+        G2_NOT_AFTER_ONLY_SHORTENS_MESSAGE,
+    ),
+    (
+        &["keys", "[]"],
+        G3_STATE_IS_MONOTONIC_RULE,
+        G3_STATE_IS_MONOTONIC_MESSAGE,
+    ),
+    (
+        &["keys", "[]"],
+        G4_REVOCATION_IS_WRITE_ONCE_RULE,
+        G4_REVOCATION_IS_WRITE_ONCE_MESSAGE,
     ),
 ];
 
@@ -208,7 +266,14 @@ pub struct KeyPrincipal {
 pub struct TrustedKey {
     /// The sha256 of the DER SPKI, lowercase hex. The merge key of this list
     /// and the id every verdict is recorded against.
-    #[schemars(regex(path = "KEY_ID_PATTERN"))]
+    ///
+    /// `length` IS LOAD-BEARING AND NOT REDUNDANT WITH THE PATTERN. The CEL
+    /// cost estimator reads `maxLength` and nothing else: with only a regex
+    /// here it assumes the largest string a request could carry, and G1's
+    /// quadratic walk over this field was refused live for exceeding the cost
+    /// budget by more than 100x. A 64-character bound makes the same rule cost
+    /// about 29,000 units against a 10,000,000 budget.
+    #[schemars(regex(path = "KEY_ID_PATTERN"), length(min = 64, max = 64))]
     pub key_id: String,
     /// The PUBLIC key, PEM-encoded. **Public material and nothing else** — a
     /// private key in this field would be a private key in `kubectl get -o
@@ -270,13 +335,16 @@ pub struct TrustPolicySpec {
     /// pattern is how a new namespace silently inherits a trust decision
     /// nobody made for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 256), inner(regex(path = "NAMESPACE_PATTERN")))]
+    #[schemars(
+        length(max = 256),
+        inner(regex(path = "NAMESPACE_PATTERN"), length(max = 63))
+    )]
     pub namespaces: Option<Vec<String>>,
     /// The cluster ids a restore may target. Replaces
     /// `TrustRoster.spec.allowedClusterIds`, at the same scope and with the
     /// same semantics: a namespace tenant must not be able to widen it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 64))]
+    #[schemars(length(max = 64), inner(length(max = 253)))]
     pub allowed_target_cluster_ids: Option<Vec<String>>,
     /// The keys. Append-only (G1), keyed by `keyId`.
     #[schemars(length(max = 64))]
