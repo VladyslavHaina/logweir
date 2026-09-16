@@ -389,7 +389,7 @@ fn sync_backfills_a_real_bucket_and_a_second_run_writes_nothing() {
 fn list_reads_the_newest_points_out_of_a_real_bucket() {
     let evidence = evidence_store();
     let f = backup_seam::Fixture::new();
-    let backup_id = unique_id("list");
+    let backup_id = unique_id("list"); // engine-token-ok: a fixture prefix for the listing test, not an engine subcommand
     let outcome = f
         .execute_as(&evidence, &backup_id, &run_id("F"))
         .expect("the backup succeeds");
