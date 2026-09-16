@@ -756,7 +756,6 @@ mod client {
     use crate::reader::{AuthConfig, NewTopicSpec};
     use logweir_core::check_contract::CheckCode;
     use rdkafka::client::ClientContext;
-    use rdkafka::config::ClientConfig;
     use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -766,6 +765,13 @@ mod client {
     /// `crates/logweir-kafka/tests/` can drive [`classify_error_code`] against
     /// the REAL table rather than against integers copied out of it.
     pub use rdkafka::error::RDKafkaErrorCode;
+
+    /// rdkafka's configuration map, re-exported for the same reason: a
+    /// `ClientConfig` is a map until `create()` is called, so a test can read
+    /// the `ssl.ca.location` and `ssl.endpoint.identification.algorithm` a
+    /// check would dial with and open no socket. W4 needs the same path to
+    /// assert what its runner sends.
+    pub use rdkafka::config::ClientConfig;
 
     /// The `client.id` every check connection announces.
     ///
@@ -952,64 +958,60 @@ mod client {
         /// The broker list.
         pub bootstrap_servers: Vec<String>,
         /// The auth, built by the caller and never pinned here.
+        ///
+        /// **THE PRIVATE CA TRAVELS ON THIS, NOT BESIDE IT.** PLAT-07.1 put the
+        /// projected trust anchor inside `AuthConfig::ScramSha512`'s
+        /// `tls_ca_file`, reached through
+        /// [`AuthConfig::with_tls_ca_file`], which REFUSES a CA on a
+        /// connection that is not TLS. A second `ca_file` field here — which
+        /// this struct used to carry — was a second place that decision could
+        /// be made, and it made the wrong one: it would have turned a
+        /// `Plaintext` connection into `SSL` because a CA happened to be
+        /// present, which is the silent transport change D-SEAMS S5 forbids.
+        /// W4 renders `ConnectionPlan::ca_file` by calling
+        /// `with_tls_ca_file`, exactly as the drill path does.
         pub auth: AuthConfig,
-        /// A PEM bundle path inside the pod, for a private CA. `None` uses the
-        /// image's trust store.
-        pub ca_file: Option<String>,
         /// Per-call timeouts.
         pub timeouts: ProbeTimeouts,
     }
 
     /// The shared `ClientConfig` both handles are built from.
     ///
-    /// **TODO (W3's deferred edit).** This duplicates the `security.protocol` /
-    /// `sasl.*` mapping in `crate::rdkafka_reader::RdKafkaReader::connect`.
-    /// PLAT-07.1 is editing that file for TLS; once it has merged, that
-    /// mapping becomes the one implementation and this function calls it.
+    /// # THE DEFERRED SEAM, NOW CLOSED
+    ///
+    /// D2 §13.2 gave W3 a later edit that would stop this module building its
+    /// own rdkafka configuration. PLAT-07.1 has landed and extracted
+    /// [`RdKafkaReader::client_config`], so that edit is this function: the
+    /// check client and the drill client now derive their
+    /// `security.protocol`, `sasl.*`, `ssl.endpoint.identification.algorithm`
+    /// and `ssl.ca.location` from ONE implementation.
+    ///
+    /// **Why sharing it is a security property and not tidiness.** Two of
+    /// those keys are controls: hostname verification, and which trust anchor
+    /// the connection accepts. A second copy is a second place they can drift,
+    /// and the copy this replaced had already drifted — it set
+    /// `ssl.ca.location` from a field of its own, with no TLS check and no
+    /// `ssl.endpoint.identification.algorithm` at all, so a check against a
+    /// private-CA broker would have failed to verify the CA while a drill
+    /// against the same broker succeeded, and a `Plaintext` connection carrying
+    /// a CA would have been silently upgraded to `SSL`.
+    ///
+    /// The ONE thing that is overridden afterwards is `client.id`
+    /// ([`CHECK_CLIENT_ID`]), so a broker operator reading their own logs can
+    /// tell a read-only check from a run that moves data. It is not a control.
     fn client_config(settings: &ConnectionSettings) -> Result<ClientConfig, CheckFailure> {
-        let mut cfg = ClientConfig::new();
-        cfg.set("bootstrap.servers", settings.bootstrap_servers.join(","))
-            .set("client.id", CHECK_CLIENT_ID)
-            // A CHECK MUST NEVER CREATE A TOPIC. A targeted metadata request
-            // for a name that does not exist is exactly what auto-creation
-            // triggers, and step 5 sends one per expected name. It is set on
-            // the SHARED config and not on the consumer clone, because a
-            // metadata request is issued by both handles.
-            .set("allow.auto.create.topics", "false");
-        match &settings.auth {
-            AuthConfig::Plaintext => {
-                cfg.set(
-                    "security.protocol",
-                    if settings.ca_file.is_some() {
-                        "SSL"
-                    } else {
-                        "PLAINTEXT"
-                    },
-                );
-            }
-            AuthConfig::ScramSha512 {
-                username,
-                password,
-                tls,
-            } => {
-                cfg.set(
-                    "security.protocol",
-                    if *tls { "SASL_SSL" } else { "SASL_PLAINTEXT" },
-                )
-                .set("sasl.mechanism", "SCRAM-SHA-512")
-                .set("sasl.username", username)
-                .set("sasl.password", password);
-            }
-            AuthConfig::Token(_) => {
-                return Err(CheckFailure::new(
-                    CheckCode::AuthenticationFailed,
-                    "token auth (OAUTHBEARER / MSK IAM) is introduced by SP4",
-                ));
-            }
-        }
-        if let Some(ca) = settings.ca_file.as_ref() {
-            cfg.set("ssl.ca.location", ca);
-        }
+        let mut cfg = crate::rdkafka_reader::RdKafkaReader::client_config(
+            &settings.bootstrap_servers,
+            &settings.auth,
+        )
+        .map_err(|e| {
+            // `client_config` refuses a CA without TLS and refuses SP4's token
+            // mode. Both are configuration this check cannot dial with, and
+            // both are reported as the authentication code rather than as a
+            // transport one: nothing was unreachable.
+            CheckFailure::new(CheckCode::AuthenticationFailed, e.to_string())
+        })?;
+        cfg.set("client.id", CHECK_CLIENT_ID);
         Ok(cfg)
     }
 
@@ -1412,6 +1414,6 @@ mod client {
 #[cfg(feature = "client")]
 pub use client::{
     classification_codes, classify_create_code, classify_error_code, is_certificate_trust_reason,
-    CapturingContext, ConnectionSettings, KafkaInventory, RDKafkaErrorCode, CHECK_CLIENT_ID,
-    CHECK_GROUP_ID,
+    CapturingContext, ClientConfig, ConnectionSettings, KafkaInventory, RDKafkaErrorCode,
+    CHECK_CLIENT_ID, CHECK_GROUP_ID,
 };

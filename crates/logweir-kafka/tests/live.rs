@@ -47,7 +47,6 @@ fn check_client() -> KafkaInventory {
     KafkaInventory::connect(&ConnectionSettings {
         bootstrap_servers: vec![bs],
         auth: AuthConfig::Plaintext,
-        ca_file: None,
         timeouts: ProbeTimeouts::for_budget(Duration::from_secs(30)),
     })
     .expect("the compose broker is reachable when `just e2e-up` has run")
@@ -208,7 +207,6 @@ fn a_refused_scram_credential_is_authentication_failed_and_not_a_timeout() {
             Some("not-the-password".to_string()),
         )
         .expect("interface I1 builds the auth"),
-        ca_file: None,
         timeouts: ProbeTimeouts::for_budget(Duration::from_secs(20)),
     })
     .expect("the client builds; nothing has dialled yet");
@@ -269,7 +267,6 @@ fn an_admin_first_refusal_is_authentication_failed_and_not_a_timeout() {
             Some("not-the-password".to_string()),
         )
         .expect("interface I1 builds the auth"),
-        ca_file: None,
         timeouts: ProbeTimeouts::for_budget(Duration::from_secs(20)),
     })
     .expect("the client builds; nothing has dialled yet");

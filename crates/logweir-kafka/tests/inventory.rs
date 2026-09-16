@@ -22,11 +22,27 @@ use logweir_core::check_contract::{
 };
 use logweir_kafka::inventory::{
     assemble, classification_codes, classify_create_code, classify_error_code, collect, escalate,
-    fault_rank, is_certificate_trust_reason, missing_expected, relay_cost, CheckFailure, FaultLog,
-    Inventory, InventoryProbe, InventoryRequest, ListedTopic, Listing, ProbeTimeouts,
-    RDKafkaErrorCode, TopicCreateOutcome, TopicPresence,
+    fault_rank, is_certificate_trust_reason, missing_expected, relay_cost, CheckFailure,
+    ClientConfig, ConnectionSettings, FaultLog, Inventory, InventoryProbe, InventoryRequest,
+    ListedTopic, Listing, ProbeTimeouts, RDKafkaErrorCode, TopicCreateOutcome, TopicPresence,
 };
-use logweir_kafka::reader::NewTopicSpec;
+use logweir_kafka::rdkafka_reader::RdKafkaReader;
+use logweir_kafka::reader::{AuthConfig, NewTopicSpec};
+
+/// The exact `ClientConfig` a [`KafkaInventory`] would dial with.
+///
+/// `KafkaInventory::connect` builds both handles from it and then adds the
+/// consumer-only keys to a clone, so reading it here is reading what the check
+/// sends — and a `ClientConfig` is a map until `create()` is called, so this
+/// opens no socket. It mirrors `RdKafkaReader::client_config` plus the one
+/// override `inventory::client::client_config` applies.
+fn check_client_config(
+    settings: &ConnectionSettings,
+) -> Result<ClientConfig, logweir_kafka::reader::KafkaError> {
+    let mut cfg = RdKafkaReader::client_config(&settings.bootstrap_servers, &settings.auth)?;
+    cfg.set("client.id", "logweir-check");
+    Ok(cfg)
+}
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -1200,4 +1216,145 @@ fn an_admin_failure_dials_the_consumer_before_it_classifies() {
         dial.contains("self.timeouts.targeted_metadata"),
         "the dial must be bounded by the shortest timeout this struct carries: {dial}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PLAT-07.1 — the saved connection's private CA reaches the check client
+// ---------------------------------------------------------------------------
+
+/// **The check client and the drill client derive TLS from ONE place.**
+///
+/// PLAT-07.1 put the projected trust anchor inside `AuthConfig::ScramSha512`'s
+/// `tls_ca_file` and extracted `RdKafkaReader::client_config` so the two
+/// security-critical keys — `ssl.endpoint.identification.algorithm` (hostname
+/// verification) and `ssl.ca.location` (which trust anchor) — are assertable
+/// without a socket. `KafkaInventory` builds through that same function, so
+/// this test reads the config the check would dial with and proves both keys
+/// are there.
+///
+/// It matters because the two clients talk to the SAME broker: a check that
+/// did not trust the projected CA would report `TlsTrustFailed` for a
+/// connection a backup uses happily, and a check that turned hostname
+/// verification off would report ready for one the engine's rustls client will
+/// refuse.
+#[test]
+fn a_tls_ca_file_reaches_the_check_clients_ssl_ca_location() {
+    const CA: &str = "/etc/logweir/trust/source-ca.pem";
+    let scram = |tls: bool, ca: Option<&str>| {
+        AuthConfig::from_spec(
+            &logweir_core::spec::AuthSpec::ScramSha512 {
+                username: "logweir".to_string(),
+                tls,
+            },
+            Some("projected".to_string()),
+        )
+        .expect("interface I1 builds the auth")
+        .with_tls_ca_file(ca.map(str::to_string))
+    };
+    let settings = |auth: AuthConfig| ConnectionSettings {
+        bootstrap_servers: vec!["b0.orders:9093".to_string()],
+        auth,
+        timeouts: ProbeTimeouts::for_budget(Duration::from_secs(30)),
+    };
+
+    // 1. TLS WITH A PROJECTED CA: both keys set, and the CA is the path
+    //    verbatim — nothing derived from it.
+    let cfg = check_client_config(&settings(scram(true, Some(CA)).expect("TLS accepts a CA")))
+        .expect("configures");
+    assert_eq!(
+        cfg.get("ssl.ca.location"),
+        Some(CA),
+        "the check client must trust the CA the connection projects, or it reports \
+         TlsTrustFailed for a broker a backup uses happily"
+    );
+    assert_eq!(
+        cfg.get("ssl.endpoint.identification.algorithm"),
+        Some("https"),
+        "hostname verification is pinned, so a librdkafka upgrade cannot quietly turn it off \
+         and the two clients cannot disagree with the engine's rustls client"
+    );
+    assert_eq!(cfg.get("security.protocol"), Some("SASL_SSL"));
+    assert_eq!(cfg.get("sasl.mechanism"), Some("SCRAM-SHA-512"));
+
+    // 2. TLS WITHOUT A CA: hostname verification still pinned, and NO
+    //    `ssl.ca.location` — an empty one would make librdkafka skip the
+    //    default verify paths and trust nothing.
+    let cfg = check_client_config(&settings(scram(true, None).expect("no CA is fine")))
+        .expect("configures");
+    assert_eq!(cfg.get("ssl.ca.location"), None);
+    assert_eq!(
+        cfg.get("ssl.endpoint.identification.algorithm"),
+        Some("https")
+    );
+
+    // 3. SASL WITHOUT TLS: neither key, and the protocol is the plaintext one.
+    let cfg = check_client_config(&settings(scram(false, None).expect("plaintext SASL")))
+        .expect("configures");
+    assert_eq!(cfg.get("security.protocol"), Some("SASL_PLAINTEXT"));
+    assert_eq!(cfg.get("ssl.ca.location"), None);
+    assert_eq!(cfg.get("ssl.endpoint.identification.algorithm"), None);
+
+    // 4. PLAINTEXT: no TLS keys at all. A check never upgrades a transport
+    //    because a CA happens to be around (D-SEAMS S5).
+    let cfg = check_client_config(&settings(
+        AuthConfig::from_spec(&logweir_core::spec::AuthSpec::Plaintext, None)
+            .expect("interface I1"),
+    ))
+    .expect("configures");
+    assert_eq!(cfg.get("security.protocol"), Some("PLAINTEXT"));
+    assert_eq!(cfg.get("ssl.ca.location"), None);
+
+    // 5. A CA WITHOUT TLS IS REFUSED, at the same place the drill refuses it.
+    assert!(
+        scram(false, Some(CA)).is_err(),
+        "a CA on a non-TLS connection is a silent downgrade, refused by `with_tls_ca_file`"
+    );
+
+    // 6. And the check's own identity is the ONE thing overridden afterwards.
+    let cfg = check_client_config(&settings(scram(true, Some(CA)).expect("TLS accepts a CA")))
+        .expect("configures");
+    assert_eq!(
+        cfg.get("client.id"),
+        Some("logweir-check"),
+        "a broker operator must be able to tell a read-only check from a run that moves data"
+    );
+    assert_eq!(
+        cfg.get("allow.auto.create.topics"),
+        Some("false"),
+        "inherited from the shared helper, not re-set here"
+    );
+}
+
+/// The check client's config is built by ONE function, and it is the drill's.
+///
+/// A behavioural test cannot see "which function built this map" — the map is
+/// identical either way today — so the no-duplication half is a source scan.
+/// It is what stops the two clients drifting again: the copy this replaced had
+/// already drifted, setting `ssl.ca.location` from a field of its own with no
+/// TLS check and no hostname verification at all.
+#[test]
+fn the_check_client_builds_no_tls_configuration_of_its_own() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/inventory.rs"),
+    )
+    .expect("the module this crate ships");
+    let code = strip_comments(&src);
+    assert!(
+        code.contains("RdKafkaReader::client_config("),
+        "the check client must derive its configuration from the drill's one implementation"
+    );
+    for forbidden in [
+        "\"ssl.ca.location\"",
+        "\"ssl.endpoint.identification.algorithm\"",
+        "\"security.protocol\"",
+        "\"sasl.mechanism\"",
+        "\"sasl.password\"",
+        "\"sasl.username\"",
+    ] {
+        assert!(
+            !code.contains(forbidden),
+            "inventory.rs sets `{forbidden}` itself; hostname verification and the trust \
+             anchor are controls, and a second copy is a second place they can drift"
+        );
+    }
 }
