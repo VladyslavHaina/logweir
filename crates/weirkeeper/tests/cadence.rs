@@ -31,10 +31,13 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use weirkeeper::cadence::presets::{self, Preset};
 use weirkeeper::cadence::{
-    admit_retry, admit_slot, is_retryable, Adjustment, Cadence, CadenceError, CatchUpPolicy,
-    MissedReason, RetryAdmission, RetryPolicy, RetryPolicyProblem, SlotAdmission, TerminalOutcome,
-    Zone, DEFAULT_RETRY_DELAY_SECONDS, DEFAULT_STARTING_DEADLINE_SECONDS, MAX_PREVIEW_COUNT,
-    MAX_SKIPPED_SLOT_ENUMERATION, RETRYABLE_TERMINAL_STATES, STATUS_NEXT_RUNS, TZDB_SOURCE,
+    admit_retry, admit_slot, is_retryable, validate_deadlines, Adjustment, Cadence, CadenceError,
+    CatchUpPolicy, DeadlineProblem, MissedReason, RetryAdmission, RetryPolicy, RetryPolicyProblem,
+    SlotAdmission, TerminalOutcome, Zone, DEFAULT_ACTIVE_DEADLINE_SECONDS,
+    DEFAULT_RETRY_DELAY_SECONDS, DEFAULT_STARTING_DEADLINE_SECONDS, MAX_ACTIVE_DEADLINE_SECONDS,
+    MAX_PREVIEW_COUNT, MAX_SKIPPED_SLOT_ENUMERATION, MAX_STARTING_DEADLINE_SECONDS,
+    MIN_ACTIVE_DEADLINE_SECONDS, MIN_STARTING_DEADLINE_SECONDS, RETRYABLE_TERMINAL_STATES,
+    STATUS_NEXT_RUNS, TZDB_SOURCE,
 };
 use weirkeeper::conditions::TERMINAL_STATES;
 use weirkeeper::slot::{
@@ -106,7 +109,21 @@ impl Rng {
 /// day-rule's union/intersection boundary rather than in the middle of an
 /// ordinary Tuesday.
 ///
-/// KILLS: any re-implementation of the UTC path. `Zone::Utc` must DELEGATE.
+/// WHAT IT DOES **NOT** KILL, stated because an earlier version of this comment
+/// claimed the opposite. For the code as written the two assertions below are
+/// tautologies: `Zone::Utc` DELEGATES, so
+/// `Cadence::last_fire_at_or_before` under it *is*
+/// `Cron::last_fire_at_or_before` and 10 000 pairs assert `x == x`. Routing the
+/// absent field through the ZONED walk instead
+/// (`Zone::resolve(None) => Ok(Zone::Named(Tz::UTC))`) leaves every assertion
+/// here passing, because the zoned walk agrees — which is a real and welcome
+/// measurement, and not the delegation guard the comment promised.
+///
+/// The delegation itself is held by
+/// `the_absent_zone_delegates_to_the_legacy_walk`; this test's value is the
+/// 10 000-pair AGREEMENT, and the second half below now measures the zoned path
+/// against the legacy one over the same corpus so that agreement is asserted
+/// rather than assumed.
 #[test]
 fn absent_timezone_is_byte_identical_to_legacy_utc() {
     let mut rng = Rng(0x5eed_1234_abcd_0001);
@@ -155,6 +172,117 @@ fn absent_timezone_is_byte_identical_to_legacy_utc() {
         fired > 9_000,
         "the generator must mostly produce expressions that fire; only {fired} of {checked} did"
     );
+
+    // THE HALF THAT IS NOT A TAUTOLOGY: the same generator, against the ZONED
+    // local-date walk with `Tz::UTC`. This one really is two implementations
+    // compared — a bitset walk over UTC dates against a walk that converts
+    // every matched local minute through `from_local_datetime` — and it is the
+    // measurement that makes `explicit_utc_agrees_with_the_absent_field`'s
+    // claim hold over the whole grammar rather than over five expressions.
+    // A thousand rather than ten thousand because the zoned walk is ~14x the
+    // cost per pair and the suite is run on every change.
+    let mut rng = Rng(0x5eed_1234_abcd_0001);
+    for _ in 0..1_000 {
+        let expr = random_expression(&mut rng);
+        let cron = Cron::parse(&expr).expect("the generator emits only legal expressions");
+        let zoned = Cadence::parse(&expr, Some("UTC")).expect("UTC resolves");
+        let t = utc(1970, 1, 1, 0, 0) + Duration::minutes(rng.below(60 * 24 * 365 * 100) as i64);
+        assert_eq!(
+            zoned.last_fire_at_or_before(t),
+            cron.last_fire_at_or_before(t),
+            "the zoned walk must agree with the legacy walk for {expr:?} at {t}"
+        );
+        assert_eq!(
+            zoned.next_fire_after(t),
+            cron.next_fire_after(t),
+            "the zoned walk must agree with the legacy walk for {expr:?} at {t}"
+        );
+    }
+}
+
+/// **The absent `timeZone` DELEGATES to `slot.rs` rather than re-deriving it.**
+///
+/// THE GUARD THE 10 000-PAIR PROPERTY ABOVE CANNOT BE. Two implementations that
+/// agree on every case anyone has thought to generate are still two
+/// implementations, and D1 §0.1 and §4.9 do not say "equivalent to today's UTC
+/// evaluator" — they say the absent field IS it. Agreement is measured
+/// elsewhere; this test is about which code runs.
+///
+/// Two arms, because two different mistakes reach the same wrong place:
+///
+/// * **`Zone::resolve(None)` must be `Zone::Utc` and not `Zone::Named(UTC)`.**
+///   The variant is the whole distinction — `Zone::name()` returns `"UTC"` for
+///   both, so every assertion phrased in terms of the NAME passes for either.
+///   This arm is what kills the mutant the review planted (`resolve(None) =>
+///   Ok(Zone::Named(Tz::UTC))`), which previously survived all 35 tests while
+///   sending every pre-D1 schedule in the product down the zoned walk.
+/// * **The three `Zone::Utc` arms must call `self.cron`.** A source scan, in
+///   the spirit of `the_cadence_module_reads_no_clock` above it: the fall-back
+///   body of each `let Zone::Named(tz) = self.zone else { … }` has to name
+///   `self.cron.last_fire_at_or_before` or `self.cron.next_fire_after`. A
+///   rewrite that kept `Zone::Utc` as a variant but re-derived the walk inside
+///   it would pass the first arm and fail here.
+#[test]
+fn the_absent_zone_delegates_to_the_legacy_walk() {
+    assert_eq!(
+        Zone::resolve(None),
+        Ok(Zone::Utc),
+        "MUTANT `resolve(None) => Named(Tz::UTC)`: the absent field is the LEGACY path, and a \
+         named zone that happens to be UTC is a user's explicit choice taking the zoned walk"
+    );
+    assert_ne!(
+        Zone::resolve(Some("UTC")),
+        Ok(Zone::Utc),
+        "and the two are distinguishable at all: an explicit `timeZone: UTC` is `Named`"
+    );
+
+    let src = std::fs::read_to_string(workspace_root().join("crates/weirkeeper/src/cadence.rs"))
+        .expect("the module is readable");
+    // The else-block is taken by MATCHING BRACES, not by looking for the first
+    // `};`: the third arm builds a struct literal, and a naive split cuts the
+    // body in half and then reports a failure that is the test's own bug.
+    let arms: Vec<String> = src
+        .split("let Zone::Named(tz) = self.zone else {")
+        .skip(1)
+        .map(|tail| {
+            let mut depth = 1usize;
+            let mut body = String::new();
+            for ch in tail.chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                body.push(ch);
+            }
+            assert_eq!(depth, 0, "an unbalanced else-block: {body}");
+            body
+        })
+        .collect();
+    assert_eq!(
+        arms.len(),
+        3,
+        "three functions branch on the zone: fire_at_or_before, fire_after and \
+         fires_after_bounded. A fourth (or a missing one) means this guard is reading the \
+         wrong thing and must be updated deliberately"
+    );
+    for (i, body) in arms.iter().enumerate() {
+        assert!(
+            body.contains("self.cron.last_fire_at_or_before")
+                || body.contains("self.cron.next_fire_after"),
+            "MUTANT `re-derive the UTC path`: Zone::Utc arm {i} must DELEGATE to slot.rs, not \
+             walk local dates itself. Body was:\n{body}"
+        );
+        assert!(
+            !body.contains("from_local_datetime"),
+            "Zone::Utc arm {i} must not convert a local time at all"
+        );
+    }
 }
 
 /// One expression over the whole grammar `slot.rs` accepts.
@@ -667,6 +795,287 @@ fn assert_table(case: &DstCase) {
     }
 }
 
+/// **All three walks give one instant one marker** — the property, over a
+/// corpus, not one asserted example.
+///
+/// # What went wrong, so it is not re-derived
+///
+/// `fire_at_or_before`, `fire_after` and `next_runs` all reduce several matched
+/// local times to one firing, and they reach the same instant from three
+/// directions. Only the third applied `Adjustment::rank`; the other two took a
+/// plain max/min over the INSTANT and kept whichever marker the walk happened
+/// to see first — which depends on the direction of travel, so the two
+/// single-shot walks disagreed with `next_runs` and with each other.
+///
+/// The measured case: `Pacific/Apia`, `0 0 * * *`. The instant
+/// 2011-12-30T10:00Z is produced twice — once by local 2011-12-30T00:00, which
+/// does not exist and shifts to the date-line crossing, and once by local
+/// 2011-12-31T00:00, which IS that crossing and exists. `fire_after` walking
+/// forwards met the gap first and answered
+/// `NonexistentLocalTimeShifted`; `next_runs` and `fire_at_or_before` answered
+/// `None`. A `BackupSchedule.status` whose `lastSlot` came from one and whose
+/// `nextRuns` came from the other would contradict itself about a single slot.
+///
+/// # Why a corpus and not the one row
+///
+/// The Apia row is asserted too (below), but a single row passes for a fix that
+/// special-cases it. The loop walks six zones — the date-line crossing, both
+/// hemispheres, a 30-minute DST step, a 24-hour repeated day and a +14 zone —
+/// four expressions and 480 start instants each, and requires the marker for
+/// every instant produced by ANY walk to equal the marker `next_runs` gives it.
+#[test]
+fn every_walk_agrees_on_the_marker_for_an_instant() {
+    let zones = [
+        "Pacific/Apia",
+        "Europe/Berlin",
+        "America/New_York",
+        "Australia/Lord_Howe",
+        "America/Sitka",
+        "Pacific/Kiritimati",
+    ];
+    let exprs = ["0 0 * * *", "30 2 * * *", "*/15 * * * *", "0 * * * *"];
+    let starts = [
+        utc(2011, 12, 27, 0, 0),
+        utc(2026, 10, 23, 0, 0),
+        utc(2027, 3, 26, 0, 0),
+        utc(2026, 10, 2, 0, 0),
+    ];
+    let mut compared = 0usize;
+    for zone in zones {
+        for expr in exprs {
+            let cadence = Cadence::parse(expr, Some(zone)).expect("zone and expression are legal");
+            for start in starts {
+                // FOUR DAYS AT THREE-HOUR STEPS, not five days hourly. The
+                // property is about instants several matched local times
+                // collapse onto, and `fire_after(t)` lands on such an instant
+                // for EVERY `t` in the whole interval before it — so a coarser
+                // grid crosses exactly the same collisions and the suite stays
+                // a suite anyone runs. (Measured: hourly took 30 s of a 32 s
+                // run; this takes about a quarter of that, and re-planting the
+                // F1 mutant still fails here.)
+                for step in 0..32 {
+                    let t = start + Duration::hours(step * 3);
+
+                    // `next_runs` is the reference: it is the one the console
+                    // and `status.nextRuns` show, so it is the answer the other
+                    // two must not contradict. `count: 1` throughout, because
+                    // the earliest firing after an instant is exactly the
+                    // firing the single-shot walks return — and a wider preview
+                    // multiplies the walk cost without widening the property.
+                    let next = cadence.next_runs(t, 1);
+                    match (cadence.fire_after(t), next.first()) {
+                        (Some(f), Some(row)) => {
+                            assert_eq!(
+                                (f.at, f.adjustment),
+                                (row.at, row.adjustment),
+                                "{zone} {expr} at {t}: fire_after and next_runs disagree"
+                            );
+                            compared += 1;
+                        }
+                        (None, None) => {}
+                        (f, row) => panic!(
+                            "{zone} {expr} at {t}: fire_after {f:?} and next_runs {row:?} do not \
+                             even agree that there is a firing"
+                        ),
+                    }
+
+                    if let Some(b) = cadence.fire_at_or_before(t) {
+                        // Reach the same instant from the OTHER direction: a
+                        // backwards walk and a forwards walk that both land on
+                        // `b.at` must carry the same marker.
+                        let just_before = b.at - Duration::seconds(1);
+                        assert_eq!(
+                            cadence.fire_after(just_before),
+                            Some(b),
+                            "{zone} {expr} at {t}: the two single-shot walks disagree about {}",
+                            b.at
+                        );
+                        let row = cadence.next_runs(just_before, 1);
+                        assert_eq!(
+                            row.first().map(|r| (r.at, r.adjustment)),
+                            Some((b.at, b.adjustment)),
+                            "{zone} {expr} at {t}: fire_at_or_before and next_runs disagree \
+                             about {}",
+                            b.at
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 4_000,
+        "a corpus that compared almost nothing is not a property test; compared {compared}"
+    );
+
+    // THE MEASURED ROW, NAMED. This is the exact disagreement the review found,
+    // and it fails for any fix that leaves either walk taking a plain min/max
+    // over the instant alone.
+    let apia = Cadence::parse("0 0 * * *", Some("Pacific/Apia")).unwrap();
+    let crossing = utc(2011, 12, 30, 10, 0);
+    let after = apia.fire_after(utc(2011, 12, 29, 10, 0)).expect("it fires");
+    assert_eq!(after.at, crossing);
+    assert_eq!(
+        after.adjustment, None,
+        "MUTANT `plain min over the instant`: local 2011-12-31T00:00 is a REAL local midnight \
+         that maps to this instant, so the marker a reader can verify is no marker"
+    );
+    assert_eq!(
+        apia.fire_at_or_before(utc(2011, 12, 30, 12, 0)),
+        Some(after),
+        "and the walk from the other direction returns the SAME Fire, marker included"
+    );
+    assert_eq!(
+        apia.next_runs(utc(2011, 12, 29, 10, 0), 1)[0].adjustment,
+        None,
+        "and so does the preview the console shows"
+    );
+}
+
+/// **All three selection points name the one tie-break** — the structural half
+/// of `every_walk_agrees_on_the_marker_for_an_instant`.
+///
+/// # Why a source scan and not more instants
+///
+/// Of the three places that reduce several matched local times to one firing,
+/// only ONE can be shown to need the tie-break by example, and that is measured
+/// rather than assumed: re-planting each mutant gives
+///
+/// | mutant | outcome |
+/// |---|---|
+/// | `fire_after` takes a plain `<` over the instant | **dies** in the corpus test (Apia, `0 0 * * *`) |
+/// | `fire_at_or_before` takes a plain `>` | survives every instant I can construct |
+/// | `record` becomes last-writer-wins | survives every instant I can construct |
+///
+/// and the reason the last two survive is structural, not a gap in the corpus.
+/// A gap shift only ever moves a firing FORWARD in time, so when two matched
+/// local times collapse onto one instant the better-ranked producer — the real
+/// local time — always belongs to the LATER local date. `fire_at_or_before`
+/// walks dates backwards and therefore meets it first, and `record` fills its
+/// map in ascending date-and-minute order and therefore overwrites with it
+/// last. Both land on the right answer for a reason that has nothing to do with
+/// the rule they are supposed to be applying.
+///
+/// That is precisely the arrangement that broke once already: three spellings
+/// of one decision, two of them right by accident, and a reader with no way to
+/// tell which. So the tie-break is asserted where it can be — one function name
+/// at all three sites — and the accident is written down rather than relied on.
+#[test]
+fn every_selection_point_names_the_one_tie_break() {
+    let src = std::fs::read_to_string(workspace_root().join("crates/weirkeeper/src/cadence.rs"))
+        .expect("the module is readable");
+
+    // Exactly one definition, and it is the rank comparison itself.
+    assert_eq!(
+        src.matches("fn marker_supersedes(").count(),
+        1,
+        "one tie-break, defined once"
+    );
+    assert_eq!(
+        src.matches("Adjustment::rank(").count(),
+        2,
+        "MUTANT `a second rank comparison`: `Adjustment::rank` is read ONLY inside \
+         `marker_supersedes` (twice, once per side). A third reader is a second tie-break \
+         growing back"
+    );
+
+    // And every site that chooses between two firings for one instant reaches
+    // it — through the two direction helpers or directly.
+    for (site, needle) in [
+        ("fire_at_or_before", "later_or_better(fire, b)"),
+        ("fire_after", "earlier_or_better(fire, b)"),
+        ("record", "marker_supersedes(adjustment, *held)"),
+    ] {
+        assert!(
+            src.contains(needle),
+            "MUTANT `{site} takes a plain min/max over the instant`: it must go through the \
+             shared tie-break, or the three walks disagree about a marker again. Looked for \
+             {needle:?}"
+        );
+    }
+    for helper in ["fn later_or_better(", "fn earlier_or_better("] {
+        let body = src
+            .split(helper)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{helper} is defined"))
+            .split("\n}")
+            .next()
+            .expect("it has a body");
+        assert!(
+            body.contains("marker_supersedes("),
+            "{helper} must delegate to the shared tie-break; body was:\n{body}"
+        );
+    }
+}
+
+/// **A 24-hour REPEATED day needs the edge slack** — `America/Sitka`, the
+/// Alaska purchase of 1867-10-18.
+///
+/// # Why this zone
+///
+/// Sitka moved from the Russian calendar at +14:59 to the American one at
+/// −09:01 and lived the same local day twice: a 24-hour fall back, the mirror
+/// of `Pacific/Apia`'s 24-hour gap. It is the case that makes `EDGE_DAYS`
+/// load-bearing, and it is here because the first round of this module recorded
+/// — wrongly, from a sweep that covered only the eastward direction — that the
+/// constant had "no measured effect".
+///
+/// # The mechanism
+///
+/// At +14:59 a local midnight lands most of a day EARLIER in UTC, so the
+/// firing that answers `fire_at_or_before(1867-10-19T01:00Z)` comes from local
+/// date 1867-10-**19** — one local date AFTER the local date of the argument
+/// (1867-10-18). `fire_at_or_before` starts its backwards walk at
+/// `local_date + EDGE_DAYS` for exactly this reason. With `EDGE_DAYS = 0` the
+/// walk starts at the argument's own local date, never visits 1867-10-19, and
+/// answers 1867-10-17T09:01:13Z — a whole slot too early, which for a daily
+/// backup is a day of data nobody notices is missing.
+#[test]
+fn a_twenty_four_hour_repeated_day_needs_the_edge_slack() {
+    let sitka = Cadence::parse("0 0 * * *", Some("America/Sitka")).expect("Sitka is in the tzdb");
+
+    let got = sitka
+        .fire_at_or_before(utc(1867, 10, 19, 1, 0))
+        .expect("the repeated day still fires");
+    assert_eq!(
+        got.at,
+        chrono::Utc
+            .with_ymd_and_hms(1867, 10, 18, 9, 1, 13)
+            .single()
+            .expect("a real instant"),
+        "MUTANT `EDGE_DAYS = 0`: the walk must start far enough FORWARD to see local date \
+         1867-10-19, whose midnight at +14:59 is this instant; starting at the argument's own \
+         local date answers 1867-10-17T09:01:13Z and loses a firing"
+    );
+    assert_eq!(got.adjustment, Some(Adjustment::RepeatedLocalTimeFirst));
+
+    // THE SECONDS ARE NOT A TYPO. Sitka's pre-purchase offset is a Local Mean
+    // Time entry of +14:58:47, so a local midnight is not on a minute
+    // boundary. The slot string truncates to the second, which is what keeps
+    // it 15 characters.
+    assert_eq!(slot_name(got.at), "18671018-090113");
+    assert_eq!(slot_name(got.at).len(), SLOT_NAME_LEN);
+
+    // BOTH OCCURRENCES FIRE, which is the repeated-hour rule at a 24-hour
+    // scale: one local midnight, two real instants, two slots.
+    let runs = sitka.next_runs(utc(1867, 10, 17, 12, 0), 3);
+    assert_eq!(
+        runs.iter().map(|r| slot_name(r.at)).collect::<Vec<_>>(),
+        ["18671018-090113", "18671019-090113", "18671020-090113"]
+    );
+    assert_eq!(
+        runs.iter().map(|r| r.adjustment).collect::<Vec<_>>(),
+        [
+            Some(Adjustment::RepeatedLocalTimeFirst),
+            Some(Adjustment::RepeatedLocalTimeSecond),
+            None,
+        ]
+    );
+    assert_eq!(runs[0].local_time, "1867-10-19T00:00:00+14:59");
+    assert_eq!(runs[1].local_time, "1867-10-19T00:00:00-09:01");
+}
+
 /// **The gap rule has a mutant.** THIS TEST EXISTS TO FAIL if the
 /// nonexistent-local-time arm is dropped or changed.
 ///
@@ -1016,6 +1425,151 @@ fn the_deadline_boundary_has_a_mutant() {
     );
 }
 
+/// **The deadline fields are range-checked HERE, not in the controller** —
+/// D1 §4.1 ranges, D1 §4.5 step 0's fail-closed re-validation.
+///
+/// THE SAME ARGUMENT `RetryPolicy::validate` MAKES FOR ITSELF. The CRD's
+/// OpenAPI ranges are the first gate; an object created against an older CRD,
+/// or read after the API server pruned a field it does not declare, reaches
+/// the scheduler without having passed them. Two gates, one table — and the
+/// table has to cover all three fields or the deadlines are the pair W2
+/// hand-rolls and gets subtly different.
+#[test]
+fn the_deadline_ranges_are_checked() {
+    // The documented defaults, which are what an absent field means.
+    assert_eq!(DEFAULT_STARTING_DEADLINE_SECONDS, 3600);
+    assert_eq!(DEFAULT_ACTIVE_DEADLINE_SECONDS, 3600);
+    assert_eq!(
+        (MIN_STARTING_DEADLINE_SECONDS, MAX_STARTING_DEADLINE_SECONDS),
+        (60, 604_800),
+        "one minute to one week (D1 §4.1)"
+    );
+    assert_eq!(
+        (MIN_ACTIVE_DEADLINE_SECONDS, MAX_ACTIVE_DEADLINE_SECONDS),
+        (60, 86_400),
+        "one minute to one day (D1 §4.1)"
+    );
+
+    // ABSENT IS ALWAYS VALID: a default this module states cannot be outside a
+    // range this module states.
+    assert_eq!(validate_deadlines(None, None), Ok(()));
+    assert_eq!(
+        validate_deadlines(
+            Some(DEFAULT_STARTING_DEADLINE_SECONDS),
+            Some(DEFAULT_ACTIVE_DEADLINE_SECONDS)
+        ),
+        Ok(()),
+        "and the defaults themselves pass the ranges they sit inside"
+    );
+
+    // BOTH BOUNDARIES ARE INCLUSIVE, pinned to the second on each side.
+    for (start, active) in [
+        (MIN_STARTING_DEADLINE_SECONDS, MIN_ACTIVE_DEADLINE_SECONDS),
+        (MAX_STARTING_DEADLINE_SECONDS, MAX_ACTIVE_DEADLINE_SECONDS),
+    ] {
+        assert_eq!(
+            validate_deadlines(Some(start), Some(active)),
+            Ok(()),
+            "MUTANT `exclusive range`: {start}/{active} are the accepted extremes"
+        );
+    }
+
+    assert_eq!(
+        validate_deadlines(Some(MIN_STARTING_DEADLINE_SECONDS - 1), None),
+        Err(DeadlineProblem::StartingOutOfRange {
+            got: 59,
+            min: 60,
+            max: 604_800
+        })
+    );
+    assert_eq!(
+        validate_deadlines(Some(MAX_STARTING_DEADLINE_SECONDS + 1), None),
+        Err(DeadlineProblem::StartingOutOfRange {
+            got: 604_801,
+            min: 60,
+            max: 604_800
+        })
+    );
+    assert_eq!(
+        validate_deadlines(None, Some(MAX_ACTIVE_DEADLINE_SECONDS + 1)),
+        Err(DeadlineProblem::ActiveOutOfRange {
+            got: 86_401,
+            min: 60,
+            max: 86_400
+        })
+    );
+    assert_eq!(
+        validate_deadlines(None, Some(0)),
+        Err(DeadlineProblem::ActiveOutOfRange {
+            got: 0,
+            min: 60,
+            max: 86_400
+        }),
+        "a zero deadline is a run with no deadline at all, which is not what the field means"
+    );
+    // A NEGATIVE VALUE IS REFUSED TOO: `int64` in the CRD is signed, and a
+    // pruned or hand-patched field can carry one.
+    assert!(validate_deadlines(Some(-1), None).is_err());
+
+    // THE STARTING DEADLINE IS REPORTED FIRST when both are wrong, so the
+    // message an operator reads names one field rather than two.
+    assert_eq!(
+        validate_deadlines(Some(1), Some(1)),
+        Err(DeadlineProblem::StartingOutOfRange {
+            got: 1,
+            min: 60,
+            max: 604_800
+        })
+    );
+
+    // The message names the field and the range, like every other refusal here.
+    let message = validate_deadlines(None, Some(9_999_999))
+        .unwrap_err()
+        .to_string();
+    for needle in ["spec.activeDeadlineSeconds", "9999999", "60", "86400"] {
+        assert!(
+            message.contains(needle),
+            "the refusal names {needle}: {message}"
+        );
+    }
+}
+
+/// **`admit_slot`'s precondition is `slot <= now`, and the documented answer
+/// for a future slot is pinned** so it is a contract rather than an accident.
+///
+/// D1 §4.5 step 5 produces the only correct argument — `latest_due_slot`, which
+/// is `last_fire_at_or_before(now)` and cannot return a future instant. A
+/// caller that passes one anyway has a negative age, which is inside
+/// `age <= startingDeadline`, so the answer is `Scheduled`: this function would
+/// tell it to run a backup before its slot. It is stated rather than guarded
+/// because a guard would need a fifth outcome D1 §4.7's table has no row for.
+#[test]
+fn admit_slot_is_documented_for_a_future_slot() {
+    let now = utc(2026, 9, 15, 12, 0);
+
+    // The precondition holds for everything `latest_due_slot` produces.
+    let cadence = Cadence::parse("*/30 * * * *", Some("Europe/Berlin")).unwrap();
+    let due = cadence.latest_due_slot(now).expect("a due slot");
+    assert!(
+        due <= now,
+        "latest_due_slot must never return a future instant; got {due} for now={now}"
+    );
+
+    // And this is what the function does when the precondition is broken.
+    assert_eq!(
+        admit_slot(
+            now + Duration::hours(1),
+            now,
+            DEFAULT_STARTING_DEADLINE_SECONDS,
+            CatchUpPolicy::None,
+            None
+        ),
+        SlotAdmission::Scheduled,
+        "a future slot has a negative age and lands in the first arm — the documented \
+         precondition is `slot <= now`, and `latest_due_slot` is the only correct source"
+    );
+}
+
 /// **A long downtime with `catchUpPolicy: Latest` produces exactly ONE run** —
 /// and with `None`, none at all.
 ///
@@ -1196,6 +1750,43 @@ fn missed_slot_accounting_caps_at_one_thousand() {
         // reconciles.
         let touching = cadence.skipped_slots(from, from + Duration::minutes(1), 1000);
         assert_eq!((touching.count, touching.capped), (0, false));
+
+        // AND NONE OF THOSE WALKS HIT THE TEN-YEAR HORIZON.
+        for walk in [exact, capped, on_the_cap, one_under, touching] {
+            assert!(
+                !walk.horizon_reached,
+                "zone {zone:?}: a walk inside the window must not claim the horizon stopped it"
+            );
+        }
+    }
+
+    // THE HORIZON IS A SECOND REASON THE COUNT IS A FLOOR, and it says so.
+    // `0 0 1 1 *` over twelve years is twelve slots and too few to reach any
+    // cap, but `slot.rs` cannot name a slot more than WALK_DAYS out — the same
+    // ten-year blindness the legacy evaluator has had since PLAT-04.1 — so the
+    // count stops at ten. Without `horizon_reached` that floor would be
+    // published as an exact total in `status.missedSlots.count`.
+    for zone in [None, Some("Europe/Berlin")] {
+        let yearly = Cadence::parse("0 0 1 1 *", zone).unwrap();
+        let walk = yearly.skipped_slots(
+            utc(2000, 6, 1, 0, 0),
+            utc(2012, 6, 1, 0, 0),
+            MAX_SKIPPED_SLOT_ENUMERATION,
+        );
+        assert!(
+            walk.horizon_reached,
+            "zone {zone:?}: MUTANT `drop horizon_reached`: a twelve-year interval is wider than \
+             the ten years this product can walk, so the count is a floor and must say so"
+        );
+        assert!(
+            !walk.capped,
+            "and it is NOT the cap that stopped it — the two facts are different"
+        );
+        assert!(
+            walk.count < 12,
+            "the walk really did stop short; got {} of the twelve slots",
+            walk.count
+        );
     }
 }
 
@@ -1528,9 +2119,36 @@ fn retry_admission_follows_the_truth_table() {
         ),
         RetryAdmission::Exhausted {
             attempt: 0,
-            max_retries: 0
+            max_retries: 0,
+            retry_configured: false
         },
         "an absent `retry` block is no retries, which is today's behaviour"
+    );
+    // AND THE TWO ZEROES ARE TOLD APART (D1 §4.7 row 10). `maxRetries: 0` is a
+    // schedule that considered retries and chose none — `RetryExhausted`; an
+    // absent block never had a budget to exhaust — `RunFailed`. A reader of
+    // `RetryAdmission` alone must be able to write the right reason, or the
+    // two drift apart in the controller.
+    assert_eq!(
+        admit_retry(
+            slot,
+            Some(slot),
+            0,
+            true,
+            finished,
+            Some(RetryPolicy {
+                max_retries: 0,
+                delay_seconds: 300
+            }),
+            finished + Duration::hours(1)
+        ),
+        RetryAdmission::Exhausted {
+            attempt: 0,
+            max_retries: 0,
+            retry_configured: true
+        },
+        "MUTANT `drop retry_configured`: `maxRetries: 0` and an absent `retry` are the same \
+         decision and DIFFERENT reasons"
     );
     // Row 11 — the delay has not elapsed.
     assert_eq!(
@@ -1585,7 +2203,8 @@ fn retry_admission_follows_the_truth_table() {
         ),
         RetryAdmission::Exhausted {
             attempt: 2,
-            max_retries: 2
+            max_retries: 2,
+            retry_configured: true
         },
         "MUTANT `unbounded retries`: at maxRetries the chain stops, and the slot is done"
     );
@@ -1606,7 +2225,8 @@ fn retry_admission_follows_the_truth_table() {
         ),
         RetryAdmission::Exhausted {
             attempt: 3,
-            max_retries: 1
+            max_retries: 1,
+            retry_configured: true
         }
     );
 }
