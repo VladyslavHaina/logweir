@@ -73,6 +73,26 @@ about them.
   `windowCovered`. The `Complete` condition times decide which of the two is restored from, and the
   second row flips them without touching list order.
 
+## The cadence preset catalogue
+
+`cadence-presets.json` is the schedule form's preset table, and it is **generated, not written**.
+`weirkeeper::cadence::presets` is the one catalogue; `crates/weirkeeper/tests/cadence.rs`'s
+`the_preset_catalogue_fixture_matches_the_rust_catalogue` serialises it and fails on any
+difference, so the two cannot drift. Regenerate after changing the Rust table:
+
+```
+LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper --test cadence \
+  the_preset_catalogue_fixture_matches_the_rust_catalogue
+```
+
+It carries three blocks. `presets` is each kind's `cronTemplate` -- a STRING template with
+`{parameter}` holes -- and its parameter ranges, which is what lets the page render "Every day at
+02:00" and the expression it will save without evaluating any cron (decision D1 §4.2: the browser
+never computes a cadence, it renders what the controller or the API returned). `aliases` is what
+`@hourly`, `@daily` and `@weekly` read back as. `examples` is one compiled expression per kind, and
+it is the drift bait: parameter ranges alone would still match a `compile` that put the fields in
+the wrong order.
+
 ## The preview fixtures
 
 `preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in

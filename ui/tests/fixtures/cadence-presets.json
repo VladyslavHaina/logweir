@@ -1,0 +1,166 @@
+{
+  "presets": [
+    {
+      "kind": "hourly",
+      "cronTemplate": "{minute} * * * *",
+      "parameters": [
+        {
+          "name": "minute",
+          "min": 0,
+          "max": 59
+        }
+      ]
+    },
+    {
+      "kind": "everyNHours",
+      "cronTemplate": "{minute} */{n} * * *",
+      "parameters": [
+        {
+          "name": "n",
+          "min": 2,
+          "max": 12,
+          "values": [
+            2,
+            3,
+            4,
+            6,
+            8,
+            12
+          ]
+        },
+        {
+          "name": "minute",
+          "min": 0,
+          "max": 59
+        }
+      ]
+    },
+    {
+      "kind": "daily",
+      "cronTemplate": "{minute} {hour} * * *",
+      "parameters": [
+        {
+          "name": "hour",
+          "min": 0,
+          "max": 23
+        },
+        {
+          "name": "minute",
+          "min": 0,
+          "max": 59
+        }
+      ]
+    },
+    {
+      "kind": "weekly",
+      "cronTemplate": "{minute} {hour} * * {dayOfWeek}",
+      "parameters": [
+        {
+          "name": "dayOfWeek",
+          "min": 0,
+          "max": 6
+        },
+        {
+          "name": "hour",
+          "min": 0,
+          "max": 23
+        },
+        {
+          "name": "minute",
+          "min": 0,
+          "max": 59
+        }
+      ]
+    },
+    {
+      "kind": "monthly",
+      "cronTemplate": "{minute} {hour} {dayOfMonth} * *",
+      "parameters": [
+        {
+          "name": "dayOfMonth",
+          "min": 1,
+          "max": 28
+        },
+        {
+          "name": "hour",
+          "min": 0,
+          "max": 23
+        },
+        {
+          "name": "minute",
+          "min": 0,
+          "max": 59
+        }
+      ]
+    }
+  ],
+  "aliases": [
+    {
+      "schedule": "@hourly",
+      "preset": {
+        "kind": "hourly",
+        "minute": 0
+      }
+    },
+    {
+      "schedule": "@daily",
+      "preset": {
+        "kind": "daily",
+        "hour": 0,
+        "minute": 0
+      }
+    },
+    {
+      "schedule": "@weekly",
+      "preset": {
+        "kind": "weekly",
+        "dayOfWeek": 0,
+        "hour": 0,
+        "minute": 0
+      }
+    }
+  ],
+  "examples": [
+    {
+      "preset": {
+        "kind": "hourly",
+        "minute": 5
+      },
+      "schedule": "5 * * * *"
+    },
+    {
+      "preset": {
+        "kind": "everyNHours",
+        "n": 6,
+        "minute": 30
+      },
+      "schedule": "30 */6 * * *"
+    },
+    {
+      "preset": {
+        "kind": "daily",
+        "hour": 2,
+        "minute": 0
+      },
+      "schedule": "0 2 * * *"
+    },
+    {
+      "preset": {
+        "kind": "weekly",
+        "dayOfWeek": 1,
+        "hour": 23,
+        "minute": 45
+      },
+      "schedule": "45 23 * * 1"
+    },
+    {
+      "preset": {
+        "kind": "monthly",
+        "dayOfMonth": 28,
+        "hour": 4,
+        "minute": 15
+      },
+      "schedule": "15 4 28 * *"
+    }
+  ]
+}
