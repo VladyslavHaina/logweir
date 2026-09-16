@@ -559,14 +559,28 @@ notify-result=slack:ok
 
 A reader scans a bounded tail and matches **by key name**, never by position — the rule erratum E4
 draws for `refusal-reason=` and `offset-report-key=`, and for the same reason: a pod log is stdout
-and stderr merged in nondeterministic order. No configured sink means no lines at all.
+and stderr merged in nondeterministic order.
+
+**A delivery with no configured sink prints exactly one line and exits 1:**
+
+```
+notify-result=none:unconfigured
+```
+
+`none` is not a sink and cannot collide with one, and `unconfigured` is deliberately not `failed`:
+a sink that refused and an alert with nowhere to go are different findings that an operator fixes
+in different places. **Do not read a bare exit 0 as delivered.** Before this line existed, "nothing
+was configured" and "every sink accepted" were the same machine-readable answer — empty stdout,
+exit 0 — so a `secretKeyRef` that had been rotated, renamed or left blank made a caller record a
+delivery that reached nobody. A delivery Job that delivered nothing did not deliver; the
+controller's retries exhaust and `NotificationsDelivered=False` is the correct record of it.
 
 **The exit codes.**
 
 | code | meaning |
 |---|---|
-| **0** | every configured sink accepted — including the case where none was configured |
-| **1** | at least one configured sink did not accept; the `notify-result=…:failed` line says which |
+| **0** | every configured sink accepted, and at least one was configured |
+| **1** | at least one configured sink did not accept (`notify-result=…:failed` says which), **or** no sink was configured at all (`notify-result=none:unconfigured`) |
 | **3** | the event document is missing, unreadable, larger than a ConfigMap can hold, of another `format_version` major, or malformed — **nothing was posted** |
 
 **2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.
@@ -576,17 +590,29 @@ artifact, so either code would make a delivery failure indistinguishable from a 
 every reader of the exit contract, including `weirkeeper::conditions::reason_for_exit`.
 
 **1 and 3 are distinguishable without parsing prose.** A refusal posted nothing, so it prints no
-`notify-result=` line at all; a delivery failure prints one per configured sink. A controller reads
-the exit code *and* the lines, which is what D3 §3.4 specifies.
+`notify-result=` line at all; a delivery failure prints one per configured sink, and a delivery with
+nowhere to go prints `none:unconfigured`. A controller reads the exit code *and* the lines, which is
+what D3 §3.4 specifies.
 
 **A failed notification never rewrites a backup result.** This subcommand writes no Kubernetes
 object of any kind — it reads a file, posts to sinks, and exits. Delivery failures reach a `Backup`
 only through what the protection controller chooses to write on `protectionpolicies/status`.
 
-**Sink credentials never reach stdout, stderr, a log line or a `Debug` output.** The routing key
-travels in the PagerDuty request body and is never printed; every sink URL that reaches a display
-surface is reduced to `scheme://host` by `redact_url` first, on the success arm and the failure arm
-alike. `crates/logweir/tests/notify_deliver.rs` asserts all of it over the shipped process.
+**Sink credentials never reach stdout, stderr, a `tracing` field or a `Debug` output.** The routing
+key travels in the PagerDuty request body and is never printed; every sink URL that reaches a
+display surface is reduced to `scheme://host` by `redact_url` first, on the success arm and the
+failure arm alike. All three streams are asserted together, over the shipped process with a routing
+key really set, because a pod log has no stream selector and a `tracing` field is a surface a log
+aggregator reads.
+
+**The event's `summary` is the only free prose, and a claim in it is edited, not obeyed and not
+fatal.** If the controller's `summary` contains a phrase claiming exhaustive verification, the
+phrase is replaced with `[claim removed]`, the edit is reported on a named log line, and the alert
+**is still delivered** — Logweir verifies a sample, and dropping the page would punish the responder
+for the controller's wording. Identifiers are never scanned: `exhaustive` is a legal DNS-1123 label,
+so a `ProtectionPolicy` named `exhaustive-backups` delivers normally. The one hard refusal is a
+`verification_scope` outside `sampled`/`degraded`/`none`, which reads an enumerated field this
+product serializes and cannot be tripped by a naming choice.
 
 **Timeouts are the drill path's**: 5 s to connect and 10 s overall per POST, so three sinks cost at
 most 30 s — inside the delivery Job's `activeDeadlineSeconds: 120`.
@@ -681,6 +707,21 @@ spend).
   reader **ignores unknown fields** on any document whose major matches what
   it supports, and **refuses** a document whose major is higher than it
   supports, rather than guessing at a shape it has never seen.
+
+  **One document is a deliberate exception and it is named here rather than
+  left to be discovered: the protection event**
+  (`application/vnd.logweir.protection-event+json;version=1.0.0`,
+  [formats/protection-event.md](formats/protection-event.md)). It **refuses**
+  unknown fields instead of ignoring them. The policy above is about SIGNED,
+  ARCHIVAL documents read years later by something that was not there when
+  they were written; the protection event is neither — it is a control message
+  passed between the protection controller and a delivery Job whose image the
+  same chart pins, and the thing a lenient reader would silently drop is an
+  alert detail an on-call responder then never learns. **The cost is real and
+  is stated:** a minor bump that adds a field is *not* backward-compatible for
+  an older runner, which exits 3 and posts nothing, so the controller and the
+  runner image upgrade together. The chart already pins both, so this binds a
+  hand-edited deployment rather than a supported upgrade.
 
 - **CLI flags and exit codes are stable within a major.** A given Logweir
   major version does not remove or repurpose a flag, nor change the meaning

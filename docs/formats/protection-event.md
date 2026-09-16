@@ -33,12 +33,25 @@ read an archive end to end and it never has.
 
 There is no fourth value. `"verification_scope": "complete"` is a **parse failure**, not a value a
 reviewer has to notice, because the Rust type is a three-variant enum and the document is parsed
-with `deny_unknown_fields`. Beyond that, every body this product is about to POST is scanned for a
-fixed list of exhaustive-verification claims and is **not sent** if one is found — including a claim
-arriving through the controller's free-text `summary`, which reaches a PagerDuty incident title
-verbatim.
+with `deny_unknown_fields`. A body whose `verification_scope` is outside the three is refused before
+a request and is the one hard refusal in the delivery path — it reads an enumerated field Logweir
+serializes, so it cannot be tripped by anything an operator typed.
 
-The word `exhaustive` is forbidden in a notification body even inside a denial. A denial and a claim
+**`summary` is scanned, and a claim in it is edited rather than obeyed.** It is the only free prose
+in the document and it reaches a PagerDuty incident title verbatim, so a phrase claiming exhaustive
+verification is replaced with `[claim removed]`, the edit is reported on a named log line, and the
+alert **is still delivered**. The alert underneath a badly-worded summary is real and still needs a
+human; dropping the page would punish the responder for the controller's wording.
+
+**Identifiers are never scanned, and that bound is load-bearing.** `exhaustive` is a legal DNS-1123
+label, so it is a legal `ProtectionPolicy` name. An earlier version scanned the whole serialized
+body — which carries `policy.name`, `policy.namespace`, `alert.key`, `details_route` and `point_id`
+— so a policy named `exhaustive-backups` had every sink refuse, and after the controller's three
+attempts its `Stale` and `Unprotected` pages reached nobody, permanently and silently. A gate that
+turns a naming choice into a total loss of alerting is strictly worse than the thing it catches. The
+subject of the scan is prose; an identifier is not prose.
+
+The word `exhaustive` is forbidden in Logweir-authored prose even inside a denial. A denial and a claim
 differ by one word, and these channels truncate: PagerDuty clips an incident summary, Slack collapses
 a long message behind "show more", and a body gets pasted into a ticket by hand. A sentence that
 survives clipping as "…an exhaustive comparison" would be the product's one unrecoverable lie,
@@ -109,6 +122,10 @@ The prefix keeps the family apart from the drill families (`logweir-drill-…`),
 `unknown` rather than to `logweir-protection--Staleness` — a key that would be one incident per kind
 across every policy in the cluster, where one team's resolve closes another team's page.
 
+`protection_dedup_key` **cannot be handed a `RecoveryCompleted`** — the four policy-keyed kinds are
+their own type, so reaching for the wrong builder is a compile error rather than a well-formed key
+for the wrong object.
+
 **The controller is the authority on this value.** `logweir notify deliver` posts the key it is
 given and never recomputes it; a key that does not match the `(policy, kind)` rule is reported on a
 named log line and delivered anyway, because a mis-keyed page still reaches a human who can act on
@@ -122,6 +139,10 @@ responder to do. A configured routing key is therefore not a configured sink for
 prints no `notify-result=pagerduty:` line.
 
 ## A worked example
+
+This block is the fixture. `crates/logweir/tests/notify_deliver.rs` reads it out of this page and
+parses it into the Rust type, so a field renamed on one side and not the other fails a test rather
+than drifting quietly.
 
 ```json
 {"format_version":"1.0.0","event_id":"sha256:0123456789abcdef",
@@ -142,10 +163,13 @@ prints no `notify-result=pagerduty:` line.
 
 - **`webhook`** — `{"media_type": …, "event": <the document, re-serialized>}`. Re-serialized from
   the parsed type and never passed through as the bytes that arrived, so nothing unrecognised can
-  reach a sink that might render it.
-- **`slack`** — `{"text": …}` and nothing else. A Slack incoming webhook answers `invalid_payload`
-  to a JSON body with no `text`, `blocks` or `attachments`, so posting the document verbatim would
-  make every Slack delivery a failure for a channel that is working perfectly.
+  reach a sink that might render it. The URL must be `https://` unless
+  `NOTIFY_ALLOW_INSECURE_SINKS` is set: it is a bearer credential and the whole event travels
+  beside it.
+- **`slack`** — `{"text": …}` and nothing else, at `https://` on the same rule as the webhook. A
+  Slack incoming webhook answers `invalid_payload` to a JSON body with no `text`, `blocks` or
+  `attachments`, so posting the document verbatim would make every Slack delivery a failure for a
+  channel that is working perfectly.
 - **`pagerduty`** — an Events v2 enqueue whose `event_action` is `alert.action`, whose `dedup_key` is
   `alert.key`, whose `payload.source` is `<namespace>/<name>`, and whose `payload.custom_details` is
   the whole document. `payload.severity` is `critical` for `Stale` and `Unprotected` and `warning`
