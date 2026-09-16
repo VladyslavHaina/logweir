@@ -522,6 +522,75 @@ draws for `refusal-reason=`: a pod log is stdout and stderr merged in nondetermi
 every reader in this project scans a bounded tail and matches by key name
 (`KEY_SCAN_TAIL_LINES = 8`, `controllers::backup::evidence_keys`).
 
+### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
+
+`logweir notify deliver --event <path>` posts one protection event
+(`application/vnd.logweir.protection-event+json;version=1.0.0`,
+[docs/formats/protection-event.md](formats/protection-event.md)) to every configured sink. It is the
+runner-side half of PLAT-14.2: the protection controller decides what the alert says and has no way
+to send it — `config/rbac/role.yaml` gives it no Secret verb, so it cannot read a routing key, and it
+is given no HTTP egress — so delivery runs as a short Job built from the runner image, with the sink
+credentials projected into that Job and nowhere else.
+
+**Sinks come from the environment, never from a flag.** A routing key or a signed webhook URL on an
+argv is visible in `/proc/<pid>/cmdline`, in every process listing on the host, and in the Job spec
+anyone with pod read can see — the same reason `logweir cluster-probe` takes its SASL password from
+`LOGWEIR_SOURCE_PASSWORD` and offers no `--password`.
+
+| variable | sink name | what is posted |
+|---|---|---|
+| `PAGERDUTY_ROUTING_KEY` | `pagerduty` | one Events v2 enqueue, `trigger`/`resolve` from `alert.action`, `dedup_key` = `alert.key` |
+| `NOTIFY_WEBHOOK_URL` | `webhook` | one POST of the event document |
+| `NOTIFY_SLACK_WEBHOOK_URL` | `slack` | one POST of `{"text": …}` |
+| `PAGERDUTY_ENDPOINT` | — | not a sink: the PagerDuty service region, `https://` only, US default |
+
+**A variable that is present and blank is not a configured sink.** `std::env::var` returns `Ok("")`
+— not `Err(NotPresent)` — for a Kubernetes `env:` entry with an empty `value:`, and a `secretKeyRef`
+to a key that exists and is blank projects the same thing.
+
+**Stdout is one line per configured sink**, in the fixed order `pagerduty`, `webhook`, `slack`, as
+the final lines the process writes:
+
+```
+notify-result=pagerduty:ok
+notify-result=webhook:failed
+notify-result=slack:ok
+```
+
+A reader scans a bounded tail and matches **by key name**, never by position — the rule erratum E4
+draws for `refusal-reason=` and `offset-report-key=`, and for the same reason: a pod log is stdout
+and stderr merged in nondeterministic order. No configured sink means no lines at all.
+
+**The exit codes.**
+
+| code | meaning |
+|---|---|
+| **0** | every configured sink accepted — including the case where none was configured |
+| **1** | at least one configured sink did not accept; the `notify-result=…:failed` line says which |
+| **3** | the event document is missing, unreadable, larger than a ConfigMap can hold, of another `format_version` major, or malformed — **nothing was posted** |
+
+**2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.
+Global Constraint 11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and
+signed" and 4 for "signing or lock-proof failed"; `notify deliver` signs nothing and writes no
+artifact, so either code would make a delivery failure indistinguishable from a drill result to
+every reader of the exit contract, including `weirkeeper::conditions::reason_for_exit`.
+
+**1 and 3 are distinguishable without parsing prose.** A refusal posted nothing, so it prints no
+`notify-result=` line at all; a delivery failure prints one per configured sink. A controller reads
+the exit code *and* the lines, which is what D3 §3.4 specifies.
+
+**A failed notification never rewrites a backup result.** This subcommand writes no Kubernetes
+object of any kind — it reads a file, posts to sinks, and exits. Delivery failures reach a `Backup`
+only through what the protection controller chooses to write on `protectionpolicies/status`.
+
+**Sink credentials never reach stdout, stderr, a log line or a `Debug` output.** The routing key
+travels in the PagerDuty request body and is never printed; every sink URL that reaches a display
+surface is reduced to `scheme://host` by `redact_url` first, on the success arm and the failure arm
+alike. `crates/logweir/tests/notify_deliver.rs` asserts all of it over the shipped process.
+
+**Timeouts are the drill path's**: 5 s to connect and 10 s overall per POST, so three sinks cost at
+most 30 s — inside the delivery Job's `activeDeadlineSeconds: 120`.
+
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
 Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once
