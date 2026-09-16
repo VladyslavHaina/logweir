@@ -488,6 +488,7 @@ fn a_scram_plan_renders_and_never_panics_and_is_never_downgraded() {
     p.source_auth = AuthRender::ScramSha512 {
         username: "logweir-drill".into(),
         tls: true,
+        tls_ca_file: None,
     };
     let doc = render_backup::render(&p).expect("the SCRAM arm renders since Task 6");
     // NOT a downgrade: the document authenticates, and says so with the

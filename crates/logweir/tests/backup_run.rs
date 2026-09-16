@@ -686,6 +686,7 @@ fn backup_run_records_the_source_auth() {
         AuthRender::ScramSha512 {
             username: "logweir".into(),
             tls: false,
+            tls_ca_file: None,
         }
     );
     // And the plan the engine was handed carries the same value — the field is
@@ -695,6 +696,7 @@ fn backup_run_records_the_source_auth() {
         AuthRender::ScramSha512 {
             username: "logweir".into(),
             tls: false,
+            tls_ca_file: None,
         }
     );
 

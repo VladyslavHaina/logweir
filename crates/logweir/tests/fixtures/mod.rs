@@ -1565,6 +1565,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             engine: Box::new(engine),
             archive,
             store: logweir_engine_oso::storage::Store::in_memory("logweir"),
+            // No projected private CA: the fixture's target is a double, and a
+            // CA path with no TLS transport is refused by `AuthRender` anyway
+            // (PLAT-07.1). `tests/tls_ca.rs` drives the other value.
+            target_tls_ca_file: None,
         },
         segment_bytes,
         out,

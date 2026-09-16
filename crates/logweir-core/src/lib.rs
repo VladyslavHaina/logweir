@@ -7,6 +7,7 @@ pub const FORMAT_VERSION: &str = "1.0.0";
 
 pub mod backup_receipt;
 pub mod check_contract;
+pub mod connection;
 pub mod destination;
 pub mod det_json;
 pub mod engine;

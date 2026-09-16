@@ -91,6 +91,12 @@ impl ConsumedRecord {
 /// v0.1 ships PLAINTEXT and SASL/SCRAM over TLS. OAUTHBEARER and MSK IAM
 /// arrive in SP4 through `crate::token::TokenProvider`; there is no AWS
 /// dependency in this crate in v0.1 (Global Constraint 1).
+///
+/// `tls_ca_file` (PLAT-07.1) is the pod-local path of a projected private CA
+/// certificate: when set, librdkafka's `ssl.ca.location` points at it and the
+/// image's default trust store is not consulted for this connection. It is
+/// attached with [`AuthConfig::with_tls_ca_file`], which refuses it for a
+/// transport that is not TLS.
 #[derive(Clone)]
 pub enum AuthConfig {
     Plaintext,
@@ -98,6 +104,7 @@ pub enum AuthConfig {
         username: String,
         password: String,
         tls: bool,
+        tls_ca_file: Option<String>,
     },
     /// SP4. Constructing this in v0.1 returns KafkaError::Client.
     Token(std::sync::Arc<dyn crate::token::TokenProvider>),
@@ -155,6 +162,8 @@ impl AuthConfig {
                     username: username.clone(),
                     password,
                     tls: *tls,
+                    // A spec names no trust anchor; see `with_tls_ca_file`.
+                    tls_ca_file: None,
                 }),
                 None => Err(KafkaError::Client(
                     "auth.mode is scramSha512 but no SASL password was projected into this \
@@ -164,6 +173,54 @@ impl AuthConfig {
                         .to_string(),
                 )),
             },
+        }
+    }
+}
+
+impl AuthConfig {
+    /// Attach a projected private CA file (PLAT-07.1), or refuse because the
+    /// transport is not TLS.
+    ///
+    /// `None` returns `self` unchanged, so a connection that names no CA builds
+    /// exactly the client it built before the field existed. The path is the
+    /// one the runner read from `LOGWEIR_{SOURCE,TARGET}_TLS_CA_FILE`; it is not
+    /// opened here — librdkafka opens it while creating the client and reports
+    /// a missing or unparsable file as a client-creation error naming
+    /// `ssl.ca.location`.
+    ///
+    /// # Errors
+    ///
+    /// `KafkaError::Client` when `ca_file` is `Some` and the auth is not
+    /// `ScramSha512 { tls: true, .. }` — the message is
+    /// `logweir_core::connection::TlsCaWithoutTls`'s.
+    pub fn with_tls_ca_file(self, ca_file: Option<String>) -> Result<AuthConfig, KafkaError> {
+        let Some(ca_file) = ca_file else {
+            return Ok(self);
+        };
+        match self {
+            AuthConfig::ScramSha512 {
+                username,
+                password,
+                tls: true,
+                ..
+            } => Ok(AuthConfig::ScramSha512 {
+                username,
+                password,
+                tls: true,
+                tls_ca_file: Some(ca_file),
+            }),
+            AuthConfig::ScramSha512 { .. } => Err(KafkaError::Client(
+                logweir_core::connection::TlsCaWithoutTls {
+                    mode: "scramSha512",
+                }
+                .to_string(),
+            )),
+            AuthConfig::Plaintext => Err(KafkaError::Client(
+                logweir_core::connection::TlsCaWithoutTls { mode: "plaintext" }.to_string(),
+            )),
+            AuthConfig::Token(_) => Err(KafkaError::Client(
+                "token auth (OAUTHBEARER / MSK IAM) is introduced by SP4".to_string(),
+            )),
         }
     }
 }
@@ -180,11 +237,14 @@ impl std::fmt::Debug for AuthConfig {
                 username,
                 password: _,
                 tls,
+                tls_ca_file,
             } => f
                 .debug_struct("ScramSha512")
                 .field("username", username)
                 .field("password", &"***")
                 .field("tls", tls)
+                // A path, not certificate text and not a credential.
+                .field("tls_ca_file", tls_ca_file)
                 .finish(),
             AuthConfig::Token(provider) => f.debug_tuple("Token").field(provider).finish(),
         }

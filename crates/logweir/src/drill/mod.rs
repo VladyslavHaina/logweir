@@ -1063,6 +1063,12 @@ pub struct Ctx {
     /// `Store::from_url` refuses an evidence prefix outside `logweir/` at
     /// construction, so a bad spec fails before phase 0.
     pub store: Store,
+    /// The projected private CA file for the TARGET connection (PLAT-07.1),
+    /// read once in `context` from `LOGWEIR_TARGET_TLS_CA_FILE`. The reader was
+    /// built with it; the plan's `target_auth` is given the same path before
+    /// the engine renders, so both TLS clients trust one file. `None` for a
+    /// connection that names no CA.
+    pub target_tls_ca_file: Option<String>,
 }
 
 fn context(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
@@ -1083,9 +1089,15 @@ fn context(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
     // a Secret for one run. An unrenderable value refuses with exit 3 before
     // any client exists; an ABSENT value under `mode: scramSha512` is exit 1,
     // named by `naming_the_password_var`.
+    let target_tls_ca_file =
+        crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR)
+            .map_err(DrillError::Operational)?;
     let target_auth =
         AuthConfig::from_spec(&spec.target.auth, validated_password(TARGET_PASSWORD_VAR)?)
-            .map_err(|e| naming_the_password_var(e, TARGET_PASSWORD_VAR))?;
+            .map_err(|e| naming_the_password_var(e, TARGET_PASSWORD_VAR))?
+            // PLAT-07.1: librdkafka's `ssl.ca.location`. Refuses a CA for a
+            // target whose plan is not SCRAM over TLS, before any client exists.
+            .with_tls_ca_file(target_tls_ca_file.clone())?;
     let connect = || {
         logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
             &spec.target.bootstrap_servers,
@@ -1162,6 +1174,7 @@ fn context(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
         engine: Box::new(engine),
         archive,
         store,
+        target_tls_ca_file,
     })
 }
 
@@ -1613,6 +1626,16 @@ fn execute_with_validated_approval(
         run_id,
         args.offset_report_out.as_deref(),
     )?;
+    // PLAT-07.1: the engine's `ssl_ca_location`, the same file the reader in
+    // `c` was built with. `None` leaves the plan exactly as built.
+    let plan = RestorePlan {
+        target_auth: plan
+            .target_auth
+            .clone()
+            .with_tls_ca_file(c.target_tls_ca_file.clone())
+            .map_err(|e| DrillError::Operational(format!("target.auth: {e}")))?,
+        ..plan
+    };
     // The engine writes its restore checkpoint to `plan.checkpoint_state` and
     // does NOT create that file's parent directory. `context` creates the
     // workdir it renders restore.yaml into (`logweir-<pid>`); the checkpoint

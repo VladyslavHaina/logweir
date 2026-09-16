@@ -104,6 +104,20 @@ fn scram(tls: bool) -> AuthRender {
     AuthRender::ScramSha512 {
         username: PRINCIPAL.into(),
         tls,
+        // No private CA: the four goldens below are the bytes of a connection
+        // that trusts the engine's bundled roots, and PLAT-07.1 leaves them
+        // byte-identical. `scram_with_ca` is the other half.
+        tls_ca_file: None,
+    }
+}
+
+/// The same principal over TLS, with a projected private CA — PLAT-07.1's
+/// `ssl_ca_location` (Global Constraint 29's engine half).
+fn scram_with_ca(ca: &str) -> AuthRender {
+    AuthRender::ScramSha512 {
+        username: PRINCIPAL.into(),
+        tls: true,
+        tls_ca_file: Some(ca.to_string()),
     }
 }
 
@@ -417,4 +431,94 @@ fn the_unsupported_auth_mode_rail_is_unreachable_from_both_arms() {
     assert!(RenderError::UnsupportedAuthMode("gssapi".into())
         .to_string()
         .contains("is not supported by this build"));
+}
+
+// ---------------------------------------------------------------------------
+// PLAT-07.1 — the private CA, in all three documents
+// ---------------------------------------------------------------------------
+
+/// A projected private CA becomes `ssl_ca_location` inside `security:`, in
+/// every document the engine reads, and NOTHING ELSE moves.
+///
+/// `ssl_ca_location` is a field of upstream's own `SecurityConfig`
+/// [U:crates/kafka-backup-core/src/config.rs:210-212, tag v0.21.0], which
+/// builds the rustls root store from that file ALONE instead of the bundled
+/// webpki roots [U:crates/kafka-backup-core/src/kafka/tls.rs:97-127] — so it
+/// is not an unknown key the engine would drop with a warning, and the trust
+/// it configures is exactly the projected CA, matching what
+/// `ssl.ca.location` does on Logweir's own librdkafka path.
+///
+/// KILLS: emit the key at `source:` level (one indent too high, which the
+/// engine reports as an unknown key and `assert_no_dropped_logweir_key` then
+/// aborts on), or drop it silently.
+#[test]
+fn a_private_ca_is_rendered_as_ssl_ca_location_in_all_three_documents() {
+    const CA: &str = "/connection/source-ca/ca.crt";
+    let auth = scram_with_ca(CA);
+    let expected = format!("    ssl_ca_location: \"{CA}\"\n");
+
+    let backup = render_backup::render(&backup_plan(auth.clone())).expect("renders");
+    let restore = render_restore::render(&restore_plan(auth.clone())).expect("renders");
+    let validation =
+        render_validation::render(&restore_plan(auth.clone()), "01J9X", None).expect("renders");
+    for (what, doc) in [
+        ("backup", &backup),
+        ("restore", &restore),
+        ("validation", &validation),
+    ] {
+        assert!(
+            doc.contains(&expected),
+            "{what}: the CA is rendered under `security:`, at the same indent as \
+             `sasl_username`, or the engine drops it as an unknown key:\n{doc}"
+        );
+        assert!(
+            doc.contains("    sasl_password: ${LOGWEIR_")
+                || doc.contains("    sasl_password: ${LOGWEIR_TARGET_PASSWORD}"),
+            "{what}: the password is still a placeholder, never a value"
+        );
+    }
+
+    // …and the documents WITHOUT a CA are byte-identical to the four goldens,
+    // which is the other half: a connection that names no CA renders exactly
+    // what it rendered before this key existed.
+    assert_eq!(
+        render_backup::render(&backup_plan(scram(true))).expect("renders"),
+        backup.replace(&expected, ""),
+        "the only difference a CA makes to a rendered document is that one line"
+    );
+}
+
+/// A CA on a connection that is not TLS is REFUSED by the renderer, not
+/// dropped: a document that silently lost the trust anchor would dial in the
+/// clear a connection its author configured to verify.
+///
+/// KILLS: render the security block ignoring `tls_ca_file` when `tls` is false.
+#[test]
+fn a_ca_without_tls_is_refused_by_every_renderer() {
+    let broken = AuthRender::ScramSha512 {
+        username: PRINCIPAL.into(),
+        tls: false,
+        tls_ca_file: Some("/connection/source-ca/ca.crt".into()),
+    };
+    assert_eq!(
+        render_backup::render(&backup_plan(broken.clone())),
+        Err(RenderError::TlsCaWithoutTls)
+    );
+    assert_eq!(
+        render_restore::render(&restore_plan(broken.clone())),
+        Err(RenderError::TlsCaWithoutTls)
+    );
+    assert_eq!(
+        render_validation::render(&restore_plan(broken), "01J9X", None),
+        Err(RenderError::TlsCaWithoutTls)
+    );
+    // The constructor refuses the same shape one step earlier, so a plan built
+    // through it can never reach the renderer in this state.
+    assert!(AuthRender::ScramSha512 {
+        username: PRINCIPAL.into(),
+        tls: false,
+        tls_ca_file: None,
+    }
+    .with_tls_ca_file(Some("/connection/source-ca/ca.crt".into()))
+    .is_err());
 }

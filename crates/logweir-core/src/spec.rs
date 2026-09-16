@@ -609,6 +609,9 @@ impl AuthSpec {
             AuthSpec::ScramSha512 { username, tls } => crate::engine::AuthRender::ScramSha512 {
                 username: username.clone(),
                 tls: *tls,
+                // A spec names no trust anchor: the CA is a projected file the
+                // runner attaches afterwards (`AuthRender::with_tls_ca_file`).
+                tls_ca_file: None,
             },
         }
     }

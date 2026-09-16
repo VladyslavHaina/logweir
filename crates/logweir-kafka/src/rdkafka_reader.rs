@@ -52,6 +52,7 @@ impl RdKafkaReader {
                 username,
                 password,
                 tls,
+                tls_ca_file,
             } => {
                 base.set(
                     "security.protocol",
@@ -60,6 +61,36 @@ impl RdKafkaReader {
                 .set("sasl.mechanism", "SCRAM-SHA-512")
                 .set("sasl.username", username)
                 .set("sasl.password", password);
+                if tls {
+                    // Explicit rather than relying on the default, for the
+                    // reason `allow.auto.create.topics` is above: hostname
+                    // verification is librdkafka 2.x's default (`https`) and
+                    // this pins it, so an upgrade cannot quietly turn it off.
+                    // There is deliberately no override — the engine's rustls
+                    // client verifies the broker hostname with no way to turn
+                    // that off, and the two clients must agree (PLAT-07.1).
+                    // [VERIFIED rdkafka-sys 4.10.0+2.12.1's vendored
+                    // librdkafka/CONFIGURATION.md: ssl.endpoint.identification.algorithm
+                    // `none, https`, default `https`.]
+                    base.set("ssl.endpoint.identification.algorithm", "https");
+                    if let Some(ca) = tls_ca_file {
+                        // `SSL_CTX_load_verify_locations` on this file ONLY:
+                        // with `ssl.ca.location` set, librdkafka skips the
+                        // default verify paths, so the connection trusts
+                        // exactly the projected CA — the same set the engine's
+                        // `ssl_ca_location` builds [VERIFIED vendored
+                        // librdkafka/src/rdkafka_ssl.c: the `ca_location` branch
+                        // clears `ca_probe`].
+                        base.set("ssl.ca.location", ca);
+                    }
+                } else if tls_ca_file.is_some() {
+                    return Err(KafkaError::Client(
+                        logweir_core::connection::TlsCaWithoutTls {
+                            mode: "scramSha512",
+                        }
+                        .to_string(),
+                    ));
+                }
             }
             AuthConfig::Token(_) => {
                 return Err(KafkaError::Client(

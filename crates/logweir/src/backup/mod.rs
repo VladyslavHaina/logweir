@@ -250,6 +250,34 @@ pub fn build_plan(spec: &BackupSpec, backup_id: &str) -> BackupPlan {
     }
 }
 
+/// [`build_plan`] with the projected private CA attached to the source auth
+/// (PLAT-07.1), so the engine document carries `ssl_ca_location`.
+///
+/// `None` is `build_plan` exactly, byte for byte in the rendered document.
+///
+/// # Errors
+///
+/// `BackupError::Operational` when a CA is supplied for a source whose auth is
+/// not SCRAM over TLS — `AuthRender::with_tls_ca_file`'s refusal. Exit 1: the
+/// controller never projects that shape, so it is a hand-built Job or a spec
+/// edited against its connection, and nothing was dialled.
+pub fn build_plan_with_tls_ca(
+    spec: &BackupSpec,
+    backup_id: &str,
+    tls_ca_file: Option<String>,
+) -> Result<BackupPlan, BackupError> {
+    let plan = build_plan(spec, backup_id);
+    let source_auth = plan
+        .source_auth
+        .clone()
+        .with_tls_ca_file(tls_ca_file)
+        .map_err(|e| BackupError::Operational(format!("source.auth: {e}")))?;
+    Ok(BackupPlan {
+        source_auth,
+        ..plan
+    })
+}
+
 /// The parsed inputs, read from the two file arguments. Local I/O only — no
 /// socket, no bucket.
 struct Inputs {
@@ -368,7 +396,16 @@ fn execute_with_signer(
         .backup_id_override
         .clone()
         .unwrap_or_else(|| inputs.spec.backup_id.clone());
-    let plan = build_plan(&inputs.spec, &backup_id);
+    // PLAT-07.1: the engine's `ssl_ca_location`, from the same variable `run`
+    // attached to the reader's `ssl.ca.location` (an environment read is stable
+    // for the life of the process, so the two clients see one path). Unset, the
+    // plan is exactly `build_plan`'s.
+    let plan = build_plan_with_tls_ca(
+        &inputs.spec,
+        &backup_id,
+        crate::tls_ca::projected_ca_file(crate::tls_ca::SOURCE_TLS_CA_FILE_VAR)
+            .map_err(BackupError::Operational)?,
+    )?;
 
     // **The engine identity, BEFORE the engine runs** (Task 4 left this to
     // Task 5b in as many words: "The identity is NOT refused when empty …
@@ -723,13 +760,23 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     // the password both use is the one value in `$LOGWEIR_SOURCE_PASSWORD` —
     // Logweir reads it here, the engine expands it out of the environment it
     // inherits.
+    // PLAT-07.1: the projected private CA, read ONCE, and handed to both TLS
+    // clients — this reader's `ssl.ca.location` here, and the engine's
+    // `ssl_ca_location` through `execute_with_signer` below.
+    let source_tls_ca =
+        match crate::tls_ca::projected_ca_file(crate::tls_ca::SOURCE_TLS_CA_FILE_VAR) {
+            Ok(ca) => ca,
+            Err(e) => return report(&run_id, Err(BackupError::Operational(e))),
+        };
     let source_auth = match logweir_kafka::reader::AuthConfig::from_spec(
         &inputs.spec.source.auth,
         match crate::drill::validated_password(crate::drill::SOURCE_PASSWORD_VAR) {
             Ok(p) => p,
             Err(refusal) => return report(&run_id, Err(refusal.into())),
         },
-    ) {
+    )
+    .and_then(|auth| auth.with_tls_ca_file(source_tls_ca.clone()))
+    {
         Ok(a) => a,
         Err(e) => {
             return report(

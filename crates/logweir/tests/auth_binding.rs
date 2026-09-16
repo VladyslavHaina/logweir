@@ -195,6 +195,7 @@ fn rendered_sasl_username_comes_from_plan_bytes_not_from_the_cluster_object() {
         AuthRender::ScramSha512 {
             username: APPROVED.to_string(),
             tls: true,
+            tls_ca_file: None,
         },
         "the principal is a field of the PLAN, which plan_hash covers"
     );
@@ -281,6 +282,7 @@ fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
         AuthRender::ScramSha512 {
             username: "logweir".into(),
             tls: false,
+            tls_ca_file: None,
         }
     );
     // And the plan the ENGINE was handed carries the same principal — the
@@ -585,6 +587,7 @@ fn no_password_reaches_a_rendered_document() {
         source_auth: AuthRender::ScramSha512 {
             username: APPROVED.into(),
             tls: true,
+            tls_ca_file: None,
         },
         topics: vec!["orders".into()],
         storage: logweir_core::engine::StorageUrl::Filesystem {
@@ -670,10 +673,16 @@ fn from_spec_is_the_one_construction_site_and_maps_both_failure_modes() {
             username,
             password,
             tls,
+            tls_ca_file,
         } => {
             assert_eq!(username, APPROVED);
             assert_eq!(password, "fake");
             assert!(tls);
+            assert_eq!(
+                tls_ca_file, None,
+                "a spec names no trust anchor: PLAT-07.1's private CA is a projected file the \
+                 runner attaches afterwards, through `with_tls_ca_file`"
+            );
         }
         other => panic!("{other:?}"),
     }

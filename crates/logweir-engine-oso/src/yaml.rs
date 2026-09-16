@@ -172,7 +172,18 @@ pub(crate) fn render_security_block(
         // NOTHING AT ALL — see `AuthRender`'s doc comment. This is also what
         // keeps every golden that predates SCRAM byte-identical.
         AuthRender::Plaintext => Ok(String::new()),
-        AuthRender::ScramSha512 { username, tls } => {
+        AuthRender::ScramSha512 {
+            username,
+            tls,
+            tls_ca_file,
+        } => {
+            // A CA with no TLS transport is refused, never dropped: see
+            // `logweir_core::connection::TlsCaWithoutTls`. `with_tls_ca_file`
+            // is the constructor that already refuses it; this is the backstop
+            // for a plan whose fields were set directly.
+            if tls_ca_file.is_some() && !*tls {
+                return Err(RenderError::TlsCaWithoutTls);
+            }
             let mut s = String::from("  security:\n");
             // SCREAMING_SNAKE_CASE over Plaintext|Ssl|SaslPlaintext|SaslSsl
             // [U:config.rs:261-269]. `tls` is separate from the mechanism
@@ -195,6 +206,21 @@ pub(crate) fn render_security_block(
             ));
             // The raw placeholder literal. See this function's doc comment.
             s.push_str(&format!("    sasl_password: {password_placeholder}\n"));
+            // PLAT-07.1, Global Constraint 29's engine half. `SecurityConfig`
+            // declares `ssl_ca_location: Option<PathBuf>` and, when it is set,
+            // builds the rustls root store from that file ALONE instead of the
+            // bundled webpki roots [U:crates/kafka-backup-core/src/config.rs:210-212,
+            // U:crates/kafka-backup-core/src/kafka/tls.rs:97-127, tag v0.21.0].
+            // A pod-local path the runner took from the projected CA volume,
+            // checked like every other interpolation (a `${` in it is refused).
+            // Emitted only when set, so every document without a private CA is
+            // byte-identical to one rendered before this key existed.
+            if let Some(ca) = tls_ca_file {
+                s.push_str(&format!(
+                    "    ssl_ca_location: {}\n",
+                    yaml_scalar_checked(ca)?
+                ));
+            }
             Ok(s)
         }
     }

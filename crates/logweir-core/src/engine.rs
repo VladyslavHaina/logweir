@@ -341,10 +341,56 @@ pub struct RestorePlan {
 /// would be a fourth spelling to keep in step with upstream for no
 /// behavioural gain — and it is what keeps every golden that predates SCRAM
 /// byte-identical.
+///
+/// # `tls_ca_file` is a path, it is not in the plan hash, and it needs TLS
+///
+/// The CA certificate file a TLS connection's brokers are verified against,
+/// when it is not in the engine's bundled roots — rendered as the engine's
+/// `ssl_ca_location` (PLAT-07.1). It is a POD-LOCAL PATH to a file projected
+/// from the saved connection, never certificate text, and it is attached by the
+/// runner from `crate::connection::{SOURCE,TARGET}_TLS_CA_FILE_ENV` after the
+/// plan is built, exactly as the password placeholder is: a trust anchor is a
+/// deployment input that rotates, not an identity an approval binds.
+/// [`AuthRender::with_tls_ca_file`] is the one way it is attached, and it
+/// refuses a CA for a connection that is not TLS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRender {
     Plaintext,
-    ScramSha512 { username: String, tls: bool },
+    ScramSha512 {
+        username: String,
+        tls: bool,
+        tls_ca_file: Option<String>,
+    },
+}
+
+impl AuthRender {
+    /// Attach the projected CA file, or refuse because the transport is not
+    /// TLS. `None` returns `self` unchanged, so a connection with no private CA
+    /// renders byte-identically to one built before the field existed.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::connection::TlsCaWithoutTls`] when `ca_file` is `Some` and the
+    /// auth is `Plaintext` or `ScramSha512 { tls: false, .. }`.
+    pub fn with_tls_ca_file(
+        self,
+        ca_file: Option<String>,
+    ) -> Result<AuthRender, crate::connection::TlsCaWithoutTls> {
+        let Some(ca_file) = ca_file else {
+            return Ok(self);
+        };
+        match self {
+            AuthRender::ScramSha512 { username, tls, .. } if tls => Ok(AuthRender::ScramSha512 {
+                username,
+                tls,
+                tls_ca_file: Some(ca_file),
+            }),
+            AuthRender::ScramSha512 { .. } => Err(crate::connection::TlsCaWithoutTls {
+                mode: "scramSha512",
+            }),
+            AuthRender::Plaintext => Err(crate::connection::TlsCaWithoutTls { mode: "plaintext" }),
+        }
+    }
 }
 
 /// Everything `render_backup::render` needs to emit a `backup.yaml`, and

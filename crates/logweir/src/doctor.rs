@@ -426,13 +426,20 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
     // credential and an absent one both land in the same place, and the
     // message says which — a `doctor` run is exactly where an operator wants
     // to be told that the Secret is missing.
+    let target_tls_ca =
+        match crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR) {
+            Ok(ca) => ca,
+            Err(e) => return CheckResult::Failed(e),
+        };
     let auth = match AuthConfig::from_spec(
         &sp.target.auth,
         match crate::drill::validated_password(crate::drill::TARGET_PASSWORD_VAR) {
             Ok(p) => p,
             Err(refusal) => return CheckResult::Failed(refusal.to_string()),
         },
-    ) {
+    )
+    .and_then(|auth| auth.with_tls_ca_file(target_tls_ca))
+    {
         Ok(a) => a,
         Err(e) => {
             return CheckResult::Failed(

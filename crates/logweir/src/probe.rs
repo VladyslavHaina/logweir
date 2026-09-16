@@ -81,6 +81,13 @@ pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
 /// anyone with pod read can see it.
 pub const SOURCE_PASSWORD_ENV: &str = "LOGWEIR_SOURCE_PASSWORD";
 
+/// The environment variable naming a projected private CA file (PLAT-07.1).
+///
+/// A probe reads ONE cluster, so — exactly as for the password — it reads the
+/// source side's variable whatever the object's `spec.role` says. The path
+/// goes to librdkafka's `ssl.ca.location`; this process does not open it.
+pub const SOURCE_TLS_CA_FILE_ENV: &str = crate::tls_ca::SOURCE_TLS_CA_FILE_VAR;
+
 /// How long the dial is given before it is reported as unreachable.
 ///
 /// **TEN SECONDS, AND THE BOUND IS THIS MODULE'S OWN.** The brief names no
@@ -272,6 +279,16 @@ pub fn auth_spec(
     tls: bool,
 ) -> Result<logweir_core::spec::AuthSpec, KafkaError> {
     match mode {
+        // TLS WITHOUT SASL IS REFUSED, NOT DOWNGRADED (PLAT-07.1). This arm used
+        // to ignore `--tls` and dial PLAINTEXT, so an object that said TLS was
+        // probed in the clear. `AuthSpec::Plaintext` has no TLS field for a
+        // restore plan to carry either, so the controller refuses the same
+        // shape before any Job exists; this is the runner's half.
+        AUTH_MODE_PLAINTEXT if tls => Err(KafkaError::Client(format!(
+            "--auth-mode {AUTH_MODE_PLAINTEXT} with --tls (TLS without SASL) is not supported; it \
+             is refused rather than dialled without TLS. Use --auth-mode \
+             {AUTH_MODE_SCRAM_SHA_512} over TLS, or drop --tls for a plaintext listener"
+        ))),
         AUTH_MODE_PLAINTEXT => Ok(logweir_core::spec::AuthSpec::Plaintext),
         AUTH_MODE_SCRAM_SHA_512 => match username {
             Some(u) if !u.trim().is_empty() => Ok(logweir_core::spec::AuthSpec::ScramSha512 {
@@ -379,10 +396,18 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
     let password = std::env::var(SOURCE_PASSWORD_ENV)
         .ok()
         .filter(|p| !p.is_empty());
-    let auth = match AuthConfig::from_spec(&spec, password) {
-        Ok(a) => a,
-        Err(e) => return outcome(&Err(e)),
+    // The projected CA, if the connection names one, for librdkafka's
+    // `ssl.ca.location` (PLAT-07.1). `with_tls_ca_file` refuses a CA for a
+    // transport that is not TLS, so a CA can never sit beside a clear dial.
+    let ca_file = match crate::tls_ca::projected_ca_file(SOURCE_TLS_CA_FILE_ENV) {
+        Ok(c) => c,
+        Err(e) => return outcome(&Err(KafkaError::Client(e))),
     };
+    let auth =
+        match AuthConfig::from_spec(&spec, password).and_then(|a| a.with_tls_ca_file(ca_file)) {
+            Ok(a) => a,
+            Err(e) => return outcome(&Err(e)),
+        };
 
     let (tx, rx) = mpsc::channel();
     let marker_topic = args.marker_topic.clone();

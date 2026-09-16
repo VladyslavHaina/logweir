@@ -27,4 +27,7 @@ pub mod probe;
 pub mod schema;
 pub mod show;
 mod signer;
+/// PLAT-07.1: the ONE read of a projected private-CA location, shared by
+/// every command that dials Kafka over TLS.
+pub mod tls_ca;
 pub mod verify;

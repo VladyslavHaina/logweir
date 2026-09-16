@@ -422,12 +422,72 @@ fn the_auth_mode_flag_maps_onto_the_spec_spellings() {
          reading the log always finds an answer"
     );
 
+    // PLAINTEXT WITH `--tls` IS REFUSED, NOT DIALLED IN THE CLEAR (PLAT-07.1).
+    // This arm used to return `AuthSpec::Plaintext` and ignore the flag, so a
+    // `KafkaCluster` whose `auth.tls` was true was probed over PLAINTEXT and
+    // reported `reachable: true` about a transport nobody asked for. TLS
+    // without SASL (`SSL`) is a mode the plan grammar cannot carry, so the
+    // saved-connection contract refuses the combination at both ends.
+    //
+    // KILLS: restore the `tls`-ignoring plaintext arm.
+    let err = auth_spec(AUTH_MODE_PLAINTEXT, None, true).expect_err("TLS without SASL");
+    let text = err.to_string();
+    assert!(
+        text.contains("--tls") && text.contains(AUTH_MODE_SCRAM_SHA_512),
+        "the diagnostic names the flag it refused and the mode that does support TLS; got {text}"
+    );
+    let o = outcome(&Err(err));
+    assert_eq!(
+        streams(&o).0,
+        format!("{CLUSTER_ID_LINE}\n{REACHABLE_LINE}false\n"),
+        "and it is still an answer, printed at once: a refusal is not a hang"
+    );
+
     // An unknown mode: the same shape, naming the mode and the two it knows.
     let err = auth_spec("mtls", None, false).expect_err("mtls is not a tag-1 mode");
     let text = err.to_string();
     assert!(
         text.contains("mtls") && text.contains(AUTH_MODE_SCRAM_SHA_512),
         "the diagnostic names what it got and what it accepts; got {text}"
+    );
+}
+
+/// The projected private CA reaches the probe through ONE variable and no
+/// flag, exactly as the password does — PLAT-07.1.
+#[test]
+fn the_ca_file_comes_from_the_environment_and_never_from_the_argv() {
+    assert_eq!(
+        logweir::probe::SOURCE_TLS_CA_FILE_ENV,
+        "LOGWEIR_SOURCE_TLS_CA_FILE"
+    );
+    assert_eq!(
+        logweir::probe::SOURCE_TLS_CA_FILE_ENV,
+        logweir_core::connection::SOURCE_TLS_CA_FILE_ENV,
+        "the probe reads the shared contract's name, not a second spelling"
+    );
+    let code = code_only(&probe_src());
+    assert!(
+        code.contains("projected_ca_file(SOURCE_TLS_CA_FILE_ENV)"),
+        "the probe reads the CA location through the one shared reader"
+    );
+    // A probe reads ONE cluster, so — like the password — it reads the SOURCE
+    // side's variable whatever the object's role says.
+    assert!(
+        !code.contains("TARGET_TLS_CA_FILE"),
+        "a probe has no sides: it never reads the target variable"
+    );
+    // And the argv still holds no path at all.
+    assert!(
+        cli::Cli::try_parse_from([
+            "logweir",
+            "cluster-probe",
+            "--bootstrap",
+            "a:9092",
+            "--tls-ca-file",
+            "/connection/source-ca/ca.crt",
+        ])
+        .is_err(),
+        "there is deliberately no CA flag: the path is a projection the controller made, and a          probe that took one could be pointed at any file in its pod"
     );
 }
 

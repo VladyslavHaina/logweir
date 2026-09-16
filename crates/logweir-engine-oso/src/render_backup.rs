@@ -89,6 +89,12 @@ pub enum RenderError {
     /// which of the two claims is true today.
     #[error("auth mode `{0}` is not supported by this build; tag 1 renders PLAINTEXT and SASL/SCRAM-SHA-512 and no other. A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named a SASL mode would be a downgrade performed on the operator's behalf")]
     UnsupportedAuthMode(String),
+    /// A TLS CA file attached to a connection whose transport is not TLS
+    /// (PLAT-07.1). Refused rather than rendered without the key: a document
+    /// that silently dropped the trust anchor would dial in the clear a
+    /// connection its author configured to verify.
+    #[error("a TLS CA file (ssl_ca_location) was attached to a connection whose security protocol is not TLS; the CA is refused rather than dropped, because dropping it would dial without TLS a connection configured to be verified")]
+    TlsCaWithoutTls,
 }
 
 /// The rendered backup document and the SHA-256 of the EXACT bytes a caller
