@@ -1,0 +1,308 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: trustpolicies.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: TrustPolicy
+    plural: trustpolicies
+    shortNames: []
+    singular: trustpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.default
+      name: DEFAULT
+      type: boolean
+    - jsonPath: .status.keyCount
+      name: KEYS
+      type: integer
+    - jsonPath: .status.loaded
+      name: LOADED
+      type: string
+    - jsonPath: .status.boundNamespaces[*]
+      name: BOUND
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'The keys that may authorise and the keys that may attest, with an explicit lifecycle (ADR 0008 Amendment G). Cluster-scoped, so a namespace never names its own trust: the policy names the namespaces it governs. The spec is MUTABLE and every change is one-way — keys are append-only, notAfter only shortens, state only moves Active -> Retired -> Revoked, and the revocation instants are write-once. Public key material is never removed, because old archives still need it.'
+        properties:
+          spec:
+            description: '`TrustPolicy.spec`.'
+            properties:
+              allowedTargetClusterIds:
+                description: 'The cluster ids a restore may target. Replaces `TrustRoster.spec.allowedClusterIds`, at the same scope and with the same semantics: a namespace tenant must not be able to widen it.'
+                items:
+                  type: string
+                maxItems: 64
+                nullable: true
+                type: array
+              default:
+                default: false
+                description: The fallback for namespaces no policy names explicitly. At most one policy cluster-wide may set it; the controller reports a conflict rather than picking one.
+                type: boolean
+              keys:
+                description: The keys. Append-only (G1), keyed by `keyId`.
+                items:
+                  description: One trusted public key, and what has happened to it.
+                  properties:
+                    algorithm:
+                      description: The algorithm, checked by the controller against the PEM.
+                      enum:
+                      - p256
+                      - ed25519
+                      type: string
+                    keyId:
+                      description: The sha256 of the DER SPKI, lowercase hex. The merge key of this list and the id every verdict is recorded against.
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    notAfter:
+                      description: The end of the validity window. May only be brought forward (G2).
+                      format: date-time
+                      type: string
+                    notBefore:
+                      description: The start of the validity window.
+                      format: date-time
+                      type: string
+                    principal:
+                      description: Who holds it.
+                      properties:
+                        display:
+                          description: A human-readable label. Mutable, because a display name is not an identity.
+                          maxLength: 253
+                          nullable: true
+                          type: string
+                        id:
+                          description: 'A stable identifier — `install:<digest>`, an email, an OIDC subject. **Immutable** (G1): it is what an audit trail joins on.'
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - id
+                      type: object
+                    retiredAt:
+                      description: When it stopped being allowed to sign. Required for `Retired`.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    revocationEffectiveFrom:
+                      description: The instant from which the revocation applies to stored evidence. Write-once (G4).
+                      format: date-time
+                      nullable: true
+                      type: string
+                    revocationReason:
+                      description: Why. Absent is read as `Unspecified`.
+                      enum:
+                      - KeyCompromise
+                      - Superseded
+                      - Unspecified
+                      nullable: true
+                      type: string
+                    revokedAt:
+                      description: When it was revoked. Write-once (G4).
+                      format: date-time
+                      nullable: true
+                      type: string
+                    spkiPem:
+                      description: The PUBLIC key, PEM-encoded. **Public material and nothing else** — a private key in this field would be a private key in `kubectl get -o yaml`, and `logweir trust export` writes this object verbatim.
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    state:
+                      description: Where the key is in its lifecycle.
+                      enum:
+                      - Active
+                      - Retired
+                      - Revoked
+                      type: string
+                    usages:
+                      description: What this key may be used for. Immutable (G1).
+                      items:
+                        description: |-
+                          What a key is allowed to be used for.
+
+                          SEPARATED BECAUSE P17 REQUIRES IT FOR PLAT-19.2. One key that both signs evidence and authorises restores is a key whose holder can approve their own work; the usage set is what makes "the runner's signing identity" and "an approver" different grants.
+                        enum:
+                        - EvidenceSigning
+                        - GovernedApproval
+                        - ConsoleConfirmation
+                        type: string
+                      maxItems: 3
+                      minItems: 1
+                      type: array
+                  required:
+                  - algorithm
+                  - keyId
+                  - notAfter
+                  - notBefore
+                  - principal
+                  - spkiPem
+                  - state
+                  - usages
+                  type: object
+                  x-kubernetes-validations:
+                  - message: a Revoked key needs revokedAt and revocationEffectiveFrom; a Retired key needs retiredAt
+                    rule: (self.state != 'Revoked' || (has(self.revokedAt) && has(self.revocationEffectiveFrom))) && (self.state != 'Retired' || has(self.retiredAt))
+                  - message: notBefore must be before notAfter
+                    rule: self.notBefore < self.notAfter
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - keyId
+                x-kubernetes-list-type: map
+              namespaces:
+                description: 'The namespaces this policy governs, by exact name. Never a pattern: a pattern is how a new namespace silently inherits a trust decision nobody made for it.'
+                items:
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  type: string
+                maxItems: 256
+                nullable: true
+                type: array
+            required:
+            - keys
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.keys is append-only: an existing keyId must remain, with the same spkiPem, algorithm, usages, principal.id and notBefore — old archives still need the public material that signed them'
+              rule: oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId && n.spkiPem == o.spkiPem && n.algorithm == o.algorithm && n.usages == o.usages && n.principal.id == o.principal.id && n.notBefore == o.notBefore))
+            - message: a key's notAfter may only be brought forward, never extended
+              rule: oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || n.notAfter <= o.notAfter))
+            - message: a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards
+              rule: 'oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || (o.state == ''Active'' ? true : (o.state == ''Retired'' ? n.state != ''Active'' : n.state == ''Revoked''))))'
+            - message: revokedAt and revocationEffectiveFrom are immutable once written
+              rule: oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || ((!has(o.revokedAt) || (has(n.revokedAt) && n.revokedAt == o.revokedAt)) && (!has(o.revocationEffectiveFrom) || (has(n.revocationEffectiveFrom) && n.revocationEffectiveFrom == o.revocationEffectiveFrom)))))
+          status:
+            description: '`TrustPolicy.status`.'
+            nullable: true
+            properties:
+              boundNamespaces:
+                description: The namespaces this policy actually governs.
+                items:
+                  type: string
+                maxItems: 256
+                nullable: true
+                type: array
+              conditions:
+                description: 'The condition set: `Loaded`, `Bound`, `ExpiringSoon`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              conflicts:
+                description: 'Namespaces claimed by more than one policy. Each of them resolves to NOTHING: every approval and verification there is refused with `TrustPolicyConflict` rather than silently taking one policy''s answer.'
+                items:
+                  description: A namespace two policies both claim.
+                  properties:
+                    namespace:
+                      description: The contested namespace.
+                      type: string
+                    policies:
+                      description: Every policy claiming it.
+                      items:
+                        type: string
+                      maxItems: 16
+                      type: array
+                  required:
+                  - namespace
+                  - policies
+                  type: object
+                maxItems: 64
+                nullable: true
+                type: array
+              evaluatedAt:
+                description: When the verdicts were last computed. Debounced to at least 300 s, so a heartbeat does not become a write loop (erratum E11(d)).
+                format: date-time
+                nullable: true
+                type: string
+              keyCount:
+                description: How many keys the spec carries, for the printer column.
+                format: int64
+                nullable: true
+                type: integer
+              keys:
+                description: The per-key verdicts. `evaluatedAt` beside them is what lets a consumer tell "not evaluated" from "evaluated and valid" — the thing `TrustRoster.status.expiredKeyIds` could not say.
+                items:
+                  description: One key, as the controller evaluated it.
+                  properties:
+                    effectiveState:
+                      description: '`Active`, `NotYetValid`, `Expired`, `Retired`, `Revoked` or `Unparseable` — the spec state resolved against the clock and the PEM.'
+                      type: string
+                    keyId:
+                      description: Which key.
+                      type: string
+                    usableForNewSignatures:
+                      description: Whether this key may sign something NEW right now.
+                      nullable: true
+                      type: boolean
+                    usableForVerification:
+                      description: '`Full`, `Historical` or `None` — whether evidence this key signed still verifies, and on what basis. **`Historical` is not a downgrade of `Full`**: it is the honest answer for a key that was valid when it signed and has since been retired.'
+                      nullable: true
+                      type: string
+                  required:
+                  - effectiveState
+                  - keyId
+                  type: object
+                maxItems: 64
+                nullable: true
+                type: array
+              loaded:
+                description: Whether every key parsed.
+                nullable: true
+                type: boolean
+              observedGeneration:
+                description: The `metadata.generation` these verdicts were computed from.
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: TrustPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -68,6 +68,7 @@ spec:
                     enum:
                     - Restore
                     - Backup
+                    - RehearsalSchedule
                     type: string
                   name:
                     description: The subject's `metadata.name`, in this namespace.
@@ -156,6 +157,7 @@ spec:
                     enum:
                     - Restore
                     - Backup
+                    - RehearsalSchedule
                     type: string
                   name:
                     description: The referent's name at verification time.

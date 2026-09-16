@@ -75,6 +75,7 @@ spec:
                     enum:
                     - Restore
                     - Backup
+                    - RehearsalSchedule
                     type: string
                   name:
                     description: The subject's `metadata.name`, in this namespace.
@@ -163,6 +164,7 @@ spec:
                     enum:
                     - Restore
                     - Backup
+                    - RehearsalSchedule
                     type: string
                   name:
                     description: The referent's name at verification time.
@@ -839,8 +841,23 @@ spec:
                 description: The archive's backup id, derived from this object's UID and `spec.slot`.
                 nullable: true
                 type: string
+              capture:
+                description: When the capture itself started and finished, copied VERBATIM from the verified receipt.
+                nullable: true
+                properties:
+                  finishedAt:
+                    description: '`BackupReceipt.finished_at`, copied from the verified receipt.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  startedAt:
+                    description: '`BackupReceipt.started_at`, copied from the verified receipt.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
               conditions:
-                description: The condition set. Spec §8's green badge for a `Backup` needs `evidence.verification.result == Valid` **and** `exitCode == 0` — a `Backup` carries no `outcome`, so the badge rule here is not the `Restore` rule.
+                description: 'The condition set. Spec §8''s green badge for a `Backup` needs `evidence.verification.result == Valid` **and** `exitCode == 0` — a `Backup` carries no `outcome`, so the badge rule here is not the `Restore` rule. `RunnerReady` joins `Verified` as a condition every terminal builder carries forward: a JSON merge patch REPLACES `status.conditions`, so a builder that emits one and not the other deletes the one it left out.'
                 items:
                   description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
                   properties:
@@ -916,6 +933,48 @@ spec:
                         description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
                         nullable: true
                         type: string
+                      signedAt:
+                        description: |-
+                          The signing time the verdict was reached AGAINST: the document's own latest pre-signature timestamp (`logweir_core::trust::claimed_signing_time`).
+
+                          **ATTACKER-CONTROLLED FOR A COMPROMISED KEY**, which is why it is recorded rather than trusted. For a retired or expired key it is what distinguishes "signed while valid" from "signed afterwards"; for a key revoked as `KeyCompromise` it is deliberately NOT accepted as evidence of when the document was signed, and only a controller-written observation ([`EvidenceVerification::verified_at`] from an earlier reconcile) counts.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      trust:
+                        description: Which trust policy said so, and on what basis.
+                        nullable: true
+                        properties:
+                          basis:
+                            description: |-
+                              `Current`, `Historical`, `RecordedBeforeRevocation` or `None`.
+
+                              **`Historical` is a pass, not a downgrade**: the key was valid when it signed and has since been retired, which is what key rotation is supposed to look like. The console renders it as "verified against retired key `<id>` (signed before retirement)" and never as a warning.
+                            nullable: true
+                            type: string
+                          keyState:
+                            description: '`Active`, `Retired`, `Expired`, `Revoked` or `Unknown` — the signing key''s state at the moment the verdict was reached.'
+                            nullable: true
+                            type: string
+                          policy:
+                            description: Which `TrustPolicy` answered, with the revision that answered.
+                            nullable: true
+                            properties:
+                              generation:
+                                description: Its `metadata.generation`. A generation change is what makes the controller re-run the verdict over STORED fields, with no storage read and no change to `phase`, `exitCode` or `outcome`.
+                                format: int64
+                                nullable: true
+                                type: integer
+                              name:
+                                description: Its name.
+                                nullable: true
+                                type: string
+                              uid:
+                                description: Its UID — a same-named replacement is a different policy.
+                                nullable: true
+                                type: string
+                            type: object
+                        type: object
                       verifiedAt:
                         description: |-
                           When the controller performed the verification.
@@ -984,6 +1043,141 @@ spec:
                 description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it.'
                 nullable: true
                 type: string
+              progress:
+                description: What this run is doing right now, and why it is taking as long as it is. **Absent on a `Backup` an older controller reconciled**, which is the documented absent-field behaviour and not a degraded state.
+                nullable: true
+                properties:
+                  diagnostics:
+                    description: What went wrong on the way, newest `lastSeen` first.
+                    items:
+                      description: One thing that went wrong, with a count rather than a repetition.
+                      properties:
+                        code:
+                          description: A CamelCase code from the closed vocabulary.
+                          type: string
+                        count:
+                          description: How many times — capped, because a status is not a counter store and an unbounded integer here is an unbounded write rate.
+                          format: int64
+                          maximum: 1000000
+                          minimum: 1
+                          nullable: true
+                          type: integer
+                        firstSeen:
+                          description: When it was first seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        lastSeen:
+                          description: When it was last seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        message:
+                          description: A sanitized, bounded explanation.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        object:
+                          description: The object it is about.
+                          nullable: true
+                          properties:
+                            kind:
+                              description: '`Pod` or `Job`.'
+                              type: string
+                            name:
+                              description: Its name.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        severity:
+                          description: '`Warning` or `Error`.'
+                          type: string
+                      required:
+                      - code
+                      - severity
+                      type: object
+                    maxItems: 8
+                    nullable: true
+                    type: array
+                  lastObservedTime:
+                    description: When the run was last observed, in active stages only, rewritten at most once every 60 s for the same reason.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  lastTransitionTime:
+                    description: 'When `stage` or `reason` last CHANGED. Not a heartbeat: a reconciler''s own status patch is what wakes it (erratum E11(d)), so a field carrying a fresh clock read on every pass would make every pass a write.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  message:
+                    description: A sanitized, bounded explanation.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  reason:
+                    description: A CamelCase reason, from the same closed vocabulary the `RunnerReady` condition uses.
+                    nullable: true
+                    type: string
+                  runner:
+                    description: Facts about the one runner pod.
+                    nullable: true
+                    properties:
+                      containerState:
+                        description: '`Waiting`, `Running` or `Terminated`, for the `runner` container.'
+                        nullable: true
+                        type: string
+                      jobName:
+                        description: The Job.
+                        nullable: true
+                        type: string
+                      podName:
+                        description: The pod.
+                        nullable: true
+                        type: string
+                      podPhase:
+                        description: '`Pending`, `Running`, `Succeeded`, `Failed` or `Unknown`.'
+                        nullable: true
+                        type: string
+                      scheduled:
+                        description: Whether a node has been chosen. `false` with no diagnostic is the "nothing is wrong yet, it is just queued" case.
+                        nullable: true
+                        type: boolean
+                      startedAt:
+                        description: When the runner container started.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      waitingReason:
+                        description: The kubelet's own waiting reason, verbatim and bounded — `ImagePullBackOff`, `CreateContainerConfigError`. Verbatim because a translated kubelet reason is a reason nobody can search for.
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    type: object
+                  runnerPhase:
+                    description: The runner's own phase, when it reported one.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The phase or step name, from the runner's own closed list.
+                        maxLength: 32
+                        nullable: true
+                        type: string
+                      number:
+                        description: The phase number, `-1`..`9`. A backup reports `-1` with a step name, because it has steps and not the drill's numbered phases.
+                        format: int32
+                        maximum: 9
+                        minimum: -1
+                        nullable: true
+                        type: integer
+                    type: object
+                  stage:
+                    description: '`Admission`, `Queued`, `Preparing`, `Running`, `Verifying` or `Finished`.'
+                    type: string
+                required:
+                - stage
+                type: object
               records:
                 description: How many records the run archived.
                 format: int64
@@ -2087,6 +2281,1496 @@ spec:
       status: {}
 
 ---
+# Source: logweir/crds/protectionpolicies.yaml
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: protectionpolicies.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: ProtectionPolicy
+    plural: protectionpolicies
+    shortNames: []
+    singular: protectionpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.protects.sourceRef.name
+      name: SOURCE
+      type: string
+    - jsonPath: .status.health
+      name: HEALTH
+      type: string
+    - jsonPath: .status.lastAvailablePoint.ageSeconds
+      name: POINT-AGE
+      type: integer
+    - description: KubernetesStatus, Catalog or CatalogStale
+      jsonPath: .status.availabilityBasis
+      name: BASIS
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'The recovery objective a set of schedules is meant to meet, and who hears about it when they do not (ADR 0008 Amendment G). The spec is MUTABLE and carries no CEL seal: it is evaluation policy, never an execution input, so editing it changes what Logweir says about results and never the results themselves. Notification channels are secretKeyRef references; no credential value appears here.'
+        properties:
+          spec:
+            description: '`ProtectionPolicy.spec`.'
+            properties:
+              evaluationIntervalSeconds:
+                default: 300
+                description: How often to evaluate.
+                format: int32
+                maximum: 3600
+                minimum: 60
+                type: integer
+              notifications:
+                description: Where alerts go. Absent means the verdict is reported in status and in the console and delivered nowhere — which is a real choice, not a broken configuration.
+                nullable: true
+                properties:
+                  kinds:
+                    description: Which alerts to send. Absent means all of them.
+                    items:
+                      description: What an alert is about.
+                      enum:
+                      - BackupFailure
+                      - Staleness
+                      - ArchiveUnavailable
+                      - RehearsalFailure
+                      - RecoveryCompleted
+                      type: string
+                    maxItems: 5
+                    nullable: true
+                    type: array
+                  renotifyAfterSeconds:
+                    default: 86400
+                    description: How long before an open alert is re-sent. `0` disables re-notify.
+                    format: int32
+                    maximum: 604800
+                    minimum: 0
+                    type: integer
+                  routes:
+                    description: The routes.
+                    items:
+                      description: One destination for alerts.
+                      properties:
+                        name:
+                          description: What to call it in status and in logs.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        pagerDuty:
+                          description: PagerDuty.
+                          nullable: true
+                          properties:
+                            endpoint:
+                              description: The Events endpoint, when it is not the global one.
+                              maxLength: 2048
+                              nullable: true
+                              type: string
+                            routingKeySecretRef:
+                              description: The routing key, by reference.
+                              properties:
+                                key:
+                                  description: The data key.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                name:
+                                  description: The Secret name, in this namespace.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          required:
+                          - routingKeySecretRef
+                          type: object
+                        slack:
+                          description: Slack.
+                          nullable: true
+                          properties:
+                            webhookUrlSecretRef:
+                              description: The webhook URL, by reference.
+                              properties:
+                                key:
+                                  description: The data key.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                name:
+                                  description: The Secret name, in this namespace.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          required:
+                          - webhookUrlSecretRef
+                          type: object
+                        webhook:
+                          description: A webhook.
+                          nullable: true
+                          properties:
+                            urlSecretRef:
+                              description: The URL, by reference.
+                              properties:
+                                key:
+                                  description: The data key.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                name:
+                                  description: The Secret name, in this namespace.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          required:
+                          - urlSecretRef
+                          type: object
+                      required:
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: a notification route names at least one of pagerDuty, webhook or slack
+                        rule: has(self.pagerDuty) || has(self.webhook) || has(self.slack)
+                    maxItems: 4
+                    nullable: true
+                    type: array
+                  sendResolved:
+                    default: true
+                    description: Whether a resolution is delivered too.
+                    type: boolean
+                type: object
+              objectives:
+                description: What "protected" means.
+                properties:
+                  maxConsecutiveFailedRuns:
+                    default: 1
+                    description: How many consecutive failed runs are tolerated before the objective is at risk.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  maxRecoveryPointAgeSeconds:
+                    description: 'How old the newest recovery point may be. Measured from CAPTURE START, not from when a run finished: a four-hour backup that started at 02:00 protects you to 02:00, and dating it 06:00 would overstate the protection by the length of the run.'
+                    format: int32
+                    maximum: 31536000
+                    minimum: 300
+                    type: integer
+                  maxRehearsalAgeSeconds:
+                    description: How old the newest successful rehearsal may be (PLAT-14.3).
+                    format: int32
+                    maximum: 31536000
+                    minimum: 3600
+                    nullable: true
+                    type: integer
+                  requireCatalogAvailability:
+                    default: true
+                    description: Whether the catalog must say the point is still in storage.
+                    type: boolean
+                  requireVerifiedEvidence:
+                    default: true
+                    description: Whether a point with unverified evidence counts as protection. Default `true`, and the default is the safe direction.
+                    type: boolean
+                required:
+                - maxRecoveryPointAgeSeconds
+                type: object
+              protects:
+                description: What this policy is about.
+                properties:
+                  catalogRef:
+                    description: The `RecoveryCatalog` that answers "is the point still there?". Absent means availability is judged from Kubernetes status alone, and `status.availabilityBasis` says so.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  destinationRef:
+                    description: The saved destination the points live in.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  legacyArchive:
+                    description: An inline archive, for an installation with no saved destinations.
+                    nullable: true
+                    properties:
+                      secretRef:
+                        description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`, in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      url:
+                        description: The object-store URL of the archive root.
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  scheduleRefs:
+                    description: The schedules whose runs count towards this objective.
+                    items:
+                      description: |-
+                        A reference to another Logweir object in the SAME namespace.
+
+                        Namespace-local by construction: there is no `namespace` field, because a cross-namespace reference is a privilege-escalation surface (the referrer's RBAC does not cover the referent's namespace) and Global Constraint 30 puts one controller in one cluster with no fleet.
+                      properties:
+                        name:
+                          description: The referenced object's `metadata.name`, in this namespace.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 16
+                    nullable: true
+                    type: array
+                  sourceRef:
+                    description: The `KafkaCluster` whose data this is about.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  topics:
+                    description: The topics. Absent means "the topics of the newest matching point", which is the honest reading when a schedule selects dynamically.
+                    items:
+                      pattern: ^[a-zA-Z0-9._-]{1,249}$
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                required:
+                - sourceRef
+                type: object
+                x-kubernetes-validations:
+                - message: spec.protects sets exactly one of destinationRef or legacyArchive
+                  rule: has(self.destinationRef) != has(self.legacyArchive)
+            required:
+            - objectives
+            - protects
+            type: object
+          status:
+            description: '`ProtectionPolicy.status`.'
+            nullable: true
+            properties:
+              alerts:
+                description: The deduplication ledger.
+                items:
+                  description: |-
+                    One entry of the deduplication ledger.
+
+                    A LEDGER AND NOT A LOG. `transition` increments on open, on resolve and on each re-notify; `notifiedTransition` records the last one a delivery Job was created for. The pair is what makes delivery exactly-once-per-transition across controller restarts, instead of "once per reconcile", which is how an alerting integration gets muted by its own operator.
+                  properties:
+                    delivery:
+                      description: How that delivery went.
+                      nullable: true
+                      properties:
+                        attempts:
+                          description: How many times delivery was attempted.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        jobRef:
+                          description: The delivery Job.
+                          nullable: true
+                          properties:
+                            name:
+                              description: The referenced object's `metadata.name`, in this namespace.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        lastAttemptAt:
+                          description: When it was last attempted.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        lastError:
+                          description: The last error, redacted and bounded. Never a routing key, never a URL.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        state:
+                          description: '`Pending`, `Delivered`, `Failed` or `Suppressed`.'
+                          nullable: true
+                          type: string
+                      type: object
+                    key:
+                      description: The dedup key — `logweir-protection-<policyUID>-<kind>`.
+                      type: string
+                    kind:
+                      description: What it is about.
+                      enum:
+                      - BackupFailure
+                      - Staleness
+                      - ArchiveUnavailable
+                      - RehearsalFailure
+                      - RecoveryCompleted
+                      type: string
+                    notifiedTransition:
+                      description: The last transition a delivery Job was created for.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    openedAt:
+                      description: When it opened.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    resolvedAt:
+                      description: When it resolved.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    state:
+                      description: '`Open` or `Resolved`.'
+                      type: string
+                    transition:
+                      description: The transition counter.
+                      format: int64
+                      nullable: true
+                      type: integer
+                  required:
+                  - key
+                  - kind
+                  - state
+                  type: object
+                maxItems: 16
+                nullable: true
+                type: array
+              availabilityBasis:
+                description: How availability was decided — `KubernetesStatus`, `Catalog` or `CatalogStale`. Printed, because "the point exists" and "a `Backup` object says it succeeded" are different claims.
+                nullable: true
+                type: string
+              conditions:
+                description: 'The condition set: `Ready`, `Protected`, `NotificationsDelivered`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              consecutiveFailedRuns:
+                description: How many runs have failed in a row.
+                format: int64
+                nullable: true
+                type: integer
+              evaluatedAt:
+                description: When. Rewritten only on change, or when older than half the interval.
+                format: date-time
+                nullable: true
+                type: string
+              health:
+                description: '`Healthy`, `AtRisk`, `Stale`, `Unprotected` or `Unknown`. **`Unknown` is a real answer** and never rendered as healthy.'
+                nullable: true
+                type: string
+              lastAttempt:
+                description: The most recent run.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  backupRef:
+                    description: The `Backup`.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  phase:
+                    description: Its phase.
+                    nullable: true
+                    type: string
+                  reason:
+                    description: Its reason.
+                    nullable: true
+                    type: string
+                type: object
+              lastAvailablePoint:
+                description: The newest point that can actually be recovered from.
+                nullable: true
+                properties:
+                  ageSeconds:
+                    description: How old the point was at `evaluatedAt`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  backupRef:
+                    description: The `Backup` object, while one still exists.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  evidence:
+                    description: '`Valid`, `ValidHistorical`, `Untrusted` or `NotAttempted`.'
+                    nullable: true
+                    type: string
+                  newestRecordAt:
+                    description: The newest record the point contains, labelled separately so nobody confuses the two.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  pointId:
+                    description: The durable point identity, when the catalog supplied one.
+                    nullable: true
+                    type: string
+                  recoveryPointAt:
+                    description: '*Capture start** — what the objective is measured from.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  topics:
+                    description: The topics it covers, bounded.
+                    items:
+                      type: string
+                    maxItems: 64
+                    nullable: true
+                    type: array
+                  topicsTruncated:
+                    description: Whether `topics` was cut short.
+                    nullable: true
+                    type: boolean
+                type: object
+              missed:
+                description: Missed-slot facts.
+                nullable: true
+                properties:
+                  lastMissedSlot:
+                    description: The last slot that did not run.
+                    nullable: true
+                    type: string
+                  sinceLastFire:
+                    description: Seconds since the last successful fire.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              observedGeneration:
+                description: The `metadata.generation` this verdict was computed from.
+                format: int64
+                nullable: true
+                type: integer
+              rehearsal:
+                description: The rehearsal side.
+                nullable: true
+                properties:
+                  lastFailedAt:
+                    description: When one last failed.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  lastReason:
+                    description: Why.
+                    nullable: true
+                    type: string
+                  lastRestoreRef:
+                    description: The `Restore` it ran as.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  lastSucceededAt:
+                    description: When a rehearsal last passed.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              schedules:
+                description: The schedules, as this policy sees them.
+                items:
+                  description: What a schedule looks like from here.
+                  properties:
+                    lastMissedSlot:
+                      description: The last slot it missed.
+                      nullable: true
+                      type: string
+                    name:
+                      description: The schedule's name.
+                      type: string
+                    nextFireTime:
+                      description: When it fires next.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    ready:
+                      description: Its `Ready` status.
+                      nullable: true
+                      type: string
+                    suspended:
+                      description: Whether it is suspended — the commonest cause of staleness, and the one nobody thinks of.
+                      nullable: true
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                maxItems: 16
+                nullable: true
+                type: array
+              staleSince:
+                description: Since when the objective has been missed.
+                format: date-time
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: ProtectionPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: logweir/crds/recoverycatalogs.yaml
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: recoverycatalogs.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: RecoveryCatalog
+    plural: recoverycatalogs
+    shortNames: []
+    singular: recoverycatalog
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.destinationRef.name
+      name: DESTINATION
+      type: string
+    - jsonPath: .status.counts.total
+      name: POINTS
+      type: integer
+    - jsonPath: .status.counts.available
+      name: AVAILABLE
+      type: integer
+    - jsonPath: .status.syncedAt
+      name: SYNCED
+      type: date
+    - jsonPath: .status.truncated
+      name: TRUNCATED
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: The durable list of recovery points in one destination, read from object storage by a short-lived check Job (ADR 0008 Amendment G). `spec.syncRequest` is the only mutable field. The Kubernetes view is a bounded, newest-first window in immutable ConfigMap pages owned by the sync Job; it expires with that Job's TTL and the archive is never touched. This kind adds NO delete permission anywhere.
+        properties:
+          spec:
+            description: '`RecoveryCatalog.spec`.'
+            properties:
+              destinationRef:
+                description: The saved destination to index. Immutable (J1).
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              legacyArchive:
+                description: An inline archive, for an archive that predates saved destinations. Immutable (J1).
+                nullable: true
+                properties:
+                  secretRef:
+                    description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The object-store URL of the archive root.
+                    type: string
+                required:
+                - url
+                type: object
+              sync:
+                description: How and how often to sync. Immutable (J1).
+                properties:
+                  deepCheck:
+                    default: ManifestDigest
+                    description: How hard to check each point.
+                    enum:
+                    - None
+                    - ManifestDigest
+                    - SegmentSample
+                    type: string
+                  intervalSeconds:
+                    default: 3600
+                    description: Seconds between syncs. `0` means manual only, through `syncRequest`.
+                    format: int32
+                    maximum: 86400
+                    minimum: 0
+                    type: integer
+                  maxObjectsPerRun:
+                    default: 100000
+                    description: The object budget for one Job. A walk that does not finish persists its cursor and continues next time, rather than restarting forever.
+                    format: int32
+                    maximum: 1000000
+                    minimum: 1000
+                    type: integer
+                  mode:
+                    default: Index
+                    description: How much to walk.
+                    enum:
+                    - Index
+                    - Full
+                    type: string
+                  viewLimit:
+                    default: 2000
+                    description: How many newest points are materialised into Kubernetes. Points beyond it are counted and histogrammed here and reachable with `logweir catalog list` on an operator workstation — never silently dropped.
+                    format: int32
+                    maximum: 5000
+                    minimum: 100
+                    type: integer
+                type: object
+              syncRequest:
+                description: 'An opaque token: change it to ask for a sync now. **The only mutable field.** The controller records the token it acted on, so a retried request is idempotent and a new one is not mistaken for a retry.'
+                maxLength: 253
+                nullable: true
+                type: string
+            required:
+            - sync
+            type: object
+            x-kubernetes-validations:
+            - message: only spec.syncRequest is mutable; a catalog of a different location is a different catalog
+              rule: has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.legacyArchive) == has(oldSelf.legacyArchive) && (!has(self.legacyArchive) || self.legacyArchive == oldSelf.legacyArchive) && has(self.sync) == has(oldSelf.sync) && (!has(self.sync) || self.sync == oldSelf.sync)
+            - message: set exactly one of spec.destinationRef or spec.legacyArchive
+              rule: has(self.destinationRef) != has(self.legacyArchive)
+          status:
+            description: '`RecoveryCatalog.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: 'The condition set: `Ready`, `Synced`, `Stale`, `TrustAvailable`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              counts:
+                description: What it found.
+                nullable: true
+                properties:
+                  available:
+                    description: Readable, digest-matching, selectable.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  conflict:
+                    description: Two records disagree about the same point.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  deleted:
+                    description: Recorded as deleted by an attributable retention run.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  invalid:
+                    description: The signature did not verify.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  missing:
+                    description: A definite `NotFound`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  total:
+                    description: Every point the walk saw.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  unreadable:
+                    description: Present but unreadable — a permission or transport failure, which is NOT the same as absent.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  unsupportedFormat:
+                    description: Written by a format this build does not understand.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  untrustedSigner:
+                    description: Signed by a key the bound `TrustPolicy` does not trust.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  unverified:
+                    description: No signature verdict was reached.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              cursor:
+                description: Where the walk got to.
+                nullable: true
+                properties:
+                  complete:
+                    description: 'Whether the walk finished. `false` is not a failure: it is a budgeted walk that will continue.'
+                    nullable: true
+                    type: boolean
+                  indexShard:
+                    description: The day shard the next `Index` sync resumes from.
+                    nullable: true
+                    type: string
+                  rescanStartAfter:
+                    description: The key the next `Full` rescan continues after.
+                    nullable: true
+                    type: string
+                type: object
+              histogram:
+                description: Points per day.
+                items:
+                  description: How many points a day holds.
+                  properties:
+                    day:
+                      description: The day, `YYYY-MM-DD`.
+                      type: string
+                    points:
+                      description: How many points.
+                      format: int64
+                      type: integer
+                  required:
+                  - day
+                  - points
+                  type: object
+                maxItems: 400
+                nullable: true
+                type: array
+              indexConfigMap:
+                description: 'The fence-pointer `ConfigMap`: point-id ranges to page index.'
+                nullable: true
+                type: string
+              lastSyncJob:
+                description: The Job that built the view.
+                nullable: true
+                properties:
+                  exitCode:
+                    description: Its exit code.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  finishedAt:
+                    description: When it finished.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  name:
+                    description: Its name.
+                    nullable: true
+                    type: string
+                  refusalReason:
+                    description: Its `refusal-reason=`, for an exit 3.
+                    nullable: true
+                    type: string
+                  startedAt:
+                    description: When it started.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              observedGeneration:
+                description: The `metadata.generation` this view was built from.
+                format: int64
+                nullable: true
+                type: integer
+              observedSyncRequest:
+                description: The `spec.syncRequest` token the controller has acted on.
+                nullable: true
+                type: string
+              pages:
+                description: The materialised pages.
+                items:
+                  description: One immutable page of the materialised view.
+                  properties:
+                    configMapName:
+                      description: The `ConfigMap`, owned by the sync Job so it is collected with it.
+                      type: string
+                    count:
+                      description: How many entries it carries.
+                      format: int64
+                      type: integer
+                    firstPointId:
+                      description: The first point id in it.
+                      nullable: true
+                      type: string
+                    index:
+                      description: Its index in the page sequence.
+                      format: int64
+                      type: integer
+                    lastPointId:
+                      description: The last point id in it.
+                      nullable: true
+                      type: string
+                    sha256:
+                      description: '`sha256:<lowercase hex>` over its entry lines — transport integrity, never authorization.'
+                      nullable: true
+                      type: string
+                  required:
+                  - configMapName
+                  - count
+                  - index
+                  type: object
+                maxItems: 8
+                nullable: true
+                type: array
+              signers:
+                description: Who signed them.
+                items:
+                  description: Who signed the points in this catalog.
+                  properties:
+                    keyId:
+                      description: The key id.
+                      type: string
+                    points:
+                      description: How many points it signed.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    principalHint:
+                      description: A hint at the principal, from the record. Never authority.
+                      nullable: true
+                      type: string
+                    trusted:
+                      description: Whether the bound `TrustPolicy` trusts it.
+                      nullable: true
+                      type: boolean
+                  required:
+                  - keyId
+                  type: object
+                maxItems: 16
+                nullable: true
+                type: array
+              syncedAt:
+                description: When the view was last refreshed.
+                format: date-time
+                nullable: true
+                type: string
+              truncated:
+                description: Whether `counts.total` exceeds `sync.viewLimit`, so the Kubernetes view is a window and not the whole archive.
+                nullable: true
+                type: boolean
+              viewExpiresAt:
+                description: When the pages age out with their Job. After it, the view is gone and this object says `ViewExpired` rather than reporting an empty archive.
+                format: date-time
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: RecoveryCatalog
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: logweir/crds/rehearsalschedules.yaml
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rehearsalschedules.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: RehearsalSchedule
+    plural: rehearsalschedules
+    shortNames: []
+    singular: rehearsalschedule
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.schedule
+      name: SCHEDULE
+      type: string
+    - jsonPath: .spec.suspend
+      name: SUSPEND
+      type: boolean
+    - jsonPath: .spec.target.clusterRef.name
+      name: TARGET
+      type: string
+    - jsonPath: .status.lastSucceeded.at
+      name: LAST-OK
+      type: date
+    - jsonPath: .status.nextFireTime
+      name: NEXT
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Authorized")].status
+      name: AUTHORIZED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A recurring recovery rehearsal (ADR 0008 Amendment G): on a cron, restore a qualifying recovery point into an isolated scratch target and score it. `spec.suspend` is the only mutable field, because the standing authorization binds a sha256 of this spec minus `suspend` — an editable template would authorize work nobody approved. The controller deletes no topic ever; teardown is the runner''s phase 9, inside a prefix guard.'
+        properties:
+          spec:
+            description: '`RehearsalSchedule.spec`.'
+            properties:
+              authorization:
+                description: The standing authorization.
+                properties:
+                  approvalPolicyRef:
+                    description: The approval policy (PLAT-19.2). Absent means the legacy governed policy.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  standingApprovalRef:
+                    description: The `Approval` carrying the signed standing scope. Its `spec.subjectRef.kind` is `RehearsalSchedule` and its `spec.planHash` is this spec's `templateDigest`.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - standingApprovalRef
+                type: object
+              bounds:
+                description: The bounds it runs inside.
+                properties:
+                  concurrencyPolicy:
+                    default: Forbid
+                    description: Whether two may run at once. `Forbid` in v1.
+                    enum:
+                    - Forbid
+                    type: string
+                  deadlineSeconds:
+                    default: 3600
+                    description: The Job's `activeDeadlineSeconds`.
+                    format: int32
+                    maximum: 21600
+                    minimum: 300
+                    type: integer
+                  maxPartitions:
+                    default: 200
+                    description: The partition ceiling, enforced when the catalog knows the count.
+                    format: int32
+                    maximum: 2000
+                    minimum: 1
+                    type: integer
+                  recordsPerPartition:
+                    default: 25
+                    description: How many records per partition the canary restores.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  runnerResources:
+                    description: The runner pod's resources, projected onto the `Restore` it creates.
+                    nullable: true
+                    properties:
+                      limits:
+                        description: Limits.
+                        nullable: true
+                        properties:
+                          cpu:
+                            description: CPU, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                          memory:
+                            description: Memory, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                        type: object
+                      requests:
+                        description: Requests.
+                        nullable: true
+                        properties:
+                          cpu:
+                            description: CPU, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                          memory:
+                            description: Memory, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                        type: object
+                    type: object
+                  startingDeadlineSeconds:
+                    default: 3600
+                    description: How late a missed slot may still start.
+                    format: int32
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                type: object
+              objectives:
+                description: What a pass means.
+                nullable: true
+                properties:
+                  passRate:
+                    description: The share of sampled records that must match, `0.0`..`1.0`.
+                    format: double
+                    maximum: 1
+                    minimum: 0
+                    nullable: true
+                    type: number
+                  rtoSeconds:
+                    description: The recovery-time objective, in seconds.
+                    format: int64
+                    maximum: 86400
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                type: object
+              point:
+                description: Which point to rehearse.
+                properties:
+                  catalogRef:
+                    description: Candidates from this `RecoveryCatalog`.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  minAgeSeconds:
+                    default: 0
+                    description: How old a point must be before it qualifies — a guard against rehearsing a run that is still being written.
+                    format: int32
+                    maximum: 2592000
+                    minimum: 0
+                    type: integer
+                  requireVerifiedEvidence:
+                    default: true
+                    description: Whether the point's evidence must verify. `true` in v1 (I2).
+                    type: boolean
+                  scheduleRefs:
+                    description: Candidates from these schedules' `Backup`s.
+                    items:
+                      description: |-
+                        A reference to another Logweir object in the SAME namespace.
+
+                        Namespace-local by construction: there is no `namespace` field, because a cross-namespace reference is a privilege-escalation surface (the referrer's RBAC does not cover the referent's namespace) and Global Constraint 30 puts one controller in one cluster with no fleet.
+                      properties:
+                        name:
+                          description: The referenced object's `metadata.name`, in this namespace.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 16
+                    nullable: true
+                    type: array
+                  selection:
+                    default: NewestAvailable
+                    description: How to choose among them.
+                    enum:
+                    - NewestAvailable
+                    type: string
+                  topics:
+                    description: The topics to restore. Must be a subset of the chosen point's.
+                    items:
+                      pattern: ^[a-zA-Z0-9._-]{1,249}$
+                      type: string
+                    maxItems: 32
+                    nullable: true
+                    type: array
+                type: object
+                x-kubernetes-validations:
+                - message: spec.point names scheduleRefs, catalogRef or both; otherwise there are no candidate points
+                  rule: has(self.scheduleRefs) || has(self.catalogRef)
+              protectionPolicyRef:
+                description: The `ProtectionPolicy` whose health these results feed.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              schedule:
+                description: A five-field UTC cron expression, the same grammar `BackupSchedule` uses.
+                maxLength: 128
+                minLength: 1
+                type: string
+              suspend:
+                default: false
+                description: Stop firing new rehearsals. **The only mutable field.**
+                type: boolean
+              target:
+                description: Where to restore it.
+                properties:
+                  clusterRef:
+                    description: The `KafkaCluster` to restore into. Its observed cluster id must be in the bound `TrustPolicy`'s `allowedTargetClusterIds` — `spec.role` is a label an adopter picks and is never authority.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  markerTopic:
+                    description: The marker topic that proves this is a scratch cluster.
+                    pattern: ^[a-zA-Z0-9._-]{1,249}$
+                    type: string
+                  replicationFactor:
+                    default: 1
+                    description: The replication factor for the topics the rehearsal creates.
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
+                  topicPrefix:
+                    description: The topic-name prefix. Rendered as `<prefix><uid-first-8>-`, so it is unique per schedule object and inside the runner's deletion guard.
+                    maxLength: 40
+                    minLength: 11
+                    pattern: ^rehearsal-[a-z0-9-]*-$
+                    type: string
+                required:
+                - clusterRef
+                - markerTopic
+                - topicPrefix
+                type: object
+            required:
+            - authorization
+            - bounds
+            - point
+            - schedule
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: only spec.suspend is mutable; the standing authorization binds a digest of this spec, so an edit would authorize work nobody approved — create a new RehearsalSchedule and a new authorization
+              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.protectionPolicyRef) == has(oldSelf.protectionPolicyRef) && (!has(self.protectionPolicyRef) || self.protectionPolicyRef == oldSelf.protectionPolicyRef) && has(self.point) == has(oldSelf.point) && (!has(self.point) || self.point == oldSelf.point) && has(self.target) == has(oldSelf.target) && (!has(self.target) || self.target == oldSelf.target) && has(self.bounds) == has(oldSelf.bounds) && (!has(self.bounds) || self.bounds == oldSelf.bounds) && has(self.objectives) == has(oldSelf.objectives) && (!has(self.objectives) || self.objectives == oldSelf.objectives) && has(self.authorization) == has(oldSelf.authorization) && (!has(self.authorization) || self.authorization == oldSelf.authorization)
+            - message: spec.point.requireVerifiedEvidence must be true in v1
+              rule: self.point.requireVerifiedEvidence == true
+          status:
+            description: '`RehearsalSchedule.status`.'
+            nullable: true
+            properties:
+              activeRestoreRef:
+                description: The rehearsal running now.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              cleanup:
+                description: Topics a teardown left behind.
+                nullable: true
+                properties:
+                  pendingTopics:
+                    description: 'The names still present, read from the signed teardown attestation. While this is non-empty the next slot is SKIPPED: the controller deletes no topic, and a run that adopted them would be operating on data it did not create.'
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  since:
+                    description: Since when.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              conditions:
+                description: 'The condition set: `Ready`, `Authorized`, `RehearsalHealthy`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              lastFailed:
+                description: The last failure.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  reason:
+                    description: Why.
+                    nullable: true
+                    type: string
+                  restoreRef:
+                    description: The `Restore` it ran as.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              lastScheduledSlot:
+                description: The last slot admitted.
+                nullable: true
+                type: string
+              lastSkipped:
+                description: The last skip.
+                nullable: true
+                properties:
+                  reason:
+                    description: '`NoQualifyingPoint`, `TargetUnavailable`, `AuthorizationInvalid`, `AuthorizationExpired`, `ConcurrencyBlocked`, `TargetBusy`, `LeftoverTopics` or `PointRetentionInProgress`.'
+                    nullable: true
+                    type: string
+                  slot:
+                    description: The slot, `yyyymmdd-hhmmss` in UTC.
+                    nullable: true
+                    type: string
+                type: object
+              lastSucceeded:
+                description: The last pass.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  evidence:
+                    description: The evidence verdict for that run.
+                    nullable: true
+                    type: string
+                  pointId:
+                    description: Which point.
+                    nullable: true
+                    type: string
+                  restoreRef:
+                    description: The `Restore` it ran as.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rtoSeconds:
+                    description: The measured recovery time.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              nextFireTime:
+                description: When the next one is due.
+                format: date-time
+                nullable: true
+                type: string
+              observedGeneration:
+                description: The `metadata.generation` this status was computed from.
+                format: int64
+                nullable: true
+                type: integer
+              pendingRestoreRef:
+                description: A slot admitted in status whose `Restore` creation is not yet confirmed — the reservation half of the PLAT-04.1 protocol.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              templateDigest:
+                description: The digest the standing authorization is checked against, recomputed every slot from this object's own sealed spec.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: RehearsalSchedule
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
 # Source: logweir/crds/restores.yaml
 # GENERATED FILE — do not edit by hand.
 #
@@ -2152,13 +3836,51 @@ spec:
             description: '`Restore.spec`.'
             properties:
               approvalRef:
-                description: The `Approval` that authorises this restore, in this namespace. The approval's `planHash` must equal the sha256 of `planBytes` above, and its `subjectRef` must name this object.
+                description: |-
+                  The `Approval` that authorises this restore, in this namespace. The approval's `planHash` must equal the sha256 of `planBytes` above, and its `subjectRef` must name this object.
+
+                  # Why this became optional, and why that is not a weakening
+
+                  A rehearsal is authorised by a STANDING document instead ([`RestoreAuthorization`]), so exactly one of this and `authorization` is set and CEL refuses both and neither. An OLDER controller reading a standing-authorised `Restore` sees no `approvalRef`, resolves the empty name to nothing and refuses terminally with `ApprovalNotReceived` — fail closed, which is the required rollback behaviour. An unauthorised restore has never been reachable through either field.
+                nullable: true
                 properties:
                   name:
                     description: The referenced object's `metadata.name`, in this namespace.
                     type: string
                 required:
                 - name
+                type: object
+              authorization:
+                description: A standing authorisation, for an unattended run (D3 §4.3). Exactly one of this and `approvalRef`.
+                nullable: true
+                properties:
+                  approvalRef:
+                    description: The `Approval` carrying the signed standing scope.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  kind:
+                    description: '`Standing` — the only kind in v1.'
+                    enum:
+                    - Standing
+                    type: string
+                  rehearsalScheduleRef:
+                    description: The `RehearsalSchedule` the scope is bound to.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - approvalRef
+                - kind
+                - rehearsalScheduleRef
                 type: object
               backupSetRef:
                 description: The backup set inside `sourceArchive` — a `backupId`.
@@ -2190,6 +3912,48 @@ spec:
                 description: The point in time to restore to. Records after it are not restored.
                 format: date-time
                 type: string
+              runnerResources:
+                description: |-
+                  What the runner pod asks for and is capped at.
+
+                  ON THE SPEC, NOT ON AN ANNOTATION, because PLAT-06.1's rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
+                nullable: true
+                properties:
+                  limits:
+                    description: Limits.
+                    nullable: true
+                    properties:
+                      cpu:
+                        description: CPU, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                      memory:
+                        description: Memory, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests.
+                    nullable: true
+                    properties:
+                      cpu:
+                        description: CPU, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                      memory:
+                        description: Memory, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                    type: object
+                type: object
               sourceArchive:
                 description: |-
                   The archive to restore from.
@@ -2255,7 +4019,6 @@ spec:
                 - topicNaming
                 type: object
             required:
-            - approvalRef
             - backupSetRef
             - deadlineSeconds
             - planBytes
@@ -2270,12 +4033,77 @@ spec:
               rule: has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)
             - message: with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name> and sourceArchive.secretRef is absent; the logweir-destination scheme is otherwise reserved
               rule: 'has(self.sourceDestinationRef) ? (self.sourceArchive.url == ''logweir-destination://'' + self.sourceDestinationRef.name && !has(self.sourceArchive.secretRef)) : !self.sourceArchive.url.startsWith(''logweir-destination://'')'
+            - message: set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized
+              rule: has(self.approvalRef) != has(self.authorization)
           status:
             description: '`Restore.status`.'
             nullable: true
             properties:
+              completion:
+                description: What the run actually restored, copied by JSON pointer from the SIGNED scorecard.
+                nullable: true
+                properties:
+                  integrityLevel:
+                    description: '`byte-fingerprint`, `consume-only` or `not-attempted` — HOW the check was made, beside its result, because "sampled 100, matched 100" means two different things under the first two.'
+                    nullable: true
+                    type: string
+                  newTopics:
+                    description: The topics created, from `target_diff.would_create`.
+                    items:
+                      description: One topic the run created, with its partition count.
+                      properties:
+                        name:
+                          description: The new topic's name.
+                          type: string
+                        partitions:
+                          description: How many partitions it was created with.
+                          format: int64
+                          nullable: true
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  recordsExpected:
+                    description: The canary size, from `sample.records_expected`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  recordsRestored:
+                    description: From `sample.records_restored`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  recordsSampled:
+                    description: From `integrity.records_sampled`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  recordsSampledMatching:
+                    description: How many of those matched.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  sampleWindow:
+                    description: The window the sample covered.
+                    nullable: true
+                    properties:
+                      end:
+                        description: Inclusive end.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      start:
+                        description: Inclusive start.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
               conditions:
-                description: The condition set.
+                description: The condition set. `RunnerReady` joins `Verified` as a condition every terminal builder carries forward, because a JSON merge patch replaces the whole list.
                 items:
                   description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
                   properties:
@@ -2356,6 +4184,48 @@ spec:
                         description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
                         nullable: true
                         type: string
+                      signedAt:
+                        description: |-
+                          The signing time the verdict was reached AGAINST: the document's own latest pre-signature timestamp (`logweir_core::trust::claimed_signing_time`).
+
+                          **ATTACKER-CONTROLLED FOR A COMPROMISED KEY**, which is why it is recorded rather than trusted. For a retired or expired key it is what distinguishes "signed while valid" from "signed afterwards"; for a key revoked as `KeyCompromise` it is deliberately NOT accepted as evidence of when the document was signed, and only a controller-written observation ([`EvidenceVerification::verified_at`] from an earlier reconcile) counts.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      trust:
+                        description: Which trust policy said so, and on what basis.
+                        nullable: true
+                        properties:
+                          basis:
+                            description: |-
+                              `Current`, `Historical`, `RecordedBeforeRevocation` or `None`.
+
+                              **`Historical` is a pass, not a downgrade**: the key was valid when it signed and has since been retired, which is what key rotation is supposed to look like. The console renders it as "verified against retired key `<id>` (signed before retirement)" and never as a warning.
+                            nullable: true
+                            type: string
+                          keyState:
+                            description: '`Active`, `Retired`, `Expired`, `Revoked` or `Unknown` — the signing key''s state at the moment the verdict was reached.'
+                            nullable: true
+                            type: string
+                          policy:
+                            description: Which `TrustPolicy` answered, with the revision that answered.
+                            nullable: true
+                            properties:
+                              generation:
+                                description: Its `metadata.generation`. A generation change is what makes the controller re-run the verdict over STORED fields, with no storage read and no change to `phase`, `exitCode` or `outcome`.
+                                format: int64
+                                nullable: true
+                                type: integer
+                              name:
+                                description: Its name.
+                                nullable: true
+                                type: string
+                              uid:
+                                description: Its UID — a same-named replacement is a different policy.
+                                nullable: true
+                                type: string
+                            type: object
+                        type: object
                       verifiedAt:
                         description: |-
                           When the controller performed the verification.
@@ -2466,6 +4336,141 @@ spec:
                 description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
+              progress:
+                description: What this run is doing right now. Absent on a `Restore` an older controller reconciled.
+                nullable: true
+                properties:
+                  diagnostics:
+                    description: What went wrong on the way, newest `lastSeen` first.
+                    items:
+                      description: One thing that went wrong, with a count rather than a repetition.
+                      properties:
+                        code:
+                          description: A CamelCase code from the closed vocabulary.
+                          type: string
+                        count:
+                          description: How many times — capped, because a status is not a counter store and an unbounded integer here is an unbounded write rate.
+                          format: int64
+                          maximum: 1000000
+                          minimum: 1
+                          nullable: true
+                          type: integer
+                        firstSeen:
+                          description: When it was first seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        lastSeen:
+                          description: When it was last seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        message:
+                          description: A sanitized, bounded explanation.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        object:
+                          description: The object it is about.
+                          nullable: true
+                          properties:
+                            kind:
+                              description: '`Pod` or `Job`.'
+                              type: string
+                            name:
+                              description: Its name.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        severity:
+                          description: '`Warning` or `Error`.'
+                          type: string
+                      required:
+                      - code
+                      - severity
+                      type: object
+                    maxItems: 8
+                    nullable: true
+                    type: array
+                  lastObservedTime:
+                    description: When the run was last observed, in active stages only, rewritten at most once every 60 s for the same reason.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  lastTransitionTime:
+                    description: 'When `stage` or `reason` last CHANGED. Not a heartbeat: a reconciler''s own status patch is what wakes it (erratum E11(d)), so a field carrying a fresh clock read on every pass would make every pass a write.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  message:
+                    description: A sanitized, bounded explanation.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  reason:
+                    description: A CamelCase reason, from the same closed vocabulary the `RunnerReady` condition uses.
+                    nullable: true
+                    type: string
+                  runner:
+                    description: Facts about the one runner pod.
+                    nullable: true
+                    properties:
+                      containerState:
+                        description: '`Waiting`, `Running` or `Terminated`, for the `runner` container.'
+                        nullable: true
+                        type: string
+                      jobName:
+                        description: The Job.
+                        nullable: true
+                        type: string
+                      podName:
+                        description: The pod.
+                        nullable: true
+                        type: string
+                      podPhase:
+                        description: '`Pending`, `Running`, `Succeeded`, `Failed` or `Unknown`.'
+                        nullable: true
+                        type: string
+                      scheduled:
+                        description: Whether a node has been chosen. `false` with no diagnostic is the "nothing is wrong yet, it is just queued" case.
+                        nullable: true
+                        type: boolean
+                      startedAt:
+                        description: When the runner container started.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      waitingReason:
+                        description: The kubelet's own waiting reason, verbatim and bounded — `ImagePullBackOff`, `CreateContainerConfigError`. Verbatim because a translated kubelet reason is a reason nobody can search for.
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    type: object
+                  runnerPhase:
+                    description: The runner's own phase, when it reported one.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The phase or step name, from the runner's own closed list.
+                        maxLength: 32
+                        nullable: true
+                        type: string
+                      number:
+                        description: The phase number, `-1`..`9`. A backup reports `-1` with a step name, because it has steps and not the drill's numbered phases.
+                        format: int32
+                        maximum: 9
+                        minimum: -1
+                        nullable: true
+                        type: integer
+                    type: object
+                  stage:
+                    description: '`Admission`, `Queued`, `Preparing`, `Running`, `Verifying` or `Finished`.'
+                    type: string
+                required:
+                - stage
+                type: object
               reason:
                 description: |-
                   The reason of the condition that describes this run RIGHT NOW — `ApprovalNotVerified`, `ApprovalNotReceived`, `PlanHashMismatch`, `ClusterNotReachable`, `NameTooLong`, `JobCreated`, `Ok`, `GuardRefused`, `DrillNotPass`, `SigningOrLock`, `Operational`, … — and the field the `REASON` printer column reads.
@@ -2479,6 +4484,41 @@ spec:
                   `exitReason` is UNCHANGED and still the honest home of GC11's wire string and of the runner's own `refusal-reason=` terminal state, which is the more specific answer whenever a pod actually ran. Two fields, two questions: *what did the run exit with* and *what state is this object in*.
                 nullable: true
                 type: string
+              teardown:
+                description: What phase 9 removed, and what it could not.
+                nullable: true
+                properties:
+                  attestationKey:
+                    description: The object key of the signed teardown attestation.
+                    nullable: true
+                    type: string
+                  deleted:
+                    description: The topics it removed.
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  failed:
+                    description: The topics it could not.
+                    items:
+                      description: One topic teardown could not remove.
+                      properties:
+                        error:
+                          description: Why, redacted and bounded.
+                          maxLength: 256
+                          type: string
+                        topic:
+                          description: The topic.
+                          type: string
+                      required:
+                      - error
+                      - topic
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                type: object
               topicPreflight:
                 description: |-
                   What phase 0 found out about the target topics (guard **G-TS**).
@@ -2509,6 +4549,554 @@ spec:
         required:
         - spec
         title: Restore
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: logweir/crds/retentionpolicies.yaml
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: retentionpolicies.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: RetentionPolicy
+    plural: retentionpolicies
+    shortNames: []
+    singular: retentionpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.destinationRef.name
+      name: DESTINATION
+      type: string
+    - jsonPath: .spec.mode
+      name: MODE
+      type: string
+    - jsonPath: .status.enforcement
+      name: ENFORCEMENT
+      type: string
+    - jsonPath: .status.lastEvaluation.candidateCount
+      name: CANDIDATES
+      type: integer
+    - jsonPath: .status.lastEvaluation.at
+      name: EVALUATED
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'What may be removed from one destination, and under whose authority (ADR 0008 Amendments G and H). `spec.destinationRef`, `spec.catalogRef` and `spec.scope` are immutable, because an approved deletion plan names point ids and a re-pointable policy would apply it elsewhere. `mode: Report` is the default and deletes nothing; `Enforce` opts in to a separately credentialed worker bounded to an explicit archive prefix, never `logweir/`, only from an approved plan, and only with a signed record.'
+        properties:
+          spec:
+            description: '`RetentionPolicy.spec`.'
+            properties:
+              catalogRef:
+                description: The catalog the evaluation reads. Immutable (K1). Evaluation reads the catalog VIEW, never a second bucket walk, so a schedule writing elsewhere is never reported against the wrong location.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              destinationRef:
+                description: The destination this policy covers. Immutable (K1).
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              enforcement:
+                description: The enforcement settings, for `Enforce` (K2).
+                nullable: true
+                properties:
+                  approvedPlanSha256:
+                    description: The digest of the plan an administrator approved after reviewing the preview. Mutable — approving a new plan is the routine — and the ONLY thing that authorizes a deletion run.
+                    nullable: true
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  credentialSecretRef:
+                    description: 'The delete-capable credential, mounted ONLY into retention Jobs. It is a separate Secret from every other grant on purpose: the blast radius of this key is exactly one prefix in one bucket.'
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  deadlineSeconds:
+                    default: 1800
+                    description: The Job's `activeDeadlineSeconds`.
+                    format: int32
+                    maximum: 21600
+                    minimum: 60
+                    type: integer
+                  maxDeletionsPerRun:
+                    default: 50
+                    description: The per-run ceiling on points.
+                    format: int32
+                    maximum: 500
+                    minimum: 1
+                    type: integer
+                  maxObjectsPerRun:
+                    default: 20000
+                    description: The per-run ceiling on object keys.
+                    format: int32
+                    maximum: 200000
+                    minimum: 1
+                    type: integer
+                  planMaxAgeSeconds:
+                    default: 3600
+                    description: How long an approved plan stays usable. A plan older than this is re-previewed rather than executed, because the archive has moved on.
+                    format: int32
+                    maximum: 86400
+                    minimum: 300
+                    type: integer
+                  requireApprovedPlan:
+                    default: true
+                    description: Whether an administrator must approve the plan before anything is deleted. Default `true`.
+                    type: boolean
+                  schedule:
+                    description: A five-field UTC cron expression for the evaluation and enforcement cadence.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - credentialSecretRef
+                - schedule
+                type: object
+              externalLifecycle:
+                description: The declared provider lifecycle rule, for `ExternalLifecycle` (K3).
+                nullable: true
+                properties:
+                  expirationDays:
+                    description: The expiry the rule declares.
+                    format: int32
+                    maximum: 36500
+                    minimum: 1
+                    type: integer
+                  prefix:
+                    description: The prefix the rule covers.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  provider:
+                    description: Whose rule it is.
+                    enum:
+                    - s3
+                    - gcs
+                    - azure
+                    type: string
+                  ruleId:
+                    description: The rule's own id in that provider's console, so an auditor can find it.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - expirationDays
+                - prefix
+                - provider
+                - ruleId
+                type: object
+              holds:
+                description: Points that may not be removed. Mutable — a legal hold arrives on a Tuesday.
+                items:
+                  description: A point that may not be removed, whatever the rules say.
+                  properties:
+                    pointId:
+                      description: The point id.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    reason:
+                      description: Why it is held — a case reference, an auditor, a regulation.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    until:
+                      description: When the hold lapses. Absent means it does not.
+                      format: date-time
+                      nullable: true
+                      type: string
+                  required:
+                  - pointId
+                  - reason
+                  type: object
+                maxItems: 256
+                nullable: true
+                type: array
+              mode:
+                default: Report
+                description: What this policy is allowed to do. `Report` by default.
+                enum:
+                - Report
+                - Enforce
+                - ExternalLifecycle
+                type: string
+              rules:
+                description: What to keep.
+                properties:
+                  keepDays:
+                    description: Keep points newer than N days.
+                    format: int32
+                    maximum: 36500
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                  keepLast:
+                    description: Keep the most recent N points.
+                    format: int32
+                    maximum: 100000
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                  minUsablePoints:
+                    default: 3
+                    description: 'The floor that survives every other rule: this many USABLE points are kept whatever `keepLast` and `keepDays` say. A retention policy that can empty an archive is a retention policy that will.'
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                type: object
+              scope:
+                description: The prefix deletion may ever touch. Immutable (K1).
+                properties:
+                  prefix:
+                    description: The archive prefix, matching the destination's bucket prefix.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                required:
+                - prefix
+                type: object
+                x-kubernetes-validations:
+                - message: spec.scope.prefix must be a non-empty archive prefix and may never name logweir/, which is the evidence root no retention run may delete under
+                  rule: '!self.prefix.matches(''(^|/)logweir(/|$)'') && self.prefix != '''''
+            required:
+            - catalogRef
+            - destinationRef
+            - rules
+            - scope
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.destinationRef, spec.catalogRef and spec.scope are immutable: an approved deletion plan names point ids, and a policy that could be re-pointed would apply that plan to a different location'
+              rule: has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.catalogRef) == has(oldSelf.catalogRef) && (!has(self.catalogRef) || self.catalogRef == oldSelf.catalogRef) && has(self.scope) == has(oldSelf.scope) && (!has(self.scope) || self.scope == oldSelf.scope)
+            - message: spec.enforcement is required for mode Enforce and forbidden otherwise
+              rule: has(self.enforcement) == (self.mode == 'Enforce')
+            - message: spec.externalLifecycle is required for mode ExternalLifecycle and forbidden otherwise
+              rule: has(self.externalLifecycle) == (self.mode == 'ExternalLifecycle')
+          status:
+            description: '`RetentionPolicy.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: 'The condition set: `Ready`, `Evaluated`, `Enforced`, `ExternalLifecycleConflict`, `EnforcementDegraded`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              consecutiveRunFailures:
+                description: How many runs have failed in a row.
+                format: int64
+                nullable: true
+                type: integer
+              enforcement:
+                description: '`RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared` — what is actually happening, as opposed to what `spec.mode` asks for.'
+                nullable: true
+                type: string
+              guarantees:
+                description: Which guarantees are in force, and by whom.
+                nullable: true
+                properties:
+                  activeRestoreProtection:
+                    description: That a point being restored right now is not removed under it.
+                    nullable: true
+                    type: string
+                  ageExpiry:
+                    description: That points older than the limit actually go.
+                    nullable: true
+                    type: string
+                  legalHold:
+                    description: That a legal hold is honoured.
+                    nullable: true
+                    type: string
+                  minUsablePoints:
+                    description: That the usable floor is respected.
+                    nullable: true
+                    type: string
+                  sharedSegments:
+                    description: That a segment two points share is not removed with one of them.
+                    nullable: true
+                    type: string
+                type: object
+              lastEnforcement:
+                description: What the last enforcement run did.
+                nullable: true
+                properties:
+                  deleted:
+                    description: The points it removed.
+                    items:
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  exitCode:
+                    description: The run's exit code.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  failed:
+                    description: The points it could not.
+                    items:
+                      description: One point a run could not delete.
+                      properties:
+                        code:
+                          description: The closed-vocabulary code. Never a raw object-store error body.
+                          type: string
+                        pointId:
+                          description: The point id.
+                          type: string
+                      required:
+                      - code
+                      - pointId
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  finishedAt:
+                    description: When it finished.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  objectsDeleted:
+                    description: How many object keys were removed.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  planSha256:
+                    description: The plan digest it executed — the one an administrator approved.
+                    nullable: true
+                    type: string
+                  recordKey:
+                    description: The signed, attributable record of the deletion. **Written under `logweir/`, which this run may never delete from.**
+                    nullable: true
+                    type: string
+                  recordSha256:
+                    description: That record's digest.
+                    nullable: true
+                    type: string
+                  runId:
+                    description: The run id.
+                    nullable: true
+                    type: string
+                  startedAt:
+                    description: When it started.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              lastEvaluation:
+                description: What the last evaluation found. Nothing in it was deleted.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  candidateCount:
+                    description: How many candidates there are, for the printer column.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  candidates:
+                    description: The points that would go.
+                    items:
+                      description: One point the evaluation would remove.
+                      properties:
+                        bytes:
+                          description: How many bytes.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        objects:
+                          description: How many object keys it owns.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        pointId:
+                          description: The point id.
+                          type: string
+                        reason:
+                          description: Why it qualifies — `OlderThanKeepDays` or `BeyondKeepLast`.
+                          nullable: true
+                          type: string
+                        recoveryPointAt:
+                          description: Its capture start.
+                          format: date-time
+                          nullable: true
+                          type: string
+                      required:
+                      - pointId
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  kept:
+                    description: The point ids that stay.
+                    items:
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  planExpiresAt:
+                    description: When the plan stops being usable.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  planRef:
+                    description: The `ConfigMap` holding the full plan.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  planSha256:
+                    description: The plan's digest — what an administrator approves by copying into `spec.enforcement.approvedPlanSha256`.
+                    nullable: true
+                    type: string
+                  pointsEvaluated:
+                    description: How many points were considered.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  protected:
+                    description: The points something protected.
+                    items:
+                      description: One point the rules selected and something else protected.
+                      properties:
+                        pointId:
+                          description: The point id.
+                          type: string
+                        reason:
+                          description: '`ActiveRestore`, `MinUsablePoints`, `LegalHold`, `SharedSegment`, `Hold` or `Unknown`. **`Unknown` protects**: a point the evaluation could not classify is never a deletion candidate.'
+                          type: string
+                      required:
+                      - pointId
+                      - reason
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  skipped:
+                    description: What could not be classified.
+                    items:
+                      description: One point or key the evaluation could not classify.
+                      properties:
+                        key:
+                          description: The object key, when there was not.
+                          nullable: true
+                          type: string
+                        pointId:
+                          description: The point id, when there was one.
+                          nullable: true
+                          type: string
+                        reason:
+                          description: '`Unreadable`, `UnsupportedFormat` or `Conflict`.'
+                          type: string
+                      required:
+                      - reason
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                type: object
+              lease:
+                description: The points a run has claimed.
+                nullable: true
+                properties:
+                  acquiredAt:
+                    description: When it was taken.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  expiresAt:
+                    description: When it lapses.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  pointIds:
+                    description: The points it covers.
+                    items:
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  runId:
+                    description: The run holding it.
+                    nullable: true
+                    type: string
+                type: object
+              observedGeneration:
+                description: The `metadata.generation` this status was computed from.
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: RetentionPolicy
         type: object
     served: true
     storage: true
@@ -2892,6 +5480,317 @@ spec:
       status: {}
 
 ---
+# Source: logweir/crds/trustpolicies.yaml
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: trustpolicies.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: TrustPolicy
+    plural: trustpolicies
+    shortNames: []
+    singular: trustpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.default
+      name: DEFAULT
+      type: boolean
+    - jsonPath: .status.keyCount
+      name: KEYS
+      type: integer
+    - jsonPath: .status.loaded
+      name: LOADED
+      type: string
+    - jsonPath: .status.boundNamespaces[*]
+      name: BOUND
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'The keys that may authorise and the keys that may attest, with an explicit lifecycle (ADR 0008 Amendment G). Cluster-scoped, so a namespace never names its own trust: the policy names the namespaces it governs. The spec is MUTABLE and every change is one-way — keys are append-only, notAfter only shortens, state only moves Active -> Retired -> Revoked, and the revocation instants are write-once. Public key material is never removed, because old archives still need it.'
+        properties:
+          spec:
+            description: '`TrustPolicy.spec`.'
+            properties:
+              allowedTargetClusterIds:
+                description: 'The cluster ids a restore may target. Replaces `TrustRoster.spec.allowedClusterIds`, at the same scope and with the same semantics: a namespace tenant must not be able to widen it.'
+                items:
+                  type: string
+                maxItems: 64
+                nullable: true
+                type: array
+              default:
+                default: false
+                description: The fallback for namespaces no policy names explicitly. At most one policy cluster-wide may set it; the controller reports a conflict rather than picking one.
+                type: boolean
+              keys:
+                description: The keys. Append-only (G1), keyed by `keyId`.
+                items:
+                  description: One trusted public key, and what has happened to it.
+                  properties:
+                    algorithm:
+                      description: The algorithm, checked by the controller against the PEM.
+                      enum:
+                      - p256
+                      - ed25519
+                      type: string
+                    keyId:
+                      description: The sha256 of the DER SPKI, lowercase hex. The merge key of this list and the id every verdict is recorded against.
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    notAfter:
+                      description: The end of the validity window. May only be brought forward (G2).
+                      format: date-time
+                      type: string
+                    notBefore:
+                      description: The start of the validity window.
+                      format: date-time
+                      type: string
+                    principal:
+                      description: Who holds it.
+                      properties:
+                        display:
+                          description: A human-readable label. Mutable, because a display name is not an identity.
+                          maxLength: 253
+                          nullable: true
+                          type: string
+                        id:
+                          description: 'A stable identifier — `install:<digest>`, an email, an OIDC subject. **Immutable** (G1): it is what an audit trail joins on.'
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - id
+                      type: object
+                    retiredAt:
+                      description: When it stopped being allowed to sign. Required for `Retired`.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    revocationEffectiveFrom:
+                      description: The instant from which the revocation applies to stored evidence. Write-once (G4).
+                      format: date-time
+                      nullable: true
+                      type: string
+                    revocationReason:
+                      description: Why. Absent is read as `Unspecified`.
+                      enum:
+                      - KeyCompromise
+                      - Superseded
+                      - Unspecified
+                      nullable: true
+                      type: string
+                    revokedAt:
+                      description: When it was revoked. Write-once (G4).
+                      format: date-time
+                      nullable: true
+                      type: string
+                    spkiPem:
+                      description: The PUBLIC key, PEM-encoded. **Public material and nothing else** — a private key in this field would be a private key in `kubectl get -o yaml`, and `logweir trust export` writes this object verbatim.
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    state:
+                      description: Where the key is in its lifecycle.
+                      enum:
+                      - Active
+                      - Retired
+                      - Revoked
+                      type: string
+                    usages:
+                      description: What this key may be used for. Immutable (G1).
+                      items:
+                        description: |-
+                          What a key is allowed to be used for.
+
+                          SEPARATED BECAUSE P17 REQUIRES IT FOR PLAT-19.2. One key that both signs evidence and authorises restores is a key whose holder can approve their own work; the usage set is what makes "the runner's signing identity" and "an approver" different grants.
+                        enum:
+                        - EvidenceSigning
+                        - GovernedApproval
+                        - ConsoleConfirmation
+                        type: string
+                      maxItems: 3
+                      minItems: 1
+                      type: array
+                  required:
+                  - algorithm
+                  - keyId
+                  - notAfter
+                  - notBefore
+                  - principal
+                  - spkiPem
+                  - state
+                  - usages
+                  type: object
+                  x-kubernetes-validations:
+                  - message: a Revoked key needs revokedAt and revocationEffectiveFrom; a Retired key needs retiredAt
+                    rule: (self.state != 'Revoked' || (has(self.revokedAt) && has(self.revocationEffectiveFrom))) && (self.state != 'Retired' || has(self.retiredAt))
+                  - message: notBefore must be before notAfter
+                    rule: self.notBefore < self.notAfter
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - keyId
+                x-kubernetes-list-type: map
+              namespaces:
+                description: 'The namespaces this policy governs, by exact name. Never a pattern: a pattern is how a new namespace silently inherits a trust decision nobody made for it.'
+                items:
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  type: string
+                maxItems: 256
+                nullable: true
+                type: array
+            required:
+            - keys
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.keys is append-only: an existing keyId must remain, with the same spkiPem, algorithm, usages, principal.id and notBefore — old archives still need the public material that signed them'
+              rule: oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId && n.spkiPem == o.spkiPem && n.algorithm == o.algorithm && n.usages == o.usages && n.principal.id == o.principal.id && n.notBefore == o.notBefore))
+            - message: a key's notAfter may only be brought forward, never extended
+              rule: oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || n.notAfter <= o.notAfter))
+            - message: a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards
+              rule: 'oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || (o.state == ''Active'' ? true : (o.state == ''Retired'' ? n.state != ''Active'' : n.state == ''Revoked''))))'
+            - message: revokedAt and revocationEffectiveFrom are immutable once written
+              rule: oldSelf.keys.all(o, self.keys.all(n, n.keyId != o.keyId || ((!has(o.revokedAt) || (has(n.revokedAt) && n.revokedAt == o.revokedAt)) && (!has(o.revocationEffectiveFrom) || (has(n.revocationEffectiveFrom) && n.revocationEffectiveFrom == o.revocationEffectiveFrom)))))
+          status:
+            description: '`TrustPolicy.status`.'
+            nullable: true
+            properties:
+              boundNamespaces:
+                description: The namespaces this policy actually governs.
+                items:
+                  type: string
+                maxItems: 256
+                nullable: true
+                type: array
+              conditions:
+                description: 'The condition set: `Loaded`, `Bound`, `ExpiringSoon`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              conflicts:
+                description: 'Namespaces claimed by more than one policy. Each of them resolves to NOTHING: every approval and verification there is refused with `TrustPolicyConflict` rather than silently taking one policy''s answer.'
+                items:
+                  description: A namespace two policies both claim.
+                  properties:
+                    namespace:
+                      description: The contested namespace.
+                      type: string
+                    policies:
+                      description: Every policy claiming it.
+                      items:
+                        type: string
+                      maxItems: 16
+                      type: array
+                  required:
+                  - namespace
+                  - policies
+                  type: object
+                maxItems: 64
+                nullable: true
+                type: array
+              evaluatedAt:
+                description: When the verdicts were last computed. Debounced to at least 300 s, so a heartbeat does not become a write loop (erratum E11(d)).
+                format: date-time
+                nullable: true
+                type: string
+              keyCount:
+                description: How many keys the spec carries, for the printer column.
+                format: int64
+                nullable: true
+                type: integer
+              keys:
+                description: The per-key verdicts. `evaluatedAt` beside them is what lets a consumer tell "not evaluated" from "evaluated and valid" — the thing `TrustRoster.status.expiredKeyIds` could not say.
+                items:
+                  description: One key, as the controller evaluated it.
+                  properties:
+                    effectiveState:
+                      description: '`Active`, `NotYetValid`, `Expired`, `Retired`, `Revoked` or `Unparseable` — the spec state resolved against the clock and the PEM.'
+                      type: string
+                    keyId:
+                      description: Which key.
+                      type: string
+                    usableForNewSignatures:
+                      description: Whether this key may sign something NEW right now.
+                      nullable: true
+                      type: boolean
+                    usableForVerification:
+                      description: '`Full`, `Historical` or `None` — whether evidence this key signed still verifies, and on what basis. **`Historical` is not a downgrade of `Full`**: it is the honest answer for a key that was valid when it signed and has since been retired.'
+                      nullable: true
+                      type: string
+                  required:
+                  - effectiveState
+                  - keyId
+                  type: object
+                maxItems: 64
+                nullable: true
+                type: array
+              loaded:
+                description: Whether every key parsed.
+                nullable: true
+                type: boolean
+              observedGeneration:
+                description: The `metadata.generation` these verdicts were computed from.
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: TrustPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
 # Source: logweir/crds/trustrosters.yaml
 # GENERATED FILE — do not edit by hand.
 #
@@ -2933,7 +5832,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Cluster-scoped. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`), both carrying public key material, plus the cluster ids a restore may target. `spec` is immutable.
+        description: 'DEPRECATED in favour of `TrustPolicy` (ADR 0008 Amendment G), and still served and reconciled: a cluster with a roster keeps working, and with no TrustPolicy present the controller synthesises `legacy-roster-v1` from this object. What it cannot express is a key LIFECYCLE — retirement, revocation and a usage split — so a rotation here makes every archive the old key signed unverifiable, which is why the replacement exists. Cluster-scoped. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`), both carrying public key material, plus the cluster ids a restore may target. `spec` is immutable.'
         properties:
           spec:
             description: '`TrustRoster.spec`. **Cluster-scoped** — see the module header.'

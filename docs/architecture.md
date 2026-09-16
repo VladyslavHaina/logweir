@@ -259,6 +259,81 @@ The three names satisfy Amendment B: `BackupDestination` names a class of object
 particular cluster, fleet, topic, connector or backup. None contains `Kafka`, so
 `KafkaCluster` remains the only kind that does.
 
+## Amendment G — operational recovery kinds
+
+Accepted from 2026-09-16. Adds five kinds to Amendment A's list: `TrustPolicy`
+(cluster-scoped), `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog` and
+`RetentionPolicy` (namespaced). With Amendment F's three that makes fourteen.
+
+| Kind | Scope | Why it is a kind and not a field |
+|---|---|---|
+| `TrustPolicy` | Cluster | It replaces a cluster-scoped kind; a namespace tenant must not be able to name or edit the trust that authorises it. It cannot live on a namespaced object at all. |
+| `ProtectionPolicy` | Namespaced | The objective outlives any one schedule — schedules are immutable and are replaced by drain-and-retain — spans several of them, and is mutable policy, so it cannot go on a sealed `BackupSchedule` spec. |
+| `RehearsalSchedule` | Namespaced | It creates executions on a cron, owns concurrency and reservation state and a standing authorisation, and needs its own RBAC. Folding it into `ProtectionPolicy` would put execution authority into an object operators edit routinely. |
+| `RecoveryCatalog` | Namespaced | A destination is storage configuration and is nearly immutable; a catalog has a mutable sync trigger, its own bounded view, its own Jobs and its own failure modes, and must exist for archives that predate this installation. |
+| `RetentionPolicy` | Namespaced | Deletion authority must be authorisable separately from destination or schedule editing, and its approved-plan state is mutable. Putting it on a destination would make "who may configure storage" and "who may delete data" the same grant. |
+
+Names encode no cluster, fleet, topic, connector or backup (Amendment B).
+
+**No kind is removed.** `TrustRoster` stays served and reconciled and is marked
+deprecated in its CRD description and in `docs/kubernetes.md` §7 and §8: with no
+`TrustPolicy` present the controller synthesises `legacy-roster-v1` from
+`TrustRoster/default`, and deleting the CRD would delete the trust anchor of
+every archive in the cluster. The two reserved names are untouched.
+
+`TrustPolicy`'s spec is deliberately **mutable**, because a key has a lifecycle,
+and an object-level CEL rule makes every change one-way instead: keys are
+append-only with identical public material, `notAfter` may only be brought
+forward, `state` moves `Active → Retired` and `Active|Retired → Revoked` and
+never back, and the revocation instants are write-once. Public material is never
+removed, because old archives still need it.
+
+`Approval.spec.subjectRef.kind` gains `RehearsalSchedule`, additively, so one
+signed standing document can authorise every slot of one sealed schedule.
+`Restore.spec.approvalRef` becomes optional and `Restore.spec.authorization`
+joins it, with CEL requiring exactly one: an older controller reading a
+standing-authorised `Restore` sees no `approvalRef` and refuses terminally with
+`ApprovalNotReceived`, which is the required fail-closed rollback behaviour.
+
+## Amendment H — storage deletion boundary
+
+Global Constraint 6 ("Logweir writes only under `logweir/`, create-only") is
+extended with: *a separately linked, separately credentialed, optional retention
+worker may delete objects under an explicitly configured archive prefix, never
+under `logweir/`, only from an administrator-approved plan, and only with an
+attributable signed record.*
+
+`logweir-store` remains delete-free and the control plane remains delete-free.
+G-RET becomes a linkage gate as well as a source-text gate.
+
+Tag 1's statement "no Logweir component holds any delete capability against
+object storage" becomes **version-scoped**: it is true wherever
+`RetentionPolicy.mode != Enforce`, which includes every installation that has no
+`RetentionPolicy` at all and every one whose policies are `Report` (the schema
+default) or `ExternalLifecycle`. **No worker exists in this build**, so the
+statement is currently unqualified in fact; it stops being unqualified in
+principle the moment an `Enforce` policy can be acted on, and
+`docs/stability.md`, `docs/kubernetes.md` §9 and §15.1 and the chart README are
+updated together with the code that changes it.
+
+`ExternalLifecycle` is a **declaration and not an enforcement**: Logweir neither
+reads nor verifies a provider lifecycle rule, and `status.guarantees` records
+`ProviderEnforcedUnverified` rather than `LogweirEnforced`.
+
+## Amendment I — execution contract v2
+
+`logweir_core::execution_contract::VERSION` moves to `"2"`, carrying the
+recovery-point binding, the standing rehearsal authorisation and the new key
+lines. `v1` stays accepted for already-created `Restore`s under the documented
+transition in `docs/kubernetes.md` §12.
+
+**Not yet performed.** This amendment is recorded here ahead of the code, as
+Amendment A requires for a decision that changes a shipped contract; the version
+constant, the bundle shape and the runner's re-validation are the rehearsal and
+catalog workers'. Nothing in the CRD shapes depends on the bump: a `Restore`
+carrying `spec.authorization` is refused by a v1 runner because the bundle it
+needs is absent, which is the same fail-closed path as a missing approval.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

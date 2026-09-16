@@ -241,7 +241,12 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
         plan_hash: logweir_core::ids::sha256_prefixed(object.spec.plan_bytes.as_bytes()),
         plan_bytes_length: object.spec.plan_bytes.len(),
         plan_bytes: with_plan_bytes.then(|| object.spec.plan_bytes.clone()),
-        approval_ref: name_ref(&object.spec.approval_ref),
+        // A standing-authorised Restore names no per-run Approval; the DTO
+        // keeps the field required and carries the empty name, which is what
+        // every consumer of this view already treats as "no approval".
+        approval_ref: NameRef {
+            name: object.spec.approval_ref_name().to_string(),
+        },
         source_archive: archive_view(&object.spec.source_archive),
         backup_set_ref: object.spec.backup_set_ref.clone(),
         point_in_time: object.spec.point_in_time,

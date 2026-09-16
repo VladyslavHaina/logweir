@@ -1,0 +1,471 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rehearsalschedules.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: RehearsalSchedule
+    plural: rehearsalschedules
+    shortNames: []
+    singular: rehearsalschedule
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.schedule
+      name: SCHEDULE
+      type: string
+    - jsonPath: .spec.suspend
+      name: SUSPEND
+      type: boolean
+    - jsonPath: .spec.target.clusterRef.name
+      name: TARGET
+      type: string
+    - jsonPath: .status.lastSucceeded.at
+      name: LAST-OK
+      type: date
+    - jsonPath: .status.nextFireTime
+      name: NEXT
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Authorized")].status
+      name: AUTHORIZED
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A recurring recovery rehearsal (ADR 0008 Amendment G): on a cron, restore a qualifying recovery point into an isolated scratch target and score it. `spec.suspend` is the only mutable field, because the standing authorization binds a sha256 of this spec minus `suspend` — an editable template would authorize work nobody approved. The controller deletes no topic ever; teardown is the runner''s phase 9, inside a prefix guard.'
+        properties:
+          spec:
+            description: '`RehearsalSchedule.spec`.'
+            properties:
+              authorization:
+                description: The standing authorization.
+                properties:
+                  approvalPolicyRef:
+                    description: The approval policy (PLAT-19.2). Absent means the legacy governed policy.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  standingApprovalRef:
+                    description: The `Approval` carrying the signed standing scope. Its `spec.subjectRef.kind` is `RehearsalSchedule` and its `spec.planHash` is this spec's `templateDigest`.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - standingApprovalRef
+                type: object
+              bounds:
+                description: The bounds it runs inside.
+                properties:
+                  concurrencyPolicy:
+                    default: Forbid
+                    description: Whether two may run at once. `Forbid` in v1.
+                    enum:
+                    - Forbid
+                    type: string
+                  deadlineSeconds:
+                    default: 3600
+                    description: The Job's `activeDeadlineSeconds`.
+                    format: int32
+                    maximum: 21600
+                    minimum: 300
+                    type: integer
+                  maxPartitions:
+                    default: 200
+                    description: The partition ceiling, enforced when the catalog knows the count.
+                    format: int32
+                    maximum: 2000
+                    minimum: 1
+                    type: integer
+                  recordsPerPartition:
+                    default: 25
+                    description: How many records per partition the canary restores.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  runnerResources:
+                    description: The runner pod's resources, projected onto the `Restore` it creates.
+                    nullable: true
+                    properties:
+                      limits:
+                        description: Limits.
+                        nullable: true
+                        properties:
+                          cpu:
+                            description: CPU, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                          memory:
+                            description: Memory, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                        type: object
+                      requests:
+                        description: Requests.
+                        nullable: true
+                        properties:
+                          cpu:
+                            description: CPU, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                          memory:
+                            description: Memory, as a Kubernetes quantity.
+                            maxLength: 16
+                            nullable: true
+                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            type: string
+                        type: object
+                    type: object
+                  startingDeadlineSeconds:
+                    default: 3600
+                    description: How late a missed slot may still start.
+                    format: int32
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                type: object
+              objectives:
+                description: What a pass means.
+                nullable: true
+                properties:
+                  passRate:
+                    description: The share of sampled records that must match, `0.0`..`1.0`.
+                    format: double
+                    maximum: 1
+                    minimum: 0
+                    nullable: true
+                    type: number
+                  rtoSeconds:
+                    description: The recovery-time objective, in seconds.
+                    format: int64
+                    maximum: 86400
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                type: object
+              point:
+                description: Which point to rehearse.
+                properties:
+                  catalogRef:
+                    description: Candidates from this `RecoveryCatalog`.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  minAgeSeconds:
+                    default: 0
+                    description: How old a point must be before it qualifies — a guard against rehearsing a run that is still being written.
+                    format: int32
+                    maximum: 2592000
+                    minimum: 0
+                    type: integer
+                  requireVerifiedEvidence:
+                    default: true
+                    description: Whether the point's evidence must verify. `true` in v1 (I2).
+                    type: boolean
+                  scheduleRefs:
+                    description: Candidates from these schedules' `Backup`s.
+                    items:
+                      description: |-
+                        A reference to another Logweir object in the SAME namespace.
+
+                        Namespace-local by construction: there is no `namespace` field, because a cross-namespace reference is a privilege-escalation surface (the referrer's RBAC does not cover the referent's namespace) and Global Constraint 30 puts one controller in one cluster with no fleet.
+                      properties:
+                        name:
+                          description: The referenced object's `metadata.name`, in this namespace.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 16
+                    nullable: true
+                    type: array
+                  selection:
+                    default: NewestAvailable
+                    description: How to choose among them.
+                    enum:
+                    - NewestAvailable
+                    type: string
+                  topics:
+                    description: The topics to restore. Must be a subset of the chosen point's.
+                    items:
+                      pattern: ^[a-zA-Z0-9._-]{1,249}$
+                      type: string
+                    maxItems: 32
+                    nullable: true
+                    type: array
+                type: object
+                x-kubernetes-validations:
+                - message: spec.point names scheduleRefs, catalogRef or both; otherwise there are no candidate points
+                  rule: has(self.scheduleRefs) || has(self.catalogRef)
+              protectionPolicyRef:
+                description: The `ProtectionPolicy` whose health these results feed.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              schedule:
+                description: A five-field UTC cron expression, the same grammar `BackupSchedule` uses.
+                maxLength: 128
+                minLength: 1
+                type: string
+              suspend:
+                default: false
+                description: Stop firing new rehearsals. **The only mutable field.**
+                type: boolean
+              target:
+                description: Where to restore it.
+                properties:
+                  clusterRef:
+                    description: The `KafkaCluster` to restore into. Its observed cluster id must be in the bound `TrustPolicy`'s `allowedTargetClusterIds` — `spec.role` is a label an adopter picks and is never authority.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  markerTopic:
+                    description: The marker topic that proves this is a scratch cluster.
+                    pattern: ^[a-zA-Z0-9._-]{1,249}$
+                    type: string
+                  replicationFactor:
+                    default: 1
+                    description: The replication factor for the topics the rehearsal creates.
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
+                  topicPrefix:
+                    description: The topic-name prefix. Rendered as `<prefix><uid-first-8>-`, so it is unique per schedule object and inside the runner's deletion guard.
+                    maxLength: 40
+                    minLength: 11
+                    pattern: ^rehearsal-[a-z0-9-]*-$
+                    type: string
+                required:
+                - clusterRef
+                - markerTopic
+                - topicPrefix
+                type: object
+            required:
+            - authorization
+            - bounds
+            - point
+            - schedule
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: only spec.suspend is mutable; the standing authorization binds a digest of this spec, so an edit would authorize work nobody approved — create a new RehearsalSchedule and a new authorization
+              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.protectionPolicyRef) == has(oldSelf.protectionPolicyRef) && (!has(self.protectionPolicyRef) || self.protectionPolicyRef == oldSelf.protectionPolicyRef) && has(self.point) == has(oldSelf.point) && (!has(self.point) || self.point == oldSelf.point) && has(self.target) == has(oldSelf.target) && (!has(self.target) || self.target == oldSelf.target) && has(self.bounds) == has(oldSelf.bounds) && (!has(self.bounds) || self.bounds == oldSelf.bounds) && has(self.objectives) == has(oldSelf.objectives) && (!has(self.objectives) || self.objectives == oldSelf.objectives) && has(self.authorization) == has(oldSelf.authorization) && (!has(self.authorization) || self.authorization == oldSelf.authorization)
+            - message: spec.point.requireVerifiedEvidence must be true in v1
+              rule: self.point.requireVerifiedEvidence == true
+          status:
+            description: '`RehearsalSchedule.status`.'
+            nullable: true
+            properties:
+              activeRestoreRef:
+                description: The rehearsal running now.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              cleanup:
+                description: Topics a teardown left behind.
+                nullable: true
+                properties:
+                  pendingTopics:
+                    description: 'The names still present, read from the signed teardown attestation. While this is non-empty the next slot is SKIPPED: the controller deletes no topic, and a run that adopted them would be operating on data it did not create.'
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  since:
+                    description: Since when.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              conditions:
+                description: 'The condition set: `Ready`, `Authorized`, `RehearsalHealthy`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              lastFailed:
+                description: The last failure.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  reason:
+                    description: Why.
+                    nullable: true
+                    type: string
+                  restoreRef:
+                    description: The `Restore` it ran as.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              lastScheduledSlot:
+                description: The last slot admitted.
+                nullable: true
+                type: string
+              lastSkipped:
+                description: The last skip.
+                nullable: true
+                properties:
+                  reason:
+                    description: '`NoQualifyingPoint`, `TargetUnavailable`, `AuthorizationInvalid`, `AuthorizationExpired`, `ConcurrencyBlocked`, `TargetBusy`, `LeftoverTopics` or `PointRetentionInProgress`.'
+                    nullable: true
+                    type: string
+                  slot:
+                    description: The slot, `yyyymmdd-hhmmss` in UTC.
+                    nullable: true
+                    type: string
+                type: object
+              lastSucceeded:
+                description: The last pass.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  evidence:
+                    description: The evidence verdict for that run.
+                    nullable: true
+                    type: string
+                  pointId:
+                    description: Which point.
+                    nullable: true
+                    type: string
+                  restoreRef:
+                    description: The `Restore` it ran as.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rtoSeconds:
+                    description: The measured recovery time.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              nextFireTime:
+                description: When the next one is due.
+                format: date-time
+                nullable: true
+                type: string
+              observedGeneration:
+                description: The `metadata.generation` this status was computed from.
+                format: int64
+                nullable: true
+                type: integer
+              pendingRestoreRef:
+                description: A slot admitted in status whose `Restore` creation is not yet confirmed — the reservation half of the PLAT-04.1 protocol.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              templateDigest:
+                description: The digest the standing authorization is checked against, recomputed every slot from this object's own sealed spec.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: RehearsalSchedule
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

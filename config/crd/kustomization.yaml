@@ -21,6 +21,11 @@ resources:
   - backupschedules.yaml
   - kafkaclusters.yaml
   - preflights.yaml
+  - protectionpolicies.yaml
+  - recoverycatalogs.yaml
+  - rehearsalschedules.yaml
   - restores.yaml
+  - retentionpolicies.yaml
   - topicdiscoveries.yaml
+  - trustpolicies.yaml
   - trustrosters.yaml

@@ -342,8 +342,13 @@ fn chart_lint_crds_are_byte_identical_copies() {
     // `weirkeeper::crds::KINDS` to derive it — `logweir` declares no edge to
     // `weirkeeper` and adding one to satisfy a test would change the
     // dependency graph the one-signer and pure-core gates police. ADR 0008
-    // records nine kinds: Amendment A's six plus Amendment F's three.
-    assert_eq!(9, source.len(), "config/crd holds nine CRDs: {source:?}");
+    // records fourteen kinds: Amendment A's six, Amendment F's three and
+    // Amendment G's five.
+    assert_eq!(
+        14,
+        source.len(),
+        "config/crd holds fourteen CRDs: {source:?}"
+    );
     assert_eq!(
         source, copy,
         "charts/logweir/crds must hold exactly the files config/crd holds"
@@ -614,7 +619,7 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         names_of(&chart, "CustomResourceDefinition"),
         "the CRD names differ"
     );
-    assert_eq!(9, names_of(&chart, "CustomResourceDefinition").len());
+    assert_eq!(14, names_of(&chart, "CustomResourceDefinition").len());
     for name in names_of(&chart, "CustomResourceDefinition") {
         assert_eq!(
             find(&install, "CustomResourceDefinition", &name).value["spec"],

@@ -1,0 +1,620 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: protectionpolicies.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: ProtectionPolicy
+    plural: protectionpolicies
+    shortNames: []
+    singular: protectionpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.protects.sourceRef.name
+      name: SOURCE
+      type: string
+    - jsonPath: .status.health
+      name: HEALTH
+      type: string
+    - jsonPath: .status.lastAvailablePoint.ageSeconds
+      name: POINT-AGE
+      type: integer
+    - description: KubernetesStatus, Catalog or CatalogStale
+      jsonPath: .status.availabilityBasis
+      name: BASIS
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'The recovery objective a set of schedules is meant to meet, and who hears about it when they do not (ADR 0008 Amendment G). The spec is MUTABLE and carries no CEL seal: it is evaluation policy, never an execution input, so editing it changes what Logweir says about results and never the results themselves. Notification channels are secretKeyRef references; no credential value appears here.'
+        properties:
+          spec:
+            description: '`ProtectionPolicy.spec`.'
+            properties:
+              evaluationIntervalSeconds:
+                default: 300
+                description: How often to evaluate.
+                format: int32
+                maximum: 3600
+                minimum: 60
+                type: integer
+              notifications:
+                description: Where alerts go. Absent means the verdict is reported in status and in the console and delivered nowhere — which is a real choice, not a broken configuration.
+                nullable: true
+                properties:
+                  kinds:
+                    description: Which alerts to send. Absent means all of them.
+                    items:
+                      description: What an alert is about.
+                      enum:
+                      - BackupFailure
+                      - Staleness
+                      - ArchiveUnavailable
+                      - RehearsalFailure
+                      - RecoveryCompleted
+                      type: string
+                    maxItems: 5
+                    nullable: true
+                    type: array
+                  renotifyAfterSeconds:
+                    default: 86400
+                    description: How long before an open alert is re-sent. `0` disables re-notify.
+                    format: int32
+                    maximum: 604800
+                    minimum: 0
+                    type: integer
+                  routes:
+                    description: The routes.
+                    items:
+                      description: One destination for alerts.
+                      properties:
+                        name:
+                          description: What to call it in status and in logs.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        pagerDuty:
+                          description: PagerDuty.
+                          nullable: true
+                          properties:
+                            endpoint:
+                              description: The Events endpoint, when it is not the global one.
+                              maxLength: 2048
+                              nullable: true
+                              type: string
+                            routingKeySecretRef:
+                              description: The routing key, by reference.
+                              properties:
+                                key:
+                                  description: The data key.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                name:
+                                  description: The Secret name, in this namespace.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          required:
+                          - routingKeySecretRef
+                          type: object
+                        slack:
+                          description: Slack.
+                          nullable: true
+                          properties:
+                            webhookUrlSecretRef:
+                              description: The webhook URL, by reference.
+                              properties:
+                                key:
+                                  description: The data key.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                name:
+                                  description: The Secret name, in this namespace.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          required:
+                          - webhookUrlSecretRef
+                          type: object
+                        webhook:
+                          description: A webhook.
+                          nullable: true
+                          properties:
+                            urlSecretRef:
+                              description: The URL, by reference.
+                              properties:
+                                key:
+                                  description: The data key.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                name:
+                                  description: The Secret name, in this namespace.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          required:
+                          - urlSecretRef
+                          type: object
+                      required:
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: a notification route names at least one of pagerDuty, webhook or slack
+                        rule: has(self.pagerDuty) || has(self.webhook) || has(self.slack)
+                    maxItems: 4
+                    nullable: true
+                    type: array
+                  sendResolved:
+                    default: true
+                    description: Whether a resolution is delivered too.
+                    type: boolean
+                type: object
+              objectives:
+                description: What "protected" means.
+                properties:
+                  maxConsecutiveFailedRuns:
+                    default: 1
+                    description: How many consecutive failed runs are tolerated before the objective is at risk.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  maxRecoveryPointAgeSeconds:
+                    description: 'How old the newest recovery point may be. Measured from CAPTURE START, not from when a run finished: a four-hour backup that started at 02:00 protects you to 02:00, and dating it 06:00 would overstate the protection by the length of the run.'
+                    format: int32
+                    maximum: 31536000
+                    minimum: 300
+                    type: integer
+                  maxRehearsalAgeSeconds:
+                    description: How old the newest successful rehearsal may be (PLAT-14.3).
+                    format: int32
+                    maximum: 31536000
+                    minimum: 3600
+                    nullable: true
+                    type: integer
+                  requireCatalogAvailability:
+                    default: true
+                    description: Whether the catalog must say the point is still in storage.
+                    type: boolean
+                  requireVerifiedEvidence:
+                    default: true
+                    description: Whether a point with unverified evidence counts as protection. Default `true`, and the default is the safe direction.
+                    type: boolean
+                required:
+                - maxRecoveryPointAgeSeconds
+                type: object
+              protects:
+                description: What this policy is about.
+                properties:
+                  catalogRef:
+                    description: The `RecoveryCatalog` that answers "is the point still there?". Absent means availability is judged from Kubernetes status alone, and `status.availabilityBasis` says so.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  destinationRef:
+                    description: The saved destination the points live in.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  legacyArchive:
+                    description: An inline archive, for an installation with no saved destinations.
+                    nullable: true
+                    properties:
+                      secretRef:
+                        description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`, in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      url:
+                        description: The object-store URL of the archive root.
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  scheduleRefs:
+                    description: The schedules whose runs count towards this objective.
+                    items:
+                      description: |-
+                        A reference to another Logweir object in the SAME namespace.
+
+                        Namespace-local by construction: there is no `namespace` field, because a cross-namespace reference is a privilege-escalation surface (the referrer's RBAC does not cover the referent's namespace) and Global Constraint 30 puts one controller in one cluster with no fleet.
+                      properties:
+                        name:
+                          description: The referenced object's `metadata.name`, in this namespace.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 16
+                    nullable: true
+                    type: array
+                  sourceRef:
+                    description: The `KafkaCluster` whose data this is about.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  topics:
+                    description: The topics. Absent means "the topics of the newest matching point", which is the honest reading when a schedule selects dynamically.
+                    items:
+                      pattern: ^[a-zA-Z0-9._-]{1,249}$
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                required:
+                - sourceRef
+                type: object
+                x-kubernetes-validations:
+                - message: spec.protects sets exactly one of destinationRef or legacyArchive
+                  rule: has(self.destinationRef) != has(self.legacyArchive)
+            required:
+            - objectives
+            - protects
+            type: object
+          status:
+            description: '`ProtectionPolicy.status`.'
+            nullable: true
+            properties:
+              alerts:
+                description: The deduplication ledger.
+                items:
+                  description: |-
+                    One entry of the deduplication ledger.
+
+                    A LEDGER AND NOT A LOG. `transition` increments on open, on resolve and on each re-notify; `notifiedTransition` records the last one a delivery Job was created for. The pair is what makes delivery exactly-once-per-transition across controller restarts, instead of "once per reconcile", which is how an alerting integration gets muted by its own operator.
+                  properties:
+                    delivery:
+                      description: How that delivery went.
+                      nullable: true
+                      properties:
+                        attempts:
+                          description: How many times delivery was attempted.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        jobRef:
+                          description: The delivery Job.
+                          nullable: true
+                          properties:
+                            name:
+                              description: The referenced object's `metadata.name`, in this namespace.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        lastAttemptAt:
+                          description: When it was last attempted.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        lastError:
+                          description: The last error, redacted and bounded. Never a routing key, never a URL.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        state:
+                          description: '`Pending`, `Delivered`, `Failed` or `Suppressed`.'
+                          nullable: true
+                          type: string
+                      type: object
+                    key:
+                      description: The dedup key — `logweir-protection-<policyUID>-<kind>`.
+                      type: string
+                    kind:
+                      description: What it is about.
+                      enum:
+                      - BackupFailure
+                      - Staleness
+                      - ArchiveUnavailable
+                      - RehearsalFailure
+                      - RecoveryCompleted
+                      type: string
+                    notifiedTransition:
+                      description: The last transition a delivery Job was created for.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    openedAt:
+                      description: When it opened.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    resolvedAt:
+                      description: When it resolved.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    state:
+                      description: '`Open` or `Resolved`.'
+                      type: string
+                    transition:
+                      description: The transition counter.
+                      format: int64
+                      nullable: true
+                      type: integer
+                  required:
+                  - key
+                  - kind
+                  - state
+                  type: object
+                maxItems: 16
+                nullable: true
+                type: array
+              availabilityBasis:
+                description: How availability was decided — `KubernetesStatus`, `Catalog` or `CatalogStale`. Printed, because "the point exists" and "a `Backup` object says it succeeded" are different claims.
+                nullable: true
+                type: string
+              conditions:
+                description: 'The condition set: `Ready`, `Protected`, `NotificationsDelivered`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              consecutiveFailedRuns:
+                description: How many runs have failed in a row.
+                format: int64
+                nullable: true
+                type: integer
+              evaluatedAt:
+                description: When. Rewritten only on change, or when older than half the interval.
+                format: date-time
+                nullable: true
+                type: string
+              health:
+                description: '`Healthy`, `AtRisk`, `Stale`, `Unprotected` or `Unknown`. **`Unknown` is a real answer** and never rendered as healthy.'
+                nullable: true
+                type: string
+              lastAttempt:
+                description: The most recent run.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  backupRef:
+                    description: The `Backup`.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  phase:
+                    description: Its phase.
+                    nullable: true
+                    type: string
+                  reason:
+                    description: Its reason.
+                    nullable: true
+                    type: string
+                type: object
+              lastAvailablePoint:
+                description: The newest point that can actually be recovered from.
+                nullable: true
+                properties:
+                  ageSeconds:
+                    description: How old the point was at `evaluatedAt`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  backupRef:
+                    description: The `Backup` object, while one still exists.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  evidence:
+                    description: '`Valid`, `ValidHistorical`, `Untrusted` or `NotAttempted`.'
+                    nullable: true
+                    type: string
+                  newestRecordAt:
+                    description: The newest record the point contains, labelled separately so nobody confuses the two.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  pointId:
+                    description: The durable point identity, when the catalog supplied one.
+                    nullable: true
+                    type: string
+                  recoveryPointAt:
+                    description: '*Capture start** — what the objective is measured from.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  topics:
+                    description: The topics it covers, bounded.
+                    items:
+                      type: string
+                    maxItems: 64
+                    nullable: true
+                    type: array
+                  topicsTruncated:
+                    description: Whether `topics` was cut short.
+                    nullable: true
+                    type: boolean
+                type: object
+              missed:
+                description: Missed-slot facts.
+                nullable: true
+                properties:
+                  lastMissedSlot:
+                    description: The last slot that did not run.
+                    nullable: true
+                    type: string
+                  sinceLastFire:
+                    description: Seconds since the last successful fire.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              observedGeneration:
+                description: The `metadata.generation` this verdict was computed from.
+                format: int64
+                nullable: true
+                type: integer
+              rehearsal:
+                description: The rehearsal side.
+                nullable: true
+                properties:
+                  lastFailedAt:
+                    description: When one last failed.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  lastReason:
+                    description: Why.
+                    nullable: true
+                    type: string
+                  lastRestoreRef:
+                    description: The `Restore` it ran as.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  lastSucceededAt:
+                    description: When a rehearsal last passed.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              schedules:
+                description: The schedules, as this policy sees them.
+                items:
+                  description: What a schedule looks like from here.
+                  properties:
+                    lastMissedSlot:
+                      description: The last slot it missed.
+                      nullable: true
+                      type: string
+                    name:
+                      description: The schedule's name.
+                      type: string
+                    nextFireTime:
+                      description: When it fires next.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    ready:
+                      description: Its `Ready` status.
+                      nullable: true
+                      type: string
+                    suspended:
+                      description: Whether it is suspended — the commonest cause of staleness, and the one nobody thinks of.
+                      nullable: true
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                maxItems: 16
+                nullable: true
+                type: array
+              staleSince:
+                description: Since when the objective has been missed.
+                format: date-time
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: ProtectionPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

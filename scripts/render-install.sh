@@ -51,7 +51,7 @@ header() {
 #     kubectl --context docker-desktop apply --server-side -f logweir.yaml
 #
 # It is safe to run twice; that is X-APPLY, spec §16 clause 1. It contains the
-# Namespace, the nine CustomResourceDefinitions, the RBAC and the controller
+# Namespace, the fourteen CustomResourceDefinitions, the RBAC and the controller
 # Deployment, and NO custom resource — so the CRD-not-yet-established ordering
 # failure cannot occur. Samples are separate files, applied second:
 # `config/samples/`. Minimum Kubernetes: 1.29.

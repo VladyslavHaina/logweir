@@ -150,8 +150,23 @@ spec:
                 description: The archive's backup id, derived from this object's UID and `spec.slot`.
                 nullable: true
                 type: string
+              capture:
+                description: When the capture itself started and finished, copied VERBATIM from the verified receipt.
+                nullable: true
+                properties:
+                  finishedAt:
+                    description: '`BackupReceipt.finished_at`, copied from the verified receipt.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  startedAt:
+                    description: '`BackupReceipt.started_at`, copied from the verified receipt.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
               conditions:
-                description: The condition set. Spec §8's green badge for a `Backup` needs `evidence.verification.result == Valid` **and** `exitCode == 0` — a `Backup` carries no `outcome`, so the badge rule here is not the `Restore` rule.
+                description: 'The condition set. Spec §8''s green badge for a `Backup` needs `evidence.verification.result == Valid` **and** `exitCode == 0` — a `Backup` carries no `outcome`, so the badge rule here is not the `Restore` rule. `RunnerReady` joins `Verified` as a condition every terminal builder carries forward: a JSON merge patch REPLACES `status.conditions`, so a builder that emits one and not the other deletes the one it left out.'
                 items:
                   description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
                   properties:
@@ -227,6 +242,48 @@ spec:
                         description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
                         nullable: true
                         type: string
+                      signedAt:
+                        description: |-
+                          The signing time the verdict was reached AGAINST: the document's own latest pre-signature timestamp (`logweir_core::trust::claimed_signing_time`).
+
+                          **ATTACKER-CONTROLLED FOR A COMPROMISED KEY**, which is why it is recorded rather than trusted. For a retired or expired key it is what distinguishes "signed while valid" from "signed afterwards"; for a key revoked as `KeyCompromise` it is deliberately NOT accepted as evidence of when the document was signed, and only a controller-written observation ([`EvidenceVerification::verified_at`] from an earlier reconcile) counts.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      trust:
+                        description: Which trust policy said so, and on what basis.
+                        nullable: true
+                        properties:
+                          basis:
+                            description: |-
+                              `Current`, `Historical`, `RecordedBeforeRevocation` or `None`.
+
+                              **`Historical` is a pass, not a downgrade**: the key was valid when it signed and has since been retired, which is what key rotation is supposed to look like. The console renders it as "verified against retired key `<id>` (signed before retirement)" and never as a warning.
+                            nullable: true
+                            type: string
+                          keyState:
+                            description: '`Active`, `Retired`, `Expired`, `Revoked` or `Unknown` — the signing key''s state at the moment the verdict was reached.'
+                            nullable: true
+                            type: string
+                          policy:
+                            description: Which `TrustPolicy` answered, with the revision that answered.
+                            nullable: true
+                            properties:
+                              generation:
+                                description: Its `metadata.generation`. A generation change is what makes the controller re-run the verdict over STORED fields, with no storage read and no change to `phase`, `exitCode` or `outcome`.
+                                format: int64
+                                nullable: true
+                                type: integer
+                              name:
+                                description: Its name.
+                                nullable: true
+                                type: string
+                              uid:
+                                description: Its UID — a same-named replacement is a different policy.
+                                nullable: true
+                                type: string
+                            type: object
+                        type: object
                       verifiedAt:
                         description: |-
                           When the controller performed the verification.
@@ -295,6 +352,141 @@ spec:
                 description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it.'
                 nullable: true
                 type: string
+              progress:
+                description: What this run is doing right now, and why it is taking as long as it is. **Absent on a `Backup` an older controller reconciled**, which is the documented absent-field behaviour and not a degraded state.
+                nullable: true
+                properties:
+                  diagnostics:
+                    description: What went wrong on the way, newest `lastSeen` first.
+                    items:
+                      description: One thing that went wrong, with a count rather than a repetition.
+                      properties:
+                        code:
+                          description: A CamelCase code from the closed vocabulary.
+                          type: string
+                        count:
+                          description: How many times — capped, because a status is not a counter store and an unbounded integer here is an unbounded write rate.
+                          format: int64
+                          maximum: 1000000
+                          minimum: 1
+                          nullable: true
+                          type: integer
+                        firstSeen:
+                          description: When it was first seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        lastSeen:
+                          description: When it was last seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        message:
+                          description: A sanitized, bounded explanation.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        object:
+                          description: The object it is about.
+                          nullable: true
+                          properties:
+                            kind:
+                              description: '`Pod` or `Job`.'
+                              type: string
+                            name:
+                              description: Its name.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        severity:
+                          description: '`Warning` or `Error`.'
+                          type: string
+                      required:
+                      - code
+                      - severity
+                      type: object
+                    maxItems: 8
+                    nullable: true
+                    type: array
+                  lastObservedTime:
+                    description: When the run was last observed, in active stages only, rewritten at most once every 60 s for the same reason.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  lastTransitionTime:
+                    description: 'When `stage` or `reason` last CHANGED. Not a heartbeat: a reconciler''s own status patch is what wakes it (erratum E11(d)), so a field carrying a fresh clock read on every pass would make every pass a write.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  message:
+                    description: A sanitized, bounded explanation.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  reason:
+                    description: A CamelCase reason, from the same closed vocabulary the `RunnerReady` condition uses.
+                    nullable: true
+                    type: string
+                  runner:
+                    description: Facts about the one runner pod.
+                    nullable: true
+                    properties:
+                      containerState:
+                        description: '`Waiting`, `Running` or `Terminated`, for the `runner` container.'
+                        nullable: true
+                        type: string
+                      jobName:
+                        description: The Job.
+                        nullable: true
+                        type: string
+                      podName:
+                        description: The pod.
+                        nullable: true
+                        type: string
+                      podPhase:
+                        description: '`Pending`, `Running`, `Succeeded`, `Failed` or `Unknown`.'
+                        nullable: true
+                        type: string
+                      scheduled:
+                        description: Whether a node has been chosen. `false` with no diagnostic is the "nothing is wrong yet, it is just queued" case.
+                        nullable: true
+                        type: boolean
+                      startedAt:
+                        description: When the runner container started.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      waitingReason:
+                        description: The kubelet's own waiting reason, verbatim and bounded — `ImagePullBackOff`, `CreateContainerConfigError`. Verbatim because a translated kubelet reason is a reason nobody can search for.
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    type: object
+                  runnerPhase:
+                    description: The runner's own phase, when it reported one.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The phase or step name, from the runner's own closed list.
+                        maxLength: 32
+                        nullable: true
+                        type: string
+                      number:
+                        description: The phase number, `-1`..`9`. A backup reports `-1` with a step name, because it has steps and not the drill's numbered phases.
+                        format: int32
+                        maximum: 9
+                        minimum: -1
+                        nullable: true
+                        type: integer
+                    type: object
+                  stage:
+                    description: '`Admission`, `Queued`, `Preparing`, `Running`, `Verifying` or `Finished`.'
+                    type: string
+                required:
+                - stage
+                type: object
               records:
                 description: How many records the run archived.
                 format: int64

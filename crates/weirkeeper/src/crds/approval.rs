@@ -13,11 +13,21 @@ use super::Condition;
 
 /// What an `Approval` can be about.
 ///
-/// EXACTLY TWO VALUES. `Switchover` is tag 2 and is **not** in this enum, so
-/// an `Approval` cannot name one: the subject kind is part of the bytes the
-/// approval binds, and without that an approved restore in a namespace would
-/// double as "a valid signature by a rostered key exists here", which any
-/// approved restore already produced.
+/// `Switchover` is tag 2 and is **not** in this enum, so an `Approval` cannot
+/// name one: the subject kind is part of the bytes the approval binds, and
+/// without that an approved restore in a namespace would double as "a valid
+/// signature by a rostered key exists here", which any approved restore
+/// already produced.
+///
+/// THE THIRD VALUE IS ADDITIVE AND NARROW. `RehearsalSchedule` (ADR 0008
+/// Amendment G) is what carries a STANDING authorization: one signed document
+/// whose `planHash` is a digest of a sealed `RehearsalSchedule.spec`, checked
+/// again every slot. It is a different referent for the same rule, not a new
+/// rule — the approval controller's checks 7 and 8 become "the recomputed
+/// subject digest" and "the signed subject kind" — and it exists because a
+/// rehearsal that needed a human every week is a rehearsal nobody runs, while
+/// a controller that could mint its own authorization would be the bypass
+/// PLAT-19.2 exists to prevent.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 pub enum SubjectKind {
     /// A `Restore` — including a drill, which is a `Restore` with
@@ -25,6 +35,8 @@ pub enum SubjectKind {
     Restore,
     /// A `Backup`.
     Backup,
+    /// A `RehearsalSchedule`, carrying a standing rehearsal authorization.
+    RehearsalSchedule,
 }
 
 impl SubjectKind {
@@ -40,15 +52,17 @@ impl SubjectKind {
     /// checks earlier, reported as a bad signature. Comparing strings keeps
     /// that case where it belongs: `SubjectKindMismatch`, naming both sides.
     ///
-    /// These two spellings are the serde spellings of the two variants — the
-    /// enum takes no `rename_all`, so `Restore` and `Backup` are what the wire
-    /// carries — and `the_subject_kind_strings_are_the_wire_spellings` asserts
-    /// that by round-tripping each through `serde_json`.
+    /// These spellings are the serde spellings of the variants — the enum
+    /// takes no `rename_all`, so `Restore`, `Backup` and `RehearsalSchedule`
+    /// are what the wire carries — and
+    /// `the_subject_kind_strings_are_the_wire_spellings` asserts that by
+    /// round-tripping each through `serde_json`.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Restore => "Restore",
             Self::Backup => "Backup",
+            Self::RehearsalSchedule => "RehearsalSchedule",
         }
     }
 }

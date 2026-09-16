@@ -161,12 +161,12 @@ Approval is a DSSE signature checked against rostered public keys, not a
 an HTTP metrics endpoint are not implemented. See [stability.md](stability.md)
 for the full limitations and deferred features.
 
-## 7. The control plane: nine kinds on `logweir.dev/v1alpha1`
+## 7. The control plane: fourteen kinds on `logweir.dev/v1alpha1`
 
 **Minimum Kubernetes: 1.29.** That floor is not about the client library — it
 is about **CEL validation rules** (`x-kubernetes-validations`), which reached GA
-in 1.29 and are how every one of the nine CRDs below seals the parts of its
-`.spec` that may not change. On an older API server the rules are dropped rather than rejected,
+in 1.29 and are how the CRDs below seal the parts of their `.spec` that may not
+change. On an older API server the rules are dropped rather than rejected,
 and a dropped immutability rule is worse than no rule: the object would accept
 an edit after approval and nothing would say so.
 
@@ -181,13 +181,33 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | `Backup` | Namespaced | One archive run, as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets `AlreadyExists` rather than a second partial archive. |
 | `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
 | `Approval` | Namespaced | A DSSE-signed authorisation for one `Restore` or `Backup`. **Four required spec fields**; `approvalBytes` and `sidecarBytes` are the UTF-8 document text, verbatim, never base64. |
-| `TrustRoster` | **Cluster** | The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`) — **both carrying public key material** — plus `allowedClusterIds`. Cluster-scoped so a namespace tenant cannot widen its own allowlist. |
+| `TrustRoster` | **Cluster** | **DEPRECATED** in favour of `TrustPolicy`, and still served and reconciled. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`) — **both carrying public key material** — plus `allowedClusterIds`. Cluster-scoped so a namespace tenant cannot widen its own allowlist. With no `TrustPolicy` in the cluster the controller synthesises `legacy-roster-v1` from `TrustRoster/default`, so nothing has to be migrated on upgrade. |
 | `BackupDestination` | Namespaced | Where archives live, saved once and referenced by name (ADR 0008 Amendment F). `spec.storage` and `spec.transport.security` are **immutable**; the description, the CA `ConfigMap` reference and all four credential references are mutable, so rotation needs no new object. It holds **no credential value** — only Secret and `ConfigMap` names and key names. |
 | `TopicDiscovery` | Namespaced | One bounded observation of the topics a saved connection can see, run as an isolated Job with no Kubernetes token. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. The result is **advisory**. |
 | `Preflight` | Namespaced | One bounded readiness observation for a `Backup`, a `Restore` or a destination's grants, run the same way. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. A `ready` verdict **authorises nothing**: every execution-time guard still runs. |
+| `TrustPolicy` | **Cluster** | The keys that may authorise and the keys that may attest, with an explicit **lifecycle** (ADR 0008 Amendment G). The policy names the namespaces it governs; a namespace never names its own trust, and one claimed by two policies resolves to **nothing**. The spec is mutable and every change is one-way: keys are append-only with identical public material, `notAfter` only shortens, `state` moves `Active → Retired → Revoked` and never back, and the revocation instants are write-once. |
+| `ProtectionPolicy` | Namespaced | The recovery objective a set of schedules is meant to meet, and who hears about it when they do not. **The one kind with no CEL seal**: it is evaluation policy, never an execution input, so editing it changes what Logweir *says* about results and never the results. Notification channels are `secretKeyRef` references; no credential value appears in the spec. |
+| `RehearsalSchedule` | Namespaced | A recurring recovery rehearsal on a cron. `spec.suspend` is the only mutable field, because the standing authorisation binds a sha256 of this spec minus `suspend` — an editable template would authorise work nobody approved. The controller deletes no topic; teardown is the runner's phase 9 inside a prefix guard. |
+| `RecoveryCatalog` | Namespaced | The durable list of recovery points in one destination, read from object storage by a short-lived check Job. `spec.syncRequest` is the only mutable field. The Kubernetes view is a bounded newest-first window in immutable `ConfigMap` pages owned by the sync Job; it expires with that Job's TTL and reports `Stale` then `ViewExpired` rather than an empty archive. **Adds no `delete` permission anywhere.** |
+| `RetentionPolicy` | Namespaced | What may be removed from one destination, and under whose authority. `spec.destinationRef`, `spec.catalogRef` and `spec.scope` are immutable, because an approved deletion plan names point ids. `mode: Report` is the **default and deletes nothing**; see §9. |
 
 `Switchover` is tag 2 and ships in none of the above, not even as a value of
 `Approval.spec.subjectRef.kind`. `MetadataSnapshot` is reserved and unbuilt.
+
+**Absent-field behaviour for the D3 additions.** `Backup.status.progress`,
+`Backup.status.capture`, `Restore.status.progress`, `Restore.status.completion`,
+`Restore.status.teardown` and the `signedAt` / `trust` fields inside
+`status.evidence.verification` are all optional and are ABSENT on every object
+an older controller reconciled — that is the documented behaviour, not a
+degraded state, and a console reads their absence as "not observed" rather than
+as a failure. `Restore.spec.approvalRef` became optional and
+`Restore.spec.authorization` joined it, with CEL requiring **exactly one**: an
+existing `Restore` names an `approvalRef` and is unaffected, and an older
+controller reading a standing-authorised one refuses terminally with
+`ApprovalNotReceived`. `Approval.spec.subjectRef.kind` gained
+`RehearsalSchedule`; no existing spelling changed. A build that does not yet
+carry the rehearsal controller refuses such an `Approval` visibly with
+`ReferentHasNoPlanBytes` rather than verifying it against bytes nobody hashed.
 
 **Absent-field behaviour for the additive fields.** `Backup.spec.destinationRef`,
 `BackupSchedule.spec.destinationRef`, `Restore.spec.sourceDestinationRef` and
@@ -234,6 +254,14 @@ declared transport, and a `caBundle` requires `TLS`. **`spec.storage.addressing`
 never appears in any of them, in either direction** — path-style versus
 virtual-hosted addressing is not a transport choice, and `InsecureHTTP` is the
 only thing that permits plaintext.
+
+`RehearsalSchedule` carries a `suspend`-only seal of its own, plus one
+validation rule (`point.requireVerifiedEvidence` must be `true` in v1).
+`RecoveryCatalog` seals everything but `spec.syncRequest`. `RetentionPolicy`
+seals `destinationRef`, `catalogRef` and `scope` and ties `mode` to its block.
+`TrustPolicy` is not sealed at all — see its row above for the four rules that
+make it monotonic instead. `ProtectionPolicy` carries no `.spec` rule, and that
+is the decision rather than an omission.
 
 `TopicDiscovery` and `Preflight` seal a REQUIRED sub-object, `spec.request`,
 rather than the whole `.spec`. That works for the same reason the schedule's
@@ -594,6 +622,31 @@ unwritable is the type — `Store` exposes no delete method and its inner
 object-store handle is private — together with Global Constraint 38, which
 closes the graph. The adopter's own bucket lifecycle policy does the deleting.
 Retention never touches a Kafka topic, in any tag.
+
+#### The version-scoped form of that claim (ADR 0008 Amendment H)
+
+Amendment H extends Global Constraint 6 with one narrow exception: *a
+separately linked, separately credentialed, optional retention worker may
+delete objects under an explicitly configured archive prefix, never under
+`logweir/`, only from an administrator-approved plan, and only with an
+attributable signed record.* The sentence above therefore becomes
+version-scoped: it holds wherever `RetentionPolicy.mode != Enforce`.
+
+**In this build it holds unqualified**, because the worker does not exist yet.
+`RetentionPolicy` ships as a shape: `mode` defaults to `Report`, which
+evaluates and reports exactly as `spec.retention` does, and
+`status.enforcement` reads `RecommendationOnly`. `ExternalLifecycle` is a
+DECLARATION — it records that a bucket lifecycle rule exists so a console can
+stop claiming retention is unenforced, and `status.guarantees` marks it
+`ProviderEnforcedUnverified`, because Logweir does not read the provider's rule
+and will not claim it is in force. `logweir-store` stays delete-free and the
+control plane stays delete-free in every mode.
+
+The CRD's own rails, at admission rather than at 04:17 in a Job log:
+`spec.scope.prefix` may never be empty and may never name `logweir/`, the three
+fields that decide *where* deletion could happen are immutable, and `mode` and
+its block travel together in both directions — a delete-capable credential
+configured under a mode that never deletes is a credential mounted for nothing.
 
 The rendered commands are **shell-quoted**. A backup id, bucket or prefix is
 whatever the archive's own keys say it is, and an S3 key may legally contain a

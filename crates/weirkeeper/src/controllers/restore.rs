@@ -569,10 +569,10 @@ pub fn admit(
     cluster: Option<&KafkaCluster>,
 ) -> RestoreAdmission {
     // ---- 1. the ref must name something ---------------------------------
-    let referent = restore.spec.approval_ref.name.trim().to_string();
+    let referent = restore.spec.approval_ref_name().trim().to_string();
     if referent.is_empty() {
         return RestoreAdmission::ApprovalNotReceived {
-            approval: restore.spec.approval_ref.name.clone(),
+            approval: restore.spec.approval_ref_name().to_string(),
         };
     }
 
@@ -1111,7 +1111,7 @@ pub fn approver_key_ids(roster: Option<&TrustRoster>) -> Vec<String> {
 /// would say nothing the kind does not already say.
 #[must_use]
 pub fn triggered_by(restore: &Restore) -> String {
-    let referent = restore.spec.approval_ref.name.trim();
+    let referent = restore.spec.approval_ref_name().trim();
     if referent.is_empty() {
         // Unreachable through `reconcile_restore` — `admit` refuses an empty
         // ref terminally before any argv is built — and named rather than
@@ -2324,7 +2324,7 @@ async fn get_approval(
     client: &kube::Client,
     namespace: &str,
 ) -> Result<Option<Approval>, RestoreError> {
-    let referent = restore.spec.approval_ref.name.trim().to_string();
+    let referent = restore.spec.approval_ref_name().trim().to_string();
     if referent.is_empty() {
         return Ok(None);
     }

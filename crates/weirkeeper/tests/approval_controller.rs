@@ -185,6 +185,7 @@ fn approval_object(approval_bytes: &str, sidecar_bytes: &str, kind: SubjectKind)
                 name: match kind {
                     SubjectKind::Restore => "r1".to_string(),
                     SubjectKind::Backup => "b1".to_string(),
+                    SubjectKind::RehearsalSchedule => "rs1".to_string(),
                 },
             },
             plan_hash: PLAN_HASH.to_string(),
@@ -353,7 +354,11 @@ fn the_missing_roster_message_names_the_roster() {
 /// `SubjectKind::as_str` returns the wire spellings, not a second vocabulary.
 #[test]
 fn the_subject_kind_strings_are_the_wire_spellings() {
-    for kind in [SubjectKind::Restore, SubjectKind::Backup] {
+    for kind in [
+        SubjectKind::Restore,
+        SubjectKind::Backup,
+        SubjectKind::RehearsalSchedule,
+    ] {
         let wire = serde_json::to_string(&kind).expect("a SubjectKind serialises");
         assert_eq!(
             wire,

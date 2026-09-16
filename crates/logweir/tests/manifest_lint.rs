@@ -1293,11 +1293,11 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         "examples/cronjob-drill.yaml carries a ServiceAccount and a CronJob"
     );
 
-    // And the install file's exact shape: 1 Namespace + 9 CRDs + 1
+    // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
     // ServiceAccount + 4 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
     // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
-    // six plus Amendment F's `BackupDestination`, `TopicDiscovery` and
-    // `Preflight` — and a kind that reaches `config/crd/` without reaching
+    // six, Amendment F's three and Amendment G's five — and a kind that
+    // reaches `config/crd/` without reaching
     // `config/crd/kustomization.yaml` shows up here as a count that did not
     // move.
     let docs = install_file();
@@ -1309,7 +1309,7 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         by_kind,
         BTreeMap::from([
             ("Namespace".to_string(), 1),
-            ("CustomResourceDefinition".to_string(), 9),
+            ("CustomResourceDefinition".to_string(), 14),
             ("ServiceAccount".to_string(), 1),
             ("ClusterRole".to_string(), 4),
             ("ClusterRoleBinding".to_string(), 1),
@@ -1320,8 +1320,8 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
     assert_eq!(
         docs.len(),
-        18,
-        "logweir.yaml must hold exactly 18 documents"
+        23,
+        "logweir.yaml must hold exactly 23 documents"
     );
 }
 

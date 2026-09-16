@@ -1,0 +1,545 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: retentionpolicies.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: RetentionPolicy
+    plural: retentionpolicies
+    shortNames: []
+    singular: retentionpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.destinationRef.name
+      name: DESTINATION
+      type: string
+    - jsonPath: .spec.mode
+      name: MODE
+      type: string
+    - jsonPath: .status.enforcement
+      name: ENFORCEMENT
+      type: string
+    - jsonPath: .status.lastEvaluation.candidateCount
+      name: CANDIDATES
+      type: integer
+    - jsonPath: .status.lastEvaluation.at
+      name: EVALUATED
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'What may be removed from one destination, and under whose authority (ADR 0008 Amendments G and H). `spec.destinationRef`, `spec.catalogRef` and `spec.scope` are immutable, because an approved deletion plan names point ids and a re-pointable policy would apply it elsewhere. `mode: Report` is the default and deletes nothing; `Enforce` opts in to a separately credentialed worker bounded to an explicit archive prefix, never `logweir/`, only from an approved plan, and only with a signed record.'
+        properties:
+          spec:
+            description: '`RetentionPolicy.spec`.'
+            properties:
+              catalogRef:
+                description: The catalog the evaluation reads. Immutable (K1). Evaluation reads the catalog VIEW, never a second bucket walk, so a schedule writing elsewhere is never reported against the wrong location.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              destinationRef:
+                description: The destination this policy covers. Immutable (K1).
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              enforcement:
+                description: The enforcement settings, for `Enforce` (K2).
+                nullable: true
+                properties:
+                  approvedPlanSha256:
+                    description: The digest of the plan an administrator approved after reviewing the preview. Mutable — approving a new plan is the routine — and the ONLY thing that authorizes a deletion run.
+                    nullable: true
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  credentialSecretRef:
+                    description: 'The delete-capable credential, mounted ONLY into retention Jobs. It is a separate Secret from every other grant on purpose: the blast radius of this key is exactly one prefix in one bucket.'
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  deadlineSeconds:
+                    default: 1800
+                    description: The Job's `activeDeadlineSeconds`.
+                    format: int32
+                    maximum: 21600
+                    minimum: 60
+                    type: integer
+                  maxDeletionsPerRun:
+                    default: 50
+                    description: The per-run ceiling on points.
+                    format: int32
+                    maximum: 500
+                    minimum: 1
+                    type: integer
+                  maxObjectsPerRun:
+                    default: 20000
+                    description: The per-run ceiling on object keys.
+                    format: int32
+                    maximum: 200000
+                    minimum: 1
+                    type: integer
+                  planMaxAgeSeconds:
+                    default: 3600
+                    description: How long an approved plan stays usable. A plan older than this is re-previewed rather than executed, because the archive has moved on.
+                    format: int32
+                    maximum: 86400
+                    minimum: 300
+                    type: integer
+                  requireApprovedPlan:
+                    default: true
+                    description: Whether an administrator must approve the plan before anything is deleted. Default `true`.
+                    type: boolean
+                  schedule:
+                    description: A five-field UTC cron expression for the evaluation and enforcement cadence.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - credentialSecretRef
+                - schedule
+                type: object
+              externalLifecycle:
+                description: The declared provider lifecycle rule, for `ExternalLifecycle` (K3).
+                nullable: true
+                properties:
+                  expirationDays:
+                    description: The expiry the rule declares.
+                    format: int32
+                    maximum: 36500
+                    minimum: 1
+                    type: integer
+                  prefix:
+                    description: The prefix the rule covers.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  provider:
+                    description: Whose rule it is.
+                    enum:
+                    - s3
+                    - gcs
+                    - azure
+                    type: string
+                  ruleId:
+                    description: The rule's own id in that provider's console, so an auditor can find it.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - expirationDays
+                - prefix
+                - provider
+                - ruleId
+                type: object
+              holds:
+                description: Points that may not be removed. Mutable — a legal hold arrives on a Tuesday.
+                items:
+                  description: A point that may not be removed, whatever the rules say.
+                  properties:
+                    pointId:
+                      description: The point id.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    reason:
+                      description: Why it is held — a case reference, an auditor, a regulation.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    until:
+                      description: When the hold lapses. Absent means it does not.
+                      format: date-time
+                      nullable: true
+                      type: string
+                  required:
+                  - pointId
+                  - reason
+                  type: object
+                maxItems: 256
+                nullable: true
+                type: array
+              mode:
+                default: Report
+                description: What this policy is allowed to do. `Report` by default.
+                enum:
+                - Report
+                - Enforce
+                - ExternalLifecycle
+                type: string
+              rules:
+                description: What to keep.
+                properties:
+                  keepDays:
+                    description: Keep points newer than N days.
+                    format: int32
+                    maximum: 36500
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                  keepLast:
+                    description: Keep the most recent N points.
+                    format: int32
+                    maximum: 100000
+                    minimum: 1
+                    nullable: true
+                    type: integer
+                  minUsablePoints:
+                    default: 3
+                    description: 'The floor that survives every other rule: this many USABLE points are kept whatever `keepLast` and `keepDays` say. A retention policy that can empty an archive is a retention policy that will.'
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                type: object
+              scope:
+                description: The prefix deletion may ever touch. Immutable (K1).
+                properties:
+                  prefix:
+                    description: The archive prefix, matching the destination's bucket prefix.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                required:
+                - prefix
+                type: object
+                x-kubernetes-validations:
+                - message: spec.scope.prefix must be a non-empty archive prefix and may never name logweir/, which is the evidence root no retention run may delete under
+                  rule: '!self.prefix.matches(''(^|/)logweir(/|$)'') && self.prefix != '''''
+            required:
+            - catalogRef
+            - destinationRef
+            - rules
+            - scope
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.destinationRef, spec.catalogRef and spec.scope are immutable: an approved deletion plan names point ids, and a policy that could be re-pointed would apply that plan to a different location'
+              rule: has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.catalogRef) == has(oldSelf.catalogRef) && (!has(self.catalogRef) || self.catalogRef == oldSelf.catalogRef) && has(self.scope) == has(oldSelf.scope) && (!has(self.scope) || self.scope == oldSelf.scope)
+            - message: spec.enforcement is required for mode Enforce and forbidden otherwise
+              rule: has(self.enforcement) == (self.mode == 'Enforce')
+            - message: spec.externalLifecycle is required for mode ExternalLifecycle and forbidden otherwise
+              rule: has(self.externalLifecycle) == (self.mode == 'ExternalLifecycle')
+          status:
+            description: '`RetentionPolicy.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: 'The condition set: `Ready`, `Evaluated`, `Enforced`, `ExternalLifecycleConflict`, `EnforcementDegraded`.'
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              consecutiveRunFailures:
+                description: How many runs have failed in a row.
+                format: int64
+                nullable: true
+                type: integer
+              enforcement:
+                description: '`RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared` — what is actually happening, as opposed to what `spec.mode` asks for.'
+                nullable: true
+                type: string
+              guarantees:
+                description: Which guarantees are in force, and by whom.
+                nullable: true
+                properties:
+                  activeRestoreProtection:
+                    description: That a point being restored right now is not removed under it.
+                    nullable: true
+                    type: string
+                  ageExpiry:
+                    description: That points older than the limit actually go.
+                    nullable: true
+                    type: string
+                  legalHold:
+                    description: That a legal hold is honoured.
+                    nullable: true
+                    type: string
+                  minUsablePoints:
+                    description: That the usable floor is respected.
+                    nullable: true
+                    type: string
+                  sharedSegments:
+                    description: That a segment two points share is not removed with one of them.
+                    nullable: true
+                    type: string
+                type: object
+              lastEnforcement:
+                description: What the last enforcement run did.
+                nullable: true
+                properties:
+                  deleted:
+                    description: The points it removed.
+                    items:
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  exitCode:
+                    description: The run's exit code.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  failed:
+                    description: The points it could not.
+                    items:
+                      description: One point a run could not delete.
+                      properties:
+                        code:
+                          description: The closed-vocabulary code. Never a raw object-store error body.
+                          type: string
+                        pointId:
+                          description: The point id.
+                          type: string
+                      required:
+                      - code
+                      - pointId
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  finishedAt:
+                    description: When it finished.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  objectsDeleted:
+                    description: How many object keys were removed.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  planSha256:
+                    description: The plan digest it executed — the one an administrator approved.
+                    nullable: true
+                    type: string
+                  recordKey:
+                    description: The signed, attributable record of the deletion. **Written under `logweir/`, which this run may never delete from.**
+                    nullable: true
+                    type: string
+                  recordSha256:
+                    description: That record's digest.
+                    nullable: true
+                    type: string
+                  runId:
+                    description: The run id.
+                    nullable: true
+                    type: string
+                  startedAt:
+                    description: When it started.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              lastEvaluation:
+                description: What the last evaluation found. Nothing in it was deleted.
+                nullable: true
+                properties:
+                  at:
+                    description: When.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  candidateCount:
+                    description: How many candidates there are, for the printer column.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  candidates:
+                    description: The points that would go.
+                    items:
+                      description: One point the evaluation would remove.
+                      properties:
+                        bytes:
+                          description: How many bytes.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        objects:
+                          description: How many object keys it owns.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        pointId:
+                          description: The point id.
+                          type: string
+                        reason:
+                          description: Why it qualifies — `OlderThanKeepDays` or `BeyondKeepLast`.
+                          nullable: true
+                          type: string
+                        recoveryPointAt:
+                          description: Its capture start.
+                          format: date-time
+                          nullable: true
+                          type: string
+                      required:
+                      - pointId
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  kept:
+                    description: The point ids that stay.
+                    items:
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  planExpiresAt:
+                    description: When the plan stops being usable.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  planRef:
+                    description: The `ConfigMap` holding the full plan.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  planSha256:
+                    description: The plan's digest — what an administrator approves by copying into `spec.enforcement.approvedPlanSha256`.
+                    nullable: true
+                    type: string
+                  pointsEvaluated:
+                    description: How many points were considered.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  protected:
+                    description: The points something protected.
+                    items:
+                      description: One point the rules selected and something else protected.
+                      properties:
+                        pointId:
+                          description: The point id.
+                          type: string
+                        reason:
+                          description: '`ActiveRestore`, `MinUsablePoints`, `LegalHold`, `SharedSegment`, `Hold` or `Unknown`. **`Unknown` protects**: a point the evaluation could not classify is never a deletion candidate.'
+                          type: string
+                      required:
+                      - pointId
+                      - reason
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  skipped:
+                    description: What could not be classified.
+                    items:
+                      description: One point or key the evaluation could not classify.
+                      properties:
+                        key:
+                          description: The object key, when there was not.
+                          nullable: true
+                          type: string
+                        pointId:
+                          description: The point id, when there was one.
+                          nullable: true
+                          type: string
+                        reason:
+                          description: '`Unreadable`, `UnsupportedFormat` or `Conflict`.'
+                          type: string
+                      required:
+                      - reason
+                      type: object
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                type: object
+              lease:
+                description: The points a run has claimed.
+                nullable: true
+                properties:
+                  acquiredAt:
+                    description: When it was taken.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  expiresAt:
+                    description: When it lapses.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  pointIds:
+                    description: The points it covers.
+                    items:
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  runId:
+                    description: The run holding it.
+                    nullable: true
+                    type: string
+                type: object
+              observedGeneration:
+                description: The `metadata.generation` this status was computed from.
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: RetentionPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -62,13 +62,51 @@ spec:
             description: '`Restore.spec`.'
             properties:
               approvalRef:
-                description: The `Approval` that authorises this restore, in this namespace. The approval's `planHash` must equal the sha256 of `planBytes` above, and its `subjectRef` must name this object.
+                description: |-
+                  The `Approval` that authorises this restore, in this namespace. The approval's `planHash` must equal the sha256 of `planBytes` above, and its `subjectRef` must name this object.
+
+                  # Why this became optional, and why that is not a weakening
+
+                  A rehearsal is authorised by a STANDING document instead ([`RestoreAuthorization`]), so exactly one of this and `authorization` is set and CEL refuses both and neither. An OLDER controller reading a standing-authorised `Restore` sees no `approvalRef`, resolves the empty name to nothing and refuses terminally with `ApprovalNotReceived` — fail closed, which is the required rollback behaviour. An unauthorised restore has never been reachable through either field.
+                nullable: true
                 properties:
                   name:
                     description: The referenced object's `metadata.name`, in this namespace.
                     type: string
                 required:
                 - name
+                type: object
+              authorization:
+                description: A standing authorisation, for an unattended run (D3 §4.3). Exactly one of this and `approvalRef`.
+                nullable: true
+                properties:
+                  approvalRef:
+                    description: The `Approval` carrying the signed standing scope.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  kind:
+                    description: '`Standing` — the only kind in v1.'
+                    enum:
+                    - Standing
+                    type: string
+                  rehearsalScheduleRef:
+                    description: The `RehearsalSchedule` the scope is bound to.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - approvalRef
+                - kind
+                - rehearsalScheduleRef
                 type: object
               backupSetRef:
                 description: The backup set inside `sourceArchive` — a `backupId`.
@@ -100,6 +138,48 @@ spec:
                 description: The point in time to restore to. Records after it are not restored.
                 format: date-time
                 type: string
+              runnerResources:
+                description: |-
+                  What the runner pod asks for and is capped at.
+
+                  ON THE SPEC, NOT ON AN ANNOTATION, because PLAT-06.1's rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
+                nullable: true
+                properties:
+                  limits:
+                    description: Limits.
+                    nullable: true
+                    properties:
+                      cpu:
+                        description: CPU, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                      memory:
+                        description: Memory, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests.
+                    nullable: true
+                    properties:
+                      cpu:
+                        description: CPU, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                      memory:
+                        description: Memory, as a Kubernetes quantity.
+                        maxLength: 16
+                        nullable: true
+                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        type: string
+                    type: object
+                type: object
               sourceArchive:
                 description: |-
                   The archive to restore from.
@@ -165,7 +245,6 @@ spec:
                 - topicNaming
                 type: object
             required:
-            - approvalRef
             - backupSetRef
             - deadlineSeconds
             - planBytes
@@ -180,12 +259,77 @@ spec:
               rule: has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)
             - message: with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name> and sourceArchive.secretRef is absent; the logweir-destination scheme is otherwise reserved
               rule: 'has(self.sourceDestinationRef) ? (self.sourceArchive.url == ''logweir-destination://'' + self.sourceDestinationRef.name && !has(self.sourceArchive.secretRef)) : !self.sourceArchive.url.startsWith(''logweir-destination://'')'
+            - message: set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized
+              rule: has(self.approvalRef) != has(self.authorization)
           status:
             description: '`Restore.status`.'
             nullable: true
             properties:
+              completion:
+                description: What the run actually restored, copied by JSON pointer from the SIGNED scorecard.
+                nullable: true
+                properties:
+                  integrityLevel:
+                    description: '`byte-fingerprint`, `consume-only` or `not-attempted` — HOW the check was made, beside its result, because "sampled 100, matched 100" means two different things under the first two.'
+                    nullable: true
+                    type: string
+                  newTopics:
+                    description: The topics created, from `target_diff.would_create`.
+                    items:
+                      description: One topic the run created, with its partition count.
+                      properties:
+                        name:
+                          description: The new topic's name.
+                          type: string
+                        partitions:
+                          description: How many partitions it was created with.
+                          format: int64
+                          nullable: true
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  recordsExpected:
+                    description: The canary size, from `sample.records_expected`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  recordsRestored:
+                    description: From `sample.records_restored`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  recordsSampled:
+                    description: From `integrity.records_sampled`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  recordsSampledMatching:
+                    description: How many of those matched.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  sampleWindow:
+                    description: The window the sample covered.
+                    nullable: true
+                    properties:
+                      end:
+                        description: Inclusive end.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      start:
+                        description: Inclusive start.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
               conditions:
-                description: The condition set.
+                description: The condition set. `RunnerReady` joins `Verified` as a condition every terminal builder carries forward, because a JSON merge patch replaces the whole list.
                 items:
                   description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
                   properties:
@@ -266,6 +410,48 @@ spec:
                         description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
                         nullable: true
                         type: string
+                      signedAt:
+                        description: |-
+                          The signing time the verdict was reached AGAINST: the document's own latest pre-signature timestamp (`logweir_core::trust::claimed_signing_time`).
+
+                          **ATTACKER-CONTROLLED FOR A COMPROMISED KEY**, which is why it is recorded rather than trusted. For a retired or expired key it is what distinguishes "signed while valid" from "signed afterwards"; for a key revoked as `KeyCompromise` it is deliberately NOT accepted as evidence of when the document was signed, and only a controller-written observation ([`EvidenceVerification::verified_at`] from an earlier reconcile) counts.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      trust:
+                        description: Which trust policy said so, and on what basis.
+                        nullable: true
+                        properties:
+                          basis:
+                            description: |-
+                              `Current`, `Historical`, `RecordedBeforeRevocation` or `None`.
+
+                              **`Historical` is a pass, not a downgrade**: the key was valid when it signed and has since been retired, which is what key rotation is supposed to look like. The console renders it as "verified against retired key `<id>` (signed before retirement)" and never as a warning.
+                            nullable: true
+                            type: string
+                          keyState:
+                            description: '`Active`, `Retired`, `Expired`, `Revoked` or `Unknown` — the signing key''s state at the moment the verdict was reached.'
+                            nullable: true
+                            type: string
+                          policy:
+                            description: Which `TrustPolicy` answered, with the revision that answered.
+                            nullable: true
+                            properties:
+                              generation:
+                                description: Its `metadata.generation`. A generation change is what makes the controller re-run the verdict over STORED fields, with no storage read and no change to `phase`, `exitCode` or `outcome`.
+                                format: int64
+                                nullable: true
+                                type: integer
+                              name:
+                                description: Its name.
+                                nullable: true
+                                type: string
+                              uid:
+                                description: Its UID — a same-named replacement is a different policy.
+                                nullable: true
+                                type: string
+                            type: object
+                        type: object
                       verifiedAt:
                         description: |-
                           When the controller performed the verification.
@@ -376,6 +562,141 @@ spec:
                 description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
+              progress:
+                description: What this run is doing right now. Absent on a `Restore` an older controller reconciled.
+                nullable: true
+                properties:
+                  diagnostics:
+                    description: What went wrong on the way, newest `lastSeen` first.
+                    items:
+                      description: One thing that went wrong, with a count rather than a repetition.
+                      properties:
+                        code:
+                          description: A CamelCase code from the closed vocabulary.
+                          type: string
+                        count:
+                          description: How many times — capped, because a status is not a counter store and an unbounded integer here is an unbounded write rate.
+                          format: int64
+                          maximum: 1000000
+                          minimum: 1
+                          nullable: true
+                          type: integer
+                        firstSeen:
+                          description: When it was first seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        lastSeen:
+                          description: When it was last seen.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        message:
+                          description: A sanitized, bounded explanation.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        object:
+                          description: The object it is about.
+                          nullable: true
+                          properties:
+                            kind:
+                              description: '`Pod` or `Job`.'
+                              type: string
+                            name:
+                              description: Its name.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        severity:
+                          description: '`Warning` or `Error`.'
+                          type: string
+                      required:
+                      - code
+                      - severity
+                      type: object
+                    maxItems: 8
+                    nullable: true
+                    type: array
+                  lastObservedTime:
+                    description: When the run was last observed, in active stages only, rewritten at most once every 60 s for the same reason.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  lastTransitionTime:
+                    description: 'When `stage` or `reason` last CHANGED. Not a heartbeat: a reconciler''s own status patch is what wakes it (erratum E11(d)), so a field carrying a fresh clock read on every pass would make every pass a write.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  message:
+                    description: A sanitized, bounded explanation.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  reason:
+                    description: A CamelCase reason, from the same closed vocabulary the `RunnerReady` condition uses.
+                    nullable: true
+                    type: string
+                  runner:
+                    description: Facts about the one runner pod.
+                    nullable: true
+                    properties:
+                      containerState:
+                        description: '`Waiting`, `Running` or `Terminated`, for the `runner` container.'
+                        nullable: true
+                        type: string
+                      jobName:
+                        description: The Job.
+                        nullable: true
+                        type: string
+                      podName:
+                        description: The pod.
+                        nullable: true
+                        type: string
+                      podPhase:
+                        description: '`Pending`, `Running`, `Succeeded`, `Failed` or `Unknown`.'
+                        nullable: true
+                        type: string
+                      scheduled:
+                        description: Whether a node has been chosen. `false` with no diagnostic is the "nothing is wrong yet, it is just queued" case.
+                        nullable: true
+                        type: boolean
+                      startedAt:
+                        description: When the runner container started.
+                        format: date-time
+                        nullable: true
+                        type: string
+                      waitingReason:
+                        description: The kubelet's own waiting reason, verbatim and bounded — `ImagePullBackOff`, `CreateContainerConfigError`. Verbatim because a translated kubelet reason is a reason nobody can search for.
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    type: object
+                  runnerPhase:
+                    description: The runner's own phase, when it reported one.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The phase or step name, from the runner's own closed list.
+                        maxLength: 32
+                        nullable: true
+                        type: string
+                      number:
+                        description: The phase number, `-1`..`9`. A backup reports `-1` with a step name, because it has steps and not the drill's numbered phases.
+                        format: int32
+                        maximum: 9
+                        minimum: -1
+                        nullable: true
+                        type: integer
+                    type: object
+                  stage:
+                    description: '`Admission`, `Queued`, `Preparing`, `Running`, `Verifying` or `Finished`.'
+                    type: string
+                required:
+                - stage
+                type: object
               reason:
                 description: |-
                   The reason of the condition that describes this run RIGHT NOW — `ApprovalNotVerified`, `ApprovalNotReceived`, `PlanHashMismatch`, `ClusterNotReachable`, `NameTooLong`, `JobCreated`, `Ok`, `GuardRefused`, `DrillNotPass`, `SigningOrLock`, `Operational`, … — and the field the `REASON` printer column reads.
@@ -389,6 +710,41 @@ spec:
                   `exitReason` is UNCHANGED and still the honest home of GC11's wire string and of the runner's own `refusal-reason=` terminal state, which is the more specific answer whenever a pod actually ran. Two fields, two questions: *what did the run exit with* and *what state is this object in*.
                 nullable: true
                 type: string
+              teardown:
+                description: What phase 9 removed, and what it could not.
+                nullable: true
+                properties:
+                  attestationKey:
+                    description: The object key of the signed teardown attestation.
+                    nullable: true
+                    type: string
+                  deleted:
+                    description: The topics it removed.
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  failed:
+                    description: The topics it could not.
+                    items:
+                      description: One topic teardown could not remove.
+                      properties:
+                        error:
+                          description: Why, redacted and bounded.
+                          maxLength: 256
+                          type: string
+                        topic:
+                          description: The topic.
+                          type: string
+                      required:
+                      - error
+                      - topic
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                type: object
               topicPreflight:
                 description: |-
                   What phase 0 found out about the target topics (guard **G-TS**).

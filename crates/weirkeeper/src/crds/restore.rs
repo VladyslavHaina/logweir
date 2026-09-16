@@ -10,7 +10,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, SpecRule, Time};
+use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, RunProgress, SpecRule, Time};
 
 /// The CEL rule that refuses half a destination-backed restore.
 ///
@@ -40,11 +40,28 @@ pub const DESTINATION_SENTINEL_RULE: &str = "has(self.sourceDestinationRef) ? (s
 /// The message [`DESTINATION_SENTINEL_RULE`] travels with.
 pub const DESTINATION_SENTINEL_MESSAGE: &str = "with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name> and sourceArchive.secretRef is absent; the logweir-destination scheme is otherwise reserved";
 
+/// The CEL rule that makes an unauthorised `Restore` unrepresentable.
+///
+/// `approvalRef` used to be required, so "no authorisation" was refused by the
+/// structural schema. Making it optional to admit a standing authorisation
+/// would have opened exactly that hole; this rule closes it, and closes the
+/// other one too — carrying BOTH, where a per-run approval and a standing
+/// scope could disagree about what was authorised.
+pub const EXACTLY_ONE_AUTHORIZATION_RULE: &str = "has(self.approvalRef) != has(self.authorization)";
+
+/// The message [`EXACTLY_ONE_AUTHORIZATION_RULE`] travels with.
+pub const EXACTLY_ONE_AUTHORIZATION_MESSAGE: &str =
+    "set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized";
+
 /// The rules on `Restore`'s `.spec`.
-pub const SPEC_RULES: [SpecRule; 3] = [
+pub const SPEC_RULES: [SpecRule; 4] = [
     SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
     SpecRule::new(DESTINATIONS_TOGETHER_RULE, DESTINATIONS_TOGETHER_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
+    SpecRule::new(
+        EXACTLY_ONE_AUTHORIZATION_RULE,
+        EXACTLY_ONE_AUTHORIZATION_MESSAGE,
+    ),
 ];
 
 /// `target.mode`'s enum, fixed byte for byte at this task.
@@ -252,7 +269,22 @@ pub struct RestoreSpec {
     /// The `Approval` that authorises this restore, in this namespace. The
     /// approval's `planHash` must equal the sha256 of `planBytes` above, and
     /// its `subjectRef` must name this object.
-    pub approval_ref: LocalRef,
+    ///
+    /// # Why this became optional, and why that is not a weakening
+    ///
+    /// A rehearsal is authorised by a STANDING document instead
+    /// ([`RestoreAuthorization`]), so exactly one of this and `authorization`
+    /// is set and CEL refuses both and neither. An OLDER controller reading a
+    /// standing-authorised `Restore` sees no `approvalRef`, resolves the empty
+    /// name to nothing and refuses terminally with `ApprovalNotReceived` —
+    /// fail closed, which is the required rollback behaviour. An unauthorised
+    /// restore has never been reachable through either field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_ref: Option<LocalRef>,
+    /// A standing authorisation, for an unattended run (D3 §4.3). Exactly one
+    /// of this and `approvalRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<RestoreAuthorization>,
     /// The archive to restore from.
     ///
     /// With `sourceDestinationRef` set this is the sentinel
@@ -278,6 +310,58 @@ pub struct RestoreSpec {
     pub target: RestoreTarget,
     /// The Job's `activeDeadlineSeconds`.
     pub deadline_seconds: i64,
+    /// What the runner pod asks for and is capped at.
+    ///
+    /// ON THE SPEC, NOT ON AN ANNOTATION, because PLAT-06.1's rule is that a
+    /// Job's shape is a function of the object. It is also what keeps
+    /// `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true:
+    /// resources come from here and never from the target mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_resources: Option<super::rehearsal_schedule::RunnerResources>,
+}
+
+impl RestoreSpec {
+    /// The per-run `Approval` this restore names, or `""`.
+    ///
+    /// `""` IS THE SHAPE EVERY CALLER ALREADY HANDLED. Before `approvalRef`
+    /// became optional, an empty NAME was the "no authorisation" case and each
+    /// call site refused it terminally with `ApprovalNotReceived`. Collapsing
+    /// absent to `""` keeps those three refusals byte-identical — which is
+    /// also exactly what an older controller does with a standing-authorised
+    /// `Restore`, so the rollback behaviour and the current behaviour are the
+    /// same code path rather than two that have to be kept in step.
+    #[must_use]
+    pub fn approval_ref_name(&self) -> &str {
+        self.approval_ref.as_ref().map_or("", |r| r.name.as_str())
+    }
+}
+
+/// How an unattended `Restore` is authorised.
+///
+/// THE CONTROLLER DOES NOT MINT THIS. `approvalRef` names the `Approval`
+/// carrying the signed standing scope, and `rehearsalScheduleRef` names the
+/// schedule whose sealed spec the scope's `templateDigest` is over. The
+/// controller re-verifies both every slot, and the runner re-proves
+/// `plan ∈ scope` against the mounted bundle before any client is constructed.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreAuthorization {
+    /// `Standing` — the only kind in v1.
+    pub kind: AuthorizationKind,
+    /// The `Approval` carrying the signed standing scope.
+    pub approval_ref: LocalRef,
+    /// The `RehearsalSchedule` the scope is bound to.
+    pub rehearsal_schedule_ref: LocalRef,
+}
+
+/// The kinds of authorisation a `Restore` can carry besides a per-run
+/// `Approval`.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+pub enum AuthorizationKind {
+    /// One signed document covering every slot of one sealed schedule, checked
+    /// again each slot and again by the runner.
+    #[default]
+    Standing,
 }
 
 /// `Restore.status`.
@@ -405,7 +489,111 @@ pub struct RestoreStatus {
     /// The Job that ran, or is running, this restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<LocalRef>,
-    /// The condition set.
+    /// What this run is doing right now. Absent on a `Restore` an older
+    /// controller reconciled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<RunProgress>,
+    /// What the run actually restored, copied by JSON pointer from the SIGNED
+    /// scorecard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<RestoreCompletion>,
+    /// What phase 9 removed, and what it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardown: Option<Teardown>,
+    /// The condition set. `RunnerReady` joins `Verified` as a condition every
+    /// terminal builder carries forward, because a JSON merge patch replaces
+    /// the whole list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
+}
+
+/// One topic the run created, with its partition count.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedTopic {
+    /// The new topic's name.
+    pub name: String,
+    /// How many partitions it was created with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<i64>,
+}
+
+/// The window the integrity sample covered.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SampleWindow {
+    /// Inclusive start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<Time>,
+    /// Inclusive end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<Time>,
+}
+
+/// The incident-facing summary of a recovery.
+///
+/// COPIED FROM THE SIGNED SCORECARD, NEVER RECOMPUTED. Every number here has a
+/// JSON pointer into a document that was signed; a controller that computed
+/// its own would be asserting an outcome nobody attested.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCompletion {
+    /// The topics created, from `target_diff.would_create`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub new_topics: Option<Vec<CreatedTopic>>,
+    /// The canary size, from `sample.records_expected`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_expected: Option<i64>,
+    /// From `sample.records_restored`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_restored: Option<i64>,
+    /// From `integrity.records_sampled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_sampled: Option<i64>,
+    /// How many of those matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_sampled_matching: Option<i64>,
+    /// `byte-fingerprint`, `consume-only` or `not-attempted` — HOW the check
+    /// was made, beside its result, because "sampled 100, matched 100" means
+    /// two different things under the first two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_level: Option<String>,
+    /// The window the sample covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_window: Option<SampleWindow>,
+}
+
+/// One topic teardown could not remove.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TeardownFailure {
+    /// The topic.
+    pub topic: String,
+    /// Why, redacted and bounded.
+    #[schemars(length(max = 256))]
+    pub error: String,
+}
+
+/// What phase 9 removed, read from the SIGNED teardown attestation.
+///
+/// THE CONTROLLER DELETES NO TOPIC, EVER. The runner's phase 9 deletes the
+/// exact names it created, through a deleter that refuses any name outside the
+/// run's prefix; this block is the controller reading what that attested. A
+/// non-empty `failed` is what makes the next rehearsal slot SKIP rather than
+/// adopt topics it did not create.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Teardown {
+    /// The object key of the signed teardown attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_key: Option<String>,
+    /// The topics it removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub deleted: Option<Vec<String>>,
+    /// The topics it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub failed: Option<Vec<TeardownFailure>>,
 }

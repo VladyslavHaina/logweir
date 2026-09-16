@@ -161,9 +161,15 @@ pub fn build(
         },
         spec: RestoreSpec {
             plan_bytes: request.plan_bytes.clone(),
-            approval_ref: LocalRef {
+            approval_ref: Some(LocalRef {
                 name: request.approval_ref.name.clone(),
-            },
+            }),
+            // This route creates a per-run, human-approved Restore. A standing
+            // authorization is minted by the rehearsal controller and never by
+            // an HTTP request, so `authorization` is absent here by
+            // construction and the CEL rule that refuses both is satisfied.
+            authorization: None,
+            runner_resources: None,
             source_archive: ArchiveRef {
                 url: request.source_archive.url.clone(),
                 secret_ref: request

@@ -565,7 +565,8 @@ pub enum ReferentProblem {
     },
     /// The referent exists and carries no `spec.planBytes` to hash.
     ///
-    /// REACHABLE IN TAG 1, FOR EXACTLY ONE KIND. `Backup.spec` has no
+    /// REACHABLE IN TAG 1, FOR TWO KINDS AND FOR DIFFERENT REASONS.
+    /// `Backup.spec` has no
     /// `planBytes` field (`crates/weirkeeper/src/crds/backup.rs`), and check 7
     /// recomputes the plan hash from the referent's own bytes. So an
     /// `Approval` whose `subjectRef.kind` is `Backup` is refused here, with a
@@ -573,9 +574,15 @@ pub enum ReferentProblem {
     /// something nobody signed, or degrading check 7 to a no-op for one kind.
     /// Tag 1's approval flow is the restore wizard (interface **I19**);
     /// `Backup` is in [`SubjectKind`] because the CRD's CEL seal admits it and
-    /// check 8 must be able to tell the two apart.
+    /// check 8 must be able to tell the kinds apart.
+    ///
+    /// `RehearsalSchedule` reaches it for a different reason: D3 §4.3 binds a
+    /// digest recomputed from that referent's own sealed spec, and the
+    /// recomputation is the rehearsal worker's. Until it lands, an approval
+    /// naming one is refused HERE rather than verified against bytes nobody
+    /// hashed.
     ReferentHasNoPlanBytes {
-        /// `Backup`.
+        /// `Backup` or `RehearsalSchedule`.
         kind: String,
         /// The name `spec.subjectRef.name` gave.
         name: String,
@@ -831,6 +838,24 @@ pub async fn decide(
                 }
                 Err(e) => return Err(e.into()),
             }
+        }
+        // FAILS CLOSED, DELIBERATELY, UNTIL THE REHEARSAL CONTROLLER LANDS.
+        //
+        // D3 §4.3 makes a `RehearsalSchedule` approval bind a digest RECOMPUTED
+        // from the referent's own sealed spec, not `planBytes` it does not
+        // have. That recomputation is the rehearsal worker's, and it is not in
+        // this build. Until it is, this arm refuses with the same
+        // `ReferentHasNoPlanBytes` verdict `Backup` gets: the enum value exists
+        // because the CRD admits it and check 8 must be able to tell the kinds
+        // apart, and an approval this build cannot verify must be a visible
+        // refusal rather than a `Verified=True` nobody computed.
+        SubjectKind::RehearsalSchedule => {
+            return Ok(ApprovalOutcome::Referent(
+                ReferentProblem::ReferentHasNoPlanBytes {
+                    kind: referent_kind.to_string(),
+                    name: subject.name.clone(),
+                },
+            ))
         }
     };
 

@@ -52,9 +52,11 @@ fi
 echo "   helm ${helm_version}"
 
 # ---------------------------------------------------------------- 1. CRDs
-# The kind count of `weirkeeper::crds::KINDS`: six from ADR 0008 Amendment A
-# plus Amendment F's `BackupDestination`, `TopicDiscovery` and `Preflight`.
-EXPECTED_CRDS=9
+# The kind count of `weirkeeper::crds::KINDS`: six from ADR 0008 Amendment A,
+# Amendment F's `BackupDestination`, `TopicDiscovery` and `Preflight`, and
+# Amendment G's `TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`,
+# `RecoveryCatalog` and `RetentionPolicy`.
+EXPECTED_CRDS=14
 echo "== 1. crds/ is a byte-identical copy of config/crd/ =="
 crd_count=0
 for src in config/crd/*.yaml; do

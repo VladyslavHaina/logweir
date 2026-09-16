@@ -47,7 +47,7 @@ fn crd_dir() -> PathBuf {
 }
 
 /// Every file, in the order [`weirkeeper::crds::KINDS`] names their kinds.
-const FILES: [&str; 9] = [
+const FILES: [&str; 14] = [
     "kafkaclusters.yaml",
     "backupschedules.yaml",
     "backups.yaml",
@@ -57,6 +57,11 @@ const FILES: [&str; 9] = [
     "backupdestinations.yaml",
     "topicdiscoveries.yaml",
     "preflights.yaml",
+    "trustpolicies.yaml",
+    "protectionpolicies.yaml",
+    "rehearsalschedules.yaml",
+    "recoverycatalogs.yaml",
+    "retentionpolicies.yaml",
 ];
 
 /// One checked-in CRD, parsed.
@@ -293,11 +298,31 @@ fn the_kind_list_is_exactly_the_adr() {
     );
     assert_eq!(
         weirkeeper::crds::KINDS.len(),
-        9,
-        "ADR 0008 records nine kinds — Amendment A's six plus Amendment F's \
-         BackupDestination, TopicDiscovery and Preflight. A tenth needs its own \
-         amendment in docs/architecture.md, and this line is where that decision \
-         becomes a diff."
+        14,
+        "ADR 0008 records fourteen kinds — Amendment A's six, Amendment F's \
+         BackupDestination, TopicDiscovery and Preflight, and Amendment G's TrustPolicy, \
+         ProtectionPolicy, RehearsalSchedule, RecoveryCatalog and RetentionPolicy. A \
+         fifteenth needs its own amendment in docs/architecture.md, and this line is where \
+         that decision becomes a diff."
+    );
+
+    // AND NO KIND IS REMOVED. `TrustRoster` stays served and reconciled,
+    // deprecated in its description, so a cluster that has one keeps working
+    // while `TrustPolicy` is adopted. Deleting a CRD deletes its objects, and
+    // a roster's objects are the trust anchor of every archive in the cluster.
+    assert!(
+        kinds.iter().any(|k| k == "TrustRoster"),
+        "TrustRoster is DEPRECATED, not removed: Amendment G replaces it with TrustPolicy \
+         and keeps it served, because deleting the CRD would delete the trust anchor"
+    );
+    let roster = crd("trustrosters.yaml");
+    let description = at(root_schema(&roster), &["description"])
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        description.starts_with("DEPRECATED"),
+        "the shipped TrustRoster CRD must say it is deprecated in the description \
+         `kubectl explain` prints; got: {description:?}"
     );
     let mut expected: Vec<String> = weirkeeper::crds::KINDS
         .iter()
@@ -496,7 +521,7 @@ type Column = (&'static str, &'static str, &'static str);
 /// **`Backup`'s table is unchanged and was never affected: it has no `REASON`
 /// column at all** (PHASE/EXIT/RECORDS/SIGNED/AGE), so there was nothing
 /// reading `.status.exitReason` on that kind to repoint.
-const PRINTER_COLUMNS: [(&str, &[Column]); 9] = [
+const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
     (
         "KafkaCluster",
         &[
@@ -599,19 +624,87 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 9] = [
             ("AGE", ".metadata.creationTimestamp", "date"),
         ],
     ),
+    (
+        "TrustPolicy",
+        &[
+            ("DEFAULT", ".spec.default", "boolean"),
+            ("KEYS", ".status.keyCount", "integer"),
+            ("LOADED", ".status.loaded", "string"),
+            ("BOUND", ".status.boundNamespaces[*]", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "ProtectionPolicy",
+        &[
+            ("SOURCE", ".spec.protects.sourceRef.name", "string"),
+            ("HEALTH", ".status.health", "string"),
+            (
+                "POINT-AGE",
+                ".status.lastAvailablePoint.ageSeconds",
+                "integer",
+            ),
+            ("BASIS", ".status.availabilityBasis", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "RehearsalSchedule",
+        &[
+            ("SCHEDULE", ".spec.schedule", "string"),
+            ("SUSPEND", ".spec.suspend", "boolean"),
+            ("TARGET", ".spec.target.clusterRef.name", "string"),
+            ("LAST-OK", ".status.lastSucceeded.at", "date"),
+            ("NEXT", ".status.nextFireTime", "date"),
+            (
+                "AUTHORIZED",
+                ".status.conditions[?(@.type==\"Authorized\")].status",
+                "string",
+            ),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "RecoveryCatalog",
+        &[
+            ("DESTINATION", ".spec.destinationRef.name", "string"),
+            ("POINTS", ".status.counts.total", "integer"),
+            ("AVAILABLE", ".status.counts.available", "integer"),
+            ("SYNCED", ".status.syncedAt", "date"),
+            ("TRUNCATED", ".status.truncated", "boolean"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "RetentionPolicy",
+        &[
+            ("DESTINATION", ".spec.destinationRef.name", "string"),
+            ("MODE", ".spec.mode", "string"),
+            ("ENFORCEMENT", ".status.enforcement", "string"),
+            (
+                "CANDIDATES",
+                ".status.lastEvaluation.candidateCount",
+                "integer",
+            ),
+            ("EVALUATED", ".status.lastEvaluation.at", "date"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
 ];
 
 /// The brief's Scope column: five workload kinds Namespaced, the roster
 /// Cluster.
 ///
-/// A LITERAL for the same reason [`PRINTER_COLUMNS`] is. `TrustRoster` is
-/// Cluster-scoped because `allowedClusterIds` must not sit where a namespace
-/// tenant can widen its own allowlist; the other five are Namespaced because
+/// A LITERAL for the same reason [`PRINTER_COLUMNS`] is. `TrustRoster` and its
+/// replacement `TrustPolicy` are Cluster-scoped because the allowed target
+/// cluster ids must not sit where a namespace tenant can widen their own
+/// allowlist — "a roster whose name the subject supplies is a roster the
+/// subject can choose"; every other kind is Namespaced because
 /// [`weirkeeper::crds::LocalRef`] carries no namespace and a cross-namespace
 /// reference is a privilege-escalation surface. A kind that quietly became
 /// Cluster-scoped would move its objects out of every namespaced RBAC rule
 /// Task 21 writes.
-const SCOPES: [(&str, &str); 9] = [
+const SCOPES: [(&str, &str); 14] = [
     ("KafkaCluster", "Namespaced"),
     ("BackupSchedule", "Namespaced"),
     ("Backup", "Namespaced"),
@@ -621,6 +714,11 @@ const SCOPES: [(&str, &str); 9] = [
     ("BackupDestination", "Namespaced"),
     ("TopicDiscovery", "Namespaced"),
     ("Preflight", "Namespaced"),
+    ("TrustPolicy", "Cluster"),
+    ("ProtectionPolicy", "Namespaced"),
+    ("RehearsalSchedule", "Namespaced"),
+    ("RecoveryCatalog", "Namespaced"),
+    ("RetentionPolicy", "Namespaced"),
 ];
 
 /// FIX ROUND 1, FINDING 1: every kind's printer columns are exactly the
@@ -756,7 +854,7 @@ fn every_kind_declares_the_status_subresource() {
 /// of its own namespace, which [`weirkeeper::crds::LocalRef`] exists to make
 /// impossible.
 #[test]
-fn only_the_roster_is_cluster_scoped() {
+fn only_the_trust_kinds_are_cluster_scoped() {
     let got: Vec<(&str, String)> = rendered()
         .iter()
         .map(|(kind, _file, doc)| {
@@ -772,9 +870,9 @@ fn only_the_roster_is_cluster_scoped() {
     let want: Vec<(&str, String)> = SCOPES.iter().map(|(k, s)| (*k, s.to_string())).collect();
     assert_eq!(
         got, want,
-        "the Scope column: every workload kind is Namespaced and `TrustRoster` alone is \
-         Cluster-scoped, so `allowedClusterIds` does not sit where a namespace tenant can \
-         widen its own allowlist and no workload kind escapes a namespaced RBAC rule"
+        "the Scope column: every workload kind is Namespaced and only the two trust kinds \
+         are Cluster-scoped, so the allowed target cluster ids do not sit where a namespace \
+         tenant can widen them and no workload kind escapes a namespaced RBAC rule"
     );
 }
 
@@ -845,6 +943,11 @@ fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
     use weirkeeper::crds;
     let rules: &[crds::SpecRule] = match file {
         "kafkaclusters.yaml" | "approvals.yaml" | "trustrosters.yaml" => &crds::WHOLE_SPEC_SEAL,
+        "trustpolicies.yaml" => &crds::trust_policy::SPEC_RULES,
+        "protectionpolicies.yaml" => &crds::protection_policy::SPEC_RULES,
+        "rehearsalschedules.yaml" => &crds::rehearsal_schedule::SPEC_RULES,
+        "recoverycatalogs.yaml" => &crds::recovery_catalog::SPEC_RULES,
+        "retentionpolicies.yaml" => &crds::retention_policy::SPEC_RULES,
         "backupschedules.yaml" => &crds::backup_schedule::SPEC_RULES,
         "backups.yaml" => &crds::backup::SPEC_RULES,
         "restores.yaml" => &crds::restore::SPEC_RULES,
@@ -895,6 +998,26 @@ fn expected_nested_rules(file: &str) -> Vec<(Vec<String>, String, String)> {
                 push(path, rule, message);
             }
         }
+        "trustpolicies.yaml" => {
+            for (path, rule, message) in crds::trust_policy::NESTED_RULES {
+                push(path, rule, message);
+            }
+        }
+        "protectionpolicies.yaml" => {
+            for (path, rule, message) in crds::protection_policy::NESTED_RULES {
+                push(path, rule, message);
+            }
+        }
+        "rehearsalschedules.yaml" => {
+            for (path, rule, message) in crds::rehearsal_schedule::NESTED_RULES {
+                push(path, rule, message);
+            }
+        }
+        "retentionpolicies.yaml" => {
+            for (path, rule, message) in crds::retention_policy::NESTED_RULES {
+                push(path, rule, message);
+            }
+        }
         _ => {}
     }
     out
@@ -931,9 +1054,12 @@ fn every_spec_carries_exactly_its_declared_rules() {
             "{file}: the checked-in `.spec` rules must be exactly the ones the emitter \
              injects, in order, each with its own message"
         );
-        assert!(
-            !on_spec.is_empty(),
-            "{file}: a kind with no rule on `.spec` is a kind whose spec is not sealed"
+        assert_eq!(
+            on_spec.is_empty(),
+            file == "protectionpolicies.yaml",
+            "{file}: exactly one kind ships with no `.spec` rule, and it is ProtectionPolicy \
+             — evaluation policy that is never an execution input, so there is no recorded \
+             result an edit could rewrite. Every other kind seals something."
         );
 
         // SORTED, AND WHY. `JSONSchemaProps::properties` is a `BTreeMap`, so
@@ -1091,6 +1217,10 @@ struct Cursor<'a> {
     /// so a malformed expression in it is still caught — but every operation
     /// that would inspect a value answers a placeholder instead.
     skip: bool,
+    /// The comprehension variables bound by `all()` / `exists()`, innermost
+    /// last. A stack, because `TrustPolicy`'s append-only rule nests one
+    /// inside the other.
+    vars: Vec<(String, Value)>,
 }
 
 /// A string-literal token, marked so it cannot collide with an identifier.
@@ -1104,7 +1234,7 @@ fn tokenize(rule: &str) -> Vec<String> {
         let c = bytes[i];
         if c.is_whitespace() {
             i += 1;
-        } else if c == '(' || c == ')' || c == '.' || c == '?' || c == ':' || c == '+' {
+        } else if c == '(' || c == ')' || c == '.' || c == '?' || c == ':' || c == '+' || c == ',' {
             out.push(c.to_string());
             i += 1;
         } else if c == '\'' || c == '"' {
@@ -1275,7 +1405,12 @@ impl<'a> Cursor<'a> {
             Some("<=") => {
                 self.next();
                 let rhs = self.additive();
-                Cel::Bool(self.number(&lhs) <= self.number(&rhs))
+                Cel::Bool(self.ordered(&lhs) <= self.ordered(&rhs))
+            }
+            Some("<") => {
+                self.next();
+                let rhs = self.additive();
+                Cel::Bool(self.ordered(&lhs) < self.ordered(&rhs))
             }
             _ => lhs,
         }
@@ -1335,6 +1470,18 @@ impl<'a> Cursor<'a> {
                 let lit = self.next();
                 Cel::Field(Some(Value::String(lit[STR.len_utf8()..].to_string())))
             }
+            // A boolean LITERAL is a `Field`, not a `Bool`, so that
+            // `self.x == true` compares equal to a schema boolean. `truth()`
+            // reads either one, and `Cel::Bool` stays what an OPERATOR
+            // produced.
+            Some("true") => {
+                self.next();
+                Cel::Field(Some(Value::Bool(true)))
+            }
+            Some("false") => {
+                self.next();
+                Cel::Field(Some(Value::Bool(false)))
+            }
             Some(t) if t.chars().all(|c| c.is_ascii_digit()) => {
                 let lit = self.next();
                 let n: u64 = lit.parse().expect("an integer literal");
@@ -1349,7 +1496,13 @@ impl<'a> Cursor<'a> {
         let mut cur = match root.as_str() {
             "self" => Some(self.new.clone()),
             "oldSelf" => Some(self.old.clone()),
-            other => panic!("unknown root `{other}` in rule: {}", self.src),
+            other => match self.vars.iter().rev().find(|(n, _)| n == other) {
+                Some((_, v)) => Some(v.clone()),
+                // Inside an untaken branch nothing is bound, and that is not a
+                // mistake — the branch is being consumed, not evaluated.
+                None if self.skip => None,
+                None => panic!("unknown root `{other}` in rule: {}", self.src),
+            },
         };
         loop {
             if self.peek() != Some(".") {
@@ -1358,12 +1511,55 @@ impl<'a> Cursor<'a> {
             self.next();
             let field = self.next();
             if self.peek() == Some("(") {
-                // A method call. `startsWith` is the only one this fragment
-                // evaluates; `matches` is regex and is deliberately NOT
-                // evaluated here (see `REGEX_ONLY_RULES`), because a second
+                self.next();
+                // The two comprehension macros, which is how every "every
+                // existing entry is still there" rule in this group is
+                // written. They bind a variable and re-evaluate their body
+                // once per element, so the body is PARSED once and EVALUATED
+                // n times — the cursor is rewound to the body's first token
+                // for each element.
+                if field == "all" || field == "exists" {
+                    let var = self.next();
+                    self.expect(",");
+                    let body = self.i;
+                    let items: Vec<Value> = match &cur {
+                        Some(Value::Sequence(seq)) => seq.clone(),
+                        None => Vec::new(),
+                        Some(other) => {
+                            panic!("{field}() takes a list; got {other:?} in `{}`", self.src)
+                        }
+                    };
+                    let mut acc = field == "all";
+                    if self.skip || items.is_empty() {
+                        // An empty list makes `all` vacuously true and
+                        // `exists` false, which is what CEL does; the body is
+                        // still consumed so the cursor ends where the parser
+                        // expects it.
+                        self.skipped(|c| {
+                            c.expr();
+                        });
+                    } else {
+                        for item in &items {
+                            self.i = body;
+                            self.vars.push((var.clone(), item.clone()));
+                            let v = self.expr();
+                            let truth = self.truth(&v);
+                            self.vars.pop();
+                            if field == "all" {
+                                acc = acc && truth;
+                            } else {
+                                acc = acc || truth;
+                            }
+                        }
+                    }
+                    self.expect(")");
+                    return Cel::Bool(!self.skip && acc);
+                }
+                // An ordinary method. `startsWith` is the only one this
+                // fragment evaluates; `matches` is regex and is deliberately
+                // NOT evaluated here (see `is_regex_only`), because a second
                 // regex engine in a test would be a second answer to the
                 // question the API server already answers.
-                self.next();
                 let arg = self.expr();
                 self.expect(")");
                 assert_eq!(
@@ -1394,10 +1590,31 @@ impl<'a> Cursor<'a> {
             other => panic!("expected a string, got {other:?} in rule: {}", self.src),
         }
     }
-    fn number(&self, v: &Cel) -> i64 {
+    /// An orderable rendering of a value, for `<` and `<=`.
+    ///
+    /// A NUMBER OR AN RFC 3339 INSTANT, AND NOTHING ELSE. The API server maps
+    /// `type: string, format: date-time` to CEL's `timestamp` and compares
+    /// those properly; this evaluator compares their TEXT, which agrees for
+    /// every value this group's schemas can hold — `date-time` in a structural
+    /// schema is RFC 3339, the fields are written by controllers that emit
+    /// `Z`, and equal-length `Z`-normalised timestamps order lexicographically
+    /// exactly as instants do. A value that is neither is a panic rather than
+    /// a guess, because a comparison this evaluator got quietly wrong would be
+    /// a green test for a rule that does not hold.
+    fn ordered(&self, v: &Cel) -> String {
         match v {
-            Cel::Field(Some(Value::Number(n))) => n.as_i64().expect("an integer"),
-            other => panic!("expected a number, got {other:?} in rule: {}", self.src),
+            Cel::Field(Some(Value::Number(n))) => {
+                format!("{:020}", n.as_i64().expect("an integer"))
+            }
+            Cel::Field(Some(Value::String(s)))
+                if s.len() == 20 && s.ends_with('Z') && s.contains('T') =>
+            {
+                s.clone()
+            }
+            other => panic!(
+                "expected a number or an RFC 3339 `Z` instant, got {other:?} in rule: {}",
+                self.src
+            ),
         }
     }
 }
@@ -1411,6 +1628,7 @@ fn eval(rule: &str, new: &Value, old: &Value) -> bool {
         new,
         old,
         skip: false,
+        vars: Vec::new(),
     };
     let v = c.expr();
     assert_eq!(
@@ -1735,12 +1953,17 @@ fn approval_status_subject_provenance_is_complete() {
     );
     assert_eq!(
         enum_values(at(subject, &["properties", "kind"])),
-        vec!["Restore", "Backup"]
+        vec!["Restore", "Backup", "RehearsalSchedule"]
     );
 }
 
-/// The subject kind enum is exactly `["Restore","Backup"]`. `Switchover` is
-/// tag 2 and an `Approval` cannot name one.
+/// The subject kind enum is exactly the three kinds an `Approval` may be
+/// about. `Switchover` is tag 2 and an `Approval` cannot name one.
+///
+/// `RehearsalSchedule` joined it with ADR 0008 Amendment G, for a standing
+/// rehearsal authorization. It is additive: no existing spelling changed, and
+/// the kind is still part of the bytes the approval binds, so an approval that
+/// matches a `Restore`'s plan hash is not accepted for a schedule.
 #[test]
 fn the_subject_kind_enum_has_no_switchover() {
     let doc = crd("approvals.yaml");
@@ -1750,10 +1973,14 @@ fn the_subject_kind_enum_has_no_switchover() {
     );
     assert_eq!(
         enum_values(node),
-        vec!["Restore", "Backup"],
-        "the subject kind enum is exactly [\"Restore\",\"Backup\"] — the subject kind is part \
-         of the bytes the approval binds, so an `Approval` whose planHash matches a `Restore` \
-         is never accepted for a `Switchover`"
+        vec!["Restore", "Backup", "RehearsalSchedule"],
+        "the subject kind enum is exactly these three — the subject kind is part of the bytes \
+         the approval binds, so an `Approval` whose planHash matches a `Restore` is never \
+         accepted for a `Switchover`"
+    );
+    assert!(
+        !enum_values(node).iter().any(|v| v == "Switchover"),
+        "`Switchover` is tag 2 and appears in no enum of this group"
     );
 }
 
@@ -2488,6 +2715,498 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
     assert!(
         !eval(pf::P3_OPERATION_BLOCK_RULE, &two, &two),
         "P3 must refuse a second block beside the matching one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0008 Amendment G: the five operational recovery kinds
+// ---------------------------------------------------------------------------
+
+/// A `TrustPolicy` key list is append-only and its lifecycle is one-way.
+///
+/// A TABLE OVER THE RULES THE CRD ACTUALLY CARRIES. Each case is a real
+/// administrator edit, and the ones expected `false` are the edits that would
+/// make an archive unverifiable or un-revoke a compromised key.
+#[test]
+fn a_trust_policy_key_is_append_only_and_its_state_is_one_way() {
+    use weirkeeper::crds::trust_policy as tp;
+
+    let key = |id: &str, pem: &str, state: &str, not_after: &str, extra: &str| {
+        format!(
+            "- keyId: {id}\n  spkiPem: {pem}\n  algorithm: p256\n  usages: [EvidenceSigning]\n  \
+             principal:\n    id: install:one\n  notBefore: '2026-01-01T00:00:00Z'\n  \
+             notAfter: '{not_after}'\n  state: {state}\n{extra}"
+        )
+    };
+    let spec = |keys: &str| yaml(&format!("keys:\n{keys}"));
+
+    let base = key("aa", "PEM-A", "Active", "2027-01-01T00:00:00Z", "");
+    let old = spec(&base);
+
+    /// One administrator edit, the rules it is checked against, and whether
+    /// the API server should accept it.
+    type LifecycleCase<'a> = (&'a str, Value, &'a [(&'a str, &'a str)], bool);
+
+    let cases: Vec<LifecycleCase<'_>> = vec![
+        (
+            "nothing changes",
+            spec(&base),
+            &[
+                ("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE),
+                ("G2", tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE),
+                ("G3", tp::G3_STATE_IS_MONOTONIC_RULE),
+                ("G4", tp::G4_REVOCATION_IS_WRITE_ONCE_RULE),
+            ],
+            true,
+        ),
+        (
+            "a second key is appended",
+            spec(&format!(
+                "{base}{}",
+                key("bb", "PEM-B", "Active", "2028-01-01T00:00:00Z", "")
+            )),
+            &[("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE)],
+            true,
+        ),
+        (
+            "the only key is REMOVED — every archive it signed becomes unverifiable",
+            spec(&key("bb", "PEM-B", "Active", "2028-01-01T00:00:00Z", "")),
+            &[("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE)],
+            false,
+        ),
+        (
+            "the public material under an existing keyId is swapped",
+            spec(&key("aa", "PEM-EVIL", "Active", "2027-01-01T00:00:00Z", "")),
+            &[("G1", tp::G1_KEYS_ARE_APPEND_ONLY_RULE)],
+            false,
+        ),
+        (
+            "notAfter is brought forward",
+            spec(&key("aa", "PEM-A", "Active", "2026-06-01T00:00:00Z", "")),
+            &[("G2", tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE)],
+            true,
+        ),
+        (
+            "notAfter is EXTENDED",
+            spec(&key("aa", "PEM-A", "Active", "2030-01-01T00:00:00Z", "")),
+            &[("G2", tp::G2_NOT_AFTER_ONLY_SHORTENS_RULE)],
+            false,
+        ),
+        (
+            "Active becomes Retired",
+            spec(&key(
+                "aa",
+                "PEM-A",
+                "Retired",
+                "2027-01-01T00:00:00Z",
+                "  retiredAt: '2026-05-01T00:00:00Z'\n",
+            )),
+            &[("G3", tp::G3_STATE_IS_MONOTONIC_RULE)],
+            true,
+        ),
+    ];
+    for (name, new, rules, expected) in cases {
+        for (id, rule) in rules {
+            assert_eq!(
+                eval(rule, &new, &old),
+                expected,
+                "case `{name}` against {id}:\n{rule}\nold: {old:?}\nnew: {new:?}"
+            );
+        }
+    }
+
+    // The backwards transitions, each from its own starting state.
+    let retired = spec(&key(
+        "aa",
+        "PEM-A",
+        "Retired",
+        "2027-01-01T00:00:00Z",
+        "  retiredAt: '2026-05-01T00:00:00Z'\n",
+    ));
+    let active = spec(&base);
+    assert!(
+        !eval(tp::G3_STATE_IS_MONOTONIC_RULE, &active, &retired),
+        "Retired must not go back to Active: a retired key that can be reactivated is a key \
+         whose retirement proves nothing"
+    );
+
+    let revoked = spec(&key(
+        "aa",
+        "PEM-A",
+        "Revoked",
+        "2027-01-01T00:00:00Z",
+        "  retiredAt: '2026-05-01T00:00:00Z'\n  revokedAt: '2026-06-01T00:00:00Z'\n  \
+         revocationEffectiveFrom: '2026-06-01T00:00:00Z'\n  revocationReason: KeyCompromise\n",
+    ));
+    assert!(
+        !eval(tp::G3_STATE_IS_MONOTONIC_RULE, &retired, &revoked),
+        "Revoked is terminal: un-revoking a compromised key is the one edit an attacker who \
+         reached the API server would most want"
+    );
+    let moved = spec(&key(
+        "aa",
+        "PEM-A",
+        "Revoked",
+        "2027-01-01T00:00:00Z",
+        "  retiredAt: '2026-05-01T00:00:00Z'\n  revokedAt: '2026-06-01T00:00:00Z'\n  \
+         revocationEffectiveFrom: '2026-12-01T00:00:00Z'\n  revocationReason: KeyCompromise\n",
+    ));
+    assert!(
+        !eval(tp::G4_REVOCATION_IS_WRITE_ONCE_RULE, &moved, &revoked),
+        "revocationEffectiveFrom is write-once: moving it later moves it PAST an attacker's \
+         signature, which is exactly what it exists to exclude"
+    );
+
+    // And the key list is an associative list, so the API server itself
+    // refuses a duplicate keyId — no quadratic CEL self-join for it.
+    let doc = crd("trustpolicies.yaml");
+    let keys = at(spec_schema(&doc), &["properties", "keys"]);
+    assert_eq!(
+        keys.get("x-kubernetes-list-type").and_then(Value::as_str),
+        Some("map"),
+        "spec.keys is an associative list keyed by keyId"
+    );
+    assert_eq!(
+        keys.get("x-kubernetes-list-map-keys")
+            .and_then(Value::as_sequence)
+            .map(|v| v.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec!["keyId"]),
+        "the merge key is keyId"
+    );
+}
+
+/// `TrustPolicy` is cluster-scoped and carries public material only.
+#[test]
+fn a_trust_policy_carries_public_material_and_is_cluster_scoped() {
+    let doc = crd("trustpolicies.yaml");
+    assert_eq!(
+        at(&doc, &["spec", "scope"]).as_str(),
+        Some("Cluster"),
+        "a namespace tenant must not be able to name or edit the trust that authorises it"
+    );
+    let entry = at(
+        spec_schema(&doc),
+        &["properties", "keys", "items", "properties"],
+    );
+    assert!(
+        entry.get("spkiPem").is_some(),
+        "a key entry carries its PUBLIC key material: an id alone gives verification nothing \
+         to verify against, which is the defect `the_roster_carries_key_material_for_both_lists` \
+         records for the roster"
+    );
+    for forbidden in ["privateKeyPem", "privateKey", "secretRef", "keyMaterial"] {
+        assert!(
+            entry.get(forbidden).is_none(),
+            "`{forbidden}` must not exist on a TrustPolicy key: `logweir trust export` writes \
+             this object verbatim, and every field here is world-readable to anyone with \
+             cluster read"
+        );
+    }
+    assert_eq!(
+        enum_values(at(entry, &["state"])),
+        vec!["Active", "Retired", "Revoked"],
+        "three states, and the order is the direction G3 allows"
+    );
+    assert_eq!(
+        enum_values(at(entry, &["usages", "items"])),
+        vec!["EvidenceSigning", "GovernedApproval", "ConsoleConfirmation"],
+        "the usage split is what keeps `signs evidence` and `approves restores` separate \
+         grants, which P17 requires for PLAT-19.2"
+    );
+}
+
+/// `RecoveryCatalog` seals everything but its sync trigger, and
+/// `RetentionPolicy` seals the three fields that decide WHERE deletion could
+/// happen.
+#[test]
+fn the_catalog_and_the_retention_policy_seal_what_they_must() {
+    use weirkeeper::crds::{recovery_catalog as rc, retention_policy as rp};
+
+    let catalog = |dest: &str, interval: i32, token: &str| {
+        yaml(&format!(
+            "destinationRef:\n  name: {dest}\nsync:\n  intervalSeconds: {interval}\n\
+             syncRequest: {token}\n"
+        ))
+    };
+    let base = catalog("primary", 3600, "t1");
+    assert!(
+        eval(
+            rc::SYNC_REQUEST_ONLY_RULE,
+            &catalog("primary", 3600, "t2"),
+            &base
+        ),
+        "changing only syncRequest is the one permitted edit"
+    );
+    assert!(
+        !eval(
+            rc::SYNC_REQUEST_ONLY_RULE,
+            &catalog("other", 3600, "t1"),
+            &base
+        ),
+        "re-pointing a catalog at a different destination must be refused"
+    );
+    assert!(
+        !eval(
+            rc::SYNC_REQUEST_ONLY_RULE,
+            &catalog("primary", 300, "t1"),
+            &base
+        ),
+        "the sync settings are sealed too"
+    );
+
+    let policy = |dest: &str, prefix: &str, keep_last: i32| {
+        yaml(&format!(
+            "destinationRef:\n  name: {dest}\ncatalogRef:\n  name: primary\n\
+             scope:\n  prefix: {prefix}\nrules:\n  keepLast: {keep_last}\nmode: Report\n"
+        ))
+    };
+    let old = policy("primary", "kafka-backups/team-a", 30);
+    assert!(
+        eval(
+            rp::IMMUTABLE_TARGET_RULE,
+            &policy("primary", "kafka-backups/team-a", 10),
+            &old
+        ),
+        "tightening the rules is the routine edit"
+    );
+    assert!(
+        !eval(
+            rp::IMMUTABLE_TARGET_RULE,
+            &policy("primary", "kafka-backups/team-b", 30),
+            &old
+        ),
+        "the scope prefix is immutable: an approved plan names point ids, and a movable scope \
+         would apply that plan to a different prefix"
+    );
+    assert!(
+        !eval(
+            rp::IMMUTABLE_TARGET_RULE,
+            &policy("other", "kafka-backups/team-a", 30),
+            &old
+        ),
+        "the destination is immutable for the same reason"
+    );
+
+    // And `mode` and its block travel together, in both directions.
+    let with = |mode: &str, block: &str| yaml(&format!("mode: {mode}\n{block}"));
+    for (name, value, expected) in [
+        ("Report with no block", with("Report", ""), true),
+        (
+            "Enforce with its block",
+            with("Enforce", "enforcement:\n  schedule: '17 4 * * *'\n"),
+            true,
+        ),
+        ("Enforce with NO block", with("Enforce", ""), false),
+        (
+            "Report carrying an enforcement block",
+            with("Report", "enforcement:\n  schedule: '17 4 * * *'\n"),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            eval(rp::K2_ENFORCEMENT_IFF_ENFORCE_RULE, &value, &value),
+            expected,
+            "case `{name}`: a delete-capable credential configured under a mode that never \
+             deletes is a credential mounted for nothing"
+        );
+    }
+    assert_eq!(
+        enum_values(at(
+            spec_schema(&crd("retentionpolicies.yaml")),
+            &["properties", "mode"]
+        )),
+        vec!["Report", "Enforce", "ExternalLifecycle"],
+    );
+    assert_eq!(
+        at(
+            spec_schema(&crd("retentionpolicies.yaml")),
+            &["properties", "mode", "default"]
+        )
+        .as_str(),
+        Some("Report"),
+        "the DEFAULT is the mode that deletes nothing. Amendment H makes the tag-1 statement \
+         version-scoped, not withdrawn: it is unqualified wherever mode is not Enforce, and \
+         an object that says nothing about mode is one of those."
+    );
+}
+
+/// `RehearsalSchedule` seals every field but `suspend`, and the seal names
+/// each of them.
+#[test]
+fn a_rehearsal_schedule_seals_everything_but_suspend() {
+    let doc = crd("rehearsalschedules.yaml");
+    let rule = &attached_rules(&doc)
+        .into_iter()
+        .find(|r| r.path == ["spec"] && r.rule.contains("oldSelf"))
+        .expect("the rehearsal schedule seals its spec")
+        .rule;
+    let sealed: Vec<&str> = at(spec_schema(&doc), &["properties"])
+        .as_mapping()
+        .expect("the spec has properties")
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| *k != "suspend")
+        .collect();
+    assert!(
+        sealed.len() >= 7,
+        "expected the full field set; got {sealed:?}"
+    );
+    for field in &sealed {
+        assert!(
+            rule.contains(&format!("has(self.{field}) == has(oldSelf.{field})")),
+            "the seal must close the absent -> present transition for `{field}`; the standing \
+             authorization binds a digest of this spec, so a field that could be ADDED after \
+             approval would authorize work nobody approved.\nrule: {rule}"
+        );
+    }
+    assert!(
+        !rule.contains("suspend"),
+        "`suspend` is the one mutable field and must not appear in the seal"
+    );
+
+    // And v1's two single-value enums say what the decision says with CEL.
+    let spec = spec_schema(&doc);
+    assert_eq!(
+        enum_values(at(
+            spec,
+            &["properties", "point", "properties", "selection"]
+        )),
+        vec!["NewestAvailable"],
+    );
+    assert_eq!(
+        enum_values(at(
+            spec,
+            &["properties", "bounds", "properties", "concurrencyPolicy"]
+        )),
+        vec!["Forbid"],
+        "two concurrent rehearsals would race over the same mapped topic names"
+    );
+    assert_eq!(
+        at(
+            spec,
+            &[
+                "properties",
+                "target",
+                "properties",
+                "topicPrefix",
+                "pattern"
+            ]
+        )
+        .as_str(),
+        Some(weirkeeper::crds::rehearsal_schedule::TOPIC_PREFIX_PATTERN),
+        "the prefix grammar is what keeps teardown inside the runner's deletion guard"
+    );
+
+    // And v1 refuses a rehearsal that would accept unverified evidence — which
+    // would prove the archive is READABLE and nothing about whether it is
+    // trustworthy.
+    let rs = weirkeeper::crds::rehearsal_schedule::I2_REQUIRE_VERIFIED_EVIDENCE_RULE;
+    for (name, value, expected) in [
+        (
+            "requireVerifiedEvidence true",
+            yaml("point:\n  requireVerifiedEvidence: true\n"),
+            true,
+        ),
+        (
+            "requireVerifiedEvidence false",
+            yaml("point:\n  requireVerifiedEvidence: false\n"),
+            false,
+        ),
+    ] {
+        assert_eq!(eval(rs, &value, &value), expected, "case `{name}`");
+    }
+}
+
+/// A `Restore` is never unauthorized, and the additive status blocks are all
+/// optional.
+#[test]
+fn a_restore_carries_exactly_one_authorization_and_additive_status_is_optional() {
+    use weirkeeper::crds::restore as r;
+    let doc = crd("restores.yaml");
+    let spec = spec_schema(&doc);
+
+    assert!(
+        !required(spec).contains(&"approvalRef".to_string()),
+        "approvalRef became optional so a standing authorization can take its place"
+    );
+    assert!(
+        !required(spec).contains(&"authorization".to_string()),
+        "and the standing authorization is optional too — the CEL rule is what makes exactly \
+         one of them required"
+    );
+    for (name, value, expected) in [
+        (
+            "a per-run approval",
+            yaml("approvalRef:\n  name: a1\n"),
+            true,
+        ),
+        (
+            "a standing authorization",
+            yaml("authorization:\n  kind: Standing\n  approvalRef:\n    name: a1\n  rehearsalScheduleRef:\n    name: weekly\n"),
+            true,
+        ),
+        ("NEITHER — an unauthorized restore", yaml("deadlineSeconds: 60\n"), false),
+        (
+            "BOTH — two authorities that could disagree",
+            yaml("approvalRef:\n  name: a1\nauthorization:\n  kind: Standing\n  approvalRef:\n    name: a2\n  rehearsalScheduleRef:\n    name: weekly\n"),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            eval(r::EXACTLY_ONE_AUTHORIZATION_RULE, &value, &value),
+            expected,
+            "case `{name}`"
+        );
+    }
+
+    // Every additive status block is optional, on both kinds. An older
+    // controller writes none of them, and a status schema that required one
+    // would make every such object invalid on upgrade.
+    for (file, blocks) in [
+        ("backups.yaml", &["progress", "capture"][..]),
+        ("restores.yaml", &["progress", "completion", "teardown"][..]),
+    ] {
+        let doc = crd(file);
+        let status = status_schema(&doc);
+        let req = required(status);
+        for block in blocks {
+            assert!(
+                at(status, &["properties", block]).is_mapping(),
+                "{file}: status.{block} must exist"
+            );
+            assert!(
+                !req.contains(&(*block).to_string()),
+                "{file}: status.{block} must be OPTIONAL — every object an older controller \
+                 reconciled has none of it, and requiring it would invalidate them all on \
+                 upgrade"
+            );
+        }
+    }
+
+    // The trust block on the shared verification type, likewise additive.
+    let backup = crd("backups.yaml");
+    let verification = at(
+        status_schema(&backup),
+        &[
+            "properties",
+            "evidence",
+            "properties",
+            "verification",
+            "properties",
+        ],
+    );
+    for field in ["signedAt", "trust"] {
+        assert!(
+            verification.get(field).is_some(),
+            "status.evidence.verification.{field} is what tells `signed while the key was \
+             valid` from `signed afterwards`"
+        );
+    }
+    assert!(
+        at(verification, &["trust", "properties"])
+            .get("basis")
+            .is_some(),
+        "and the basis is what makes `Historical` a pass rather than a downgrade"
     );
 }
 

@@ -72,7 +72,7 @@ pub struct KeyEntry {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "TrustRoster",
-    doc = "Cluster-scoped. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`), both carrying public key material, plus the cluster ids a restore may target. `spec` is immutable.",
+    doc = "DEPRECATED in favour of `TrustPolicy` (ADR 0008 Amendment G), and still served and reconciled: a cluster with a roster keeps working, and with no TrustPolicy present the controller synthesises `legacy-roster-v1` from this object. What it cannot express is a key LIFECYCLE — retirement, revocation and a usage split — so a rotation here makes every archive the old key signed unverifiable, which is why the replacement exists. Cluster-scoped. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`), both carrying public key material, plus the cluster ids a restore may target. `spec` is immutable.",
     plural = "trustrosters",
     singular = "trustroster",
     status = "TrustRosterStatus",

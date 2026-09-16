@@ -11,7 +11,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, SpecRule};
+use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, RunProgress, SpecRule, Time};
 
 /// The CEL rule that ties `spec.destinationRef` to the sentinel in
 /// `spec.archive.url`, on every create as well as every update.
@@ -267,10 +267,42 @@ pub struct BackupStatus {
     /// The Job that ran, or is running, this backup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<LocalRef>,
+    /// What this run is doing right now, and why it is taking as long as it
+    /// is. **Absent on a `Backup` an older controller reconciled**, which is
+    /// the documented absent-field behaviour and not a degraded state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<RunProgress>,
+    /// When the capture itself started and finished, copied VERBATIM from the
+    /// verified receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureWindow>,
     /// The condition set. Spec §8's green badge for a `Backup` needs
     /// `evidence.verification.result == Valid` **and** `exitCode == 0` — a
     /// `Backup` carries no `outcome`, so the badge rule here is not the
-    /// `Restore` rule.
+    /// `Restore` rule. `RunnerReady` joins `Verified` as a condition every
+    /// terminal builder carries forward: a JSON merge patch REPLACES
+    /// `status.conditions`, so a builder that emits one and not the other
+    /// deletes the one it left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
+}
+
+/// When the capture actually happened.
+///
+/// # Why `startedAt` and not `finishedAt` is what protection is measured from
+///
+/// A four-hour backup that STARTED at 02:00 protects you to 02:00. Dating the
+/// recovery point at 06:00 would overstate the protection by the length of the
+/// run — which is exactly backwards, since a long run is usually a big or a
+/// struggling one. `ProtectionPolicy` reads `startedAt`; both are recorded so
+/// nobody has to infer the other.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureWindow {
+    /// `BackupReceipt.started_at`, copied from the verified receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Time>,
+    /// `BackupReceipt.finished_at`, copied from the verified receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<Time>,
 }
