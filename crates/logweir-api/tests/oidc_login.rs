@@ -800,3 +800,93 @@ async fn the_login_surface_is_rate_limited() {
         Decision::Allowed
     );
 }
+
+/// **The administrator's algorithm allowlist is load-bearing: a token that is
+/// perfectly valid under a key the provider publishes is still refused when its
+/// `alg` is not on the list.**
+///
+/// REGRESSION REASON. A planted mutant that deleted the allowlist check
+/// SURVIVED the fifteen cases above. It survived honestly: `alg: none` and
+/// `HS256` have no matching key family, so `select_key` refuses them anyway,
+/// and every case there asserts only that the sign-in failed. The check the
+/// allowlist actually performs is the one this test drives — RS256 refused by
+/// an installation that configured ES256 only, with an RSA key published and
+/// the signature genuinely valid — and nothing else in the suite covered it.
+#[tokio::test]
+async fn an_algorithm_off_the_allowlist_is_refused_even_with_a_published_key() {
+    let ec = TestKey::ec("k-ec-1");
+    let rsa = TestKey::rsa("k-rsa-1");
+    // The provider publishes BOTH keys; the administrator allows only ES256.
+    let idp = MockIdp::new(ISSUER, &[&ec, &rsa]);
+    let restricted = SharedApp::new(
+        FakeKube::new(),
+        idp.clone(),
+        SharedOptions {
+            bindings: support::default_bindings(),
+            allowed_algorithms: vec!["ES256".into()],
+            ..SharedOptions::default()
+        },
+    );
+
+    let (_, started) = start_login(&restricted, "").await;
+    let started = started.expect("login redirects");
+    idp.grant(
+        "code-rs256",
+        Grant {
+            id_token: rsa.mint(&claims(&started.nonce)),
+            code_challenge: None,
+            redirect_uri: None,
+        },
+    );
+    let refused = finish_login(&restricted, &started, "code-rs256").await;
+    assert_eq!(
+        refused.status.as_u16(),
+        401,
+        "RS256 was accepted by an ES256-only installation"
+    );
+    assert!(session_cookie_of(&refused).is_none());
+
+    // The SAME token signs in where RS256 is allowed, which is what makes the
+    // refusal above the allowlist's doing and not a broken RSA path.
+    let permissive = SharedApp::new(
+        FakeKube::new(),
+        idp.clone(),
+        SharedOptions {
+            bindings: support::default_bindings(),
+            allowed_algorithms: vec!["RS256".into(), "ES256".into()],
+            ..SharedOptions::default()
+        },
+    );
+    let (_, started) = start_login(&permissive, "").await;
+    let started = started.expect("login redirects");
+    idp.grant(
+        "code-rs256-ok",
+        Grant {
+            id_token: rsa.mint(&claims(&started.nonce)),
+            code_challenge: None,
+            redirect_uri: None,
+        },
+    );
+    let accepted = finish_login(&permissive, &started, "code-rs256-ok").await;
+    assert_eq!(accepted.status.as_u16(), 303, "{}", accepted.code());
+    assert!(session_cookie_of(&accepted).is_some());
+
+    // And an ES256 token still works on the restricted installation.
+    let (_, started) = start_login(&restricted, "").await;
+    let started = started.expect("login redirects");
+    idp.grant(
+        "code-es256",
+        Grant {
+            id_token: ec.mint(&claims(&started.nonce)),
+            code_challenge: None,
+            redirect_uri: None,
+        },
+    );
+    assert_eq!(
+        finish_login(&restricted, &started, "code-es256")
+            .await
+            .status
+            .as_u16(),
+        303
+    );
+}

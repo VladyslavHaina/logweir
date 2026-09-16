@@ -1552,7 +1552,7 @@ mod tests {
         // Loopback + the flag: accepted.
         let ok = block.replace(
             "issuer: https://idp.example.com/realms/logweir",
-            "issuer: http://127.0.0.1:18399/realms/logweir\n  insecureLoopbackIssuer: true",
+            "issuer: http://127.0.0.1:38399/realms/logweir\n  insecureLoopbackIssuer: true",
         );
         let config = Config::parse(&ok, Path::new(".")).expect("a loopback mock issuer is allowed");
         assert!(config.shared().unwrap().oidc.insecure_loopback_issuer);
@@ -1574,7 +1574,7 @@ mod tests {
         // And plain HTTP on loopback WITHOUT the flag is still refused.
         let unflagged = block.replace(
             "issuer: https://idp.example.com/realms/logweir",
-            "issuer: http://127.0.0.1:18399/realms/logweir",
+            "issuer: http://127.0.0.1:38399/realms/logweir",
         );
         assert!(matches!(
             Config::parse(&unflagged, Path::new(".")),

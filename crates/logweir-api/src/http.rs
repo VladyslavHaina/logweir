@@ -274,6 +274,25 @@ pub async fn boundary_guard(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // THE IDENTITY-CLAIMING HEADERS ARE REMOVED, NOT MERELY IGNORED. Ignoring
+    // them is a property of every reader; removing them is a property of the
+    // request, and it is the one a future route cannot undo by accident. Their
+    // NAMES go into the audit record; their values are never read.
+    //
+    // This runs BEFORE the impersonation refusal so that the refused request
+    // gets a complete audit line too: a caller who sends both is exactly the
+    // caller an operator most wants the record for.
+    let stripped = strip_identity_headers(req.headers_mut());
+    let peer = req.extensions().get::<PeerAddr>().copied();
+    if let Some(audit) = req.extensions().get::<Arc<AuditContext>>().cloned() {
+        let forwarded = forwarded_client(&state, req.headers(), peer.map(|p| p.0));
+        audit.set_transport(
+            &peer.map(|p| p.0.to_string()).unwrap_or_default(),
+            forwarded.as_deref(),
+            &stripped,
+        );
+    }
+
     if let Some(name) = req
         .headers()
         .keys()
@@ -290,21 +309,6 @@ pub async fn boundary_guard(
         ));
         return axum::response::IntoResponse::into_response(error);
     }
-    // THE IDENTITY-CLAIMING HEADERS ARE REMOVED, NOT MERELY IGNORED. Ignoring
-    // them is a property of every reader; removing them is a property of the
-    // request, and it is the one a future route cannot undo by accident. Their
-    // NAMES go into the audit record; their values are never read.
-    let stripped = strip_identity_headers(req.headers_mut());
-    let peer = req.extensions().get::<PeerAddr>().copied();
-    if let Some(audit) = req.extensions().get::<Arc<AuditContext>>().cloned() {
-        let forwarded = forwarded_client(&state, req.headers(), peer.map(|p| p.0));
-        audit.set_transport(
-            &peer.map(|p| p.0.to_string()).unwrap_or_default(),
-            forwarded.as_deref(),
-            &stripped,
-        );
-    }
-
     // An EXACT path match, against the router's own paths. No prefix and no
     // normalisation, so `/healthz/../api/v1/session` is not exempt — it is not
     // a route either, and the fallback answers it 404.
@@ -524,6 +528,76 @@ pub fn parse_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The identity-claiming headers are REMOVED from the map, not merely
+    /// left for everyone to ignore.**
+    ///
+    /// REGRESSION REASON. A planted mutant that kept reporting the names while
+    /// skipping `headers.remove` SURVIVED the whole suite: every other test
+    /// asserts a consequence (the actor is unchanged, the names are audited),
+    /// and both consequences hold whether or not the header is still on the
+    /// request. The difference only matters for the code that has not been
+    /// written yet — which is exactly the code the stripping exists to protect
+    /// — so it needs a test that looks at the map itself.
+    #[test]
+    fn identity_headers_are_removed_from_the_request_not_just_ignored() {
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in [
+            ("x-remote-user", "impostor"),
+            ("x-remote-groups", "cluster-admins"),
+            ("x-remote-extra-scopes", "everything"),
+            ("x-forwarded-user", "impostor"),
+            ("x-forwarded-email", "impostor@example.test"),
+            ("x-auth-request-user", "impostor"),
+            ("x-auth-request-anything", "impostor"),
+            // Kept: these are not identity claims.
+            ("host", "console.test"),
+            ("cookie", "__Host-logweir_session=x"),
+            ("origin", "https://console.test"),
+            ("x-forwarded-for", "203.0.113.9"),
+            ("x-forwarded-proto", "https"),
+        ] {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+
+        let removed = strip_identity_headers(&mut headers);
+        assert_eq!(
+            removed,
+            vec![
+                "x-auth-request-anything",
+                "x-auth-request-user",
+                "x-forwarded-email",
+                "x-forwarded-user",
+                "x-remote-extra-scopes",
+                "x-remote-groups",
+                "x-remote-user",
+            ]
+        );
+        for name in &removed {
+            assert!(
+                !headers.contains_key(name.as_str()),
+                "{name} is still on the request after being reported as stripped"
+            );
+        }
+        // The value is gone, not merely the first of several.
+        assert!(headers.get_all("x-remote-user").iter().next().is_none());
+        // And nothing else was taken.
+        assert_eq!(headers.len(), 5, "{headers:?}");
+        for kept in [
+            "host",
+            "cookie",
+            "origin",
+            "x-forwarded-for",
+            "x-forwarded-proto",
+        ] {
+            assert!(headers.contains_key(kept), "{kept} was removed");
+        }
+        // A second pass finds nothing left to do.
+        assert!(strip_identity_headers(&mut headers).is_empty());
+    }
 
     #[test]
     fn json_content_types() {

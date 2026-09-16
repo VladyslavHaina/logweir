@@ -727,3 +727,68 @@ async fn a_dependencys_debug_logging_cannot_print_the_upstream_body() {
         "the adapter's own redacted line is missing:\n{text}"
     );
 }
+
+/// **A forwarded client address is recorded only when the immediate peer is a
+/// configured trusted proxy — and it changes no decision either way.**
+///
+/// D0 allows forwarded values for transport logging and nothing else. The two
+/// halves here are the same request from two different peers, so the only
+/// difference is the trust decision.
+#[tokio::test]
+async fn a_forwarded_address_is_recorded_only_for_a_trusted_peer() {
+    use logweir_api::config::Cidr;
+    use logweir_api::http::PeerAddr;
+
+    async fn probe(peer: [u8; 4], trusted: Vec<Cidr>) -> (Value, String) {
+        let (log, _guard) = capture();
+        let app = SharedApp::new(
+            seeded(),
+            support::idp::MockIdp::new(ISSUER, &[]),
+            SharedOptions {
+                bindings: support::RoleBindings {
+                    revision: "fwd".into(),
+                    bindings: vec![support::binding(Role::Operator, NS_A, &["lw-a-operators"])],
+                },
+                trusted_proxy_cidrs: trusted,
+                ..SharedOptions::default()
+            },
+        );
+        let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/session")
+            .header("host", SHARED_HOST)
+            .header("cookie", &cookie)
+            .header("x-forwarded-for", "203.0.113.9, 198.51.100.2")
+            .header("x-forwarded-proto", "http")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(PeerAddr(std::net::IpAddr::from(peer)));
+        let response = app.app.send(request).await;
+        assert_eq!(response.status.as_u16(), 200);
+        let actor = response.json()["actor"]["id"].as_str().unwrap().to_string();
+        (log.record(&request_id(&response)), actor)
+    }
+
+    let trusted = vec![Cidr::parse("10.0.0.0/8").expect("a constant CIDR")];
+    let (recorded, actor_a) = probe([10, 1, 2, 3], trusted.clone()).await;
+    assert_eq!(recorded["peer"], "10.1.2.3");
+    assert_eq!(
+        recorded["forwardedFor"], "203.0.113.9",
+        "the first hop of a trusted proxy's header is the transport fact worth logging"
+    );
+
+    let (ignored, actor_b) = probe([203, 0, 113, 200], trusted).await;
+    assert_eq!(ignored["peer"], "203.0.113.200");
+    assert_eq!(
+        ignored["forwardedFor"], "",
+        "an untrusted peer's X-Forwarded-For must not be recorded at all"
+    );
+
+    // AND NEITHER CHANGED THE ACTOR. The header is transport logging; it is not
+    // an input to anything.
+    assert_eq!(actor_a, actor_b);
+    assert_eq!(actor_a, format!("{ISSUER}#u-op"));
+}
