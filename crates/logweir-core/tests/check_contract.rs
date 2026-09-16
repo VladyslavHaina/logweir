@@ -13,13 +13,13 @@ use logweir_core::check_contract::{
     advisory_warnings, aggregate, aggregate_expires_at, apply_rules, frames, inputs_digest, redact,
     redaction_rules, stale_reasons, topic_tsv, topic_tsv_sha256, visibility, ApprovalRef,
     Attestation, Authority, BindingInputs, CaBundleRef, CheckCode, CheckId, CheckOperation,
-    CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest, CheckResult, CheckState,
-    ConnectionPlan, CredentialMode, DestinationAccessRequest, DestinationPlan, EndFrame,
-    EvidenceFetchRequest, EvidenceObjectRequest, ExpectedSummary, FrameExpectations, Gating,
-    OverallState, Referent, RosterRef, StaleReason, Stream, TopicEntry, TopicInventoryRequest,
-    TruncationReason, VisibilityBasis, VisibilitySignals, VisibilityState, CHECK_CONTRACT_VERSION,
-    CHECK_PLAN_CONTRACT, CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES, MESSAGE_MAX_CHARS,
-    PART_MAX_BASE64_CHARS, REDACTED,
+    CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest, CheckResult,
+    CheckResultError, CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest,
+    DestinationPlan, EndFrame, EvidenceFetchRequest, EvidenceObjectRequest, ExpectedSummary,
+    FrameExpectations, Gating, OverallState, Referent, RosterRef, StaleReason, Stream, TopicEntry,
+    TopicInventoryRequest, TruncationReason, VisibilityBasis, VisibilitySignals, VisibilityState,
+    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES,
+    MAX_CHECK_ENTRIES, MESSAGE_MAX_CHARS, PART_MAX_BASE64_CHARS, REDACTED,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
@@ -840,44 +840,70 @@ fn an_outcome_redacts_its_own_strings() {
 
 // ---------------------------------------------------------------- redaction
 
-/// Each rule, with the mutant that deleting it plants. The harness is the
+/// Each rule, with the mutants that deleting it plants. The harness is the
 /// point: `apply_rules` with the rule REMOVED must leak, and with every rule
 /// present must not. A test that only asserted the second half is satisfied by
 /// a redactor that replaces everything with a constant, and a test that only
 /// asserted the first is satisfied by a redactor that does nothing.
+///
+/// Several fixtures per rule, so a rule that still fires on ONE shape but has
+/// lost another is caught too — which is how F1 (the JSON form) and F5 (the
+/// second `<Error>` block) got past the first version of this harness.
 #[test]
 fn every_redaction_rule_has_a_mutant_that_leaks() {
-    // (input, the witness the rule removes)
-    let cases: [(&str, &str, &str); 6] = [
+    // (rule, [(input, the witness the rule removes)])
+    let cases: [(&str, &[(&str, &str)]); 6] = [
         (
             "pem",
-            "key: -----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n done",
-            "BEGIN RSA PRIVATE KEY",
+            &[(
+                "key: -----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n done",
+                "BEGIN RSA PRIVATE KEY",
+            )],
         ),
         (
             "s3-xml",
-            "<Error><Code>AccessDenied</Code><Message>arn:aws:iam::12345:user/backup is not authorized</Message><RequestId>17C3</RequestId></Error>",
-            "not authorized",
+            &[
+                (
+                    "<Error><Code>AccessDenied</Code><Message>arn:aws:iam::12345:user/backup is not authorized</Message><RequestId>17C3</RequestId></Error>",
+                    "not authorized",
+                ),
+                // F5: the SECOND block. A rule that handles only the first
+                // still passes the row above.
+                (
+                    "<Error><Code>AccessDenied</Code></Error><Error><Code>NoSuchKey</Code><Message>and the second body survives</Message></Error>",
+                    "the second body survives",
+                ),
+            ],
         ),
         (
             "url-userinfo",
-            "connect to https://alice:hunter2@minio.storage.svc:9000/bucket failed",
-            "hunter2",
+            &[(
+                "connect to https://alice:hunter2@minio.storage.svc:9000/bucket failed",
+                "hunter2",
+            )],
         ),
         (
             "secret-key-value",
-            "sasl.password=sw0rdf1sh and the broker refused",
-            "sw0rdf1sh",
+            &[
+                ("sasl.password=sw0rdf1sh and the broker refused", "sw0rdf1sh"),
+                // F1: the JSON form, with a value short enough that the
+                // long-run rule cannot stand in for this one.
+                (r#"admission webhook denied: {"password":"sw0rdf1sh"}"#, "sw0rdf1sh"),
+                (r#"{"aws_secret_access_key": "sw0rdf1sh"}"#, "sw0rdf1sh"),
+            ],
         ),
         (
             "aws-access-key-id",
-            "principal AKIAIOSFODNN7EXAMPLE is denied",
-            "AKIAIOSFODNN7EXAMPLE",
+            &[("principal AKIAIOSFODNN7EXAMPLE is denied", "AKIAIOSFODNN7EXAMPLE")],
         ),
         (
             "long-base64-or-hex-run",
-            "signature over wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01 rejected",
-            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+            &[(
+                // EXACTLY 40 characters, so the threshold is pinned at its
+                // boundary rather than comfortably inside it.
+                "signature over wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01 rejected",
+                "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+            )],
         ),
     ];
     let all = redaction_rules();
@@ -887,29 +913,31 @@ fn every_redaction_rule_has_a_mutant_that_leaks() {
         "a rule was added without a mutant case"
     );
 
-    for (name, input, witness) in cases {
-        assert!(
-            input.contains(witness),
-            "the fixture must carry `{witness}`"
-        );
-
-        // The whole redactor removes it.
-        let whole = redact(input);
-        assert!(
-            !whole.contains(witness),
-            "rule `{name}`: `{witness}` survived the full redactor: {whole}"
-        );
-
-        // THE MUTANT: the same input through every rule but this one.
+    for (name, fixtures) in cases {
         let without: Vec<_> = all.iter().filter(|r| r.name != name).copied().collect();
         assert_eq!(without.len(), all.len() - 1);
-        let leaked = apply_rules(input, &without);
-        assert!(
-            leaked.contains(witness),
-            "deleting rule `{name}` must leak `{witness}`, but the output was already clean: \
-             {leaked}. Either the rule is redundant (say so) or the fixture no longer \
-             exercises it."
-        );
+        for (input, witness) in fixtures {
+            assert!(
+                input.contains(witness),
+                "the fixture must carry `{witness}`"
+            );
+
+            // The whole redactor removes it.
+            let whole = redact(input);
+            assert!(
+                !whole.contains(witness),
+                "rule `{name}`: `{witness}` survived the full redactor: {whole}"
+            );
+
+            // THE MUTANT: the same input through every rule but this one.
+            let leaked = apply_rules(input, &without);
+            assert!(
+                leaked.contains(witness),
+                "deleting rule `{name}` must leak `{witness}`, but the output was already \
+                 clean: {leaked}. Either the rule is redundant (say so) or the fixture no \
+                 longer exercises it."
+            );
+        }
     }
 }
 
@@ -942,27 +970,93 @@ fn redaction_caps_at_512_characters_without_splitting_a_character() {
     assert_eq!(redact(short), short);
 }
 
-/// The value forms of D2 §4.1, each spelled the way a real error spells it.
+/// **F1.** Every value form of D2 §4.1, in every quoting and spacing shape a
+/// real error uses. The JSON and quoted-key rows are the finding: the first
+/// version of the scanner skipped only spaces and tabs after the keyword and
+/// then required a separator, so the `"` between the two abandoned the match
+/// and the value was copied verbatim. W5 relays an admission-webhook or
+/// API-server body — JSON — through `redact` into a status message.
 #[test]
 fn the_secret_keyword_forms_are_all_caught() {
-    for case in [
+    let cases = [
+        // separator forms
         "password=hunter2",
         "password: hunter2",
         "password : hunter2",
+        "password => hunter2",
         "sasl.password=\"hunter2\"",
         "SASL.PASSWORD=hunter2",
         "aws_secret_access_key=hunter2",
         "secret_access_key: hunter2",
         "secret-access-key=hunter2",
+        "secretaccesskey=hunter2",
+        // whitespace-only separator (argv)
         "--token hunter2",
         "token=hunter2,region=us",
-    ] {
+        // JSON and quoted-key YAML — the F1 rows
+        r#"broker config rejected: {"password":"hunter2","user":"alice"}"#,
+        r#"{"aws_secret_access_key": "hunter2"}"#,
+        r#"{"sasl.password" : "hunter2"}"#,
+        r#"{'password':'hunter2'}"#,
+        "password: \"hunter2\"",
+        r#"{"secret":"hunter2"}"#,
+        r#"{"token":"hunter2"}"#,
+        r#"{"password":hunter2}"#,
+        // the keyword as a SUFFIX of a longer identifier
+        "sessionToken=hunter2",
+        "mypassword=hunter2",
+        r#"{"clientSecret":"hunter2"}"#,
+        // a value that would otherwise slip under the 40-character long-run
+        // threshold — which is the whole reason this rule exists
+        r#"{"password":"short"}"#,
+    ];
+    for case in cases {
         let out = redact(case);
-        assert!(!out.contains("hunter2"), "`{case}` leaked: {out}");
+        if case.contains("short") {
+            assert!(!out.contains("short"), "`{case}` leaked: {out}");
+        } else {
+            assert!(!out.contains("hunter2"), "`{case}` leaked: {out}");
+        }
         assert!(out.contains(REDACTED), "`{case}` produced {out}");
     }
-    // An ordinary English word that merely contains a keyword is untouched.
+
+    // An ordinary word that merely CONTAINS a keyword is untouched: a keyword
+    // that is the PREFIX of a longer identifier is a word, not a key.
     assert_eq!(redact("the tokenizer failed"), "the tokenizer failed");
+    assert_eq!(redact("password_file=/etc/x"), "password_file=/etc/x");
+
+    // D2 §6.5: a Secret NAME and a key name are public references and must
+    // survive. `secret` is the bare keyword, so this is the case that decides
+    // its form must be quoted-key only.
+    let remedy = "secret `logweir-s3` key `access-key-id` not found";
+    assert_eq!(redact(remedy), remedy);
+}
+
+/// **F5.** S3 and MinIO return several `<Error>` elements in one body for
+/// `DeleteObjects` and multipart completion, and the first version replaced
+/// only the first and re-emitted the rest untouched.
+#[test]
+fn every_s3_error_block_is_reduced_to_its_code() {
+    let body = "<?xml version=\"1.0\"?><Error><Code>AccessDenied</Code>\
+                <Message>first message names a key</Message></Error>\
+                <Error><Code>NoSuchKey</Code>\
+                <Message>second message names another</Message>\
+                <RequestId>17C3E1</RequestId></Error> trailing text";
+    let out = redact(body);
+    assert!(!out.contains("<Message>"), "{out}");
+    assert!(!out.contains("first message"), "{out}");
+    assert!(!out.contains("second message"), "{out}");
+    assert!(!out.contains("17C3E1"), "{out}");
+    assert!(out.contains("AccessDenied"), "{out}");
+    assert!(out.contains("NoSuchKey"), "{out}");
+    assert!(out.contains("trailing text"), "{out}");
+
+    // A block with no usable `<Code>` still loses its body.
+    let out = redact("<Error><Message>nothing to see</Message></Error>");
+    assert_eq!(out, "<Error><Code>Unknown</Code></Error>");
+    // A code is not a smuggling channel.
+    let out = redact("<Error><Code>Access Denied for arn:aws:iam::1:user/x</Code></Error>");
+    assert_eq!(out, "<Error><Code>Unknown</Code></Error>");
 }
 
 #[test]
@@ -1207,6 +1301,65 @@ fn the_binding_digest_is_order_independent() {
     assert!(inputs_digest(&a).starts_with("sha256:"));
 }
 
+/// **F4.** `inputs_digest` sorts `ca_bundles` and documents that callers must
+/// not pre-sort; `stale_reasons` compared them POSITIONALLY, so two bindings
+/// with an identical digest reported `caBundleChanged`.
+///
+/// The case is a two-destination restore preflight: the controller records the
+/// CA bundles in the order it resolved source and evidence, the API recomputes
+/// them from a map and gets the other order, and every GET of that `Preflight`
+/// answers `stale` — so the restore can never be approved from the UI. It
+/// fails safe and is undiagnosable, which is the worst combination.
+///
+/// MUTANT: dropping either `sorted(...)` call in `stale_reasons` turns the
+/// second assertion red.
+#[test]
+fn the_two_ca_bundle_orderings_agree() {
+    let mut recorded = binding();
+    recorded.ca_bundles = vec![
+        CaBundleRef {
+            destination_uid: "uid-source".into(),
+            sha256: sha256_prefixed(b"ca-source"),
+        },
+        CaBundleRef {
+            destination_uid: "uid-evidence".into(),
+            sha256: sha256_prefixed(b"ca-evidence"),
+        },
+    ];
+    let mut recomputed = recorded.clone();
+    recomputed.ca_bundles.reverse();
+
+    assert_eq!(
+        inputs_digest(&recorded),
+        inputs_digest(&recomputed),
+        "the digest is already order-independent"
+    );
+    assert!(
+        stale_reasons(
+            &recorded,
+            Some(t("2026-09-16T01:00:00Z")),
+            &recomputed,
+            t("2026-09-16T00:00:00Z")
+        )
+        .is_empty(),
+        "a reordered CA-bundle list is the same list"
+    );
+
+    // And a genuine rotation is still caught, so the fix is not a rule that
+    // never fires.
+    let mut rotated = recomputed.clone();
+    rotated.ca_bundles[0].sha256 = sha256_prefixed(b"ca-rotated");
+    assert_eq!(
+        stale_reasons(
+            &recorded,
+            Some(t("2026-09-16T01:00:00Z")),
+            &rotated,
+            t("2026-09-16T00:00:00Z")
+        ),
+        vec![StaleReason::CaBundleChanged]
+    );
+}
+
 /// Every consequence D2 §6.6 lists, one assertion each.
 #[test]
 fn every_binding_input_changes_the_digest() {
@@ -1409,6 +1562,121 @@ fn an_inventory_result_carries_signals_and_not_a_verdict() {
     // The result carries NO visibility field: the verdict is the controller's,
     // because only the controller holds the policy attestation.
     assert!(!serde_json::to_string(&inv).unwrap().contains("visibility"));
+}
+
+/// **F6.** D2 §6.4's "≤ 64 entries", enforced rather than declared.
+/// `MAX_CHECK_ENTRIES` had no reader anywhere in the workspace, so a W4 or W9
+/// bug emitting 400 outcomes would have written a half-megabyte status and
+/// nothing would have refused it.
+#[test]
+fn a_result_document_over_the_entry_cap_is_refused() {
+    let mut r = CheckResult::new(CheckPlanKind::OperationReadiness);
+    for _ in 0..MAX_CHECK_ENTRIES {
+        r.checks.push(outcome(
+            CheckId::ConnectionResolved,
+            CheckState::Ready,
+            Gating::Blocking,
+        ));
+    }
+    assert!(r.validate().is_ok(), "exactly the cap is allowed");
+    r.checks.push(outcome(
+        CheckId::ConnectionResolved,
+        CheckState::Ready,
+        Gating::Blocking,
+    ));
+    assert!(matches!(
+        r.validate(),
+        Err(CheckResultError::TooManyChecks(65))
+    ));
+
+    // And it is refused through the relay, as a `ResultUnreadable`, not only
+    // by a method nobody calls.
+    let bytes = r.to_canonical_json().unwrap();
+    let lines = write_all(&[], &[(Stream::Result, bytes)], "sha256:plan", "uid-1");
+    let relay = relay_of(&lines, &expectations("sha256:plan", "uid-1")).unwrap();
+    let err = relay.result().unwrap().unwrap_err();
+    assert_eq!(err.code(), CheckCode::ResultUnreadable);
+}
+
+/// **F11.** The decoded document carries whatever the runner wrote:
+/// `CheckOutcome`'s fields are public and `Deserialize`d directly, and
+/// `redact`/`cap` run only inside the constructors. D2 §4.1 applies redaction
+/// to every RELAYED status message too, so `CheckRelay::result` sanitises
+/// before it hands the document over — the controller gets one call instead of
+/// a hand-rolled walk it could forget.
+#[test]
+fn a_relayed_result_is_sanitised_before_the_controller_sees_it() {
+    // A document built the way a COMPROMISED or buggy runner would: fields
+    // assigned directly, bypassing `with_message` and friends.
+    let mut r = CheckResult::new(CheckPlanKind::OperationReadiness);
+    let mut bad = outcome(
+        CheckId::DestinationArchiveListable,
+        CheckState::NotReady,
+        Gating::Blocking,
+    );
+    bad.message = r#"denied: {"password":"hunter2"} for AKIAIOSFODNN7EXAMPLE"#.to_string();
+    // Long, but broken into short tokens so it is the CAP that shortens it
+    // and not the long-run rule.
+    bad.remedy = "grant the action and retry. ".repeat(60);
+    bad.facts.insert(
+        "endpoint".into(),
+        "https://alice:hunter2@minio.svc:9000".into(),
+    );
+    r.checks.push(bad);
+
+    let bytes = r.to_canonical_json().unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("hunter2"),
+        "the fixture must really carry the secret before the relay"
+    );
+    let lines = write_all(&[], &[(Stream::Result, bytes)], "sha256:plan", "uid-1");
+    let relay = relay_of(&lines, &expectations("sha256:plan", "uid-1")).unwrap();
+    let got = relay.result().unwrap().unwrap();
+
+    assert!(
+        !got.checks[0].message.contains("hunter2"),
+        "{:?}",
+        got.checks[0]
+    );
+    assert!(!got.checks[0].message.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!got.checks[0].facts["endpoint"].contains("hunter2"));
+    assert!(got.checks[0].facts["endpoint"].contains("minio.svc"));
+    assert_eq!(got.checks[0].remedy.chars().count(), MESSAGE_MAX_CHARS);
+
+    // `sanitise` is idempotent and is also callable on its own, for a
+    // controller that assembles a document from several sources.
+    let mut again = got.clone();
+    again.sanitise();
+    assert_eq!(again, got);
+}
+
+/// A result document whose contract or JSON is wrong is `ResultUnreadable`
+/// too, so the caller has ONE code for the frames and their contents.
+#[test]
+fn a_bad_result_document_is_result_unreadable() {
+    let lines = write_all(
+        &[],
+        &[(Stream::Result, b"{not json".to_vec())],
+        "sha256:plan",
+        "uid-1",
+    );
+    let relay = relay_of(&lines, &expectations("sha256:plan", "uid-1")).unwrap();
+    let err = relay.result().unwrap().unwrap_err();
+    assert_eq!(err.code(), CheckCode::ResultUnreadable);
+
+    let mut r = CheckResult::new(CheckPlanKind::TopicInventory);
+    r.contract = "logweir.dev/check-result/v2".into();
+    let lines = write_all(
+        &[],
+        &[(Stream::Result, r.to_canonical_json().unwrap())],
+        "sha256:plan",
+        "uid-1",
+    );
+    let relay = relay_of(&lines, &expectations("sha256:plan", "uid-1")).unwrap();
+    assert!(matches!(
+        relay.result().unwrap().unwrap_err(),
+        logweir_core::check_contract::FrameError::ResultDocument(CheckResultError::Contract(_))
+    ));
 }
 
 #[test]

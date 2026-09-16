@@ -13,9 +13,9 @@
 
 use logweir_core::engine::StorageUrl;
 use logweir_store::{
-    is_workload_identity_not_injected, s3_effective, workload_identity_from_env, CredentialKind,
-    CredentialSource, Store, StoreError, StoreErrorClass, StoreOptions, WorkloadIdentity,
-    DEAD_METADATA_ENDPOINT, WORKLOAD_IDENTITY_NOT_INJECTED,
+    is_workload_identity_not_injected, s3_builder_config, s3_effective, workload_identity_from_env,
+    CredentialKind, CredentialSource, Store, StoreError, StoreErrorClass, StoreOptions,
+    WorkloadIdentity, DEAD_METADATA_ENDPOINT, WORKLOAD_IDENTITY_NOT_INJECTED,
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -246,24 +246,25 @@ fn explicit_allow_http_false_wins_over_aws_allow_http_true() {
 }
 
 /// PLAT-08.1's "without global configuration leakage", as a property rather
-/// than an enumeration: an explicit store reads NO `AWS_*` variable except the
-/// ones its credential source NAMES.
+/// than an enumeration: NO credential source — `Ambient` included — reads an
+/// `AWS_*` variable that is not on its own named list.
 ///
 /// The tripwire is a variable whose value object_store parses at `build()`
 /// time. An unparseable `AWS_CONDITIONAL_PUT` makes a `from_env()`-based build
 /// FAIL and leaves a `new()`-based build untouched, so the two cases are
-/// distinguishable with no socket, no server and no request. The second half
-/// of the test is what makes the first half mean anything: with the SAME
-/// poison, the ambient source really does fail, so the tripwire is armed.
+/// distinguishable with no socket, no server and no request. The armed control
+/// is the LEGACY constructor `Store::read_only_from_url`, which really does
+/// read the whole environment and really does fail — without it this test
+/// would be satisfied by a tripwire object_store had stopped parsing.
 ///
-/// MUTANT: making every credential source start from
-/// `AmazonS3Builder::from_env()` — which is invisible to every other test in
-/// this file, because they all set an explicit endpoint and region that
-/// override the poisoned ones — turns the first assertion red. A destination
-/// whose `region` or `endpoint` is ABSENT is the case that would otherwise
-/// silently inherit the controller's own.
+/// MUTANT: making any credential source start from
+/// `AmazonS3Builder::from_env()` turns the corresponding assertion red. That
+/// is invisible to every other test in this file, because they all set an
+/// explicit endpoint AND region that override the poisoned ones — see
+/// `ambient_does_not_inherit_an_endpoint_or_region_from_the_environment` for
+/// the shape that is not covered that way.
 #[test]
-fn an_explicit_store_reads_no_unnamed_aws_variable() {
+fn no_credential_source_reads_an_unnamed_aws_variable() {
     let _l = env_lock();
     let _g = EnvGuard::clear(&AWS_VARS);
     let tripwires = [
@@ -275,29 +276,200 @@ fn an_explicit_store_reads_no_unnamed_aws_variable() {
     for var in tripwires {
         let _poison = EnvGuard::set(&[(var, "definitely-not-a-valid-value")]);
 
-        // Armed: the ambient source DOES read the environment, so the poison
-        // reaches object_store and the build fails.
+        // Armed: the LEGACY constructor reads the whole environment, so the
+        // poison reaches object_store and the build fails.
         assert!(
-            Store::read_only_with(&https_tls(), &StoreOptions::ambient()).is_err(),
-            "{var} is not a tripwire: the ambient build accepted it, so this test \
-             proves nothing about the explicit one"
+            Store::read_only_from_url(&https_tls()).is_err(),
+            "{var} is not a tripwire: even the legacy from_env() constructor accepted \
+             it, so this test proves nothing about the explicit ones"
         );
 
-        // And the explicit sources do not.
+        // And no explicit-path source does.
+        let _keys = EnvGuard::set(&[
+            ("AWS_ACCESS_KEY_ID", "AKIAPROJECTED0000001"),
+            ("AWS_SECRET_ACCESS_KEY", "projected"),
+        ]);
         for (name, opts) in [
             ("static", StoreOptions::static_keys("AKIADEST", "s", None)),
             ("staticFromEnv", StoreOptions::static_from_env()),
+            ("ambient", StoreOptions::ambient()),
         ] {
-            let _keys = EnvGuard::set(&[
-                ("AWS_ACCESS_KEY_ID", "AKIAPROJECTED0000001"),
-                ("AWS_SECRET_ACCESS_KEY", "projected"),
-            ]);
             assert!(
                 Store::read_only_with(&https_tls(), &opts).is_ok(),
                 "credential source `{name}` read {var}, which no destination named"
             );
+            let eff = s3_effective(&https_tls(), &opts).unwrap();
+            assert!(
+                !eff.environment_variables_read.contains(&var),
+                "`{name}` lists {var} among the variables it reads"
+            );
         }
     }
+}
+
+/// **F2, the reviewer's reproduction.** The shape every other test in this
+/// file avoided: a destination that names NEITHER an endpoint NOR a region.
+///
+/// D2 §3.10 builds the controller's `ControllerIdentity` evidence cache with
+/// `credentials: Ambient`. When `Ambient` started from
+/// `AmazonS3Builder::from_env()`, such a destination inherited
+/// `AWS_ENDPOINT_URL` from the controller's own environment while
+/// `s3_effective` reported `endpoint: None` — so a `BackupDestination` on
+/// plain AWS S3 would have had its evidence read from the controller's own
+/// MinIO bucket, and a W7 test written against `s3_effective` would have
+/// passed while the client dialled the wrong host. That is G2's "global
+/// configuration leakage", the defect PLAT-08.1 exists to close.
+///
+/// It is asserted on `s3_builder_config`, which reads the values back off the
+/// `AmazonS3Builder` the store is actually built from — NOT off
+/// `s3_effective`, because the whole point of the finding is that the two can
+/// disagree. Nothing is dialled: an endpoint-less destination targets AWS S3,
+/// and a unit test does not leave this machine (Global Constraint 17).
+#[test]
+fn ambient_does_not_inherit_an_endpoint_or_region_from_the_environment() {
+    let _l = env_lock();
+    let _g = EnvGuard::clear(&AWS_VARS);
+    let _poison = EnvGuard::set(&[
+        ("AWS_ENDPOINT_URL", "http://127.0.0.1:1"),
+        ("AWS_REGION", "ap-southeast-2"),
+        ("AWS_ALLOW_HTTP", "true"),
+        ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "true"),
+        ("AWS_ACCESS_KEY_ID", "AKIAAMBIENT000000001"),
+        ("AWS_SECRET_ACCESS_KEY", "ambient-secret"),
+    ]);
+
+    // Plain AWS S3: no endpoint, no region.
+    let plain_aws = StorageUrl::S3 {
+        bucket: "lw-b".into(),
+        prefix: "logweir/".into(),
+        region: None,
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+
+    for (name, opts) in [
+        ("ambient", StoreOptions::ambient()),
+        ("static", StoreOptions::static_keys("AKIADEST", "s", None)),
+        ("staticFromEnv", StoreOptions::static_from_env()),
+    ] {
+        let eff = s3_effective(&plain_aws, &opts).unwrap();
+        assert_eq!(eff.endpoint, None, "{name}");
+        assert_eq!(eff.region, None, "{name}");
+        assert!(!eff.allow_http, "{name}");
+        assert!(!eff.virtual_hosted_style, "{name}");
+        assert!(
+            !eff.environment_variables_read.contains(&"AWS_ENDPOINT_URL")
+                && !eff.environment_variables_read.contains(&"AWS_REGION"),
+            "{name} lists a location variable among the ones it reads: {:?}",
+            eff.environment_variables_read
+        );
+
+        // THE CLAIM THAT MATTERS: what the builder actually holds.
+        let config = s3_builder_config(&plain_aws, &opts).unwrap();
+        let get = |k: &str| config.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            get("endpoint"),
+            None,
+            "`{name}` put the environment's endpoint on the builder: {config:?}"
+        );
+        assert_eq!(
+            get("region"),
+            None,
+            "`{name}` put the environment's region on the builder: {config:?}"
+        );
+        assert_eq!(get("bucket").as_deref(), Some("lw-b"), "{name}");
+        assert_eq!(
+            get("virtual_hosted_style_request").as_deref(),
+            Some("false"),
+            "`{name}` took its addressing from AWS_VIRTUAL_HOSTED_STYLE_REQUEST"
+        );
+        // The secret never reaches the readback, only the public key id.
+        assert!(!format!("{config:?}").contains("ambient-secret"), "{name}");
+    }
+
+    // And the same destination WITH an endpoint puts that one — the
+    // destination's own — on the builder, so the assertions above are not
+    // satisfied by a readback that always answers `None`.
+    let config = s3_builder_config(&https_tls(), &StoreOptions::ambient()).unwrap();
+    assert_eq!(
+        config
+            .iter()
+            .find(|(n, _)| *n == "endpoint")
+            .map(|(_, v)| v.as_str()),
+        Some("https://minio.storage.svc:9000")
+    );
+}
+
+/// The legacy constructors are the contrast, and they are unchanged: they DO
+/// read the environment, which is why the explicit ones had to stop.
+///
+/// This is also what arms
+/// `no_credential_source_reads_an_unnamed_aws_variable`: if
+/// `Store::read_only_from_url` ever stopped inheriting `AWS_ENDPOINT_URL`,
+/// that test's control would go quiet and it would prove nothing.
+#[test]
+fn the_legacy_constructors_still_read_the_environment() {
+    let _l = env_lock();
+    let _g = EnvGuard::clear(&AWS_VARS);
+    let _poison = EnvGuard::set(&[("AWS_ENDPOINT_URL", "http://127.0.0.1:1")]);
+    let plain_aws = StorageUrl::S3 {
+        bucket: "lw-b".into(),
+        prefix: "logweir/".into(),
+        region: None,
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+    // The legacy path builds, and the only way to observe its inheritance
+    // without a socket is that it accepts a poisoned parse-at-build variable
+    // the explicit path refuses to read at all.
+    let _bad = EnvGuard::set(&[("AWS_CONDITIONAL_PUT", "definitely-not-a-valid-value")]);
+    assert!(
+        Store::read_only_from_url(&plain_aws).is_err(),
+        "the legacy constructor is supposed to read the whole AWS_* environment"
+    );
+    assert!(
+        Store::read_only_with(&plain_aws, &StoreOptions::ambient()).is_ok(),
+        "the explicit constructor is supposed not to"
+    );
+}
+
+/// `Ambient` resolves object_store's credential ORDER over the named
+/// variables, and reports which arm it took — so W7 can log the principal
+/// without dialling to find out.
+#[test]
+fn ambient_reports_the_arm_of_the_chain_it_resolved() {
+    let _l = env_lock();
+    let _g = EnvGuard::clear(&AWS_VARS);
+
+    // Nothing projected: instance metadata, which is what `Ambient` means.
+    let eff = s3_effective(&https_tls(), &StoreOptions::ambient()).unwrap();
+    assert_eq!(eff.credentials, CredentialKind::Ambient);
+    assert_eq!(eff.access_key_id, None);
+    assert_eq!(eff.workload_identity, None);
+
+    // An injected identity.
+    let _wi = EnvGuard::set(&[
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/token"),
+        ("AWS_ROLE_ARN", "arn:aws:iam::1:role/logweir"),
+    ]);
+    let eff = s3_effective(&https_tls(), &StoreOptions::ambient()).unwrap();
+    assert_eq!(eff.credentials, CredentialKind::WorkloadIdentity);
+    assert!(matches!(
+        eff.workload_identity,
+        Some(WorkloadIdentity::WebIdentity { .. })
+    ));
+
+    // Static keys win, exactly as object_store's own chain orders them.
+    let _sk = EnvGuard::set(&[
+        ("AWS_ACCESS_KEY_ID", "AKIAAMBIENT000000001"),
+        ("AWS_SECRET_ACCESS_KEY", "ambient-secret"),
+    ]);
+    let eff = s3_effective(&https_tls(), &StoreOptions::ambient()).unwrap();
+    assert_eq!(eff.credentials, CredentialKind::Static);
+    assert_eq!(eff.access_key_id.as_deref(), Some("AKIAAMBIENT000000001"));
+    assert!(!format!("{eff:?}").contains("ambient-secret"));
 }
 
 /// The addressing half of the same override. `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`
@@ -442,6 +614,83 @@ fn static_from_env_needs_both_halves() {
     assert_eq!(eff.credentials, CredentialKind::Static);
     assert_eq!(eff.access_key_id.as_deref(), Some("AKIAPROJECTED0000001"));
     assert!(eff.reads_environment);
+}
+
+/// **F3.** `StoreOptions` derives `Debug` and W4/W7/W10 will hold it inside
+/// structs that derive `Debug` or pass it to `tracing`'s `?field`. One `?opts`
+/// would otherwise put an AWS secret access key into a runner or controller
+/// log — the invariant WORKER-RULES names first. `CredentialSource`'s `Debug`
+/// is hand-written so the derive above it is safe.
+///
+/// MUTANT: replacing the hand-written impl with `#[derive(Debug)]` turns every
+/// assertion below red.
+#[test]
+fn no_debug_rendering_can_carry_a_secret() {
+    const SECRET: &str = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY";
+    const TOKEN: &str = "FwoGZXIvYXdzEBYaSESSIONTOKENVALUE";
+    let opts = StoreOptions::static_keys("AKIAIOSFODNN7EXAMPLE", SECRET, Some(TOKEN.into()));
+
+    for rendered in [
+        format!("{opts:?}"),
+        format!("{:?}", opts.credentials),
+        // The shape that actually happens: the options nested in a struct that
+        // derives Debug.
+        format!("{:?}", (("archive", &opts), 1u8)),
+    ] {
+        assert!(!rendered.contains(SECRET), "leaked the secret: {rendered}");
+        assert!(!rendered.contains(TOKEN), "leaked the token: {rendered}");
+        assert!(
+            rendered.contains("[redacted]"),
+            "the redaction must be visible, not silent: {rendered}"
+        );
+        // The PUBLIC half stays, so a log still says which principal was used.
+        assert!(
+            rendered.contains("AKIAIOSFODNN7EXAMPLE"),
+            "the access key id is the public half and is diagnostic: {rendered}"
+        );
+        // "present" and "absent" are distinguishable without the value.
+        assert!(rendered.contains("session_token"), "{rendered}");
+    }
+
+    let no_token = StoreOptions::static_keys("AKIAIOSFODNN7EXAMPLE", SECRET, None);
+    assert!(format!("{no_token:?}").contains("absent"));
+    // The other three variants carry nothing to leak.
+    for src in [
+        CredentialSource::Ambient,
+        CredentialSource::StaticFromEnv,
+        CredentialSource::WorkloadIdentity,
+    ] {
+        let r = format!("{src:?}");
+        assert!(!r.contains("[redacted]"), "{r}");
+    }
+}
+
+/// **F8.** Setting `max_retries` must not silently shorten the retry WINDOW;
+/// that is `retry_timeout`, and it keeps object_store's own 180 s default.
+#[test]
+fn max_retries_and_retry_timeout_are_independent() {
+    let _l = env_lock();
+    let _g = EnvGuard::clear(&AWS_VARS);
+    let only_retries = StoreOptions::static_keys("a", "b", None).with_max_retries(0);
+    assert_eq!(only_retries.retry_timeout, None);
+    let eff = s3_effective(&https_tls(), &only_retries).unwrap();
+    assert_eq!(eff.max_retries, Some(0));
+    assert_eq!(
+        eff.retry_timeout, None,
+        "an unset retry window stays object_store's 180 s default"
+    );
+
+    let both = StoreOptions::static_keys("a", "b", None)
+        .with_max_retries(2)
+        .with_request_timeout(Duration::from_secs(5))
+        .with_retry_timeout(Duration::from_secs(9));
+    let eff = s3_effective(&https_tls(), &both).unwrap();
+    assert_eq!(eff.request_timeout, Some(Duration::from_secs(5)));
+    assert_eq!(
+        eff.retry_timeout,
+        Some(Duration::from_secs(9)),
+        "the window is its own field and is not derived from request_timeout"
+    );
 }
 
 // ------------------------------------------------------- metadata endpoint
