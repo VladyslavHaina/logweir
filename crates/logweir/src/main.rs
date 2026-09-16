@@ -51,6 +51,14 @@ fn main() -> std::process::ExitCode {
             secret_key,
         }),
         cli::Command::Schema { which } => schema::run(&which),
+        // PLAT-14.2 / D3 §3.4. `main.rs` is edited alongside `cli.rs` for the
+        // structural reason the comment at the end of this match records: the
+        // arm list is exhaustive with no catch-all, so a subcommand added to
+        // `cli.rs` and not wired here is a COMPILE error rather than a runtime
+        // stub.
+        cli::Command::Notify(cli::NotifyCmd::Deliver { event }) => {
+            logweir::notify::run(&logweir::notify::DeliverArgs { event })
+        }
         cli::Command::Backup(cli::BackupCmd::Run {
             spec,
             allowed_clusters,

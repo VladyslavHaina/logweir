@@ -46,6 +46,12 @@ pub enum Command {
     Backup(BackupCmd),
     /// Print a JSON Schema. Tag 1 accepts `scorecard` and `backup-receipt`.
     Schema { which: String },
+    // PLAT-14.2 / D3 §3.4. DELIBERATELY A SUBCOMMAND GROUP WITH ONE LEAF: the
+    // D2 check runner adds a sibling `notify check` to this same enum, and a
+    // flat `NotifyDeliver` would have to be renamed to make room for it.
+    /// Deliver one protection event to the configured notification sinks.
+    #[command(subcommand)]
+    Notify(NotifyCmd),
     // Chain L, Task 15c, interface I14. A PURPOSE-BUILT LIVENESS PROBE, and
     // not `doctor` with fewer flags: `doctor` takes two more MANDATORY paths,
     // cannot be told which auth to use, refuses unless the cluster is in a
@@ -120,6 +126,36 @@ pub enum Command {
         /// that genuinely had no way to look (addendum A2/A4).
         #[arg(long)]
         strict: bool,
+    },
+}
+
+/// PLAT-14.2's delivery leaf. Kept SMALL on purpose — D3 §14 gives this enum a
+/// second arm later, and the enum is the seam the two tasks share.
+#[derive(Subcommand)]
+pub enum NotifyCmd {
+    /// POST one protection event to every configured sink, and report each one
+    /// on stdout.
+    ///
+    /// Sinks come from the ENVIRONMENT, never from a flag, because a routing
+    /// key or a signed webhook URL on an argv is visible in every process
+    /// listing on the host and lands in the Job spec anyone with pod read can
+    /// see: `PAGERDUTY_ROUTING_KEY`, `NOTIFY_WEBHOOK_URL`,
+    /// `NOTIFY_SLACK_WEBHOOK_URL`, plus `PAGERDUTY_ENDPOINT` for a non-US
+    /// PagerDuty service region. A variable that is present and blank is not a
+    /// configured sink.
+    ///
+    /// Prints `notify-result=<sink>:<ok|failed>` for each configured sink as
+    /// its final stdout lines. Exits 0 when every configured sink accepted
+    /// (including when none was configured), 1 when one did not, and 3 when
+    /// the event document itself was refused — in which case nothing was
+    /// posted and no `notify-result=` line is printed.
+    Deliver {
+        /// The protection event document
+        /// (`application/vnd.logweir.protection-event+json;version=1.0.0`).
+        /// In the shipped Job this is the controller's immutable ConfigMap
+        /// projected at `/event/event.json`.
+        #[arg(long)]
+        event: PathBuf,
     },
 }
 
