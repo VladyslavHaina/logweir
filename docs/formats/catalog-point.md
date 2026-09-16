@@ -126,7 +126,7 @@ all of them wanted:
 | `receipt.payload_type` | string | The receipt's media type, so a reader knows which verifier to run without guessing from the bytes. |
 | `backup_id` | string | The archive SET. Two runs appending to one set share it. |
 | `run_id` | string | The run that produced the receipt. |
-| `signing.key_id` / `.algorithm` | string | The key that signed THIS record. `key_id` is the SHA-256 of the DER SPKI — the same number `openssl` prints ([keys.md](../keys.md)) — and `algorithm` is spelled exactly as the installation's public identity ConfigMap spells it (`ecdsa-p256-sha256` or `ed25519`). |
+| `signing.key_id` / `.algorithm` | string | The key that signed THIS record. `key_id` is the SHA-256 of the DER SPKI — the same number `openssl` prints ([keys.md](../keys.md)) — and `algorithm` is a **closed set of two**, `ecdsa-p256-sha256` or `ed25519`, spelled exactly as the installation's public identity ConfigMap spells it. The schema publishes both values as an `enum`; `p256` is not one of them. |
 | `installation.key_id` | string, **optional** | The key under which the writer VERIFIED the receipt — i.e. the installation that produced the backup, which is a different question from who wrote this record. On a backfill by another installation the two differ. |
 
 ### The archive
@@ -157,7 +157,7 @@ all of them wanted:
 `username` even though the receipt has one: a catalog is the surface an operator
 lists in bulk, and a SASL principal is not a fact a recovery point needs.
 
-### Provenance (optional, and absent on this build)
+### Provenance (optional, and mostly absent on this build)
 
 `execution` describes the Kubernetes execution that produced the backup —
 `kind`, `namespace`, `name`, `uid`, `execution_id`, `inputs_sha256`,
@@ -167,11 +167,28 @@ lists in bulk, and a SASL principal is not a fact a recovery point needs.
 grammar. This record **cites** them and never redefines them: it does not
 describe what goes into that digest and does not recompute it.
 
-A Backup Job on this build carries no execution-contract environment, so
-`logweir backup run` writes no `execution` block at all and a backfill by
-`logweir catalog sync` — which sees a receipt and a bucket and no Kubernetes
-object — writes none either. **An absent block means the provenance is
-unknown**, never "no execution".
+What this build fills, and what it does not:
+
+* **`triggered_by` IS filled**, from the receipt's own field, whenever the
+  receipt carries a non-empty one. An empty `triggered_by` is not copied: `""`
+  means the operator said nothing, and writing it would turn an absence into a
+  value.
+* **Everything else is absent.** Not because the controller does not know it —
+  it records `Backup.status.execution` and freezes `execution-inputs.json` —
+  but because the Backup **Job's argv carries the runner no execution
+  identity**: it passes `--backup-id-override <execution_id>` and no namespace,
+  name, UID or `inputsSha256`. A backfill by `logweir catalog sync` knows even
+  less: a receipt and a bucket and no Kubernetes object at all.
+* **`execution_id` stays absent even on a controller-driven run**, although
+  `backup_id` happens to equal it there. The runner cannot tell an execution id
+  from a schedule slot — `--backup-id-override` carries both — and a field that
+  is right on one path and a fabrication on the other is worse than an absent
+  one.
+* A block that would establish nothing is written as **absent**, never as an
+  object of nulls: absent is the one spelling of unknown.
+
+**An absent block, or an absent field inside one, means UNKNOWN** — never
+"no execution".
 
 ### The recovery point is the CAPTURE START
 
@@ -288,7 +305,8 @@ logweir catalog sync --url s3://<bucket> \
   [--since <object key>] [--max <n>] \
   [--region <r>] [--endpoint <url>] [--path-style] [--allow-http]
 
-logweir catalog list --url s3://<bucket> [--since <object key>] [--max <n>] …
+logweir catalog list --url s3://<bucket> \
+  [--since <object key>] [--max <n>] [--days <n>] …
 ```
 
 `--url` names the archive's bucket; the evidence root `logweir/` is imposed and
@@ -307,13 +325,44 @@ receipt examined, then `catalog-scanned=`, `catalog-written=`,
 Re-running it is idempotent: identity is content-derived, so a second run over
 the same archive produces the same ids and reports them as already present.
 
-`list` reads only. Its rows come from the unsigned index, and it says so on
-every run.
+`list` reads only, and walks **day shards backwards from today**, stopping the
+moment `--max` rows are held — which is what the day shard is for. `--days`
+(default 400, decision D3 §5.3's own histogram bound) is how far back it will
+look. Every run prints `catalog-listed=`, then
+`catalog-unsupported-format=`, `catalog-unreadable=` and
+`catalog-inconsistent=` — the entries it **skipped**, because "refusal is per
+entry, not per catalog" is worth nothing if a short page cannot be told from a
+complete one — then `catalog-searched-days=` and
+`catalog-oldest-day-searched=`, so an empty page says which window it is empty
+for rather than implying the catalog is empty. `catalog-truncated=true` appears
+when `--max` filled with days still unlooked-at.
+
+There is deliberately **no resume cursor for older points**: a windowed query
+over history is an advertised-absent capability (D3 §5.3), and a
+`catalog-next=` that nothing consumes would be the fake stub that section
+forbids. Raise `--max`, or narrow with `--since`.
+
+An index entry that this build cannot read — a higher major, a truncated
+object, or one whose `record_key` is not the key its own `point_id` implies —
+is **skipped and counted**, never fatal to the listing. That last check matters
+because the log prefix is create-only but not append-restricted: anyone who can
+write a *new* key there could otherwise publish a row attributing an arbitrary
+record to a chosen identity. Its rows come from the unsigned index, and `list`
+says so on every run.
 
 Exit codes are the existing contract with no new variant: `0` completed, `1`
-operational (a bad command line, a store that could not be read, a write that
-failed after other writes had landed), `4` signing failed. Neither command
-produces `2` or `3` — they run no plan and sign no verdict.
+operational, `4` signing failed. Neither command produces `2` or `3` — they run
+no plan and sign no verdict.
+
+**`4` means what the contract says it means**: signing or lock-proof failed
+*and nothing was uploaded*. It is produced only when the failure happened
+before any put was attempted — a document that contradicts itself, or a signing
+failure. A store that refuses or cannot complete a put is **`1`**, with a
+message that says so in as many words: the record was signed before any put was
+attempted, part of the point may already be stored, nothing under `logweir/` is
+ever rewritten, and `--since` resumes the walk. Reporting a denied `PUT` as `4`
+would send an operator to rotate signing material over a bucket policy, and
+would assert "nothing was uploaded" in exactly the case where something was.
 
 ## Credentials
 
