@@ -305,6 +305,30 @@ Restore, the create still names the one `Approval` that Restore's
 `spec.approvalRef` names, and an `Approval` that already exists with different
 content is a conflict that overwrites nothing.
 
+## Addressing style never enables plaintext transport
+
+`path_style` addressing and insecure HTTP are **two controls over two different
+things**, and this page keeps them apart (defect `UI-HTTPDOWNGRADE`, decision
+D-SEAMS S5). The wizard used to read the addressing checkbox into the plan's
+insecure-transport flag, so an operator ticking `path_style` for a MinIO or Ceph
+endpoint -- which is what every on-premises object store needs -- also told the
+runner it could carry the object-store credential and every restored record over
+an unencrypted connection, in a document an approver then signed.
+
+Step 1 now renders a separate **"Allow insecure HTTP (explicit, local
+development only)"** checkbox. It defaults **off**, it is the only thing that
+sets the flag, and a warning beside it says what ticking it costs. Neither the
+addressing style, nor the shape of an endpoint, nor any value from the
+environment sets it -- in either storage block. A draft restored after a refusal
+keeps the two apart as well: the flag is a field of the draft in its own right
+and is never re-derived. The behaviour gate row is
+`restore_wizard_path_style_does_not_enable_http`, which drives the real mount
+half and compares the bytes it submits.
+
+One endpoint, one region and one addressing value still apply to **both** the
+source archive and the evidence store. Separating those two is PLAT-08.2's UI
+slice and is not done here.
+
 ## The three rules, each with a gate
 
 1. **No external resource of any kind.** No content delivery network, no

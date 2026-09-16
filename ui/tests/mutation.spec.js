@@ -38,11 +38,14 @@ import { PRIVATE_KEY_REFUSAL } from "../render.js";
 import { CLUSTER_DRAFT_FIELDS, CLUSTER_FORM, mountClusters } from "../pages/clusters.js";
 import { SCHEDULE_FORM, mountSchedules, renderSuspendStatus } from "../pages/schedules.js";
 import {
+  WIZARD_DRAFT_FIELDS,
   WIZARD_FORM,
+  applyWizardDraft,
   initialState,
   mountRestoreWizard,
   preparePlan,
   submitRestore,
+  wizardDraftValues,
 } from "../pages/restore-wizard.js";
 import {
   APPROVAL_FORM,
@@ -233,6 +236,23 @@ function fakeView() {
 }
 
 const parse = (html) => [{ html: html }];
+
+/** The plan document out of the rendered wizard's `<pre>`, decoded. The page
+ *  escapes every value it renders, so the bytes in the element are the bytes
+ *  the submit sends only once those five entities are read back. */
+function planBytesOf(html) {
+  const open = "<pre class=\"plan-bytes\" id=\"plan-bytes\">";
+  const start = html.lastIndexOf(open);
+  assert.ok(start !== -1, "the wizard rendered its plan bytes");
+  const end = html.indexOf("</pre>", start);
+  return html
+    .slice(start + open.length, end)
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
 
 // --------------------------------------------------------- the fake cluster
 
@@ -1287,4 +1307,139 @@ test("an_edit_after_a_timed_out_restore_submit_still_settles_the_late_answer", a
   } finally {
     globalThis.window = originalWindow;
   }
+});
+
+// -------------------------- D2 §13.2 W13a / defect UI-HTTPDOWNGRADE (S5)
+
+test("restore_wizard_path_style_does_not_enable_http", async () => {
+  // THE DEFECT, EXACTLY. `wire()` used to read the ADDRESSING checkbox into
+  // the plan's insecure-transport flag --
+  //     block.pathStyle = pathStyle.checked === true;
+  //     block.allowHttp = pathStyle.checked === true;
+  // -- so an operator ticking `path_style` for a MinIO or Ceph endpoint, which
+  // is what every on-premises object store needs, also told the runner it
+  // could carry the object-store credential and every restored record over an
+  // unencrypted connection. D-SEAMS S5: transport security is never derived,
+  // from addressing style or from anything else. The check runs through the
+  // real mount half, because `wire()` is where the derivation lived.
+  const ns = "wizard-http-ns";
+  const k8s = wizardKubernetes(ns);
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, parse, k8s, createRouteLifecycle().begin());
+    const flagOf = () => {
+      const bytes = planBytesOf(view.html());
+      const line = bytes.split("\n").filter((l) => l.trim().startsWith("allow_" + "http"));
+      assert.equal(line.length, 2, "one flag per storage block, source and evidence: " + line);
+      assert.equal(line[0].trim(), line[1].trim(), "and the two agree");
+      return line[0].trim().split(":")[1].trim();
+    };
+    const pathStyle = view.find("#store-pathStyle");
+    const insecure = view.find("#store-allow-insecure");
+    assert.ok(pathStyle !== null, "the addressing checkbox is rendered");
+    assert.ok(insecure !== null, "and the insecure-transport checkbox is its own control");
+    assert.equal(insecure.checked, false, "which defaults OFF");
+    assert.equal(flagOf(), "false", "and the plan starts with the flag clear");
+
+    // TICKING PATH-STYLE CHANGES ADDRESSING AND NOTHING ELSE.
+    view.find("#store-pathStyle").checked = true;
+    await view.find("#store-pathStyle").dispatch("change");
+    await settled();
+    assert.ok(
+      planBytesOf(view.html()).includes("path_style: true"),
+      "the addressing flag followed the box",
+    );
+    assert.equal(
+      flagOf(),
+      "false",
+      "AND THE TRANSPORT FLAG DID NOT. This is the assertion the defect fails.",
+    );
+    assert.equal(view.find("#store-allow-insecure").checked, false, "the other box is untouched");
+
+    // ONLY THE EXPLICIT BOX SETS IT.
+    view.find("#store-allow-insecure").checked = true;
+    await view.find("#store-allow-insecure").dispatch("change");
+    await settled();
+    assert.equal(flagOf(), "true", "the explicit box, and only it, sets the flag");
+
+    // AND UNTICKING PATH-STYLE DOES NOT CLEAR IT EITHER: two controls, two
+    // fields, no arrow in either direction.
+    view.find("#store-pathStyle").checked = false;
+    await view.find("#store-pathStyle").dispatch("change");
+    await settled();
+    assert.ok(planBytesOf(view.html()).includes("path_style: false"), "addressing followed");
+    assert.equal(flagOf(), "true", "and the transport flag stayed where the operator put it");
+
+    // WHAT REACHES THE CLUSTER IS THOSE BYTES. A page that rendered one
+    // document and submitted another would pass every assertion above.
+    view.find("#store-allow-insecure").checked = false;
+    await view.find("#store-allow-insecure").dispatch("change");
+    view.find("#store-pathStyle").checked = true;
+    await view.find("#store-pathStyle").dispatch("change");
+    await settled();
+    const shown = planBytesOf(view.html());
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    const created = k8s.creates("restores");
+    assert.equal(created.length, 1, "the submit sent one create: " + JSON.stringify(k8s.calls.map((c) => c.verb)));
+    const sent = created[0].body.spec.planBytes;
+    assert.equal(sent, shown, "the bytes on screen are the bytes sent");
+    assert.ok(sent.includes("path_style: true"), "with path-style addressing");
+    assert.ok(
+      sent.includes("allow_" + "http" + ": false"),
+      "and plaintext transport OFF, which is what the operator actually chose: " + sent,
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () => {
+  // THE OTHER HALF OF THE SAME DEFECT. `applyWizardDraft` used to write
+  // `block.allowHttp = d.pathStyle`, so a draft put back after a refusal came
+  // back with plaintext transport enabled even though its box had never been
+  // ticked. The draft allowlist now carries the flag in its own right.
+  const backups = fixture("wizard-backups.json");
+  const state = initialState("wizard-draft-ns", fixture("wizard-clusters.json"), backups);
+  assert.ok(
+    WIZARD_DRAFT_FIELDS.includes("allowHttp"),
+    "the flag is a field a draft keeps in its own right: " + WIZARD_DRAFT_FIELDS.join(", "),
+  );
+  const kept = wizardDraftValues(state);
+  assert.equal(kept.allowHttp, false, "and it starts false");
+
+  assert.equal(
+    applyWizardDraft(state, Object.assign({}, kept, { pathStyle: true })),
+    true,
+    "a draft for this point applies",
+  );
+  assert.equal(state.fields.source.pathStyle, true, "the addressing style came back");
+  assert.equal(
+    state.fields.source.allowHttp,
+    false,
+    "AND THE TRANSPORT FLAG DID NOT COME BACK WITH IT",
+  );
+  assert.equal(state.fields.evidence.allowHttp, false, "in either storage block");
+
+  applyWizardDraft(state, Object.assign({}, kept, { pathStyle: true, allowHttp: true }));
+  assert.equal(state.fields.source.allowHttp, true, "an explicitly kept true does come back");
+  assert.equal(state.fields.evidence.allowHttp, true);
+
+  // A DRAFT THAT CARRIES NO FLAG AT ALL leaves it alone -- it does not fall
+  // back to the addressing style. This is the arm that fails against the
+  // original line, which had no `allowHttp` branch to overwrite it with.
+  const partial = Object.assign({}, kept, { pathStyle: true });
+  delete partial.allowHttp;
+  state.fields.source.allowHttp = false;
+  state.fields.evidence.allowHttp = false;
+  applyWizardDraft(state, partial);
+  assert.equal(state.fields.source.pathStyle, true, "the addressing style still comes back");
+  assert.equal(
+    state.fields.source.allowHttp,
+    false,
+    "and a draft with no flag of its own does not acquire one from the addressing style",
+  );
+  assert.equal(state.fields.evidence.allowHttp, false);
 });

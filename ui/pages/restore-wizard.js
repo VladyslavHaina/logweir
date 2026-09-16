@@ -32,6 +32,14 @@
 // edit: "edit" prefills a NEW draft, whose bytes hash differently, and the
 // page says so above the form.
 //
+// TRANSPORT SECURITY IS NEVER DERIVED (D-SEAMS S5, defect UI-HTTPDOWNGRADE).
+// Addressing style and plaintext transport are two controls and this page
+// keeps them apart: `path_style` addressing says how a bucket is named in a
+// URL, and it has never had the authority to turn off encryption in transit.
+// The plan's insecure-transport flag is set by one explicit checkbox, which
+// defaults OFF, and by nothing else -- not by the addressing style, not by the
+// shape of an endpoint, not by any environment value.
+//
 // ONE GUIDED SUBMIT (PLAT-12.1). "Create the Restore" is the only action, and
 // it does the whole journey in order: check that the plan about to be sent is
 // the plan on screen, create the Restore idempotently -- its name is minted
@@ -99,7 +107,7 @@ export const WIZARD_FORM = "restore-wizard";
  *  again, and hashed again, from these. */
 export const WIZARD_DRAFT_FIELDS = Object.freeze([
   "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "endpoint", "region",
-  "pathStyle", "evidenceBucket", "archiveSecret",
+  "pathStyle", "allowHttp", "evidenceBucket", "archiveSecret",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -239,6 +247,8 @@ export function renderStoreFields(state) {
     "<label class=\"inline\" for=\"store-pathStyle\">" +
     "<input type=\"checkbox\" id=\"store-pathStyle\" name=\"pathStyle\"" +
     (store.pathStyle === true ? " checked" : "") + "> path_style addressing</label>" +
+    "<p class=\"note\">" + ADDRESSING_NOTE + "</p>" +
+    renderInsecureTransportField(s) +
     "<div class=\"field\"><label for=\"evidence-bucket\">evidence bucket</label>" +
     "<input id=\"evidence-bucket\" name=\"evidenceBucket\" value=\"" +
     esc(((s.fields || {}).evidence || {}).bucket) + "\"" +
@@ -249,6 +259,52 @@ export function renderStoreFields(state) {
     "after the approver has already signed it.</p></div>"
   );
 }
+
+/** Said beside the addressing checkbox, so a reader knows what it does and --
+ *  as of decision D2 section 13.2, task W13a -- what it does NOT do. */
+export const ADDRESSING_NOTE =
+  "path_style addressing says where a bucket's name goes in a URL: after the host rather " +
+  "than in front of it, which is what most on-premises object stores need. It says nothing " +
+  "about transport security and sets nothing else in this plan.";
+
+/** THE ONE CONTROL THAT ALLOWS PLAINTEXT TRANSPORT, and it is checked by hand.
+ *
+ *  Until this was split out, the wizard set the plan's insecure-transport flag
+ *  from the ADDRESSING checkbox (defect UI-HTTPDOWNGRADE): an operator ticking
+ *  "path_style" for a MinIO or Ceph endpoint -- which is what every
+ *  on-premises store needs -- silently also told the runner it could send the
+ *  archive credential and every restored record over an unencrypted
+ *  connection. The two are independent controls over independent things, and
+ *  D-SEAMS S5 states the rule for the whole product: neither addressing style,
+ *  nor endpoint shape, nor any environment value may enable plaintext
+ *  transport. So the flag has its own box, it defaults OFF, and nothing in
+ *  this page reads any other control to set it.
+ *
+ *  IT IS A PLAN FIELD, NOT A PAGE SETTING. The runner reads it out of the
+ *  signed bytes, so an approver sees it in the document they sign -- which is
+ *  the other half of why deriving it was a defect: the derived value went into
+ *  a signed document nobody had stated. */
+export function renderInsecureTransportField(state) {
+  const s = state || {};
+  const store = ((s.fields || {}).source) || {};
+  return (
+    "<label class=\"inline\" for=\"store-allow-insecure\">" +
+    "<input type=\"checkbox\" id=\"store-allow-insecure\" name=\"allowHttp\"" +
+    (store.allowHttp === true ? " checked" : "") +
+    "> Allow insecure HTTP (explicit, local development only)</label>" +
+    "<p class=\"complaint\" id=\"insecure-transport-warning\">" + INSECURE_TRANSPORT_WARNING +
+    "</p>"
+  );
+}
+
+/** The warning printed under that box, whether or not it is ticked. */
+export const INSECURE_TRANSPORT_WARNING =
+  "Ticking this writes allow_" + "http" + " true into the plan an approver signs, and the " +
+  "runner then reaches the archive and the evidence store over an unencrypted connection: " +
+  "the object-store credential and every restored record cross the network in the clear. " +
+  "Nothing else on this page sets it -- not the addressing style, not the endpoint, not any " +
+  "value from the environment -- and it defaults to off. Tick it only for a store on your " +
+  "own machine.";
 
 /** The sentence step 2 prints under the chosen row. A running schedule is the
  *  normal state of a backed-up cluster, and this page is a snapshot of one
@@ -898,6 +954,7 @@ export function wizardDraftValues(state) {
     endpoint: source.endpoint,
     region: source.region,
     pathStyle: source.pathStyle === true,
+    allowHttp: source.allowHttp === true,
     evidenceBucket: (f.evidence || {}).bucket,
     archiveSecret: s.archiveSecretName,
   };
@@ -934,7 +991,13 @@ export function applyWizardDraft(state, draft) {
     }
     if (typeof d.pathStyle === "boolean") {
       block.pathStyle = d.pathStyle;
-      block.allowHttp = d.pathStyle;
+    }
+    // AND NEVER FROM THE ADDRESSING STYLE. This is the other half of defect
+    // UI-HTTPDOWNGRADE: a draft restored after a refusal used to re-derive the
+    // insecure-transport flag from `pathStyle`, so even a plan whose box was
+    // never ticked came back with it set.
+    if (typeof d.allowHttp === "boolean") {
+      block.allowHttp = d.allowHttp;
     }
   }
   if (typeof d.evidenceBucket === "string") {
@@ -1412,6 +1475,8 @@ export function initialState(ns, clusters, backups) {
   const archiveSecretName =
     typeof ((archive.secretRef || {}).name) === "string" ? archive.secretRef.name : "";
   const target = firstTarget(clusters);
+  // `allowHttp` STARTS FALSE AND IS NEVER DERIVED (D-SEAMS S5). It is set by
+  // the one explicit checkbox in step 1 and by nothing else.
   const store = { region: "", endpoint: "", pathStyle: false, allowHttp: false };
   return {
     ns: ns,
@@ -1515,6 +1580,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const endpoint = node.querySelector("#store-endpoint");
   const region = node.querySelector("#store-region");
   const pathStyle = node.querySelector("#store-pathStyle");
+  const allowInsecure = node.querySelector("#store-allow-insecure");
   const evidenceBucket = node.querySelector("#evidence-bucket");
   const archiveSecret = node.querySelector("#archive-secret");
   const refresh = async () => {
@@ -1544,11 +1610,16 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       }
       if (pathStyle !== null) {
         block.pathStyle = pathStyle.checked === true;
-        // An endpoint that is not AWS S3 is reached over whatever transport the
-        // adopter gave it; the flag travels with the addressing style because
-        // the two are set together for every on-premises object store this
-        // product has been run against.
-        block.allowHttp = pathStyle.checked === true;
+      }
+      // TWO BOXES, TWO FIELDS, AND NO ARROW BETWEEN THEM (D-SEAMS S5, defect
+      // UI-HTTPDOWNGRADE). The line that used to stand here read
+      // `pathStyle.checked` into `allowHttp`, on the reasoning that an
+      // on-premises store needs both -- which is true of some deployments and
+      // is not a reason for a page to write a security setting nobody asked
+      // for into a document an approver signs. `allowHttp` is this checkbox
+      // and only this checkbox.
+      if (allowInsecure !== null) {
+        block.allowHttp = allowInsecure.checked === true;
       }
     }
     if (evidenceBucket !== null) {
@@ -1594,6 +1665,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     endpoint,
     region,
     pathStyle,
+    allowInsecure,
     evidenceBucket,
     archiveSecret,
   ]) {
