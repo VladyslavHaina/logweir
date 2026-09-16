@@ -119,7 +119,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-04.1 | Done | closure-0413, w0-reservation, plat06-live, plat06-review | Completion record under PLAT-04.1. The two gaps closed live in `10f6c28`'s run: the deleted-Job case (e) and the reservation under the unmodified shipped role (c). |
 | PLAT-04.1 defect (P0) | Fixed (`bdd26dc`, live-proved) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
 | PLAT-06.1 | Done | plat06-live, plat06-review | Completion record under PLAT-06.1. Integrated into main as `8e362f9..10f6c28`. |
-| PLAT-07.1 | In progress | plat07-finish | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
+| PLAT-07.1 | Done | plat07-finish, plat07-integrate, plat07-review, plat07-live | Completion record under PLAT-07.1. Integrated into main as `6c534b2..199020a` plus the live harness `50e641f`. | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
@@ -169,12 +169,13 @@ surviving. None is fixed yet except where a worker is named.
 | Id | Defect | Owner |
 | --- | --- | --- |
 | P0-RESERVE | `backup_schedule.rs:1359` reserves a slot with `replace_status` (PUT, verb `update`) while the shipped role grants only `patch` on `backupschedules/status`; default `Forbid` schedules therefore never create a Backup on a shipped install. Confirmed live (`auth can-i`: update no, patch yes). **Fixed** in `bdd26dc` (resourceVersion-conditional merge PATCH) with the reverse "every call has a grant" lint (`40fd7cb`); live-proved under the unmodified shipped role in the PLAT-06.1 run (reservation set at rv 2332382, cleared at 2332386). | w0-reservation, plat06-live (done) |
-| SEC-ENVHTTP | The controller forwards its own `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into every runner Job (`controllers/backup.rs:192`, `restore.rs:1297`); the engine's `from_env()` then honours them, so a forwarded `AWS_ALLOW_HTTP=true` enables plaintext transport even when the approved plan says `allow_http: false`. A global setting overrides approved execution inputs. | PLAT-08.1 destination resolver (D2 W6b) |
+| SEC-ENVHTTP | The controller forwards its own `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into every runner Job (`controllers/backup.rs:192`, `restore.rs:1297`); the engine's `from_env()` then honours them, so a forwarded `AWS_ALLOW_HTTP=true` enables plaintext transport even when the approved plan says `allow_http: false`. A global setting overrides approved execution inputs. Store-layer half closed by D2 W2 (`e86ea4a`: no credential source inherits endpoint, region, addressing or transport from the environment); the controller still forwards the variables and PLAT-06.1 now freezes them into the snapshot, so the controller/runner half stays open. | PLAT-08.1 destination resolver (D2 W7/W10) |
 | SEC-PODLOG | Pod lookup for exit codes and evidence keys matches on labels alone and takes the first result (`controllers/backup.rs:1683`, `restore.rs:2519`, `kafka_cluster.rs:832`); a tenant able to create a pod with `batch.kubernetes.io/job-name=<job>` can have its log read as the run's outcome. The pod's controller owner UID is never checked. | queued after plat06/plat07 merge |
 | UI-HTTPDOWNGRADE | The restore wizard sets `allowHttp` from the path-style checkbox (`ui/pages/restore-wizard.js:1142`) and applies one endpoint/region/addressing to both the source archive and evidence store (`:1135`). **First half fixed** in `6c2c95e` (D2 W13a): path-style never sets `allowHttp`; an explicit, separate "allow insecure HTTP" control defaulting off is the only source of `allow_http: true`, guarded by a behaviour row and a live journey that reads the plan bytes the API server holds. The one-endpoint-for-archive-and-evidence half remains PLAT-08.2. | PLAT-08.2 UI slice |
 | UI-FAKEPREFLIGHT | Wizard step 5 "Target-topic preflight" shows only the target cluster's cached `status.reachable` (`ui/pages/restore-wizard.js:424`), and restore admission gates on the same cached value (`controllers/restore.rs:638`). | PLAT-03.2 |
 | RET-WRONGBUCKET | Retention lists manifests through the controller's single global store while rendering commands for the schedule's own URL (`backup_schedule.rs:1417`), so a schedule on another bucket is reported against the wrong catalog. | PLAT-16.1 |
 | ENGINE-PATHSTYLE | The pinned engine ignores `path_style` and forces path-style addressing whenever an endpoint is set (`kafka-backup-core storage/s3.rs:66`), so virtual-hosted addressing with a custom endpoint cannot be honoured and must be refused rather than advertised. | PLAT-08.1 (documented refusal) |
+| STATUS-RECORDS | `Backup.status.records` is declared in `config/crd/backups.yaml` with a `RECORDS` printer column and is never written by any controller path; it is blank on every Backup the PLAT-06.1 and PLAT-07.1 live runs produced and on the lab's own scheduled Backup, while the counts exist in the signed receipt. Found by plat07-live. Either write it from the verified receipt or drop the field and column. | PLAT-14.1 (D3 W2 status/progress) |
 | RECEIPT-DUP | A Backup Job re-created from its frozen inputs (PLAT-06.1 case e) writes a second run-id receipt under the same execution id while overwriting the manifest at the same key; if the topic advanced between the runs, the first signed receipt's digests no longer match and a verifier reports it Invalid. Found by plat06-review (M1); run identity is idempotent, signed evidence is not. | PLAT-15.1 catalog / D3 W3 (point identity is content-derived from the receipt) |
 | LINT-INLINE-CALL | The reverse RBAC lint (`manifest_lint::every_call_site_has_a_grant`) and its forward twin do not see an inline `Api::<T>::namespaced(…).delete(…)` call shape (plat06-review L1), so a future controller call written that way would escape both. | PLAT-20.1 regression set; fix alongside the next controller task that adds a call |
 
@@ -631,6 +632,56 @@ PLAT-07.1, PLAT-13.1.
 **Migration/safety and done evidence:** Existing KafkaCluster references remain
 usable. Do not pool runner sockets across pods or infer EKS compatibility solely
 from a broker metadata success; capture settings used by each tested path.
+
+**Completion record — Done (2026-09-16), PLAT-07.1.** Landed in main as
+`6c534b2` (a projected private CA trusted by both of the runner's TLS clients),
+`b53afb6` (one resolver for every runner Job), `a0725e8` (the contract docs),
+`7cf50c1`/`efa8906`/`9973f5c`/`b999b74`/`199020a` (rebase proof and review fixes)
+and `50e641f` (live harness `scripts/test-plat07-live.py`). Contract v1
+(`docs/kubernetes.md` §20, `logweir_core::connection::CONTRACT_VERSION`):
+`KafkaCluster.spec.auth` carries the mode, the username, `secretRef {name,
+passwordKey}` (absent key means `password`, byte-for-byte legacy), the `tls`
+switch and `tlsCa` (exactly one Secret or ConfigMap key in the same namespace,
+CEL-required to sit beside `tls: true`); `weirkeeper::connection::resolve(cluster,
+ConnectionUse)` is the one resolver for the probe, backup, restore (source and
+target), discovery and preflight Jobs and `ResolvedConnection::project()` is the
+only place that renders the password reference (a `secretKeyRef` the kubelet
+resolves, never a value) and the CA projection (one variable read by both
+librdkafka and the engine); conflicting shapes (`tlsCa` without `tls`, both CA
+sources, `plaintext`+`tls`, `scramSha512` without a credential, malformed
+bootstrap entries or Secret names) are refused by CEL or by the resolver before
+any Job with a named condition, never dialled; the frozen execution inputs of
+PLAT-06.1 now record the resolved CA reference (the `v1` grammar stays
+byte-identical for CA-less objects) so a changed connection is
+`PlanConfigMapConflict`. Verified at `199020a`: weirkeeper 395/395 (`connection`
+27), runner crates and API 1175/1175, strict clippy and fmt, `just lint`,
+`crds-check`/`chart-check`/`schema-check`/`render-install --check`, the TLS
+hostname-verification and CA-to-both-clients pins guarded by tests whose mutants
+die. Live docker-desktop (`artifacts/plat07/`, controller and runner built from
+the branch, lab restored, lock 13:36:33–13:54:49Z): SCRAM with a non-default
+`passwordKey`, plaintext against an in-namespace broker, TLS with a private CA
+succeeding and failing at the handshake without or with the wrong CA (never a
+plaintext dial), credential rotation without editing the `KafkaCluster`, a
+redaction sweep over 1.7 MB of CRs, ConfigMaps, Jobs, logs and events with zero
+hits, and a foreign-namespace Secret refused. Combined live leg over the merged
+frozen-inputs path (`artifacts/plat07-live/`, images from `64e4bb8`, lock
+14:48:08–14:59:56Z, lab restored byte-equal): 6/6 — a snapshot carrying
+`source.tlsCa`, the joint conflict (a recreated cluster with a different CA is a
+terminal `PlanConfigMapConflict`, zero Jobs even after the holding quota was
+lifted, plan resourceVersion unchanged), rotation with `inputsSha256`
+byte-identical, every receipt independently verified by the Python verifier.
+Independent review `claude/plat07.review.md`: ACCEPT-WITH-FIXES (two medium: the
+TLS pins were untested) then ACCEPT, PLAT-07.1 Done unconditional. Migration
+(`docs/kubernetes.md` §20.5-§20.7): apply the `kafkaclusters` CRD before the
+controller; legacy objects render the same Job and plan; four previously
+accepted shapes are now refused with the listed reasons and are fixed by
+delete-and-recreate; a CA in a Secret puts that Secret's name (never its value)
+in the plan ConfigMap, a documented trade `configMapKeyRef` avoids; an older
+controller ignores `passwordKey`/`tlsCa` and would dial without the CA, so
+downgrade only after removing CA-bearing objects. Limitations carried forward:
+no live restore run through the new resolver (D2 W10's combined leg); the
+`credential` write-only builder has no caller until PLAT-17's routes; no node
+placement in the execution context (contract v1 has no such setting).
 
 ## PLAT-08 — Save backup destinations instead of rebuilding storage inputs
 
