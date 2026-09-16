@@ -158,7 +158,34 @@ fn default_detail(code: ProblemCode) -> &'static str {
     }
 }
 
+/// The two paths the `Host` allowlist does not cover. See [`boundary_guard`].
+pub const HOST_EXEMPT_PATHS: [&str; 2] = ["/healthz", "/readyz"];
+
 /// Layer 2. See the module documentation.
+///
+/// THE `Host` ALLOWLIST DOES NOT COVER THE TWO PROBES, and that is deliberate
+/// rather than an oversight. [`crate::config`] derives the allowed authorities
+/// from `publicOrigin` and the listen port, which is right for every route that
+/// acts with an actor's authority: it is what stops a DNS-rebinding page from
+/// reaching a loopback listener through a name that resolves to 127.0.0.1.
+///
+/// A kubelet HTTP probe cannot satisfy it. It addresses the Pod directly and
+/// sends `Host: <podIP>:<port>`, an address no administrator configures and no
+/// origin names, so with the guard applied to `/healthz` and `/readyz` a
+/// deployed console would answer both probes 421 and never become ready. That
+/// is a real trap for the stage that packages this service, not a hypothetical.
+///
+/// Exempting them leaks nothing. Neither reads a header, a cookie, a query or a
+/// body; neither consults the authenticator, the authorizer or any actor;
+/// neither takes a namespace. `/healthz` answers a fixed `{"status":"ok"}`
+/// without touching a dependency, and `/readyz` answers `{"status":"ready"}` or
+/// a problem that names no endpoint, no cluster and no reason — the
+/// `the_readiness_probe_never_says_why` test holds that line. A rebinding page
+/// that reaches them learns that a Logweir API is listening, which is the same
+/// thing a refused connection tells it.
+///
+/// The `Impersonate-*` refusal below is NOT exempted. It costs one header scan
+/// and there is no reason a probe would carry one.
 pub async fn boundary_guard(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if let Some(name) = req
         .headers()
@@ -176,7 +203,11 @@ pub async fn boundary_guard(State(state): State<AppState>, req: Request, next: N
         ));
         return axum::response::IntoResponse::into_response(error);
     }
-    let host_ok = {
+    // An EXACT path match, against the router's own paths. No prefix and no
+    // normalisation, so `/healthz/../api/v1/session` is not exempt — it is not
+    // a route either, and the fallback answers it 404.
+    let exempt = HOST_EXEMPT_PATHS.contains(&req.uri().path());
+    let host_ok = exempt || {
         let mut hosts = req.headers().get_all(header::HOST).iter();
         match (hosts.next(), hosts.next()) {
             (Some(host), None) => host.to_str().is_ok_and(|h| {

@@ -48,6 +48,22 @@ hex.workspace = true
 hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
+# THE TRANSPORT LIMITS (review finding R4). `axum::serve` builds its hyper
+# connection with `Builder::new(TokioExecutor::new())` and exposes no way to
+# configure it, so a header-read timeout and a header-size cap are unreachable
+# through it. `src/main.rs` runs the accept loop itself over these two. NEITHER
+# ADDS A PACKAGE: `hyper` and `hyper-util` are already resolved — axum is built
+# on them and `kube-client` pulls `hyper-util`'s `client` feature — so this
+# turns on features of crates already in `Cargo.lock` and leaves the package set
+# and THIRD_PARTY_NOTICES.md unchanged. `tests/linkage.rs` asserts that.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = [
+    "server",
+    "server-auto",
+    "server-graceful",
+    "service",
+    "tokio",
+] }
 k8s-openapi = { version = "0.24", features = ["v1_29"] }
 # A subset of weirkeeper's feature list; the resolved feature set is the union.
 kube = { version = "0.99", default-features = false, features = ["client", "rustls-tls"] }
@@ -63,7 +79,7 @@ thiserror.workspace = true
 # `signal` for SIGTERM/SIGINT, `rt-multi-thread` for the server runtime, `sync`
 # for the readiness cache. All three are features of the already-resolved
 # tokio and add no package.
-tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

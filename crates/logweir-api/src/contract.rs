@@ -660,11 +660,22 @@ pub struct Operation {
     pub verified_success: bool,
     /// Evidence object references.
     pub evidence: OperationEvidence,
-    /// The runner Job name, when one exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub job_name: Option<String>,
     /// The status conditions, at most 16.
     pub conditions: Vec<ConditionView>,
+    //
+    // THERE IS NO `jobName` HERE, DELIBERATELY. An earlier draft carried the
+    // runner Job's name. PLAT-17.1 exists because "direct CR manipulation
+    // exposes infrastructure details", and D0 gives PLAT-14.1 the final
+    // normalized operation mapping: what "remains visible in bounded form" is
+    // reason, message, exit code, last phase, timestamps and evidence
+    // references. A Job name is on none of those lists.
+    //
+    // Removing it now is the cheap direction. Adding a field later is a MINOR
+    // change to this document; removing one is MAJOR. So the field waits for
+    // the task that owns the ruling instead of being frozen into a versioned
+    // contract by whoever wrote the projection first.
+    // `no_infrastructure_detail_is_frozen_into_the_operation_contract` in
+    // `tests/status_mapping.rs` is what keeps it out.
 }
 
 /// The status summary carried by list items.

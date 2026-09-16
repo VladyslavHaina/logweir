@@ -1834,6 +1834,8 @@ dependencies = [
  "hmac",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "k8s-openapi",
  "kube",
  "logweir-core",

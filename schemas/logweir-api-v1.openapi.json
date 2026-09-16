@@ -2482,11 +2482,6 @@
             "description": "Evidence object references.",
             "$ref": "#/components/schemas/OperationEvidence"
           },
-          "jobName": {
-            "description": "The runner Job name, when one exists.",
-            "type": "string",
-            "nullable": true
-          },
           "kind": {
             "description": "`backup` or `restore`.",
             "$ref": "#/components/schemas/OperationKind"

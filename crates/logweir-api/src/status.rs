@@ -328,9 +328,6 @@ pub fn backup_operation(backup: &Backup) -> Operation {
             offset_report_key: None,
             offset_report_sha256: None,
         },
-        job_name: status
-            .and_then(|s| s.job_ref.as_ref())
-            .map(|r| r.name.clone()),
         conditions: condition_views(observed.conditions),
     }
 }
@@ -391,9 +388,6 @@ pub fn restore_operation(restore: &Restore) -> Operation {
             offset_report_key: evidence.and_then(|e| e.offset_report_key.clone()),
             offset_report_sha256: evidence.and_then(|e| e.offset_report_sha256.clone()),
         },
-        job_name: status
-            .and_then(|s| s.job_ref.as_ref())
-            .map(|r| r.name.clone()),
         conditions: condition_views(observed.conditions),
     }
 }
