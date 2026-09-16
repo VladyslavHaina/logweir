@@ -124,6 +124,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
 | PLAT-18.1 | Done | ui-typed-client, ui-typed-client-review | Completion record under PLAT-18.1; D0 stage 6 (static client migration) done for its own scope. Integrated into main as `fa73824..48d5ec0`. |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
+| PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes; `gc.rs` waits for the W6a kinds. The reviewers confirmed `controllers::backup::select_job_pod` on main still accepts non-controller owners and adopts an ownerless labelled pod (SEC-PODLOG) — W10 replaces it. |
@@ -1149,6 +1150,51 @@ PLAT-19.1.
 solely because it arrived beside an archive. Supply catalog compatibility rules
 and a complete source-offline/CR-loss recovery record.
 
+**Partial record (2026-09-16) — PLAT-15.1: the runner half (D3 W3) landed; the
+task stays In progress until the `RecoveryCatalog` kind, its controller and the
+bounded Kubernetes view (D3 W0/W8) exist.** Landed in main as `49c2a63`
+(`Store::list_page`: one bounded page of keys, no write, no delete), `75253ac`
+(the backup runner writes a durable, signed recovery-point record beside every
+receipt and `logweir catalog sync|list`), `389ab9c` (mutant guards and the
+Python verifier's `--payload-type catalog-point`), `be33766`
+(`docs/formats/catalog-point.md`), `1794275`, `398b403`, `c5d57ce` (review
+fixes). Contract: `pointId = "lwp1-" + hex(sha256(receipt bytes))[0..32]` with
+the full `receipt.sha256` as the binding, so two receipts under one
+`backup_id` are two points (the RECEIPT-DUP defect's answer) and a copied
+archive yields the same point; create-only, never-rewritten keys
+`logweir/catalog/v1/points/<pointId>/record.json|.sig` and the day-sharded
+index `logweir/catalog/v1/log/<yyyy>/<mm>/<dd>/<ms:013>-<pointId>.json` under
+the existing `LOGWEIR_ROOT` write assertion; the record
+(`application/vnd.logweir.catalog-point+json;version=1.0.0`,
+`schemas/logweir-catalog-point-1.0.0.json` with an `enum` for
+`signing.algorithm`) signed with the one run signer as a DSSE sidecar; reading
+rules — a higher major is `UnsupportedFormat` per entry, unknown fields are
+ignored within major 1, absent optional fields mean unknown never zero, the
+receipt-derived facts are recomputed from the verified receipt and a
+disagreeing copy is `RecordMismatch`, a malformed or inconsistent index entry
+is skipped and counted, never fatal; the runner prints a conditional
+`catalog-key=` line before the receipt lines and a failed catalog write is a
+warning that can change neither the exit code nor the receipt; `logweir
+catalog sync` backfills records only for receipts that verify against a
+supplied public key and reports a store refusal as exit 1 with the truth, never
+as the signing exit 4; `logweir catalog list` walks day shards newest-first
+within `--max`/`--days`. Verified at `c5d57ce`: catalog 42, `list_page` 8,
+private-MinIO rows 5/5 (twice; container and network removed), `just verify-py`
+106, parity corpus extended, `check-no-archive-write`, `pure-core`, strict
+clippy and fmt; eight planted mutants killed plus the reviewer's three.
+Independent review `claude/d3-catalog-writer.review.md`: ACCEPT-WITH-FIXES
+(three medium: a store failure reported as a signing failure, the schema's
+old `p256` spelling, a fatal index read) then ACCEPT. Decision amendments
+recorded in D3 at integration: §17 S1 now lists `logweir catalog sync|list` as
+the third deliberate exception (an operator command over the same create-only
+key family, not a check runner; the `catalogSync` plan kind remains what the
+controller runs) and §5.2's example names `ecdsa-p256-sha256`. Migration: an
+additive key family under `logweir/`; old archives without records are
+backfilled by `sync`; no reader of existing evidence changes. Limitations: the
+`execution` block is absent because a Backup Job's argv passes the runner no
+execution identity today; availability, verification state, tombstones,
+retention and disaster import are W8/W9/PLAT-15.2.
+
 ## PLAT-16 — Make retention promises and destination scope accurate
 
 **Priority P2 · Proposed.** Current keep-count/day fields report recommendations;
@@ -1275,6 +1321,65 @@ identity/role enforcement can ship before its approval-policy integration.
 **Migration/safety and done evidence:** Keep local administrator access explicit;
 do not imply that adding a login in front of a shared proxy creates per-user
 authorization. Supply threat-boundary, RBAC and deployment migration decisions.
+
+**Partial record (2026-09-16) — D0 stage 2 landed; PLAT-17.2 stays In progress
+and shared mode is not declared secure.** Landed in main as `24752f4` (OIDC
+identity, sessions, CSRF, roles and audit for `mode: shared`), `8bfe3d3`
+(the OIDC, session, CSRF, role-matrix and audit suites over an in-process
+provider signing real RS256/ES256), `8d35fd0` (the shared-mode contract in
+`docs/api.md`, whose configuration example a test parses and starts),
+`bd853bb`, `af5e083` and `90ecd0c` (review fixes). Contract (`docs/api.md`
+§Shared mode): Authorization Code with PKCE S256, `state` and `nonce` in a
+sealed ten-minute login cookie, exact issuer, exact audience with `azp`
+checked whenever present, `alg` allowlist, JWKS by exact `kid` with bounded
+refetch and a fail-closed outage window, `exp`/`iat` with bounded skew; the
+browser never receives a provider token; a ≤ 15-minute
+ChaCha20-Poly1305-sealed `__Host-logweir_session` cookie (`Secure`, `HttpOnly`,
+`SameSite=Lax`, `Path=/`, no `Domain`, key version in the AAD, refused on an
+unexpected key rotation, refused by name as `session_too_large` rather than
+truncated) carrying only bindable group claims; a synchroniser CSRF token
+derived by HMAC from the session id, required with `application/json` and the
+exact `Origin` on every unsafe method, no CORS anywhere; `X-Remote-User`,
+`X-Forwarded-*`, `X-Auth-Request-*` ignored and stripped from logs and
+`Impersonate-*` refused; four roles over exact group or `issuer#sub` bindings,
+re-derived per request from the carried claims, `Role::allows` an exhaustive
+match with Administrator absent from approval submission and separation of
+duties by `(issuer, sub)`; an ungranted namespace answered byte-identically
+to a missing object before any Kubernetes call; one deny-by-default audit
+record per request with the D0 fields and the real reason behind the
+enumeration-resistant 404, never a cookie, token, code, CSRF token, client
+secret, Secret value, plan bytes or URL userinfo (a captured-tracing guard
+and a real-key process row enforce it); shared mode refuses at startup, by
+field, a non-HTTPS `publicBaseUrl`, a missing or rotated key file, wildcard
+bindings and every other malformed setting the doc example is mutated into.
+Verified at `90ecd0c`: logweir-api 185/185 (twelve targets), 22 planted
+mutants killed plus the reviewer's five, strict clippy and fmt, `just lint`,
+`schema-check`, `one-signer`, `cargo deny`, notices unchanged (five dependency
+edges, zero new packages). Live docker-desktop (`artifacts/plat17-2-authz/live/`,
+namespaces `lw-p172-a/b-20260916152433` deleted after owner-label checks, no
+lock, a local TLS terminator and a local ES256 mock provider): 71/71 — four
+real code+PKCE sign-ins, the operator's API-created `KafkaCluster` and
+`BackupSchedule` reconciled by the shared lab controller while the API created
+no Secret, Job or Pod, viewer cannot mutate, approver cannot create, operator
+and admin are not offered approval submission, the operator's reach into the
+other namespace is byte-identical to a missing object, forged identity
+headers change nothing, missing CSRF or `Origin` refused, foreign `Host` 421,
+no `Access-Control-*` header anywhere, 43 audit records with no secret
+material, session expiry after the configured lifetime. Mandatory independent
+security review `claude/plat17-2-authz.review.md`: ACCEPT-WITH-FIXES (two
+medium: transport refusals lacked audit codes; an unbounded session cookie)
+then ACCEPT. Migration/rollback: none — nothing deploys shared mode yet; the
+`localAdmin` mode and the legacy `kubectl proxy` UI are unchanged. Not done,
+in D0's own terms: the console image, chart, ingress and per-namespace
+RoleBindings (stage 7), so the API has no Kubernetes identity of its own and
+the `auth can-i` negatives cannot run; the console keys still sit inside
+`weirkeeper`'s Job-create authority (stage 5) — D0 says shared mode must not be
+declared secure until that is scoped; no TLS-ingress or NetworkPolicy
+evidence; no browser journey (stage 8) and the `ui/` client's console mode
+uses a provisional CSRF header name; no governed-approval route (PLAT-19.2);
+no event stream (PLAT-14.1); the legacy direct proxy is neither removed nor
+isolated; revocation is bounded by the ≤ 15-minute expiry; the session key
+bytes and CSRF subkey are not zeroised (only the client secret is).
 
 ## PLAT-18 — Strengthen UI structure without a speculative rewrite
 

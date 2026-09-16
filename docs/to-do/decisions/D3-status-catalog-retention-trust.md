@@ -751,7 +751,7 @@ signing key (DSSE detached sidecar, same PAE and key id rules as every other doc
  "topics":[{"name":"orders","partitions":6,"records":1234}],
  "source":{"cluster_id":"...","bootstrap_servers":["..."],"auth_mode":"scramSha512"},
  "execution":{"kind":"Backup","namespace":"team-a","name":"...","uid":"...","execution_id":"...","inputs_sha256":"sha256:...","schedule":{"name":"nightly","uid":"...","slot":"20260915-030000"},"triggered_by":"schedule"},
- "signing":{"key_id":"<sha256 SPKI hex>","algorithm":"p256"},
+ "signing":{"key_id":"<sha256 SPKI hex>","algorithm":"ecdsa-p256-sha256"},
  "installation":{"key_id":"<sha256 SPKI hex>"}}
 ```
 
@@ -1734,7 +1734,7 @@ difference was material.
 
 | Seam / neighbour decision | What D3 does |
 |---|---|
-| **S1 — one check runner** | Catalog sync is a plan kind `catalogSync` of D2's `logweir check run --plan <file> --check-contract-version 1`, using D2's result frames and closed error codes (§5.3). No `logweir catalog sync` subcommand exists. Two deliberate exceptions, each with a reason: `logweir notify deliver` (egress with sink credentials, not a check, different failure semantics — it adopts the same startup order, key-line and redaction conventions) and the separate `logweir-retention` binary (deletion linkage must not be reachable from the everyday binary, §6.5). |
+| **S1 — one check runner** | Catalog sync is a plan kind `catalogSync` of D2's `logweir check run --plan <file> --check-contract-version 1`, using D2's result frames and closed error codes (§5.3). The controller's sync stays that plan kind. Three deliberate exceptions, each with a reason: `logweir notify deliver` (egress with sink credentials, not a check, different failure semantics — it adopts the same startup order, key-line and redaction conventions); the separate `logweir-retention` binary (deletion linkage must not be reachable from the everyday binary, §6.5); and `logweir catalog sync|list` (amended 2026-09-16 at W3's integration: the operator's backfill and read-only listing over the same create-only `logweir/catalog/v1/` key family, run by a human with a public key, which is not a controller-created check Job and produces no result frames — the `catalogSync` plan kind remains what the `RecoveryCatalog` controller runs). |
 | **S2 — discovery results are never execution inputs** | Nothing in D3 reads a `TopicDiscovery` result as an input. A rehearsal's topic set comes from the chosen point's frozen topic list; a catalog entry's topics come from the signed receipt. |
 | **S3 — completeness vocabulary** | `unknown` / `limited` / `attestedComplete` stays the *topic-coverage* vocabulary. D3's `verificationScope` (`sampled` / `degraded` / `none`) is a different axis — how thoroughly records were reconciled — and no surface may merge the two or claim "all topics" from a verification scope. |
 | **S4 — execution inputs grammar** | Backup-side additions (the catalog record inputs, the resolved destination) are blocks in PLAT-06.1's `execution-inputs.json` v2 inside the one immutable Backup-owned ConfigMap, never a second freeze. Restore-side additions (point binding, standing authorization, scope) are blocks in PLAT-01.2's per-Restore immutable bundle, under execution contract v2 (Amendment I). |
