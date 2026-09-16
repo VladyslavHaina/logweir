@@ -174,6 +174,11 @@ pub fn build(
                         name: r.name.clone(),
                     }),
             },
+            // D2 W6b's saved destinations are not an API route yet: this
+            // route takes an inline archive, so both refs are absent and the
+            // object behaves exactly as it did before the fields existed.
+            source_destination_ref: None,
+            evidence_destination_ref: None,
             backup_set_ref: request.backup_set_ref.clone(),
             point_in_time,
             target: RestoreTarget {

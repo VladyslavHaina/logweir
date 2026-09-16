@@ -77,6 +77,19 @@ spec:
                 description: The Job's `activeDeadlineSeconds`.
                 format: int64
                 type: integer
+              evidenceDestinationRef:
+                description: |-
+                  The saved `BackupDestination` this run's evidence is written to.
+
+                  A SECOND DESTINATION, ON PURPOSE. Evidence is written under `logweir/` with its own grant, and an installation that keeps evidence in a different bucket from the archive is the case this pair exists for.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
               planBytes:
                 description: |-
                   The restore plan, as the exact bytes the approver signed.
@@ -88,7 +101,10 @@ spec:
                 format: date-time
                 type: string
               sourceArchive:
-                description: The archive to restore from.
+                description: |-
+                  The archive to restore from.
+
+                  With `sourceDestinationRef` set this is the sentinel `logweir-destination://<name>` and carries no `secretRef`; see [`DESTINATION_SENTINEL_RULE`].
                 properties:
                   secretRef:
                     description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
@@ -105,6 +121,16 @@ spec:
                     type: string
                 required:
                 - url
+                type: object
+              sourceDestinationRef:
+                description: The saved `BackupDestination` the archive is read from, in this namespace. Set together with `evidenceDestinationRef`.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
                 type: object
               target:
                 description: Where the restore writes, and in which mode.
@@ -150,6 +176,10 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable; create a new object instead
               rule: self == oldSelf
+            - message: sourceDestinationRef and evidenceDestinationRef are set together
+              rule: has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)
+            - message: with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name> and sourceArchive.secretRef is absent; the logweir-destination scheme is otherwise reserved
+              rule: 'has(self.sourceDestinationRef) ? (self.sourceArchive.url == ''logweir-destination://'' + self.sourceDestinationRef.name && !has(self.sourceArchive.secretRef)) : !self.sourceArchive.url.startsWith(''logweir-destination://'')'
           status:
             description: '`Restore.status`.'
             nullable: true

@@ -1,0 +1,492 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backupdestinations.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: BackupDestination
+    plural: backupdestinations
+    shortNames: []
+    singular: backupdestination
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.storage.bucket
+      name: BUCKET
+      type: string
+    - description: absent means AWS S3
+      jsonPath: .spec.storage.endpoint
+      name: ENDPOINT
+      type: string
+    - description: TLS or InsecureHTTP; never derived from addressing
+      jsonPath: .spec.transport.security
+      name: TRANSPORT
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Valid")].status
+      name: VALID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Where archives live, saved once and referenced by name. `spec.storage` and `spec.transport.security` are immutable — a different location or transport is a different destination — while the description, the CA reference and every credential reference are mutable so that rotation needs no new object. It holds NO credential value; executions freeze a resolved snapshot, so a later edit never changes a run that already exists.
+        properties:
+          spec:
+            description: '`BackupDestination.spec`.'
+            properties:
+              access:
+                description: The four credential references. Mutable, and references only.
+                properties:
+                  archiveRead:
+                    description: The read-only archive grant. Absent means `archiveWrite` is used.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when the credential is temporary. No default: a session token nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: SecretKeys needs secret and no workloadIdentity; WorkloadIdentity takes no secret
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity)) : !has(self.secret)'
+                  archiveWrite:
+                    description: 'The grant execution Jobs write the archive with. Required: a destination nothing may write to is not a backup destination.'
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when the credential is temporary. No default: a session token nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: SecretKeys needs secret and no workloadIdentity; WorkloadIdentity takes no secret
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity)) : !has(self.secret)'
+                  evidenceRead:
+                    description: The grant that reads evidence back for verification. Absent means verification is `NotAttempted`, with a detail naming this field.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        - ControllerIdentity
+                        - ArchiveReadGrant
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when the credential is temporary. No default: a session token nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: evidenceRead fields must match its mode
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity)) : (!has(self.secret) && (self.mode == ''WorkloadIdentity'' || !has(self.workloadIdentity)))'
+                  evidenceWrite:
+                    description: The grant that writes evidence under `logweir/`. Absent means `archiveWrite` is used.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when the credential is temporary. No default: a session token nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: SecretKeys needs secret and no workloadIdentity; WorkloadIdentity takes no secret
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity)) : !has(self.secret)'
+                required:
+                - archiveWrite
+                type: object
+                x-kubernetes-validations:
+                - message: evidenceRead ArchiveReadGrant requires an explicit read-only archiveRead grant; a write grant is never reused for verification
+                  rule: '!has(self.evidenceRead) || self.evidenceRead.mode != ''ArchiveReadGrant'' || has(self.archiveRead)'
+              description:
+                description: What this destination is, for a human reading `kubectl get`. Mutable.
+                maxLength: 256
+                nullable: true
+                type: string
+              readiness:
+                description: 'Explicit readiness settings. Absent means `writeProbe: Disabled`.'
+                nullable: true
+                properties:
+                  writeProbe:
+                    default: Disabled
+                    description: Whether a readiness test may write a marker. Absent means `Disabled`.
+                    enum:
+                    - Disabled
+                    - CreateOnlyMarker
+                    type: string
+                type: object
+              storage:
+                description: The location. **Immutable** (R1).
+                properties:
+                  addressing:
+                    description: 'How a request names the bucket. **Never** a transport choice: see the module header and R3.'
+                    enum:
+                    - PathStyle
+                    - VirtualHosted
+                    type: string
+                  bucket:
+                    description: The bucket.
+                    maxLength: 63
+                    minLength: 3
+                    pattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+                    type: string
+                  endpoint:
+                    description: An http(s) ORIGIN. Absent means AWS S3.
+                    maxLength: 2048
+                    nullable: true
+                    type: string
+                  prefix:
+                    default: ''
+                    description: 'The key prefix inside the bucket, relative, `""` for the bucket root. Never `logweir` or anything under it: that is Logweir''s own evidence root (Global Constraint 6) and R6 refuses it.'
+                    maxLength: 512
+                    type: string
+                  provider:
+                    description: The object-store provider. One value, so a second one is a reviewable event with its own validation rules rather than free text.
+                    enum:
+                    - S3
+                    type: string
+                  region:
+                    description: The region, when the provider needs one.
+                    nullable: true
+                    pattern: ^[a-z0-9-]{1,32}$
+                    type: string
+                required:
+                - addressing
+                - bucket
+                - provider
+                type: object
+                x-kubernetes-validations:
+                - message: 'storage.endpoint must be an http(s) origin: scheme, host and optional port only (no userinfo, path, query or fragment)'
+                  rule: '!has(self.endpoint) || self.endpoint.matches(''^https?://([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?/?$'')'
+                - message: storage.prefix is relative with no empty, '.' or '..' segment, and may not be the reserved evidence root logweir/
+                  rule: self.prefix == '' || (self.prefix.matches("^[A-Za-z0-9!_.*'()-]+(/[A-Za-z0-9!_.*'()-]+)*$") && !self.prefix.matches('(^|/)[.]{1,2}(/|$)') && !self.prefix.matches('^logweir(/|$)'))
+              transport:
+                description: Transport security and its trust material. `security` is **immutable** (R2); `caBundle` is not.
+                properties:
+                  caBundle:
+                    description: A private CA for `TLS`. Mutable, because a CA rotates.
+                    nullable: true
+                    properties:
+                      configMapName:
+                        description: The `ConfigMap` name, in this namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      key:
+                        default: ca.crt
+                        description: The data key holding the PEM bundle.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                    required:
+                    - configMapName
+                    type: object
+                  security:
+                    description: '`TLS` or `InsecureHTTP`. **Immutable** (R2), and the ONE field that decides whether plaintext is permitted.'
+                    enum:
+                    - TLS
+                    - InsecureHTTP
+                    type: string
+                required:
+                - security
+                type: object
+            required:
+            - access
+            - storage
+            - transport
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.storage is immutable: a different location is a different BackupDestination'
+              rule: self.storage == oldSelf.storage
+            - message: 'spec.transport.security is immutable: transport can never be changed in place'
+              rule: self.transport.security == oldSelf.transport.security
+            - message: 'transport.security must match the endpoint scheme: TLS needs an https:// endpoint or none; InsecureHTTP needs an explicit http:// endpoint. storage.addressing never changes transport'
+              rule: 'self.transport.security == ''InsecureHTTP'' ? (has(self.storage.endpoint) && self.storage.endpoint.startsWith(''http://'')) : (!has(self.storage.endpoint) || self.storage.endpoint.startsWith(''https://''))'
+            - message: transport.caBundle requires transport.security TLS
+              rule: '!has(self.transport.caBundle) || self.transport.security == ''TLS'''
+          status:
+            description: '`BackupDestination.status`.'
+            nullable: true
+            properties:
+              caBundleSha256:
+                description: '`sha256:<lowercase hex>` over the CA bytes read from the `ConfigMap`, so a rotation is visible without reading the bundle again.'
+                nullable: true
+                type: string
+              canonicalUrl:
+                description: The archive root as one URL — `s3://<bucket>/<prefix>` — so an operator and a plan never spell the same location two ways.
+                nullable: true
+                type: string
+              conditions:
+                description: The condition set. One type, `Valid`.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              locationDigest:
+                description: '`sha256:<lowercase hex>` over the canonical location, as `logweir_core::destination::DestinationLocation::location_digest` computes it. What a frozen plan is compared against.'
+                nullable: true
+                type: string
+              observedAt:
+                description: When the controller last reached this verdict. A new verdict takes a new instant; an unchanged one keeps the stored one (erratum E11(d)).
+                format: date-time
+                nullable: true
+                type: string
+              observedGeneration:
+                description: The `metadata.generation` the verdict below was computed from.
+                format: int64
+                nullable: true
+                type: integer
+              reason:
+                description: The `Valid` condition's reason, promoted to a scalar — `Valid`, `AddressingUnsupportedByEngine`, `CaBundleNotFound`, `CaBundleKeyMissing`, `CaBundleTooLarge`, `CaBundleInvalid`.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: BackupDestination
+        type: object
+        x-kubernetes-validations:
+        - message: BackupDestination names are at most 63 characters
+          rule: size(self.metadata.name) <= 63
+    served: true
+    storage: true
+    subresources:
+      status: {}

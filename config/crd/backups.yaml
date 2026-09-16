@@ -48,7 +48,10 @@ spec:
             description: '`Backup.spec`.'
             properties:
               archive:
-                description: Where the archive is written.
+                description: |-
+                  Where the archive is written.
+
+                  With `destinationRef` set this is the sentinel `logweir-destination://<name>` and carries no `secretRef`; see [`DESTINATION_SENTINEL_RULE`] for why the field stays REQUIRED rather than becoming optional.
                 properties:
                   secretRef:
                     description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
@@ -70,6 +73,19 @@ spec:
                 description: The Job's `activeDeadlineSeconds`.
                 format: int64
                 type: integer
+              destinationRef:
+                description: |-
+                  The saved `BackupDestination` this run writes to, in this namespace.
+
+                  Optional and additive: absent means `archive` carries the location inline, exactly as it did before saved destinations existed. An older controller ignores this field — and then refuses the sentinel URL terminally, which is the intended rollback behaviour.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
               scheduleRef:
                 description: The `BackupSchedule` that created this object, when one did.
                 nullable: true
@@ -111,6 +127,8 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable; create a new object instead
               rule: self == oldSelf
+            - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved
+              rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://'' + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
           status:
             description: '`Backup.status`.'
             nullable: true

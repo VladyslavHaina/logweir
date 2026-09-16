@@ -45,9 +45,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod approval;
 pub mod backup;
+pub mod backup_destination;
 pub mod backup_schedule;
 pub mod kafka_cluster;
+pub mod preflight;
 pub mod restore;
+pub mod topic_discovery;
 pub mod trust_roster;
 
 /// The API group. Global Constraint 14: Logweir owns `logweir.dev`, now, not
@@ -57,19 +60,26 @@ pub const GROUP: &str = "logweir.dev";
 /// The one served, stored version. `v1alpha1` for tag 1.
 pub const VERSION: &str = "v1alpha1";
 
-/// The six kinds, in the order [`render_all`] emits them.
+/// Every kind, in the order [`render_all`] emits them.
 ///
-/// EXACTLY SIX. `the_kind_list_is_exactly_six` asserts the emitted set against
-/// this list and additionally asserts that no kind is named `Drill`,
+/// THE LIST IS THE DECISION RECORD'S, NOT A CONVENIENCE. ADR 0008 Amendment A
+/// fixes the kind list and requires a recorded architectural decision for each
+/// addition: the first six are Amendment A's, and `BackupDestination`,
+/// `TopicDiscovery` and `Preflight` are **Amendment F**'s.
+/// `the_kind_list_is_exactly_the_adr` asserts the emitted set against this
+/// list and additionally asserts that no kind is named `Drill`,
 /// `RestoreDrill`, `Switchover` or `MetadataSnapshot`, and that no kind
 /// contains `Kafka` other than `KafkaCluster`.
-pub const KINDS: [&str; 6] = [
+pub const KINDS: [&str; 9] = [
     "KafkaCluster",
     "BackupSchedule",
     "Backup",
     "Restore",
     "Approval",
     "TrustRoster",
+    "BackupDestination",
+    "TopicDiscovery",
+    "Preflight",
 ];
 
 /// The CRD spelling of a Kubernetes `metav1.Time`: an RFC 3339 string, which
@@ -207,24 +217,42 @@ pub const SPEC_IMMUTABLE_RULE: &str = "self == oldSelf";
 /// update.
 pub const SPEC_IMMUTABLE_MESSAGE: &str = "spec is immutable; create a new object instead";
 
-/// The message paired with an object-level rule this crate does not otherwise
-/// know about. Reached only if a later task passes `seal_spec` a rule of its
-/// own without pairing a message with it, which is a mistake worth a
-/// legible-but-generic message rather than a panic at emit time.
-pub const SPEC_PARTIALLY_IMMUTABLE_MESSAGE: &str =
-    "this spec field is immutable; create a new object instead";
+/// One CEL rule and the message that travels with it.
+///
+/// A PAIR, AND NOT TWO PARALLEL LISTS. Before this type there were exactly two
+/// rules in this crate and [`seal_spec`] looked the message up from the rule
+/// text; with fourteen rules on five `.spec`s a lookup is a table that can go
+/// out of step with itself, and a message that belongs to a different rule is
+/// the worst kind of admission error — legible, confident and wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpecRule {
+    /// The CEL expression, exactly as the API server compiles it.
+    pub rule: &'static str,
+    /// What the API server returns when it refuses.
+    pub message: &'static str,
+}
 
-/// Inject the CEL immutability rule onto `.spec` of every version of `crd`.
+impl SpecRule {
+    /// Pair a rule with its message.
+    #[must_use]
+    pub const fn new(rule: &'static str, message: &'static str) -> Self {
+        Self { rule, message }
+    }
+}
+
+/// The seal every kind with a fully immutable `.spec` carries.
+pub const WHOLE_SPEC_SEAL: [SpecRule; 1] =
+    [SpecRule::new(SPEC_IMMUTABLE_RULE, SPEC_IMMUTABLE_MESSAGE)];
+
+/// Attach `rules` to `.spec` of every version of `crd`, replacing whatever was
+/// there.
 ///
-/// `object_rule` is `None` for the five kinds whose whole `.spec` is sealed,
-/// and `Some(rule)` for [`backup_schedule::SUSPEND_ONLY_RULE`] — the one kind
-/// with a mutable field. The message travels with the rule rather than as a
-/// second parameter because exactly two rules exist in this crate and each has
-/// exactly one message; [`message_for`] is that pairing, and
-/// `every_spec_is_sealed_and_only_suspend_is_mutable` reads both halves back
-/// out of the checked-in YAML.
+/// `rules` is [`WHOLE_SPEC_SEAL`] for the kinds whose whole `.spec` is sealed,
+/// [`backup_schedule::SUSPEND_ONLY_RULE`]'s pair for the one kind with a
+/// mutable field, and a kind-specific list for the ones whose `.spec` carries
+/// several rules (`backup_destination::SPEC_RULES` is four).
 ///
-/// THE RULE GOES ON `.spec`, NOT ON `.spec`'s FIELDS. A per-field transition
+/// THE RULES GO ON `.spec`, NOT ON `.spec`'s FIELDS. A per-field transition
 /// rule is evaluated only when `oldSelf` exists for that field, so an optional
 /// field could be ADDED after creation (absent → present) and a per-field
 /// `self == oldSelf` would never fire. `optionalOldSelf` closes that and is
@@ -232,17 +260,21 @@ pub const SPEC_PARTIALLY_IMMUTABLE_MESSAGE: &str =
 /// rule is evaluated on every update, which is what makes the
 /// `has(self.x) == has(oldSelf.x)` half of
 /// [`backup_schedule::SUSPEND_ONLY_RULE`] able to refuse the absent → present
-/// transition at all.
+/// transition at all. The one exception is a rule attached to a REQUIRED
+/// sub-object — `spec.request` on the two check kinds — which is evaluated on
+/// every update for the same reason; [`attach_transition_rule`] is how that is
+/// spelled, and it says so at its own call site.
 ///
 /// PANICS, DELIBERATELY, rather than skipping. A `CustomResourceDefinition`
 /// with no `.spec` property is a programming error in this module, and an
-/// emitter that quietly wrote an UNSEALED CRD would produce a file that
-/// passes the drift gate and seals nothing. The only caller is
-/// [`render_all`].
-pub fn seal_spec(crd: &mut CustomResourceDefinition, object_rule: Option<&str>) {
-    let rule = object_rule.unwrap_or(SPEC_IMMUTABLE_RULE).to_string();
-    let message = message_for(object_rule).to_string();
+/// emitter that quietly wrote an UNSEALED CRD would produce a file that passes
+/// the drift gate and seals nothing. The only caller is [`render_all`].
+pub fn seal_spec(crd: &mut CustomResourceDefinition, rules: &[SpecRule]) {
     let name = crd.metadata.name.clone().unwrap_or_default();
+    assert!(
+        !rules.is_empty(),
+        "{name}: a kind with no rule on `.spec` is a kind whose spec is not sealed at all"
+    );
     assert!(
         !crd.spec.versions.is_empty(),
         "{name}: a CRD with no versions cannot be sealed"
@@ -268,23 +300,59 @@ pub fn seal_spec(crd: &mut CustomResourceDefinition, object_rule: Option<&str>) 
                 version.name
             )
         });
-        spec.x_kubernetes_validations = Some(vec![ValidationRule {
-            rule: rule.clone(),
-            message: Some(message.clone()),
-            ..Default::default()
-        }]);
+        spec.x_kubernetes_validations = Some(
+            rules
+                .iter()
+                .map(|r| ValidationRule {
+                    rule: r.rule.to_string(),
+                    message: Some(r.message.to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+    }
+}
+
+/// Attach one rule to the schema ROOT of every version of `crd`.
+///
+/// THE ROOT IS THE ONE PLACE A RULE MAY READ `self.metadata.name`. The API
+/// server exposes exactly `metadata.name` and `metadata.generateName` there
+/// and nothing else, which is why a name-length budget
+/// ([`backup_destination::R0_NAME_RULE`]) cannot be expressed anywhere below
+/// it.
+///
+/// PANICS on a CRD with no versions, for the reason [`seal_spec`] does.
+pub fn attach_root_rule(crd: &mut CustomResourceDefinition, rule: &str, message: &str) {
+    let name = crd.metadata.name.clone().unwrap_or_default();
+    assert!(
+        !crd.spec.versions.is_empty(),
+        "{name}: a CRD with no versions carries no root schema"
+    );
+    for version in crd.spec.versions.iter_mut() {
+        let root = version
+            .schema
+            .as_mut()
+            .and_then(|s| s.open_api_v3_schema.as_mut())
+            .unwrap_or_else(|| panic!("{name}: version {} carries no root schema", version.name));
+        root.x_kubernetes_validations
+            .get_or_insert_with(Vec::new)
+            .push(ValidationRule {
+                rule: rule.to_string(),
+                message: Some(message.to_string()),
+                ..Default::default()
+            });
     }
 }
 
 /// Attach one NON-TRANSITION validation rule below `.spec`.
 ///
-/// For the saved-connection contract's cross-field rules
-/// ([`kafka_cluster::CONNECTION_RULES`]). None of them names `oldSelf`, so the
+/// For cross-field rules such as the saved-connection contract's
+/// ([`kafka_cluster::CONNECTION_RULES`]), the destination's R5–R9
+/// ([`backup_destination::NESTED_RULES`]) and the check kinds' P3–P9
+/// ([`preflight::NESTED_RULES`]). None of them names `oldSelf`, so the
 /// per-field placement that [`seal_spec`] warns about for IMMUTABILITY is the
-/// right one here: a rule on `spec.auth.tlsCa` is evaluated exactly when that
-/// object exists, which is exactly when it has something to say.
-/// `every_spec_is_sealed_and_only_suspend_is_mutable` asserts no rule below
-/// `.spec` is a transition rule.
+/// right one here: a rule on `spec.access.evidenceRead` is evaluated exactly
+/// when that object exists, which is exactly when it has something to say.
 ///
 /// PANICS on a path the schema does not have, for the reason [`seal_spec`]
 /// does: an emitter that silently skipped a rule would render a CRD that
@@ -292,8 +360,52 @@ pub fn seal_spec(crd: &mut CustomResourceDefinition, object_rule: Option<&str>) 
 pub fn attach_rule(crd: &mut CustomResourceDefinition, path: &[&str], rule: &str, message: &str) {
     assert!(
         !rule.contains("oldSelf"),
-        "attach_rule is for non-transition rules; `{rule}` names oldSelf"
+        "attach_rule is for non-transition rules; `{rule}` names oldSelf. A transition rule \
+         below `.spec` is only sound on a REQUIRED sub-object — use attach_transition_rule, \
+         which says so and checks it."
     );
+    attach_at(crd, path, rule, message);
+}
+
+/// Attach one TRANSITION rule to a REQUIRED sub-object of `.spec`.
+///
+/// # Why this is sound where a per-field transition rule is not
+///
+/// [`seal_spec`]'s warning is about OPTIONAL fields: a transition rule is
+/// evaluated only when `oldSelf` has the field, so an optional field can be
+/// added after creation and the rule never fires. A REQUIRED sub-object is
+/// present in every stored object by construction, so `oldSelf` always has it
+/// and the rule is evaluated on every update — exactly as an object-level rule
+/// is.
+///
+/// That is the whole reason `TopicDiscovery` and `Preflight` split their specs
+/// into a required `spec.request` plus `spec.cancelRequested`: one rule on the
+/// required sub-object seals everything inside it, including fields that are
+/// themselves optional, and the one field an operator may change sits outside
+/// it with a monotonic rule of its own.
+///
+/// CALLERS MUST KEEP THE SUB-OBJECT REQUIRED.
+/// `a_sealed_request_is_a_required_property` reads the emitted schema back and
+/// asserts that every path this function is used on appears in its parent's
+/// `required` list, so making `request` optional is a red test rather than a
+/// seal that silently stops sealing.
+///
+/// PANICS on a path the schema does not have, like [`attach_rule`].
+pub fn attach_transition_rule(
+    crd: &mut CustomResourceDefinition,
+    path: &[&str],
+    rule: &str,
+    message: &str,
+) {
+    assert!(
+        !path.is_empty(),
+        "a transition rule with an empty path belongs on `.spec` itself, through seal_spec"
+    );
+    attach_at(crd, path, rule, message);
+}
+
+/// The shared walk both attach helpers use.
+fn attach_at(crd: &mut CustomResourceDefinition, path: &[&str], rule: &str, message: &str) {
     let name = crd.metadata.name.clone().unwrap_or_default();
     for version in crd.spec.versions.iter_mut() {
         let mut node = version
@@ -326,17 +438,6 @@ pub fn attach_rule(crd: &mut CustomResourceDefinition, path: &[&str], rule: &str
     }
 }
 
-/// The message that belongs to `object_rule`.
-fn message_for(object_rule: Option<&str>) -> &'static str {
-    match object_rule {
-        None => SPEC_IMMUTABLE_MESSAGE,
-        Some(rule) if rule == backup_schedule::SUSPEND_ONLY_RULE => {
-            backup_schedule::SUSPEND_ONLY_MESSAGE
-        }
-        Some(_) => SPEC_PARTIALLY_IMMUTABLE_MESSAGE,
-    }
-}
-
 /// One rendered CRD document.
 #[derive(Clone, Debug)]
 pub struct Rendered {
@@ -361,7 +462,53 @@ const HEADER: &str = "\
 # Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
 ";
 
-/// Render all six CRDs, sealed, in [`KINDS`] order.
+/// The schema keys whose value is a JSON NUMBER that `schemars` models as an
+/// `f64`.
+const NUMERIC_BOUND_KEYS: [&str; 5] = [
+    "maximum",
+    "minimum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "multipleOf",
+];
+
+/// Write an integral numeric bound as an integer: `maximum: 600.0` becomes
+/// `maximum: 600`.
+///
+/// # Why this exists, and why it is not cosmetic
+///
+/// `JSONSchemaProps::maximum` is an `f64`, so `serde_yaml` writes `600.0`.
+/// `kubectl kustomize` — the one renderer of `logweir.yaml` — round-trips the
+/// same document through its own YAML library and writes `600`. The two
+/// installs Logweir ships would then carry BYTE-DIFFERENT CRDs for the same
+/// kind, and `chart_lint_default_render_agrees_with_the_install_file` fails on
+/// it. Normalising here means both renderers see the same text, so neither has
+/// anything left to normalise.
+///
+/// JSON has one number type, so `600` and `600.0` are the same value to the
+/// API server; this changes the spelling and never the schema. A bound with a
+/// real fraction is left exactly as it is.
+fn integral_bounds_as_integers(yaml: &str) -> String {
+    let mut out = String::with_capacity(yaml.len());
+    for line in yaml.lines() {
+        let trimmed = line.trim_start();
+        let rewritten = NUMERIC_BOUND_KEYS.iter().find_map(|key| {
+            let rest = trimmed.strip_prefix(key)?.strip_prefix(": ")?;
+            let digits = rest.strip_suffix(".0")?;
+            // `-` is the only sign a bound can carry, and everything else must
+            // be a digit: this refuses `1.0e3`, a quoted string and anything
+            // that is not a plain decimal.
+            let body = digits.strip_prefix('-').unwrap_or(digits);
+            (!body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| format!("{}{key}: {digits}", &line[..line.len() - trimmed.len()]))
+        });
+        out.push_str(rewritten.as_deref().unwrap_or(line));
+        out.push('\n');
+    }
+    out
+}
+
+/// Render every CRD, sealed, in [`KINDS`] order.
 ///
 /// DETERMINISTIC BY CONSTRUCTION, which is what makes the drift gate a gate.
 /// `serde_yaml` writes struct fields in declaration order and
@@ -372,9 +519,11 @@ pub fn render_all() -> Vec<Rendered> {
     let mut push = |kind: &'static str,
                     file_name: &'static str,
                     mut crd: CustomResourceDefinition,
-                    object_rule: Option<&str>| {
-        seal_spec(&mut crd, object_rule);
-        let body = serde_yaml::to_string(&crd).expect("a CustomResourceDefinition serialises");
+                    spec_rules: &[SpecRule]| {
+        seal_spec(&mut crd, spec_rules);
+        let body = integral_bounds_as_integers(
+            &serde_yaml::to_string(&crd).expect("a CustomResourceDefinition serialises"),
+        );
         out.push(Rendered {
             kind,
             file_name,
@@ -392,27 +541,79 @@ pub fn render_all() -> Vec<Rendered> {
             }
             crd
         },
-        None,
+        &WHOLE_SPEC_SEAL,
     );
     push(
         "BackupSchedule",
         "backupschedules.yaml",
         backup_schedule::BackupSchedule::crd(),
-        Some(backup_schedule::SUSPEND_ONLY_RULE),
+        &backup_schedule::SPEC_RULES,
     );
-    push("Backup", "backups.yaml", backup::Backup::crd(), None);
-    push("Restore", "restores.yaml", restore::Restore::crd(), None);
+    push(
+        "Backup",
+        "backups.yaml",
+        backup::Backup::crd(),
+        &backup::SPEC_RULES,
+    );
+    push(
+        "Restore",
+        "restores.yaml",
+        restore::Restore::crd(),
+        &restore::SPEC_RULES,
+    );
     push(
         "Approval",
         "approvals.yaml",
         approval::Approval::crd(),
-        None,
+        &WHOLE_SPEC_SEAL,
     );
     push(
         "TrustRoster",
         "trustrosters.yaml",
         trust_roster::TrustRoster::crd(),
-        None,
+        &WHOLE_SPEC_SEAL,
+    );
+    push(
+        "BackupDestination",
+        "backupdestinations.yaml",
+        {
+            let mut crd = backup_destination::BackupDestination::crd();
+            attach_root_rule(
+                &mut crd,
+                backup_destination::R0_NAME_RULE,
+                backup_destination::R0_NAME_MESSAGE,
+            );
+            for (path, rule, message) in backup_destination::NESTED_RULES {
+                attach_rule(&mut crd, path, rule, message);
+            }
+            crd
+        },
+        &backup_destination::SPEC_RULES,
+    );
+    push(
+        "TopicDiscovery",
+        "topicdiscoveries.yaml",
+        {
+            let mut crd = topic_discovery::TopicDiscovery::crd();
+            let (path, rule, message) = topic_discovery::REQUEST_RULE;
+            attach_transition_rule(&mut crd, path, rule, message);
+            crd
+        },
+        &topic_discovery::SPEC_RULES,
+    );
+    push(
+        "Preflight",
+        "preflights.yaml",
+        {
+            let mut crd = preflight::Preflight::crd();
+            let (path, rule, message) = preflight::REQUEST_RULE;
+            attach_transition_rule(&mut crd, path, rule, message);
+            for (path, rule, message) in preflight::NESTED_RULES {
+                attach_rule(&mut crd, path, rule, message);
+            }
+            crd
+        },
+        &preflight::SPEC_RULES,
     );
 
     out

@@ -1038,14 +1038,24 @@ fn the_suspend_restriction_is_cel_not_rbac() {
     let validations = schema["x-kubernetes-validations"]
         .as_sequence()
         .expect("config/crd/backupschedules.yaml carries an object-level `.spec` CEL rule");
+    // ONE SEAL, PLUS WHATEVER VALIDATION RULES SIT BESIDE IT. The seal is the
+    // rule that names `oldSelf`; the others (D2's destination sentinel) are
+    // ordinary validation rules that run on CREATE, where a transition rule is
+    // skipped. Picking the seal by that property rather than by index is what
+    // keeps this assertion about the RESTRICTION and not about how many other
+    // rules the kind happens to carry.
+    let seals: Vec<&str> = validations
+        .iter()
+        .filter_map(|v| v["rule"].as_str())
+        .filter(|r| r.contains("oldSelf"))
+        .collect();
     assert_eq!(
-        validations.len(),
+        seals.len(),
         1,
-        "expected exactly one object-level `.spec` rule on BackupSchedule"
+        "expected exactly one object-level `.spec` TRANSITION rule on BackupSchedule; got \
+         {seals:?}"
     );
-    let rule = validations[0]["rule"]
-        .as_str()
-        .expect("the CEL rule is a string");
+    let rule = seals[0];
     let sealed: Vec<&str> = schema["properties"]
         .as_mapping()
         .expect("BackupSchedule.spec has properties")
@@ -1283,9 +1293,13 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         "examples/cronjob-drill.yaml carries a ServiceAccount and a CronJob"
     );
 
-    // And the install file's exact shape: 1 Namespace + 6 CRDs + 1
+    // And the install file's exact shape: 1 Namespace + 9 CRDs + 1
     // ServiceAccount + 4 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
-    // 1 NetworkPolicy.
+    // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
+    // six plus Amendment F's `BackupDestination`, `TopicDiscovery` and
+    // `Preflight` — and a kind that reaches `config/crd/` without reaching
+    // `config/crd/kustomization.yaml` shows up here as a count that did not
+    // move.
     let docs = install_file();
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     for m in &docs {
@@ -1295,7 +1309,7 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         by_kind,
         BTreeMap::from([
             ("Namespace".to_string(), 1),
-            ("CustomResourceDefinition".to_string(), 6),
+            ("CustomResourceDefinition".to_string(), 9),
             ("ServiceAccount".to_string(), 1),
             ("ClusterRole".to_string(), 4),
             ("ClusterRoleBinding".to_string(), 1),
@@ -1306,8 +1320,8 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
     assert_eq!(
         docs.len(),
-        15,
-        "logweir.yaml must hold exactly 15 documents"
+        18,
+        "logweir.yaml must hold exactly 18 documents"
     );
 }
 

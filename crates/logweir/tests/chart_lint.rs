@@ -325,8 +325,8 @@ fn ui_repository() -> String {
 
 // ============================================================== the copies
 
-/// **The chart's `crds/` is a byte-identical copy of `config/crd/`** — the six
-/// files, no seventh, no missing one. The script says the same with `cmp`.
+/// **The chart's `crds/` is a byte-identical copy of `config/crd/`** — every
+/// file, no extra, no missing one. The script says the same with `cmp`.
 #[test]
 fn chart_lint_crds_are_byte_identical_copies() {
     let source: BTreeSet<String> = files_under("config/crd")
@@ -338,7 +338,12 @@ fn chart_lint_crds_are_byte_identical_copies() {
         .into_iter()
         .map(|p| p.trim_start_matches("charts/logweir/crds/").to_string())
         .collect();
-    assert_eq!(6, source.len(), "config/crd holds six CRDs: {source:?}");
+    // THE NUMBER IS WRITTEN DOWN, and this crate cannot read
+    // `weirkeeper::crds::KINDS` to derive it — `logweir` declares no edge to
+    // `weirkeeper` and adding one to satisfy a test would change the
+    // dependency graph the one-signer and pure-core gates police. ADR 0008
+    // records nine kinds: Amendment A's six plus Amendment F's three.
+    assert_eq!(9, source.len(), "config/crd holds nine CRDs: {source:?}");
     assert_eq!(
         source, copy,
         "charts/logweir/crds must hold exactly the files config/crd holds"
@@ -603,13 +608,13 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         "rendered with -n logweir-system, the subject's namespace is the release namespace"
     );
 
-    // The six CRDs, by name, and byte-for-byte the same documents.
+    // Every CRD, by name, and byte-for-byte the same documents.
     assert_eq!(
         names_of(&install, "CustomResourceDefinition"),
         names_of(&chart, "CustomResourceDefinition"),
         "the CRD names differ"
     );
-    assert_eq!(6, names_of(&chart, "CustomResourceDefinition").len());
+    assert_eq!(9, names_of(&chart, "CustomResourceDefinition").len());
     for name in names_of(&chart, "CustomResourceDefinition") {
         assert_eq!(
             find(&install, "CustomResourceDefinition", &name).value["spec"],

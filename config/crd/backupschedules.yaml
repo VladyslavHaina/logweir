@@ -50,7 +50,10 @@ spec:
             description: '`BackupSchedule.spec`. Only `suspend` is mutable — see the module header.'
             properties:
               archive:
-                description: Where the backup is written.
+                description: |-
+                  Where the backup is written.
+
+                  With `destinationRef` set this is the sentinel `logweir-destination://<name>` and carries no `secretRef`.
                 properties:
                   secretRef:
                     description: A Secret in this namespace carrying the object-store credential. Its keys are read by the Job, never by the controller's own archive handle, which is read-only (Global Constraint 6).
@@ -75,6 +78,19 @@ spec:
                 - Forbid
                 - Allow
                 type: string
+              destinationRef:
+                description: |-
+                  The saved `BackupDestination` every run of this schedule writes to, in this namespace.
+
+                  Optional, additive and sealed like every other field but `suspend`: re-pointing a schedule at a different destination is a different schedule, for the same reason a different location is a different destination.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
               retention:
                 description: '`{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.'
                 nullable: true
@@ -119,7 +135,9 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: only spec.suspend is mutable; create a new BackupSchedule instead
-              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)
+              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)
+            - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved
+              rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://'' + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
           status:
             description: '`BackupSchedule.status`.'
             nullable: true

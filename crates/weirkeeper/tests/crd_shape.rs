@@ -1,4 +1,4 @@
-//! The properties of the six kinds, read off the CHECKED-IN CRD YAML.
+//! The properties of every kind, read off the CHECKED-IN CRD YAML.
 //!
 //! WHY THESE READ FILES RATHER THAN CALL CODE. What ships is `config/crd/*.yaml`
 //! — that is what `kubectl apply` consumes, what the UI's forms are written
@@ -41,19 +41,22 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The directory the six checked-in CRDs live in.
+/// The directory the checked-in CRDs live in.
 fn crd_dir() -> PathBuf {
     repo_root().join("config/crd")
 }
 
-/// The six files, in the order [`weirkeeper::crds::KINDS`] names their kinds.
-const FILES: [&str; 6] = [
+/// Every file, in the order [`weirkeeper::crds::KINDS`] names their kinds.
+const FILES: [&str; 9] = [
     "kafkaclusters.yaml",
     "backupschedules.yaml",
     "backups.yaml",
     "restores.yaml",
     "approvals.yaml",
     "trustrosters.yaml",
+    "backupdestinations.yaml",
+    "topicdiscoveries.yaml",
+    "preflights.yaml",
 ];
 
 /// One checked-in CRD, parsed.
@@ -231,19 +234,23 @@ fn the_group_is_logweir_dev_v1alpha1() {
     }
 }
 
-/// Exactly six kinds. Global Constraint 34 amends the roadmap's kind list to
-/// these, `RestoreDrill` retired for `Restore` and `MetadataSnapshot` merely
-/// reserved.
+/// Exactly the kinds ADR 0008 records, and no others.
+///
+/// Global Constraint 34 amended the roadmap's list to Amendment A's six,
+/// `RestoreDrill` retired for `Restore` and `MetadataSnapshot` merely
+/// reserved; **Amendment F** adds `BackupDestination`, `TopicDiscovery` and
+/// `Preflight`. The count below is the ADR's, written down, so a kind that
+/// arrives without an amendment is a red test rather than a new CRD file.
 #[test]
-fn the_kind_list_is_exactly_six() {
+fn the_kind_list_is_exactly_the_adr() {
     // READ EVERY FILE IN `config/crd/`, NOT THE SIX THIS TEST NAMES. A list
-    // built from `FILES` could not see a SEVENTH kind at all — the emitted set
-    // would be compared against itself and the forbidden-name loop below would
-    // have nothing to look at. Reading the directory is what makes a `Drill`
-    // CRD someone added and emitted fail on its own name.
+    // built from `FILES` could not see an UNLISTED kind at all — the emitted
+    // set would be compared against itself and the forbidden-name loop below
+    // would have nothing to look at. Reading the directory is what makes a
+    // `Drill` CRD someone added and emitted fail on its own name.
     //
     // ONE EXACT FILENAME IS SKIPPED, AND IT IS NOT A PATTERN (Task 21).
-    // `config/crd/kustomization.yaml` is the kustomize base that lists the six
+    // `config/crd/kustomization.yaml` is the kustomize base that lists the
     // CRDs by name, and it is a `kustomize.config.k8s.io/v1beta1 Kustomization`
     // rather than a `CustomResourceDefinition`. It has to live in this
     // directory: kustomize only recognises a base by a file of that exact name
@@ -279,9 +286,18 @@ fn the_kind_list_is_exactly_six() {
     kinds.sort();
     assert_eq!(
         kinds.len(),
-        6,
-        "config/crd holds {} kinds, not six: {kinds:?}",
-        kinds.len()
+        weirkeeper::crds::KINDS.len(),
+        "config/crd holds {} kinds, not the {} ADR 0008 records: {kinds:?}",
+        kinds.len(),
+        weirkeeper::crds::KINDS.len()
+    );
+    assert_eq!(
+        weirkeeper::crds::KINDS.len(),
+        9,
+        "ADR 0008 records nine kinds — Amendment A's six plus Amendment F's \
+         BackupDestination, TopicDiscovery and Preflight. A tenth needs its own \
+         amendment in docs/architecture.md, and this line is where that decision \
+         becomes a diff."
     );
     let mut expected: Vec<String> = weirkeeper::crds::KINDS
         .iter()
@@ -290,8 +306,8 @@ fn the_kind_list_is_exactly_six() {
     expected.sort();
     assert_eq!(
         kinds, expected,
-        "the emitted kind set must be exactly {{KafkaCluster, BackupSchedule, Backup, Restore, \
-         Approval, TrustRoster}}"
+        "the emitted kind set must be exactly `weirkeeper::crds::KINDS`, which is ADR 0008 \
+         Amendment A's six plus Amendment F's three"
     );
 
     // The four names that must NOT be kinds, each for its own reason: a drill
@@ -328,8 +344,27 @@ fn the_kind_list_is_exactly_six() {
     want.sort();
     assert_eq!(
         on_disk, want,
-        "config/crd holds exactly the six CRD files and no seventh (the one kustomize base named \
-         in NOT_A_CRD aside) — a stray file here is a seventh kind someone applied"
+        "config/crd holds exactly the CRD files `FILES` names and no more (the one kustomize \
+         base named in NOT_A_CRD aside) — a stray file here is a kind someone applied"
+    );
+
+    // AND THE KUSTOMIZE BASE LISTS EVERY ONE OF THEM. `kustomize` has no
+    // directory wildcard, so a file that exists here but is missing from
+    // `resources:` never reaches `logweir.yaml` — the install would create a
+    // controller for a kind the cluster cannot store.
+    let kustomization = std::fs::read_to_string(dir.join("kustomization.yaml"))
+        .expect("config/crd/kustomization.yaml is readable");
+    let listed: Vec<String> = kustomization
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- "))
+        .map(str::to_string)
+        .collect();
+    let mut listed_sorted = listed.clone();
+    listed_sorted.sort();
+    assert_eq!(
+        listed_sorted, want,
+        "config/crd/kustomization.yaml must list every CRD file by name; kustomize has no \
+         directory wildcard, so an unlisted file is a kind `logweir.yaml` never installs"
     );
 }
 
@@ -461,7 +496,7 @@ type Column = (&'static str, &'static str, &'static str);
 /// **`Backup`'s table is unchanged and was never affected: it has no `REASON`
 /// column at all** (PHASE/EXIT/RECORDS/SIGNED/AGE), so there was nothing
 /// reading `.status.exitReason` on that kind to repoint.
-const PRINTER_COLUMNS: [(&str, &[Column]); 6] = [
+const PRINTER_COLUMNS: [(&str, &[Column]); 9] = [
     (
         "KafkaCluster",
         &[
@@ -529,6 +564,41 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 6] = [
             ("AGE", ".metadata.creationTimestamp", "date"),
         ],
     ),
+    (
+        "BackupDestination",
+        &[
+            ("BUCKET", ".spec.storage.bucket", "string"),
+            ("ENDPOINT", ".spec.storage.endpoint", "string"),
+            ("TRANSPORT", ".spec.transport.security", "string"),
+            (
+                "VALID",
+                ".status.conditions[?(@.type==\"Valid\")].status",
+                "string",
+            ),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "TopicDiscovery",
+        &[
+            ("CONNECTION", ".spec.request.connectionRef.name", "string"),
+            ("PHASE", ".status.phase", "string"),
+            ("VISIBILITY", ".status.result.visibility.state", "string"),
+            ("TOPICS", ".status.result.counts.returned", "integer"),
+            ("OBSERVED", ".status.observedAt", "date"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
+    (
+        "Preflight",
+        &[
+            ("OPERATION", ".spec.request.operation", "string"),
+            ("PHASE", ".status.phase", "string"),
+            ("RESULT", ".status.result.state", "string"),
+            ("EXPIRES", ".status.result.expiresAt", "date"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
 ];
 
 /// The brief's Scope column: five workload kinds Namespaced, the roster
@@ -541,13 +611,16 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 6] = [
 /// reference is a privilege-escalation surface. A kind that quietly became
 /// Cluster-scoped would move its objects out of every namespaced RBAC rule
 /// Task 21 writes.
-const SCOPES: [(&str, &str); 6] = [
+const SCOPES: [(&str, &str); 9] = [
     ("KafkaCluster", "Namespaced"),
     ("BackupSchedule", "Namespaced"),
     ("Backup", "Namespaced"),
     ("Restore", "Namespaced"),
     ("Approval", "Namespaced"),
     ("TrustRoster", "Cluster"),
+    ("BackupDestination", "Namespaced"),
+    ("TopicDiscovery", "Namespaced"),
+    ("Preflight", "Namespaced"),
 ];
 
 /// FIX ROUND 1, FINDING 1: every kind's printer columns are exactly the
@@ -558,7 +631,7 @@ fn the_printer_columns_are_exactly_the_briefs_table() {
     assert_eq!(
         docs.len(),
         PRINTER_COLUMNS.len(),
-        "the brief's Produces table fixes printer columns for six kinds; the renderer \
+        "the Produces tables fix printer columns for every kind; the renderer \
          produced {}",
         docs.len()
     );
@@ -626,7 +699,7 @@ fn the_printer_columns_are_exactly_the_briefs_table() {
     }
 }
 
-/// FIX ROUND 1, FINDING 2: all six kinds declare `subresources.status`, and
+/// FIX ROUND 1, FINDING 2: every kind declares `subresources.status`, and
 /// losing it is otherwise silent.
 ///
 /// MEASURED CONSEQUENCE, not a style rule. With `subresources` dropped from
@@ -646,8 +719,8 @@ fn every_kind_declares_the_status_subresource() {
     let docs = rendered();
     assert_eq!(
         docs.len(),
-        6,
-        "six kinds carry a status subresource; the renderer produced {}",
+        weirkeeper::crds::KINDS.len(),
+        "every kind carries a status subresource; the renderer produced {}",
         docs.len()
     );
 
@@ -672,14 +745,18 @@ fn every_kind_declares_the_status_subresource() {
     );
 }
 
-/// FIX ROUND 1, FINDING 3: the scope of ALL SIX kinds, not only the roster's.
+/// FIX ROUND 1, FINDING 3: the scope of EVERY kind, not only the roster's.
 ///
 /// `the_roster_carries_key_material_for_both_lists` asserts
-/// `TrustRoster.scope == Cluster` and nothing asserted the other five, so a
-/// kind that silently became Cluster-scoped passed every gate — and would then
-/// sit outside every namespaced RBAC rule Task 21 writes.
+/// `TrustRoster.scope == Cluster` and nothing asserted the others, so a kind
+/// that silently became Cluster-scoped passed every gate — and would then sit
+/// outside every namespaced RBAC rule Task 21 writes. A kind that became
+/// Cluster-scoped the other way round is worse: `BackupDestination` names
+/// namespace-local Secrets, so a cluster-scoped one would be a reference out
+/// of its own namespace, which [`weirkeeper::crds::LocalRef`] exists to make
+/// impossible.
 #[test]
-fn five_kinds_are_namespaced_and_only_the_roster_is_cluster_scoped() {
+fn only_the_roster_is_cluster_scoped() {
     let got: Vec<(&str, String)> = rendered()
         .iter()
         .map(|(kind, _file, doc)| {
@@ -695,10 +772,9 @@ fn five_kinds_are_namespaced_and_only_the_roster_is_cluster_scoped() {
     let want: Vec<(&str, String)> = SCOPES.iter().map(|(k, s)| (*k, s.to_string())).collect();
     assert_eq!(
         got, want,
-        "the brief's Scope column: the five workload kinds are Namespaced and `TrustRoster` \
-         alone is Cluster-scoped, so `allowedClusterIds` does not sit where a namespace \
-         tenant can widen its own allowlist and no workload kind escapes a namespaced RBAC \
-         rule"
+        "the Scope column: every workload kind is Namespaced and `TrustRoster` alone is \
+         Cluster-scoped, so `allowedClusterIds` does not sit where a namespace tenant can \
+         widen its own allowlist and no workload kind escapes a namespaced RBAC rule"
     );
 }
 
@@ -757,115 +833,127 @@ fn collect_rules(node: &Value, path: &mut Vec<String>, out: &mut Vec<Attached>) 
     }
 }
 
-/// Five kinds seal the whole `.spec`; `BackupSchedule` seals everything but
-/// `suspend`, with ONE object-level rule; and nothing is attached to
-/// `spec.suspend`.
+/// The `.spec` rules the emitter injects, per file, taken from the emitter's
+/// own constants.
+///
+/// READ FROM THE CONSTANTS, COMPARED AGAINST THE FILE. The property is "the
+/// checked-in YAML carries exactly the rules the emitter injects, in order",
+/// which is only worth asserting if the two sides come from different places:
+/// the left is `crds::*::SPEC_RULES`, the right is the bytes `kubectl apply`
+/// will read.
+fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
+    use weirkeeper::crds;
+    let rules: &[crds::SpecRule] = match file {
+        "kafkaclusters.yaml" | "approvals.yaml" | "trustrosters.yaml" => &crds::WHOLE_SPEC_SEAL,
+        "backupschedules.yaml" => &crds::backup_schedule::SPEC_RULES,
+        "backups.yaml" => &crds::backup::SPEC_RULES,
+        "restores.yaml" => &crds::restore::SPEC_RULES,
+        "backupdestinations.yaml" => &crds::backup_destination::SPEC_RULES,
+        "topicdiscoveries.yaml" => &crds::topic_discovery::SPEC_RULES,
+        "preflights.yaml" => &crds::preflight::SPEC_RULES,
+        other => panic!("no `.spec` rule list is declared for {other} — add one beside its kind"),
+    };
+    rules
+        .iter()
+        .map(|r| (r.rule.to_string(), r.message.to_string()))
+        .collect()
+}
+
+/// Every rule attached BELOW `.spec`, per file, as `(path, rule, message)`.
+///
+/// A LITERAL TABLE, and deliberately not derived from the emitter's loops. It
+/// is the placement that matters — a cross-field rule one node too high is
+/// evaluated when it has nothing to say, and one node too low is never
+/// evaluated at all — so the expectation names the path.
+fn expected_nested_rules(file: &str) -> Vec<(Vec<String>, String, String)> {
+    use weirkeeper::crds;
+    let mut out: Vec<(Vec<String>, String, String)> = Vec::new();
+    let mut push = |path: &[&str], rule: &str, message: &str| {
+        let mut full = vec!["spec".to_string()];
+        full.extend(path.iter().map(|p| (*p).to_string()));
+        out.push((full, rule.to_string(), message.to_string()));
+    };
+    match file {
+        "kafkaclusters.yaml" => {
+            for (path, rule, message) in crds::kafka_cluster::CONNECTION_RULES {
+                push(path, rule, message);
+            }
+        }
+        "backupdestinations.yaml" => {
+            for (path, rule, message) in crds::backup_destination::NESTED_RULES {
+                push(path, rule, message);
+            }
+        }
+        "topicdiscoveries.yaml" => {
+            let (path, rule, message) = crds::topic_discovery::REQUEST_RULE;
+            push(path, rule, message);
+        }
+        "preflights.yaml" => {
+            let (path, rule, message) = crds::preflight::REQUEST_RULE;
+            push(path, rule, message);
+            for (path, rule, message) in crds::preflight::NESTED_RULES {
+                push(path, rule, message);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Every `.spec` carries exactly the rules its kind declares, in order, and
+/// nothing is attached to `spec.suspend`.
+///
+/// # What changed when the group grew past six kinds
+///
+/// The original form of this test asserted ONE rule per `.spec` and one
+/// author of deeper rules. Both were true and neither was the property. A
+/// kind's `.spec` may now carry several rules — `BackupDestination` carries
+/// four, two of them transition rules — because a seal and a cross-field
+/// validation are different questions and a validation rule has to run on
+/// CREATE, where a transition rule is skipped. So the assertion is now
+/// equality against the kind's own declared list, which fails on a dropped
+/// rule, an added one, a reordered one and a message that travelled with the
+/// wrong rule.
 #[test]
-fn every_spec_is_sealed_and_only_suspend_is_mutable() {
+fn every_spec_carries_exactly_its_declared_rules() {
     for file in FILES {
         let doc = crd(file);
         let rules = attached_rules(&doc);
-        let on_spec: Vec<&Attached> = rules.iter().filter(|r| r.path == ["spec"]).collect();
-        assert_eq!(
-            on_spec.len(),
-            1,
-            "{file}: exactly one CEL rule is attached to `.spec`; got {rules:?}"
-        );
-        let deeper: Vec<&Attached> = rules.iter().filter(|r| r.path != ["spec"]).collect();
-        for rule in &deeper {
-            // NO TRANSITION RULE BELOW `.spec`, EVER — a per-field transition
-            // rule is evaluated only when `oldSelf` has that field, so it does
-            // not seal an optional one on the 1.29 floor (Global Constraint
-            // 25). What MAY sit deeper is an ordinary cross-field VALIDATION
-            // rule, which is evaluated exactly when the object it is attached
-            // to exists: PLAT-07.1's saved-connection rules are the only ones.
-            assert!(
-                !rule.rule.contains("oldSelf"),
-                "{file}: the rule at {:?} names oldSelf below `.spec`; immutability is sealed by \
-                 the object-level rule alone. Got {rule:?}",
-                rule.path
-            );
-            assert_eq!(
-                file, "kafkaclusters.yaml",
-                "only the saved-connection contract attaches rules below `.spec` today; \
-                 {file} attached {rule:?}"
-            );
-        }
-        if file == "kafkaclusters.yaml" {
-            let attached: Vec<(Vec<String>, String, String)> = deeper
-                .iter()
-                .map(|r| (r.path.clone(), r.rule.clone(), r.message.clone()))
-                .collect();
-            let expected: Vec<(Vec<String>, String, String)> =
-                weirkeeper::crds::kafka_cluster::CONNECTION_RULES
-                    .iter()
-                    .map(|(path, rule, message)| {
-                        let mut full = vec!["spec".to_string()];
-                        full.extend(path.iter().map(|p| (*p).to_string()));
-                        (full, (*rule).to_string(), (*message).to_string())
-                    })
-                    .collect();
-            assert_eq!(
-                attached, expected,
-                "the checked-in KafkaCluster CRD must carry exactly the connection rules the \
-                 emitter injects, at exactly those paths"
-            );
-        }
 
-        let rule = &on_spec[0].rule;
-        if file == "backupschedules.yaml" {
-            // The object-level rule names every field except `suspend`.
-            for named in [
-                "schedule",
-                "sourceRef",
-                "topics",
-                "archive",
-                "concurrencyPolicy",
-                "retention",
-            ] {
-                assert!(
-                    rule.contains(&format!("self.{named}")),
-                    "{file}: the object-level rule must name `{named}`; rule was:\n{rule}"
-                );
-                assert!(
-                    rule.contains(&format!("oldSelf.{named}")),
-                    "{file}: the object-level rule must compare `{named}` against oldSelf; \
-                     rule was:\n{rule}"
-                );
-                // And close the absent -> present transition for it.
-                assert!(
-                    rule.contains(&format!("has(self.{named}) == has(oldSelf.{named})")),
-                    "{file}: `{named}` needs its `has(self.x) == has(oldSelf.x)` half, which \
-                     is what refuses the absent -> present transition; rule was:\n{rule}"
-                );
-            }
-            assert!(
-                !rule.contains("suspend"),
-                "{file}: `suspend` is the one mutable field and must not appear in the seal; \
-                 rule was:\n{rule}"
-            );
-            assert_eq!(
-                rule,
-                weirkeeper::crds::backup_schedule::SUSPEND_ONLY_RULE,
-                "{file}: the checked-in rule must be the constant the emitter injects"
-            );
-            assert_eq!(
-                on_spec[0].message,
-                weirkeeper::crds::backup_schedule::SUSPEND_ONLY_MESSAGE,
-                "{file}: the message travels with the rule"
-            );
-        } else {
-            assert_eq!(
-                rule,
-                weirkeeper::crds::SPEC_IMMUTABLE_RULE,
-                "{file}: the whole `.spec` is sealed with `self == oldSelf`"
-            );
-            assert_eq!(
-                on_spec[0].message,
-                weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
-                "{file}: the message travels with the rule"
-            );
-        }
+        let on_spec: Vec<(String, String)> = rules
+            .iter()
+            .filter(|r| r.path == ["spec"])
+            .map(|r| (r.rule.clone(), r.message.clone()))
+            .collect();
+        assert_eq!(
+            on_spec,
+            expected_spec_rules(file),
+            "{file}: the checked-in `.spec` rules must be exactly the ones the emitter \
+             injects, in order, each with its own message"
+        );
+        assert!(
+            !on_spec.is_empty(),
+            "{file}: a kind with no rule on `.spec` is a kind whose spec is not sealed"
+        );
+
+        // SORTED, AND WHY. `JSONSchemaProps::properties` is a `BTreeMap`, so
+        // the rendered file walks the schema alphabetically and not in
+        // injection order. The property asserted is the SET of (path, rule,
+        // message) triples; a dropped rule, an added one, a rule at the wrong
+        // path and a mispaired message all still fail.
+        let mut deeper: Vec<(Vec<String>, String, String)> = rules
+            .iter()
+            .filter(|r| r.path != ["spec"])
+            .map(|r| (r.path.clone(), r.rule.clone(), r.message.clone()))
+            .collect();
+        deeper.sort();
+        let mut want = expected_nested_rules(file);
+        want.sort();
+        assert_eq!(
+            deeper, want,
+            "{file}: the rules below `.spec` must be exactly the ones the emitter injects, \
+             AT EXACTLY THOSE PATHS"
+        );
     }
 
     // Stated separately, because it is the mutant's target: NOTHING is
@@ -881,6 +969,78 @@ fn every_spec_is_sealed_and_only_suspend_is_mutable() {
         "no CEL rule may be attached to `spec.suspend` — it is the one mutable field, and the \
          only `.spec` write the controller performs in tag 1. Got {on_suspend:?}"
     );
+
+    // And the schedule seal still names every field but `suspend`, including
+    // the one W6b added.
+    let rule = &attached_rules(&schedule)
+        .into_iter()
+        .find(|r| r.path == ["spec"])
+        .expect("the schedule seals its spec")
+        .rule;
+    for named in [
+        "schedule",
+        "sourceRef",
+        "topics",
+        "archive",
+        "destinationRef",
+        "concurrencyPolicy",
+        "retention",
+    ] {
+        assert!(
+            rule.contains(&format!("has(self.{named}) == has(oldSelf.{named})")),
+            "backupschedules.yaml: `{named}` needs its `has(self.x) == has(oldSelf.x)` half, \
+             which is what refuses the absent -> present transition; rule was:\n{rule}"
+        );
+        assert!(
+            rule.contains(&format!("self.{named} == oldSelf.{named}")),
+            "backupschedules.yaml: `{named}` must be compared against oldSelf; rule was:\n{rule}"
+        );
+    }
+    assert!(
+        !rule.contains("suspend"),
+        "backupschedules.yaml: `suspend` is the one mutable field and must not appear in the \
+         seal; rule was:\n{rule}"
+    );
+}
+
+/// A transition rule below `.spec` is sound ONLY on a required sub-object, and
+/// every one this group ships sits on one.
+///
+/// # The hole this closes
+///
+/// `seal_spec`'s module note is about optional fields: a transition rule is
+/// evaluated only when `oldSelf` HAS the field, so a rule on an optional one
+/// never fires on the absent → present transition and seals nothing. The two
+/// check kinds deliberately put `self == oldSelf` on `spec.request` instead of
+/// on `.spec`, which is sound **because `request` is required** — and would
+/// silently stop being sound the moment somebody made it optional. That edit
+/// is a one-word diff in `crds/topic_discovery.rs`; this test is what turns it
+/// red.
+#[test]
+fn a_transition_rule_below_spec_sits_on_a_required_property() {
+    for file in FILES {
+        let doc = crd(file);
+        for r in attached_rules(&doc) {
+            if r.path == ["spec"] || !r.rule.contains("oldSelf") {
+                continue;
+            }
+            // Walk to the rule's PARENT and read its `required` list.
+            let mut node = spec_schema(&doc);
+            let last = r.path.last().expect("a non-empty path");
+            for key in &r.path[1..r.path.len() - 1] {
+                node = at(node, &["properties", key.as_str()]);
+            }
+            assert!(
+                required(node).contains(last),
+                "{file}: the transition rule at {:?} sits on `{last}`, which its parent does \
+                 NOT list as required. A transition rule on an OPTIONAL property is not \
+                 evaluated when the stored object lacks it, so this rule would seal nothing \
+                 on exactly the update it exists to refuse. Either make `{last}` required or \
+                 move the rule to `.spec`.",
+                r.path
+            );
+        }
+    }
 }
 
 // --------------------------------------------------- the CEL evaluator
@@ -894,6 +1054,10 @@ fn every_spec_is_sealed_and_only_suspend_is_mutable() {
 // `&&` binds tighter than `||`, as in CEL.
 
 /// A value in the fragment: a boolean, or a resolved path that may be absent.
+///
+/// A STRING AND AN INTEGER LITERAL ARE `Field(Some(...))`, not variants of
+/// their own, so `==` between a literal and a path is the same comparison the
+/// API server makes and needs no per-type arm.
 #[derive(Debug, Clone, PartialEq)]
 enum Cel {
     Bool(bool),
@@ -905,6 +1069,7 @@ impl Cel {
     fn truth(&self, src: &str) -> bool {
         match self {
             Cel::Bool(b) => *b,
+            Cel::Field(Some(Value::Bool(b))) => *b,
             Cel::Field(_) => panic!("a path is not a boolean in `{src}`"),
         }
     }
@@ -916,7 +1081,20 @@ struct Cursor<'a> {
     src: &'a str,
     new: &'a Value,
     old: &'a Value,
+    /// Inside the UNTAKEN branch of a ternary.
+    ///
+    /// CEL EVALUATES ONE BRANCH, AND SO MUST THIS. The sentinel rule's `else`
+    /// arm reads `self.archive.url.startsWith(...)`, and its `then` arm reads
+    /// `self.destinationRef.name`; evaluating both would make one of them
+    /// touch a field that is absent by construction and turn a correct rule
+    /// into a panic. While this is set the parser still CONSUMES the branch —
+    /// so a malformed expression in it is still caught — but every operation
+    /// that would inspect a value answers a placeholder instead.
+    skip: bool,
 }
+
+/// A string-literal token, marked so it cannot collide with an identifier.
+const STR: char = '\u{1}';
 
 fn tokenize(rule: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -926,19 +1104,66 @@ fn tokenize(rule: &str) -> Vec<String> {
         let c = bytes[i];
         if c.is_whitespace() {
             i += 1;
-        } else if c == '(' || c == ')' || c == '.' {
+        } else if c == '(' || c == ')' || c == '.' || c == '?' || c == ':' || c == '+' {
             out.push(c.to_string());
             i += 1;
-        } else if c == '&' || c == '|' || c == '=' {
+        } else if c == '\'' || c == '"' {
+            // A CEL string literal. `\\` and `\'` are the only escapes these
+            // rules use; anything else is taken verbatim, and an unterminated
+            // literal is a panic rather than a silent truncation.
+            let quote = c;
+            let mut lit = String::new();
+            i += 1;
+            loop {
+                assert!(
+                    i < bytes.len(),
+                    "unterminated string literal in rule: {rule}"
+                );
+                let ch = bytes[i];
+                if ch == '\\' {
+                    assert!(i + 1 < bytes.len(), "trailing backslash in rule: {rule}");
+                    lit.push(bytes[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if ch == quote {
+                    i += 1;
+                    break;
+                }
+                lit.push(ch);
+                i += 1;
+            }
+            out.push(format!("{STR}{lit}"));
+        } else if c == '&' || c == '|' {
             assert!(
                 i + 1 < bytes.len() && bytes[i + 1] == c,
                 "unexpected single `{c}` in rule: {rule}"
             );
             out.push(format!("{c}{c}"));
             i += 2;
+        } else if c == '=' {
+            assert!(
+                i + 1 < bytes.len() && bytes[i + 1] == '=',
+                "unexpected single `=` in rule: {rule}"
+            );
+            out.push("==".to_string());
+            i += 2;
         } else if c == '!' {
-            out.push("!".to_string());
-            i += 1;
+            if i + 1 < bytes.len() && bytes[i + 1] == '=' {
+                out.push("!=".to_string());
+                i += 2;
+            } else {
+                out.push("!".to_string());
+                i += 1;
+            }
+        } else if c == '<' || c == '>' {
+            if i + 1 < bytes.len() && bytes[i + 1] == '=' {
+                out.push(format!("{c}="));
+                i += 2;
+            } else {
+                out.push(c.to_string());
+                i += 1;
+            }
         } else if c.is_alphanumeric() || c == '_' {
             let start = i;
             while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
@@ -969,13 +1194,54 @@ impl<'a> Cursor<'a> {
         let got = self.next();
         assert_eq!(got, want, "expected `{want}` in rule: {}", self.src);
     }
+    /// `v.truth()`, or `false` inside an untaken branch.
+    fn truth(&self, v: &Cel) -> bool {
+        if self.skip {
+            return false;
+        }
+        v.truth(self.src)
+    }
+    /// Parse `f` with the untaken-branch flag forced on, and discard its value.
+    fn skipped<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let was = self.skip;
+        self.skip = true;
+        let v = f(self);
+        self.skip = was;
+        v
+    }
+
+    /// The whole fragment: a conditional, which is CEL's lowest precedence.
+    fn expr(&mut self) -> Cel {
+        let cond = self.or_expr();
+        if self.peek() != Some("?") {
+            return cond;
+        }
+        self.next();
+        let taken = self.truth(&cond);
+        let then = if taken && !self.skip {
+            self.expr()
+        } else {
+            self.skipped(Self::expr)
+        };
+        self.expect(":");
+        let otherwise = if !taken && !self.skip {
+            self.expr()
+        } else {
+            self.skipped(Self::expr)
+        };
+        if taken {
+            then
+        } else {
+            otherwise
+        }
+    }
 
     fn or_expr(&mut self) -> Cel {
         let mut acc = self.and_expr();
         while self.peek() == Some("||") {
             self.next();
             let rhs = self.and_expr();
-            acc = Cel::Bool(acc.truth(self.src) || rhs.truth(self.src));
+            acc = Cel::Bool(self.truth(&acc) || self.truth(&rhs));
         }
         acc
     }
@@ -984,7 +1250,7 @@ impl<'a> Cursor<'a> {
         while self.peek() == Some("&&") {
             self.next();
             let rhs = self.unary();
-            acc = Cel::Bool(acc.truth(self.src) && rhs.truth(self.src));
+            acc = Cel::Bool(self.truth(&acc) && self.truth(&rhs));
         }
         acc
     }
@@ -992,21 +1258,47 @@ impl<'a> Cursor<'a> {
         if self.peek() == Some("!") {
             self.next();
             let v = self.unary();
-            return Cel::Bool(!v.truth(self.src));
+            return Cel::Bool(!self.truth(&v));
         }
-        let lhs = self.primary();
-        if self.peek() == Some("==") {
+        let lhs = self.additive();
+        match self.peek() {
+            Some("==") => {
+                self.next();
+                let rhs = self.additive();
+                Cel::Bool(lhs == rhs)
+            }
+            Some("!=") => {
+                self.next();
+                let rhs = self.additive();
+                Cel::Bool(lhs != rhs)
+            }
+            Some("<=") => {
+                self.next();
+                let rhs = self.additive();
+                Cel::Bool(self.number(&lhs) <= self.number(&rhs))
+            }
+            _ => lhs,
+        }
+    }
+    /// String concatenation — the one `+` these rules use.
+    fn additive(&mut self) -> Cel {
+        let mut acc = self.primary();
+        while self.peek() == Some("+") {
             self.next();
             let rhs = self.primary();
-            return Cel::Bool(lhs == rhs);
+            if self.skip {
+                continue;
+            }
+            let joined = format!("{}{}", self.string(&acc), self.string(&rhs));
+            acc = Cel::Field(Some(Value::String(joined)));
         }
-        lhs
+        acc
     }
     fn primary(&mut self) -> Cel {
         match self.peek() {
             Some("(") => {
                 self.next();
-                let v = self.or_expr();
+                let v = self.expr();
                 self.expect(")");
                 v
             }
@@ -1020,6 +1312,34 @@ impl<'a> Cursor<'a> {
                     Cel::Bool(_) => panic!("has() takes a path, in rule: {}", self.src),
                 }
             }
+            Some("size") => {
+                self.next();
+                self.expect("(");
+                let v = self.expr();
+                self.expect(")");
+                if self.skip {
+                    return Cel::Field(Some(Value::Number(0.into())));
+                }
+                let n = match v {
+                    Cel::Field(Some(Value::String(s))) => s.chars().count(),
+                    Cel::Field(Some(Value::Sequence(q))) => q.len(),
+                    Cel::Field(Some(Value::Mapping(m))) => m.len(),
+                    other => panic!(
+                        "size() takes a string, list or map; got {other:?} in `{}`",
+                        self.src
+                    ),
+                };
+                Cel::Field(Some(Value::Number((n as u64).into())))
+            }
+            Some(t) if t.starts_with(STR) => {
+                let lit = self.next();
+                Cel::Field(Some(Value::String(lit[STR.len_utf8()..].to_string())))
+            }
+            Some(t) if t.chars().all(|c| c.is_ascii_digit()) => {
+                let lit = self.next();
+                let n: u64 = lit.parse().expect("an integer literal");
+                Cel::Field(Some(Value::Number(n.into())))
+            }
             Some(_) => self.path(),
             None => panic!("rule ended early: {}", self.src),
         }
@@ -1031,9 +1351,33 @@ impl<'a> Cursor<'a> {
             "oldSelf" => Some(self.old.clone()),
             other => panic!("unknown root `{other}` in rule: {}", self.src),
         };
-        while self.peek() == Some(".") {
+        loop {
+            if self.peek() != Some(".") {
+                break;
+            }
             self.next();
             let field = self.next();
+            if self.peek() == Some("(") {
+                // A method call. `startsWith` is the only one this fragment
+                // evaluates; `matches` is regex and is deliberately NOT
+                // evaluated here (see `REGEX_ONLY_RULES`), because a second
+                // regex engine in a test would be a second answer to the
+                // question the API server already answers.
+                self.next();
+                let arg = self.expr();
+                self.expect(")");
+                assert_eq!(
+                    field, "startsWith",
+                    "unsupported CEL method `{field}` in rule: {}",
+                    self.src
+                );
+                if self.skip {
+                    return Cel::Bool(false);
+                }
+                let recv = self.string(&Cel::Field(cur.clone()));
+                let needle = self.string(&arg);
+                return Cel::Bool(recv.starts_with(&needle));
+            }
             cur = cur.and_then(|v| v.get(field.as_str()).cloned());
             // An explicit YAML `null` is "absent" for `has()`, which is what
             // the API server does with a null-valued optional property.
@@ -1042,6 +1386,19 @@ impl<'a> Cursor<'a> {
             }
         }
         Cel::Field(cur)
+    }
+
+    fn string(&self, v: &Cel) -> String {
+        match v {
+            Cel::Field(Some(Value::String(s))) => s.clone(),
+            other => panic!("expected a string, got {other:?} in rule: {}", self.src),
+        }
+    }
+    fn number(&self, v: &Cel) -> i64 {
+        match v {
+            Cel::Field(Some(Value::Number(n))) => n.as_i64().expect("an integer"),
+            other => panic!("expected a number, got {other:?} in rule: {}", self.src),
+        }
     }
 }
 
@@ -1053,14 +1410,27 @@ fn eval(rule: &str, new: &Value, old: &Value) -> bool {
         src: rule,
         new,
         old,
+        skip: false,
     };
-    let v = c.or_expr();
+    let v = c.expr();
     assert_eq!(
         c.i,
         c.toks.len(),
         "the rule was not fully consumed, so this evaluation means nothing: {rule}"
     );
     v.truth(rule)
+}
+
+/// The rules this evaluator deliberately does not evaluate: the regex-only
+/// ones.
+///
+/// EVALUATING THEM HERE WOULD BE A SECOND ANSWER. `matches()` is RE2 inside
+/// the API server; a Rust `regex` here would agree most of the time and
+/// disagree exactly where a subtle pattern matters. These are asserted by TEXT
+/// in `the_destination_rules_are_the_decisions_text` and exercised for real by
+/// the live CEL probe recorded in the task report.
+fn is_regex_only(rule: &str) -> bool {
+    rule.contains(".matches(")
 }
 
 /// Evaluate every rule the CHECKED-IN CRD attaches, under the API server's
@@ -1091,6 +1461,9 @@ fn eval_attached(crd: &Value, new_spec: &Value, old_spec: &Value) -> bool {
             }
             cur
         };
+        if is_regex_only(&r.rule) {
+            continue;
+        }
         let (Some(new_at), Some(old_at)) = (sub(new_spec), sub(old_spec)) else {
             // Not evaluated: `oldSelf` (or `self`) has no value at this path.
             continue;
@@ -1600,6 +1973,525 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
 }
 
 // ---------------------------------------------------------------------------
+// ADR 0008 Amendment F: BackupDestination, TopicDiscovery, Preflight
+// ---------------------------------------------------------------------------
+
+/// `BackupDestination.spec` is the decision's table: the required set, the
+/// enum spellings, the defaults, and the two immutables.
+#[test]
+fn the_destination_spec_is_the_decisions_table() {
+    let doc = crd("backupdestinations.yaml");
+    let spec = spec_schema(&doc);
+
+    assert_eq!(
+        required(spec),
+        vec!["access", "storage", "transport"],
+        "a destination is a LOCATION, a TRANSPORT and its GRANTS; `description` and \
+         `readiness` are the two a user may leave out"
+    );
+
+    let storage = at(spec, &["properties", "storage"]);
+    assert_eq!(
+        required(storage),
+        vec!["addressing", "bucket", "provider"],
+        "`addressing` has NO DEFAULT on purpose: path-style versus virtual-hosted is a \
+         property of the endpoint the operator is pointing at, and a default would make one \
+         of the two silently wrong"
+    );
+    assert_eq!(
+        enum_values(at(storage, &["properties", "provider"])),
+        vec!["S3"],
+        "one provider; a second is a reviewable event with its own validation rules"
+    );
+    assert_eq!(
+        enum_values(at(storage, &["properties", "addressing"])),
+        vec!["PathStyle", "VirtualHosted"],
+        "the addressing spellings are the contract `logweir_core::destination::Addressing` \
+         serialises to"
+    );
+    assert_eq!(
+        at(storage, &["properties", "bucket", "pattern"]).as_str(),
+        Some(weirkeeper::crds::backup_destination::BUCKET_PATTERN),
+        "the bucket pattern is the one the emitter declares"
+    );
+    assert_eq!(
+        at(storage, &["properties", "prefix", "maxLength"]).as_u64(),
+        Some(512),
+        "the prefix cap matches `logweir_core::destination::PREFIX_MAX_LEN`, so the API's 422 \
+         and the API server's rejection agree"
+    );
+    assert_eq!(
+        at(storage, &["properties", "endpoint", "maxLength"]).as_u64(),
+        Some(2048),
+        "the endpoint cap matches `logweir_core::destination::ENDPOINT_MAX_LEN`"
+    );
+
+    let transport = at(spec, &["properties", "transport"]);
+    assert_eq!(
+        required(transport),
+        vec!["security"],
+        "`security` is required and `caBundle` is not: trust material is optional, a \
+         transport choice never is"
+    );
+    assert_eq!(
+        enum_values(at(transport, &["properties", "security"])),
+        vec!["TLS", "InsecureHTTP"],
+        "the transport spellings are the contract \
+         `logweir_core::destination::TransportSecurity` serialises to — and the ONLY place \
+         plaintext HTTP is ever chosen"
+    );
+    assert_eq!(
+        at(
+            transport,
+            &["properties", "caBundle", "properties", "key", "default"]
+        )
+        .as_str(),
+        Some("ca.crt"),
+        "the CA key default is `ca.crt`"
+    );
+
+    let access = at(spec, &["properties", "access"]);
+    assert_eq!(
+        required(access),
+        vec!["archiveWrite"],
+        "a destination nothing may write to is not a backup destination; the other three \
+         grants have documented absent-field behaviour"
+    );
+    for role in ["archiveWrite", "archiveRead", "evidenceWrite"] {
+        assert_eq!(
+            enum_values(at(access, &["properties", role, "properties", "mode"])),
+            vec!["SecretKeys", "WorkloadIdentity"],
+            "{role}: two modes"
+        );
+    }
+    assert_eq!(
+        enum_values(at(
+            access,
+            &["properties", "evidenceRead", "properties", "mode"]
+        )),
+        vec![
+            "SecretKeys",
+            "WorkloadIdentity",
+            "ControllerIdentity",
+            "ArchiveReadGrant"
+        ],
+        "evidenceRead has two more modes, and neither of them takes a reference"
+    );
+    let secret = at(
+        access,
+        &["properties", "archiveWrite", "properties", "secret"],
+    );
+    assert_eq!(
+        at(secret, &["properties", "accessKeyIdKey", "default"]).as_str(),
+        Some("access-key-id"),
+        "the key defaults are today's ARCHIVE_ACCESS_KEY / ARCHIVE_SECRET_KEY, so a \
+         destination written with no key names projects what the existing Jobs project"
+    );
+    assert_eq!(
+        at(secret, &["properties", "secretAccessKeyKey", "default"]).as_str(),
+        Some("secret-access-key")
+    );
+    assert_eq!(
+        required(secret),
+        vec!["name"],
+        "only the Secret NAME is required; the keys have defaults"
+    );
+    assert!(
+        secret
+            .get("properties")
+            .and_then(|p| p.get("sessionTokenKey"))
+            .is_some_and(|k| k.get("default").is_none()),
+        "`sessionTokenKey` has NO default: a session token nobody configured is a token that \
+         does not exist, and defaulting it would make every Secret look temporary"
+    );
+
+    assert_eq!(
+        enum_values(at(
+            spec,
+            &["properties", "readiness", "properties", "writeProbe"]
+        )),
+        vec!["Disabled", "CreateOnlyMarker"],
+        "the write probe is opt-in"
+    );
+    assert_eq!(
+        at(
+            spec,
+            &[
+                "properties",
+                "readiness",
+                "properties",
+                "writeProbe",
+                "default"
+            ]
+        )
+        .as_str(),
+        Some("Disabled"),
+        "absent `readiness.writeProbe` means Disabled (D2 §11.1), and the schema says so \
+         rather than leaving it to a controller"
+    );
+}
+
+/// **NO CREDENTIAL VALUE, ANYWHERE, IN ANY OF THE THREE NEW SPECS.**
+///
+/// A SOURCE-SHAPED PROPERTY ASSERTED OVER THE SHIPPED SCHEMA, because the
+/// shipped schema is what an API server will store. A destination holds
+/// REFERENCES: Secret names and key names, which are public. A field named
+/// `password`, `secret` with a string type, `accessKey`, `token` or
+/// `credential` carrying a scalar would be a place an operator could paste a
+/// key and a place `kubectl get -o yaml` would then print it.
+#[test]
+fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
+    const FORBIDDEN: [&str; 7] = [
+        "password",
+        "accesskey",
+        "accesskeyid",
+        "secretaccesskey",
+        "sessiontoken",
+        "credential",
+        "privatekey",
+    ];
+    let mut found: Vec<String> = Vec::new();
+    for file in [
+        "backupdestinations.yaml",
+        "topicdiscoveries.yaml",
+        "preflights.yaml",
+    ] {
+        let doc = crd(file);
+        let mut stack = vec![(vec!["spec".to_string()], spec_schema(&doc).clone())];
+        while let Some((path, node)) = stack.pop() {
+            if let Some(props) = node.get("properties").and_then(Value::as_mapping) {
+                for (k, v) in props {
+                    let name = k.as_str().expect("a property name").to_string();
+                    let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+                    if ty == "string" && FORBIDDEN.contains(&name.to_lowercase().as_str()) {
+                        found.push(format!("{file}: {}.{name}", path.join(".")));
+                    }
+                    let mut next = path.clone();
+                    next.push(name);
+                    stack.push((next, v.clone()));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "these kinds carry references, never values. A scalar field with one of these names \
+         is a place a credential can be pasted and a place `kubectl get -o yaml` prints it \
+         back:\n{}",
+        found.join("\n")
+    );
+}
+
+/// The destination's rules are the decision's text, byte for byte — including
+/// the two the in-process evaluator deliberately does not evaluate.
+#[test]
+fn the_destination_rules_are_the_decisions_text() {
+    use weirkeeper::crds::backup_destination as d;
+    let doc = crd("backupdestinations.yaml");
+    let rules = attached_rules(&doc);
+    let texts: Vec<&str> = rules.iter().map(|r| r.rule.as_str()).collect();
+
+    for (id, rule) in [
+        ("R1", d::R1_STORAGE_IMMUTABLE_RULE),
+        ("R2", d::R2_TRANSPORT_IMMUTABLE_RULE),
+        ("R3", d::R3_TRANSPORT_SCHEME_RULE),
+        ("R4", d::R4_CA_REQUIRES_TLS_RULE),
+        ("R5", d::R5_ENDPOINT_RULE),
+        ("R6", d::R6_PREFIX_RULE),
+        ("R7", d::R7_GRANT_SHAPE_RULE),
+        ("R8", d::R8_EVIDENCE_READ_SHAPE_RULE),
+        ("R9", d::R9_ARCHIVE_READ_GRANT_RULE),
+    ] {
+        assert!(
+            texts.contains(&rule),
+            "{id} is missing from the checked-in BackupDestination CRD. Rules are what the \
+             API server enforces; a rule that is only in the decision document is a rule \
+             nobody runs.\nwanted: {rule}\ngot: {texts:#?}"
+        );
+    }
+
+    // R0 sits on the ROOT, which is the one node a rule may read
+    // `self.metadata.name` from — `attached_rules` walks `.spec` and downward,
+    // so it is read separately here.
+    let root_rules = root_schema(&doc)
+        .get("x-kubernetes-validations")
+        .and_then(Value::as_sequence)
+        .map(|v| {
+            v.iter()
+                .filter_map(|e| e.get("rule").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        root_rules,
+        vec![d::R0_NAME_RULE],
+        "R0 is a name-length budget and `self.metadata.name` is readable ONLY at the schema \
+         root; anywhere else it would not compile"
+    );
+
+    // R3 NEVER MENTIONS ADDRESSING, in either direction. This is defect G5 —
+    // the UI turning path-style addressing into plaintext HTTP — written into
+    // the schema so it cannot come back through the API server either.
+    assert!(
+        !d::R3_TRANSPORT_SCHEME_RULE.contains("addressing"),
+        "R3 couples the endpoint SCHEME to the transport and nothing else. Naming \
+         `addressing` here would make bucket addressing a transport decision, which is \
+         exactly the defect this rule exists to close"
+    );
+    for rule in &texts {
+        assert!(
+            !(rule.contains("addressing") && rule.contains("security")),
+            "no rule may derive transport security from addressing, or the reverse: `{rule}`"
+        );
+    }
+
+    // The two regex-only rules are the ones the in-process evaluator skips,
+    // and that set is asserted rather than assumed.
+    let skipped: Vec<&&str> = texts.iter().filter(|r| is_regex_only(r)).collect();
+    assert_eq!(
+        skipped,
+        vec![&d::R5_ENDPOINT_RULE, &d::R6_PREFIX_RULE],
+        "only R5 and R6 use `matches()`; a third regex rule needs its own live-probe line in \
+         the task report, because this file does not evaluate regexes"
+    );
+}
+
+/// The sentinel is a pair, and half of it is refused.
+///
+/// A TABLE OVER THE RULE THE CRD ACTUALLY CARRIES, evaluated with the API
+/// server's semantics. The rule is a VALIDATION rule (no `oldSelf`), so unlike
+/// the seal beside it, it runs on CREATE — which is the only moment that
+/// matters, because `Backup.spec` is immutable afterwards.
+#[test]
+fn the_destination_sentinel_binds_the_ref_to_the_url() {
+    let rule = weirkeeper::crds::backup::DESTINATION_SENTINEL_RULE;
+    let spec = |url: &str, dest: Option<&str>, secret: bool| -> Value {
+        let mut text = format!("archive:\n  url: {url}\n");
+        if secret {
+            text.push_str("  secretRef:\n    name: creds\n");
+        }
+        if let Some(d) = dest {
+            text.push_str(&format!("destinationRef:\n  name: {d}\n"));
+        }
+        yaml(&text)
+    };
+
+    let cases: Vec<(&str, Value, bool)> = vec![
+        (
+            "no ref, an ordinary url",
+            spec("s3://bucket/archive", None, true),
+            true,
+        ),
+        (
+            "a ref and the matching sentinel",
+            spec("logweir-destination://primary", Some("primary"), false),
+            true,
+        ),
+        (
+            "a ref and a sentinel naming a DIFFERENT destination",
+            spec("logweir-destination://other", Some("primary"), false),
+            false,
+        ),
+        (
+            "a ref and an ordinary url — the run would write somewhere else",
+            spec("s3://bucket/archive", Some("primary"), false),
+            false,
+        ),
+        (
+            "a ref, the right sentinel, but a credential reference beside it",
+            spec("logweir-destination://primary", Some("primary"), true),
+            false,
+        ),
+        (
+            "the reserved scheme with NO ref at all",
+            spec("logweir-destination://primary", None, false),
+            false,
+        ),
+    ];
+    for (name, value, expected) in cases {
+        let got = eval(rule, &value, &value);
+        assert_eq!(
+            got, expected,
+            "case `{name}`: the sentinel rule evaluated to {got}, expected {expected}.\n\
+             rule: {rule}\nspec: {value:?}"
+        );
+    }
+
+    // And the same text is on the schedule, which is what makes a schedule's
+    // children inherit a consistent pair.
+    assert_eq!(
+        weirkeeper::crds::backup_schedule::DESTINATION_SENTINEL_RULE,
+        rule,
+        "a Backup and the BackupSchedule that creates it must agree about the sentinel, or \
+         a child would be refused by a rule its parent passed"
+    );
+}
+
+/// A `Restore` takes both destinations or neither, and its sentinel binds the
+/// SOURCE archive.
+#[test]
+fn a_restore_takes_both_destinations_or_neither() {
+    use weirkeeper::crds::restore as r;
+    let spec = |src: Option<&str>, ev: Option<&str>, url: &str| -> Value {
+        let mut text = format!("sourceArchive:\n  url: {url}\n");
+        if let Some(s) = src {
+            text.push_str(&format!("sourceDestinationRef:\n  name: {s}\n"));
+        }
+        if let Some(e) = ev {
+            text.push_str(&format!("evidenceDestinationRef:\n  name: {e}\n"));
+        }
+        yaml(&text)
+    };
+    let cases: Vec<(&str, Value, bool)> = vec![
+        ("neither", spec(None, None, "s3://b/a"), true),
+        (
+            "both",
+            spec(
+                Some("primary"),
+                Some("evidence"),
+                "logweir-destination://primary",
+            ),
+            true,
+        ),
+        (
+            "source only — evidence would land wherever the inline archive pointed",
+            spec(Some("primary"), None, "logweir-destination://primary"),
+            false,
+        ),
+        (
+            "evidence only",
+            spec(None, Some("evidence"), "s3://b/a"),
+            false,
+        ),
+    ];
+    for (name, value, expected) in cases {
+        assert_eq!(
+            eval(r::DESTINATIONS_TOGETHER_RULE, &value, &value),
+            expected,
+            "case `{name}`"
+        );
+    }
+
+    let mismatched = spec(
+        Some("primary"),
+        Some("evidence"),
+        "logweir-destination://other",
+    );
+    assert!(
+        !eval(r::DESTINATION_SENTINEL_RULE, &mismatched, &mismatched),
+        "a sourceArchive sentinel naming a destination other than sourceDestinationRef must \
+         be refused"
+    );
+}
+
+/// The check kinds seal `spec.request` and let `cancelRequested` move one way.
+#[test]
+fn the_check_kinds_seal_the_request_and_cancel_moves_forward_only() {
+    for (file, kind) in [
+        ("topicdiscoveries.yaml", "TopicDiscovery"),
+        ("preflights.yaml", "Preflight"),
+    ] {
+        let doc = crd(file);
+        let spec = spec_schema(&doc);
+        assert_eq!(
+            required(spec),
+            vec!["request"],
+            "{kind}: `request` is REQUIRED — that is what makes a transition rule on it fire \
+             on every update — and `cancelRequested` is not, because it has a default"
+        );
+        assert_eq!(
+            at(spec, &["properties", "cancelRequested", "default"]).as_bool(),
+            Some(false),
+            "{kind}: absent `cancelRequested` means false"
+        );
+
+        let request_rule = attached_rules(&doc)
+            .into_iter()
+            .find(|r| r.path == ["spec", "request"] && r.rule.contains("oldSelf"))
+            .unwrap_or_else(|| panic!("{kind}: `spec.request` carries no transition rule"));
+        assert_eq!(
+            request_rule.rule, "self == oldSelf",
+            "{kind}: the request is sealed whole; a per-field seal would leave every optional \
+             field inside it addable after creation"
+        );
+
+        let cancel_rule = attached_rules(&doc)
+            .into_iter()
+            .find(|r| r.path == ["spec"])
+            .unwrap_or_else(|| panic!("{kind}: `.spec` carries no rule"));
+        let with = |c: bool| yaml(&format!("cancelRequested: {c}\n"));
+        for (name, old, new, expected) in [
+            ("false stays false", with(false), with(false), true),
+            ("false becomes true", with(false), with(true), true),
+            ("true stays true", with(true), with(true), true),
+            ("true falls back to false", with(true), with(false), false),
+        ] {
+            assert_eq!(
+                eval(&cancel_rule.rule, &new, &old),
+                expected,
+                "{kind} case `{name}`: an uncancel would ask a reconciler to resurrect work \
+                 it has provably stopped"
+            );
+        }
+    }
+}
+
+/// `Preflight.spec.request` admits exactly the block its `operation` names.
+#[test]
+fn a_preflight_carries_only_the_block_its_operation_names() {
+    use weirkeeper::crds::preflight as pf;
+    let doc = crd("preflights.yaml");
+    let request = at(spec_schema(&doc), &["properties", "request"]);
+    assert_eq!(
+        enum_values(at(request, &["properties", "operation"])),
+        vec!["Backup", "Restore", "DestinationAccess"],
+        "three operations, and P3 ties the block to the value"
+    );
+    assert_eq!(
+        required(request),
+        vec!["operation"],
+        "only `operation` is required; which block must be present is P3's job, not the \
+         structural schema's, because the schema cannot express `exactly one of`"
+    );
+
+    let req = |op: &str, block: &str| yaml(&format!("operation: {op}\n{block}:\n  x: 1\n"));
+    for (name, value, expected) in [
+        ("Backup with backup", req("Backup", "backup"), true),
+        ("Backup with restore", req("Backup", "restore"), false),
+        ("Restore with restore", req("Restore", "restore"), true),
+        (
+            "DestinationAccess with destinationAccess",
+            req("DestinationAccess", "destinationAccess"),
+            true,
+        ),
+        (
+            "DestinationAccess with backup",
+            req("DestinationAccess", "backup"),
+            false,
+        ),
+        (
+            "Backup with no block at all",
+            yaml("operation: Backup\n"),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            eval(pf::P3_OPERATION_BLOCK_RULE, &value, &value),
+            expected,
+            "case `{name}`"
+        );
+    }
+
+    // Two blocks at once is refused too, which is the half a naive
+    // `has(the right one)` rule would miss.
+    let two = yaml("operation: Backup\nbackup:\n  x: 1\nrestore:\n  y: 2\n");
+    assert!(
+        !eval(pf::P3_OPERATION_BLOCK_RULE, &two, &two),
+        "P3 must refuse a second block beside the matching one"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The runner image, the recipe, and the drift gate
 // ---------------------------------------------------------------------------
 
@@ -1884,7 +2776,7 @@ fn the_ci_workflow_carries_the_crd_drift_arm() {
     assert!(checks.lines().any(|line| line == "just crds-check"));
     assert!(checks.lines().any(|line| line == "just schema-check"));
     // The following in-process test compares every CRD to the actual emitter;
-    // no workflow needs a duplicate list of the six filenames.
+    // no workflow needs a duplicate list of the filenames.
 }
 
 /// THE DRIFT GATE, LOCALLY AND IN-PROCESS: the checked-in files are exactly
@@ -1900,8 +2792,8 @@ fn the_checked_in_crds_are_what_the_emitter_renders() {
     let rendered = weirkeeper::crds::render_all();
     assert_eq!(
         rendered.len(),
-        6,
-        "the emitter renders six documents; got {}",
+        FILES.len(),
+        "the emitter renders one document per kind; got {}",
         rendered.len()
     );
     let order: Vec<&str> = rendered.iter().map(|r| r.file_name).collect();

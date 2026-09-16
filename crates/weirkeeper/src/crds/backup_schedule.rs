@@ -55,19 +55,42 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ArchiveRef, Condition, LocalRef, Time};
+use super::{ArchiveRef, Condition, LocalRef, SpecRule, Time};
 
 /// The object-level CEL rule that makes `spec.suspend` the only mutable field.
 ///
 /// Read the module header for why this is one rule on `.spec` and not six
 /// rules on six fields, and for the rejected map-based form. The clause order
 /// is the field order of [`BackupScheduleSpec`], minus `suspend`.
-pub const SUSPEND_ONLY_RULE: &str = "has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)";
+pub const SUSPEND_ONLY_RULE: &str = "has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)";
 
 /// The message the API server returns when [`SUSPEND_ONLY_RULE`] refuses an
 /// update.
 pub const SUSPEND_ONLY_MESSAGE: &str =
     "only spec.suspend is mutable; create a new BackupSchedule instead";
+
+/// The CEL rule that ties `spec.destinationRef` to the sentinel in
+/// `spec.archive.url`.
+///
+/// Identical in text and in reason to [`super::backup::DESTINATION_SENTINEL_RULE`]
+/// — the same two fields, the same rollback behaviour — and stated once per
+/// kind because each kind carries its own `.spec` rule list and a shared
+/// constant read from the other module would hide which kinds actually have
+/// it.
+pub const DESTINATION_SENTINEL_RULE: &str = super::backup::DESTINATION_SENTINEL_RULE;
+
+/// The message [`DESTINATION_SENTINEL_RULE`] travels with.
+pub const DESTINATION_SENTINEL_MESSAGE: &str = super::backup::DESTINATION_SENTINEL_MESSAGE;
+
+/// The rules on `BackupSchedule`'s `.spec`.
+///
+/// The seal is first, the sentinel second: the seal is a transition rule and
+/// is skipped on create, and the sentinel is a validation rule that must run
+/// on create as well.
+pub const SPEC_RULES: [SpecRule; 2] = [
+    SpecRule::new(SUSPEND_ONLY_RULE, SUSPEND_ONLY_MESSAGE),
+    SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
+];
 
 /// `{keepLast, keepDays}` — **reporting only**, in every tag.
 ///
@@ -288,7 +311,19 @@ pub struct BackupScheduleSpec {
     /// not an allowlist.
     pub topics: Vec<String>,
     /// Where the backup is written.
+    ///
+    /// With `destinationRef` set this is the sentinel
+    /// `logweir-destination://<name>` and carries no `secretRef`.
     pub archive: ArchiveRef,
+    /// The saved `BackupDestination` every run of this schedule writes to, in
+    /// this namespace.
+    ///
+    /// Optional, additive and sealed like every other field but `suspend`:
+    /// re-pointing a schedule at a different destination is a different
+    /// schedule, for the same reason a different location is a different
+    /// destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_ref: Option<LocalRef>,
     /// Whether a due slot may start while an earlier Backup owned by this
     /// schedule is unfinished. Omitted means `Forbid`, including on schedules
     /// stored before this field was introduced. `Allow` is explicit.

@@ -228,6 +228,37 @@ residual risk is accepted by the current design. The corpus gate
 workflows, scripts and Rust source for the withdrawn stronger guarantee;
 only the two scripts that explicitly prohibit it are exempt.
 
+## Amendment F — saved destinations and transient check requests
+
+Accepted from 2026-09-16. Adds three namespaced kinds to Amendment A's list:
+`BackupDestination`, `TopicDiscovery` and `Preflight`. `Switchover` remains tag 2
+and `MetadataSnapshot` remains reserved.
+
+`BackupDestination` is durable configuration: where archives live (immutable
+location and transport security) and which namespace-local credential references
+each role uses. It holds no credential value. Executions freeze a resolved
+snapshot of it, so later edits never change an existing run or recovery point.
+
+`TopicDiscovery` and `Preflight` are requests for bounded, time-limited
+observations. `weirkeeper` turns each into one isolated runner-image Job in the
+request's namespace. That Job has no Kubernetes token and uses the same credential
+projection as execution. The controller stores results in status and in owned,
+immutable `ConfigMap` chunks. It may cancel the Job and may delete an expired
+terminal check request; it deletes nothing else. Results are advisory. No
+reconciler or runner treats a check result as authorization or as a substitute
+for an execution-time guard.
+
+Rejected alternatives: controller Secret reads, scoped by name or otherwise;
+API-side checks; a single discriminated `Check` kind; destination settings as
+`ConfigMap` conventions. The controller still holds no verb on `secrets`, and the
+signing-oracle residual of Amendment E is unchanged: check Jobs are created under
+the same Job-create authority.
+
+The three names satisfy Amendment B: `BackupDestination` names a class of object,
+`TopicDiscovery` and `Preflight` name operations, and none of them encodes a
+particular cluster, fleet, topic, connector or backup. None contains `Kafka`, so
+`KafkaCluster` remains the only kind that does.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

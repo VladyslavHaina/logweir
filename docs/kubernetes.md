@@ -161,12 +161,12 @@ Approval is a DSSE signature checked against rostered public keys, not a
 an HTTP metrics endpoint are not implemented. See [stability.md](stability.md)
 for the full limitations and deferred features.
 
-## 7. The control plane: six kinds on `logweir.dev/v1alpha1`
+## 7. The control plane: nine kinds on `logweir.dev/v1alpha1`
 
 **Minimum Kubernetes: 1.29.** That floor is not about the client library — it
 is about **CEL validation rules** (`x-kubernetes-validations`), which reached GA
-in 1.29 and are how every one of the six CRDs below makes its `.spec`
-immutable. On an older API server the rules are dropped rather than rejected,
+in 1.29 and are how every one of the nine CRDs below seals the parts of its
+`.spec` that may not change. On an older API server the rules are dropped rather than rejected,
 and a dropped immutability rule is worse than no rule: the object would accept
 an edit after approval and nothing would say so.
 
@@ -182,9 +182,35 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
 | `Approval` | Namespaced | A DSSE-signed authorisation for one `Restore` or `Backup`. **Four required spec fields**; `approvalBytes` and `sidecarBytes` are the UTF-8 document text, verbatim, never base64. |
 | `TrustRoster` | **Cluster** | The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`) — **both carrying public key material** — plus `allowedClusterIds`. Cluster-scoped so a namespace tenant cannot widen its own allowlist. |
+| `BackupDestination` | Namespaced | Where archives live, saved once and referenced by name (ADR 0008 Amendment F). `spec.storage` and `spec.transport.security` are **immutable**; the description, the CA `ConfigMap` reference and all four credential references are mutable, so rotation needs no new object. It holds **no credential value** — only Secret and `ConfigMap` names and key names. |
+| `TopicDiscovery` | Namespaced | One bounded observation of the topics a saved connection can see, run as an isolated Job with no Kubernetes token. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. The result is **advisory**. |
+| `Preflight` | Namespaced | One bounded readiness observation for a `Backup`, a `Restore` or a destination's grants, run the same way. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. A `ready` verdict **authorises nothing**: every execution-time guard still runs. |
 
 `Switchover` is tag 2 and ships in none of the above, not even as a value of
 `Approval.spec.subjectRef.kind`. `MetadataSnapshot` is reserved and unbuilt.
+
+**Absent-field behaviour for the additive fields.** `Backup.spec.destinationRef`,
+`BackupSchedule.spec.destinationRef`, `Restore.spec.sourceDestinationRef` and
+`Restore.spec.evidenceDestinationRef` are all optional: absent means the object
+carries its location inline in `archive` / `sourceArchive`, exactly as before
+saved destinations existed, and nothing about its behaviour changes. Absent
+`BackupDestination.spec.readiness.writeProbe` means `Disabled` (no readiness test
+ever writes an object). Absent `spec.access.archiveRead` or
+`spec.access.evidenceWrite` means `archiveWrite` is used; absent
+`spec.access.evidenceRead` means verification is `NotAttempted`, with a detail
+naming the field — never a silent fallback to a wider grant. Absent
+`TopicDiscovery.spec.request` fields take the defaults printed in the CRD schema.
+
+**When a destination is referenced, `archive.url` is a sentinel.** A
+destination-backed `Backup` carries `archive.url:
+logweir-destination://<destinationRef.name>` and no `archive.secretRef`, and CEL
+refuses any other combination — including the scheme with no reference. The field
+stays REQUIRED on purpose. An older controller that decoded an object with no
+`archive` at all would fail the whole list/watch with a reflector decode error and
+stall *every* `Backup` reconcile; with the sentinel it decodes the object, fails
+to parse the unknown scheme, and writes the terminal `ArchiveUrlUnreadable` before
+any Job is created. One object fails closed and says so, instead of the kind going
+dark.
 
 **Every `kubectl` command line in this repository names its context
 explicitly** — `kubectl --context docker-desktop …`, the `proxy` subcommand
@@ -195,9 +221,26 @@ rather than a line to run, and is not one of them.
 
 ### The immutability seals
 
-Five kinds carry one rule on `.spec`: `self == oldSelf`, message *spec is
-immutable; create a new object instead*. `BackupSchedule` carries one
-**object-level** rule instead, naming every field except `suspend`.
+`KafkaCluster`, `Approval` and `TrustRoster` carry one rule on `.spec`:
+`self == oldSelf`, message *spec is immutable; create a new object instead*.
+`Backup` and `Restore` carry the same seal plus the destination-sentinel
+validation rules below. `BackupSchedule` carries one **object-level** rule
+instead, naming every field except `suspend`.
+
+`BackupDestination` carries four rules on `.spec`: `spec.storage` and
+`spec.transport.security` are compared against `oldSelf` (a different location
+or transport is a different destination), the endpoint scheme must match the
+declared transport, and a `caBundle` requires `TLS`. **`spec.storage.addressing`
+never appears in any of them, in either direction** — path-style versus
+virtual-hosted addressing is not a transport choice, and `InsecureHTTP` is the
+only thing that permits plaintext.
+
+`TopicDiscovery` and `Preflight` seal a REQUIRED sub-object, `spec.request`,
+rather than the whole `.spec`. That works for the same reason the schedule's
+object-level rule does: a transition rule fires only when `oldSelf` has the
+field, and a required sub-object is present in every stored object. The one
+field an operator may change, `spec.cancelRequested`, sits outside the sealed
+object with a rule that lets it move `false` → `true` and never back.
 
 The object level is load-bearing and not a style choice. A **per-field**
 transition rule is evaluated only when `oldSelf` exists for that field, so an

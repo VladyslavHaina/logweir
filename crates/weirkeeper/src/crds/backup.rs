@@ -11,7 +11,40 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef};
+use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, SpecRule};
+
+/// The CEL rule that ties `spec.destinationRef` to the sentinel in
+/// `spec.archive.url`, on every create as well as every update.
+///
+/// # Why a sentinel and not an absent `archive`
+///
+/// An older controller deserializing a `Backup` with no `archive` would fail
+/// the whole list or watch with a reflector decode error, and EVERY `Backup`
+/// reconcile would stall after a rollback — one bad object taking out the
+/// kind. With the sentinel the old object decodes, the old `storage_url_for`
+/// falls into its unknown-scheme arm, and the old controller writes the
+/// terminal `ArchiveUrlUnreadable` **before any POST**. Fail closed, visibly,
+/// on one object.
+///
+/// The second half — `!has(self.archive.secretRef)` — is what stops a
+/// destination-backed `Backup` carrying a credential reference that nothing
+/// would read. The `else` arm reserves the scheme: without it, an object could
+/// name `logweir-destination://something` with no `destinationRef` and mean
+/// nothing at all.
+pub const DESTINATION_SENTINEL_RULE: &str = "has(self.destinationRef) ? (self.archive.url == 'logweir-destination://' + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith('logweir-destination://')";
+
+/// The message [`DESTINATION_SENTINEL_RULE`] travels with.
+pub const DESTINATION_SENTINEL_MESSAGE: &str = "with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved";
+
+/// The rules on `Backup`'s `.spec`.
+///
+/// The whole spec stays sealed — a run's inputs are the run — and the sentinel
+/// rule sits beside it because a transition rule is NOT evaluated on create
+/// and the sentinel has to be.
+pub const SPEC_RULES: [SpecRule; 2] = [
+    SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
+    SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
+];
 
 /// The archive window this run covers, in **epoch milliseconds**.
 ///
@@ -137,7 +170,20 @@ pub struct BackupSpec {
     /// `BackupSchedule`.
     pub topics: Vec<String>,
     /// Where the archive is written.
+    ///
+    /// With `destinationRef` set this is the sentinel
+    /// `logweir-destination://<name>` and carries no `secretRef`; see
+    /// [`DESTINATION_SENTINEL_RULE`] for why the field stays REQUIRED rather
+    /// than becoming optional.
     pub archive: ArchiveRef,
+    /// The saved `BackupDestination` this run writes to, in this namespace.
+    ///
+    /// Optional and additive: absent means `archive` carries the location
+    /// inline, exactly as it did before saved destinations existed. An older
+    /// controller ignores this field — and then refuses the sentinel URL
+    /// terminally, which is the intended rollback behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_ref: Option<LocalRef>,
     /// The `BackupSchedule` that created this object, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_ref: Option<LocalRef>,

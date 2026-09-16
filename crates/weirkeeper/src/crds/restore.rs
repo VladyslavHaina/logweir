@@ -10,7 +10,42 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, Time};
+use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, SpecRule, Time};
+
+/// The CEL rule that refuses half a destination-backed restore.
+///
+/// A restore reads an archive and WRITES evidence, and those are two grants on
+/// two destinations. Allowing one of the pair to be set would let a run read
+/// from a saved destination and write its scorecard wherever the inline
+/// archive pointed — two locations nobody chose together.
+pub const DESTINATIONS_TOGETHER_RULE: &str =
+    "has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)";
+
+/// The message [`DESTINATIONS_TOGETHER_RULE`] travels with.
+pub const DESTINATIONS_TOGETHER_MESSAGE: &str =
+    "sourceDestinationRef and evidenceDestinationRef are set together";
+
+/// The CEL rule that ties `spec.sourceDestinationRef` to the sentinel in
+/// `spec.sourceArchive.url`.
+///
+/// # What an older controller does with a sentinel Restore
+///
+/// It ignores `sourceDestinationRef`, projects no archive credential (the
+/// sentinel carries no `secretRef`) and its runner fails reading the
+/// plan-pinned location. **The approved plan bytes pin the location**, so
+/// nothing is misrouted: the failure is an unreadable archive, never a write
+/// somewhere else.
+pub const DESTINATION_SENTINEL_RULE: &str = "has(self.sourceDestinationRef) ? (self.sourceArchive.url == 'logweir-destination://' + self.sourceDestinationRef.name && !has(self.sourceArchive.secretRef)) : !self.sourceArchive.url.startsWith('logweir-destination://')";
+
+/// The message [`DESTINATION_SENTINEL_RULE`] travels with.
+pub const DESTINATION_SENTINEL_MESSAGE: &str = "with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name> and sourceArchive.secretRef is absent; the logweir-destination scheme is otherwise reserved";
+
+/// The rules on `Restore`'s `.spec`.
+pub const SPEC_RULES: [SpecRule; 3] = [
+    SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
+    SpecRule::new(DESTINATIONS_TOGETHER_RULE, DESTINATIONS_TOGETHER_MESSAGE),
+    SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
+];
 
 /// `target.mode`'s enum, fixed byte for byte at this task.
 ///
@@ -219,7 +254,22 @@ pub struct RestoreSpec {
     /// its `subjectRef` must name this object.
     pub approval_ref: LocalRef,
     /// The archive to restore from.
+    ///
+    /// With `sourceDestinationRef` set this is the sentinel
+    /// `logweir-destination://<name>` and carries no `secretRef`; see
+    /// [`DESTINATION_SENTINEL_RULE`].
     pub source_archive: ArchiveRef,
+    /// The saved `BackupDestination` the archive is read from, in this
+    /// namespace. Set together with `evidenceDestinationRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_destination_ref: Option<LocalRef>,
+    /// The saved `BackupDestination` this run's evidence is written to.
+    ///
+    /// A SECOND DESTINATION, ON PURPOSE. Evidence is written under `logweir/`
+    /// with its own grant, and an installation that keeps evidence in a
+    /// different bucket from the archive is the case this pair exists for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_destination_ref: Option<LocalRef>,
     /// The backup set inside `sourceArchive` — a `backupId`.
     pub backup_set_ref: String,
     /// The point in time to restore to. Records after it are not restored.

@@ -52,6 +52,9 @@ fi
 echo "   helm ${helm_version}"
 
 # ---------------------------------------------------------------- 1. CRDs
+# The kind count of `weirkeeper::crds::KINDS`: six from ADR 0008 Amendment A
+# plus Amendment F's `BackupDestination`, `TopicDiscovery` and `Preflight`.
+EXPECTED_CRDS=9
 echo "== 1. crds/ is a byte-identical copy of config/crd/ =="
 crd_count=0
 for src in config/crd/*.yaml; do
@@ -74,11 +77,15 @@ done
 for extra in "$CHART"/crds/*.yaml; do
   base="$(basename "$extra")"
   if [ ! -f "config/crd/$base" ]; then
-    echo "FAIL: $CHART/crds/$base has no counterpart under config/crd/ — a seventh kind arrives in the emitter first" >&2
+    echo "FAIL: $CHART/crds/$base has no counterpart under config/crd/ — a new kind arrives in the emitter first" >&2
     fail=1
   fi
 done
-[ "$crd_count" -eq 6 ] || { echo "FAIL: expected six CRDs under config/crd/, found $crd_count" >&2; fail=1; }
+# THE NUMBER IS WRITTEN DOWN ON PURPOSE. The loops above prove the two
+# directories AGREE; only a literal count proves neither of them quietly lost a
+# kind. It tracks `weirkeeper::crds::KINDS`, and changing it is a reviewable
+# diff on this line.
+[ "$crd_count" -eq "$EXPECTED_CRDS" ] || { echo "FAIL: expected $EXPECTED_CRDS CRDs under config/crd/, found $crd_count" >&2; fail=1; }
 [ "$fail" -eq 0 ] && echo "   ok: $crd_count CRDs, byte for byte"
 
 # ---------------------------------------------------------------- 2. the UI

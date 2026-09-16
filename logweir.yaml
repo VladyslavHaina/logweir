@@ -10,7 +10,7 @@
 #     kubectl --context docker-desktop apply --server-side -f logweir.yaml
 #
 # It is safe to run twice; that is X-APPLY, spec §16 clause 1. It contains the
-# Namespace, the six CustomResourceDefinitions, the RBAC and the controller
+# Namespace, the nine CustomResourceDefinitions, the RBAC and the controller
 # Deployment, and NO custom resource — so the CRD-not-yet-established ordering
 # failure cannot occur. Samples are separate files, applied second:
 # `config/samples/`. Minimum Kubernetes: 1.29.
@@ -254,6 +254,556 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: backupdestinations.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: BackupDestination
+    plural: backupdestinations
+    shortNames: []
+    singular: backupdestination
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.storage.bucket
+      name: BUCKET
+      type: string
+    - description: absent means AWS S3
+      jsonPath: .spec.storage.endpoint
+      name: ENDPOINT
+      type: string
+    - description: TLS or InsecureHTTP; never derived from addressing
+      jsonPath: .spec.transport.security
+      name: TRANSPORT
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Valid")].status
+      name: VALID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Where archives live, saved once and referenced by name. `spec.storage`
+          and `spec.transport.security` are immutable — a different location or transport
+          is a different destination — while the description, the CA reference and
+          every credential reference are mutable so that rotation needs no new object.
+          It holds NO credential value; executions freeze a resolved snapshot, so
+          a later edit never changes a run that already exists.
+        properties:
+          spec:
+            description: '`BackupDestination.spec`.'
+            properties:
+              access:
+                description: The four credential references. Mutable, and references
+                  only.
+                properties:
+                  archiveRead:
+                    description: The read-only archive grant. Absent means `archiveWrite`
+                      is used.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when
+                              the credential is temporary. No default: a session token
+                              nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: SecretKeys needs secret and no workloadIdentity; WorkloadIdentity
+                        takes no secret
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity))
+                        : !has(self.secret)'
+                  archiveWrite:
+                    description: 'The grant execution Jobs write the archive with.
+                      Required: a destination nothing may write to is not a backup
+                      destination.'
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when
+                              the credential is temporary. No default: a session token
+                              nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: SecretKeys needs secret and no workloadIdentity; WorkloadIdentity
+                        takes no secret
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity))
+                        : !has(self.secret)'
+                  evidenceRead:
+                    description: The grant that reads evidence back for verification.
+                      Absent means verification is `NotAttempted`, with a detail naming
+                      this field.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        - ControllerIdentity
+                        - ArchiveReadGrant
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when
+                              the credential is temporary. No default: a session token
+                              nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: evidenceRead fields must match its mode
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity))
+                        : (!has(self.secret) && (self.mode == ''WorkloadIdentity''
+                        || !has(self.workloadIdentity)))'
+                  evidenceWrite:
+                    description: The grant that writes evidence under `logweir/`.
+                      Absent means `archiveWrite` is used.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: How the credential is obtained.
+                        enum:
+                        - SecretKeys
+                        - WorkloadIdentity
+                        type: string
+                      secret:
+                        description: The Secret and its keys, for `SecretKeys`.
+                        nullable: true
+                        properties:
+                          accessKeyIdKey:
+                            default: access-key-id
+                            description: The data key holding the access key id.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The Secret name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: The data key holding the secret access key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          sessionTokenKey:
+                            description: 'The data key holding a session token, when
+                              the credential is temporary. No default: a session token
+                              nobody configured is a token that does not exist.'
+                            maxLength: 253
+                            minLength: 1
+                            nullable: true
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      workloadIdentity:
+                        description: The ServiceAccount, for `WorkloadIdentity`.
+                        nullable: true
+                        properties:
+                          serviceAccountName:
+                            default: logweir-runner
+                            description: The ServiceAccount name, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: SecretKeys needs secret and no workloadIdentity; WorkloadIdentity
+                        takes no secret
+                      rule: 'self.mode == ''SecretKeys'' ? (has(self.secret) && !has(self.workloadIdentity))
+                        : !has(self.secret)'
+                required:
+                - archiveWrite
+                type: object
+                x-kubernetes-validations:
+                - message: evidenceRead ArchiveReadGrant requires an explicit read-only
+                    archiveRead grant; a write grant is never reused for verification
+                  rule: '!has(self.evidenceRead) || self.evidenceRead.mode != ''ArchiveReadGrant''
+                    || has(self.archiveRead)'
+              description:
+                description: What this destination is, for a human reading `kubectl
+                  get`. Mutable.
+                maxLength: 256
+                nullable: true
+                type: string
+              readiness:
+                description: 'Explicit readiness settings. Absent means `writeProbe:
+                  Disabled`.'
+                nullable: true
+                properties:
+                  writeProbe:
+                    default: Disabled
+                    description: Whether a readiness test may write a marker. Absent
+                      means `Disabled`.
+                    enum:
+                    - Disabled
+                    - CreateOnlyMarker
+                    type: string
+                type: object
+              storage:
+                description: The location. **Immutable** (R1).
+                properties:
+                  addressing:
+                    description: 'How a request names the bucket. **Never** a transport
+                      choice: see the module header and R3.'
+                    enum:
+                    - PathStyle
+                    - VirtualHosted
+                    type: string
+                  bucket:
+                    description: The bucket.
+                    maxLength: 63
+                    minLength: 3
+                    pattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+                    type: string
+                  endpoint:
+                    description: An http(s) ORIGIN. Absent means AWS S3.
+                    maxLength: 2048
+                    nullable: true
+                    type: string
+                  prefix:
+                    default: ""
+                    description: 'The key prefix inside the bucket, relative, `""`
+                      for the bucket root. Never `logweir` or anything under it: that
+                      is Logweir''s own evidence root (Global Constraint 6) and R6
+                      refuses it.'
+                    maxLength: 512
+                    type: string
+                  provider:
+                    description: The object-store provider. One value, so a second
+                      one is a reviewable event with its own validation rules rather
+                      than free text.
+                    enum:
+                    - S3
+                    type: string
+                  region:
+                    description: The region, when the provider needs one.
+                    nullable: true
+                    pattern: ^[a-z0-9-]{1,32}$
+                    type: string
+                required:
+                - addressing
+                - bucket
+                - provider
+                type: object
+                x-kubernetes-validations:
+                - message: 'storage.endpoint must be an http(s) origin: scheme, host
+                    and optional port only (no userinfo, path, query or fragment)'
+                  rule: '!has(self.endpoint) || self.endpoint.matches(''^https?://([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?/?$'')'
+                - message: storage.prefix is relative with no empty, '.' or '..' segment,
+                    and may not be the reserved evidence root logweir/
+                  rule: self.prefix == '' || (self.prefix.matches("^[A-Za-z0-9!_.*'()-]+(/[A-Za-z0-9!_.*'()-]+)*$")
+                    && !self.prefix.matches('(^|/)[.]{1,2}(/|$)') && !self.prefix.matches('^logweir(/|$)'))
+              transport:
+                description: Transport security and its trust material. `security`
+                  is **immutable** (R2); `caBundle` is not.
+                properties:
+                  caBundle:
+                    description: A private CA for `TLS`. Mutable, because a CA rotates.
+                    nullable: true
+                    properties:
+                      configMapName:
+                        description: The `ConfigMap` name, in this namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      key:
+                        default: ca.crt
+                        description: The data key holding the PEM bundle.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                    required:
+                    - configMapName
+                    type: object
+                  security:
+                    description: '`TLS` or `InsecureHTTP`. **Immutable** (R2), and
+                      the ONE field that decides whether plaintext is permitted.'
+                    enum:
+                    - TLS
+                    - InsecureHTTP
+                    type: string
+                required:
+                - security
+                type: object
+            required:
+            - access
+            - storage
+            - transport
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.storage is immutable: a different location is a different
+                BackupDestination'
+              rule: self.storage == oldSelf.storage
+            - message: 'spec.transport.security is immutable: transport can never
+                be changed in place'
+              rule: self.transport.security == oldSelf.transport.security
+            - message: 'transport.security must match the endpoint scheme: TLS needs
+                an https:// endpoint or none; InsecureHTTP needs an explicit http://
+                endpoint. storage.addressing never changes transport'
+              rule: 'self.transport.security == ''InsecureHTTP'' ? (has(self.storage.endpoint)
+                && self.storage.endpoint.startsWith(''http://'')) : (!has(self.storage.endpoint)
+                || self.storage.endpoint.startsWith(''https://''))'
+            - message: transport.caBundle requires transport.security TLS
+              rule: '!has(self.transport.caBundle) || self.transport.security == ''TLS'''
+          status:
+            description: '`BackupDestination.status`.'
+            nullable: true
+            properties:
+              caBundleSha256:
+                description: '`sha256:<lowercase hex>` over the CA bytes read from
+                  the `ConfigMap`, so a rotation is visible without reading the bundle
+                  again.'
+                nullable: true
+                type: string
+              canonicalUrl:
+                description: The archive root as one URL — `s3://<bucket>/<prefix>`
+                  — so an operator and a plan never spell the same location two ways.
+                nullable: true
+                type: string
+              conditions:
+                description: The condition set. One type, `Valid`.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              locationDigest:
+                description: '`sha256:<lowercase hex>` over the canonical location,
+                  as `logweir_core::destination::DestinationLocation::location_digest`
+                  computes it. What a frozen plan is compared against.'
+                nullable: true
+                type: string
+              observedAt:
+                description: When the controller last reached this verdict. A new
+                  verdict takes a new instant; an unchanged one keeps the stored one
+                  (erratum E11(d)).
+                format: date-time
+                nullable: true
+                type: string
+              observedGeneration:
+                description: The `metadata.generation` the verdict below was computed
+                  from.
+                format: int64
+                nullable: true
+                type: integer
+              reason:
+                description: The `Valid` condition's reason, promoted to a scalar
+                  — `Valid`, `AddressingUnsupportedByEngine`, `CaBundleNotFound`,
+                  `CaBundleKeyMissing`, `CaBundleTooLarge`, `CaBundleInvalid`.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: BackupDestination
+        type: object
+        x-kubernetes-validations:
+        - message: BackupDestination names are at most 63 characters
+          rule: size(self.metadata.name) <= 63
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
   name: backups.logweir.dev
 spec:
   group: logweir.dev
@@ -294,7 +844,10 @@ spec:
             description: '`Backup.spec`.'
             properties:
               archive:
-                description: Where the archive is written.
+                description: |-
+                  Where the archive is written.
+
+                  With `destinationRef` set this is the sentinel `logweir-destination://<name>` and carries no `secretRef`; see [`DESTINATION_SENTINEL_RULE`] for why the field stays REQUIRED rather than becoming optional.
                 properties:
                   secretRef:
                     description: A Secret in this namespace carrying the object-store
@@ -319,6 +872,20 @@ spec:
                 description: The Job's `activeDeadlineSeconds`.
                 format: int64
                 type: integer
+              destinationRef:
+                description: |-
+                  The saved `BackupDestination` this run writes to, in this namespace.
+
+                  Optional and additive: absent means `archive` carries the location inline, exactly as it did before saved destinations existed. An older controller ignores this field — and then refuses the sentinel URL terminally, which is the intended rollback behaviour.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
               scheduleRef:
                 description: The `BackupSchedule` that created this object, when one
                   did.
@@ -368,6 +935,11 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable; create a new object instead
               rule: self == oldSelf
+            - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name>
+                and archive.secretRef is absent; the logweir-destination scheme is
+                otherwise reserved
+              rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://''
+                + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
           status:
             description: '`Backup.status`.'
             nullable: true
@@ -659,7 +1231,10 @@ spec:
               module header.'
             properties:
               archive:
-                description: Where the backup is written.
+                description: |-
+                  Where the backup is written.
+
+                  With `destinationRef` set this is the sentinel `logweir-destination://<name>` and carries no `secretRef`.
                 properties:
                   secretRef:
                     description: A Secret in this namespace carrying the object-store
@@ -690,6 +1265,20 @@ spec:
                 - Forbid
                 - Allow
                 type: string
+              destinationRef:
+                description: |-
+                  The saved `BackupDestination` every run of this schedule writes to, in this namespace.
+
+                  Optional, additive and sealed like every other field but `suspend`: re-pointing a schedule at a different destination is a different schedule, for the same reason a different location is a different destination.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
               retention:
                 description: '`{keepLast, keepDays}` — **reporting only**. Logweir
                   deletes nothing.'
@@ -755,11 +1344,17 @@ spec:
                 && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) &&
                 has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics
                 == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) &&
-                (!has(self.archive) || self.archive == oldSelf.archive) && has(self.concurrencyPolicy)
-                == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy)
-                || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention)
-                == has(oldSelf.retention) && (!has(self.retention) || self.retention
-                == oldSelf.retention)
+                (!has(self.archive) || self.archive == oldSelf.archive) && has(self.destinationRef)
+                == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef
+                == oldSelf.destinationRef) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy)
+                && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy)
+                && has(self.retention) == has(oldSelf.retention) && (!has(self.retention)
+                || self.retention == oldSelf.retention)
+            - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name>
+                and archive.secretRef is absent; the logweir-destination scheme is
+                otherwise reserved
+              rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://''
+                + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
           status:
             description: '`BackupSchedule.status`.'
             nullable: true
@@ -1236,6 +1831,581 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: preflights.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Preflight
+    plural: preflights
+    shortNames: []
+    singular: preflight
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.request.operation
+      name: OPERATION
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: ready, notReady or unknown — advisory, never authorization
+      jsonPath: .status.result.state
+      name: RESULT
+      type: string
+    - jsonPath: .status.result.expiresAt
+      name: EXPIRES
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'One bounded readiness observation for a Backup, a Restore or
+          a BackupDestination''s grants, executed as an isolated Job with no Kubernetes
+          token. `spec.request` is immutable and `spec.cancelRequested` may only move
+          from false to true. The verdict is ADVISORY: a `ready` result authorizes
+          nothing and every execution-time guard still runs.'
+        properties:
+          spec:
+            description: '`Preflight.spec`.'
+            properties:
+              cancelRequested:
+                default: false
+                description: Ask the controller to stop. `false` → `true` only (P2).
+                type: boolean
+              request:
+                description: What to check. Immutable (P1).
+                properties:
+                  backup:
+                    description: 'The backup block, for `operation: Backup`.'
+                    nullable: true
+                    properties:
+                      destinationRef:
+                        description: The saved destination it would write to.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      legacyArchive:
+                        description: An inline archive location, for an installation
+                          that has not adopted saved destinations. Exactly one of
+                          this and `destinationRef` (P4).
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: A Secret in this namespace carrying the object-store
+                              credential. Its keys are read by the Job, never by the
+                              controller's own archive handle, which is read-only
+                              (Global Constraint 6).
+                            nullable: true
+                            properties:
+                              name:
+                                description: The referenced object's `metadata.name`,
+                                  in this namespace.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          url:
+                            description: The object-store URL of the archive root.
+                            type: string
+                        required:
+                        - url
+                        type: object
+                      scheduleRef:
+                        description: The schedule this check is about, when there
+                          is one. Context only.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      sourceRef:
+                        description: The `KafkaCluster` the backup would read.
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      topics:
+                        description: NAMED topics, never patterns — guard **G-GLOB**,
+                          as everywhere else.
+                        items:
+                          pattern: ^[a-zA-Z0-9._-]{1,249}$
+                          type: string
+                        maxItems: 1000
+                        minItems: 1
+                        type: array
+                    required:
+                    - sourceRef
+                    - topics
+                    type: object
+                    x-kubernetes-validations:
+                    - message: set exactly one of destinationRef or legacyArchive
+                      rule: has(self.destinationRef) != has(self.legacyArchive)
+                  destinationAccess:
+                    description: 'The destination block, for `operation: DestinationAccess`.'
+                    nullable: true
+                    properties:
+                      destinationRef:
+                        description: The destination to exercise.
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      roles:
+                        description: Which grants to exercise. `ArchiveWrite`, `ArchiveRead`,
+                          `EvidenceWrite`, `EvidenceRead`.
+                        items:
+                          description: Which grant an operation needs. Lives in the
+                            pure layer because the check plan (`logweir_core::check_contract`),
+                            the controller resolver (`weirkeeper::destination`) and
+                            the API DTOs must all name the same four roles; two enums
+                            would be two vocabularies.
+                          enum:
+                          - ArchiveWrite
+                          - ArchiveRead
+                          - EvidenceWrite
+                          - EvidenceRead
+                          type: string
+                        maxItems: 4
+                        minItems: 1
+                        type: array
+                    required:
+                    - destinationRef
+                    - roles
+                    type: object
+                  operation:
+                    description: Which operation this is about. P3 ties the block
+                      below to it.
+                    enum:
+                    - Backup
+                    - Restore
+                    - DestinationAccess
+                    type: string
+                  restore:
+                    description: 'The restore block, for `operation: Restore`.'
+                    nullable: true
+                    properties:
+                      evidenceDestinationRef:
+                        description: The destination evidence is written to.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      legacySourceArchive:
+                        description: An inline source archive, for an installation
+                          that has not adopted saved destinations. Exactly one of
+                          this and the destination refs (P8).
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: A Secret in this namespace carrying the object-store
+                              credential. Its keys are read by the Job, never by the
+                              controller's own archive handle, which is read-only
+                              (Global Constraint 6).
+                            nullable: true
+                            properties:
+                              name:
+                                description: The referenced object's `metadata.name`,
+                                  in this namespace.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          url:
+                            description: The object-store URL of the archive root.
+                            type: string
+                        required:
+                        - url
+                        type: object
+                      planBytes:
+                        description: A draft plan, as the exact bytes an approver
+                          would sign. Exactly one of this and `restoreRef` (P5).
+                        maxLength: 262144
+                        nullable: true
+                        type: string
+                      planHash:
+                        description: The draft's sha256. **The controller recomputes
+                          it**; this field is the requester's claim, and a mismatch
+                          is the check's own finding.
+                        nullable: true
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      recoveryPointRef:
+                        description: The recovery point being restored, by the identity
+                          PLAT-11.1 fixes.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's name, in this namespace.
+                            type: string
+                          uid:
+                            description: Its UID, when the requester knew it.
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      restoreRef:
+                        description: An existing `Restore` — typically one waiting
+                          for an approver.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's name, in this namespace.
+                            type: string
+                          uid:
+                            description: Its UID, when the requester knew it.
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      sourceDestinationRef:
+                        description: The destination the archive is read from. Set
+                          with `evidenceDestinationRef` (P7).
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      targetRef:
+                        description: The target `KafkaCluster`. Required with a draft
+                          (P6); derived from the `Restore` otherwise.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`,
+                              in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: set exactly one of planBytes (a draft) or restoreRef
+                        (an existing Restore)
+                      rule: has(self.planBytes) != has(self.restoreRef)
+                    - message: a draft needs planHash and targetRef; the controller
+                        recomputes the hash
+                      rule: '!has(self.planBytes) || (has(self.planHash) && has(self.targetRef))'
+                    - message: source and evidence destinations are set together
+                      rule: has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)
+                    - message: set exactly one of the destination refs or legacySourceArchive
+                      rule: has(self.sourceDestinationRef) != has(self.legacySourceArchive)
+                    - message: planHash is sha256:<64 lowercase hex>, the form logweir_core::ids::sha256_prefixed
+                        produces
+                      rule: '!has(self.planHash) || self.planHash.matches(''^sha256:[0-9a-f]{64}$'')'
+                  skipChecks:
+                    description: 'Checks to leave out. **A skipped blocking check
+                      keeps the overall state `unknown`**: skipping a question is
+                      not answering it.'
+                    items:
+                      type: string
+                    maxItems: 32
+                    nullable: true
+                    type: array
+                  timeoutSeconds:
+                    default: 120
+                    description: The in-Job budget.
+                    format: int32
+                    maximum: 600
+                    minimum: 30
+                    type: integer
+                required:
+                - operation
+                type: object
+                x-kubernetes-validations:
+                - message: spec.request is immutable; create a new Preflight
+                  rule: self == oldSelf
+                - message: exactly the block matching spec.request.operation may be
+                    set
+                  rule: 'self.operation == ''Backup'' ? (has(self.backup) && !has(self.restore)
+                    && !has(self.destinationAccess)) : self.operation == ''Restore''
+                    ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess))
+                    : (has(self.destinationAccess) && !has(self.backup) && !has(self.restore))'
+            required:
+            - request
+            type: object
+            x-kubernetes-validations:
+            - message: spec.cancelRequested may only change from false to true
+              rule: (!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested) ||
+                (has(self.cancelRequested) && self.cancelRequested)
+          status:
+            description: '`Preflight.status`.'
+            nullable: true
+            properties:
+              binding:
+                description: What this verdict is about, exactly.
+                nullable: true
+                properties:
+                  inputsDigest:
+                    description: '`sha256:<lowercase hex>` over the canonical binding
+                      inputs.'
+                    nullable: true
+                    type: string
+                  operation:
+                    description: The operation checked.
+                    nullable: true
+                    type: string
+                  planHash:
+                    description: The plan hash the controller RECOMPUTED, for a restore.
+                    nullable: true
+                    type: string
+                  policyDigest:
+                    description: '`sha256:<lowercase hex>` over the installation policy
+                      in force.'
+                    nullable: true
+                    type: string
+                  referents:
+                    description: Every object this check read, with its revision.
+                    items:
+                      description: One object this check was bound to, with the revision
+                        it observed.
+                      properties:
+                        generation:
+                          description: Its `metadata.generation` at binding time.
+                          format: int64
+                          nullable: true
+                          type: integer
+                        kind:
+                          description: The referent's kind.
+                          type: string
+                        name:
+                          description: Its name, in this namespace.
+                          type: string
+                        uid:
+                          description: Its UID.
+                          nullable: true
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    maxItems: 16
+                    nullable: true
+                    type: array
+                type: object
+              conditions:
+                description: The condition set. Two types, `Complete` and `Ready`.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              jobRef:
+                description: The Job that ran, or is running, the check.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              message:
+                description: A redacted, bounded explanation.
+                maxLength: 1024
+                nullable: true
+                type: string
+              observedAt:
+                description: When the check was taken — the runner container's `finishedAt`.
+                format: date-time
+                nullable: true
+                type: string
+              phase:
+                description: '`Pending`, `Queued`, `Running`, `Completed`, `Failed`
+                  or `Cancelled`. `Failed` means no result could be produced — it
+                  is NOT `Completed` with `state: notReady`.'
+                nullable: true
+                type: string
+              reason:
+                description: The reason of the condition this patch writes, promoted
+                  to a scalar.
+                nullable: true
+                type: string
+              result:
+                description: The verdict.
+                nullable: true
+                properties:
+                  checks:
+                    description: The findings.
+                    items:
+                      description: One check's finding.
+                      properties:
+                        authority:
+                          description: Who answered — `controller`, `checkJob` or
+                            `podStatus`.
+                          nullable: true
+                          type: string
+                        category:
+                          description: Its category — `source`, `target`, `archive`,
+                            `evidence`, `runtime`.
+                          nullable: true
+                          type: string
+                        code:
+                          description: 'The closed-vocabulary code. **Codes, not raw
+                            errors**: an S3 or SASL error body is exactly what redaction
+                            exists to keep out of a status.'
+                          nullable: true
+                          type: string
+                        expiresAt:
+                          description: When this check's answer stops being usable.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        gating:
+                          description: '`blocking` or `advisory`.'
+                          nullable: true
+                          type: string
+                        id:
+                          description: The check id, e.g. `target.mappedTopics`.
+                          type: string
+                        message:
+                          description: A redacted, bounded explanation.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        observedAt:
+                          description: When this check was answered.
+                          format: date-time
+                          nullable: true
+                          type: string
+                        remedy:
+                          description: What to do about it, in one sentence.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        scope:
+                          description: What the finding is about.
+                          nullable: true
+                          properties:
+                            kind:
+                              description: The object's kind.
+                              nullable: true
+                              type: string
+                            name:
+                              description: Its name.
+                              nullable: true
+                              type: string
+                            uid:
+                              description: Its UID.
+                              nullable: true
+                              type: string
+                          type: object
+                        state:
+                          description: '`ready`, `notReady`, `unknown` or `skipped`.'
+                          type: string
+                      required:
+                      - id
+                      - state
+                      type: object
+                    maxItems: 64
+                    nullable: true
+                    type: array
+                  detailsRef:
+                    description: Where the long form lives.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The `ConfigMap` name, in this namespace.
+                        type: string
+                      sha256:
+                        description: '`sha256:<lowercase hex>` over its bytes.'
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  expiresAt:
+                    description: The minimum `expiresAt` over the non-skipped checks.
+                    format: date-time
+                    nullable: true
+                    type: string
+                  state:
+                    description: '`ready`, `notReady` or `unknown`. `notReady` if
+                      any blocking check is `notReady`; otherwise `unknown` if any
+                      blocking check is `unknown` or `skipped`; otherwise `ready`.'
+                    type: string
+                required:
+                - state
+                type: object
+            type: object
+        required:
+        - spec
+        title: Preflight
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
   name: restores.logweir.dev
 spec:
   group: logweir.dev
@@ -1311,6 +2481,20 @@ spec:
                 description: The Job's `activeDeadlineSeconds`.
                 format: int64
                 type: integer
+              evidenceDestinationRef:
+                description: |-
+                  The saved `BackupDestination` this run's evidence is written to.
+
+                  A SECOND DESTINATION, ON PURPOSE. Evidence is written under `logweir/` with its own grant, and an installation that keeps evidence in a different bucket from the archive is the case this pair exists for.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
               planBytes:
                 description: |-
                   The restore plan, as the exact bytes the approver signed.
@@ -1323,7 +2507,10 @@ spec:
                 format: date-time
                 type: string
               sourceArchive:
-                description: The archive to restore from.
+                description: |-
+                  The archive to restore from.
+
+                  With `sourceDestinationRef` set this is the sentinel `logweir-destination://<name>` and carries no `secretRef`; see [`DESTINATION_SENTINEL_RULE`].
                 properties:
                   secretRef:
                     description: A Secret in this namespace carrying the object-store
@@ -1343,6 +2530,18 @@ spec:
                     type: string
                 required:
                 - url
+                type: object
+              sourceDestinationRef:
+                description: The saved `BackupDestination` the archive is read from,
+                  in this namespace. Set together with `evidenceDestinationRef`.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
                 type: object
               target:
                 description: Where the restore writes, and in which mode.
@@ -1392,6 +2591,14 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable; create a new object instead
               rule: self == oldSelf
+            - message: sourceDestinationRef and evidenceDestinationRef are set together
+              rule: has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)
+            - message: with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name>
+                and sourceArchive.secretRef is absent; the logweir-destination scheme
+                is otherwise reserved
+              rule: 'has(self.sourceDestinationRef) ? (self.sourceArchive.url == ''logweir-destination://''
+                + self.sourceDestinationRef.name && !has(self.sourceArchive.secretRef))
+                : !self.sourceArchive.url.startsWith(''logweir-destination://'')'
           status:
             description: '`Restore.status`.'
             nullable: true
@@ -1693,6 +2900,419 @@ spec:
         required:
         - spec
         title: Restore
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: topicdiscoveries.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: TopicDiscovery
+    plural: topicdiscoveries
+    shortNames: []
+    singular: topicdiscovery
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.request.connectionRef.name
+      name: CONNECTION
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: unknown, limited or attestedComplete — a successful listing alone
+        is unknown
+      jsonPath: .status.result.visibility.state
+      name: VISIBILITY
+      type: string
+    - jsonPath: .status.result.counts.returned
+      name: TOPICS
+      type: integer
+    - jsonPath: .status.observedAt
+      name: OBSERVED
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'One bounded observation of the topics a saved connection can
+          see, executed as an isolated Job with no Kubernetes token. `spec.request`
+          is immutable and `spec.cancelRequested` may only move from false to true.
+          The result is ADVISORY: it is never authorization and never replaces an
+          execution-time guard.'
+        properties:
+          spec:
+            description: '`TopicDiscovery.spec`.'
+            properties:
+              cancelRequested:
+                default: false
+                description: Ask the controller to stop. `false` → `true` only (T2).
+                type: boolean
+              request:
+                description: What to observe. Immutable (T1).
+                properties:
+                  connectionRef:
+                    description: The `KafkaCluster` to list topics from, in this namespace.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  expectedTopics:
+                    description: Topics the requester expects to exist. Each one is
+                      reported as visible, not authorized, not found or unknown, which
+                      is the only way to tell "the topic is gone" from "this principal
+                      cannot describe it" — Kafka silently omits both.
+                    items:
+                      pattern: ^[a-zA-Z0-9._-]{1,249}$
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  includeInternal:
+                    default: false
+                    description: Whether Kafka's internal topics (`__consumer_offsets`
+                      and the rest) are counted in the returned inventory. Absent
+                      means `false`; they are always counted separately in `counts.internalExcluded`.
+                    type: boolean
+                  maxTopics:
+                    default: 20000
+                    description: The ceiling on returned entries. The installation
+                      policy may lower it, never raise it.
+                    format: int32
+                    maximum: 50000
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 60
+                    description: The in-Job Kafka budget.
+                    format: int32
+                    maximum: 300
+                    minimum: 10
+                    type: integer
+                required:
+                - connectionRef
+                type: object
+                x-kubernetes-validations:
+                - message: spec.request is immutable; create a new TopicDiscovery
+                  rule: self == oldSelf
+            required:
+            - request
+            type: object
+            x-kubernetes-validations:
+            - message: spec.cancelRequested may only change from false to true
+              rule: (!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested) ||
+                (has(self.cancelRequested) && self.cancelRequested)
+          status:
+            description: '`TopicDiscovery.status`.'
+            nullable: true
+            properties:
+              binding:
+                description: What the observation was taken against.
+                nullable: true
+                properties:
+                  authMode:
+                    description: '`plaintext` or `scramSha512`.'
+                    nullable: true
+                    type: string
+                  bootstrapSha256:
+                    description: '`sha256:<lowercase hex>` over the resolved bootstrap
+                      list.'
+                    nullable: true
+                    type: string
+                  connectionGeneration:
+                    description: Its `metadata.generation` at resolution time.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  connectionName:
+                    description: The `KafkaCluster` name.
+                    nullable: true
+                    type: string
+                  connectionUid:
+                    description: 'Its UID: a same-named replacement is a different
+                      connection.'
+                    nullable: true
+                    type: string
+                  policyDigest:
+                    description: '`sha256:<lowercase hex>` over the installation policy
+                      in force.'
+                    nullable: true
+                    type: string
+                  principal:
+                    description: The SASL principal Logweir PRESENTED — `User:<name>`,
+                      or `User:ANONYMOUS`. Kafka exposes no call for the principal
+                      the broker authenticated, so this is what was offered and never
+                      what was accepted.
+                    nullable: true
+                    type: string
+                type: object
+              conditions:
+                description: The condition set. One type, `Complete`.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with
+                    their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status
+                        to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material
+                        or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed
+                        from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for
+                        the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`,
+                        `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              freshUntil:
+                description: '`observedAt` plus the installation policy''s freshness
+                  window. After it, a consumer treats the inventory as stale rather
+                  than wrong.'
+                format: date-time
+                nullable: true
+                type: string
+              jobRef:
+                description: The Job that ran, or is running, the observation.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this
+                      namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              message:
+                description: A redacted, bounded explanation. Never a credential,
+                  never a broker error body, never a URL carrying userinfo.
+                maxLength: 1024
+                nullable: true
+                type: string
+              observedAt:
+                description: '**When the observation was taken** — the runner container''s
+                  `finishedAt`, the same rule the `KafkaCluster` probe uses. Not the
+                  instant the controller noticed.'
+                format: date-time
+                nullable: true
+                type: string
+              phase:
+                description: '`Pending`, `Queued`, `Running`, `Succeeded`, `Failed`
+                  or `Cancelled`.'
+                nullable: true
+                type: string
+              queuedAt:
+                description: When the Job was created.
+                format: date-time
+                nullable: true
+                type: string
+              reason:
+                description: The reason of the condition this patch writes, promoted
+                  to a scalar — `Succeeded`, `ConnectionNotFound`, `ConnectionInvalid`,
+                  `ResultUnreadable`, `RunnerContractUnsupported`, `DeadlineExceeded`,
+                  `CancelRequested`, `Stalled`.
+                nullable: true
+                type: string
+              result:
+                description: The inventory.
+                nullable: true
+                properties:
+                  brokerCount:
+                    description: How many brokers answered metadata.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  chunks:
+                    description: The `ConfigMap` chunks holding the names.
+                    items:
+                      description: |-
+                        One immutable `ConfigMap` chunk of the inventory.
+
+                        THE NAMES DO NOT LIVE IN THE STATUS. A topic inventory is unbounded and a status is not a store; the chunks are owned, immutable `ConfigMap`s and this block carries their names and digests only.
+                      properties:
+                        count:
+                          description: How many entries it carries.
+                          format: int64
+                          type: integer
+                        firstName:
+                          description: The first topic name in it, so a reader can
+                            seek without fetching.
+                          nullable: true
+                          type: string
+                        lastName:
+                          description: The last topic name in it.
+                          nullable: true
+                          type: string
+                        name:
+                          description: The `ConfigMap` name, in this namespace, owned
+                            by this object.
+                          type: string
+                        sha256:
+                          description: '`sha256:<lowercase hex>` over the chunk''s
+                            canonical TSV.'
+                          type: string
+                      required:
+                      - count
+                      - name
+                      - sha256
+                      type: object
+                    maxItems: 64
+                    nullable: true
+                    type: array
+                  clusterId:
+                    description: The cluster id READ FROM THE BROKER, never from a
+                      spec.
+                    nullable: true
+                    type: string
+                  counts:
+                    description: The four counts.
+                    properties:
+                      errored:
+                        description: Entries the broker reported an error for.
+                        format: int64
+                        type: integer
+                      internalExcluded:
+                        description: Internal topics left out.
+                        format: int64
+                        type: integer
+                      listed:
+                        description: Entries the broker listed.
+                        format: int64
+                        type: integer
+                      returned:
+                        description: Entries in the stored inventory.
+                        format: int64
+                        type: integer
+                    required:
+                    - errored
+                    - internalExcluded
+                    - listed
+                    - returned
+                    type: object
+                  expected:
+                    description: The `expectedTopics` verdict, when any were asked
+                      about.
+                    nullable: true
+                    properties:
+                      notAuthorized:
+                        description: How many the broker refused to describe.
+                        format: int64
+                        type: integer
+                      notFound:
+                        description: How many are provably absent.
+                        format: int64
+                        type: integer
+                      requested:
+                        description: How many were asked about.
+                        format: int64
+                        type: integer
+                      unknown:
+                        description: How many could not be classified.
+                        format: int64
+                        type: integer
+                      visible:
+                        description: How many the principal can see.
+                        format: int64
+                        type: integer
+                    required:
+                    - notAuthorized
+                    - notFound
+                    - requested
+                    - unknown
+                    - visible
+                    type: object
+                  format:
+                    description: '`logweir.dev/topic-inventory/v1` — the format a
+                      reader must understand.'
+                    type: string
+                  topicsSha256:
+                    description: '`sha256:<lowercase hex>` over the canonical TSV
+                      of every returned entry, so a consumer can prove the chunks
+                      it read are the ones this status describes.'
+                    nullable: true
+                    type: string
+                  truncated:
+                    default: false
+                    description: Whether the inventory was cut short.
+                    type: boolean
+                  truncationReason:
+                    description: '`MaxTopics` or `RelayLimit`, when it was.'
+                    nullable: true
+                    type: string
+                  visibility:
+                    description: The completeness claim, and its basis.
+                    properties:
+                      attestation:
+                        description: The administrator attestation that upgraded the
+                          state to `attestedComplete`, when there was one.
+                        nullable: true
+                        type: string
+                      basis:
+                        description: Why the state is what it is — `expectedTopicNotAuthorized`,
+                          `describeAclDenied`, and the rest of the closed basis vocabulary.
+                        items:
+                          type: string
+                        maxItems: 8
+                        nullable: true
+                        type: array
+                      state:
+                        description: '`unknown`, `limited` or `attestedComplete`.
+                          **A successful listing alone is `unknown`**: Kafka omits
+                          topics a principal cannot describe, so a complete-looking
+                          list proves nothing about completeness.'
+                        type: string
+                    required:
+                    - state
+                    type: object
+                required:
+                - counts
+                - format
+                - visibility
+                type: object
+              startedAt:
+                description: When the runner container started.
+                format: date-time
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: TopicDiscovery
         type: object
     served: true
     storage: true

@@ -551,6 +551,11 @@ pub fn scheduled_backup(
             source_ref: schedule.spec.source_ref.clone(),
             topics: schedule.spec.topics.clone(),
             archive: schedule.spec.archive.clone(),
+            // COPIED, NOT RESOLVED. The child carries the same saved
+            // destination the schedule names, so `archive.url`'s sentinel and
+            // `destinationRef` stay the pair the admission rule requires; the
+            // Backup controller is what resolves it, once, before it freezes.
+            destination_ref: schedule.spec.destination_ref.clone(),
             schedule_ref: Some(LocalRef {
                 name: schedule_name,
             }),

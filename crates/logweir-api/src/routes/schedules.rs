@@ -215,6 +215,10 @@ pub fn build(
                     name: r.name.clone(),
                 }),
             },
+            // As in the restore route: this route takes an inline archive, so
+            // the saved-destination reference is absent and the sentinel rule
+            // has nothing to bind.
+            destination_ref: None,
             concurrency_policy: match request.concurrency_policy {
                 None | Some(ConcurrencyPolicy::Forbid) => CrdConcurrency::Forbid,
                 Some(ConcurrencyPolicy::Allow) => CrdConcurrency::Allow,

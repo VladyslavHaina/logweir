@@ -1,0 +1,373 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: topicdiscoveries.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: TopicDiscovery
+    plural: topicdiscoveries
+    shortNames: []
+    singular: topicdiscovery
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.request.connectionRef.name
+      name: CONNECTION
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: unknown, limited or attestedComplete — a successful listing alone is unknown
+      jsonPath: .status.result.visibility.state
+      name: VISIBILITY
+      type: string
+    - jsonPath: .status.result.counts.returned
+      name: TOPICS
+      type: integer
+    - jsonPath: .status.observedAt
+      name: OBSERVED
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'One bounded observation of the topics a saved connection can see, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The result is ADVISORY: it is never authorization and never replaces an execution-time guard.'
+        properties:
+          spec:
+            description: '`TopicDiscovery.spec`.'
+            properties:
+              cancelRequested:
+                default: false
+                description: Ask the controller to stop. `false` → `true` only (T2).
+                type: boolean
+              request:
+                description: What to observe. Immutable (T1).
+                properties:
+                  connectionRef:
+                    description: The `KafkaCluster` to list topics from, in this namespace.
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  expectedTopics:
+                    description: Topics the requester expects to exist. Each one is reported as visible, not authorized, not found or unknown, which is the only way to tell "the topic is gone" from "this principal cannot describe it" — Kafka silently omits both.
+                    items:
+                      pattern: ^[a-zA-Z0-9._-]{1,249}$
+                      type: string
+                    maxItems: 500
+                    nullable: true
+                    type: array
+                  includeInternal:
+                    default: false
+                    description: Whether Kafka's internal topics (`__consumer_offsets` and the rest) are counted in the returned inventory. Absent means `false`; they are always counted separately in `counts.internalExcluded`.
+                    type: boolean
+                  maxTopics:
+                    default: 20000
+                    description: The ceiling on returned entries. The installation policy may lower it, never raise it.
+                    format: int32
+                    maximum: 50000
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 60
+                    description: The in-Job Kafka budget.
+                    format: int32
+                    maximum: 300
+                    minimum: 10
+                    type: integer
+                required:
+                - connectionRef
+                type: object
+                x-kubernetes-validations:
+                - message: spec.request is immutable; create a new TopicDiscovery
+                  rule: self == oldSelf
+            required:
+            - request
+            type: object
+            x-kubernetes-validations:
+            - message: spec.cancelRequested may only change from false to true
+              rule: (!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested) || (has(self.cancelRequested) && self.cancelRequested)
+          status:
+            description: '`TopicDiscovery.status`.'
+            nullable: true
+            properties:
+              binding:
+                description: What the observation was taken against.
+                nullable: true
+                properties:
+                  authMode:
+                    description: '`plaintext` or `scramSha512`.'
+                    nullable: true
+                    type: string
+                  bootstrapSha256:
+                    description: '`sha256:<lowercase hex>` over the resolved bootstrap list.'
+                    nullable: true
+                    type: string
+                  connectionGeneration:
+                    description: Its `metadata.generation` at resolution time.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  connectionName:
+                    description: The `KafkaCluster` name.
+                    nullable: true
+                    type: string
+                  connectionUid:
+                    description: 'Its UID: a same-named replacement is a different connection.'
+                    nullable: true
+                    type: string
+                  policyDigest:
+                    description: '`sha256:<lowercase hex>` over the installation policy in force.'
+                    nullable: true
+                    type: string
+                  principal:
+                    description: The SASL principal Logweir PRESENTED — `User:<name>`, or `User:ANONYMOUS`. Kafka exposes no call for the principal the broker authenticated, so this is what was offered and never what was accepted.
+                    nullable: true
+                    type: string
+                type: object
+              conditions:
+                description: The condition set. One type, `Complete`.
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              freshUntil:
+                description: '`observedAt` plus the installation policy''s freshness window. After it, a consumer treats the inventory as stale rather than wrong.'
+                format: date-time
+                nullable: true
+                type: string
+              jobRef:
+                description: The Job that ran, or is running, the observation.
+                nullable: true
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              message:
+                description: A redacted, bounded explanation. Never a credential, never a broker error body, never a URL carrying userinfo.
+                maxLength: 1024
+                nullable: true
+                type: string
+              observedAt:
+                description: '**When the observation was taken** — the runner container''s `finishedAt`, the same rule the `KafkaCluster` probe uses. Not the instant the controller noticed.'
+                format: date-time
+                nullable: true
+                type: string
+              phase:
+                description: '`Pending`, `Queued`, `Running`, `Succeeded`, `Failed` or `Cancelled`.'
+                nullable: true
+                type: string
+              queuedAt:
+                description: When the Job was created.
+                format: date-time
+                nullable: true
+                type: string
+              reason:
+                description: The reason of the condition this patch writes, promoted to a scalar — `Succeeded`, `ConnectionNotFound`, `ConnectionInvalid`, `ResultUnreadable`, `RunnerContractUnsupported`, `DeadlineExceeded`, `CancelRequested`, `Stalled`.
+                nullable: true
+                type: string
+              result:
+                description: The inventory.
+                nullable: true
+                properties:
+                  brokerCount:
+                    description: How many brokers answered metadata.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  chunks:
+                    description: The `ConfigMap` chunks holding the names.
+                    items:
+                      description: |-
+                        One immutable `ConfigMap` chunk of the inventory.
+
+                        THE NAMES DO NOT LIVE IN THE STATUS. A topic inventory is unbounded and a status is not a store; the chunks are owned, immutable `ConfigMap`s and this block carries their names and digests only.
+                      properties:
+                        count:
+                          description: How many entries it carries.
+                          format: int64
+                          type: integer
+                        firstName:
+                          description: The first topic name in it, so a reader can seek without fetching.
+                          nullable: true
+                          type: string
+                        lastName:
+                          description: The last topic name in it.
+                          nullable: true
+                          type: string
+                        name:
+                          description: The `ConfigMap` name, in this namespace, owned by this object.
+                          type: string
+                        sha256:
+                          description: '`sha256:<lowercase hex>` over the chunk''s canonical TSV.'
+                          type: string
+                      required:
+                      - count
+                      - name
+                      - sha256
+                      type: object
+                    maxItems: 64
+                    nullable: true
+                    type: array
+                  clusterId:
+                    description: The cluster id READ FROM THE BROKER, never from a spec.
+                    nullable: true
+                    type: string
+                  counts:
+                    description: The four counts.
+                    properties:
+                      errored:
+                        description: Entries the broker reported an error for.
+                        format: int64
+                        type: integer
+                      internalExcluded:
+                        description: Internal topics left out.
+                        format: int64
+                        type: integer
+                      listed:
+                        description: Entries the broker listed.
+                        format: int64
+                        type: integer
+                      returned:
+                        description: Entries in the stored inventory.
+                        format: int64
+                        type: integer
+                    required:
+                    - errored
+                    - internalExcluded
+                    - listed
+                    - returned
+                    type: object
+                  expected:
+                    description: The `expectedTopics` verdict, when any were asked about.
+                    nullable: true
+                    properties:
+                      notAuthorized:
+                        description: How many the broker refused to describe.
+                        format: int64
+                        type: integer
+                      notFound:
+                        description: How many are provably absent.
+                        format: int64
+                        type: integer
+                      requested:
+                        description: How many were asked about.
+                        format: int64
+                        type: integer
+                      unknown:
+                        description: How many could not be classified.
+                        format: int64
+                        type: integer
+                      visible:
+                        description: How many the principal can see.
+                        format: int64
+                        type: integer
+                    required:
+                    - notAuthorized
+                    - notFound
+                    - requested
+                    - unknown
+                    - visible
+                    type: object
+                  format:
+                    description: '`logweir.dev/topic-inventory/v1` — the format a reader must understand.'
+                    type: string
+                  topicsSha256:
+                    description: '`sha256:<lowercase hex>` over the canonical TSV of every returned entry, so a consumer can prove the chunks it read are the ones this status describes.'
+                    nullable: true
+                    type: string
+                  truncated:
+                    default: false
+                    description: Whether the inventory was cut short.
+                    type: boolean
+                  truncationReason:
+                    description: '`MaxTopics` or `RelayLimit`, when it was.'
+                    nullable: true
+                    type: string
+                  visibility:
+                    description: The completeness claim, and its basis.
+                    properties:
+                      attestation:
+                        description: The administrator attestation that upgraded the state to `attestedComplete`, when there was one.
+                        nullable: true
+                        type: string
+                      basis:
+                        description: Why the state is what it is — `expectedTopicNotAuthorized`, `describeAclDenied`, and the rest of the closed basis vocabulary.
+                        items:
+                          type: string
+                        maxItems: 8
+                        nullable: true
+                        type: array
+                      state:
+                        description: '`unknown`, `limited` or `attestedComplete`. **A successful listing alone is `unknown`**: Kafka omits topics a principal cannot describe, so a complete-looking list proves nothing about completeness.'
+                        type: string
+                    required:
+                    - state
+                    type: object
+                required:
+                - counts
+                - format
+                - visibility
+                type: object
+              startedAt:
+                description: When the runner container started.
+                format: date-time
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: TopicDiscovery
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

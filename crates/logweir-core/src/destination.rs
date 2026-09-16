@@ -19,18 +19,23 @@
 //! `scripts/check-pure-core.sh`.
 
 use crate::engine::StorageUrl;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The only provider the location model admits. An enum, not a string, so a
 /// second provider is a reviewable event with its own validation rules rather
 /// than an unvalidated free-text field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum StorageProvider {
     S3,
 }
 
 /// How a request addresses the bucket. **Never** a transport choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum Addressing {
     PathStyle,
     VirtualHosted,
@@ -39,11 +44,15 @@ pub enum Addressing {
 /// Transport security, spelled exactly as the CRD enum spells it. **Never**
 /// derived from addressing, from the endpoint shape alone, or from any process
 /// environment value (D-SEAMS S5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum TransportSecurity {
     #[serde(rename = "TLS")]
+    #[schemars(rename = "TLS")]
     Tls,
     #[serde(rename = "InsecureHTTP")]
+    #[schemars(rename = "InsecureHTTP")]
     InsecureHttp,
 }
 
@@ -87,7 +96,9 @@ impl Addressing {
 /// plan (`logweir_core::check_contract`), the controller resolver
 /// (`weirkeeper::destination`) and the API DTOs must all name the same four
 /// roles; two enums would be two vocabularies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum DestinationRole {
     ArchiveWrite,
     ArchiveRead,
