@@ -1352,3 +1352,130 @@ fn an_event_reduces_to_the_four_fields_the_table_reads() {
         "an event with no reason could match no row"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Source guards — the two rules a fixture cannot express
+// ---------------------------------------------------------------------------
+
+fn check_sources() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/check");
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(&dir)
+        .expect("the check module ships")
+        .flatten()
+    {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "rs") {
+            out.push((
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read_to_string(&p).expect("a readable module"),
+            ));
+        }
+    }
+    out.sort();
+    assert!(out.len() >= 5, "the scan found only {} modules", out.len());
+    out
+}
+
+fn code_only(src: &str) -> String {
+    src.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// **No check path falls back to the legacy pod label.**
+///
+/// [`weirkeeper::controllers::backup::pod_selectors`] tries
+/// `batch.kubernetes.io/job-name` and then the unprefixed `job-name`, because
+/// the execution paths must work on a 1.29 cluster that has not backfilled the
+/// prefixed one. New code does not need that — the prefixed label has been set
+/// since 1.27 — and a second selector is a second chance for a foreign pod to
+/// be considered at all (D2 §4.3: "No legacy-label fallback for check Jobs").
+/// A fixture cannot express this: the fallback only fires when the first
+/// selector returns nothing, which a route table always controls.
+#[test]
+fn no_check_module_names_the_legacy_pod_label_or_the_two_selector_helper() {
+    for (name, src) in check_sources() {
+        let code = code_only(&src);
+        // The bare token, not only the quoted form: a fallback smuggled into
+        // a `format!` string carries no quotes of its own. `JOB_NAME_LABEL` is
+        // imported by name, and `job_name` spells its separator differently.
+        for forbidden in ["JOB_NAME_LABEL_LEGACY", "pod_selectors(", "job-name"] {
+            assert!(
+                !code.contains(forbidden),
+                "crates/weirkeeper/src/check/{name} names `{forbidden}`; a check's pod is found \
+                 by one selector and then proved by its controller ownerReference UID"
+            );
+        }
+    }
+
+    // And the behavioural half, which no grep can give: ONE label, ONE value.
+    let selector = cpod::pod_selector("lwc-td-0123456789abcdef0123");
+    assert_eq!(
+        selector,
+        "batch.kubernetes.io/job-name=lwc-td-0123456789abcdef0123"
+    );
+    assert!(
+        !selector.contains(','),
+        "a comma is a second label in a Kubernetes selector: {selector}"
+    );
+    assert_eq!(selector.matches('=').count(), 1, "{selector}");
+}
+
+/// **The check framework builds no `Api<Event>` handle.**
+///
+/// The weirkeeper `ClusterRole` grants no verb on `events`, and
+/// `crates/logweir/tests/manifest_lint.rs`'s `every_call_site_has_a_grant`
+/// panics on an `Api<T>` whose resource it cannot map — so a handle added here
+/// before W11's rule lands breaks that gate rather than 403ing in production.
+/// [`weirkeeper::check::EventFact`] is the seam: the classifier takes the facts
+/// as values, and the one handle belongs to the controller that will have the
+/// grant. When W11 lands `events: [list, watch]` and the lint learns the type,
+/// this test is what has to be deleted in the same commit — deliberately, so
+/// the grant and the call arrive together.
+#[test]
+fn the_check_framework_builds_no_event_handle_before_its_grant_exists() {
+    for (name, src) in check_sources() {
+        let code = code_only(&src);
+        assert!(
+            !code.contains("Api<Event>"),
+            "crates/weirkeeper/src/check/{name} builds an `Api<Event>`, which config/rbac/\
+             role.yaml grants nothing on and manifest_lint cannot map to a resource"
+        );
+    }
+    // And the seam it exists instead of: the converter names the k8s type
+    // without ever building a handle for it.
+    let waiting = check_sources()
+        .into_iter()
+        .find(|(n, _)| n == "waiting.rs")
+        .expect("the classifier module");
+    assert!(
+        code_only(&waiting.1).contains("pub fn from_event(event: &Event)"),
+        "EventFact::from_event is the seam that keeps the classifier complete without a grant"
+    );
+}
+
+/// **Nothing in the check framework reads a clock.**
+///
+/// Every `now` is an argument, exactly as on the five existing reconcilers, so
+/// a boundary like [`waiting::UNSCHEDULABLE_GRACE`] is assertable rather than
+/// observable only by waiting — and so a re-read of the same objects produces a
+/// byte-identical patch, which is what stopped the `KafkaCluster` probe's
+/// measured 3,388-reconciles-in-ninety-seconds hot loop.
+#[test]
+fn no_check_module_reads_a_clock() {
+    for (name, src) in check_sources() {
+        let code = code_only(&src);
+        for forbidden in ["Utc::now()", "SystemTime::now", "Instant::now"] {
+            assert!(
+                !code.contains(forbidden),
+                "crates/weirkeeper/src/check/{name} names `{forbidden}`; `now` is an argument \
+                 everywhere in this crate"
+            );
+        }
+    }
+}
