@@ -19,7 +19,7 @@ import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountSchedules } from "./pages/schedules.js";
 import { mountBackupDetail, mountBackups } from "./pages/backups.js";
 import { mountHistory, mountRestoreDetail } from "./pages/history.js";
-import { mountRestoreWizard } from "./pages/restore-wizard.js";
+import { mountRestoreWizard, restoreRouteParams } from "./pages/restore-wizard.js";
 import { approvalRouteParams, mountApprovals } from "./pages/approvals.js";
 import { mountKeys } from "./pages/keys.js";
 
@@ -29,8 +29,8 @@ const ROUTES = [
   { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules },
   { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
   { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },
-  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: archive, set, point in time, target, preflight, plan.", mount: mountRestoreWizard },
-  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true },
+  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: a chosen recovery point, archive, point in time, target, preflight, plan.", mount: mountRestoreWizard, route: true, params: restoreRouteParams },
+  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true, params: approvalRouteParams },
   { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true },
 ];
 
@@ -90,7 +90,11 @@ export function createRouteLifecycle(AbortControllerClass) {
 /** The `#/route?ns=name` a hash carries: the route half, the namespace, and
  *  every other parameter the hash names.
  *
- *  `params` exists for the approvals route, which the restore wizard's guided
+ *  `params` exists for the two routes that carry an identity. The restore
+ *  wizard is entered as `#/restore?ns=<ns>&backup=<name>&uid=<uid>`: `uid` is
+ *  the recovery point's identity and `backup` is its name, and the wizard
+ *  refuses rather than substituting another point when nothing answers to the
+ *  uid. The approvals route, which the restore wizard's guided
  *  submit navigates to as
  *  `#/approvals?subject=<restore>&hash=<planHash>&name=<approval>`. `subject`
  *  names WHICH Restore; the approvals page reads that Restore and derives the
@@ -305,26 +309,25 @@ function render(lifecycle, context) {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
       current.mount(main, parseFragment, undefined, lifecycle);
     } else if (current.route === true && typeof current.mount === "function") {
-      // The approvals page reads `subject`, `hash` and `name` off the hash the
-      // wizard navigated to. They are route parameters and never values parsed
-      // out of the two approval documents -- and the page checks them against
-      // the Restore `subject` names before it offers any form.
+      // TWO ROUTES CARRY AN IDENTITY IN THE HASH, and each names its own
+      // extractor. The approvals page reads `subject`, `hash` and `name`; the
+      // restore wizard reads `backup` and `uid`, the recovery point it is
+      // bound to. In both cases they are route parameters and never values
+      // parsed out of a document, and in both cases the page checks them
+      // against the object it reads before it offers anything.
       //
       // THE EXTRACTION IS THE PAGE MODULE'S OWN, and deliberately not written
       // out here. This file touches `window` at module scope and so cannot be
       // imported under `node --test`; an extraction written inline would be a
       // hop no test in either language could reach, and swapping two of these
-      // three values left the whole suite green. `approvalRouteParams` is a
-      // pure function of the hash string, and the suite calls it.
+      // values left the whole suite green. `approvalRouteParams` and
+      // `restoreRouteParams` are pure functions of the hash string, and the
+      // suite calls both.
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, here.ns, approvalRouteParams(hash), parseFragment, undefined, lifecycle);
+      current.mount(main, here.ns, current.params(hash), parseFragment, undefined, lifecycle);
     } else if (typeof current.mount === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      if (current.hash === "#/restore") {
-        current.mount(main, here.ns, parseFragment, undefined, lifecycle);
-      } else {
-        current.mount(main, here.ns, parseFragment, lifecycle);
-      }
+      current.mount(main, here.ns, parseFragment, lifecycle);
     } else {
       replace(main, view(current));
     }

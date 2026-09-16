@@ -43,6 +43,7 @@ import {
   applyWizardDraft,
   initialState,
   mountRestoreWizard,
+  recoveryPoints,
   preparePlan,
   submitRestore,
   wizardDraftValues,
@@ -676,14 +677,35 @@ function wizardKubernetes(ns) {
   for (const cluster of fixture("wizard-clusters.json").items) {
     k8s.put(ns, "kafkaclusters", cluster);
   }
+  // THE STORE MINTS ITS OWN UIDs, like the API server does -- so the route
+  // identity a mount is entered with is the uid the STORE holds, not the
+  // fixture's. A test that passed the fixture's uid would be testing a link
+  // nobody could ever click.
+  k8s.point = null;
   for (const backup of fixture("wizard-backups.json").items) {
-    k8s.put(ns, "backups", backup);
+    const stored = k8s.put(ns, "backups", backup);
+    k8s.point = { uid: stored.metadata.uid, backup: stored.metadata.name };
   }
   return k8s;
 }
 
+/** The route identity for a fixture's newest recovery point. Since PLAT-11.1
+ *  the wizard does not pick a Backup for itself: it is entered ON one, by uid,
+ *  and every row below enters it the way a history link does. */
+function newestPoint(list) {
+  const point = recoveryPoints(list)[0];
+  return { uid: point.metadata.uid, backup: point.metadata.name };
+}
+
+const WIZARD_POINT = newestPoint(fixture("wizard-backups.json"));
+
 function wizardState(ns) {
-  return initialState(ns, fixture("wizard-clusters.json"), fixture("wizard-backups.json"));
+  return initialState(
+    ns,
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups.json"),
+    WIZARD_POINT,
+  );
 }
 
 test("the_guided_submit_routes_an_unapproved_restore_to_awaiting_approval", async () => {
@@ -791,7 +813,7 @@ test("the_wizard_double_click_sends_one_create_and_success_navigates_to_awaiting
     const route = createRouteLifecycle().begin();
     let release;
     k8s.holdNextCreate = new Promise((resolve) => { release = resolve; });
-    await mountRestoreWizard(view.root, ns, parse, k8s, route);
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, route);
     const button = view.find("#create-restore");
     assert.ok(button !== null, "the one guided submit is rendered");
     assert.equal(view.find("#request-approval"), null, "and there is no second, navigating button");
@@ -814,7 +836,7 @@ test("a_rejected_restore_keeps_every_wizard_edit_and_marks_the_field", async () 
   const k8s = wizardKubernetes(ns);
   const view = fakeView();
   const route = createRouteLifecycle().begin();
-  await mountRestoreWizard(view.root, ns, parse, k8s, route);
+  await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, route);
   const prefix = view.find("#topic-prefix");
   prefix.value = "incident-4471-";
   await prefix.dispatch("change");
@@ -832,7 +854,7 @@ test("a_rejected_restore_keeps_every_wizard_edit_and_marks_the_field", async () 
   // Leaving and coming back in the same page keeps it too; a draft for another
   // backup set would not be applied.
   const view2 = fakeView();
-  await mountRestoreWizard(view2.root, ns, parse, k8s, createRouteLifecycle().begin());
+  await mountRestoreWizard(view2.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
   assert.equal(view2.find("#topic-prefix").value, "incident-4471-");
   assert.ok(view2.html().includes("Your unsubmitted edits to this plan"));
 });
@@ -1262,7 +1284,7 @@ test("an_edit_after_a_timed_out_restore_submit_still_settles_the_late_answer", a
   globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
   try {
     const view = fakeView();
-    await mountRestoreWizard(view.root, ns, parse, k8s, createRouteLifecycle().begin());
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
     const submitted = view.html().match(/<code>(restore-[0-9a-f]{8})<\/code>/)[1];
     await view.find("#create-restore").dispatch("click");
     await settled();
@@ -1328,7 +1350,7 @@ test("restore_wizard_path_style_does_not_enable_http", async () => {
   const originalWindow = globalThis.window;
   globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
   try {
-    await mountRestoreWizard(view.root, ns, parse, k8s, createRouteLifecycle().begin());
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
     const flagOf = () => {
       const bytes = planBytesOf(view.html());
       const line = bytes.split("\n").filter((l) => l.trim().startsWith("allow_" + "http"));
@@ -1402,7 +1424,12 @@ test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () 
   // back with plaintext transport enabled even though its box had never been
   // ticked. The draft allowlist now carries the flag in its own right.
   const backups = fixture("wizard-backups.json");
-  const state = initialState("wizard-draft-ns", fixture("wizard-clusters.json"), backups);
+  const state = initialState(
+    "wizard-draft-ns",
+    fixture("wizard-clusters.json"),
+    backups,
+    WIZARD_POINT,
+  );
   assert.ok(
     WIZARD_DRAFT_FIELDS.includes("allowHttp"),
     "the flag is a field a draft keeps in its own right: " + WIZARD_DRAFT_FIELDS.join(", "),
@@ -1442,4 +1469,120 @@ test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () 
     "and a draft with no flag of its own does not acquire one from the addressing style",
   );
   assert.equal(state.fields.evidence.allowHttp, false);
+});
+
+// ------------------------------ PLAT-11.1 through the real mount half
+
+test("a_visit_with_no_recovery_point_gets_the_selector_and_a_gone_one_gets_a_refusal", async () => {
+  const ns = "wizard-select-ns";
+  const k8s = wizardKubernetes(ns);
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    // NO IDENTITY -> the selector, and no plan at all.
+    const selector = fakeView();
+    await mountRestoreWizard(selector.root, ns, {}, parse, k8s, createRouteLifecycle().begin());
+    assert.ok(selector.html().includes("id=\"step-select-point\""), selector.html().slice(0, 300));
+    assert.equal(selector.find("#create-restore"), null, "nothing can be submitted from it");
+    assert.equal(selector.html().indexOf("plan-bytes"), -1, "and no plan is rendered");
+    assert.ok(
+      selector.html().includes("uid=" + k8s.point.uid),
+      "the row carries the identity a click will send",
+    );
+
+    // AN IDENTITY THAT DOES NOT RESOLVE -> a refusal naming it, and still no
+    // plan. This is the "missing selected point" case.
+    const gone = fakeView();
+    await mountRestoreWizard(
+      gone.root,
+      ns,
+      { uid: "uid-does-not-exist", backup: k8s.point.backup },
+      parse,
+      k8s,
+      createRouteLifecycle().begin(),
+    );
+    assert.ok(gone.html().includes("id=\"point-refusal\""), gone.html().slice(0, 400));
+    assert.ok(gone.html().includes("uid-does-not-exist"), "the uid asked for is named");
+    assert.equal(gone.find("#create-restore"), null, "and there is nothing to submit");
+    assert.equal(
+      k8s.calls.filter((c) => c.verb === "create").length,
+      0,
+      "a refused point writes nothing",
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("discarding_a_draft_re_reads_the_namespace_without_moving_the_point", async () => {
+  // THE ONE PLACE THE WIZARD RE-READS THE NAMESPACE. A re-read that dropped
+  // the route's identity would rebuild the page with no point -- or, under the
+  // behaviour PLAT-11.1 replaces, with whichever run was newest by then.
+  const ns = "wizard-rearead-ns";
+  const k8s = wizardKubernetes(ns);
+  const chosen = k8s.point;
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, chosen, parse, k8s, createRouteLifecycle().begin());
+    const before = planBytesOf(view.html());
+    // An edit, kept in this page's memory...
+    view.find("#topic-prefix").value = "kept-";
+    await view.find("#topic-prefix").dispatch("change");
+    await settled();
+    assert.ok(planBytesOf(view.html()).includes("prefix: \"kept-\""), "the edit is in the plan");
+    // ...and a return to the same route, which is where the wizard offers to
+    // discard them -- and which is the page's one re-read of the namespace.
+    const back = fakeView();
+    await mountRestoreWizard(back.root, ns, chosen, parse, k8s, createRouteLifecycle().begin());
+    assert.ok(back.find("#discard-draft") !== null, "the draft note is offered: " + back.html().slice(0, 200));
+
+    // A NEWER RUN COMPLETES while the wizard is open.
+    k8s.put(ns, "backups", {
+      apiVersion: "logweir.dev/v1alpha1",
+      kind: "Backup",
+      metadata: { name: "newer-run" },
+      spec: {
+        sourceRef: { name: "orders-prod" },
+        topics: ["orders", "payments"],
+        archive: { url: "s3://kafka-backups/drill-demo", secretRef: { name: "logweir-s3" } },
+        scheduleRef: { name: "orders-hourly" },
+        slot: "20260907-160500",
+        triggeredBy: "schedule",
+        deadlineSeconds: 1800,
+      },
+      status: {
+        phase: "Succeeded",
+        exitCode: 0,
+        backupId: "01JB7Z0000000000000000000Z",
+        records: 400,
+        windowCovered: { fromMs: 1788789900000, toMs: 1788793500000 },
+        conditions: [
+          { type: "Complete", status: "True", lastTransitionTime: "2026-09-07T16:05:41Z" },
+        ],
+      },
+    });
+
+    await back.find("#discard-draft").dispatch("click");
+    await settled(20);
+    const after = planBytesOf(back.html());
+    assert.equal(after, before, "the re-read rebuilt the SAME plan, over the same point");
+    assert.ok(
+      after.includes("backup: \"01JB7Z0000000000000000000B\""),
+      "and not the run that completed since: " + after,
+    );
+    assert.ok(back.html().includes(chosen.uid), "the point's uid is still the one on the page");
+    assert.equal(
+      after.indexOf("01JB7Z0000000000000000000Z"),
+      -1,
+      "and the newer run's set is nowhere in the plan",
+    );
+    assert.ok(
+      back.html().includes("01JB7Z0000000000000000000Z"),
+      "though the catalog does list it: the re-read SAW the new run and did not switch to it",
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
 });

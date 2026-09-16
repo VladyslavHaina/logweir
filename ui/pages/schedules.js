@@ -55,11 +55,14 @@ import {
   listFooter,
   mutationStatus,
   replace,
+  rfc3339,
   table,
 } from "../render.js";
 import { focusFirstProblem, isObjectName, itemsOf } from "./clusters.js";
+import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
 
 const PLURAL = "backupschedules";
+const BACKUPS = "backups";
 
 const API = { list: list, get: get, create: create, patchSuspend: patchSuspend };
 
@@ -458,9 +461,66 @@ export function scheduleFormView(ns) {
   };
 }
 
-/** One schedule's card: its name, its toggle, the toggle's status and the
- *  retention panel. */
-export function renderScheduleCard(ns, object) {
+/** The sentence the recovery-point panel carries when a schedule has fired no
+ *  completed run yet. */
+export const NO_POINTS_SENTENCE =
+  "this schedule has no completed run with a backup set yet; there is nothing to restore " +
+  "from until one reaches phase Succeeded.";
+
+/** THE RECOVERY POINTS ONE SCHEDULE HAS PRODUCED, each with the link that
+ *  opens the restore wizard ON IT (PLAT-11.1).
+ *
+ *  The rows are `Backup` objects whose `spec.scheduleRef.name` is this
+ *  schedule -- the field `weirkeeper` writes when the cron reconciler creates
+ *  a run -- filtered to the ones a plan can actually be built from and ordered
+ *  newest completion first. The link carries the Backup's UID beside its name,
+ *  because the wizard resolves by UID: a point deleted and recreated under the
+ *  same name is a different run, and following it silently is the defect this
+ *  identity exists to prevent.
+ *
+ *  It is a READ and a LINK. This panel creates nothing, patches nothing and
+ *  decides nothing about the restore; the wizard reads the point again for
+ *  itself and refuses if it is gone. */
+export function renderRecoveryPoints(ns, object, backups) {
+  const schedule = ((object && object.metadata) || {}).name || "";
+  const mine = itemsOf(backups).filter(
+    (backup) => ((((backup || {}).spec) || {}).scheduleRef || {}).name === schedule,
+  );
+  const rows = recoveryPoints(mine).map((point) => {
+    const meta = point.metadata || {};
+    const spec = point.spec || {};
+    const status = point.status || {};
+    const covered = status.windowCovered || {};
+    return [
+      cell(meta.name),
+      cell(spec.slot),
+      cell(status.backupId),
+      cell(rfc3339(covered.fromMs)),
+      cell(rfc3339(covered.toMs)),
+      cell(status.records),
+      "<a href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
+    ];
+  });
+  const running = mine.filter((backup) => !isRecoveryPoint(backup)).length;
+  return (
+    "<section class=\"retention\"><h3>Recovery points</h3>" +
+    table(
+      ["BACKUP", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", ""],
+      rows,
+      NO_POINTS_SENTENCE,
+    ) +
+    (running === 0
+      ? ""
+      : "<p class=\"note\">" + String(running) + " further run(s) of this schedule are not " +
+        "offered: a run still in flight, or one that completed without a backup set and a " +
+        "covered window, is not a point a plan can be built from.</p>") +
+    "</section>"
+  );
+}
+
+/** One schedule's card: its name, its toggle, the toggle's status, its
+ *  recovery points and the retention panel. */
+export function renderScheduleCard(ns, object, backups) {
   const name = ((object && object.metadata) || {}).name || "";
   const state = mutationFor(formKey(ns, SUSPEND_FORM, name)).state;
   return (
@@ -470,6 +530,7 @@ export function renderScheduleCard(ns, object) {
     "</div>" +
     "<div class=\"form-status\" data-suspend-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
     renderSuspendStatus(object, state) + "</div>" +
+    renderRecoveryPoints(ns, object, backups) +
     renderRetentionPanel(object) +
     "</section>"
   );
@@ -480,12 +541,20 @@ export function renderScheduleCard(ns, object) {
 export async function mountSchedules(node, ns, parse, lifecycle, deps) {
   const api = deps || API;
   try {
-    const collection = await api.list(ns, PLURAL, readOptions(lifecycle));
+    // The schedules AND the runs they produced: a schedule card's recovery
+    // points are `Backup` objects naming it, and there is no field on the
+    // schedule that carries them.
+    const collections = await Promise.all([
+      api.list(ns, PLURAL, readOptions(lifecycle)),
+      api.list(ns, BACKUPS, readOptions(lifecycle)),
+    ]);
     if (!active(lifecycle)) {
       return;
     }
+    const collection = collections[0];
+    const backups = collections[1];
     const objects = itemsOf(collection);
-    const panels = objects.map((object) => renderScheduleCard(ns, object)).join("");
+    const panels = objects.map((object) => renderScheduleCard(ns, object, backups)).join("");
     replace(
       node,
       parse(

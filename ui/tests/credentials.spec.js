@@ -8,6 +8,13 @@ import { renderPlanBytes } from "../plan.js";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL("./fixtures/" + name, import.meta.url)));
 
+/** The route identity for a fixture's newest recovery point -- what the wizard
+ *  is entered with since PLAT-11.1: it no longer picks a Backup for itself. */
+function newestPoint(list) {
+  const point = wizard.recoveryPoints(list)[0];
+  return { uid: point.metadata.uid, backup: point.metadata.name };
+}
+
 function scramState() {
   const clusters = fixture("wizard-clusters.json");
   const target = clusters.items.find((c) => c.spec.role === "target");
@@ -15,7 +22,8 @@ function scramState() {
     mode: "scramSha512", username: "restore-user", tls: true,
     secretRef: { name: "kafka-scram" }, password: "must-not-enter-plan",
   };
-  return wizard.initialState("incident", clusters, fixture("wizard-backups.json"));
+  const backups = fixture("wizard-backups.json");
+  return wizard.initialState("incident", clusters, backups, newestPoint(backups));
 }
 
 test("schedule form defaults to the installed archive credential and preserves its reference", () => {

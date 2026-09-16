@@ -286,16 +286,28 @@ export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
  *  The table sits in a `div.table-wrap`, which scrolls sideways on a narrow
  *  laptop and lets the stylesheet stack the rows into cards below 720 px; the
  *  column captions those cards show are copied from the header row by
- *  `app.js` when the nodes are adopted, so the string here carries them once. */
-export function table(columns, rows, empty) {
+ *  `app.js` when the nodes are adopted, so the string here carries them once.
+ *
+ *  `rowAttributes[i]`, when given, is spelled into row `i`'s opening tag. It
+ *  exists for ONE thing: naming a row so the page can find it again without
+ *  counting -- the restore wizard's point selector marks each row with the
+ *  Backup's UID and filters in place, and an index-counted lookup would follow
+ *  the wrong row the moment the list changed under it. It is a string OF OURS
+ *  (a caller renders it from `esc`'d values) and is never a value read out of
+ *  the cluster unescaped. */
+export function table(columns, rows, empty, rowAttributes) {
+  const attributes = Array.isArray(rowAttributes) ? rowAttributes : [];
   const head = columns.map((c) => "<th scope=\"col\">" + esc(c) + "</th>").join("");
   const body = rows
-    .map((row) => {
+    .map((row, index) => {
       const cells = [];
       for (let i = 0; i < columns.length; i += 1) {
         cells.push("<td>" + (row[i] === undefined ? ABSENT : row[i]) + "</td>");
       }
-      return "<tr>" + cells.join("") + "</tr>";
+      const extra = typeof attributes[index] === "string" && attributes[index].length > 0
+        ? " " + attributes[index]
+        : "";
+      return "<tr" + extra + ">" + cells.join("") + "</tr>";
     })
     .join("");
   const sentence = typeof empty === "string" && empty.length > 0 ? empty : EMPTY_TABLE_SENTENCE;

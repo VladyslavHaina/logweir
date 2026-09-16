@@ -32,6 +32,19 @@
 // edit: "edit" prefills a NEW draft, whose bytes hash differently, and the
 // page says so above the form.
 //
+// ONE CHOSEN RECOVERY POINT (PLAT-11.1). This page no longer picks a Backup
+// for you. A recovery point is chosen -- from a history row, from a schedule
+// card, or from this page's own selector -- and travels in the route as
+// `#/restore?ns=<ns>&backup=<name>&uid=<uid>`. The UID is the identity and the
+// name is for reading: a Backup deleted and recreated under the same name is a
+// different run over a different archive, and a page that resolved by name
+// would follow the new one without saying so. Because the identity is in the
+// address, a newer Backup completing mid-wizard cannot move the selection: the
+// list is read again and the same UID is found again. A point that has gone,
+// or that is not Succeeded, is a REFUSAL naming it -- no plan, no hash, no
+// submit -- because the alternative is a wizard that quietly restores from
+// something else.
+//
 // TRANSPORT SECURITY IS NEVER DERIVED (D-SEAMS S5, defect UI-HTTPDOWNGRADE).
 // Addressing style and plaintext transport are two controls and this page
 // keeps them apart: `path_style` addressing says how a bucket is named in a
@@ -72,6 +85,7 @@ import {
   CONVENIENCE_SENTENCE,
   COPY_CAVEAT,
   RESTORE_IMMUTABLE_SENTENCE,
+  UNVERIFIED,
   bucketOf,
   cell,
   copyBlock,
@@ -143,6 +157,248 @@ const EVIDENCE_PREFIX = "logweir/";
  *  write half could only be exercised in a browser is a page whose write half
  *  is exercised nowhere. */
 const API = { create: create, get: get, list: list };
+
+// ------------------------------------------- the recovery point (PLAT-11.1)
+
+/** THE ROUTE'S RECOVERY POINT: `#/restore?ns=<ns>&backup=<name>&uid=<uid>`.
+ *
+ *  `uid` is the IDENTITY and `backup` is the display name. A Backup's UID is
+ *  the one identifier here that cannot be re-used: an object deleted and
+ *  recreated under the same name is a different run over a different archive,
+ *  and a wizard that resolved by name alone would follow the new one silently.
+ *  The name travels beside it so a refusal can still say which point was asked
+ *  for when nothing answers to the UID. A link that carries only `backup`
+ *  still works -- it resolves by name and then PINS the UID it found -- which
+ *  is what keeps a hand-typed or older link usable.
+ *
+ *  Extracted here rather than in `app.js` for `approvalRouteParams`'s reason:
+ *  that module touches `window` at module scope and cannot be imported under
+ *  `node --test`, so a hand-off written inline there is a hand-off no test in
+ *  either language can reach -- and two values swapped in it leave the whole
+ *  suite green. */
+export function restoreRouteParams(hash) {
+  const text = typeof hash === "string" ? hash : "";
+  const route = { ns: "", uid: "", backup: "" };
+  const question = text.indexOf("?");
+  if (question === -1) {
+    return route;
+  }
+  for (const pair of text.slice(question + 1).split("&")) {
+    const equals = pair.indexOf("=");
+    if (equals === -1) {
+      continue;
+    }
+    const key = pair.slice(0, equals);
+    const value = decodeURIComponent(pair.slice(equals + 1)).trim();
+    if (key === "uid") {
+      route.uid = value;
+    } else if (key === "backup") {
+      route.backup = value;
+    } else if (key === "ns" && value.length > 0) {
+      route.ns = value;
+    }
+  }
+  return route;
+}
+
+/** The link that opens the wizard ON one recovery point. Both halves of the
+ *  identity travel, percent-encoded, and the namespace is explicit: `default`
+ *  is a real selected namespace and must cross a hand-off rather than be
+ *  elided. */
+export function restorePointRoute(ns, backup) {
+  const meta = ((backup || {}).metadata) || {};
+  const n = typeof ns === "string" ? ns.trim() : "";
+  const name = typeof meta.name === "string" ? meta.name : "";
+  const uid = typeof meta.uid === "string" ? meta.uid : "";
+  return (
+    "#/restore?" +
+    (n.length > 0 ? "ns=" + encodeURIComponent(n) + "&" : "") +
+    "backup=" + encodeURIComponent(name) +
+    "&uid=" + encodeURIComponent(uid)
+  );
+}
+
+/** The wizard with NO point chosen: its selector. */
+export function restoreSelectorRoute(ns) {
+  const n = typeof ns === "string" ? ns.trim() : "";
+  return "#/restore" + (n.length > 0 ? "?ns=" + encodeURIComponent(n) : "");
+}
+
+/** Whether a `Backup` is a recovery point a plan can be built from:
+ *  `phase: Succeeded`, a non-empty `status.backupId`, AND a covered window of
+ *  two integers.
+ *
+ *  THE WINDOW IS PART OF IT, because every other field of the plan is derived
+ *  from it: the point in time defaults to the window's end, the sample window
+ *  is the window itself, and the default topic prefix is a function of that
+ *  instant. A `Succeeded` run with no `windowCovered` -- which is what a run
+ *  that completed before the controller wrote its status looks like for a
+ *  moment -- is not a point this page can offer; it is a row in the catalog
+ *  table with nothing to restore from. */
+export function isRecoveryPoint(backup) {
+  const status = (backup || {}).status || {};
+  const covered = status.windowCovered || {};
+  return (
+    status.phase === "Succeeded" &&
+    typeof status.backupId === "string" &&
+    status.backupId.length > 0 &&
+    typeof covered.fromMs === "number" &&
+    typeof covered.toMs === "number"
+  );
+}
+
+/** The recovery points a namespace holds, NEWEST COMPLETION FIRST.
+ *
+ *  Ordered by the `Complete` condition's transition time, falling back to the
+ *  creation timestamp -- never by the covered window, because the window is
+ *  about the RECORDS and two runs can cover windows that end in the other
+ *  order from the order they ran. A tie keeps list order, which is
+ *  `kubectl`'s. Pure; no clock. */
+export function recoveryPoints(backups) {
+  return itemsOf(backups)
+    .filter(isRecoveryPoint)
+    .map((point, index) => ({ point: point, index: index }))
+    .sort((a, b) => {
+      const left = completedAt(a.point);
+      const right = completedAt(b.point);
+      if (left === right || left === null || right === null) {
+        return a.index - b.index;
+      }
+      return left < right ? 1 : -1;
+    })
+    .map((entry) => entry.point);
+}
+
+/** WHAT A ROUTE IDENTITY RESOLVES TO against the Backups a namespace holds.
+ *  Pure, and the ONE place the wizard decides which point it is bound to.
+ *
+ *  Four answers, and none of them is "the newest one instead":
+ *   - `none`      -- nothing was asked for; the page is the selector.
+ *   - `selected`  -- the UID is here and it is a recovery point.
+ *   - `unusable`  -- the object is here and is not `Succeeded` with a set and
+ *                    a window; its phase is carried so the refusal can say so.
+ *   - `missing`   -- nothing answers to that UID. When the NAME is now held by
+ *                    a different object, `renamed` says so: that is a point
+ *                    deleted and recreated, and following it would be
+ *                    restoring from a run nobody chose. */
+export function resolvePoint(backups, selection) {
+  const wanted = selection || {};
+  const uid = typeof wanted.uid === "string" ? wanted.uid.trim() : "";
+  const name = typeof wanted.backup === "string" ? wanted.backup.trim() : "";
+  const blank = { state: "none", point: null, uid: "", name: "", phase: null, renamed: false };
+  if (uid.length === 0 && name.length === 0) {
+    return blank;
+  }
+  const all = itemsOf(backups);
+  let found = null;
+  for (const backup of all) {
+    const meta = (backup || {}).metadata || {};
+    if (uid.length > 0 ? meta.uid === uid : meta.name === name) {
+      found = backup;
+      break;
+    }
+  }
+  if (found === null) {
+    let renamed = false;
+    if (uid.length > 0 && name.length > 0) {
+      for (const backup of all) {
+        if (((backup || {}).metadata || {}).name === name) {
+          renamed = true;
+          break;
+        }
+      }
+    }
+    return { state: "missing", point: null, uid: uid, name: name, phase: null, renamed: renamed };
+  }
+  const meta = found.metadata || {};
+  const identity = {
+    uid: typeof meta.uid === "string" && meta.uid.length > 0 ? meta.uid : uid,
+    name: typeof meta.name === "string" && meta.name.length > 0 ? meta.name : name,
+  };
+  if (!isRecoveryPoint(found)) {
+    return {
+      state: "unusable",
+      point: null,
+      uid: identity.uid,
+      name: identity.name,
+      phase: ((found.status || {}).phase),
+      renamed: false,
+    };
+  }
+  return {
+    state: "selected",
+    point: found,
+    uid: identity.uid,
+    name: identity.name,
+    phase: "Succeeded",
+    renamed: false,
+  };
+}
+
+/** The lowercased text one point is searched by: its name, its schedule, its
+ *  slot, its backup set, its source cluster, its archive and its topics. */
+export function pointHaystack(backup) {
+  const b = backup || {};
+  const meta = b.metadata || {};
+  const spec = b.spec || {};
+  const status = b.status || {};
+  const parts = [
+    meta.name,
+    (spec.scheduleRef || {}).name,
+    spec.slot,
+    (spec.sourceRef || {}).name,
+    (spec.archive || {}).url,
+    status.backupId,
+  ].concat(Array.isArray(spec.topics) ? spec.topics : []);
+  return parts
+    .filter((part) => typeof part === "string" && part.length > 0)
+    .join(" ")
+    .toLowerCase();
+}
+
+/** Whether a haystack matches a query. EVERY whitespace-separated term must
+ *  appear, so `orders 1406` narrows rather than widens. An empty query matches
+ *  everything -- a filter nobody typed hides nothing. Pure. */
+export function matchesQuery(haystack, query) {
+  const text = typeof haystack === "string" ? haystack.toLowerCase() : "";
+  const terms = (typeof query === "string" ? query : "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((term) => term.length > 0);
+  for (const term of terms) {
+    if (text.indexOf(term) === -1) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The signed verdict a point carries, in words. `unverified` is a real state
+ *  and not a missing value: the controller writes `evidence.verification` only
+ *  after it has fetched the receipt and checked it. */
+export function pointVerdict(backup) {
+  const verification = (((backup || {}).status || {}).evidence || {}).verification || {};
+  return typeof verification.result === "string" && verification.result.length > 0
+    ? verification.result
+    : UNVERIFIED;
+}
+
+/** WHAT "ARCHIVE AVAILABILITY" MEANS TODAY, and it is a statement about the
+ *  STATUS and not about the bucket. Logweir holds no list capability against
+ *  an archive and this page holds no bucket credential at all, so the nearest
+ *  thing to availability the cluster can tell it is whether the run that wrote
+ *  the set recorded a manifest key for it. A point with no manifest key is a
+ *  point whose set the runner will have to find by name alone.
+ *
+ *  PLAT-15.1's durable catalog is what turns this into a real answer: it
+ *  records, per set, whether the objects are still there. Until then this page
+ *  says exactly what it knows and no more. */
+export function archiveAvailability(backup) {
+  const status = (backup || {}).status || {};
+  return typeof status.manifestKey === "string" && status.manifestKey.length > 0
+    ? "manifest recorded"
+    : "no manifest recorded";
+}
 
 // ---------------------------------------------------------------- the steps
 
@@ -306,22 +562,24 @@ export const INSECURE_TRANSPORT_WARNING =
   "value from the environment -- and it defaults to off. Tick it only for a store on your " +
   "own machine.";
 
-/** The sentence step 2 prints under the chosen row. A running schedule is the
- *  normal state of a backed-up cluster, and this page is a snapshot of one
- *  `list` -- Task 28 measured three `Backup` objects in six minutes against a
- *  two-minute schedule, with the plan bytes, the plan hash and both minted
- *  names moving under the operator on every reload. Saying which object was
- *  chosen is what makes the move visible; suspending the schedule is what
- *  stops it. */
-export const RELOAD_SENTENCE =
-  "a running schedule may complete a newer backup while you read this; reload to pick it " +
-  "up, or suspend the schedule first.";
+/** The sentence step 2 prints under the point this wizard is bound to.
+ *
+ *  It replaces the old reload advice, and it replaces it because the advice
+ *  was true: this page used to pick the newest `Succeeded` Backup for itself,
+ *  and Task 28 measured three `Backup` objects arriving in six minutes against
+ *  a two-minute schedule -- with the chosen set, the covered window, the plan
+ *  bytes, the plan hash and BOTH minted names moving under the operator on
+ *  every reload. The identity now lives in this page's address, so a reload
+ *  finds the same point and a newer completion does not move it. */
+export const POINT_PINNED_SENTENCE =
+  "this point is named in this page's address by its UID, so a newer backup completing while " +
+  "you read this does not move it: a reload, and every re-read this page makes, resolve to " +
+  "the same run. Choose a different recovery point below to change it.";
 
-/** Printed instead of the chosen-row sentence when NO run in this archive has
- *  reached `Succeeded` -- the page still renders, off the last row, and says
- *  what it did. */
+/** Printed in the catalog table's caption when NO run in this namespace has
+ *  reached `Succeeded` with a set and a covered window. */
 export const NO_SUCCEEDED_SENTENCE =
-  "no run in this archive has reached phase Succeeded; the last listed Backup is shown, and " +
+  "no run in this archive has reached phase Succeeded with a backup set and a covered window; " +
   "a set no completed run wrote is a set the runner will not find.";
 
 /** Printed as the WHOLE page when no run in this namespace has completed with
@@ -335,41 +593,34 @@ export const NO_COMPLETED_BACKUP_SENTENCE =
   "or create a Backup, then reload this page. The runs the namespace does hold are listed " +
   "below.";
 
-/** The `Backup`s a plan can be built from: `phase: Succeeded` AND a non-empty
- *  `status.backupId`. A run still running, or one that completed before the
- *  controller wrote the id (Task 28a), is not one. Pure. */
+/** The `Backup`s a plan can be built from: see [`isRecoveryPoint`]. Kept under
+ *  its old name because it is what the mount half asks before it offers a
+ *  wizard at all. Pure. */
 export function completedBackups(backups) {
-  return itemsOf(backups).filter((backup) => {
-    const status = (backup || {}).status || {};
-    return (
-      status.phase === "Succeeded" &&
-      typeof status.backupId === "string" &&
-      status.backupId.length > 0
-    );
-  });
+  return itemsOf(backups).filter(isRecoveryPoint);
 }
 
-/** The page rendered instead of the six steps when [`completedBackups`] is
- *  empty: the heading, the sentence, and step 2's table so the reader sees
+/** The page rendered instead of the selector when [`completedBackups`] is
+ *  empty: the heading, the sentence, and the catalog table so the reader sees
  *  what the namespace does hold. Pure; never throws on an empty or
  *  running-only list. */
 export function renderNoCompletedBackup(ns, backups) {
   return (
     "<h2>Restore wizard</h2>" +
     "<div class=\"empty-state\"><p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p></div>" +
-    renderBackupSetStep({ ns: ns, backups: backups, fields: {} })
+    "<section class=\"step\" id=\"step-catalog\" tabindex=\"-1\"><h3>What this namespace holds</h3>" +
+    renderCatalogTable(itemsOf(backups), null) +
+    "<p class=\"note\">" + NO_SUCCEEDED_SENTENCE + "</p></section>"
   );
 }
 
-/** Step 2 -- the backup set. Every `Backup` whose archive is the selected one,
- *  with its covered range CONVERTED TO RFC 3339 (interface I22: the field is
- *  two integers, and a viewer reading `1757253900000` learns nothing) -- and
- *  the one this wizard CHOSE, named. */
-export function renderBackupSetStep(state) {
-  const s = state || {};
-  const chosen = chosenBackup(s);
-  const chosenName = ((chosen || {}).metadata || {}).name;
-  const rows = backupsOf(s).map((backup) => {
+/** Every `Backup` in the list with its set, its covered range CONVERTED TO RFC
+ *  3339 (interface I22: the field is two integers, and a viewer reading
+ *  `1757253900000` learns nothing) and its phase -- and the chosen one, named.
+ *  This is the CATALOG, not the selector: it shows the running and failed runs
+ *  too, because "what is here" is the question it answers. */
+export function renderCatalogTable(backups, chosenName) {
+  const rows = itemsOf(backups).map((backup) => {
     const status = backup.status || {};
     const covered = status.windowCovered || {};
     const name = (backup.metadata || {}).name;
@@ -379,29 +630,164 @@ export function renderBackupSetStep(state) {
       cell(rfc3339(covered.toMs)),
       cell(status.records),
       cell(status.phase),
-      cell(name === chosenName ? name + " (chosen)" : name),
+      cell(name === chosenName && typeof name === "string" ? name + " (chosen)" : name),
     ];
   });
-  const succeeded = newestSucceeded(s) !== null;
-  const chose =
-    chosen === null
-      ? "<p class=\"note\">this namespace holds no Backup for this archive.</p>"
-      : "<p class=\"note\">chosen: " + esc(String(chosenName)) + ", backup set " +
-        esc(String(((chosen.status || {}).backupId) || "(none -- this run wrote no set)")) +
-        ". " + (succeeded ? RELOAD_SENTENCE : NO_SUCCEEDED_SENTENCE) + "</p>";
+  return table(
+    ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
+    rows,
+    "no Backup names this archive in this namespace",
+  );
+}
+
+/** Step 2 -- THE RECOVERY POINT this wizard is bound to, and what it covers.
+ *
+ *  Every value here was read from the chosen `Backup`'s own spec and status.
+ *  "Coverage" is `status.windowCovered`, two epoch-millisecond integers, shown
+ *  as RFC 3339 and closed at both ends; the topics are the frozen list the run
+ *  archived (`spec.topics`); the source cluster is `spec.sourceRef`; the
+ *  signed verdict is what weirkeeper recorded when it verified the receipt;
+ *  and "archive" is [`archiveAvailability`]'s statement about the status, not
+ *  about the bucket -- this page holds no bucket credential and lists no
+ *  object storage. */
+export function renderRecoveryPointStep(state) {
+  const s = state || {};
+  const point = s.point || null;
+  const meta = (point || {}).metadata || {};
+  const spec = (point || {}).spec || {};
+  const status = (point || {}).status || {};
+  const covered = status.windowCovered || {};
+  const topics = Array.isArray(spec.topics) ? spec.topics : [];
   return (
-    "<section class=\"step\" id=\"step-backup-set\" tabindex=\"-1\"><h3>2. Backup set</h3>" +
-    "<p class=\"blurb\">The sets this archive holds. The wizard restores from the run that " +
-    "COMPLETED most recently -- the newest Succeeded row, not the newest row: the newest row " +
-    "is usually still running and has no set to restore from. The covered range is " +
+    "<section class=\"step\" id=\"step-backup-set\" tabindex=\"-1\"><h3>2. Recovery point</h3>" +
+    "<p class=\"blurb\">The run this restore reads, chosen explicitly and pinned by UID. " +
+    "Everything below was read from that Backup's own spec and status; the covered range is " +
     "Backup.status.windowCovered, two epoch-millisecond integers, shown as RFC 3339.</p>" +
-    table(
-      ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
-      rows,
-      "no Backup names this archive in this namespace",
-    ) +
-    chose +
+    facts([
+      ["Backup", "<code id=\"point-name\">" + esc(meta.name) + "</code>"],
+      ["uid", "<code id=\"point-uid\">" + esc(meta.uid) + "</code>"],
+      ["backup set", cell(status.backupId)],
+      ["schedule", cell((spec.scheduleRef || {}).name)],
+      ["slot", cell(spec.slot)],
+      ["source cluster", cell((spec.sourceRef || {}).name)],
+      ["covered from", cell(rfc3339(covered.fromMs))],
+      ["covered to", cell(rfc3339(covered.toMs))],
+      ["topics", topics.length === 0 ? cell(null) : esc(topics.join(", "))],
+      ["records", cell(status.records)],
+      ["signed", cell(pointVerdict(point))],
+      ["archive", cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point))],
+    ]) +
+    "<p class=\"note\">" + POINT_PINNED_SENTENCE + "</p>" +
+    "<div class=\"actions\"><a class=\"nav-link\" id=\"choose-another-point\" href=\"" +
+    esc(restoreSelectorRoute(s.ns)) + "\">Choose a different recovery point</a></div>" +
+    "<h4>What this namespace holds</h4>" +
+    renderCatalogTable(backupsOf(s), meta.name) +
     "</section>"
+  );
+}
+
+// ------------------------------------------------------------- the selector
+
+/** The selector's blurb: what a row is and what choosing one does. */
+export const SELECTOR_SENTENCE =
+  "Every completed run this namespace holds, newest completion first. Choosing one pins it " +
+  "to this page's address by its UID, so the wizard stays on it while newer backups arrive. " +
+  "A run still in flight, or one that completed without a backup set, is not offered: there " +
+  "is nothing to restore from yet.";
+
+/** Printed in place of the table when a search matches no row. */
+export const NO_MATCH_SENTENCE = "no recovery point matches that search";
+
+/** THE SELECTOR: the page the wizard is when no point has been chosen.
+ *
+ *  It is a page and not a step, because there are no steps yet: a plan
+ *  document is built from a point's set, window and topics, so with no point
+ *  there is nothing to render, nothing to hash and nothing to submit. Choosing
+ *  a row is a LINK, not a button: the identity belongs in the address, which
+ *  is what makes it survive a reload and be sharable, and a selection kept
+ *  only in this page's memory would be a selection a refresh threw away. */
+export function renderPointSelector(state) {
+  const s = state || {};
+  const points = recoveryPoints(s.backups);
+  const query = typeof s.query === "string" ? s.query : "";
+  const rows = points.map((point) => {
+    const meta = point.metadata || {};
+    const spec = point.spec || {};
+    const status = point.status || {};
+    const covered = status.windowCovered || {};
+    const topics = Array.isArray(spec.topics) ? spec.topics : [];
+    return [
+      cell(meta.name),
+      cell((spec.scheduleRef || {}).name),
+      cell(spec.slot),
+      cell(rfc3339(covered.fromMs)),
+      cell(rfc3339(covered.toMs)),
+      topics.length === 0 ? cell(null) : esc(topics.join(", ")),
+      cell(status.records),
+      cell(pointVerdict(point)),
+      cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point)),
+      "<a href=\"" + esc(restorePointRoute(s.ns, point)) + "\">Restore this point</a>",
+    ];
+  });
+  const attributes = points.map(
+    (point) =>
+      "data-point=\"" + esc(((point.metadata || {}).uid)) + "\" data-search=\"" +
+      esc(pointHaystack(point)) + "\"",
+  );
+  return (
+    "<h2>Restore wizard</h2>" +
+    "<p class=\"blurb\">" + SELECTOR_SENTENCE + "</p>" +
+    "<section class=\"step\" id=\"step-select-point\" tabindex=\"-1\">" +
+    "<h3>Choose a recovery point</h3>" +
+    "<div class=\"field\"><label for=\"point-search\">search</label>" +
+    "<input id=\"point-search\" name=\"q\" value=\"" + esc(query) + "\">" +
+    "<p class=\"help\">Filters the rows below by name, schedule, slot, source cluster, " +
+    "archive, backup set or topic. Every word must match.</p></div>" +
+    table(
+      ["BACKUP", "SCHEDULE", "SLOT", "COVERED FROM", "COVERED TO", "TOPICS", "RECORDS",
+        "SIGNED", "ARCHIVE", ""],
+      rows,
+      NO_COMPLETED_BACKUP_SENTENCE,
+      attributes,
+    ) +
+    "<p class=\"note\" id=\"no-match\" hidden>" + NO_MATCH_SENTENCE + "</p>" +
+    "<h4>What this namespace holds</h4>" +
+    renderCatalogTable(itemsOf(s.backups), null) +
+    "</section>"
+  );
+}
+
+// ------------------------------------------------------------- the refusals
+
+/** THE REFUSAL a selected point that is gone, or that is not a recovery point,
+ *  gets. It names the identity that was asked for and offers the selector; it
+ *  renders NO plan, no hash and no submit, because there is nothing to build
+ *  one from and "nearly the point you chose" is a different restore. */
+export function renderPointRefusal(state) {
+  const s = state || {};
+  const asked =
+    "<p class=\"note\">Asked for: Backup <code>" + esc(s.pointName) + "</code>, uid <code>" +
+    esc(s.pointUid) + "</code>.</p>";
+  const why = s.pointState === "unusable"
+    ? "<p class=\"refusal\">That Backup is in phase <code>" + esc(s.pointPhase) +
+      "</code> and is not a recovery point: a plan is built from a completed run's backup " +
+      "set and covered window, and this run has not recorded both. Nothing was read and " +
+      "nothing was sent.</p>"
+    : "<p class=\"refusal\">No Backup in this namespace carries that uid, so the recovery " +
+      "point this link names is gone. It was not replaced by another: this page will not " +
+      "restore from a run nobody chose." +
+      (s.pointRenamed === true
+        ? " A DIFFERENT object now answers to that name, which is what a Backup deleted and " +
+          "recreated looks like -- a different run, over a different archive window."
+        : "") +
+      "</p>";
+  return (
+    "<h2>Restore wizard</h2>" +
+    "<div class=\"refusal-block\" id=\"point-refusal\" role=\"alert\">" + why + asked +
+    "<p class=\"note\"><a href=\"" + esc(restoreSelectorRoute(s.ns)) +
+    "\">Choose a recovery point</a></p></div>" +
+    "<h3>What this namespace holds</h3>" +
+    renderCatalogTable(itemsOf(s.backups), null)
   );
 }
 
@@ -730,7 +1116,7 @@ export const APPROVE_COMMAND =
  *  words. */
 export const STEPS = Object.freeze([
   { id: "step-archive", title: "Archive" },
-  { id: "step-backup-set", title: "Backup set" },
+  { id: "step-backup-set", title: "Recovery point" },
   { id: "step-point-in-time", title: "Point in time" },
   { id: "step-target", title: "Target and naming" },
   { id: "step-preflight", title: "Target-topic preflight" },
@@ -770,6 +1156,9 @@ export function stepStates(state) {
     chosen !== null &&
     typeof ((chosen.status || {}).backupId) === "string" &&
     chosen.status.backupId.length > 0;
+  // A wizard with no point never renders this stepper -- the selector does --
+  // so `attention` on step 2 is the case where the point is here and its set
+  // is not, which is a run whose status the controller has not finished.
   const whole = [
     typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
     setChosen,
@@ -876,7 +1265,7 @@ export function renderPreparedWizard(state, prepared) {
       : "") +
     renderStepper(state) +
     renderArchiveStep(state) +
-    renderBackupSetStep(state) +
+    renderRecoveryPointStep(state) +
     renderPointInTimeStep(state) +
     renderTargetStep(state) +
     renderPreflightStep(state) +
@@ -913,6 +1302,20 @@ export function validateRestore(state) {
   const problems = Object.create(null);
   if (epochMs(fields.pointInTime) === null) {
     problems.pointInTime = "an RFC 3339 instant, such as 2026-09-07T14:05:00Z";
+  } else if (windowComplaint(fields.pointInTime, coveredOf(s)) !== null) {
+    // THE DISCLOSED COVERAGE IS A BOUND, NOT A HINT (PLAT-11.1). The window is
+    // CLOSED AT BOTH ENDS: a point equal to `fromMs` or to `toMs` is inside
+    // it, and only a point strictly outside is refused. The refusal is the
+    // page's own and nothing is sent, so every value the operator typed stays
+    // where it was -- which is the difference between this and the grey
+    // complaint it replaces, which let a plan be built for a point the archive
+    // never covered and left phase 0 to say so after an approver had signed
+    // it. Guard G-WIN in the runner is still the gate; this is the page
+    // refusing to waste a signature on a document that cannot pass it.
+    problems.pointInTime =
+      "outside the coverage this recovery point discloses -- " +
+      windowMessage(coveredOf(s).fromMs, coveredOf(s).toMs) +
+      ", and both bounds are inside it";
   }
   if (TARGET_MODES.indexOf(target.mode) === -1) {
     problems.mode = "one of " + TARGET_MODES.join(", ");
@@ -935,6 +1338,15 @@ export function validateRestore(state) {
   }
   if (typeof fields.backupSetRef !== "string" || fields.backupSetRef.length === 0) {
     problems.backupSet = "no completed backup set is chosen";
+  }
+  // AND THE POINT ITSELF, because every field above was derived from it. A
+  // state whose point did not resolve has no business reaching `create`, and
+  // the mount half never renders a submit for one -- this is the arm that
+  // holds when `submitRestore` is called directly.
+  if (s.pointState !== "selected") {
+    problems.backupSet =
+      "no recovery point is selected (" + String(s.pointState || "none") + "); choose one " +
+      "before a plan can be built";
   }
   return problems;
 }
@@ -1268,28 +1680,10 @@ function coveredOf(state) {
   return { fromMs: covered.fromMs, toMs: covered.toMs };
 }
 
-/** The `Backup` whose run COMPLETED most recently, or `null`.
- *
- *  THE LAST ROW OF A LIST IS NOT THE NEWEST COMPLETED RUN, and Task 28
- *  measured the difference on a live cluster: a two-minute schedule produced
- *  three `Backup` objects in six minutes and the page read a different one on every
- *  reload -- the chosen set, its covered window, the plan bytes, the plan hash
- *  and BOTH minted names all changing under the operator between one render
- *  and the next. Worse, the newest object is usually the one still RUNNING,
- *  which has no `backupId` and no `windowCovered` at all.
- *
- *  So: only a `Succeeded` run is offered, and among those the one whose
- *  `Complete` condition transitioned latest (falling back to the creation
- *  timestamp, then to list order). A tie or a missing timestamp keeps the
- *  later-listed object, which is `kubectl`'s own order.
- *
- *  `completedAt` is read off the `Complete` condition rather than off
+/** WHEN A RUN COMPLETED, read off the `Complete` condition rather than off
  *  `windowCovered.toMs`: the covered window is about the RECORDS, and two runs
- *  can cover windows that end in the other order from the order they ran. */
-function succeededBackups(state) {
-  return backupsOf(state).filter((b) => ((b.status || {}).phase) === "Succeeded");
-}
-
+ *  can cover windows that end in the other order from the order they ran. The
+ *  creation timestamp is the fallback; `null` when neither is readable. */
 function completedAt(backup) {
   const conditions = ((backup || {}).status || {}).conditions;
   if (Array.isArray(conditions)) {
@@ -1305,42 +1699,17 @@ function completedAt(backup) {
   return epochMs(((backup || {}).metadata || {}).creationTimestamp);
 }
 
-function newestSucceeded(state) {
-  const candidates = succeededBackups(state);
-  let best = null;
-  for (const backup of candidates) {
-    if (best === null) {
-      best = backup;
-      continue;
-    }
-    const left = completedAt(backup);
-    const right = completedAt(best);
-    if (left === null || right === null ? true : left >= right) {
-      best = backup;
-    }
-  }
-  return best;
-}
-
+/** THE POINT THIS STATE IS BOUND TO, and nothing else.
+ *
+ *  This used to be a search: with no `backupSetRef` it answered with the
+ *  newest `Succeeded` object, which meant the page chose for the operator and
+ *  changed its mind whenever a schedule completed (Task 28 measured it doing
+ *  exactly that). It is now a field, resolved ONCE by `resolvePoint` from the
+ *  identity in the route, and every later render reads the same object. There
+ *  is no fallback: a state with no point renders the selector or a refusal,
+ *  never a plan. */
 function chosenBackup(state) {
-  const wanted = (state.fields || {}).backupSetRef;
-  const candidates = backupsOf(state);
-  // THE STRING MUST BE A STRING. `wanted` is `undefined` before a set has been
-  // chosen, and a `Backup` that is still RUNNING has no `backupId` either -- so
-  // an equality test that did not check the type matched the running object
-  // and handed the page a `Backup` with no covered window at all.
-  if (typeof wanted === "string" && wanted.length > 0) {
-    for (const backup of candidates) {
-      if (((backup.status || {}).backupId) === wanted) {
-        return backup;
-      }
-    }
-  }
-  const succeeded = newestSucceeded(state);
-  if (succeeded !== null) {
-    return succeeded;
-  }
-  return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+  return ((state || {}).point) || null;
 }
 
 /** The chosen target: the one named in the state if it is still in the list,
@@ -1385,8 +1754,21 @@ function windowComplaint(value, covered) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountRestoreWizard(node, ns, parse, deps, lifecycle) {
+/** The wizard, over one namespace and one route identity.
+ *
+ *  `params` is [`restoreRouteParams`]'s answer for the current hash. Three
+ *  pages live behind this one mount, and which one it is depends only on that
+ *  identity and on what the namespace holds:
+ *   - no identity          -> the selector (or the empty state, when there is
+ *                             nothing completed to select);
+ *   - an identity that does not resolve -> a refusal naming it;
+ *   - an identity that resolves         -> the six steps.
+ *  The identity is carried back into every re-mount this page makes, so
+ *  discarding a draft -- the one place the wizard re-reads the namespace --
+ *  cannot land on a different point. */
+export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycle) {
   const api = deps || API;
+  const selection = params || {};
   try {
     const collections = await Promise.all([
       api.list(ns, CLUSTERS, readOptions(lifecycle)),
@@ -1397,11 +1779,20 @@ export async function mountRestoreWizard(node, ns, parse, deps, lifecycle) {
     }
     const clusters = collections[0];
     const backups = collections[1];
-    if (completedBackups(backups).length === 0) {
-      replace(node, parse(renderNoCompletedBackup(ns, backups)));
+    const state = initialState(ns, clusters, backups, selection);
+    if (state.pointState === "none") {
+      if (completedBackups(backups).length === 0) {
+        replace(node, parse(renderNoCompletedBackup(ns, backups)));
+        return;
+      }
+      replace(node, parse(renderPointSelector(state)));
+      wireSelector(node, state, lifecycle);
       return;
     }
-    const state = initialState(ns, clusters, backups);
+    if (state.pointState !== "selected") {
+      replace(node, parse(renderPointRefusal(state)));
+      return;
+    }
     const key = formKey(ns, WIZARD_FORM);
     const record = mutationFor(key);
     if (record.state.phase === "succeeded") {
@@ -1445,33 +1836,38 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
   return true;
 }
 
-/** The state the six steps read: the two collections, the chosen archive and
- *  target, and the WHOLE plan document's fields.
+/** The state the six steps read: the two collections, THE RESOLVED RECOVERY
+ *  POINT, the chosen archive and target, and the WHOLE plan document's fields.
+ *
+ *  `selection` is the route's identity -- `{uid, backup}` from
+ *  [`restoreRouteParams`] -- and it is the only thing that decides which point
+ *  this state is bound to. Absent, `pointState` is `none` and the mount half
+ *  renders the selector; present and unresolvable, it is `missing` or
+ *  `unusable` and the mount half renders a refusal. In neither case is a plan
+ *  built, and in NO case does this function look for "the newest one instead":
+ *  that search is the defect PLAT-11.1 removes.
  *
  *  THE FIELDS OBJECT IS COMPLETE FROM THE FIRST RENDER, because a plan is
  *  hashed as a whole and an approver signs a whole document. A wizard that
  *  built half a document and left the rest to a later edit would be offering
- *  to invalidate its own approval. Every value below is either read from a
- *  Kubernetes object, fixed by a constraint, or editable in a step -- and the
- *  three object-store settings that no CRD records -- endpoint, region and the
- *  `path_style` flag -- are editable in step 1 rather than left out, because
- *  the runner reads them from these bytes and from nowhere else. */
-export function initialState(ns, clusters, backups) {
-  // THE NEWEST *COMPLETED* RUN, NOT THE LAST ROW. `chosenBackup` is asked with
-  // no `backupSetRef` yet, so it answers with the newest `Succeeded` object --
-  // the same one every later render will pick, and the only kind that carries
-  // a `backupId` and a `windowCovered` to build a plan from. See
-  // `newestSucceeded` for what Task 28 measured when this took the last row.
-  const newest = chosenBackup({ backups: backups, fields: {} });
-  const spec = (newest || {}).spec || {};
-  const status = (newest || {}).status || {};
+ *  to invalidate its own approval. Every value below is either read from the
+ *  chosen point, read from a Kubernetes object, fixed by a constraint, or
+ *  editable in a step -- and the three object-store settings that no CRD
+ *  records (endpoint, region and the `path_style` flag) plus the explicit
+ *  insecure-transport flag are editable in step 1 rather than left out,
+ *  because the runner reads them from these bytes and from nowhere else. */
+export function initialState(ns, clusters, backups, selection) {
+  const resolved = resolvePoint(backups, selection);
+  const point = resolved.point;
+  const spec = (point || {}).spec || {};
+  const status = (point || {}).status || {};
   const covered = status.windowCovered || {};
   const pointInTime = rfc3339(covered.toMs);
   const archive = spec.archive || {};
   const archiveUrl = archive.url;
-  // BOTH HALVES OF THE ARCHIVE REFERENCE, FROM THE SAME OBJECT. A URL taken
-  // from one Backup and a credential taken from another would be two archives
-  // and one name for them.
+  // BOTH HALVES OF THE ARCHIVE REFERENCE, FROM THE SAME OBJECT -- and that
+  // object is the chosen point. A URL taken from one Backup and a credential
+  // taken from another would be two archives and one name for them.
   const archiveSecretName =
     typeof ((archive.secretRef || {}).name) === "string" ? archive.secretRef.name : "";
   const target = firstTarget(clusters);
@@ -1482,6 +1878,14 @@ export function initialState(ns, clusters, backups) {
     ns: ns,
     clusters: clusters,
     backups: backups,
+    selection: { uid: resolved.uid, backup: resolved.name },
+    point: point,
+    pointState: resolved.state,
+    pointUid: resolved.uid,
+    pointName: resolved.name,
+    pointPhase: resolved.phase,
+    pointRenamed: resolved.renamed,
+    query: "",
     archiveUrl: archiveUrl,
     archiveSecretName: archiveSecretName,
     evidenceBucket: "logweir-evidence",
@@ -1511,8 +1915,8 @@ export function initialState(ns, clusters, backups) {
         teardown: "delete",
       },
       // THE SAMPLE WINDOW IS NOT THE RESTORE WINDOW. This one bounds the
-      // per-record reconciliation and defaults to the set's own covered range,
-      // which is the only window the cluster told this page about; the
+      // per-record reconciliation and defaults to the point's own covered
+      // range, which is the only window the cluster told this page about; the
       // RESTORE's floor is the archive's earliest covered timestamp, read from
       // the manifest by the runner, and is never a field here.
       sample: {
@@ -1528,6 +1932,30 @@ export function initialState(ns, clusters, backups) {
       ),
     },
   };
+}
+
+/** A FRESH READ OF THE SAME NAMESPACE, WITHOUT MOVING THE SELECTION.
+ *
+ *  This is the property PLAT-11.1 is about, in one function: a later `list`
+ *  brings newer `Backup` objects, and the point stays the one whose UID the
+ *  route names. It re-resolves rather than trusting the old object, so a point
+ *  that has been DELETED since becomes `missing` here -- a refusal on the next
+ *  render -- instead of a stale object the page keeps drawing a plan from.
+ *
+ *  The plan fields are deliberately left alone: they were derived from this
+ *  point when the state was built and, apart from the operator's own edits,
+ *  are still that derivation. Returns the new `pointState`. */
+export function refreshBackups(state, backups) {
+  const s = state || {};
+  const resolved = resolvePoint(backups, s.selection);
+  s.backups = backups;
+  s.point = resolved.point;
+  s.pointState = resolved.state;
+  s.pointUid = resolved.uid;
+  s.pointName = resolved.name;
+  s.pointPhase = resolved.phase;
+  s.pointRenamed = resolved.renamed;
+  return resolved.state;
 }
 
 // Copy public settings only. The controller projects the selected cluster's
@@ -1728,7 +2156,11 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       }
       dropDraft(key);
       record.clear();
-      mountRestoreWizard(node, state.ns, parse, api, lifecycle);
+      // THE IDENTITY GOES BACK IN. This is the wizard's one re-read of the
+      // namespace, and a re-read that dropped the route's `uid` would rebuild
+      // the page with no point at all -- or, under the behaviour this task
+      // replaces, with whichever run happened to be newest by then.
+      mountRestoreWizard(node, state.ns, state.selection, parse, api, lifecycle);
     }, lifecycle);
   }
 
@@ -1793,6 +2225,48 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       }, { about: { hash: reviewed, restoreName: (prepared || {}).restoreName } });
     }, lifecycle);
   }
+}
+
+/** THE SELECTOR'S SEARCH, filtered IN PLACE.
+ *
+ *  The rows are all rendered and the query hides the ones that do not match,
+ *  rather than re-rendering the table on every keystroke: a re-render replaces
+ *  the input the operator is typing into and takes the caret with it. Each row
+ *  carries its own haystack in `data-search`, so the filter never counts
+ *  positions and never has to be told the list again.
+ *
+ *  `style.display` AND `hidden`, on purpose. Below 720 px the stylesheet turns
+ *  every `table.grid` row into a card with `display: block`, and an author
+ *  rule beats the user agent's `[hidden] { display: none }`; an inline style
+ *  beats both. `hidden` is still set, because that is what an assistive
+ *  technology reads. */
+function wireSelector(node, state, lifecycle) {
+  const search = node.querySelector("#point-search");
+  if (search === null) {
+    return;
+  }
+  const rows = Array.from(node.querySelectorAll("tr[data-search]"));
+  const empty = node.querySelector("#no-match");
+  const filter = () => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    state.query = String(search.value);
+    let shown = 0;
+    for (const row of rows) {
+      const matches = matchesQuery(row.getAttribute("data-search"), state.query);
+      row.hidden = !matches;
+      row.style.display = matches ? "" : "none";
+      if (matches) {
+        shown += 1;
+      }
+    }
+    if (empty !== null) {
+      empty.hidden = shown !== 0 || rows.length === 0;
+    }
+  };
+  listen(search, "input", filter, lifecycle);
+  listen(search, "change", filter, lifecycle);
 }
 
 /** A form control's value. Kept here rather than inline so the submit region

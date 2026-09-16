@@ -11,7 +11,18 @@ import { createRouteLifecycle, namespaceContext, parseHash } from "../app.js";
 import { listen } from "../lifecycle.js";
 import { mountBackups } from "../pages/backups.js";
 import { mountClusters } from "../pages/clusters.js";
-import { initialState, mountRestoreWizard, submitRestore } from "../pages/restore-wizard.js";
+import {
+  initialState,
+  mountRestoreWizard,
+  recoveryPoints,
+  submitRestore,
+} from "../pages/restore-wizard.js";
+
+/** The route identity for a fixture's newest recovery point. */
+function newestPoint(list) {
+  const point = recoveryPoints(list)[0];
+  return { uid: point.metadata.uid, backup: point.metadata.name };
+}
 import { readFileSync } from "node:fs";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL("./fixtures/" + name, import.meta.url)));
@@ -168,10 +179,22 @@ test("restore preparation never renders or posts after its route has left", asyn
       : fixture("wizard-backups.json"),
     create: async () => assert.fail("a stale preparation must not reach create"),
   };
-  await mountRestoreWizard(target, "team-old", (html) => [{ html }], api, renderThenLeave);
+  await mountRestoreWizard(
+    target,
+    "team-old",
+    newestPoint(fixture("wizard-backups.json")),
+    (html) => [{ html }],
+    api,
+    renderThenLeave,
+  );
   assert.equal(target.children.length, 0, "an async digest cannot replace a newer route");
 
-  const state = initialState("team-old", fixture("wizard-clusters.json"), fixture("wizard-backups.json"));
+  const state = initialState(
+    "team-old",
+    fixture("wizard-clusters.json"),
+    fixture("wizard-backups.json"),
+    newestPoint(fixture("wizard-backups.json")),
+  );
   let posts = 0;
   const result = await submitRestore(
     state,

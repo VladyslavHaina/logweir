@@ -32,6 +32,7 @@ import { renderApprovalsPage } from "../pages/approvals.js";
 import {
   STEPS,
   initialState,
+  recoveryPoints,
   renderRestoreWizard,
   stepStates,
 } from "../pages/restore-wizard.js";
@@ -328,11 +329,18 @@ test("every_badge_carries_a_text_label_and_not_only_a_colour", () => {
   assert.ok(css.includes(".badge::before"), "and draws the dot that is the badge's second channel");
 });
 
+/** The route identity for a fixture's newest recovery point. */
+function newestPoint(list) {
+  const point = recoveryPoints(list)[0];
+  return { uid: point.metadata.uid, backup: point.metadata.name };
+}
+
 test("the_wizard_stepper_says_which_step_is_current", async () => {
   const state = initialState(
     "logweir-t27",
     fixture("wizard-clusters.json"),
     fixture("wizard-backups.json"),
+    newestPoint(fixture("wizard-backups.json")),
   );
   const steps = stepStates(state);
   assert.equal(steps.length, 6, "six steps");
@@ -355,6 +363,7 @@ test("the_wizard_stepper_says_which_step_is_current", async () => {
     "logweir-t27",
     fixture("wizard-clusters.json"),
     fixture("wizard-backups.json"),
+    newestPoint(fixture("wizard-backups.json")),
   );
   outside.fields.pointInTime = "2026-09-08T00:00:00Z";
   const complained = stepStates(outside);
@@ -369,6 +378,7 @@ test("the_wizard_stepper_says_which_step_is_current", async () => {
     "logweir-t28",
     fixture("wizard-clusters-source-only.json"),
     fixture("wizard-backups-schedule-running.json"),
+    newestPoint(fixture("wizard-backups-schedule-running.json")),
   );
   scratch.fields.target.mode = "scratch";
   const warned = stepStates(scratch);

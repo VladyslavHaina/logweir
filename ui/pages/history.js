@@ -54,6 +54,7 @@ import {
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
 import { backupBadge, greenLabel, validVerification } from "./backups.js";
+import { isRecoveryPoint, restorePointRoute } from "./restore-wizard.js";
 import {
   approvalState,
   approvalSubjectRoute,
@@ -125,6 +126,29 @@ function rowBadge(object) {
   return kindOf(object) === "Backup" ? backupBadge(status) : restoreBadge(status);
 }
 
+/** THE LINK THAT CARRIES A RECOVERY POINT'S IDENTITY INTO THE WIZARD
+ *  (PLAT-11.1).
+ *
+ *  Only a `Backup` that IS a recovery point gets one -- Succeeded, with a
+ *  backup set and a covered window -- because the wizard has nothing to build
+ *  a plan from otherwise, and a link that opened a refusal would be this page
+ *  offering an action it knows cannot work. The `Restore` rows get none: a
+ *  restore is not a point to restore from.
+ *
+ *  BOTH HALVES OF THE IDENTITY TRAVEL. `restorePointRoute` spells the UID
+ *  beside the name, and the UID is what the wizard resolves by, so a row
+ *  clicked after the object was deleted and recreated under the same name ends
+ *  in a refusal naming the point that is gone rather than in a plan over a
+ *  different run. */
+export function restorePointCell(object, ns) {
+  if (kindOf(object) !== "Backup" || !isRecoveryPoint(object)) {
+    return cell(null);
+  }
+  return (
+    "<a href=\"" + esc(restorePointRoute(ns, object)) + "\">Restore this point</a>"
+  );
+}
+
 /** Restores and Backups interleaved, newest first.
  *
  *  Accepts one collection, an array, or two collections
@@ -158,14 +182,20 @@ export function renderHistoryList(input, second, ns) {
     phaseBadge((object.status || {}).phase),
     resultCell(object),
     rowBadge(object),
+    restorePointCell(object, ns),
   ]);
 
   return (
     "<h2>History</h2>" +
     "<p class=\"blurb\">Completed runs of both kinds, newest first. A Backup's result " +
     "is its exit code; a Restore's is its outcome. The two kinds do not share a badge " +
-    "rule, because they do not share a field.</p>" +
-    table(["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED"], rows, NO_HISTORY_SENTENCE) +
+    "rule, because they do not share a field. A completed Backup carries a link that opens " +
+    "the restore wizard on THAT recovery point, by uid.</p>" +
+    table(
+      ["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED", "RESTORE"],
+      rows,
+      NO_HISTORY_SENTENCE,
+    ) +
     listFooter()
   );
 }

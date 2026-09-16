@@ -165,12 +165,14 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | file | what it is |
 |---|---|
 | `index.html` | the shell. Loads `./app.js` as a module; every reference relative. |
-| `app.js` | the hash router and the frame. Seven routes: `#/clusters`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. |
+| `app.js` | the hash router and the frame. Seven routes: `#/clusters`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. Two of them carry an identity in the hash -- see *The restore route, and the point it names*. |
 | `api.js` | the **only** module that issues a network request. |
 | `render.js` | DOM helpers. Sets text, never `innerHTML`. |
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
 | `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
-| `pages/restore-wizard.js` | the six wizard steps, the plan bytes, and the ONE guided submit that creates the Restore and opens what it needs next. |
+| `pages/restore-wizard.js` | the recovery-point selector, the six wizard steps over the point somebody chose, the plan bytes, and the ONE guided submit that creates the Restore and opens what it needs next. |
+| `pages/history.js` | Backups and Restores interleaved, the Restore detail view, and the "Restore this point" link a completed Backup row carries. |
+| `pages/schedules.js` | the BackupSchedule list, the suspend toggle, the retention panel, and each schedule's recovery points with their own "Restore this point" links. |
 | `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key by name and by the words that open its PEM, and never parses the two documents. |
 | `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
 | `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
@@ -304,6 +306,74 @@ recorded" -- and still offers the form, because the subject comes from the
 Restore, the create still names the one `Approval` that Restore's
 `spec.approvalRef` names, and an `Approval` that already exists with different
 content is a conflict that overwrites nothing.
+
+## The restore route, and the point it names
+
+**The wizard is bound to a recovery point somebody chose, and never picks one
+itself** (PLAT-11.1). Until this landed, opening `#/restore` selected the newest
+`Succeeded` `Backup` in the namespace -- so the page chose for the operator, and
+changed its mind whenever a schedule completed. Task 28 measured three `Backup`
+objects arriving in six minutes against a two-minute schedule, with the chosen
+set, the covered window, the plan bytes, the plan hash and both minted names
+moving between one render and the next.
+
+The route is
+
+```
+#/restore?ns=<namespace>&backup=<backup name>&uid=<backup uid>
+```
+
+* **`uid` is the identity.** A `Backup`'s UID is the one identifier here that
+  cannot be re-used: an object deleted and recreated under the same name is a
+  different run over a different archive window, and a page resolving by name
+  alone would follow the new one without saying so.
+* **`backup` is for reading**, and for naming the point in a refusal when
+  nothing answers to the UID. A link carrying only `backup` still works: it
+  resolves by name and pins the UID it found, so an older or hand-typed link
+  stays usable.
+* **`ns` is explicit.** `default` is a real selected namespace and crosses the
+  hand-off rather than being elided.
+
+**Who links here.** A completed `Backup` row on `#/history` carries *Restore
+this point*, and so does every recovery point listed on a schedule's card on
+`#/schedules`. Both build the route with the same function, so what a click
+sends is the identity the object actually has. A `Restore` row carries none: a
+restore is not a point to restore *from*. A run still in flight carries none
+either -- the wizard would only refuse it.
+
+**What each visit renders.** With no identity, the **selector**: every recovery
+point in the namespace, newest completion first, with its schedule, slot,
+disclosed coverage, frozen topic list, record count, signed verdict and what is
+known about its archive, filtered in place by a search box; and, when the
+namespace holds none, the empty state naming the runs it does hold. With an
+identity that resolves, the six steps. With an identity that does **not**
+resolve -- the object is gone, or it is not `Succeeded` with a backup set and a
+covered window -- a **refusal** naming the point that was asked for, with no
+plan, no hash and no submit. Nothing is substituted, ever.
+
+**The choice does not move.** Because the identity is in the address, every
+re-read the page makes -- a reload, a return to the route, the re-read that
+discarding a draft performs -- resolves the same UID. A backup completing
+mid-wizard appears in the catalog table and changes nothing else: same set, same
+bytes, same hash, same two minted names.
+
+**Coverage, and what it is made of today.** "Coverage" is
+`Backup.status.windowCovered`, two epoch-millisecond integers (interface I22),
+shown as RFC 3339 and **closed at both ends**: a point equal to either bound is
+inside it. A requested point-in-time outside it is a **field error that keeps
+every value typed** -- nothing is sent, and the message sits beside the input.
+The archive line is a statement about the *status*, not about the bucket: this
+page holds no bucket credential and lists no object storage, so the nearest
+thing to availability the cluster can tell it is whether the run recorded a
+manifest key. **PLAT-15.1** is what turns that into a real answer -- a durable
+catalog that records, per set, whether the objects are still there, and that
+carries imported points this namespace's `Backup` objects do not.
+
+**A swapped point is a different plan.** The plan document names the chosen
+point's backup set and its covered window, so choosing another point changes the
+bytes, the sha256 on screen and both minted names -- and the reviewed-plan check
+(PLAT-13.2) refuses a submit whose prepared hash is not the hash that was
+displayed. An approval covers the point it was signed over, and nothing else.
 
 ## Addressing style never enables plaintext transport
 

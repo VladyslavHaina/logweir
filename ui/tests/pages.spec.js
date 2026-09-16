@@ -44,11 +44,21 @@ import {
   ENGINE_SUBREPORT_LINE,
   IMMUTABLE_LINE,
   RETENTION_SENTENCE,
+  windowMessage,
 } from "../render.js";
 import { renderClusterList } from "../pages/clusters.js";
-import { renderRetentionPanel, renderScheduleList } from "../pages/schedules.js";
+import {
+  NO_POINTS_SENTENCE,
+  renderRecoveryPoints,
+  renderRetentionPanel,
+  renderScheduleList,
+} from "../pages/schedules.js";
 import { renderBackupDetail, renderBackupList } from "../pages/backups.js";
-import { renderHistoryList, renderRestoreDetail } from "../pages/history.js";
+import {
+  renderHistoryList,
+  renderRestoreDetail,
+  restorePointCell,
+} from "../pages/history.js";
 
 // -- Task 27: the wizard, the approval flow and the roster ------------------
 import { createHash } from "node:crypto";
@@ -59,23 +69,44 @@ import { join } from "node:path";
 
 import { mintNames, planHash, renderPlanBytes } from "../plan.js";
 import {
+  ADDRESSING_NOTE,
   APPROVE_COMMAND,
+  INSECURE_TRANSPORT_WARNING,
   NO_COMPLETED_BACKUP_SENTENCE,
+  NO_MATCH_SENTENCE,
   NO_SUCCEEDED_SENTENCE,
-  RELOAD_SENTENCE,
+  POINT_PINNED_SENTENCE,
   SCRATCH_MARKER_WARNING,
   TARGET_ROLE_SENTENCE,
+  applyWizardDraft,
   approvalRoute,
+  archiveAvailability,
   completedBackups,
   draftFrom,
   initialState,
+  isRecoveryPoint,
+  matchesQuery,
+  pointHaystack,
+  recoveryPoints,
+  refreshBackups,
   renderNoCompletedBackup,
   preparePlan,
-  renderBackupSetStep,
+  preparePlanOrProblem,
+  renderCatalogTable,
   renderPointInTimeStep,
+  renderPointRefusal,
+  renderPointSelector,
+  renderRecoveryPointStep,
   renderRestoreWizard,
   renderTargetStep,
+  resolvePoint,
+  restorePointRoute,
+  restoreRouteParams,
+  restoreSelectorRoute,
+  stepStates,
   submitRestore,
+  validateRestore,
+  wizardDraftValues,
 } from "../pages/restore-wizard.js";
 import {
   approvalRouteParams,
@@ -582,12 +613,31 @@ function bytesOf(text) {
   return new TextEncoder().encode(text);
 }
 
+/** The route identity for a fixture's newest recovery point. Since PLAT-11.1
+ *  the wizard is entered ON a point, by uid; it no longer picks one. */
+function newestPoint(list) {
+  const point = recoveryPoints(list)[0];
+  return { uid: point.metadata.uid, backup: point.metadata.name };
+}
+
+/** The route identity for a named Backup in a fixture list. */
+function pointNamed(list, name) {
+  for (const item of list.items) {
+    if (item.metadata.name === name) {
+      return { uid: item.metadata.uid, backup: item.metadata.name };
+    }
+  }
+  throw new Error("no fixture Backup is named " + name);
+}
+
 /** The wizard state the rows below drive, built the way the page builds it. */
 function wizardState() {
+  const backups = fixture("wizard-backups.json");
   return initialState(
     "logweir-t27",
     fixture("wizard-clusters.json"),
-    fixture("wizard-backups.json"),
+    backups,
+    newestPoint(backups),
   );
 }
 
@@ -1368,6 +1418,7 @@ test("the_restore_names_the_archive_credential_the_runner_reads_it_with", async 
     "logweir-t27",
     fixture("wizard-clusters.json"),
     fixture("wizard-backups-nocredential.json"),
+    newestPoint(fixture("wizard-backups-nocredential.json")),
   );
   assert.equal(blank.archiveSecretName, "", "an archive with no secretRef prefills empty");
   const blankApi = recordingApi();
@@ -1390,6 +1441,7 @@ test("the_restore_names_the_archive_credential_the_runner_reads_it_with", async 
     "logweir-t27",
     fixture("wizard-clusters.json"),
     fixture("wizard-backups-nocredential.json"),
+    newestPoint(fixture("wizard-backups-nocredential.json")),
   );
   typed.archiveSecretName = "logweir-s3-readonly";
   const typedApi = recordingApi();
@@ -1452,6 +1504,7 @@ test("the_archive_step_shows_the_credential_name_and_says_what_it_is_for", async
       "logweir-t27",
       fixture("wizard-clusters.json"),
       fixture("wizard-backups-nocredential.json"),
+      newestPoint(fixture("wizard-backups-nocredential.json")),
     ),
   );
   assert.ok(
@@ -1484,6 +1537,7 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     "logweir-t28",
     fixture("wizard-clusters-source-only.json"),
     fixture("wizard-backups-schedule-running.json"),
+    newestPoint(fixture("wizard-backups-schedule-running.json")),
   );
   assert.equal(
     only.targetClusterName,
@@ -1525,6 +1579,7 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     "logweir-t27",
     fixture("wizard-clusters.json"),
     fixture("wizard-backups.json"),
+    newestPoint(fixture("wizard-backups.json")),
   );
   assert.equal(both.targetClusterName, "orders-recovery", "a `role: target` cluster still wins");
   const step4both = renderTargetStep(both);
@@ -1551,6 +1606,7 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     "logweir-t27",
     fixture("wizard-clusters.json"),
     fixture("wizard-backups.json"),
+    newestPoint(fixture("wizard-backups.json")),
   );
   chosen.targetClusterName = "orders-prod";
   chosen.fields.target.bootstrapServers = ["kafka-0.orders.svc:9093"];
@@ -1570,6 +1626,7 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     "logweir-t28",
     fixture("wizard-clusters-source-only.json"),
     fixture("wizard-backups-schedule-running.json"),
+    newestPoint(fixture("wizard-backups-schedule-running.json")),
   );
   scratch.fields.target.mode = "scratch";
   const warned = renderTargetStep(scratch);
@@ -1582,112 +1639,431 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
   assert.ok(stillRenders.includes("id=\"plan-bytes\""), "the plan still renders in scratch mode");
 });
 
-test("the_wizard_restores_from_the_newest_succeeded_backup_and_names_it", async () => {
-  // DEFECT 3. `initialState` and `chosenBackup` both took
-  // `objects[objects.length - 1]`, so a live schedule swapped the chosen set —
-  // and with it `windowCovered`, the plan bytes, the plan hash and BOTH minted
-  // names — on every reload. Task 28 measured three `Backup` objects in six
-  // minutes. Worse, the last row is usually the one still RUNNING, which has
-  // no `backupId` and no `windowCovered` at all.
-  //
-  // ARM 1: a running backup listed AFTER two succeeded ones. The newest
-  // SUCCEEDED one is chosen, and the page names it.
-  //
-  // Step 2 is asserted FIRST and off a bare state, because it is the assertion
-  // that still speaks when the choice is wrong: `initialState` on the running
-  // object THROWS out of `defaultTopicPrefix` (there is no covered window to
-  // derive an instant from), and a row whose first clause is a TypeError says
-  // less about which object was picked than one that names it.
+// -- PLAT-11.1: the wizard is bound to a recovery point somebody chose ------
+
+test("the_wizard_binds_to_the_recovery_point_the_route_names_and_picks_none_itself", async () => {
+  // THE DEFECT PLAT-11.1 REMOVES. `initialState` used to answer "the newest
+  // Succeeded Backup" when nothing had been chosen, so the page picked for the
+  // operator — and changed its mind whenever a schedule completed. Task 28
+  // measured three `Backup` objects in six minutes with the chosen set, the
+  // covered window, the plan bytes, the plan hash and BOTH minted names moving
+  // between one render and the next.
   const backups = fixture("wizard-backups-schedule-running.json");
-  const step2 = renderBackupSetStep({ backups: backups, fields: {} });
-  assert.ok(
-    step2.includes("chosen: logweir-backup-laptop-20260911-183600"),
-    "step 2 names the object it chose, and it is the 18:36 run - Succeeded, and the later of " +
-      "the two completions. The 18:38 object is LAST in the list and still Running, so it has " +
-      "no backup set at all: " + step2,
+  const clusters = fixture("wizard-clusters-source-only.json");
+
+  // ARM 1: NO IDENTITY, NO POINT. Not "the newest one instead".
+  const unbound = initialState("logweir-t28", clusters, backups);
+  assert.equal(unbound.pointState, "none", "nothing was asked for, so nothing is selected");
+  assert.equal(unbound.point, null, "and the page holds no Backup at all");
+  assert.equal(
+    unbound.fields.backupSetRef,
+    undefined,
+    "the plan has no backup set: a wizard with no point has nothing to build a document from",
   );
 
-  const state = initialState(
-    "logweir-t28",
-    fixture("wizard-clusters-source-only.json"),
-    backups,
-  );
+  // ARM 2: THE OLDER POINT, named by its uid, is the one bound — and the
+  // wizard does not quietly prefer the newer completion beside it.
+  const older = pointNamed(backups, "logweir-backup-laptop-20260911-183400");
+  const newer = pointNamed(backups, "logweir-backup-laptop-20260911-183600");
+  assert.notEqual(older.uid, newer.uid, "the fixture holds two distinct points (control)");
+  const bound = initialState("logweir-t28", clusters, backups, older);
+  assert.equal(bound.pointState, "selected");
+  assert.equal(bound.pointUid, older.uid, "the uid the route named");
+  assert.equal(bound.pointName, older.backup);
   assert.equal(
-    state.fields.backupSetRef,
-    "01M28ZBBBBBBBBBBBBBBBBBBBB",
-    "and the wizard's own state carries that run's set; taking the last row leaves " +
-      "`backupSetRef` undefined and the runner's grammar refuses the document",
-  );
-  assert.equal(
-    state.fields.pointInTime,
-    "2026-09-11T18:36:00Z",
-    "…and the point in time is THAT run's covered `toMs`, not the running one's absent window",
-  );
-  assert.ok(
-    renderBackupSetStep(state).includes("chosen: logweir-backup-laptop-20260911-183600"),
-    "…and the two agree: the state's chosen set and step 2's named object are one decision",
-  );
-  assert.ok(
-    step2.includes("backup set 01M28ZBBBBBBBBBBBBBBBBBBBB"),
-    "…and its backup set: " + step2,
-  );
-  assert.ok(
-    step2.includes("logweir-backup-laptop-20260911-183600 (chosen)"),
-    "…and marks the row, so the table and the sentence cannot disagree: " + step2,
-  );
-  assert.ok(
-    step2.includes(RELOAD_SENTENCE),
-    "…and says the choice can move under a running schedule: " + step2,
-  );
-  assert.ok(
-    step2.includes("PHASE</th>"),
-    "the table carries the phase, so a reader can see which rows were candidates",
-  );
-
-  // ARM 2: THE LATER COMPLETION WINS BETWEEN TWO SUCCEEDED RUNS, and it is the
-  // `Complete` condition's transition time that decides — not list order and
-  // not the covered window. Reversing the two completion times reverses the
-  // choice while the list order stays exactly as it was.
-  const reversed = fixture("wizard-backups-schedule-running.json");
-  reversed.items[0].status.conditions[0].lastTransitionTime = "2026-09-11T18:37:10Z";
-  const later = initialState(
-    "logweir-t28",
-    fixture("wizard-clusters-source-only.json"),
-    reversed,
-  );
-  assert.equal(
-    later.fields.backupSetRef,
+    bound.fields.backupSetRef,
     "01M28ZAAAAAAAAAAAAAAAAAAAA",
-    "the FIRST-listed run now completed last, so it is the one chosen. A page reading list " +
-      "order would still answer `…BBBB` here",
-  );
-
-  // ARM 3: NO SUCCEEDED RUN AT ALL. Step 2 falls back to the last listed row —
-  // the object the page used to take unconditionally — and SAYS it did.
-  //
-  // Step 2 is reached directly here rather than through `initialState`,
-  // because a namespace in which nothing has completed has no covered window
-  // to default a point in time from and therefore no plan to render at all;
-  // that is a true statement about the cluster and not a defect of this page,
-  // and the row is about what step 2 says.
-  const none = fixture("wizard-backups-schedule-running.json");
-  for (const item of none.items) {
-    item.status = { phase: "Running" };
-  }
-  const step2none = renderBackupSetStep({ backups: none, fields: {} });
-  assert.ok(
-    step2none.includes(NO_SUCCEEDED_SENTENCE),
-    "the fallback is stated in the page: " + step2none,
-  );
-  assert.ok(
-    step2none.includes("chosen: logweir-backup-laptop-20260911-183800"),
-    "…and it is the last listed object, which is what the page used to take unconditionally",
+    "the OLDER run's set. A page that still searched for the newest completion would answer " +
+      "`…BBBB`, which is the 18:36 run",
   );
   assert.equal(
-    step2none.indexOf(RELOAD_SENTENCE),
-    -1,
-    "the reload sentence belongs to a chosen SUCCEEDED run and is not printed here",
+    bound.fields.pointInTime,
+    "2026-09-11T18:34:00Z",
+    "…and the point in time is THAT run's covered toMs",
   );
+  assert.deepEqual(
+    [bound.fields.sample.windowStart, bound.fields.sample.windowEnd],
+    ["2026-09-11T18:30:00Z", "2026-09-11T18:34:00Z"],
+    "…and the sample window is that run's covered range",
+  );
+
+  // ARM 3: THE NAME IS FOR READING, THE UID IS THE IDENTITY. A link carrying
+  // only the name still resolves, and pins the uid it found.
+  const byName = initialState("logweir-t28", clusters, backups, { backup: older.backup });
+  assert.equal(byName.pointUid, older.uid, "resolving by name pins the uid");
+  assert.equal(byName.fields.backupSetRef, bound.fields.backupSetRef);
+
+  // ARM 4: A UID THAT NAMES A RUNNING RUN IS NOT A POINT. The 18:38 object is
+  // last in the list and still Running, so it has no set and no window at all.
+  const running = pointNamed(backups, "logweir-backup-laptop-20260911-183800");
+  const refused = initialState("logweir-t28", clusters, backups, running);
+  assert.equal(refused.pointState, "unusable");
+  assert.equal(refused.pointPhase, "Running");
+  assert.equal(refused.point, null, "and no plan is built from it");
+
+  // ARM 5: STEP 2 SAYS WHICH POINT, AND WHAT IT COVERS. Every value comes off
+  // the chosen Backup's own spec and status.
+  const step2 = renderRecoveryPointStep(bound);
+  assert.ok(step2.includes("<h3>2. Recovery point</h3>"), step2);
+  assert.ok(step2.includes(">" + older.backup + "</code>"), "the Backup, named: " + step2);
+  assert.ok(step2.includes(">" + older.uid + "</code>"), "and its uid, which is the identity");
+  assert.ok(step2.includes("01M28ZAAAAAAAAAAAAAAAAAAAA"), "and its backup set");
+  assert.ok(step2.includes("2026-09-11T18:30:00Z"), "and the coverage it discloses, from");
+  assert.ok(step2.includes("2026-09-11T18:34:00Z"), "…and to");
+  assert.ok(step2.includes("orders"), "and the frozen topic list the run archived");
+  assert.ok(step2.includes("900"), "and the record count");
+  assert.ok(step2.includes("laptop"), "and the schedule that produced it");
+  assert.ok(step2.includes(POINT_PINNED_SENTENCE), "and that the choice does not move");
+  assert.ok(
+    step2.includes(restoreSelectorRoute("logweir-t28")),
+    "and the way back to the selector: " + step2,
+  );
+
+  // ARM 6: THE WHOLE WIZARD RENDERS OVER THE CHOSEN POINT, and the plan
+  // document carries that point's set — which is what makes a swapped point a
+  // different plan and therefore a different approval.
+  const whole = await renderRestoreWizard(bound);
+  assert.ok(whole.includes("id=\"plan-bytes\""), "all six steps render");
+  assert.ok(
+    planPreOf(whole).includes("backup: \"01M28ZAAAAAAAAAAAAAAAAAAAA\""),
+    "and the plan names the chosen point's set",
+  );
+});
+
+test("a_newer_backup_arriving_mid_wizard_does_not_move_the_selection", async () => {
+  // THE ACCEPTANCE SENTENCE OF PLAT-11.1: "an older selected backup remains
+  // selected throughout review and submission". The list is read again — which
+  // is what `refreshBackups` is, and what every re-mount of the page does —
+  // and a run that completed in between must not become the chosen one.
+  const clusters = fixture("wizard-clusters-source-only.json");
+  const before = fixture("wizard-backups-schedule-running.json");
+  const older = pointNamed(before, "logweir-backup-laptop-20260911-183400");
+  const state = initialState("logweir-t28", clusters, before, older);
+  const planBefore = await preparePlan(state);
+
+  // A NEWER COMPLETION ARRIVES: the 18:38 run finishes, with a later
+  // `Complete` transition than anything already there.
+  const after = fixture("wizard-backups-schedule-running.json");
+  after.items[2].status = {
+    phase: "Succeeded",
+    exitCode: 0,
+    backupId: "01M28ZCCCCCCCCCCCCCCCCCCCC",
+    records: 2100,
+    windowCovered: { fromMs: 1789151400000, toMs: 1789151880000 },
+    conditions: [{ type: "Complete", status: "True", lastTransitionTime: "2026-09-11T18:38:41Z" }],
+  };
+  assert.equal(
+    recoveryPoints(after)[0].metadata.name,
+    "logweir-backup-laptop-20260911-183800",
+    "the new run IS the newest completion (control): a page that searched would take it",
+  );
+
+  assert.equal(refreshBackups(state, after), "selected", "the re-read still resolves the point");
+  assert.equal(state.pointUid, older.uid, "and it is the SAME point, by uid");
+  assert.equal(state.fields.backupSetRef, "01M28ZAAAAAAAAAAAAAAAAAAAA", "…and the same set");
+  const planAfter = await preparePlan(state);
+  assert.equal(planAfter.hash, planBefore.hash, "so the plan under review did not change");
+  assert.equal(planAfter.restoreName, planBefore.restoreName, "nor either minted name");
+  assert.equal(planAfter.approvalName, planBefore.approvalName);
+
+  // AND A RE-READ THAT NO LONGER HOLDS THE POINT SAYS SO. The list is the
+  // authority on every read, not the object the state happens to be holding:
+  // a point deleted since becomes a refusal on the next render rather than a
+  // stale object the page keeps drawing a plan from.
+  const deleted = fixture("wizard-backups-schedule-running.json");
+  deleted.items = deleted.items.filter((b) => b.metadata.uid !== older.uid);
+  assert.equal(refreshBackups(state, deleted), "missing", "the point is gone, and the re-read says so");
+  assert.equal(state.point, null, "and the state stops holding the object it had");
+  refreshBackups(state, after);
+  assert.equal(state.pointState, "selected", "…and finds it again when it comes back (control)");
+
+  // AND THE PLAN IS A FUNCTION OF THE POINT, which is what makes a swap
+  // invalidate a review rather than silently restore from something else.
+  const swapped = initialState(
+    "logweir-t28",
+    clusters,
+    after,
+    pointNamed(after, "logweir-backup-laptop-20260911-183600"),
+  );
+  const other = await preparePlan(swapped);
+  assert.notEqual(other.hash, planBefore.hash, "another point is another document");
+  const api = { create: async () => assert.fail("nothing may be sent after a swapped point") };
+  await assert.rejects(
+    () => submitRestore(swapped, api, undefined, { reviewedHash: planBefore.hash }),
+    (error) => {
+      assert.equal(error.kind, "refused");
+      assert.match(error.message, /the plan changed after it was displayed/);
+      return true;
+    },
+    "the reviewed-hash check refuses a plan built from a point the reviewer did not see",
+  );
+});
+
+test("a_selected_point_that_is_gone_or_unusable_is_refused_with_no_plan", async () => {
+  const backups = fixture("wizard-backups-schedule-running.json");
+  const clusters = fixture("wizard-clusters-source-only.json");
+
+  // GONE: nothing answers to the uid.
+  const gone = resolvePoint(backups, {
+    uid: "00000000-0000-4000-8000-000000000000",
+    backup: "logweir-backup-laptop-20260911-180000",
+  });
+  assert.equal(gone.state, "missing");
+  assert.equal(gone.point, null);
+  assert.equal(gone.renamed, false, "no object answers to that name either");
+
+  // GONE AND RECREATED: the NAME is held by a different object now. Following
+  // it would be restoring from a run nobody chose.
+  const recreated = resolvePoint(backups, {
+    uid: "00000000-0000-4000-8000-000000000000",
+    backup: "logweir-backup-laptop-20260911-183600",
+  });
+  assert.equal(recreated.state, "missing", "the uid decides, not the name");
+  assert.equal(recreated.renamed, true, "and the page says a different object holds that name");
+
+  const missingState = initialState("logweir-t28", clusters, backups, {
+    uid: "00000000-0000-4000-8000-000000000000",
+    backup: "logweir-backup-laptop-20260911-183600",
+  });
+  const refusal = renderPointRefusal(missingState);
+  assert.ok(refusal.includes("id=\"point-refusal\""), refusal);
+  assert.ok(refusal.includes("00000000-0000-4000-8000-000000000000"), "the uid asked for is named");
+  assert.ok(refusal.includes("logweir-backup-laptop-20260911-183600"), "and the name beside it");
+  assert.ok(refusal.includes("A DIFFERENT object now answers to that name"), refusal);
+  assert.equal(refusal.indexOf("plan-bytes"), -1, "no plan is rendered");
+  assert.equal(refusal.indexOf("create-restore"), -1, "and nothing can be submitted");
+
+  // A STATE WITH NO POINT DISCLOSES NO COVERAGE AND HAS NO COMPLETED STEP 2.
+  // This is what stops any later render from quietly falling back to "the
+  // newest one": there is no window, so there is nothing to bound a point in
+  // time by, and the stepper does not report a choice nobody made.
+  assert.ok(
+    renderPointInTimeStep(missingState).includes(windowMessage(undefined, undefined)),
+    "no window is disclosed: " + renderPointInTimeStep(missingState),
+  );
+  assert.notEqual(
+    stepStates(missingState)[1].status,
+    "done",
+    "and the stepper does not report a recovery point as chosen",
+  );
+  assert.equal(
+    (await preparePlanOrProblem(missingState)).hash,
+    undefined,
+    "and no plan is prepared from it at all",
+  );
+
+  // NOT SUCCEEDED: the object is here and is not a recovery point.
+  const runningState = initialState(
+    "logweir-t28",
+    clusters,
+    backups,
+    pointNamed(backups, "logweir-backup-laptop-20260911-183800"),
+  );
+  const unusable = renderPointRefusal(runningState);
+  assert.ok(unusable.includes("phase <code>Running</code>"), unusable);
+  assert.equal(unusable.indexOf("plan-bytes"), -1, "still no plan");
+
+  // AND `submitRestore` REFUSES DIRECTLY, so the property does not depend on
+  // the mount half choosing the right page.
+  const api = { create: async () => assert.fail("a refused point must not reach create") };
+  await assert.rejects(
+    () => submitRestore(missingState, api),
+    (error) => {
+      assert.equal(error.kind, "invalid");
+      assert.match(String(error.fields.backupSet), /no recovery point is selected \(missing\)/);
+      return true;
+    },
+  );
+});
+
+test("the_selector_lists_every_recovery_point_newest_first_and_searches_them", () => {
+  const backups = fixture("wizard-backups-schedule-running.json");
+  const clusters = fixture("wizard-clusters-source-only.json");
+  const state = initialState("logweir-t28", clusters, backups);
+  assert.equal(state.pointState, "none", "the selector is what a visit with no identity gets");
+
+  const ordered = recoveryPoints(backups).map((p) => p.metadata.name);
+  assert.deepEqual(
+    ordered,
+    ["logweir-backup-laptop-20260911-183600", "logweir-backup-laptop-20260911-183400"],
+    "newest COMPLETION first, and the Running run is not a point at all",
+  );
+
+  const html = renderPointSelector(state);
+  assert.ok(html.includes("id=\"step-select-point\""), html.slice(0, 400));
+  for (const name of ordered) {
+    assert.ok(html.includes(name), "every point is offered: " + name);
+  }
+  assert.equal(
+    html.indexOf("logweir-backup-laptop-20260911-183800\">"),
+    -1,
+    "and the Running run is not offered as one",
+  );
+  assert.ok(
+    html.indexOf(ordered[0]) < html.indexOf(ordered[1]),
+    "in newest-first order in the rendered rows",
+  );
+  // Each row carries the identity the link will send, and the link itself.
+  for (const point of recoveryPoints(backups)) {
+    const route = restorePointRoute("logweir-t28", point);
+    // `&` is an HTML escape in an attribute, so the rendered href is the
+    // escaped spelling of exactly this route.
+    assert.ok(
+      html.includes("href=\"" + route.replace(/&/g, "&amp;") + "\">Restore this point</a>"),
+      route + " in " + html,
+    );
+    assert.ok(
+      html.includes("data-point=\"" + point.metadata.uid + "\""),
+      "and the row names the uid, so the filter never counts positions",
+    );
+  }
+  // The disclosed coverage, the topics, the count, the verdict and what this
+  // page can honestly say about the archive.
+  assert.ok(html.includes("2026-09-11T18:30:00Z"), "covered from");
+  assert.ok(html.includes("2026-09-11T18:36:00Z"), "covered to");
+  assert.ok(html.includes("1400"), "the record count");
+  assert.ok(html.includes("unverified"), "the signed verdict, in words");
+  assert.ok(html.includes("no manifest recorded"), "and what is known about the archive");
+  assert.ok(html.includes("id=\"point-search\""), "with a search over the rows");
+  assert.ok(html.includes(NO_MATCH_SENTENCE), "and the sentence the filter shows when none match");
+
+  // The search itself is a pure function the mount half applies to each row's
+  // own haystack.
+  const haystack = pointHaystack(recoveryPoints(backups)[0]);
+  assert.ok(matchesQuery(haystack, ""), "an empty query hides nothing");
+  assert.ok(matchesQuery(haystack, "LAPTOP"), "case-insensitive");
+  assert.ok(matchesQuery(haystack, "laptop orders"), "every term must match");
+  assert.ok(!matchesQuery(haystack, "laptop payments"), "…so a term that does not match narrows");
+  assert.ok(matchesQuery(haystack, "20260911-183600"), "the slot is searchable");
+  assert.ok(matchesQuery(haystack, "01M28ZBBBBBBBBBBBBBBBBBBBB".toLowerCase()), "and the set");
+
+  // TWO SCHEDULES, TWO ARCHIVES: a point is offered with the schedule that
+  // produced it, and the search narrows to one of them.
+  const mixed = fixture("wizard-backups-schedule-running.json");
+  mixed.items[0].spec.scheduleRef = { name: "nightly" };
+  mixed.items[0].spec.archive = { url: "s3://other-bucket/nightly" };
+  const mixedHtml = renderPointSelector(
+    initialState("logweir-t28", clusters, mixed),
+  );
+  assert.ok(mixedHtml.includes("nightly"), "the other schedule is named on its own row");
+  assert.ok(mixedHtml.includes("s3://other-bucket/nightly"), "…with its own archive");
+  assert.ok(
+    matchesQuery(pointHaystack(mixed.items[0]), "nightly") &&
+      !matchesQuery(pointHaystack(mixed.items[1]), "nightly"),
+    "and searching for one schedule excludes the other's points",
+  );
+});
+
+test("the_point_route_carries_name_and_uid_and_is_read_back_exactly", () => {
+  const backups = fixture("wizard-backups.json");
+  const point = recoveryPoints(backups)[0];
+  const route = restorePointRoute("team a", point);
+  assert.equal(
+    route,
+    "#/restore?ns=team%20a&backup=" + encodeURIComponent(point.metadata.name) +
+      "&uid=" + encodeURIComponent(point.metadata.uid),
+    "the namespace is explicit and every value percent-encoded: " + route,
+  );
+  const read = restoreRouteParams(route);
+  assert.deepEqual(read, {
+    ns: "team a",
+    uid: point.metadata.uid,
+    backup: point.metadata.name,
+  });
+  // TWO VALUES THAT MUST NOT BE SWAPPED. A hand-off that read the name into
+  // `uid` would leave the whole suite green if only one of them were asserted.
+  assert.notEqual(read.uid, read.backup);
+  assert.deepEqual(
+    restoreRouteParams("#/restore?ns=incident"),
+    { ns: "incident", uid: "", backup: "" },
+    "a visit with no point is the selector",
+  );
+  assert.deepEqual(
+    restoreRouteParams("#/restore"),
+    { ns: "", uid: "", backup: "" },
+    "and so is a visit with no query at all",
+  );
+  assert.equal(restoreSelectorRoute("incident"), "#/restore?ns=incident");
+  assert.equal(restoreSelectorRoute(""), "#/restore", "no namespace is guessed");
+});
+
+test("the_requested_point_in_time_is_bounded_by_the_disclosed_coverage_inclusively", async () => {
+  // PLAT-11.1: "constrain the requested timestamp to disclosed archive
+  // coverage", with the boundary INCLUSIVE at both ends. Until this row the
+  // out-of-window case was a grey complaint and the create went out anyway,
+  // so an approver could sign a document phase 0 was always going to refuse.
+  const backups = fixture("wizard-backups.json");
+  const state = initialState(
+    "logweir-t27",
+    fixture("wizard-clusters.json"),
+    backups,
+    newestPoint(backups),
+  );
+  const covered = recoveryPoints(backups)[0].status.windowCovered;
+  const floor = new Date(covered.fromMs).toISOString().replace(".000Z", "Z");
+  const ceiling = new Date(covered.toMs).toISOString().replace(".000Z", "Z");
+
+  // BOTH BOUNDS ARE INSIDE. A record whose timestamp equals either exactly is
+  // restored, and the page must not refuse it.
+  for (const inside of [floor, ceiling]) {
+    state.fields.pointInTime = inside;
+    assert.deepEqual(
+      Object.keys(validateRestore(state)),
+      [],
+      inside + " is inside the window the point discloses",
+    );
+  }
+
+  // ONE MILLISECOND OUTSIDE EITHER END IS A FIELD ERROR, and nothing is sent.
+  for (const outside of [
+    new Date(covered.fromMs - 1).toISOString(),
+    new Date(covered.toMs + 1).toISOString(),
+  ]) {
+    state.fields.pointInTime = outside;
+    const problems = validateRestore(state);
+    assert.match(
+      String(problems.pointInTime),
+      /outside the coverage this recovery point discloses/,
+      outside + " is outside it: " + JSON.stringify(problems),
+    );
+    const api = { create: async () => assert.fail("an out-of-window point must not be sent") };
+    await assert.rejects(
+      () => submitRestore(state, api),
+      (error) => {
+        assert.equal(error.kind, "invalid");
+        assert.ok(error.fields.pointInTime, "the message is on the field the operator typed in");
+        return true;
+      },
+    );
+  }
+
+  // AND THE REFUSAL KEEPS THE DRAFT: nothing here clears a value, and the
+  // field the page marks is the one the wizard renders a message beside.
+  state.fields.pointInTime = new Date(covered.toMs + 1).toISOString();
+  const kept = wizardDraftValues(state);
+  assert.equal(kept.pointInTime, state.fields.pointInTime, "the typed value survives the refusal");
+  const rendered = renderPointInTimeStep(
+    Object.assign({}, state, { errors: { pointInTime: [validateRestore(state).pointInTime] } }),
+  );
+  assert.ok(rendered.includes("aria-invalid=\"true\""), "and the input is marked: " + rendered);
+  assert.ok(rendered.includes("outside the coverage"), rendered);
+
+  // A GAPPED OR UNAVAILABLE ARCHIVE: a point whose run recorded no manifest
+  // key is still offered, and the page says what it does and does not know.
+  const gapped = fixture("wizard-backups.json");
+  delete gapped.items[0].status.manifestKey;
+  assert.equal(archiveAvailability(gapped.items[0]), "no manifest recorded");
+  assert.equal(
+    archiveAvailability(fixture("wizard-backups.json").items[0]),
+    "manifest recorded",
+    "and a run that did record one says so (control)",
+  );
+  // A run with NO covered window at all is not a point: there is no coverage
+  // to bound anything by, so nothing is offered rather than an unbounded one.
+  const windowless = fixture("wizard-backups.json");
+  delete windowless.items[0].status.windowCovered;
+  assert.equal(isRecoveryPoint(windowless.items[0]), false);
+  assert.equal(recoveryPoints(windowless).length, 0);
 });
 
 test("the_wizard_renders_a_sentence_and_step_2_when_no_backup_has_completed", () => {
@@ -1703,8 +2079,15 @@ test("the_wizard_renders_a_sentence_and_step_2_when_no_backup_has_completed", ()
   assert.equal(completedBackups(running).length, 0, "a Running-only list has no completed run");
   const page = renderNoCompletedBackup("ns", running);
   assert.ok(page.includes(NO_COMPLETED_BACKUP_SENTENCE), "the sentence is printed: " + page);
-  assert.ok(page.includes("<h3>2. Backup set</h3>"), "and step 2's table follows it");
+  assert.ok(page.includes(NO_SUCCEEDED_SENTENCE), "and why the rows below are not points");
+  assert.ok(page.includes("<h3>What this namespace holds</h3>"), "and the catalog follows it");
+  assert.ok(page.includes(running.items[0].metadata.name), "naming the runs there are");
   assert.equal(page.includes("<h3>6."), false, "and no later step is rendered");
+  assert.equal(page.indexOf("create-restore"), -1, "and nothing can be submitted");
+  assert.ok(
+    renderCatalogTable(running, null).includes("PHASE</th>"),
+    "the catalog carries the phase, so a reader can see which rows were candidates",
+  );
   const empty = renderNoCompletedBackup("ns", { items: [] });
   assert.ok(empty.includes(NO_COMPLETED_BACKUP_SENTENCE), "an empty list renders too: " + empty);
   const stale = JSON.parse(JSON.stringify(list));
@@ -1716,4 +2099,62 @@ test("the_wizard_renders_a_sentence_and_step_2_when_no_backup_has_completed", ()
     0,
     "a Succeeded run without a backupId (written before Task 28a) is not a completed set",
   );
+});
+
+// -- PLAT-11.1: the links that carry a point's identity into the wizard ------
+
+test("a_history_row_and_a_schedule_card_link_to_that_point_by_uid", () => {
+  const backups = fixture("wizard-backups-schedule-running.json");
+  const point = recoveryPoints(backups)[0];
+  const running = backups.items.find((b) => b.status.phase === "Running");
+
+  // THE HISTORY ROW. A completed Backup carries the link; a run still in
+  // flight does not, because the wizard would only refuse it -- a page that
+  // offered an action it knows cannot work is a page that wastes a click.
+  const list = renderHistoryList({ items: backups.items }, undefined, "logweir-t28");
+  assert.ok(list.includes("RESTORE</th>"), "the table has a column for it: " + list.slice(0, 600));
+  const route = restorePointRoute("logweir-t28", point).replace(/&/g, "&amp;");
+  assert.ok(
+    list.includes("href=\"" + route + "\">Restore this point</a>"),
+    "and the row links to THAT point, by uid: " + route,
+  );
+  assert.ok(route.includes("uid=" + point.metadata.uid), "both halves of the identity travel");
+  assert.ok(route.includes("backup=" + point.metadata.name), "the name beside the uid");
+  assert.equal(
+    restorePointCell(running, "logweir-t28").includes("Restore this point"),
+    false,
+    "a Running run is offered no link",
+  );
+  assert.equal(
+    restorePointCell({ kind: "Restore", metadata: { name: "restore-1" } }, "logweir-t28")
+      .includes("Restore this point"),
+    false,
+    "and a Restore is not a point to restore FROM",
+  );
+
+  // THE SCHEDULE CARD. Its rows are the Backups naming this schedule, newest
+  // completion first, each with the same link.
+  const schedule = { metadata: { name: "laptop" } };
+  const panel = renderRecoveryPoints("logweir-t28", schedule, backups);
+  assert.ok(panel.includes("<h3>Recovery points</h3>"), panel.slice(0, 200));
+  for (const p of recoveryPoints(backups)) {
+    assert.ok(
+      panel.includes("href=\"" + restorePointRoute("logweir-t28", p).replace(/&/g, "&amp;") + "\""),
+      "every point of this schedule is offered: " + p.metadata.name,
+    );
+  }
+  assert.ok(
+    panel.indexOf(recoveryPoints(backups)[0].metadata.name) <
+      panel.indexOf(recoveryPoints(backups)[1].metadata.name),
+    "newest completion first",
+  );
+  assert.ok(
+    panel.includes("1 further run(s) of this schedule are not offered"),
+    "and the run still in flight is counted, not silently dropped: " + panel,
+  );
+
+  // ANOTHER SCHEDULE'S RUNS ARE NOT THIS SCHEDULE'S POINTS.
+  const other = renderRecoveryPoints("logweir-t28", { metadata: { name: "nightly" } }, backups);
+  assert.ok(other.includes(NO_POINTS_SENTENCE), "a schedule with no run of its own says so");
+  assert.equal(other.indexOf("Restore this point"), -1, "and offers nothing");
 });
