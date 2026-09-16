@@ -361,10 +361,24 @@ impl Store {
             b = b
                 .with_bucket_name(&eff.bucket)
                 // Applied AFTER `from_env`, so an explicit value wins over
-                // `AWS_ALLOW_HTTP` / `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` in the
-                // environment (defect SEC-ENVHTTP, D-SEAMS S5).
+                // `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` in the environment.
                 .with_virtual_hosted_style_request(eff.virtual_hosted_style)
-                .with_allow_http(eff.allow_http)
+                // THE SINGLE TRANSPORT OVERRIDE, and it is deliberately the
+                // only one. `AmazonS3Builder::with_allow_http` writes into the
+                // builder's own `client_options`, which this call then
+                // REPLACES wholesale — so calling both would leave one of them
+                // dead, and a dead override is how a guard comes to be deleted
+                // as redundant while the live one is deleted as
+                // "already covered". `client` was built above from
+                // `eff.allow_http`, which came from the plan's transport and
+                // from nothing else (defect SEC-ENVHTTP, D-SEAMS S5).
+                //
+                // For `Ambient` this also means the new constructors do NOT
+                // inherit `from_env`'s other client options (proxy, timeouts).
+                // That is the point of the explicit path: `Ambient` here means
+                // "credentials from the ambient chain", not "transport from
+                // the environment". `from_url` / `read_only_from_url` are
+                // unchanged and still inherit everything.
                 .with_client_options(client);
             if let Some(r) = &eff.region {
                 b = b.with_region(r);
