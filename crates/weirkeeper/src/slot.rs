@@ -60,7 +60,13 @@ use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
 /// ten years has no match a scheduler should act on, and `None` is a reported
 /// outcome here rather than a silent one — the reconciler writes a condition
 /// for it.
-const WALK_DAYS: u32 = 3700;
+///
+/// PUBLIC SINCE D1 W1 BECAUSE [`crate::cadence`] WALKS THE SAME BOUND. A zoned
+/// cadence enumerates LOCAL calendar dates rather than UTC ones, so it cannot
+/// call the two functions below; it must reproduce their bound, and a second
+/// literal `3700` in another file is how the two would come to disagree about
+/// which expressions are answerable.
+pub const WALK_DAYS: u32 = 3700;
 
 /// A five-field cron expression: minute hour day-of-month month day-of-week.
 ///
@@ -339,6 +345,33 @@ impl Cron {
         bit(self.hour, minutes / 60) && bit(self.minute, minutes % 60)
     }
 
+    /// Whether this expression's month, day-of-month and day-of-week fields
+    /// match the calendar date `date`, by the classic cron day rule.
+    ///
+    /// ADDED BY D1 W1, AND IT IS A WINDOW AND NOT A NEW RULE. It exposes
+    /// [`Cron::day_matches`] unchanged, because [`crate::cadence`] matches the
+    /// **local** calendar date in a time zone and then maps the matched local
+    /// minutes to UTC instants — a walk this module's own two functions cannot
+    /// do, since theirs is a walk of UTC dates. Re-deriving the day rule there
+    /// would put two copies of cronie's `(DOM_STAR || DOW_STAR) ? … : …` line
+    /// in the tree, and the second copy is the one that drifts.
+    #[must_use]
+    pub fn matches_date(&self, date: NaiveDate) -> bool {
+        self.day_matches(date)
+    }
+
+    /// Whether this expression's hour and minute fields match `minutes`
+    /// minutes past midnight.
+    ///
+    /// The companion window to [`Cron::matches_date`]; see its note for why
+    /// [`crate::cadence`] needs both rather than a whole-instant predicate.
+    /// `minutes` outside `0..1440` simply matches nothing: [`bit`] is `false`
+    /// past its field's width, so there is no panic and no wrap.
+    #[must_use]
+    pub fn matches_minute_of_day(&self, minutes: u32) -> bool {
+        self.time_matches(minutes)
+    }
+
     /// Whether `date` matches the month, day-of-month and day-of-week fields.
     ///
     /// THE CLASSIC CRON DAY RULE, AS cronie ITSELF COMPUTES IT. `find_jobs`
@@ -522,6 +555,32 @@ fn check_range(value: u64, min: u32, max: u32) -> Result<(), FieldProblem> {
     Ok(())
 }
 
+/// The five-field expansion of one of the three accepted `@` aliases, or
+/// `None` for anything else — including an `@` form this parser refuses.
+///
+/// ADDED BY D1 W1 SO THERE IS STILL ONE ALIAS TABLE. `cadence::presets`
+/// recognises a saved `schedule` string as a preset by reading its five
+/// canonical fields, and D1 §4.2 rules that `@hourly`, `@daily` and `@weekly`
+/// map to `hourly{0}`, `daily{0,0}` and `weekly{0,0,0}`. That mapping is not a
+/// second decision: it is what [`AT_FORMS`] already says these three expand
+/// to, read through the matcher the other expressions go through. A
+/// hand-written `match` over the three strings in the preset module would be a
+/// second table, and a fourth alias added to [`AT_FORMS`] would then silently
+/// stop being recognisable as a preset.
+///
+/// `None` FOR AN UNKNOWN `@` FORM RATHER THAN AN ERROR: the caller's next step
+/// is [`Cron::parse`], which refuses it by name
+/// ([`CronError::UnknownAtForm`]), and two refusals of the same string from
+/// two functions is one refusal too many.
+#[must_use]
+pub fn expand_alias(expr: &str) -> Option<&'static str> {
+    let trimmed = expr.trim();
+    AT_FORMS
+        .iter()
+        .find(|(form, _)| *form == trimmed)
+        .map(|(_, expansion)| *expansion)
+}
+
 /// The bitset with every value in `min..=max` set.
 fn mask(min: u32, max: u32) -> u64 {
     let mut bits = 0u64;
@@ -602,7 +661,84 @@ impl std::error::Error for SlotError {}
 ///
 /// [`SlotError::NameTooLong`] when the composed name exceeds [`NAME_LIMIT`].
 pub fn scheduled_backup_name(schedule: &str, slot: &str) -> Result<String, SlotError> {
-    let name = format!("{SCHEDULED_BACKUP_PREFIX}{schedule}-{slot}");
+    scheduled_backup_name_for_attempt(schedule, slot, 0)
+}
+
+/// The number of characters `-r<k>` adds to a retry's name (D1 §3.1 rule 6).
+///
+/// THREE, NOT FOUR, and the difference is the whole schedule-name budget. `k`
+/// is `1..=`[`MAX_RETRIES`] — one decimal digit, always — so the suffix is a
+/// hyphen, an `r` and that digit. [`max_schedule_name_len`] turns this into the
+/// 32-character budget for a run without retries and the 29-character budget
+/// for a schedule that enables them.
+pub const RETRY_SUFFIX_LEN: usize = 3;
+
+/// The highest `spec.retry.maxRetries` this product accepts (D1 §4.1), and
+/// therefore the highest attempt number a slot's chain can reach.
+///
+/// THREE IS ALSO WHY [`RETRY_SUFFIX_LEN`] IS THREE: a two-digit `k` would add a
+/// fourth character to every retry name and move the budget under any schedule
+/// name an existing install already uses. Raising this cap is therefore a name
+/// decision as well as a policy one.
+pub const MAX_RETRIES: u32 = 3;
+
+/// The number of characters [`slot_name`] produces.
+///
+/// FIFTEEN — `yyyymmdd` + `-` + `hhmmss` — AND IT IS ASSERTED, NOT ASSUMED.
+/// [`max_schedule_name_len`] is a `const fn` and cannot call `slot_name`, so
+/// `tests/cadence.rs::the_slot_string_is_the_length_the_budget_assumes` walks
+/// real instants across a leap day, a year boundary and both DST directions
+/// and fails if any of them is not this many characters.
+pub const SLOT_NAME_LEN: usize = 15;
+
+/// The longest `BackupSchedule` name whose runs still fit [`NAME_LIMIT`].
+///
+/// **32 without retries, 29 with them** (D1 §3.1 rule 6): the prefix is 15
+/// characters, the separator 1 and the slot [`SLOT_NAME_LEN`], which leaves 32
+/// of the 63; enabling retries spends [`RETRY_SUFFIX_LEN`] of those.
+///
+/// WHY A FUNCTION AND NOT A DOCUMENTED NUMBER. A schedule whose name fits
+/// attempt 0 but not `-r1` would admit its slot, fail, and then be unable to
+/// mint the retry the user asked for — a policy that silently does not apply.
+/// D1 §4.5 step 0 makes that an INVALID POLICY (`Ready=False`
+/// `reason=NameTooLong`) rather than a run without retries, and
+/// [`retry_names_fit`] is the check that decides it.
+#[must_use]
+pub const fn max_schedule_name_len(with_retries: bool) -> usize {
+    let fixed = SCHEDULED_BACKUP_PREFIX.len() + 1 + SLOT_NAME_LEN;
+    let suffix = if with_retries { RETRY_SUFFIX_LEN } else { 0 };
+    NAME_LIMIT - fixed - suffix
+}
+
+/// `logweir-backup-<schedule>-<slot>` for attempt 0, and
+/// `logweir-backup-<schedule>-<slot>-r<k>` for retry `k` (D1 §3.1).
+///
+/// ATTEMPT 0 IS BYTE-FOR-BYTE [`scheduled_backup_name`], which is now a
+/// one-line call into this function: the retry names are the same names with a
+/// suffix, and two functions composing one string is how a retry comes to be
+/// spelled differently from the attempt it retries.
+///
+/// THE ATTEMPT IS A SUFFIX AND NOT SECONDS IN THE SLOT (D1 §4.10, rejected
+/// alternative). Encoding `k` in the slot's seconds digits would keep the name
+/// at 32 characters and make `20260907-140501` read as a real instant one
+/// second after the slot — to `reserved_slot`, to a label selector, and to the
+/// operator reading `kubectl get backups`.
+///
+/// # Errors
+///
+/// [`SlotError::NameTooLong`] when the composed name exceeds [`NAME_LIMIT`] —
+/// including when the *retry* is what pushes it past, which is the case
+/// [`retry_names_fit`] exists to catch before a slot is ever admitted.
+pub fn scheduled_backup_name_for_attempt(
+    schedule: &str,
+    slot: &str,
+    attempt: u32,
+) -> Result<String, SlotError> {
+    let name = if attempt == 0 {
+        format!("{SCHEDULED_BACKUP_PREFIX}{schedule}-{slot}")
+    } else {
+        format!("{SCHEDULED_BACKUP_PREFIX}{schedule}-{slot}-r{attempt}")
+    };
     if name.len() > NAME_LIMIT {
         return Err(SlotError::NameTooLong {
             limit: NAME_LIMIT,
@@ -610,6 +746,33 @@ pub fn scheduled_backup_name(schedule: &str, slot: &str) -> Result<String, SlotE
         });
     }
     Ok(name)
+}
+
+/// Whether every attempt name this schedule could ever need fits
+/// [`NAME_LIMIT`], given the retry policy's `max_retries`.
+///
+/// CHECKED AGAINST THE **DEEPEST** ATTEMPT, NOT THE FIRST. `max_retries` is
+/// `0..=`[`MAX_RETRIES`] and every retry suffix is the same
+/// [`RETRY_SUFFIX_LEN`] characters, so the deepest name is the longest and one
+/// probe answers for the whole chain. `max_retries == 0` probes attempt 0
+/// alone — a schedule that has not enabled retries keeps the 32-character
+/// budget it has always had, and this function must not shrink it.
+///
+/// THE SLOT IS A SYNTHETIC ONE, AND THAT IS SOUND BECAUSE EVERY SLOT IS THE
+/// SAME LENGTH ([`SLOT_NAME_LEN`], asserted by a test that walks real
+/// instants). A check that needed the *actual* next slot could not run at
+/// policy-validation time, which is the only moment at which the answer is
+/// still useful.
+///
+/// # Errors
+///
+/// [`SlotError::NameTooLong`], carrying the length the deepest attempt's name
+/// would have had — the value D1 §4.5 step 0 reports as `Ready=False`
+/// `reason=NameTooLong`.
+pub fn retry_names_fit(schedule: &str, max_retries: u32) -> Result<(), SlotError> {
+    let probe = "0".repeat(SLOT_NAME_LEN);
+    scheduled_backup_name_for_attempt(schedule, &probe, max_retries)?;
+    Ok(())
 }
 
 /// `<schedule uid>-<slot>` — the archive's `backup_id` for one scheduled run.
@@ -622,5 +785,26 @@ pub fn scheduled_backup_name(schedule: &str, slot: &str) -> Result<String, SlotE
 /// per cluster, so the collision cannot be constructed.
 #[must_use]
 pub fn backup_id_for(schedule_uid: &str, slot: &str) -> String {
-    format!("{schedule_uid}-{slot}")
+    backup_id_for_attempt(schedule_uid, slot, 0)
+}
+
+/// `<schedule uid>-<slot>` for attempt 0, `<schedule uid>-<slot>-r<k>` for
+/// retry `k` — the archive's `backup_id` for one scheduled EXECUTION (D1
+/// §3.1).
+///
+/// A RETRY IS A NEW EXECUTION ID AND NOT A SECOND WRITE UNDER THE OLD ONE.
+/// That is the module header's whole argument, restated for the retry case
+/// (D1 §4.6): a failed attempt may have written part of an archive, and a
+/// retry that reused its `backup_id` would append into that partial prefix —
+/// the manifest-says-2048-broker-holds-6000 false pass this module exists to
+/// prevent. The suffix is what keeps attempt `k` and attempt `k+1` in two
+/// prefixes, so a later drill restores from one complete archive or from
+/// none.
+#[must_use]
+pub fn backup_id_for_attempt(schedule_uid: &str, slot: &str, attempt: u32) -> String {
+    if attempt == 0 {
+        format!("{schedule_uid}-{slot}")
+    } else {
+        format!("{schedule_uid}-{slot}-r{attempt}")
+    }
 }

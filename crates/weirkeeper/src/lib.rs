@@ -24,6 +24,17 @@
 //! `AlreadyExists`** from the API server instead of writing a second, partial
 //! archive. [`controllers::backup_schedule`] is the reconciler that uses them.
 //!
+//! WHAT D1 W1 ADDED. [`cadence`] — the zone a cron expression is read in, the
+//! policy inputs that decide whether a due slot may still run, and the
+//! next-run preview the console shows (decision D1 §4, PLAT-04.2). It is the
+//! ONE cadence evaluator in the product: the scheduler, the API's
+//! `GET /api/v1/cadence-previews` and, through them, the browser all read this
+//! module, so there is no second answer to "when does my backup run". An
+//! absent `spec.timeZone` takes [`cadence::Zone::Utc`], which delegates to
+//! [`slot::Cron`] itself rather than re-deriving it, so every schedule that
+//! exists today keeps the slots it has today. Nothing here reads a clock
+//! either — guard **G-SLOT** covers both modules.
+//!
 //! WHAT TASK 16 ADDED. [`controllers`] holds the first two reconcilers —
 //! [`controllers::approval`], whose five checks in a stated order are what
 //! turn an `Approval` object into an authorisation, and
@@ -97,6 +108,7 @@
 //! the next reconcile finds none.
 
 pub mod backup_execution;
+pub mod cadence;
 pub mod conditions;
 pub mod controllers;
 pub mod crds;
