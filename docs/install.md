@@ -531,7 +531,15 @@ inside `spec.scheduleRef`, `spec.allUserTopics` and `status.selection` — all
 optional, and a `Backup` with none of them is read exactly as the controller
 that created it read it.
 No existing object is converted, nothing is rewritten, and an object that names
-none of the new fields resolves exactly as it did. The one field that stopped
+none of the new fields resolves exactly as it did.
+
+**One widening is not rollback-safe, and nothing in this build triggers it.**
+`Approval.spec.subjectRef.kind` gained `RehearsalSchedule`. A controller image
+that predates this change cannot decode such an object, and that is a reflector
+decode error which stalls **every** `Approval` reconcile — not one object. No
+component here creates one, so applying these CRDs and rolling the controller
+back is safe today. Before any worker starts creating them, read
+[kubernetes.md, "The one widening that is NOT rollback-safe"](kubernetes.md#the-one-widening-that-is-not-rollback-safe-approvalspecsubjectrefkind). The one field that stopped
 being required — `Restore.spec.approvalRef` — is still required in effect: CEL
 demands exactly one of it and `spec.authorization`, so an unauthorised `Restore`
 remains unrepresentable. An older controller reading a

@@ -109,7 +109,7 @@ pub struct VerifiedSubjectRef {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "Approval",
-    doc = "A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable.",
+    doc = "A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable. `subjectRef.kind` gained `RehearsalSchedule` in ADR 0008 Amendment G: the enum only GROWS, but the decode is closed, so a controller image that predates that amendment cannot deserialize such an object and its whole Approval watch stalls. Nothing in this build creates one; before anything does, every rollback target must already understand the value (docs/kubernetes.md, `Upgrade, rollback and legacy Jobs`).",
     plural = "approvals",
     singular = "approval",
     namespaced,

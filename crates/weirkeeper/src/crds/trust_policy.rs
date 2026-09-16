@@ -282,7 +282,16 @@ pub struct TrustedKey {
     pub spki_pem: String,
     /// The algorithm, checked by the controller against the PEM.
     pub algorithm: KeyAlgorithm,
-    /// What this key may be used for. Immutable (G1).
+    /// What this key may be used for. Immutable (G7).
+    ///
+    /// COMPARED AS AN ORDERED LIST, which is stricter than the property needs.
+    /// CEL's `==` on a list is order-sensitive and this is not declared
+    /// `x-kubernetes-list-type: set`, so re-ordering `usages` without changing
+    /// the SET is refused with G7's message — over-strict, and harmless because
+    /// a usage set is written once and never edited. Declaring it a set would
+    /// relax the comparison; it would also let the API server merge entries
+    /// from two appliers, which is not wanted on a field that decides what a
+    /// key may authorise.
     #[schemars(length(min = 1, max = 3))]
     pub usages: Vec<KeyUsage>,
     /// Who holds it.

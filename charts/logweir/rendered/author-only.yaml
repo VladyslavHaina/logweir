@@ -47,7 +47,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable.'
+        description: 'A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable. `subjectRef.kind` gained `RehearsalSchedule` in ADR 0008 Amendment G: the enum only GROWS, but the decode is closed, so a controller image that predates that amendment cannot deserialize such an object and its whole Approval watch stalls. Nothing in this build creates one; before anything does, every rollback target must already understand the value (docs/kubernetes.md, `Upgrade, rollback and legacy Jobs`).'
         properties:
           spec:
             description: '`Approval.spec` — **four fields, all required**.'
@@ -920,6 +920,8 @@ spec:
               rule: self == oldSelf
             - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved
               rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://'' + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
+            - message: 'spec.allUserTopics requires spec.topics to be empty: a named allowlist and a dynamic selection are two answers to one question'
+              rule: '!has(self.allUserTopics) || size(self.topics) == 0'
           status:
             description: '`Backup.status`.'
             nullable: true
@@ -3574,16 +3576,16 @@ spec:
                         nullable: true
                         properties:
                           cpu:
-                            description: CPU, as a Kubernetes quantity.
-                            maxLength: 16
+                            description: CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling** (4) is the rehearsal controller's, not this pattern's.
+                            maxLength: 20
                             nullable: true
-                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                             type: string
                           memory:
-                            description: Memory, as a Kubernetes quantity.
-                            maxLength: 16
+                            description: Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling** (8Gi) is the rehearsal controller's, not this pattern's.
+                            maxLength: 20
                             nullable: true
-                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                             type: string
                         type: object
                       requests:
@@ -3591,16 +3593,16 @@ spec:
                         nullable: true
                         properties:
                           cpu:
-                            description: CPU, as a Kubernetes quantity.
-                            maxLength: 16
+                            description: CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling** (4) is the rehearsal controller's, not this pattern's.
+                            maxLength: 20
                             nullable: true
-                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                             type: string
                           memory:
-                            description: Memory, as a Kubernetes quantity.
-                            maxLength: 16
+                            description: Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling** (8Gi) is the rehearsal controller's, not this pattern's.
+                            maxLength: 20
                             nullable: true
-                            pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                            pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                             type: string
                         type: object
                     type: object
@@ -4083,16 +4085,16 @@ spec:
                     nullable: true
                     properties:
                       cpu:
-                        description: CPU, as a Kubernetes quantity.
-                        maxLength: 16
+                        description: CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling** (4) is the rehearsal controller's, not this pattern's.
+                        maxLength: 20
                         nullable: true
-                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                       memory:
-                        description: Memory, as a Kubernetes quantity.
-                        maxLength: 16
+                        description: Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling** (8Gi) is the rehearsal controller's, not this pattern's.
+                        maxLength: 20
                         nullable: true
-                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                     type: object
                   requests:
@@ -4100,16 +4102,16 @@ spec:
                     nullable: true
                     properties:
                       cpu:
-                        description: CPU, as a Kubernetes quantity.
-                        maxLength: 16
+                        description: CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling** (4) is the rehearsal controller's, not this pattern's.
+                        maxLength: 20
                         nullable: true
-                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                       memory:
-                        description: Memory, as a Kubernetes quantity.
-                        maxLength: 16
+                        description: Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling** (8Gi) is the rehearsal controller's, not this pattern's.
+                        maxLength: 20
                         nullable: true
-                        pattern: ^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$
+                        pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                     type: object
                 type: object
@@ -5779,7 +5781,10 @@ spec:
                       - Revoked
                       type: string
                     usages:
-                      description: What this key may be used for. Immutable (G1).
+                      description: |-
+                        What this key may be used for. Immutable (G7).
+
+                        COMPARED AS AN ORDERED LIST, which is stricter than the property needs. CEL's `==` on a list is order-sensitive and this is not declared `x-kubernetes-list-type: set`, so re-ordering `usages` without changing the SET is refused with G7's message — over-strict, and harmless because a usage set is written once and never edited. Declaring it a set would relax the comparison; it would also let the API server merge entries from two appliers, which is not wanted on a field that decides what a key may authorise.
                       items:
                         description: |-
                           What a key is allowed to be used for.

@@ -89,10 +89,10 @@ use crate::conditions::{
     REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
     REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
-    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_JOB_NAME_CONFLICT,
-    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
-    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_UNSCHEDULABLE,
-    TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
+    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
 };
 use crate::crds::backup::Backup;
 use crate::crds::kafka_cluster::KafkaCluster;
@@ -2186,6 +2186,42 @@ async fn reconcile_backup_inner(
                 "spec.topics names `{entry}`, which carries a glob metacharacter; topics are a \
                  mandatory NAMED allowlist (Global Constraint 18(c) rail 1, guard G-GLOB) and a \
                  pattern is refused rather than expanded"
+            ),
+        ));
+    }
+
+    // STEP 0b'. THE SELECTION SHAPE, BEFORE ANY `POST`, AND FOR THE SAME
+    // REASON THE GLOB RAIL IS HERE. D1 §7.1 fixes exactly two shapes; the
+    // third — a named allowlist beside a dynamic block — is the one this
+    // build would answer WRONG rather than refuse, because nothing in it
+    // resolves `allUserTopics` yet, so an operator who asked for whole-cluster
+    // coverage would get a two-topic run and no signal.
+    //
+    // ADMISSION REFUSES IT TOO (`crds::backup::SELECTION_SHAPE_RULE`), and
+    // this rail is not redundant with it: an object admitted by an OLDER CRD
+    // revision reaches this controller unchecked, and `validate_topic_selection`
+    // is the one implementation the scheduler, this reconciler and the API's
+    // 422 all share, so the three cannot disagree about what a valid policy is.
+    //
+    // THE SELECTION HALF ONLY. `deadlineSeconds` is part of the run policy
+    // digest but its refusal already belongs to PLAT-06.1's
+    // `ExecutionSpecInvalid`, which names the field; moving it here would
+    // change the terminal state of a run that already has one.
+    //
+    // TERMINAL, because `spec` is CEL-immutable: a requeue over a shape that
+    // cannot be edited would never succeed.
+    if let Err(errors) = crate::policy::validate_topic_selection(&backup.spec) {
+        let detail = errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(BackupError::Refused(
+            TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+            format!(
+                "spec.topics and spec.allUserTopics do not form one of the two selection shapes \
+                 D1 §7.1 admits (a non-empty named allowlist with no allUserTopics, or \
+                 `topics: []` with one): {detail}"
             ),
         ));
     }

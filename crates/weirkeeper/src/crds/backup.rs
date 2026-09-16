@@ -129,14 +129,43 @@ pub const DESTINATION_SENTINEL_RULE: &str = "has(self.destinationRef) ? (self.ar
 /// The message [`DESTINATION_SENTINEL_RULE`] travels with.
 pub const DESTINATION_SENTINEL_MESSAGE: &str = "with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved";
 
+/// The CEL rule that refuses the third selection shape.
+///
+/// # Why admission has to say this and not only the controller
+///
+/// D1 §7.1 fixes exactly two shapes: a non-empty `topics` with no
+/// `allUserTopics`, or `topics: []` with one. The third — a named allowlist
+/// AND a dynamic block — is two answers to one question, and the answer this
+/// build gives is the WRONG one silently: today's controller ignores
+/// `allUserTopics`, so an operator who asked for whole-cluster coverage would
+/// get a two-topic run and no signal at all. `topics: []` with no block fails
+/// SAFE (the runner's empty-list rail exits 3 without contacting the engine);
+/// this shape fails wrong.
+///
+/// D1 §5.2's ratcheting objection — "a stored `topics: []` object would block
+/// even `suspend` updates on 1.29" — is about `BackupSchedule`, whose spec is
+/// editable. `Backup.spec` is sealed whole and no stored `Backup` carries
+/// `allUserTopics`, so no existing object can fail this rule.
+///
+/// `crate::policy::validate_run_policy` says the same thing a second time, on
+/// purpose: it is what the API answers 422 with, what an older CRD's objects
+/// are re-checked against, and what the reconciler refuses terminally with
+/// before any POST.
+pub const SELECTION_SHAPE_RULE: &str = "!has(self.allUserTopics) || size(self.topics) == 0";
+
+/// The message [`SELECTION_SHAPE_RULE`] travels with.
+pub const SELECTION_SHAPE_MESSAGE: &str =
+    "spec.allUserTopics requires spec.topics to be empty: a named allowlist and a dynamic selection are two answers to one question";
+
 /// The rules on `Backup`'s `.spec`.
 ///
-/// The whole spec stays sealed — a run's inputs are the run — and the sentinel
-/// rule sits beside it because a transition rule is NOT evaluated on create
-/// and the sentinel has to be.
-pub const SPEC_RULES: [SpecRule; 2] = [
+/// The whole spec stays sealed — a run's inputs are the run — and the two
+/// validation rules sit beside it because a transition rule is NOT evaluated
+/// on create, which is the only moment that matters for a sealed spec.
+pub const SPEC_RULES: [SpecRule; 3] = [
     SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
+    SpecRule::new(SELECTION_SHAPE_RULE, SELECTION_SHAPE_MESSAGE),
 ];
 
 /// The archive window this run covers, in **epoch milliseconds**.

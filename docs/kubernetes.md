@@ -1414,9 +1414,43 @@ later replacement is refused before phase 0. Legacy Verified Approval status
 is held until the Approval controller records `verifiedSubjectRef`; an Approval
 already bound to a deleted UID is refused and must be recreated.
 
-The Approval CRD change is additive and may remain installed during and after a
-controller rollback; do not attempt to downgrade or delete the CRD as part of
-rollback. Fence controller changes by scaling weirkeeper to zero, then let or
+##### The one widening that is NOT rollback-safe: `Approval.spec.subjectRef.kind`
+
+ADR 0008 Amendment G adds a third value, `RehearsalSchedule`. The **schema**
+change is additive — the enum only grows — but the *decode* is not.
+`weirkeeper`'s `SubjectKind` is a closed serde enum with no unknown-value
+fallback, so a controller image that predates Amendment G **cannot deserialize
+an `Approval` whose `subjectRef.kind` is `RehearsalSchedule`**. That is a
+reflector decode error, and a reflector decode error takes down the whole
+watch: **every** `Approval` reconcile in the cluster stalls, not just that one
+object. It is exactly the failure the `Backup` archive sentinel was designed to
+avoid, and the enum cannot be given the same treatment — a sentinel needs a
+field to hide in, and this is the field.
+
+**In this build the hazard is latent and nothing triggers it.** No component
+creates such an `Approval`: the rehearsal controller does not exist, and this
+build's `Approval` reconciler refuses a `RehearsalSchedule` subject visibly with
+`ReferentHasNoPlanBytes` rather than verifying it. So an operator who applies
+these CRDs and rolls the controller back is unaffected.
+
+**The rule for the rehearsal worker, and the rollback order:**
+
+1. Do **not** create an `Approval` with `subjectRef.kind: RehearsalSchedule`
+   until every controller image you might roll back to already understands the
+   value. That floor is the commit that adds Amendment G.
+2. If one exists and you must roll back further, **delete or recreate those
+   `Approval` objects first**, before the controller image changes. Deleting
+   the CRD is not an option — it would delete every `Approval` in the cluster.
+3. Check for them with
+   `kubectl --context "$LOGWEIR_CONTEXT" get approvals -A -o jsonpath='{range .items[?(@.spec.subjectRef.kind=="RehearsalSchedule")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`
+   and expect no output before rolling back.
+
+The CRD's own description says the same thing, so
+`kubectl explain approval.spec.subjectRef.kind` carries the warning.
+
+The rest of the Approval CRD change is additive and may remain installed during
+and after a controller rollback; do not attempt to downgrade or delete the CRD
+as part of rollback. Fence controller changes by scaling weirkeeper to zero, then let or
 cancel every pending/running Restore and verify none is between ConfigMap
 materialization and Job creation. Roll back controller and runner images only
 after that drain. An older controller does not understand the new execution

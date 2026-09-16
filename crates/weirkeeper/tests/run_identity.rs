@@ -514,6 +514,26 @@ fn the_selection_shape_is_one_of_exactly_two() {
         "an empty allowlist with no dynamic block must name the guard it violates: {errs:?}"
     );
 
+    // THE TWO ENTRY POINTS AGREE ABOUT THE SHAPE, and differ only about
+    // `deadlineSeconds` — which belongs to PLAT-06.1's `ExecutionSpecInvalid`,
+    // not to D1's `InvalidTopicSelection`. The Backup reconciler calls the
+    // selection half so it does not take over a refusal that already has an
+    // owner.
+    let mut zero_deadline = dynamic.clone();
+    zero_deadline["spec"]["deadlineSeconds"] = json!(0);
+    let zero_deadline = backup(&zero_deadline);
+    assert_eq!(
+        policy::validate_topic_selection(&zero_deadline.spec),
+        Ok(SelectionShape::AllUserTopics),
+        "a zero deadline is not a selection problem"
+    );
+    let errs = policy::validate_run_policy(&zero_deadline.spec)
+        .expect_err("but it IS a run-policy problem");
+    assert!(
+        errs.iter().all(|e| e.field == "spec.deadlineSeconds"),
+        "and the only error is the deadline: {errs:?}"
+    );
+
     // And the digest distinguishes the two dynamic policies, so switching
     // `incompleteDiscovery` is visibly a policy change.
     let mut refusing = dynamic.clone();

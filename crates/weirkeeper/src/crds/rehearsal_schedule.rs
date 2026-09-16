@@ -67,15 +67,31 @@ pub const RENDERED_PREFIX_SUFFIX_LEN: usize = 9;
 /// The Kafka topic-name grammar.
 pub const TOPIC_NAME_PATTERN: &str = super::topic_discovery::TOPIC_NAME_PATTERN;
 
-/// A Kubernetes quantity, in the forms this field accepts.
+/// A Kubernetes quantity, in **the grammar `apimachinery` actually accepts**:
+/// a decimal number with an optional decimal SI suffix (`n`, `u`, `m`, none,
+/// `k`, `M`, `G`, `T`, `P`, `E`), an optional binary SI suffix (`Ki`, `Mi`,
+/// `Gi`, `Ti`, `Pi`, `Ei`) or an optional decimal exponent (`e9`, `E-3`).
 ///
-/// A PATTERN AND NOT A CEL COMPARISON. Comparing quantities in CEL needs the
-/// `quantity` library, whose presence cannot be proved on the 1.29 floor Global
-/// Constraint 25 fixes — the same reason D2 R5 uses a regex instead of the CEL
-/// URL library. The numeric ceilings D3 §4.1 states (memory limit 8Gi, cpu
-/// limit 4) are enforced by the rehearsal controller, which refuses the slot
-/// and records `AuthorizationInvalid` rather than creating an oversized Job.
-pub const QUANTITY_PATTERN: &str = r"^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|K|M|G)?$";
+/// # Two corrections, both from review finding F6
+///
+/// The first form of this pattern was `(m|Ki|Mi|Gi|K|M|G)?`. It **refused legal
+/// quantities** an operator would reasonably write — `2Ti` for a scratch
+/// restore, `100n`, `1e9` — with a message that says only "should match", and
+/// it **accepted `K`**, which Kubernetes does not: the decimal kilo suffix is
+/// lowercase `k`, and `Ki` is the binary one.
+///
+/// # What a pattern still cannot say
+///
+/// It cannot tell a cpu quantity from a memory one, so `cpu: 5Gi` and
+/// `memory: 100m` are both well-formed here and both nonsense. Nor can it
+/// express the numeric ceilings D3 §4.1 states (memory limit 8Gi, cpu limit 4):
+/// comparing quantities in CEL needs the `quantity` library, whose presence
+/// cannot be proved on the 1.29 floor Global Constraint 25 fixes — the same
+/// reason D2 R5 uses a regex instead of the CEL URL library. **Both are the
+/// rehearsal controller's**, which must refuse an oversized or wrong-unit
+/// request with `AuthorizationInvalid` rather than creating the Job.
+pub const QUANTITY_PATTERN: &str =
+    r"^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$";
 
 /// I1 — the spec is sealed except `suspend`.
 ///
@@ -216,13 +232,15 @@ pub struct RehearsalTarget {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceQuantities {
-    /// CPU, as a Kubernetes quantity.
+    /// CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling**
+    /// (4) is the rehearsal controller's, not this pattern's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 16))]
+    #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 20))]
     pub cpu: Option<String>,
-    /// Memory, as a Kubernetes quantity.
+    /// Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling**
+    /// (8Gi) is the rehearsal controller's, not this pattern's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 16))]
+    #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 20))]
     pub memory: Option<String>,
 }
 

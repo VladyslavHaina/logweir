@@ -161,10 +161,47 @@ pub enum SelectionShape {
 /// `logweir_core::destination::validate` returns every one: a 422 that names
 /// one of three mistakes makes the operator submit three times.
 ///
+/// This is [`validate_topic_selection`] plus the bounds that are not about
+/// topics. The two are separate because they are refused in DIFFERENT PLACES:
+/// the selection half is the `Backup` reconciler's terminal
+/// `InvalidTopicSelection` (D1 §3.4), while `deadlineSeconds` already belongs
+/// to PLAT-06.1's `ExecutionSpecInvalid`, which names the field and has its
+/// own test. One function reporting both would move a refusal that already has
+/// an owner.
+///
 /// # Errors
 ///
 /// A [`FieldError`] per problem, each naming a dotted path rooted at `spec`.
 pub fn validate_run_policy(spec: &BackupSpec) -> Result<SelectionShape, Vec<FieldError>> {
+    let mut errs: Vec<FieldError> = match validate_topic_selection(spec) {
+        Ok(_) => Vec::new(),
+        Err(errs) => errs,
+    };
+    let shape = validate_topic_selection(spec).ok();
+
+    if spec.deadline_seconds <= 0 {
+        errs.push(field_error(
+            "spec.deadlineSeconds",
+            format!(
+                "deadlineSeconds is {}; a Job needs a positive activeDeadlineSeconds",
+                spec.deadline_seconds
+            ),
+        ));
+    }
+
+    match (errs.is_empty(), shape) {
+        (true, Some(shape)) => Ok(shape),
+        _ => Err(errs),
+    }
+}
+
+/// The TOPIC half of the run policy: which of D1 §7.1's two shapes this spec
+/// declares, or every reason it declares neither.
+///
+/// # Errors
+///
+/// A [`FieldError`] per problem, each naming a dotted path rooted at `spec`.
+pub fn validate_topic_selection(spec: &BackupSpec) -> Result<SelectionShape, Vec<FieldError>> {
     let mut errs: Vec<FieldError> = Vec::new();
 
     // THE THIRD SHAPE IS THE ONE THAT MATTERS. `topics` non-empty AND a
@@ -241,16 +278,6 @@ pub fn validate_run_policy(spec: &BackupSpec) -> Result<SelectionShape, Vec<Fiel
                 ));
             }
         }
-    }
-
-    if spec.deadline_seconds <= 0 {
-        errs.push(field_error(
-            "spec.deadlineSeconds",
-            format!(
-                "deadlineSeconds is {}; a Job needs a positive activeDeadlineSeconds",
-                spec.deadline_seconds
-            ),
-        ));
     }
 
     match (errs.is_empty(), shape) {

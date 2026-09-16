@@ -229,6 +229,8 @@ spec:
               rule: self == oldSelf
             - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved
               rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://'' + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
+            - message: 'spec.allUserTopics requires spec.topics to be empty: a named allowlist and a dynamic selection are two answers to one question'
+              rule: '!has(self.allUserTopics) || size(self.topics) == 0'
           status:
             description: '`Backup.status`.'
             nullable: true

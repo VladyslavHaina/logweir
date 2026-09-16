@@ -3073,6 +3073,108 @@ async fn a_wildcard_topic_is_refused_before_any_post() {
     );
 }
 
+/// The third selection shape — a named allowlist **and** a dynamic block — is a
+/// **terminal refusal before any `POST`**, and so is an empty allowlist with no
+/// block.
+///
+/// # Why the controller refuses this and not only the API server
+///
+/// `crds::backup::SELECTION_SHAPE_RULE` refuses it at admission, which handles
+/// every object created against this CRD revision. It does NOT handle an object
+/// admitted by an OLDER CRD and reconciled by this controller, which is the
+/// ordinary state of affairs during an upgrade — CRDs are applied before the
+/// controller, so the reverse (a newer controller reading objects admitted by
+/// an older schema) is the supported direction and the one that reaches here.
+///
+/// AND THE FAILURE MODE IS THE BAD KIND. Nothing in this build resolves
+/// `allUserTopics`, so without this rail an operator who asked for
+/// whole-cluster coverage would get a two-topic run, a signed receipt
+/// attesting two topics, and no signal anywhere. `topics: []` alone fails SAFE
+/// — the runner's empty-list rail exits 3 before contacting the engine — and is
+/// refused here too, earlier and by name.
+///
+/// TERMINAL, because `spec` is CEL-immutable: nothing about waiting changes a
+/// shape that cannot be edited.
+#[tokio::test]
+async fn a_selection_that_is_neither_shape_is_refused_before_any_post() {
+    let both = {
+        let mut v: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+        v["spec"]["allUserTopics"] =
+            serde_json::json!({ "incompleteDiscovery": "BackUpVisibleTopics" });
+        v
+    };
+    let neither = {
+        let mut v: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+        v["spec"]["topics"] = serde_json::json!([]);
+        v
+    };
+
+    for (case, value, field) in [
+        (
+            "a named allowlist beside a dynamic block",
+            both,
+            "spec.allUserTopics",
+        ),
+        (
+            "an empty allowlist with no dynamic block",
+            neither,
+            "spec.topics",
+        ),
+    ] {
+        let b: Backup = serde_json::from_value(value).expect("the mutated fixture is a Backup");
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+        let outcome = reconcile_backup(
+            &b,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an OUTCOME, never an error");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("InvalidTopicSelection"),
+            "case `{case}`: D1 §3.4's terminal state, not a generic one"
+        );
+        {
+            let seen = seen.lock().expect("the recorder is readable");
+            assert!(
+                !seen.iter().any(|r| r.method == "POST"),
+                "case `{case}`: ZERO `POST`s — no ConfigMap, no Job; got {:?}",
+                *seen
+            );
+        }
+        let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+        assert_eq!(
+            conditions_of(&statuses[0]),
+            vec![(
+                "Failed".to_string(),
+                "True".to_string(),
+                "InvalidTopicSelection".to_string()
+            )],
+            "case `{case}`'s condition"
+        );
+        let message = statuses[0]["conditions"][0]["message"]
+            .as_str()
+            .expect("the condition carries a message");
+        assert!(
+            message.contains(field),
+            "case `{case}`: the message NAMES the field that is wrong, so an operator does not \
+             have to guess which half to change; got: {message}"
+        );
+    }
+
+    // THE CONTROL. The unmodified fixture is a named allowlist and is rendered,
+    // so the two refusals above failed on the SHAPE and on nothing else.
+    let (_seen, bodies) = create_pass(create_routes(201, existing_plan_config_map(UID))).await;
+    assert!(
+        posted_config_map(&bodies)["data"]["backup.yaml"].is_string(),
+        "a non-empty `topics` with no `allUserTopics` is one of the two legal shapes"
+    );
+}
+
 /// A `scramSha512` cluster with no `auth.username` cannot be rendered, and
 /// that is terminal too.
 ///

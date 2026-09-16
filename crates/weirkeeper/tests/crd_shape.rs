@@ -1132,6 +1132,359 @@ fn every_spec_carries_exactly_its_declared_rules() {
     );
 }
 
+/// Every CEL rule the three decisions name is PRESENT in the shipped CRD, by
+/// its own constant and by its message text in the file's bytes.
+///
+/// # The hole this closes, which was reproduced twice
+///
+/// `every_spec_carries_exactly_its_declared_rules` compares the shipped YAML
+/// against each kind's `SPEC_RULES` array — so when a rule is deleted from that
+/// array, BOTH SIDES MOVE TOGETHER and the comparison still holds. The
+/// semantic tests beside it read the rule CONSTANT and evaluate its text, which
+/// says what the rule means and nothing about whether it ships.
+///
+/// Review finding F1 planted two mutants through that hole. Deleting
+/// `restore::EXACTLY_ONE_AUTHORIZATION_RULE` from `restore::SPEC_RULES` and
+/// running `just crds` left all forty `crd_shape` tests green with
+/// `config/crd/restores.yaml` no longer carrying the rule — and that rule is
+/// the ONLY thing making an unauthorised `Restore` unrepresentable, in the same
+/// change that made `approvalRef` optional. Deleting
+/// `backup::DESTINATION_SENTINEL_RULE` survived the whole 424-test suite.
+///
+/// So this table is a LITERAL, deliberately not derived from any array the
+/// emitter reads. Each row names a kind, the constant, and the message; the
+/// assertions are made against the parsed schema AND against the file's raw
+/// bytes, so neither a dropped array entry nor a schema-walk that stopped
+/// looking can hide a missing rule.
+const NAMED_RULES: &[(&str, &str, &str)] = &[
+    (
+        "backups.yaml",
+        weirkeeper::crds::SPEC_IMMUTABLE_RULE,
+        weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "backups.yaml",
+        weirkeeper::crds::backup::DESTINATION_SENTINEL_RULE,
+        weirkeeper::crds::backup::DESTINATION_SENTINEL_MESSAGE,
+    ),
+    (
+        "backups.yaml",
+        weirkeeper::crds::backup::SELECTION_SHAPE_RULE,
+        weirkeeper::crds::backup::SELECTION_SHAPE_MESSAGE,
+    ),
+    (
+        "backupschedules.yaml",
+        weirkeeper::crds::backup_schedule::SUSPEND_ONLY_RULE,
+        weirkeeper::crds::backup_schedule::SUSPEND_ONLY_MESSAGE,
+    ),
+    (
+        "backupschedules.yaml",
+        weirkeeper::crds::backup_schedule::DESTINATION_SENTINEL_RULE,
+        weirkeeper::crds::backup_schedule::DESTINATION_SENTINEL_MESSAGE,
+    ),
+    (
+        "restores.yaml",
+        weirkeeper::crds::SPEC_IMMUTABLE_RULE,
+        weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "restores.yaml",
+        weirkeeper::crds::restore::DESTINATIONS_TOGETHER_RULE,
+        weirkeeper::crds::restore::DESTINATIONS_TOGETHER_MESSAGE,
+    ),
+    (
+        "restores.yaml",
+        weirkeeper::crds::restore::DESTINATION_SENTINEL_RULE,
+        weirkeeper::crds::restore::DESTINATION_SENTINEL_MESSAGE,
+    ),
+    (
+        "restores.yaml",
+        weirkeeper::crds::restore::EXACTLY_ONE_AUTHORIZATION_RULE,
+        weirkeeper::crds::restore::EXACTLY_ONE_AUTHORIZATION_MESSAGE,
+    ),
+    (
+        "kafkaclusters.yaml",
+        weirkeeper::crds::SPEC_IMMUTABLE_RULE,
+        weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "approvals.yaml",
+        weirkeeper::crds::SPEC_IMMUTABLE_RULE,
+        weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "trustrosters.yaml",
+        weirkeeper::crds::SPEC_IMMUTABLE_RULE,
+        weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
+    ),
+    // D2 §3.2, R0-R9. R0 sits on the schema ROOT and is checked beside the
+    // others below, because that is the one node a rule may read
+    // `self.metadata.name` from.
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R1_STORAGE_IMMUTABLE_RULE,
+        weirkeeper::crds::backup_destination::R1_STORAGE_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R2_TRANSPORT_IMMUTABLE_RULE,
+        weirkeeper::crds::backup_destination::R2_TRANSPORT_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R3_TRANSPORT_SCHEME_RULE,
+        weirkeeper::crds::backup_destination::R3_TRANSPORT_SCHEME_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R4_CA_REQUIRES_TLS_RULE,
+        weirkeeper::crds::backup_destination::R4_CA_REQUIRES_TLS_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R5_ENDPOINT_RULE,
+        weirkeeper::crds::backup_destination::R5_ENDPOINT_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R6_PREFIX_RULE,
+        weirkeeper::crds::backup_destination::R6_PREFIX_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R7_GRANT_SHAPE_RULE,
+        weirkeeper::crds::backup_destination::R7_GRANT_SHAPE_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R8_EVIDENCE_READ_SHAPE_RULE,
+        weirkeeper::crds::backup_destination::R8_EVIDENCE_READ_SHAPE_MESSAGE,
+    ),
+    (
+        "backupdestinations.yaml",
+        weirkeeper::crds::backup_destination::R9_ARCHIVE_READ_GRANT_RULE,
+        weirkeeper::crds::backup_destination::R9_ARCHIVE_READ_GRANT_MESSAGE,
+    ),
+    // D2 §5.1 T1/T2 and §6.2 P1-P9.
+    (
+        "topicdiscoveries.yaml",
+        weirkeeper::crds::topic_discovery::T1_REQUEST_IMMUTABLE_RULE,
+        weirkeeper::crds::topic_discovery::T1_REQUEST_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "topicdiscoveries.yaml",
+        weirkeeper::crds::topic_discovery::CANCEL_MONOTONIC_RULE,
+        weirkeeper::crds::topic_discovery::CANCEL_MONOTONIC_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P1_REQUEST_IMMUTABLE_RULE,
+        weirkeeper::crds::preflight::P1_REQUEST_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P2_CANCEL_MONOTONIC_RULE,
+        weirkeeper::crds::preflight::P2_CANCEL_MONOTONIC_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P3_OPERATION_BLOCK_RULE,
+        weirkeeper::crds::preflight::P3_OPERATION_BLOCK_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P4_BACKUP_TARGET_RULE,
+        weirkeeper::crds::preflight::P4_BACKUP_TARGET_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P5_RESTORE_SUBJECT_RULE,
+        weirkeeper::crds::preflight::P5_RESTORE_SUBJECT_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P6_DRAFT_FIELDS_RULE,
+        weirkeeper::crds::preflight::P6_DRAFT_FIELDS_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P7_RESTORE_DESTINATIONS_RULE,
+        weirkeeper::crds::preflight::P7_RESTORE_DESTINATIONS_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P8_RESTORE_SOURCE_RULE,
+        weirkeeper::crds::preflight::P8_RESTORE_SOURCE_MESSAGE,
+    ),
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P9_PLAN_HASH_RULE,
+        weirkeeper::crds::preflight::P9_PLAN_HASH_MESSAGE,
+    ),
+    // D3 §7.1 G1-G7.
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G1_KEYS_ARE_APPEND_ONLY_RULE,
+        weirkeeper::crds::trust_policy::G1_KEYS_ARE_APPEND_ONLY_MESSAGE,
+    ),
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G2_NOT_AFTER_ONLY_SHORTENS_RULE,
+        weirkeeper::crds::trust_policy::G2_NOT_AFTER_ONLY_SHORTENS_MESSAGE,
+    ),
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G3_STATE_IS_MONOTONIC_RULE,
+        weirkeeper::crds::trust_policy::G3_STATE_IS_MONOTONIC_MESSAGE,
+    ),
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G4_REVOCATION_IS_WRITE_ONCE_RULE,
+        weirkeeper::crds::trust_policy::G4_REVOCATION_IS_WRITE_ONCE_MESSAGE,
+    ),
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G5_LIFECYCLE_FIELDS_RULE,
+        weirkeeper::crds::trust_policy::G5_LIFECYCLE_FIELDS_MESSAGE,
+    ),
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G6_VALIDITY_ORDER_RULE,
+        weirkeeper::crds::trust_policy::G6_VALIDITY_ORDER_MESSAGE,
+    ),
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
+        weirkeeper::crds::trust_policy::G7_KEY_MATERIAL_IS_IMMUTABLE_MESSAGE,
+    ),
+    // D3 §3.1, §4.1, §5.3, §6.2.
+    (
+        "protectionpolicies.yaml",
+        weirkeeper::crds::protection_policy::H1_DESTINATION_XOR_RULE,
+        weirkeeper::crds::protection_policy::H1_DESTINATION_XOR_MESSAGE,
+    ),
+    (
+        "protectionpolicies.yaml",
+        weirkeeper::crds::protection_policy::H2_ROUTE_HAS_A_CHANNEL_RULE,
+        weirkeeper::crds::protection_policy::H2_ROUTE_HAS_A_CHANNEL_MESSAGE,
+    ),
+    (
+        "rehearsalschedules.yaml",
+        weirkeeper::crds::rehearsal_schedule::SUSPEND_ONLY_RULE,
+        weirkeeper::crds::rehearsal_schedule::SUSPEND_ONLY_MESSAGE,
+    ),
+    (
+        "rehearsalschedules.yaml",
+        weirkeeper::crds::rehearsal_schedule::I2_REQUIRE_VERIFIED_EVIDENCE_RULE,
+        weirkeeper::crds::rehearsal_schedule::I2_REQUIRE_VERIFIED_EVIDENCE_MESSAGE,
+    ),
+    (
+        "rehearsalschedules.yaml",
+        weirkeeper::crds::rehearsal_schedule::I3_POINT_SOURCE_RULE,
+        weirkeeper::crds::rehearsal_schedule::I3_POINT_SOURCE_MESSAGE,
+    ),
+    (
+        "recoverycatalogs.yaml",
+        weirkeeper::crds::recovery_catalog::SYNC_REQUEST_ONLY_RULE,
+        weirkeeper::crds::recovery_catalog::SYNC_REQUEST_ONLY_MESSAGE,
+    ),
+    (
+        "recoverycatalogs.yaml",
+        weirkeeper::crds::recovery_catalog::J2_DESTINATION_XOR_RULE,
+        weirkeeper::crds::recovery_catalog::J2_DESTINATION_XOR_MESSAGE,
+    ),
+    (
+        "retentionpolicies.yaml",
+        weirkeeper::crds::retention_policy::IMMUTABLE_TARGET_RULE,
+        weirkeeper::crds::retention_policy::IMMUTABLE_TARGET_MESSAGE,
+    ),
+    (
+        "retentionpolicies.yaml",
+        weirkeeper::crds::retention_policy::K2_ENFORCEMENT_IFF_ENFORCE_RULE,
+        weirkeeper::crds::retention_policy::K2_ENFORCEMENT_IFF_ENFORCE_MESSAGE,
+    ),
+    (
+        "retentionpolicies.yaml",
+        weirkeeper::crds::retention_policy::K3_EXTERNAL_IFF_EXTERNAL_RULE,
+        weirkeeper::crds::retention_policy::K3_EXTERNAL_IFF_EXTERNAL_MESSAGE,
+    ),
+    (
+        "retentionpolicies.yaml",
+        weirkeeper::crds::retention_policy::K4_SCOPE_IS_NOT_EVIDENCE_RULE,
+        weirkeeper::crds::retention_policy::K4_SCOPE_IS_NOT_EVIDENCE_MESSAGE,
+    ),
+];
+
+/// Every rule in [`NAMED_RULES`] is in the shipped CRD, with its own message.
+#[test]
+fn every_named_cel_rule_ships_in_its_crd() {
+    // Enough rows that a truncated table is itself a failure: forty-eight
+    // named rules across twelve rule-bearing kinds.
+    assert!(
+        NAMED_RULES.len() >= 48,
+        "the named-rule table has shrunk to {} rows; a rule removed from this table is a rule \
+         nothing pins",
+        NAMED_RULES.len()
+    );
+
+    for (file, rule, message) in NAMED_RULES {
+        // 1. The PARSED schema carries it, somewhere at or under `.spec`.
+        let doc = crd(file);
+        let attached = attached_rules(&doc);
+        let found = attached
+            .iter()
+            .find(|r| r.rule == *rule)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{file} does not carry this rule anywhere at or under `.spec`:\n  {rule}\n\
+                     It is named by a decision and by a constant in `crds/`, so its absence from \
+                     the shipped CRD means the API server enforces nothing. The rules present \
+                     are:\n{}",
+                    attached
+                        .iter()
+                        .map(|r| format!("  {:?} {}", r.path, r.rule))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            });
+        assert_eq!(
+            &found.message, message,
+            "{file}: the rule ships with the wrong message. A legible message paired with the \
+             wrong rule is the worst kind of admission error — confident and wrong.\n  rule: \
+             {rule}"
+        );
+
+        // 2. And the FILE'S BYTES carry the message. `attached_rules` walks a
+        //    structure this test also relies on; reading the text as well means
+        //    a walk that stopped looking cannot hide a missing rule either.
+        let text = std::fs::read_to_string(crd_dir().join(file))
+            .unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert!(
+            text.contains(*message),
+            "{file}'s bytes do not contain this rule's message, so `kubectl apply -f` would \
+             install a CRD that does not enforce it:\n  {message}"
+        );
+    }
+
+    // R0 is the one rule that does not sit at or under `.spec`: a name-length
+    // budget may only read `self.metadata.name`, and that is readable only at
+    // the schema root.
+    let dest = crd("backupdestinations.yaml");
+    let root = root_schema(&dest)
+        .get("x-kubernetes-validations")
+        .and_then(Value::as_sequence)
+        .map(|v| {
+            v.iter()
+                .filter_map(|e| e.get("rule").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        root.contains(&weirkeeper::crds::backup_destination::R0_NAME_RULE),
+        "R0 must be on the BackupDestination schema ROOT; got {root:?}"
+    );
+}
+
 /// A transition rule below `.spec` is sound ONLY on a required sub-object, and
 /// every one this group ships sits on one.
 ///
@@ -2397,7 +2750,7 @@ fn the_destination_spec_is_the_decisions_table() {
 /// key and a place `kubectl get -o yaml` would then print it.
 #[test]
 fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
-    const FORBIDDEN: [&str; 7] = [
+    const FORBIDDEN: [&str; 12] = [
         "password",
         "accesskey",
         "accesskeyid",
@@ -2405,15 +2758,42 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
         "sessiontoken",
         "credential",
         "privatekey",
+        // Review finding F5 widened both lists. These four are the shapes the
+        // D3 kinds could plausibly have grown: a routing key, a bearer token,
+        // an API key, and a Slack webhook URL — which is a bearer token with a
+        // hostname on the front.
+        "token",
+        "bearertoken",
+        "apikey",
+        "routingkey",
+        "webhookurl",
     ];
+    // `url` ALONE IS NOT ON THE LIST, and the omission is deliberate: an
+    // `ArchiveRef.url` is a LOCATION, and the credential that reaches it is the
+    // `secretRef` beside it. `webhookUrl` is on the list because a Slack
+    // incoming-webhook URL is a bearer token with a hostname on the front —
+    // the one URL in this group that is a secret.
     let mut found: Vec<String> = Vec::new();
+    // EVERY NEW KIND, spec AND status. The narrow three-kind form was finding
+    // F5: a `smtp.password` added to `ProtectionPolicy.spec.notifications` —
+    // the one kind in the group that carries delivery channels — would have
+    // shipped unguarded under a test whose name claims it covers "no new
+    // kind".
     for file in [
         "backupdestinations.yaml",
         "topicdiscoveries.yaml",
         "preflights.yaml",
+        "trustpolicies.yaml",
+        "protectionpolicies.yaml",
+        "rehearsalschedules.yaml",
+        "recoverycatalogs.yaml",
+        "retentionpolicies.yaml",
     ] {
         let doc = crd(file);
-        let mut stack = vec![(vec!["spec".to_string()], spec_schema(&doc).clone())];
+        let mut stack = vec![
+            (vec!["spec".to_string()], spec_schema(&doc).clone()),
+            (vec!["status".to_string()], status_schema(&doc).clone()),
+        ];
         while let Some((path, node)) = stack.pop() {
             if let Some(props) = node.get("properties").and_then(Value::as_mapping) {
                 for (k, v) in props {
@@ -2435,6 +2815,22 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
          is a place a credential can be pasted and a place `kubectl get -o yaml` prints it \
          back:\n{}",
         found.join("\n")
+    );
+
+    // THE SCAN IS NOT VACUOUS. `spkiPem` is a string field on `TrustPolicy`
+    // whose whole purpose is to carry key material, so the walk really does
+    // reach the deepest list-item properties of the widest kind. Without this
+    // line a walk that stopped at the first level would pass silently.
+    let policy = crd("trustpolicies.yaml");
+    assert!(
+        at(
+            spec_schema(&policy),
+            &["properties", "keys", "items", "properties", "spkiPem"]
+        )
+        .get("type")
+        .and_then(Value::as_str)
+            == Some("string"),
+        "the walk must reach list-item properties, and this is the deepest string in the group"
     );
 }
 
@@ -3483,6 +3879,42 @@ fn the_selection_shape_is_declared_and_incomplete_discovery_has_no_default() {
          promise the mode's own name makes. An operator who has not thought about it must not \
          be able to ship either answer by omission."
     );
+
+    // AND ADMISSION REFUSES THE THIRD SHAPE. Review finding F2: without this
+    // rule a `Backup` naming two topics AND `allUserTopics` was accepted live,
+    // and today's controller ignores `allUserTopics` — so the operator who
+    // asked for whole-cluster coverage would have got a two-topic run and no
+    // signal. `crate::policy::validate_topic_selection` says the same thing in
+    // the reconciler, for objects admitted by an older CRD revision.
+    let shape = weirkeeper::crds::backup::SELECTION_SHAPE_RULE;
+    for (name, value, expected) in [
+        (
+            "a named allowlist, no dynamic block",
+            yaml("topics: [orders, payments]\n"),
+            true,
+        ),
+        (
+            "topics: [] with a dynamic block",
+            yaml("topics: []\nallUserTopics:\n  incompleteDiscovery: Refuse\n"),
+            true,
+        ),
+        (
+            "BOTH: two answers to one question",
+            yaml("topics: [orders]\nallUserTopics:\n  incompleteDiscovery: Refuse\n"),
+            false,
+        ),
+        (
+            "topics: [] alone — accepted here, and refused by the controller and the runner",
+            yaml("topics: []\n"),
+            true,
+        ),
+    ] {
+        assert_eq!(
+            eval(shape, &value, &value),
+            expected,
+            "case `{name}` against {shape}"
+        );
+    }
 
     // The exclusions are NAMES AND LITERAL PREFIXES. Guard G-GLOB is a pattern
     // on both, so `orders*` is not writable in an exclusion any more than in

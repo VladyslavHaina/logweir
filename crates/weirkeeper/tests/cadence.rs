@@ -1977,8 +1977,10 @@ fn retry_classification_is_a_closed_match_and_unknown_is_not_retryable() {
             "NoExitCode",
             "DiscoveryFailed",
         ],
-        "the four spellings D1 §4.6 names; `DiscoveryFailed` is pinned here until \
-         conditions.rs declares its constant"
+        "the four spellings D1 §4.6 names. `DiscoveryFailed` is now \
+         `conditions::TERMINAL_STATE_DISCOVERY_FAILED`, and this assertion is deliberately \
+         written as a LITERAL: it is what proves the swap from the literal to the constant \
+         changed the spelling and not the value"
     );
 
     // EVERY OTHER TERMINAL STATE THIS BUILD KNOWS OF, walked from the source

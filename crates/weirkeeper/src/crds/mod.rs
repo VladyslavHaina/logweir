@@ -759,8 +759,43 @@ const NUMERIC_BOUND_KEYS: [&str; 5] = [
 /// real fraction is left exactly as it is.
 fn integral_bounds_as_integers(yaml: &str) -> String {
     let mut out = String::with_capacity(yaml.len());
+    // BLOCK SCALARS ARE SKIPPED WHOLE (review finding F7). The emitted CRDs
+    // carry block-scalar `description`s — thirteen in `backups.yaml` alone —
+    // and their content is PROSE, written by whoever wrote a doc comment. A
+    // line-based rewrite that did not track them would silently edit a
+    // sentence that happened to read `maximum: 600.0` at the start of a line.
+    // Cosmetic and deterministic, but a text rewrite reaching into text it
+    // does not own is exactly the kind of thing no gate would catch.
+    let mut block: Option<usize> = None;
     for line in yaml.lines() {
+        let indent = line.len() - line.trim_start().len();
+        if let Some(open) = block {
+            // A block scalar runs until a line indented no further than the
+            // key that opened it. Blank lines belong to it either way.
+            if line.trim().is_empty() || indent > open {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            block = None;
+        }
         let trimmed = line.trim_start();
+        // `key: |`, `key: |-`, `key: >`, `key: >2-` — serde_yaml's block
+        // scalar openers, all of which end the line at the indicator.
+        if let Some((_, rest)) = trimmed.split_once(": ") {
+            let indicator = rest.trim_end();
+            if matches!(indicator.chars().next(), Some('|' | '>'))
+                && indicator
+                    .chars()
+                    .skip(1)
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+            {
+                block = Some(indent);
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+        }
         let rewritten = NUMERIC_BOUND_KEYS.iter().find_map(|key| {
             let rest = trimmed.strip_prefix(key)?.strip_prefix(": ")?;
             let digits = rest.strip_suffix(".0")?;
