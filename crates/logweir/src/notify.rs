@@ -611,6 +611,31 @@ pub const NOTIFY_RESULT_LINE: &str = "notify-result=";
 /// The `pagerduty` sink's name in a [`NOTIFY_RESULT_LINE`].
 pub const SINK_PAGERDUTY: &str = "pagerduty";
 
+/// The pseudo-sink name on the one line a delivery with NO configured sink
+/// prints: `notify-result=none:unconfigured`.
+///
+/// `none` is not a sink and can never collide with one — the three real names
+/// are fixed constants beside this — so a reader matching by key name can tell
+/// "this Job had nowhere to send the alert" from "this sink refused" without
+/// reading prose. See [`RESULT_UNCONFIGURED`].
+pub const SINK_NONE: &str = "none";
+
+/// The only value [`SINK_NONE`] ever carries. Deliberately NOT `failed`: a
+/// sink that refused and an alert with nowhere to go are different findings,
+/// and an operator fixes them in different places (the sink, versus the
+/// Secret the Job projects).
+pub const RESULT_UNCONFIGURED: &str = "unconfigured";
+
+/// The documented local-development escape hatch for a `http://` webhook or
+/// Slack URL. Set it to `1`, `true` or `yes` to accept one.
+///
+/// It exists because the test suite's loopback listener speaks `http://` and
+/// because an adopter evaluating Logweir against a scratch receiver on their
+/// own laptop should not have to mint a certificate first. It is a deliberate,
+/// greppable act in a Job spec — not a default, and not a loopback special
+/// case that would also cover a host on the pod network.
+pub const ALLOW_INSECURE_SINKS_ENV: &str = "NOTIFY_ALLOW_INSECURE_SINKS";
+
 /// The `webhook` sink's name in a [`NOTIFY_RESULT_LINE`].
 pub const SINK_WEBHOOK: &str = "webhook";
 
@@ -956,6 +981,75 @@ pub fn parse_event(bytes: &[u8]) -> Result<ProtectionEvent, String> {
     serde_json::from_slice(bytes).map_err(|e| format!("the event document is malformed: {e}"))
 }
 
+/// The four alert kinds that key on the POLICY UID.
+///
+/// A separate type, not a runtime check, because the thing to prevent is a
+/// CALL and not a value. `protection_dedup_key` used to take an
+/// [`AlertKind`] and cheerfully answer
+/// `logweir-protection-<policyUID>-RecoveryCompleted` for the fifth one — a
+/// well-formed key for the wrong object, which is the worst kind of wrong: W6
+/// would have keyed every recovery of a policy onto ONE incident, so the
+/// second restore of the day overwrites the first one's message and a
+/// responder reads about the wrong restore. That is the exact defect the
+/// Restore-UID keying exists to prevent, reachable by a one-word mistake that
+/// nothing would have flagged (`dedup_key_advice` returns `None` early for
+/// that kind).
+///
+/// With this type the mistake does not compile. [`recovery_completed_dedup_key`]
+/// is the only route to a `RecoveryCompleted` key, and it takes a Restore UID
+/// because that is the only identity it can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PolicyAlertKind {
+    /// [`AlertKind::BackupFailure`].
+    BackupFailure,
+    /// [`AlertKind::Staleness`].
+    Staleness,
+    /// [`AlertKind::ArchiveUnavailable`].
+    ArchiveUnavailable,
+    /// [`AlertKind::RehearsalFailure`].
+    RehearsalFailure,
+}
+
+impl PolicyAlertKind {
+    /// The wire spelling — the same string [`AlertKind::as_str`] gives.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        AlertKind::from(self).as_str()
+    }
+}
+
+impl From<PolicyAlertKind> for AlertKind {
+    fn from(k: PolicyAlertKind) -> Self {
+        match k {
+            PolicyAlertKind::BackupFailure => AlertKind::BackupFailure,
+            PolicyAlertKind::Staleness => AlertKind::Staleness,
+            PolicyAlertKind::ArchiveUnavailable => AlertKind::ArchiveUnavailable,
+            PolicyAlertKind::RehearsalFailure => AlertKind::RehearsalFailure,
+        }
+    }
+}
+
+impl AlertKind {
+    /// This kind as a [`PolicyAlertKind`], or `None` for
+    /// [`AlertKind::RecoveryCompleted`].
+    ///
+    /// The one narrowing, in one place. A caller holding an `AlertKind` off a
+    /// parsed document asks here and handles the `None`; a caller that knows
+    /// statically which kind it means names the `PolicyAlertKind` variant and
+    /// never asks.
+    #[must_use]
+    pub fn policy_keyed(self) -> Option<PolicyAlertKind> {
+        match self {
+            AlertKind::BackupFailure => Some(PolicyAlertKind::BackupFailure),
+            AlertKind::Staleness => Some(PolicyAlertKind::Staleness),
+            AlertKind::ArchiveUnavailable => Some(PolicyAlertKind::ArchiveUnavailable),
+            AlertKind::RehearsalFailure => Some(PolicyAlertKind::RehearsalFailure),
+            // Keys on the Restore UID — see `recovery_completed_dedup_key`.
+            AlertKind::RecoveryCompleted => None,
+        }
+    }
+}
+
 /// D3 §3.3's dedup key for the four policy-keyed kinds:
 /// `logweir-protection-<policyUID>-<kind>`.
 ///
@@ -977,7 +1071,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<ProtectionEvent, String> {
 /// `unknown`, a key that is honest about having no identity and structurally
 /// incapable of being the degenerate one.
 #[must_use]
-pub fn protection_dedup_key(policy_uid: &str, kind: AlertKind) -> String {
+pub fn protection_dedup_key(policy_uid: &str, kind: PolicyAlertKind) -> String {
     format!(
         "{PROTECTION_DEDUP_PREFIX}{}-{}",
         ident_or_unknown(policy_uid),
@@ -1053,13 +1147,13 @@ pub fn dedup_key_advice(ev: &ProtectionEvent) -> Option<String> {
             ev.alert.key
         ));
     }
-    if ev.alert.kind == AlertKind::RecoveryCompleted {
-        // Keyed on the Restore UID (D3 §3.3), which is not a field of this
-        // document. The prefix above is all there is to check, and saying so
-        // is better than a check that silently covers four kinds of five.
-        return None;
-    }
-    let expected = protection_dedup_key(&ev.policy.uid, ev.alert.kind);
+    // `RecoveryCompleted` is keyed on the Restore UID (D3 §3.3), which is not a
+    // field of this document, so the prefix above is all there is to check —
+    // and the narrowing that says so is the SAME one that makes the wrong
+    // builder call impossible (`AlertKind::policy_keyed`). Saying it here is
+    // better than a check that silently covers four kinds of five.
+    let kind = ev.alert.kind.policy_keyed()?;
+    let expected = protection_dedup_key(&ev.policy.uid, kind);
     (ev.alert.key != expected).then(|| {
         format!(
             "alert.key `{}` is not the `(policy, kind)` key for this event (`{expected}`); \
@@ -1116,29 +1210,90 @@ pub const EXHAUSTIVE_CLAIMS: [&str; 10] = [
     "all records were verified",
 ];
 
-/// Every forbidden verification claim found in a body that is about to be
-/// POSTed, plus a `verification_scope` that is not one of the three.
+/// Every forbidden verification claim in **one string of prose Logweir wrote
+/// or forwards as prose**, in the order they appear in [`EXHAUSTIVE_CLAIMS`].
 ///
-/// PURE, and it takes the SERIALIZED body rather than the typed event, because
-/// what reaches a Slack channel is the bytes: a claim that arrives through
-/// `summary`, through `details_route`, through a PagerDuty `payload.summary`
-/// this module composes, or through a field a later version adds, is caught by
-/// the same pass. `crates/logweir/tests/notify_deliver.rs` drives it over the
-/// full cross-product of kind × health × scope, and the `RecoveryCompleted`
-/// row is the one that proves the list is narrow enough to be usable.
+/// # It takes prose, and that bound is the whole finding
+///
+/// The first version took the SERIALIZED BODY, on the reasoning that what
+/// reaches a Slack channel is the bytes. That reasoning is right about the
+/// bytes and wrong about the SUBJECT: a body also carries `policy.name`,
+/// `policy.namespace`, `alert.key`, `details_route` and `point_id`, which are
+/// operator-chosen identifiers, and `exhaustive` is a perfectly legal
+/// DNS-1123 label. A `ProtectionPolicy` named `exhaustive-backups` therefore
+/// made every body for that policy contain the banned token, every sink
+/// refuse, and — after the controller's three attempts — that policy's
+/// `Stale` and `Unprotected` pages reach **nobody, permanently and silently**.
+///
+/// That is the failure [`dedup_key_advice`] already refuses to cause, in so
+/// many words: a gate that converts a naming choice into a total loss of
+/// alerting is strictly worse than the thing it catches. The same argument
+/// governs here now. The scan's subject is the prose — the controller's
+/// `summary`, which reaches a PagerDuty incident title verbatim — and an
+/// identifier is never prose.
+///
+/// The disclaimer half of [`slack_text`] is not scanned at runtime either: it
+/// is [`SAMPLE_DISCLAIMER`], a constant, and
+/// `crates/logweir/tests/notify_deliver.rs` asserts the constant itself is
+/// clean. A claim cannot be introduced into it without changing the source.
 #[must_use]
-pub fn exhaustive_claim_offences(body: &serde_json::Value) -> Vec<String> {
-    let text = body.to_string().to_lowercase();
-    let mut found: Vec<String> = EXHAUSTIVE_CLAIMS
+pub fn exhaustive_claim_offences(prose: &str) -> Vec<&'static str> {
+    let text = prose.to_lowercase();
+    EXHAUSTIVE_CLAIMS
         .iter()
         .filter(|c| text.contains(**c))
-        .map(|c| (*c).to_string())
-        .collect();
-    // The `verification_scope` value itself, wherever it sits in the body —
-    // top level for the webhook, inside `payload.custom_details` for
-    // PagerDuty. A three-variant enum makes `complete` unparseable, so this
-    // can only fire on a body this module composed wrongly; it is the second
-    // lock on the one claim the product must never make.
+        .copied()
+        .collect()
+}
+
+/// What replaces a forbidden claim in composed prose.
+///
+/// A marker rather than an empty string: "orders-prod: [claim removed]" tells
+/// a responder that a sentence was edited, which is a fact they may need;
+/// silently deleting words leaves a sentence that reads as if the controller
+/// wrote it that way.
+pub const CLAIM_REDACTED: &str = "[claim removed]";
+
+/// Remove every forbidden claim from prose, returning the cleaned text and
+/// what was removed.
+///
+/// **SANITIZE AND DELIVER, never suppress.** If a claim really does arrive in
+/// the controller's `summary`, the alert underneath it is still real and still
+/// needs a human. Dropping the page would punish the responder for the
+/// controller's wording; editing the wording costs them one marker and keeps
+/// the page. The removal is reported on a named log line either way, so the
+/// producer can be fixed.
+#[must_use]
+pub fn sanitize_exhaustive_claims(prose: &str) -> (String, Vec<&'static str>) {
+    let mut out = prose.to_string();
+    let mut removed = Vec::new();
+    for claim in EXHAUSTIVE_CLAIMS {
+        // Case-insensitive replacement over a string that may spell the claim
+        // in any case: find on the lowercased copy, splice on the original, so
+        // the surrounding prose keeps its own capitalisation.
+        loop {
+            let lower = out.to_lowercase();
+            let Some(at) = lower.find(claim) else { break };
+            removed.push(claim);
+            out.replace_range(at..at + claim.len(), CLAIM_REDACTED);
+        }
+    }
+    (out, removed)
+}
+
+/// A `verification_scope` anywhere in a composed body that is not one of the
+/// three legal values.
+///
+/// Separate from [`exhaustive_claim_offences`] and still a HARD REFUSAL,
+/// because its subject is different: this reads one enumerated field that this
+/// module serializes, never an operator's free text, so it cannot be tripped
+/// by a naming choice. A three-variant enum plus `deny_unknown_fields` makes
+/// `complete` unparseable, so this can only fire on a body this module
+/// composed wrongly — it is the second lock on the one claim the product must
+/// never make, and the one place where refusing to post is the right answer.
+#[must_use]
+pub fn scope_offences(body: &serde_json::Value) -> Vec<String> {
+    let mut found = Vec::new();
     for scope in find_all(body, "verification_scope") {
         if let Some(s) = scope.as_str() {
             if !matches!(s, "sampled" | "degraded" | "none") {
@@ -1152,7 +1307,7 @@ pub fn exhaustive_claim_offences(body: &serde_json::Value) -> Vec<String> {
 }
 
 /// Every value stored under `key`, at any depth. Used only by
-/// [`exhaustive_claim_offences`]; a body is a handful of fields deep.
+/// [`scope_offences`]; a body is a handful of fields deep.
 fn find_all<'a>(v: &'a serde_json::Value, key: &str) -> Vec<&'a serde_json::Value> {
     let mut out = Vec::new();
     match v {
@@ -1189,6 +1344,21 @@ pub fn webhook_body(ev: &ProtectionEvent) -> serde_json::Value {
     })
 }
 
+/// The one sentence every Logweir notification says about what it checked.
+///
+/// A CONSTANT, and that is the mechanism rather than the style: the runtime
+/// claim scan's subject is the controller's free-text `summary` and nothing
+/// else (see [`exhaustive_claim_offences`]), so the prose THIS module writes
+/// needs a different guard — one that cannot be tripped by an operator's
+/// naming choice and cannot be edited without changing the source.
+/// `crates/logweir/tests/notify_deliver.rs` asserts this string carries no
+/// claim, and a claim added here fails that row.
+///
+/// It deliberately avoids the word [`EXHAUSTIVE_CLAIMS`] forbids, rather than
+/// writing "not an exhaustive comparison" — see that constant for why a
+/// negated claim is not safe in a channel that truncates.
+pub const SAMPLE_DISCLAIMER: &str = "a SAMPLE was checked, never the whole archive";
+
 /// The Slack incoming webhook's body: `{"text": …}` and nothing else.
 ///
 /// **Not the raw event document.** A Slack incoming webhook rejects a JSON
@@ -1211,9 +1381,8 @@ pub fn slack_body(ev: &ProtectionEvent) -> serde_json::Value {
 /// opened or cleared, the health, **the verification scope spelled out in
 /// words that cannot be mistaken for a whole-archive check**, and the route.
 ///
-/// The disclaimer deliberately avoids the word [`EXHAUSTIVE_CLAIMS`] forbids,
-/// rather than writing "not an exhaustive comparison" — see that constant for
-/// why a negated claim is not safe in a channel that truncates.
+/// The disclaimer is [`SAMPLE_DISCLAIMER`], a constant, so it is checked once
+/// by a test rather than scanned on every delivery.
 #[must_use]
 pub fn slack_text(ev: &ProtectionEvent) -> String {
     let point = match &ev.last_available_point {
@@ -1225,7 +1394,7 @@ pub fn slack_text(ev: &ProtectionEvent) -> String {
     };
     format!(
         "{}\n{} {} · health {} · {} · failed slots {} · missed slots {} · \
-         verification scope: {} (a SAMPLE was checked, never the whole archive) · {}",
+         verification scope: {} ({SAMPLE_DISCLAIMER}) · {}",
         ev.summary,
         ev.alert.kind.as_str(),
         ev.alert.action.as_str(),
@@ -1259,6 +1428,42 @@ pub fn pagerduty_event(ev: &ProtectionEvent, routing_key: &str) -> serde_json::V
     })
 }
 
+/// Why a webhook or Slack URL may not be posted to, or `Ok(())`.
+///
+/// `https://` always passes. Anything else is refused unless
+/// [`ALLOW_INSECURE_SINKS_ENV`] is set, and the refusal names the **scheme
+/// only** — the rest of the URL is where an adopter's token lives, and this
+/// string reaches a log. That is the same discipline `pagerduty_endpoint`
+/// applies to the PagerDuty region, and for the same reason: a webhook URL is
+/// a bearer credential in its own right, and the whole protection event
+/// travels beside it.
+///
+/// # This is narrower than the drill path, on purpose
+///
+/// `notify_with_sink` above posts `n.webhooks` and `n.slack_webhook` at
+/// whatever scheme the spec carries, and has since v0.1. Tightening THAT is a
+/// change to shipped behaviour with its own tests and its own migration note,
+/// so it is not smuggled in here. This is a new route with no adopters, which
+/// is the one moment a default can be chosen rather than changed.
+///
+/// # Errors
+///
+/// The URL is not `https://` and the override is not set.
+pub fn insecure_sink_refusal(url: &str, allow_insecure: bool) -> Result<(), String> {
+    if url.starts_with("https://") || allow_insecure {
+        return Ok(());
+    }
+    let scheme = match url.split_once("://") {
+        Some((s, _)) if !s.is_empty() => s,
+        _ => "<no scheme>",
+    };
+    Err(format!(
+        "refusing scheme `{scheme}`: a webhook URL is a bearer credential and the \
+         protection event travels beside it, so the sink must be `https://`. Set \
+         {ALLOW_INSECURE_SINKS_ENV}=1 to accept a plaintext sink for local development."
+    ))
+}
+
 /// The sinks this delivery is configured for, read from the environment.
 ///
 /// **A sink is configured exactly when its variable holds a non-blank value.**
@@ -1280,6 +1485,9 @@ pub struct SinkRoutes {
     pub webhook_url: Option<String>,
     /// [`SLACK_WEBHOOK_URL_ENV`], when non-blank.
     pub slack_webhook_url: Option<String>,
+    /// [`ALLOW_INSECURE_SINKS_ENV`] parsed as a flag. Not a credential and not
+    /// a URL, so it is the one field this struct's `Debug` prints in full.
+    pub allow_insecure_sinks: bool,
 }
 
 /// HAND-WRITTEN for the reason `logweir_core::spec::Notifications`' is: three
@@ -1303,6 +1511,7 @@ impl std::fmt::Debug for SinkRoutes {
                 "slack_webhook_url",
                 &self.slack_webhook_url.as_deref().map(redact_url),
             )
+            .field("allow_insecure_sinks", &self.allow_insecure_sinks)
             .finish()
     }
 }
@@ -1333,6 +1542,12 @@ impl SinkRoutes {
             pagerduty_endpoint: read(PAGERDUTY_ENDPOINT_ENV),
             webhook_url: read(WEBHOOK_URL_ENV),
             slack_webhook_url: read(SLACK_WEBHOOK_URL_ENV),
+            // An explicit affirmative only. `NOTIFY_ALLOW_INSECURE_SINKS=0`,
+            // `=false` and `=` all mean "no" — the same reading
+            // `weirkeeper::retention`'s flag parser uses, so an operator who
+            // switches the value off does not discover it was still on.
+            allow_insecure_sinks: read(ALLOW_INSECURE_SINKS_ENV)
+                .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
         }
     }
 
@@ -1408,15 +1623,52 @@ pub fn deliver_with(
         diagnostics.push(advice);
     }
 
+    // SANITIZE, THEN DELIVER. The one piece of free prose in this document is
+    // the controller's `summary`, and it reaches a PagerDuty incident title
+    // verbatim. A claim in it is edited out and the edit is reported; the page
+    // still goes, because the alert underneath a badly-worded summary is still
+    // real and still needs a human. Every body below is composed from the
+    // SANITIZED event, so no sink can receive the unedited sentence.
+    //
+    // Identifiers are NOT scanned — see `exhaustive_claim_offences`. A policy
+    // named `exhaustive-backups` delivers.
+    let (clean_summary, removed) = sanitize_exhaustive_claims(&ev.summary);
+    let mut owned;
+    let ev = if removed.is_empty() {
+        ev
+    } else {
+        diagnostics.push(format!(
+            "the event summary claimed exhaustive verification ({removed:?}); the \
+             phrase was replaced with `{CLAIM_REDACTED}` and the alert was delivered \
+             — Logweir verifies a SAMPLE, and the producer of this summary needs fixing"
+        ));
+        tracing::warn!(target: "logweir::notify", event_id = %ev.event_id,
+                       dedup_key = %ev.alert.key, removed = ?removed,
+                       "edited an exhaustive-verification claim out of the event summary");
+        owned = ev.clone();
+        owned.summary = clean_summary;
+        &owned
+    };
+
+    // One writer for every contract line, so the shape is decided once.
+    // `SINK_NONE` is the one name whose value is neither `ok` nor `failed`.
     let mut record = |name: &str, ok: bool| {
         stdout.push_str(NOTIFY_RESULT_LINE);
         stdout.push_str(name);
         stdout.push(':');
-        stdout.push_str(if ok { RESULT_OK } else { RESULT_FAILED });
+        stdout.push_str(if name == SINK_NONE {
+            RESULT_UNCONFIGURED
+        } else if ok {
+            RESULT_OK
+        } else {
+            RESULT_FAILED
+        });
         stdout.push('\n');
     };
 
-    for name in routes.configured_for(ev.alert.kind) {
+    let configured = routes.configured_for(ev.alert.kind);
+    let nothing_configured = configured.is_empty();
+    for name in configured {
         let (url, body) = match name {
             SINK_PAGERDUTY => {
                 // `pagerduty_endpoint` is reused rather than re-implemented,
@@ -1468,21 +1720,40 @@ pub fn deliver_with(
             }
         };
 
+        // THE SCHEME GATE. A webhook URL is a bearer credential in its own
+        // right — a signed webhook puts the token in the query, a Slack
+        // incoming webhook puts it in the path — and the whole protection
+        // event travels beside it. `http://` puts both on the wire in
+        // cleartext, so it is refused unless the operator has deliberately
+        // said otherwise. PagerDuty's endpoint is already https-only, one
+        // layer up, through `pagerduty_endpoint`.
+        if let Err(reason) = insecure_sink_refusal(&url, routes.allow_insecure_sinks) {
+            diagnostics.push(format!("{name}: {reason}"));
+            tracing::warn!(target: "logweir::notify", sink = %name,
+                           endpoint = %redact_url(&url), reason = %reason,
+                           "protection event NOT delivered");
+            all_ok = false;
+            record(name, false);
+            continue;
+        }
+
         // THE LAST GATE BEFORE THE WIRE. `verification_scope` cannot be
         // `complete` — the enum has three variants — but the bytes are checked
         // anyway, because this is the one claim the product must never make
-        // and the composition above is code that can be edited. An offending
-        // body is NOT posted.
-        let offences = exhaustive_claim_offences(&body);
+        // and the composition above is code that can be edited. It reads one
+        // enumerated field this module serializes, never an operator's free
+        // text, so unlike the prose scan it cannot be tripped by a naming
+        // choice — which is why THIS one still refuses to post.
+        let offences = scope_offences(&body);
         if !offences.is_empty() {
             let shown = redact_url(&url);
             diagnostics.push(format!(
-                "refusing to post to {shown}: the body would claim exhaustive \
-                 verification ({offences:?}); Logweir verifies a SAMPLE"
+                "refusing to post to {shown}: the body's verification scope is not one \
+                 of sampled/degraded/none ({offences:?}); Logweir verifies a SAMPLE"
             ));
             tracing::error!(target: "logweir::notify", sink = %shown,
                             offences = ?offences,
-                            "refusing to post a body that claims exhaustive verification");
+                            "refusing to post a body whose verification scope is not one of the three");
             all_ok = false;
             record(name, false);
             continue;
@@ -1516,11 +1787,27 @@ pub fn deliver_with(
         }
     }
 
-    if stdout.is_empty() {
+    if nothing_configured {
+        // NOT A SUCCESS, AND NOT SILENT. This used to be exit 0 with no line
+        // at all, which made "nothing was configured" and "every sink
+        // accepted" the same machine-readable answer: empty stdout, code 0.
+        // A `secretKeyRef` that was rotated, renamed or left blank projects
+        // `Ok("")`, the emptiness filter in `SinkRoutes` correctly reports it
+        // as unconfigured — and W6 then recorded `delivery.state=Delivered`
+        // for an alert that reached nobody. D3 §3.4.2's "exits 0 only when
+        // every configured sink accepted" was vacuously satisfied.
+        //
+        // So a delivery that reached nobody says so on BOTH channels: one
+        // `notify-result=none:unconfigured` line, which keeps the by-key-name
+        // reader intact and is impossible to mistake for a sink result, and
+        // exit 1, because a delivery Job that delivered nothing did not
+        // deliver. The controller's retries will exhaust and set
+        // `NotificationsDelivered=False`, which is the correct record of it.
         let why = if ev.alert.kind.pages() {
             format!(
                 "no sink is configured: set {ROUTING_KEY_ENV}, {WEBHOOK_URL_ENV} or \
-                 {SLACK_WEBHOOK_URL_ENV}"
+                 {SLACK_WEBHOOK_URL_ENV} (a variable that is present and BLANK is not \
+                 configured — check the projected Secret keys)"
             )
         } else {
             format!(
@@ -1533,6 +1820,8 @@ pub fn deliver_with(
         diagnostics.push(why.clone());
         tracing::warn!(target: "logweir::notify", event_id = %ev.event_id,
                        dedup_key = %ev.alert.key, "{why}");
+        record(SINK_NONE, false);
+        all_ok = false;
     }
 
     DeliveryOutcome {
