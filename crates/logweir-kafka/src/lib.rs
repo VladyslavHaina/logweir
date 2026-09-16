@@ -2,6 +2,7 @@
 //! feature added in Task 10, the only broker-dialling code in the workspace.
 #![forbid(unsafe_code)]
 pub mod fingerprint;
+pub mod inventory;
 pub mod reader;
 pub mod token;
 
