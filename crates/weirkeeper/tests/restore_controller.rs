@@ -162,6 +162,31 @@ fn new_topic_plan_bytes() -> String {
     )
 }
 
+/// The same plan with the target's `auth` block — the shape the UI emits for a
+/// `scramSha512` connection, and the one PLAT-07.1 requires to MATCH the
+/// `KafkaCluster` `spec.target.clusterRef` names: the runner dials the plan's
+/// address with that connection's credential, so the two must describe one
+/// connection.
+fn scram_plan_bytes() -> String {
+    PLAN_BYTES.replace(
+        "  mode: scratch\n",
+        "  auth:\n    mode: scramSha512\n    username: logweir\n    tls: true\n  mode: scratch\n",
+    )
+}
+
+/// The `Restore` carrying [`scram_plan_bytes`], with an `Approval` whose signed
+/// bytes name that plan's hash.
+fn scram_restore() -> (Restore, weirkeeper::crds::approval::Approval) {
+    let plan = scram_plan_bytes();
+    let hash = sha256_prefixed(plan.as_bytes());
+    let restore: Restore = serde_json::from_str(&restore_json(&plan, APPROVAL, NAME))
+        .expect("the fixture is a Restore");
+    let approval: weirkeeper::crds::approval::Approval =
+        serde_json::from_str(&approval_json(true, &hash, &hash))
+            .expect("the fixture is an Approval");
+    (restore, approval)
+}
+
 /// `sha256_prefixed(PLAN_BYTES)` — computed, never written out as a literal.
 ///
 /// A HARD-CODED HASH WOULD MAKE THE MUTANT SURVIVE. If the expected value were
@@ -2410,7 +2435,8 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
 fn a_scram_target_password_is_projected_by_reference_and_never_read() {
     let scram: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_str(&cluster_json(true, SCRAM_AUTH)).expect("the fixture is a cluster");
-    let spec = runner_job_spec(&restore(), &scram, &[], &approval(true), &roster())
+    let (scram_restore, scram_approval) = scram_restore();
+    let spec = runner_job_spec(&scram_restore, &scram, &[], &scram_approval, &roster())
         .expect("the job spec builds");
     let built = job::build(&spec);
     let env = built
@@ -2462,23 +2488,60 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
         .remove("secretRef");
     let no_secret: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_value(value).expect("the mutated fixture is a cluster");
-    let spec = runner_job_spec(&restore(), &no_secret, &[], &approval(true), &roster())
-        .expect("the job spec still builds");
+    let refusal = runner_job_spec(&scram_restore, &no_secret, &[], &scram_approval, &roster())
+        .expect_err("no reference, no Job (PLAT-07.1)");
     assert!(
-        !job::build(&spec)
-            .spec
-            .as_ref()
-            .and_then(|s| s.template.spec.as_ref())
-            .map(|p| p.containers[0].env.clone().unwrap_or_default())
-            .unwrap_or_default()
-            .iter()
-            .any(|e| e.name == TARGET_PASSWORD_ENV),
-        "no secretRef, no variable — and no controller-side refusal either"
+        refusal
+            .to_string()
+            .contains(TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE),
+        "the controller now refuses this before any ConfigMap or Job exists, keeping the state \
+         the runner reports for the same object: {refusal}"
     );
     assert!(
         TERMINAL_STATES.contains(&TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE),
         "the state the RUNNER refuses with is on the shared list, ready to be mapped"
     );
+}
+
+/// An approved plan that names a different target than the saved connection is
+/// refused before any ConfigMap or Job exists — PLAT-07.1.
+///
+/// The runner dials the PLAN's address and authenticates with the CONNECTION's
+/// credential and CA, so a mismatch sends a saved credential somewhere the
+/// saved connection does not name, or dials without the TLS it requires.
+///
+/// KILLS: drop `check_restore_plan` from `runner_job_spec`.
+#[test]
+fn a_plan_naming_another_target_than_the_saved_connection_is_refused() {
+    let scram: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_str(&cluster_json(true, SCRAM_AUTH)).expect("the fixture is a cluster");
+    // The plan says plaintext; the connection says SCRAM over TLS.
+    let refusal = runner_job_spec(&restore(), &scram, &[], &approval(true), &roster())
+        .expect_err("a plaintext plan may not spend a SCRAM connection's credential");
+    assert!(
+        refusal
+            .to_string()
+            .contains(weirkeeper::conditions::TERMINAL_STATE_CONNECTION_PLAN_MISMATCH),
+        "got {refusal}"
+    );
+
+    // The plan names another address; everything else agrees.
+    let (mut elsewhere, elsewhere_approval) = scram_restore();
+    elsewhere.spec.plan_bytes =
+        scram_plan_bytes().replace("scratch-0.logweir-t20:9092", "elsewhere.example:9092");
+    let refusal = runner_job_spec(&elsewhere, &scram, &[], &elsewhere_approval, &roster())
+        .expect_err("a plan may not point the connection's credential elsewhere");
+    let text = refusal.to_string();
+    assert!(
+        text.contains(weirkeeper::conditions::TERMINAL_STATE_CONNECTION_PLAN_MISMATCH)
+            && text.contains("elsewhere.example:9092"),
+        "the refusal names the address the plan asked for: {text}"
+    );
+
+    // And a plan built from the saved connection builds a Job.
+    let (matching, matching_approval) = scram_restore();
+    runner_job_spec(&matching, &scram, &[], &matching_approval, &roster())
+        .expect("a plan built from the saved connection builds a Job");
 }
 
 // ===========================================================================

@@ -88,11 +88,11 @@ use crate::conditions::{
     CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
     REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
     REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
-    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
-    TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
-    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
-    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
+    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_JOB_NAME_CONFLICT,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
+    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_UNSCHEDULABLE,
+    TERMINAL_STATE_REFERENT_NOT_FOUND,
 };
 use crate::crds::backup::Backup;
 use crate::crds::kafka_cluster::KafkaCluster;
@@ -377,8 +377,9 @@ pub fn desired_execution_inputs(
 /// # Errors
 ///
 /// [`BackupError::Refused`] for a spec that states no runnable identity, an
-/// unreadable `archive.url`, or a `scramSha512` cluster with no username or
-/// Secret reference.
+/// unreadable `archive.url`, or a source connection
+/// [`crate::connection::resolve`] refuses (PLAT-07.1) — a `scramSha512`
+/// cluster with no username or `secretRef` among them.
 pub fn plan_backup_spec(
     backup: &Backup,
     cluster: &KafkaCluster,
@@ -870,6 +871,46 @@ pub fn runner_job_spec_from_inputs(
         ));
     }
 
+    // THE SOURCE CONNECTION, FROM THE ONE RESOLVER THE PROBE USES (PLAT-07.1):
+    // the password as `secretKeyRef` and a private CA as a projected file,
+    // references only. A connection that does not resolve is refused here,
+    // before the Job exists.
+    let connection =
+        crate::connection::resolve(cluster, crate::connection::ConnectionUse::BackupSource)?;
+    connection.check_job_namespace(&namespace)?;
+    // AND IT MUST BE THE CONNECTION THE SNAPSHOT FROZE. The UID check above
+    // says the referent is the same OBJECT; this says its connection still
+    // resolves to what the frozen plan document was rendered from and approved
+    // against. Addresses, auth and the CA reference are exactly the three
+    // things the snapshot carries and the Job or the plan acts on, so an edit
+    // to any of them between the freeze and a Job re-creation is refused here
+    // as well as by `verify_frozen_config_map` — this function is public and
+    // pure, and a caller holding frozen inputs may reach it without the
+    // reconciler's verify pass.
+    let frozen_connection = (
+        &inputs.source.bootstrap_servers,
+        &inputs.source.auth,
+        &inputs.source.tls_ca,
+    );
+    let resolved_connection = (
+        &connection.bootstrap_servers,
+        &connection.auth,
+        &connection.tls_ca,
+    );
+    if frozen_connection != resolved_connection {
+        return Err(BackupError::Refused(
+            TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+            format!(
+                "the frozen execution inputs of {name} resolved KafkaCluster {} to a different \
+                 connection than it resolves to now (bootstrap servers, auth or the auth.tlsCa \
+                 reference), so the frozen plan bytes would be executed against a changed \
+                 connection",
+                inputs.source.cluster.name
+            ),
+        ));
+    }
+    let projection = connection.project();
+
     let mut secret_mounts = vec![SecretMount {
         volume: SIGNING_VOLUME.to_string(),
         secret_name: SIGNING_KEY_SECRET.to_string(),
@@ -879,29 +920,14 @@ pub fn runner_job_spec_from_inputs(
             SIGNING_KEY_FILE.to_string(),
         )],
     }];
+    secret_mounts.extend(projection.secret_mounts);
     // Kept out of `env_from_secret` for the same reason the drill manifest
     // keeps the signing key out of it: a key is a FILE the runner opens by
     // path, and an env var holding PEM text would appear in
     // `kubectl describe pod` output for anyone with pod read.
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
-    let mut env_from_secret = Vec::new();
-    if matches!(
-        inputs.source.auth,
-        logweir_core::spec::AuthSpec::ScramSha512 { .. }
-    ) {
-        let credential = super::kafka_cluster::source_password_env(cluster).ok_or_else(|| {
-            BackupError::Refused(
-                TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
-                format!(
-                    "the KafkaCluster {} uses scramSha512 but has no non-empty auth.secretRef.name; \
-                     reference a Secret in namespace {namespace} with a password key",
-                    cluster.name_any()
-                ),
-            )
-        })?;
-        env_from_secret.push(credential);
-    }
+    let mut env_from_secret = projection.env_from_secret;
     if let Some(secret) = backup.spec.archive.secret_ref.as_ref() {
         env_from_secret.push(EnvFromSecret {
             name: ARCHIVE_ACCESS_KEY_ENV.to_string(),
@@ -928,9 +954,9 @@ pub fn runner_job_spec_from_inputs(
         },
         args: inputs.runner.args.clone(),
         deadline_seconds: inputs.runner.deadline_seconds,
-        service_account_name: RUNNER_SERVICE_ACCOUNT.to_string(),
+        service_account_name: connection.execution.service_account_name.clone(),
         secret_mounts,
-        config_map_mounts: Vec::new(),
+        config_map_mounts: projection.config_map_mounts,
         env_from_secret,
         // `RUST_LOG` is pinned rather than inherited: below `info` the run id
         // and the exit-code meaning line are lost, and those two are how a
@@ -947,6 +973,7 @@ pub fn runner_job_spec_from_inputs(
                     .iter()
                     .map(|v| (v.name.clone(), v.value.clone())),
             );
+            env.extend(projection.env_literal);
             env
         },
         plan_config_map: Some(plan_config_map_name(&backup.name_any())),

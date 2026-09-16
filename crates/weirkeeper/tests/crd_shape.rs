@@ -772,12 +772,45 @@ fn every_spec_is_sealed_and_only_suspend_is_mutable() {
             "{file}: exactly one CEL rule is attached to `.spec`; got {rules:?}"
         );
         let deeper: Vec<&Attached> = rules.iter().filter(|r| r.path != ["spec"]).collect();
-        assert!(
-            deeper.is_empty(),
-            "{file}: no CEL rule is attached BELOW `.spec` — a per-field transition rule is \
-             evaluated only when `oldSelf` has that field, so it does not seal an optional \
-             one on the 1.29 floor (Global Constraint 25). Got {deeper:?}"
-        );
+        for rule in &deeper {
+            // NO TRANSITION RULE BELOW `.spec`, EVER — a per-field transition
+            // rule is evaluated only when `oldSelf` has that field, so it does
+            // not seal an optional one on the 1.29 floor (Global Constraint
+            // 25). What MAY sit deeper is an ordinary cross-field VALIDATION
+            // rule, which is evaluated exactly when the object it is attached
+            // to exists: PLAT-07.1's saved-connection rules are the only ones.
+            assert!(
+                !rule.rule.contains("oldSelf"),
+                "{file}: the rule at {:?} names oldSelf below `.spec`; immutability is sealed by \
+                 the object-level rule alone. Got {rule:?}",
+                rule.path
+            );
+            assert_eq!(
+                file, "kafkaclusters.yaml",
+                "only the saved-connection contract attaches rules below `.spec` today; \
+                 {file} attached {rule:?}"
+            );
+        }
+        if file == "kafkaclusters.yaml" {
+            let attached: Vec<(Vec<String>, String, String)> = deeper
+                .iter()
+                .map(|r| (r.path.clone(), r.rule.clone(), r.message.clone()))
+                .collect();
+            let expected: Vec<(Vec<String>, String, String)> =
+                weirkeeper::crds::kafka_cluster::CONNECTION_RULES
+                    .iter()
+                    .map(|(path, rule, message)| {
+                        let mut full = vec!["spec".to_string()];
+                        full.extend(path.iter().map(|p| (*p).to_string()));
+                        (full, (*rule).to_string(), (*message).to_string())
+                    })
+                    .collect();
+            assert_eq!(
+                attached, expected,
+                "the checked-in KafkaCluster CRD must carry exactly the connection rules the \
+                 emitter injects, at exactly those paths"
+            );
+        }
 
         let rule = &on_spec[0].rule;
         if file == "backupschedules.yaml" {
@@ -1403,9 +1436,42 @@ fn kafka_cluster_auth_mode_accepts_only_plaintext_or_scram_sha512() {
     names.sort();
     assert_eq!(
         names,
-        vec!["mode", "secretRef", "tls", "username"],
-        "the auth block is {{mode, username, secretRef, tls}} and carries NO password field"
+        vec!["mode", "secretRef", "tls", "tlsCa", "username"],
+        "the auth block is {{mode, username, secretRef, tls, tlsCa}} and carries NO password field: \
+         PLAT-07.1 added the CA REFERENCE and the credential key NAME, never a value"
     );
+    let secret_ref = at(auth, &["properties", "secretRef", "properties"]);
+    let mut secret_ref_names: Vec<&str> = secret_ref
+        .as_mapping()
+        .expect("secretRef has properties")
+        .keys()
+        .map(|k| k.as_str().expect("a property name"))
+        .collect();
+    secret_ref_names.sort();
+    assert_eq!(
+        secret_ref_names,
+        vec!["name", "passwordKey"],
+        "the credential reference is a Secret NAME and a data KEY, and has no namespace field: a \
+         cross-namespace reference is a privilege-escalation surface"
+    );
+    for source in ["configMapKeyRef", "secretKeyRef"] {
+        let node = at(
+            auth,
+            &["properties", "tlsCa", "properties", source, "properties"],
+        );
+        let mut keys: Vec<&str> = node
+            .as_mapping()
+            .expect("a CA source has properties")
+            .keys()
+            .map(|k| k.as_str().expect("a property name"))
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["key", "name"],
+            "a CA source is {{name, key}} in THIS namespace — no namespace field"
+        );
+    }
 }
 
 /// Interface **I22**: `windowCovered` is two epoch-millisecond integers.

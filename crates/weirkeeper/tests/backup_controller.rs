@@ -1670,15 +1670,17 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        20,
-        "the twenty terminal states that are NOT an exit code — the original ten, plus \
+        24,
+        "the twenty-four terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
          (Task 20's `Restore` admission, and note that its third admission reason \
          `ApprovalNotVerified` is deliberately NOT here — it is a thirty-second HOLD under \
          interface I19, so it lives in `CONDITION_REASONS`), plus `ExecutionSpecInvalid` \
-         (PLAT-06.1: a typed spec that states no runnable identity); got {TERMINAL_STATES:?}"
+         (PLAT-06.1: a typed spec that states no runnable identity), plus PLAT-07.1's four \
+         saved-connection refusals `ConnectionConfigInvalid` / `ConnectionReferenceInvalid` / \
+         `ConnectionFieldUnsupported` / `ConnectionPlanMismatch`; got {TERMINAL_STATES:?}"
     );
     for state in TERMINAL_STATES {
         assert!(
@@ -2218,6 +2220,10 @@ async fn plaintext_backups_do_not_project_an_incidental_source_secret() {
         .unwrap();
     let mut cluster: Value = serde_json::from_str(&route.body).unwrap();
     cluster["spec"]["auth"]["mode"] = serde_json::json!("plaintext");
+    // …and `tls: false` with it: PLAT-07.1 refuses `plaintext` with `tls: true`
+    // (TLS without SASL) rather than dialling it in the clear, so the leftover
+    // credential this row is about has to sit on a connection that resolves.
+    cluster["spec"]["auth"]["tls"] = serde_json::json!(false);
     route.body = cluster.to_string();
     let (_, bodies) = create_pass(routes).await;
     let posted = bodies

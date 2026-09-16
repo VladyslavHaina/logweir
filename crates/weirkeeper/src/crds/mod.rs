@@ -276,6 +276,56 @@ pub fn seal_spec(crd: &mut CustomResourceDefinition, object_rule: Option<&str>) 
     }
 }
 
+/// Attach one NON-TRANSITION validation rule below `.spec`.
+///
+/// For the saved-connection contract's cross-field rules
+/// ([`kafka_cluster::CONNECTION_RULES`]). None of them names `oldSelf`, so the
+/// per-field placement that [`seal_spec`] warns about for IMMUTABILITY is the
+/// right one here: a rule on `spec.auth.tlsCa` is evaluated exactly when that
+/// object exists, which is exactly when it has something to say.
+/// `every_spec_is_sealed_and_only_suspend_is_mutable` asserts no rule below
+/// `.spec` is a transition rule.
+///
+/// PANICS on a path the schema does not have, for the reason [`seal_spec`]
+/// does: an emitter that silently skipped a rule would render a CRD that
+/// passes the drift gate and validates nothing.
+pub fn attach_rule(crd: &mut CustomResourceDefinition, path: &[&str], rule: &str, message: &str) {
+    assert!(
+        !rule.contains("oldSelf"),
+        "attach_rule is for non-transition rules; `{rule}` names oldSelf"
+    );
+    let name = crd.metadata.name.clone().unwrap_or_default();
+    for version in crd.spec.versions.iter_mut() {
+        let mut node = version
+            .schema
+            .as_mut()
+            .and_then(|s| s.open_api_v3_schema.as_mut())
+            .and_then(|root| root.properties.as_mut())
+            .and_then(|props| props.get_mut("spec"))
+            .unwrap_or_else(|| panic!("{name}: version {} has no `spec` schema", version.name));
+        for key in path {
+            node = node
+                .properties
+                .as_mut()
+                .and_then(|props| props.get_mut(*key))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: version {} has no `spec.{}` schema",
+                        version.name,
+                        path.join(".")
+                    )
+                });
+        }
+        node.x_kubernetes_validations
+            .get_or_insert_with(Vec::new)
+            .push(ValidationRule {
+                rule: rule.to_string(),
+                message: Some(message.to_string()),
+                ..Default::default()
+            });
+    }
+}
+
 /// The message that belongs to `object_rule`.
 fn message_for(object_rule: Option<&str>) -> &'static str {
     match object_rule {
@@ -335,7 +385,13 @@ pub fn render_all() -> Vec<Rendered> {
     push(
         "KafkaCluster",
         "kafkaclusters.yaml",
-        kafka_cluster::KafkaCluster::crd(),
+        {
+            let mut crd = kafka_cluster::KafkaCluster::crd();
+            for (path, rule, message) in kafka_cluster::CONNECTION_RULES {
+                attach_rule(&mut crd, path, rule, message);
+            }
+            crd
+        },
         None,
     );
     push(

@@ -1,0 +1,11 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaCluster",
+  "metadata": { "name": "orders-scram", "namespace": "logweir-plat07", "uid": "7d1f4a52-0000-4000-8000-0000000007a4", "generation": 1 },
+  "spec": {
+    "bootstrapServers": ["b-1.example.kafka.us-west-2.amazonaws.com:9096", "b-2.example.kafka.us-west-2.amazonaws.com:9096"],
+    "auth": { "mode": "scramSha512", "username": "logweir", "secretRef": { "name": "orders-sasl" }, "tls": true },
+    "role": "source"
+  },
+  "status": { "reachable": true, "clusterId": "LEGACY00000000000000004" }
+}

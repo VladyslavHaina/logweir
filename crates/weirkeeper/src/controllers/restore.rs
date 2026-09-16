@@ -108,8 +108,8 @@ use tracing::{debug, info, warn};
 
 use super::backup::{
     self, ARCHIVE_ACCESS_KEY, ARCHIVE_ACCESS_KEY_ENV, ARCHIVE_SECRET_KEY, ARCHIVE_SECRET_KEY_ENV,
-    RUNNER_SERVICE_ACCOUNT, SIGNING_KEY_FILE, SIGNING_KEY_SECRET, SIGNING_KEY_SECRET_KEY,
-    SIGNING_MOUNT_PATH, SIGNING_VOLUME, TTL_SECONDS_AFTER_FINISHED,
+    SIGNING_KEY_FILE, SIGNING_KEY_SECRET, SIGNING_KEY_SECRET_KEY, SIGNING_MOUNT_PATH,
+    SIGNING_VOLUME, TTL_SECONDS_AFTER_FINISHED,
 };
 use super::Context;
 use crate::conditions::{
@@ -125,7 +125,7 @@ use crate::conditions::{
     TERMINAL_STATE_PLAN_HASH_MISMATCH, TERMINAL_STATE_WINDOW_NOT_COVERED,
 };
 use crate::crds::approval::Approval;
-use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
+use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::restore::Restore;
 use crate::crds::trust_roster::TrustRoster;
 use crate::job::{
@@ -233,6 +233,14 @@ pub const TARGET_PASSWORD_ENV: &str = "LOGWEIR_TARGET_PASSWORD";
 /// then authenticates as nobody. `CredentialNotRenderable` — the runner's
 /// refusal at exit 3 — is what an absent or unrenderable value becomes, and it
 /// is the runner that decides it.
+///
+/// **PLAT-07.1 MADE IT THE DEFAULT RATHER THAN THE ONLY KEY.** A connection may
+/// name `auth.secretRef.passwordKey`; absent, the resolver projects this key, so
+/// every Secret written before that field existed still resolves. The constant
+/// stays here because the chart's own refusal quotes this line
+/// (`crates/logweir/tests/chart_lint.rs`), and
+/// `crates/weirkeeper/tests/connection.rs` asserts it equals
+/// `crds::kafka_cluster::DEFAULT_PASSWORD_KEY`.
 pub const TARGET_PASSWORD_SECRET_KEY: &str = "password";
 
 // ---------------------------------------------------------------------------
@@ -1187,7 +1195,10 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
 ///
 /// # Errors
 ///
-/// [`RestoreError`] when the object carries no namespace or UID.
+/// [`RestoreError`] when the object carries no namespace or UID, and
+/// [`RestoreError::Refused`] when the target connection does not resolve or the
+/// approved plan names a different target than it (PLAT-07.1,
+/// [`crate::connection`]) — before any ConfigMap or Job exists.
 pub fn runner_job_spec(
     restore: &Restore,
     cluster: &KafkaCluster,
@@ -1202,6 +1213,17 @@ pub fn runner_job_spec(
     let uid = restore
         .uid()
         .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
+
+    // THE TARGET CONNECTION, FROM THE ONE RESOLVER THE PROBE AND THE BACKUP USE
+    // (PLAT-07.1). The runner dials `planBytes`' target with THIS connection's
+    // password and CA, so the approved plan must name the same target; a
+    // mismatch is refused here, which is before `write_plan_config_map` and the
+    // Job `POST` in `reconcile_restore`.
+    let connection =
+        crate::connection::resolve(cluster, crate::connection::ConnectionUse::RestoreTarget)?;
+    connection.check_job_namespace(&namespace)?;
+    connection.check_restore_plan(&restore.spec.plan_bytes)?;
+    let projection = connection.project();
 
     // The private signing key remains the only file-backed Secret. The
     // approval inputs are public and come from the immutable ConfigMap this
@@ -1218,6 +1240,7 @@ pub fn runner_job_spec(
             SIGNING_KEY_FILE.to_string(),
         )],
     }];
+    secret_mounts.extend(projection.secret_mounts);
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = Vec::new();
@@ -1235,19 +1258,11 @@ pub fn runner_job_spec(
     }
     // THE TARGET'S SASL PASSWORD, PROJECTED AND NEVER READ. `secretKeyRef`
     // only: the controller holds no `get` on Secrets, so this is a reference
-    // it writes into a pod spec and a value it cannot see. A `scramSha512`
-    // cluster with no `secretRef` gets NO variable — and the runner then
-    // refuses at exit 3 with `CredentialNotRenderable`, which is interface
-    // I11's division of labour and not a gap on this side.
-    if matches!(cluster.spec.auth.mode, AuthMode::ScramSha512) {
-        if let Some(secret) = cluster.spec.auth.secret_ref.as_ref() {
-            env_from_secret.push(EnvFromSecret {
-                name: TARGET_PASSWORD_ENV.to_string(),
-                secret_name: secret.name.clone(),
-                key: TARGET_PASSWORD_SECRET_KEY.to_string(),
-            });
-        }
-    }
+    // it writes into a pod spec and a value it cannot see. The VALUE is still
+    // validated by the RUNNER (exit 3, `CredentialNotRenderable`), interface
+    // I11's division of labour; what the resolver refuses up front is a
+    // `scramSha512` connection with no reference at all.
+    env_from_secret.extend(projection.env_from_secret);
 
     Ok(RunnerJobSpec {
         // THE JOB IS NAMED AFTER THE CR, VERBATIM — see `RunnerJobSpec::name`
@@ -1263,22 +1278,26 @@ pub fn runner_job_spec(
         },
         args: runner_argv(restore, approver_key_ids),
         deadline_seconds: restore.spec.deadline_seconds,
-        service_account_name: RUNNER_SERVICE_ACCOUNT.to_string(),
+        service_account_name: connection.execution.service_account_name.clone(),
         secret_mounts,
-        config_map_mounts: vec![ConfigMapMount {
-            volume: APPROVAL_VOLUME.to_string(),
-            config_map_name: approval_bundle_config_map_name(&restore.name_any()),
-            mount_path: APPROVAL_MOUNT_PATH.to_string(),
-            items: vec![
-                (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
-                (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
-                (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
-                (
-                    ALLOWED_CLUSTERS_FILE.to_string(),
-                    ALLOWED_CLUSTERS_FILE.to_string(),
-                ),
-            ],
-        }],
+        config_map_mounts: {
+            let mut mounts = vec![ConfigMapMount {
+                volume: APPROVAL_VOLUME.to_string(),
+                config_map_name: approval_bundle_config_map_name(&restore.name_any()),
+                mount_path: APPROVAL_MOUNT_PATH.to_string(),
+                items: vec![
+                    (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
+                    (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
+                    (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
+                    (
+                        ALLOWED_CLUSTERS_FILE.to_string(),
+                        ALLOWED_CLUSTERS_FILE.to_string(),
+                    ),
+                ],
+            }];
+            mounts.extend(projection.config_map_mounts);
+            mounts
+        },
         env_from_secret,
         // `RUST_LOG` is pinned rather than inherited: below `info` the run id
         // and the exit-code meaning line are lost, and those two are how a pod
@@ -1296,6 +1315,7 @@ pub fn runner_job_spec(
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
             env.extend(backup::archive_addressing_env());
             env.extend(execution_contract_env(restore, approval, roster)?);
+            env.extend(projection.env_literal);
             env
         },
         plan_config_map: Some(plan_config_map_name(&restore.name_any())),

@@ -69,10 +69,11 @@ use crate::conditions::{
     TERMINAL_STATE_EXECUTION_SPEC_INVALID, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
     TERMINAL_STATE_REFERENT_NOT_FOUND,
 };
+use crate::connection::ConnectionUse;
 use crate::controllers::backup::{plan_config_map_name, PLAN_ALLOWED_CLUSTERS_KEY, PLAN_SPEC_KEY};
 use crate::crds::backup::{Backup, BackupExecution};
 use crate::crds::backup_schedule::BackupSchedule;
-use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
+use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::LocalRef;
 use logweir_core::engine::StorageUrl;
 use logweir_core::ids::sha256_prefixed;
@@ -154,6 +155,17 @@ impl ExecutionRefusal {
 
     fn conflict(message: impl Into<String>) -> Self {
         Self::new(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, message)
+    }
+}
+
+impl From<crate::connection::ConnectionRefusal> for ExecutionRefusal {
+    /// A connection the ONE resolver refuses is a refusal of the run, with the
+    /// resolver's own terminal state and message (PLAT-07.1). The state is
+    /// carried rather than flattened to one of this module's: a caller that
+    /// sees `ConnectionConfigInvalid` is being told the saved connection is
+    /// wrong, not that the snapshot is.
+    fn from(refusal: crate::connection::ConnectionRefusal) -> Self {
+        Self::new(refusal.reason, refusal.message)
     }
 }
 
@@ -451,6 +463,23 @@ pub struct SourceInputs {
     pub bootstrap_servers: Vec<String>,
     /// Mode, SCRAM username and TLS flag. No password at any variant.
     pub auth: AuthSpec,
+    /// The private CA the connection verifies the broker with, as the
+    /// reference [`crate::connection::resolve`] decided — Secret or ConfigMap,
+    /// object name and data key (PLAT-07.1).
+    ///
+    /// EXECUTABLE, so a `tlsCa` edited after the freeze is a
+    /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] and never a Job that
+    /// verifies the broker against a different root than the plan was approved
+    /// for. A CA CERTIFICATE IS PUBLIC MATERIAL, which is why its reference may
+    /// be named here while the SASL password's may not: the password reference
+    /// is projected into the Job from the pinned `KafkaCluster` and resolved by
+    /// the kubelet, and appears in no snapshot, no document and no status.
+    ///
+    /// Absent for every connection that names no CA, so a snapshot frozen
+    /// before this field existed re-encodes to the same bytes and is still
+    /// admitted under grammar [`INPUTS_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_ca: Option<crate::connection::CaReference>,
     /// `KafkaCluster.status.clusterId` when the inputs were resolved.
     /// INFORMATIONAL on the backup path: the runner observes the id from the
     /// broker and never reads this, so it is excluded from the executable
@@ -566,8 +595,11 @@ impl BackupExecutionInputs {
 /// # Errors
 ///
 /// A terminal [`ExecutionRefusal`]: `ReferentNotFound` for a cluster with no
-/// UID, `CredentialNotRenderable` for a SCRAM cluster without a username or a
-/// usable Secret reference, or an archive Secret reference with a blank name,
+/// UID, whatever [`crate::connection::resolve`] refuses the source connection
+/// for (`CredentialNotRenderable` for a SCRAM cluster without a username or a
+/// usable Secret reference, `ConnectionConfigInvalid`,
+/// `ConnectionReferenceInvalid` or `ConnectionFieldUnsupported` — PLAT-07.1),
+/// `CredentialNotRenderable` for an archive Secret reference with a blank name,
 /// `ArchiveUrlUnreadable` for an archive URL no storage block can be rendered
 /// from, and `ExecutionSpecInvalid` for a non-positive deadline.
 pub fn resolve_inputs(
@@ -593,45 +625,24 @@ pub fn resolve_inputs(
             ),
         )
     })?;
-    let auth = match cluster.spec.auth.mode {
-        AuthMode::Plaintext => AuthSpec::Plaintext,
-        AuthMode::ScramSha512 => {
-            let username = cluster
-                .spec
-                .auth
-                .username
-                .clone()
-                .filter(|u| !u.is_empty())
-                .ok_or_else(|| {
-                    ExecutionRefusal::new(
-                        TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
-                        format!(
-                            "the KafkaCluster {cluster_name} names auth mode scramSha512 and no \
-                             auth.username, so the plan document cannot name the identity the run \
-                             will present"
-                        ),
-                    )
-                })?;
-            // The reference is VALIDATED here and not copied: the Job builder
-            // projects it from this same KafkaCluster, whose UID the snapshot
-            // pins and whose spec is CEL-immutable.
-            if crate::controllers::kafka_cluster::source_password_env(cluster).is_none() {
-                return Err(ExecutionRefusal::new(
-                    TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
-                    format!(
-                        "the KafkaCluster {cluster_name} uses scramSha512 but has no non-empty \
-                         auth.secretRef.name; reference a Secret in namespace {} with a password \
-                         key",
-                        identity.backup.namespace
-                    ),
-                ));
-            }
-            AuthSpec::ScramSha512 {
-                username,
-                tls: cluster.spec.auth.tls,
-            }
-        }
-    };
+    // THE ONE RESOLUTION (PLAT-07.1). The source connection's settings are not
+    // read off `cluster.spec` here: `connection::resolve` is the single answer
+    // to "what does a runner Job need to dial this KafkaCluster", so the plan
+    // document, the probe and the Job cannot disagree, and a connection it
+    // refuses is refused BEFORE anything is frozen or created.
+    //
+    // WHAT IS COPIED AND WHAT IS ONLY VALIDATED. The bootstrap addresses, the
+    // auth block and the CA reference are copied into the snapshot, because
+    // each of them changes what the run dials or trusts and a later pass must
+    // compare them. The PASSWORD reference is validated and NOT copied: the Job
+    // builder projects it from this same KafkaCluster, whose UID the snapshot
+    // pins and whose spec is CEL-immutable, so no Secret name and no credential
+    // key reaches a ConfigMap.
+    let connection = crate::connection::resolve(cluster, ConnectionUse::BackupSource)
+        .map_err(ExecutionRefusal::from)?;
+    connection
+        .check_job_namespace(&identity.backup.namespace)
+        .map_err(ExecutionRefusal::from)?;
     let storage = crate::retention::storage_url_for(&backup.spec.archive.url).map_err(|e| {
         ExecutionRefusal::new(
             TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
@@ -661,8 +672,9 @@ pub fn resolve_inputs(
                 name: cluster_name,
                 uid: cluster_uid,
             },
-            bootstrap_servers: cluster.spec.bootstrap_servers.clone(),
-            auth,
+            bootstrap_servers: connection.bootstrap_servers,
+            auth: connection.auth,
+            tls_ca: connection.tls_ca,
             observed_cluster_id: cluster
                 .status
                 .as_ref()

@@ -1,0 +1,11 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaCluster",
+  "metadata": { "name": "tls-no-sasl", "namespace": "logweir-plat07", "uid": "7d1f4a52-0000-4000-8000-0000000007a7", "generation": 1 },
+  "spec": {
+    "bootstrapServers": ["b0.orders:9093"],
+    "auth": { "mode": "plaintext", "tls": true },
+    "role": "source"
+  },
+  "status": { "reachable": true, "clusterId": "LEGACY00000000000000007" }
+}

@@ -66,13 +66,14 @@ use serde_json::{json, Value};
 use std::fmt;
 use tracing::{debug, info, warn};
 
-use super::backup::{self, RUNNER_SERVICE_ACCOUNT};
+use super::backup;
 use super::Context;
 use crate::conditions::{
     current_condition, merge_condition, status_unchanged, TERMINAL_STATE_NAME_TOO_LONG,
 };
+use crate::connection::{self, ConnectionUse, ResolvedConnection};
 use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
-use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner};
+use crate::job::{self, RunnerJobSpec, RunnerOwner};
 
 /// The `Job` name a `KafkaCluster` gets: `logweir-probe-<cr name>`.
 ///
@@ -104,27 +105,6 @@ pub const SOURCE_PASSWORD_ENV: &str = "LOGWEIR_SOURCE_PASSWORD";
 /// kind of Secret, so an adopter who wrote a credential for a restore does not
 /// have to write a second one for the probe.
 pub const SOURCE_PASSWORD_SECRET_KEY: &str = super::restore::TARGET_PASSWORD_SECRET_KEY;
-
-/// Reuse the cluster's source credential for both probes and backup Jobs.
-/// Kubernetes resolves the reference in the Job's namespace; the controller
-/// never reads or caches the password. Plaintext clusters need no credential.
-#[must_use]
-pub fn source_password_env(cluster: &KafkaCluster) -> Option<EnvFromSecret> {
-    if !matches!(cluster.spec.auth.mode, AuthMode::ScramSha512) {
-        return None;
-    }
-    let secret = cluster
-        .spec
-        .auth
-        .secret_ref
-        .as_ref()
-        .filter(|secret| !secret.name.trim().is_empty())?;
-    Some(EnvFromSecret {
-        name: SOURCE_PASSWORD_ENV.to_string(),
-        secret_name: secret.name.clone(),
-        key: SOURCE_PASSWORD_SECRET_KEY.to_string(),
-    })
-}
 
 /// Interface **I14**'s first line, as a prefix. Matched BY NAME (erratum E4).
 pub const CLUSTER_ID_PREFIX: &str = "cluster-id=";
@@ -177,6 +157,10 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
     REASON_PROBE_REPORTED_UNREACHABLE,
     REASON_PROBE_OUTPUT_UNREADABLE,
     REASON_PROBE_RUNNING,
+    crate::conditions::TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+    crate::conditions::TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
+    crate::conditions::TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
+    crate::conditions::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
 ];
 
 /// `spec.activeDeadlineSeconds` on a probe Job.
@@ -378,7 +362,13 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
     }
 }
 
-/// The probe's argv — interface **I14**'s flag list, built from the object.
+/// The probe's argv — interface **I14**'s flag list, built from the RESOLVED
+/// connection (PLAT-07.1) plus this object's marker topic.
+///
+/// The connection flags are [`ResolvedConnection::probe_args`] — the same
+/// resolution the backup and restore Jobs are built from, so a probe can never
+/// dial settings those runs do not use. A connection that does not resolve has
+/// no argv at all: [`runner_job_spec`] refuses it first.
 ///
 /// `--marker-topic` IS PASSED UNCONDITIONALLY WHEN THE FIELD IS SET, and the
 /// probe never asserts it: this controller does not branch on a field whose only
@@ -387,21 +377,9 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
 /// `super::restore::runner_argv` emits `--approver-key-ids` only for a non-empty
 /// roster: a boolean flag has no false form.
 #[must_use]
-pub fn runner_argv(cluster: &KafkaCluster) -> Vec<String> {
-    let mut argv = vec![
-        "cluster-probe".to_string(),
-        "--bootstrap".to_string(),
-        cluster.spec.bootstrap_servers.join(","),
-        "--auth-mode".to_string(),
-        auth_mode_flag(cluster.spec.auth.mode).to_string(),
-    ];
-    if let Some(u) = cluster.spec.auth.username.as_ref() {
-        argv.push("--username".to_string());
-        argv.push(u.clone());
-    }
-    if cluster.spec.auth.tls {
-        argv.push("--tls".to_string());
-    }
+pub fn runner_argv(cluster: &KafkaCluster, connection: &ResolvedConnection) -> Vec<String> {
+    let mut argv = vec!["cluster-probe".to_string()];
+    argv.extend(connection.probe_args());
     if let Some(t) = cluster.spec.marker_topic.as_ref() {
         argv.push("--marker-topic".to_string());
         argv.push(t.clone());
@@ -429,7 +407,9 @@ pub fn auth_mode_flag(mode: AuthMode) -> &'static str {
 /// # Errors
 ///
 /// [`KafkaClusterError::NoNamespace`] / [`KafkaClusterError::NoUid`] — neither
-/// reachable from the API server, named rather than unwrapped.
+/// reachable from the API server, named rather than unwrapped — and
+/// [`KafkaClusterError::Refused`] carrying the connection's own refusal when
+/// [`connection::resolve`] refuses it (PLAT-07.1).
 pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClusterError> {
     let name = cluster.name_any();
     let namespace = cluster
@@ -439,14 +419,16 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         .uid()
         .ok_or_else(|| KafkaClusterError::NoUid(name.clone()))?;
 
-    // THE PASSWORD, PROJECTED AND NEVER READ. `valueFrom.secretKeyRef` only:
-    // this controller holds no `get` on Secrets (spec §9), so this is a
-    // reference it writes into a pod spec and a value it cannot see. A
-    // `scramSha512` cluster with NO `secretRef` gets no variable at all, and
-    // the probe then prints `reachable=false` naming the unprojected credential
-    // — interface I11's division of labour, and the reason that case is not a
-    // refusal on this side.
-    let env_from_secret = source_password_env(cluster).into_iter().collect();
+    // THE ONE RESOLUTION (PLAT-07.1). The password and the CA, PROJECTED AND
+    // NEVER READ: `valueFrom.secretKeyRef` and a projected volume only — this
+    // controller holds no `get` on Secrets (spec §9), so these are references
+    // it writes into a pod spec and values it cannot see. A `scramSha512`
+    // cluster with no `secretRef` used to get a probe with no variable, which
+    // then printed `reachable=false` about a configuration mistake; the
+    // resolver refuses it before any Job exists instead.
+    let connection = connection::resolve(cluster, ConnectionUse::Probe)?;
+    connection.check_job_namespace(&namespace)?;
+    let projection = connection.project();
 
     Ok(RunnerJobSpec {
         name: probe_job_name(&name),
@@ -457,16 +439,21 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
             name,
             uid,
         },
-        args: runner_argv(cluster),
+        args: runner_argv(cluster, &connection),
         deadline_seconds: PROBE_DEADLINE_SECONDS,
-        service_account_name: RUNNER_SERVICE_ACCOUNT.to_string(),
-        // NO SECRET VOLUME AND NO SIGNING KEY. A probe signs nothing, reads no
-        // approval and writes no artifact, so it is the one runner Job in this
-        // crate that mounts no Secret at all.
-        secret_mounts: Vec::new(),
-        config_map_mounts: Vec::new(),
-        env_from_secret,
-        env_literal: vec![("RUST_LOG".to_string(), "info".to_string())],
+        service_account_name: connection.execution.service_account_name.clone(),
+        // NO SIGNING KEY, AND NOTHING BUT THE CONNECTION'S OWN CA. A probe
+        // signs nothing, reads no approval and writes no artifact, so the only
+        // volume it may carry besides `/work` is the private CA the connection
+        // names — projected exactly as the backup and restore Jobs project it.
+        secret_mounts: projection.secret_mounts,
+        config_map_mounts: projection.config_map_mounts,
+        env_from_secret: projection.env_from_secret,
+        env_literal: {
+            let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
+            env.extend(projection.env_literal);
+            env
+        },
         // NO PLAN. `logweir cluster-probe` reads no `--spec`, which is why
         // `job::RunnerJobSpec::plan_config_map` is an `Option` at all — and a
         // Job with an empty `/plan` mount would stall in `ContainerCreating`
@@ -714,6 +701,32 @@ pub fn refused_status_patch(
 ) -> Value {
     json!({
         "status": {
+            "reason": reason,
+            "conditions": [condition(cluster, "Unknown", reason, message, now)],
+        }
+    })
+}
+
+/// The `/status` merge patch for a connection this controller refused to
+/// resolve (PLAT-07.1) — before any Job exists.
+///
+/// `reachable` IS CLEARED (`null` removes it under a merge patch) and nothing
+/// else about the last probe is. A connection that does not resolve is not one
+/// any run may use, and a `Restore` admits a target only on
+/// `reachable == true`: a stale `true` from a probe an earlier controller ran
+/// with different settings would let a restore reach Job construction on the
+/// strength of an observation this controller does not stand behind.
+/// `clusterId` and `observedAt` stay as the record of that last look.
+#[must_use]
+pub fn connection_refused_status_patch(
+    cluster: &KafkaCluster,
+    reason: &str,
+    message: &str,
+    now: DateTime<Utc>,
+) -> Value {
+    json!({
+        "status": {
+            "reachable": null,
             "reason": reason,
             "conditions": [condition(cluster, "Unknown", reason, message, now)],
         }
@@ -988,6 +1001,37 @@ async fn reconcile_cluster_inner(
                 name.len().saturating_sub(name_limit_for_cluster())
             ),
         ));
+    }
+
+    // STEP 0b. THE CONNECTION, BEFORE ANY `GET` OR `POST` (PLAT-07.1). Pure,
+    // like the name check above, and NOT terminal: it is re-evaluated on every
+    // reconcile, so a controller upgrade that understands the object — or a
+    // rollback fixed by rolling forward — clears the refusal with no edit.
+    if let Err(refusal) = connection::resolve(cluster, ConnectionUse::Probe) {
+        warn!(
+            cluster = %name,
+            namespace = %namespace,
+            reason = refusal.reason,
+            field = %refusal.field,
+            "refusing to probe this KafkaCluster: its saved connection does not resolve, so no \
+             probe Job is created"
+        );
+        patch_status_if_changed(
+            &clusters,
+            cluster,
+            &name,
+            connection_refused_status_patch(cluster, refusal.reason, &refusal.message, now),
+        )
+        .await?;
+        return Ok(ProbeOutcome {
+            job_name,
+            created: false,
+            reachable: None,
+            cluster_id: None,
+            reason: Some(refusal.reason.to_string()),
+            ttl_patched: false,
+            requeue: Requeue::AwaitChange,
+        });
     }
 
     let existing = jobs

@@ -170,6 +170,10 @@ pub const TERMINAL_STATES: &[&str] = &[
     "PlanHashMismatch",
     "ClusterNotReachable",
     TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+    TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+    TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
+    TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
+    TERMINAL_STATE_CONNECTION_PLAN_MISMATCH,
 ];
 
 /// The typed `Backup.spec` cannot produce a runner execution: `triggeredBy` is
@@ -182,6 +186,49 @@ pub const TERMINAL_STATES: &[&str] = &[
 /// from it and from server-generated metadata, never from an annotation. The
 /// condition message names the field.
 pub const TERMINAL_STATE_EXECUTION_SPEC_INVALID: &str = "ExecutionSpecInvalid";
+
+/// A `KafkaCluster`'s settings contradict each other or name an unusable
+/// value — PLAT-07.1, [`crate::connection::resolve`].
+///
+/// `plaintext` with `tls: true` (TLS without SASL, which contract v1 does not
+/// dial rather than dial without TLS), `auth.tlsCa` with `tls: false`, a CA
+/// naming both or neither source, or a bootstrap entry no client can dial.
+/// Refused before any Job, ConfigMap or plan exists. Terminal for a `Backup` or
+/// `Restore` (their `spec` and the referent's are immutable); on the
+/// `KafkaCluster` itself it is re-evaluated on every reconcile, so a controller
+/// upgrade that understands the object clears it without an edit.
+pub const TERMINAL_STATE_CONNECTION_CONFIG_INVALID: &str = "ConnectionConfigInvalid";
+
+/// A credential or CA reference is missing a required part or names something
+/// the kubelet could never resolve — an empty or non-DNS-1123 object name, or a
+/// data key outside `[-._a-zA-Z0-9]+`. PLAT-07.1.
+///
+/// WHAT IT CANNOT SAY: that the named Secret or ConfigMap EXISTS, or holds the
+/// key. The controller holds no read on Secrets (spec §9) and checks neither
+/// kind, so a well-formed reference to a missing object is still a pod that
+/// cannot start; PLAT-03.1's readiness check is where that becomes a named
+/// prerequisite.
+pub const TERMINAL_STATE_CONNECTION_REFERENCE_INVALID: &str = "ConnectionReferenceInvalid";
+
+/// The object carries a connection field this controller does not implement —
+/// the CRD installed is newer than the controller (a rollback, or a CRD
+/// applied ahead of its controller). PLAT-07.1.
+///
+/// Refused rather than resolved without the field, because a connection built
+/// without a setting its author asked for is exactly the silent downgrade a
+/// rollback must not perform. The message names every such field.
+pub const TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED: &str = "ConnectionFieldUnsupported";
+
+/// A `Restore`'s approved plan names a different target than the saved
+/// connection its `spec.target.clusterRef` resolves to — bootstrap servers,
+/// auth mode, username or TLS. PLAT-07.1.
+///
+/// The runner dials the PLAN's address with the CONNECTION's credential and CA,
+/// so a mismatch is a credential sent somewhere the saved connection does not
+/// name, or a TLS connection dialled without TLS. Terminal: both `spec`s are
+/// immutable and the plan is approved bytes, so the fix is a new plan built
+/// from the saved connection, and a new approval.
+pub const TERMINAL_STATE_CONNECTION_PLAN_MISMATCH: &str = "ConnectionPlanMismatch";
 
 /// A `scramSha512` `KafkaCluster` carries no `auth.username`, so the plan
 /// document cannot name the identity the run will present.

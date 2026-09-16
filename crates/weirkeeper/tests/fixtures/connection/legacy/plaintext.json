@@ -1,0 +1,12 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaCluster",
+  "metadata": { "name": "orders-prod", "namespace": "logweir-plat07", "uid": "7d1f4a52-0000-4000-8000-0000000007a1", "generation": 1 },
+  "spec": {
+    "bootstrapServers": ["b0.orders:9092", "b1.orders:9092"],
+    "auth": { "mode": "plaintext", "tls": false },
+    "role": "source",
+    "markerTopic": "logweir.scratch"
+  },
+  "status": { "reachable": true, "clusterId": "LEGACY00000000000000001" }
+}

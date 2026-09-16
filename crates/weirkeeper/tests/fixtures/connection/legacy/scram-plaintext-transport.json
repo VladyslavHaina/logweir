@@ -1,0 +1,12 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaCluster",
+  "metadata": { "name": "scram-local", "namespace": "logweir-plat07", "uid": "7d1f4a52-0000-4000-8000-0000000007a5", "generation": 1 },
+  "spec": {
+    "bootstrapServers": ["kafka-source.logweir-scram-local.svc.cluster.local:9096"],
+    "auth": { "mode": "scramSha512", "username": "scram-user", "secretRef": { "name": "source-scram" }, "tls": false },
+    "role": "target",
+    "markerTopic": "logweir.scratch"
+  },
+  "status": { "reachable": true, "clusterId": "LEGACY00000000000000005" }
+}

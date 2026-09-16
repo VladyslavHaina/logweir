@@ -24,7 +24,11 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 use weirkeeper::conditions::apply_merge_patch;
-use weirkeeper::conditions::{TERMINAL_STATES, TERMINAL_STATE_NAME_TOO_LONG};
+use weirkeeper::conditions::{
+    TERMINAL_STATES, TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+    TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE, TERMINAL_STATE_NAME_TOO_LONG,
+};
+use weirkeeper::connection::{resolve, ConnectionUse};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
 use weirkeeper::controllers::kafka_cluster::{
     action_for, auth_mode_flag, crashed_status_patch, name_limit_for_cluster, observed_at,
@@ -696,6 +700,96 @@ async fn a_kafka_cluster_whose_name_is_too_long_is_refused_before_any_post() {
     );
 }
 
+/// A `KafkaCluster` whose saved connection does not resolve is refused BEFORE
+/// any Job is looked for or created, and the refusal CLEARS `reachable` —
+/// PLAT-07.1.
+///
+/// `reachable` is cleared because a `Restore` admits a target on
+/// `status.reachable == true`: a stale `true`, written by an earlier controller
+/// that dialled the same object with different settings, would otherwise let a
+/// restore reach Job construction on an observation this controller does not
+/// stand behind.
+///
+/// KILLS: resolve the connection after the Job `GET`, or leave `reachable`
+/// standing on a refusal.
+#[tokio::test]
+async fn a_connection_that_does_not_resolve_is_refused_before_any_job() {
+    // `plaintext` with `tls: true` — TLS without SASL, which earlier releases
+    // dialled in the clear.
+    let cluster: KafkaCluster = serde_json::from_str(&cluster_json(
+        NAME,
+        r#"{ "mode": "plaintext", "tls": true }"#,
+        r#"{ "reachable": true, "clusterId": "OLDOBSERVATION000000001" }"#,
+    ))
+    .expect("the fixture is a KafkaCluster");
+    let routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-probe-orders-prod",
+            status: 404,
+            body: not_found_body("jobs.batch", JOB),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: job_body("Complete"),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/status",
+            status: 200,
+            body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
+        },
+    ];
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_cluster(&cluster, &client, now())
+        .await
+        .expect("a refusal is an outcome, not an error");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(
+        count(&seen, "POST", "/jobs"),
+        0,
+        "no probe Job exists for a connection this controller will not dial"
+    );
+    assert_eq!(
+        count(&seen, "GET", "/jobs/logweir-probe-orders-prod"),
+        0,
+        "and the connection is resolved BEFORE the Job is even looked for"
+    );
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses.len(), 1, "exactly one status patch");
+    assert_eq!(
+        conditions_of(&statuses[0]),
+        vec![(
+            CONDITION_REACHABLE.to_string(),
+            "Unknown".to_string(),
+            TERMINAL_STATE_CONNECTION_CONFIG_INVALID.to_string()
+        )],
+    );
+    assert!(
+        statuses[0]["reachable"].is_null()
+            && statuses[0]
+                .as_object()
+                .expect("an object")
+                .contains_key("reachable"),
+        "`reachable: null` REMOVES the stale observation under a merge patch: {}",
+        statuses[0]
+    );
+    let message = statuses[0]["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("auth.tls") && message.contains("refused rather than dialled"),
+        "the message names the field and says what the earlier behaviour was: {message}"
+    );
+    assert_eq!(
+        outcome.requeue,
+        Requeue::AwaitChange,
+        "`spec` is immutable, so nothing about this object will change by itself — but the          refusal is re-evaluated on every reconcile, so a controller that understands the          object clears it with no edit"
+    );
+}
+
 /// A probe Job that finished with no terminated `runner` container leaves
 /// `reachable` alone and names the sub-case.
 #[tokio::test]
@@ -930,12 +1024,16 @@ fn the_verdict_is_a_function_of_the_log_alone() {
 // The Job spec and the argv
 // ---------------------------------------------------------------------------
 
-/// Interface **I14**'s argv, built from the object — and `--marker-topic`
-/// passed through UNCONDITIONALLY.
+/// Interface **I14**'s argv, built from the RESOLVED connection (PLAT-07.1) —
+/// and `--marker-topic` passed through UNCONDITIONALLY.
 #[test]
 fn the_argv_is_interface_i14s_flag_list() {
+    let plaintext =
+        resolve(&cluster(), ConnectionUse::Probe).expect("the plaintext connection resolves");
+    let scram =
+        resolve(&scram_cluster(), ConnectionUse::Probe).expect("the SCRAM connection resolves");
     assert_eq!(
-        runner_argv(&cluster()),
+        runner_argv(&cluster(), &plaintext),
         vec![
             "cluster-probe",
             "--bootstrap",
@@ -954,7 +1052,7 @@ fn the_argv_is_interface_i14s_flag_list() {
     );
 
     assert_eq!(
-        runner_argv(&scram_cluster()),
+        runner_argv(&scram_cluster(), &scram),
         vec![
             "cluster-probe",
             "--bootstrap",
@@ -974,7 +1072,7 @@ fn the_argv_is_interface_i14s_flag_list() {
          form — and NO PASSWORD APPEARS ANYWHERE ON THE ARGV"
     );
 
-    for a in runner_argv(&scram_cluster()) {
+    for a in runner_argv(&scram_cluster(), &scram) {
         assert!(
             !a.contains("password") && !a.contains("secret"),
             "the argv names no credential: {a}"
@@ -1001,7 +1099,8 @@ fn the_password_is_projected_as_a_secret_key_ref_and_never_read() {
     let spec = runner_job_spec(&scram_cluster()).expect("the Job spec builds");
     assert!(
         spec.secret_mounts.is_empty(),
-        "a probe signs nothing and reads no approval, so it mounts no Secret at all"
+        "a probe signs nothing and reads no approval, so it mounts no Secret at all unless the \
+         connection names a private CA (PLAT-07.1)"
     );
     assert_eq!(spec.env_from_secret.len(), 1);
     let e = &spec.env_from_secret[0];
@@ -1019,19 +1118,23 @@ fn the_password_is_projected_as_a_secret_key_ref_and_never_read() {
     let spec = runner_job_spec(&cluster()).expect("the Job spec builds");
     assert!(spec.env_from_secret.is_empty());
 
-    // ...and neither does a `scramSha512` cluster with NO `secretRef`: the
-    // probe then prints `reachable=false` naming the unprojected credential,
-    // which is interface I11's division of labour and not a refusal here.
+    // ...and a `scramSha512` cluster with NO `secretRef` is REFUSED before a
+    // Job exists (PLAT-07.1). It used to get a probe with no variable, which
+    // then printed `reachable=false` about a configuration mistake — a fact
+    // about this control plane reported as a fact about somebody's cluster.
     let no_secret: KafkaCluster = serde_json::from_str(&cluster_json(
         NAME,
         r#"{ "mode": "scramSha512", "username": "logweir", "tls": true }"#,
         "{}",
     ))
     .expect("the fixture is a KafkaCluster");
-    assert!(runner_job_spec(&no_secret)
-        .expect("the Job spec builds")
-        .env_from_secret
-        .is_empty());
+    let refusal = runner_job_spec(&no_secret).expect_err("no reference, no Job");
+    assert!(
+        refusal
+            .to_string()
+            .contains(TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE),
+        "the refusal keeps the state a backup reported for the same object: {refusal}"
+    );
 }
 
 /// The Job shape comes from `job::build` and is not rebuilt here.
@@ -1221,9 +1324,18 @@ fn every_probe_condition_reason_is_a_valid_metav1_reason() {
     );
     assert_eq!(
         PROBE_CONDITION_REASONS.len(),
-        4,
-        "four reasons: Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, ProbeRunning"
+        8,
+        "the four probe verdicts — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
+         ProbeRunning — plus the four PLAT-07.1 saved-connection refusals this loop writes \
+         before any Job exists, which are the shared terminal states and not a second vocabulary"
     );
+    for r in PROBE_CONDITION_REASONS.iter().skip(4) {
+        assert!(
+            TERMINAL_STATES.contains(r),
+            "`{r}` is written as a condition reason here, so it must be one of the shared \
+             terminal states rather than a spelling only this module knows"
+        );
+    }
 }
 
 /// The re-probe cadence is the Job's TTL, and the requeue clears it.

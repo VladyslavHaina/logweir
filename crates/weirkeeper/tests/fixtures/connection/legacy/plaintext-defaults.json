@@ -1,0 +1,10 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "KafkaCluster",
+  "metadata": { "name": "minimal", "namespace": "logweir-plat07", "uid": "7d1f4a52-0000-4000-8000-0000000007a2" },
+  "spec": {
+    "bootstrapServers": ["kafka.logweir-plat07.svc:9092"],
+    "auth": { "mode": "plaintext" },
+    "role": "source"
+  }
+}

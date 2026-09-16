@@ -106,10 +106,19 @@
 //! and it deletes nothing — the re-probe cadence is the probe Job's own
 //! `ttlSecondsAfterFinished`, so the API server collects the finished Job and
 //! the next reconcile finds none.
+//!
+//! WHAT PLAT-07.1 ADDED. [`connection`] — the saved-connection resolver. One
+//! function turns a `KafkaCluster` into the public settings and the Secret and
+//! ConfigMap REFERENCES a runner needs, and the probe, backup and restore Jobs
+//! are all built from that one resolution; a conflicting or unusable connection
+//! is refused before any Job exists. [`connection::credential`] is the
+//! write-only credential-entry contract a product API builds its create-only
+//! Secret with — a library the controller itself never calls.
 
 pub mod backup_execution;
 pub mod cadence;
 pub mod conditions;
+pub mod connection;
 pub mod controllers;
 pub mod crds;
 pub mod job;

@@ -1008,10 +1008,12 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'A Kafka cluster Logweir connects to: bootstrap servers, auth
-          mode and username, role, and the marker topic that proves a scratch target.
-          The password lives in a Secret; `status.clusterId` is read from the broker
-          and never from this spec. `spec` is immutable.'
+        description: 'A Kafka cluster Logweir connects to (saved-connection contract
+          v1): bootstrap servers, auth mode and username, the TLS switch and an optional
+          private CA reference, role, and the marker topic that proves a scratch target.
+          The password lives in a Secret and the CA in a Secret or ConfigMap, both
+          in this namespace and both referenced, never copied; `status.clusterId`
+          is read from the broker and never from this spec. `spec` is immutable.'
         properties:
           spec:
             description: '`KafkaCluster.spec`.'
@@ -1026,32 +1028,102 @@ spec:
                     - scramSha512
                     type: string
                   secretRef:
-                    description: A Secret in this namespace holding the SASL password.
+                    description: A Secret in this namespace holding the SASL password,
+                      and the key it is under. Required when `mode` is `scramSha512`.
                       Logweir never reads its value into a status field, a log line
                       or a rendered document.
                     nullable: true
                     properties:
                       name:
-                        description: The referenced object's `metadata.name`, in this
-                          namespace.
+                        description: The Secret's `metadata.name`, in this namespace.
+                        type: string
+                      passwordKey:
+                        description: The data key holding the password. Absent means
+                          `password`, the key every earlier release projected.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        pattern: ^[-._a-zA-Z0-9]+$
                         type: string
                     required:
                     - name
                     type: object
                   tls:
                     default: false
-                    description: Whether the transport is TLS. Independent of `mode`
-                      — see the type's own note.
+                    description: 'Whether the transport is TLS — the only switch that
+                      turns TLS on. Independent of `mode`; in connection contract
+                      v1 TLS is supported with `scramSha512` (SASL_SSL), and `plaintext`
+                      with `tls: true` is refused rather than dialled without TLS.'
                     type: boolean
+                  tlsCa:
+                    description: 'The certificate authority that signs the brokers''
+                      certificates, when it is not one the runner image already trusts:
+                      exactly one key of a Secret or a ConfigMap in this namespace.
+                      It replaces the default trust store for this connection in BOTH
+                      clients (the engine''s `ssl_ca_location` and librdkafka''s `ssl.ca.location`).
+                      Requires `tls: true`.'
+                    nullable: true
+                    properties:
+                      configMapKeyRef:
+                        description: A key of a ConfigMap in this namespace holding
+                          PEM CA certificate(s). A CA certificate is public, so a
+                          ConfigMap is an ordinary home for it.
+                        nullable: true
+                        properties:
+                          key:
+                            description: The data key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The object's `metadata.name`, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      secretKeyRef:
+                        description: A key of a Secret in this namespace holding PEM
+                          CA certificate(s).
+                        nullable: true
+                        properties:
+                          key:
+                            description: The data key.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: The object's `metadata.name`, in this namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: auth.tlsCa names exactly one of secretKeyRef or configMapKeyRef
+                      rule: has(self.secretKeyRef) != has(self.configMapKeyRef)
                   username:
-                    description: The SASL principal. Required in practice when `mode`
-                      is `scramSha512`; it is what `planBytes` binds, so changing
-                      it after an approval invalidates that approval's plan hash.
+                    description: The SASL principal. Required when `mode` is `scramSha512`;
+                      it is what `planBytes` binds, so changing it after an approval
+                      invalidates that approval's plan hash. Never read from a Secret.
                     nullable: true
                     type: string
                 required:
                 - mode
                 type: object
+                x-kubernetes-validations:
+                - message: 'auth.tlsCa names a CA for a TLS transport, so it requires
+                    auth.tls: true'
+                  rule: '!has(self.tlsCa) || self.tls'
               bootstrapServers:
                 description: The broker bootstrap addresses, `host:port`.
                 items:
