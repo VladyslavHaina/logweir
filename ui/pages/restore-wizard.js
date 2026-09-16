@@ -571,7 +571,7 @@ export function renderPlanStep(prepared, state) {
     "</div>" +
     "<p class=\"note\">" + GUIDED_SUBMIT_SENTENCE + "</p>" +
     "<div class=\"form-status\" id=\"restore-submit-status\" tabindex=\"-1\">" +
-    submissionStatus(submission, p, beside) +
+    submissionStatus(submission, p, beside, s.ns) +
     "</div>" +
     "</section>"
   );
@@ -585,20 +585,71 @@ export const GUIDED_SUBMIT_SENTENCE =
   "or the same plan after a reload -- never creates a second Restore, because its name is minted " +
   "from these bytes.";
 
-function submissionStatus(submission, prepared, beside) {
+/** Whether an outcome is about a plan this page is no longer showing.
+ *
+ *  An attempt records the plan it sent (`about`, see `createMutation`). A
+ *  field edited while that attempt was outstanding leaves the two apart: the
+ *  page then shows one plan and holds an outcome about another, and every
+ *  sentence that says "submit again" is false of it. An attempt that recorded
+ *  nothing (there is none in this file, and a caller may still pass one) is
+ *  treated as being about what is shown, which is the older behaviour. */
+export function outcomeIsElsewhere(submission, prepared) {
+  const about = ((submission || {}).about) || {};
+  const hash = (prepared || {}).hash;
+  if (typeof about.hash !== "string" || about.hash.length === 0) {
+    return false;
+  }
+  return typeof hash !== "string" || about.hash !== hash;
+}
+
+/** The name the attempt these words are about actually sent, which is not the
+ *  name on screen once a field has changed. */
+function submittedName(submission, prepared) {
+  const about = ((submission || {}).about) || {};
+  return typeof about.restoreName === "string" && about.restoreName.length > 0
+    ? about.restoreName
+    : (prepared || {}).restoreName;
+}
+
+function submissionStatus(submission, prepared, beside, ns) {
   const s = submission || {};
+  const settled = s.phase === "succeeded" || s.phase === "failed";
+  // THE OUTCOME MAY BE ABOUT A PLAN THAT IS NO LONGER ON SCREEN. `about` is
+  // absent only before the first attempt of this page's life, so an outcome
+  // that carries none is treated as being about what is shown.
+  const elsewhere = settled && outcomeIsElsewhere(s, prepared);
+  const name = submittedName(s, prepared);
+  const aside = elsewhere
+    ? "<p class=\"note\" id=\"submitted-elsewhere\">These words are about Restore <code>" +
+      esc(name) + "</code>, the plan that was submitted -- not the plan shown above, which the " +
+      "fields have changed since. Submitting now creates <code>" +
+      esc((prepared || {}).restoreName) + "</code> instead.</p>"
+    : "";
   if (s.phase === "succeeded") {
     const result = s.result || {};
     const meta = ((result.object || {}).metadata) || {};
-    const route = typeof result.route === "string" ? result.route : "";
+    const shown = typeof meta.name === "string" && meta.name.length > 0 ? meta.name : name;
+    // THE DURABLE LINK IS SHOWN EVEN WHEN THE DRAFT MOVED ON. An outcome about
+    // another plan is exactly the case where the object would otherwise never
+    // be mentioned again, and the one page that says whether it exists and
+    // where it stands is its own operation view -- not the next step the
+    // submit had chosen for a plan this page is no longer showing.
+    const route = elsewhere || typeof result.route !== "string" || result.route.length === 0
+      ? restoreOperationRoute(ns, shown)
+      : result.route;
     return (
-      mutationStatus(s, { kind: "Restore", name: meta.name }) +
-      (route.length > 0
-        ? "<p class=\"note\"><a href=\"" + esc(route) + "\">Open Restore " + esc(meta.name) + "</a></p>"
-        : "")
+      mutationStatus(s, { kind: "Restore", name: shown }) +
+      "<p class=\"note\"><a href=\"" + esc(route) + "\">Open Restore " + esc(shown) + "</a></p>" +
+      aside
     );
   }
-  return mutationStatus(s, { kind: "Restore", name: (prepared || {}).restoreName }, beside);
+  return (
+    mutationStatus(s, { kind: "Restore", name: name, resubmits: !elsewhere }, beside) +
+    (elsewhere
+      ? aside + "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, name)) +
+        "\">Open Restore " + esc(name) + " to see whether it exists</a></p>"
+      : "")
+  );
 }
 
 /** The field messages the wizard state carries, by input. */
@@ -803,7 +854,7 @@ export function validateRestore(state) {
   const s = state || {};
   const fields = s.fields || {};
   const target = fields.target || {};
-  const problems = {};
+  const problems = Object.create(null);
   if (epochMs(fields.pointInTime) === null) {
     problems.pointInTime = "an RFC 3339 instant, such as 2026-09-07T14:05:00Z";
   }
@@ -1516,8 +1567,23 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     }
     // THE EDIT IS KEPT BEFORE ANYTHING ELSE, and a settled outcome about the
     // previous plan is cleared: it described bytes that are no longer these.
+    //
+    // WHICH OUTCOMES AN EDIT CLEARS. An outcome about these BYTES -- a refusal,
+    // a 422, a conflict -- described bytes that are no longer these, so it
+    // goes. An outcome about whether an OBJECT EXISTS does not: editing a
+    // field does not un-create a Restore, and does not settle one whose fate
+    // is unknown.
+    //
+    // That is the defect this rule replaces. A create that timed out was NOT
+    // cancelled and may still be accepted; clearing the record on the next
+    // edit took its attempt number with it, so the late 201 for that Restore
+    // found no answerable attempt and was dropped -- leaving an object nobody
+    // was ever told about. Now the record is kept, and `submissionStatus` says
+    // which plan it is about and links to it by name.
     keepDraft(key, wizardDraftValues(state), WIZARD_DRAFT_FIELDS);
-    record.clear();
+    if (record.state.phase === "failed" && record.state.kind !== "unknown") {
+      record.clear();
+    }
     await renderAndWire(node, state, parse, api, lifecycle);
   };
   for (const field of [
@@ -1600,7 +1666,13 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   // is still the current one. A route left in between keeps the outcome in the
   // record, and the next mount of the wizard shows it with a link.
   watchMutation(node, key, record, (settled) => {
-    if (settled.phase === "succeeded") {
+    // A SETTLEMENT ABOUT THE PLAN ON SCREEN OWNS THE PAGE; one about a plan the
+    // fields have moved on from does not. A late answer to a timed-out attempt
+    // arrives after the operator has started editing: navigating away from
+    // those edits, or dropping them as "consumed", would answer one problem by
+    // causing another. Instead the wizard re-renders in place and
+    // `submissionStatus` shows the durable link to the Restore that settled.
+    if (settled.phase === "succeeded" && !outcomeIsElsewhere(settled, prepared)) {
       dropDraft(key);
       const route = ((settled.result || {}).route);
       if (typeof route === "string" && route.length > 0 && typeof window !== "undefined") {
@@ -1639,11 +1711,14 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       }
       const reviewed = typeof (prepared || {}).hash === "string" ? prepared.hash : undefined;
       // The record turns pending BEFORE the first await inside it, so a second
-      // click in the same instant finds it pending and sends nothing.
+      // click in the same instant finds it pending and sends nothing. The
+      // attempt carries WHAT IT IS ABOUT -- the reviewed plan's hash and the
+      // name minted from it -- so an outcome that arrives after the fields have
+      // changed can still be told, and named, for what it is.
       record.run(async () => {
         const result = await submitRestore(state, api, lifecycle, { reviewedHash: reviewed });
         return result === null ? { outcome: "abandoned" } : result;
-      });
+      }, { about: { hash: reviewed, restoreName: (prepared || {}).restoreName } });
     }, lifecycle);
   }
 }

@@ -171,7 +171,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
 | `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
 | `pages/restore-wizard.js` | the six wizard steps, the plan bytes, and the ONE guided submit that creates the Restore and opens what it needs next. |
-| `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key and never parses the two documents. |
+| `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key by name and by the words that open its PEM, and never parses the two documents. |
 | `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
 | `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
@@ -229,10 +229,18 @@ is exactly this, and it is the same in every form:
   navigation between routes of the loaded page;
 * **does not survive** a reload, a new tab or a closed tab -- a reload starts
   the form empty;
-* **is never kept at all** for a value carrying private-key text, whichever
-  field it was pasted into, and for any field a form does not name in its own
-  allowlist. The forms have no field a password goes in: a credential is always
-  a **Secret's name**.
+* **is never kept at all** for a value spelling the words that open a
+  private-key PEM -- in any case, across any run of whitespace including a line
+  break, and so for the PKCS#8, PKCS#1, SEC1, encrypted and OpenSSH labels
+  alike -- whichever field it was pasted into, and for any field a form does
+  not name in its own allowlist. The forms have no field a password goes in: a
+  credential is always a **Secret's name**, which is also why `private-key`
+  joined by a dash or an underscore counts only inside a PEM `BEGIN` line: a
+  Secret may honestly be called `minio-private-key`. That test reads words, so
+  a renamed, headerless blob spells none and is beyond it -- which is why the
+  approvals form refuses a key by its **file name** as well (`.pem`, `.key`,
+  `.p8`, `.p12`, `.pfx`, `.jks`, `.ppk`, or a name beginning `id_`) and why the
+  controller, not the page, is the gate.
 
 **One click makes one object.** Every create the page issues names its object:
 a name you typed, or a name minted from the plan bytes. So a second click, a
@@ -248,12 +256,23 @@ compares its spec with the draft's:
 * a submission that is still pending disables its own button, so a double click
   cannot start a second request at all.
 
-**A failure says what is known.** A refusal says nothing was created. An
-**unknown** outcome -- no answer, a timeout, a 5xx -- says exactly that: the
-object may or may not exist, the request was not cancelled, and submitting
-again is safe for the reason above. The API server's own status, reason and
-message are shown verbatim beside it, and a 422's `causes[]` are put beside the
-fields they name.
+**A failure says what is known, about the request that was made.** A refusal
+says nothing was created. An **unknown** outcome -- no answer, a timeout, a
+5xx -- says exactly that: the object may or may not exist, the request was not
+cancelled, and submitting again is safe for the reason above. The API server's
+own status, reason and message are shown verbatim beside it, and a 422's
+`causes[]` are put beside the fields they name.
+
+Two requests are not creates and do not borrow a create's words. The **suspend
+toggle** is a `PATCH` on a schedule that already exists: an unknown outcome
+there says the change may or may not have landed, that nothing was created
+either way, and that repeating it sets the same field to the same value. And an
+outcome that is about a **plan the wizard is no longer showing** -- a create
+that timed out, then a field edited while it was still outstanding -- says so:
+it keeps the name it actually sent, says that submitting now would create a
+different Restore instead of settling this one, and links to the Restore it
+named. That record is not discarded by an edit, so a late answer to the
+timed-out attempt still settles it and still names the object it made.
 
 **The restore wizard has one action.** *Create the Restore* checks that the
 plan about to be sent is the plan on screen -- a field changed after the bytes
@@ -275,6 +294,16 @@ form; an `Approval` bound to another subject, another execution (another UID) or
 another plan is shown as such and never offered for reuse. `pending`,
 `refused` and `expired` are read from `Approval.status` and its `Verified`
 condition, never derived here.
+
+**A list this viewer may not read is a warning beside the page, not instead of
+it.** An approver's role often grants `create` on `approvals` and no `list` or
+`get`. Either list failing on the standalone visit is caught and rendered where
+it happened, and the other one is still shown; a Restore's own approval page
+whose `Approval` cannot be read says its state is **unknown** -- never "none
+recorded" -- and still offers the form, because the subject comes from the
+Restore, the create still names the one `Approval` that Restore's
+`spec.approvalRef` names, and an `Approval` that already exists with different
+content is a conflict that overwrites nothing.
 
 ## The three rules, each with a gate
 

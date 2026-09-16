@@ -10,13 +10,17 @@
 // base64). An encoding step between the approver's file and the hashed bytes
 // is the class of transformation `planBytes` exists to forbid.
 //
-// IT REFUSES KEY MATERIAL, BY NAME AND BY CONTENT. A file whose name ends
-// `.pem` or `.key`, or whose text carries the words that open a private-key
-// PEM, is refused before anything is sent, with one message and no `create` at
-// all -- and the refused text is cleared from the field and never kept in the
-// draft. v0.1 has no key lifecycle, and a page that "helpfully" filled that gap
-// would be inventing the most consequential missing subsystem in the product
-// inside a browser (Global Constraint 28).
+// IT REFUSES KEY MATERIAL, BY NAME AND BY CONTENT, AND SAYS WHICH. A file
+// named the way a key file is named -- ending `.pem`, `.key`, `.p8`, `.p12`,
+// `.pfx`, `.jks` or `.ppk`, or beginning `id_` -- and any text spelling the
+// words that open a private-key PEM, in any case and across any spacing, is
+// refused before anything is sent, with one message and no `create` at all;
+// the refused text is cleared from the field and never kept in the draft.
+// WHAT THAT DOES NOT COVER is a renamed, headerless blob, which spells nothing
+// and is named nothing: the controller refuses it as a document that is not a
+// DSSE envelope. v0.1 has no key lifecycle, and a page that "helpfully" filled
+// that gap would be inventing the most consequential missing subsystem in the
+// product inside a browser (Global Constraint 28).
 //
 // THE SUBJECT IS READ FROM THE CLUSTER, NOT FROM THE ROUTE (PLAT-12.2).
 // `Approval.spec` is `{subjectRef{kind,name}, planHash, approvalBytes,
@@ -44,6 +48,7 @@ import { create, get, list } from "../api.js";
 import {
   active,
   cancelled,
+  carriesKeyMaterial,
   dropDraft,
   fieldErrors,
   formKey,
@@ -175,19 +180,38 @@ const API = { create: create, get: get, list: list };
 // The two shapes a private key arrives in. Names first, because a file input
 // gives a name before anything is read; content second, because a paste has no
 // name at all.
-const KEY_SUFFIXES = [".pem", ".key"];
-const KEY_MARKER = "PRIVATE KEY";
+//
+// THE NAME RULE IS THE HALF THAT CATCHES A KEY THAT SPELLS NOTHING. A DER or
+// PKCS#12 blob and a header-stripped base64 body carry no words at all, so the
+// content rule (`carriesKeyMaterial`) cannot see them; what they do carry is a
+// conventional file name. These are the names OpenSSL, OpenSSH, Java and PuTTY
+// write, and an approval document has never been called any of them.
+const KEY_SUFFIXES = [".pem", ".key", ".p8", ".p12", ".pfx", ".jks", ".ppk"];
+
+/** The names `ssh-keygen` writes by default. Matched as a PREFIX of the file's
+ *  own name, so `id_rsa`, `id_ed25519` and `id_ecdsa.pub` are all refused. */
+const KEY_NAME_PREFIX = "id_";
 
 /** The refusal, or `null`. It is a pure function of the file's name and its
- *  text, so it is checkable without a browser and runs before any write. */
+ *  text, so it is checkable without a browser and runs before any write.
+ *
+ *  NEITHER HALF IS EXHAUSTIVE AND THE PROSE SAYS SO. Between them they catch
+ *  every PEM shape in any case or spacing and every conventionally named key
+ *  file; a renamed, headerless blob pasted into the textarea is not caught
+ *  here, and is refused by the controller as a document that is not a DSSE
+ *  envelope. This page's promise is the refusal it can keep. */
 export function refuseKeyMaterial(fileName, text) {
   const name = typeof fileName === "string" ? fileName.toLowerCase() : "";
+  const base = name.slice(name.lastIndexOf("/") + 1);
   for (const suffix of KEY_SUFFIXES) {
     if (name.length >= suffix.length && name.slice(-suffix.length) === suffix) {
       return PRIVATE_KEY_REFUSAL;
     }
   }
-  if (typeof text === "string" && text.indexOf(KEY_MARKER) !== -1) {
+  if (base.indexOf(KEY_NAME_PREFIX) === 0) {
+    return PRIVATE_KEY_REFUSAL;
+  }
+  if (carriesKeyMaterial(text)) {
     return PRIVATE_KEY_REFUSAL;
   }
   return null;
@@ -493,22 +517,30 @@ export function awaitingRestores(restores) {
 /** A standalone visit: the Restores waiting for an approval, each a link to
  *  its own approval page, or a sentence saying there are none -- and the
  *  recorded approvals. No form: an approval is recorded for a chosen Restore. */
-export function renderApprovalsIndex(ns, approvals, restores, now, restoresError) {
-  const byName = {};
+export function renderApprovalsIndex(ns, approvals, restores, now, restoresError, approvalsError) {
+  // A MAP, NOT AN OBJECT. The key is a Kubernetes name, and `constructor`,
+  // `toString` and `__proto__` are all valid DNS-1123 subdomains: a plain
+  // `{}` would answer such a lookup out of `Object.prototype` and this table
+  // would then state something about the cluster that is not there. A `Map`
+  // has no inherited entries, so a name nobody created reads `undefined`.
+  const byName = new Map();
   for (const approval of itemsOf(approvals)) {
-    byName[((approval || {}).metadata || {}).name] = approval;
+    byName.set(((approval || {}).metadata || {}).name, approval);
   }
   const rows = awaitingRestores(restores).map((restore) => {
     const meta = restore.metadata || {};
     const approvalName = (((restore.spec || {}).approvalRef) || {}).name;
-    const found = approvalState(byName[approvalName] || null, {
+    const found = approvalState(byName.get(approvalName) || null, {
       ns: ns, kind: SUBJECT_KIND, name: meta.name, uid: meta.uid, planHash: "",
     });
     return [
       "<a href=\"" + esc(approvalSubjectRoute(ns, meta.name)) + "\">" + esc(meta.name) + "</a>",
       phaseBadge(((restore.status || {}).phase)) === "-" ? cell("not reconciled") : phaseBadge(restore.status.phase),
       cell(approvalName),
-      cell(STATE_WORDS[found.state]),
+      // An unreadable approvals list is not an absent approval. Saying "none
+      // recorded" here would be a claim about the cluster this page has no
+      // grounds for, so the column says what is true: it could not be read.
+      cell(approvalsError ? "unknown -- not readable" : STATE_WORDS[found.state]),
       cell(meta.creationTimestamp),
     ];
   });
@@ -516,7 +548,17 @@ export function renderApprovalsIndex(ns, approvals, restores, now, restoresError
     ? "<p class=\"note\">The Restores in this namespace could not be listed, so none can be " +
       "chosen here:</p>" + errorLine(restoresError)
     : table(["RESTORE", "PHASE", "APPROVAL", "APPROVAL STATE", "CREATED"], rows, NO_AWAITING_SENTENCE);
-  const panels = itemsOf(approvals).map(renderApprovalStatus).join("");
+  // A LIST THIS VIEWER MAY NOT READ IS A WARNING BESIDE THE PAGE, NOT INSTEAD
+  // OF IT. An approver whose role grants `create` on approvals but not `list`
+  // still has to reach a Restore's own approval page, and that page does its
+  // own `get`. The same rule as `history.js`: an unreadable Approval leaves
+  // the rest of the view standing.
+  const approvalsWarning = approvalsError
+    ? "<p class=\"note\">The Approvals in this namespace could not be listed, so this page " +
+      "cannot say which Restores already have one. Every Restore below is still selectable, " +
+      "and its own page reads its Approval directly:</p>" + errorLine(approvalsError)
+    : "";
+  const panels = approvalsError ? "" : itemsOf(approvals).map(renderApprovalStatus).join("");
   return (
     "<h2>Approvals</h2>" +
     "<p class=\"blurb\">An Approval that exists is not an approval; an Approval whose " +
@@ -524,13 +566,19 @@ export function renderApprovalsIndex(ns, approvals, restores, now, restoresError
     "its reason, as the record of a rejected attempt.</p>" +
     "<section class=\"step\" id=\"awaiting-approval\"><h3>Restores waiting for an approval</h3>" +
     "<p class=\"note\">Choose one to see its plan hash and record its approval.</p>" +
-    listing + "</section>" +
+    approvalsWarning + listing + "</section>" +
     "<h3>Recorded approvals</h3>" +
-    approvalTable(approvals, now) + listFooter() + panels
+    (approvalsError
+      ? "<p class=\"note\">Not listed here: this viewer may not list Approvals in " + esc(ns) +
+        " (see above). Nothing is claimed about which exist.</p>"
+      : approvalTable(approvals, now) + listFooter() + panels)
   );
 }
 
-const STATE_WORDS = Object.freeze({
+// A LOOKUP TABLE WITH NO PROTOTYPE, read by a state name. The eight keys are
+// this module's own closed set, and a table read by a name is never a plain
+// `{}` here: the rule holds even where today's key cannot come from outside.
+const STATE_WORDS = Object.freeze(Object.assign(Object.create(null), {
   "absent": "none recorded",
   "awaiting-verification": "awaiting verification",
   "verified": "verified",
@@ -539,7 +587,7 @@ const STATE_WORDS = Object.freeze({
   "foreign-subject": "bound to another subject",
   "foreign-execution": "bound to another execution",
   "plan-mismatch": "names another plan",
-});
+}));
 
 function errorLine(error) {
   const e = error || {};
@@ -551,7 +599,17 @@ function errorLine(error) {
 
 /** Whether a form may be offered for this subject: the Restore exists and has
  *  neither run nor been refused, its approval name is free, and the route
- *  agrees with it. */
+ *  agrees with it.
+ *
+ *  AN APPROVAL THIS VIEWER MAY NOT READ IS NOT A REFUSAL TO OFFER THE FORM.
+ *  An approver-only role -- `create` on approvals, no `get` -- is the reason
+ *  this page exists, and withholding the form from it would make PLAT-12.2's
+ *  "a standalone visit is usable" false for exactly the person the visit is
+ *  for. Offering it concedes nothing: the subject still comes from the
+ *  Restore, the create still names the one Approval `spec.approvalRef` names,
+ *  and `createOnce` answers an existing object with the same content as that
+ *  object and different content as a conflict it never overwrites. The page
+ *  says the state is unknown rather than implying it is absent. */
 export function formOffered(view) {
   const v = view || {};
   if (v.restore === null || v.restore === undefined) {
@@ -566,6 +624,9 @@ export function formOffered(view) {
   const phase = ((v.restore.status || {}).phase);
   if (phase !== undefined && phase !== null && phase !== "" && phase !== "Pending") {
     return false;
+  }
+  if (v.approvalError) {
+    return true;
   }
   return ((v.found || {}).state) === "absent";
 }
@@ -590,7 +651,20 @@ export function renderApprovalSubject(view, now) {
   const s = v.subject || {};
   const found = v.found || { state: "absent" };
   const mismatches = Array.isArray(v.mismatches) ? v.mismatches : [];
-  const heading = found.state === "verified" ? "Approved: Restore " : "Awaiting approval: Restore ";
+  // The same sentence `history.js` renders for the same condition: the
+  // Approval's state is UNKNOWN. The subject facts above it were read from the
+  // Restore and are unaffected.
+  const stateBlockOrWarning = v.approvalError
+    ? "<div class=\"approval-state\">" + badge("warn", "state unknown") +
+      "<p class=\"note\">Approval " + esc(s.approvalName) + " could not be read, so whether one " +
+      "exists for this Restore -- and whether weirkeeper verified it -- is unknown from here. " +
+      "Recording one below is still safe: an Approval with exactly this content is recognised " +
+      "rather than duplicated, and one with different content is reported as a conflict and " +
+      "never overwritten.</p>" + errorLine(v.approvalError) + "</div>"
+    : renderApprovalState(found, s, s.approvalName);
+  const heading = v.approvalError
+    ? "Approval for Restore "
+    : (found.state === "verified" ? "Approved: Restore " : "Awaiting approval: Restore ");
   const mismatchBlock = mismatches.length === 0
     ? ""
     : "<div class=\"refusal-block\" role=\"alert\"><p class=\"refusal\">This link does not match " +
@@ -618,7 +692,7 @@ export function renderApprovalSubject(view, now) {
       ["Restore phase", phaseBadge(((v.restore.status || {}).phase))],
       ["progress", restoreProgressSentence(v.restore)],
     ]) +
-    renderApprovalState(found, s, s.approvalName) +
+    stateBlockOrWarning +
     "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, s.name)) + "\">Open the " +
     "Restore's operation view</a></p>" +
     "</section>" +
@@ -683,9 +757,9 @@ export function renderApprovalForm(subject, view) {
     "spellcheck=\"false\"" + invalidAttributes("approval-sig", errors.sidecarBytes) + "></textarea>" +
     "<p class=\"help\">The signature sidecar the same command wrote beside it.</p>" +
     fieldErrorLine("approval-sig", errors.sidecarBytes) + "</div>" +
-    "<p class=\"refusal-rule\">" + PRIVATE_KEY_REFUSAL + ". A file named for one, or any " +
-    "text carrying a private-key header, is refused here, cleared from the field, and nothing " +
-    "is sent.</p>" +
+    "<p class=\"refusal-rule\">" + PRIVATE_KEY_REFUSAL + ". A file named the way a key file " +
+    "is named, or any text spelling the words that open a private-key PEM, is refused here, " +
+    "cleared from the field, and nothing is sent.</p>" +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create the Approval</button></div>" +
     "</fieldset>" +
     "<div class=\"form-status\" id=\"approval-form-status\" tabindex=\"-1\">" +
@@ -849,17 +923,27 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
     }
   }
   if (restore === null) {
-    return { ns: ns, route: r, restore: null, subject: null, approval: null, found: null, mismatches: [] };
+    return {
+      ns: ns, route: r, restore: null, subject: null, approval: null, found: null,
+      approvalError: null, mismatches: [],
+    };
   }
   const hash = await planHash((((restore || {}).spec) || {}).planBytes || "");
   const subject = subjectOf(restore, hash, ns);
   let approval = null;
+  let approvalError = null;
   if (subject.approvalName.length > 0) {
     try {
       approval = await api.get(ns, PLURAL, subject.approvalName, readOptions(lifecycle));
     } catch (error) {
-      if (!(error !== null && typeof error === "object" && error.status === 404)) {
+      if (cancelled(error, lifecycle)) {
         throw error;
+      }
+      // NOT READ IS NOT ABSENT, and it is not a reason to take the page away
+      // either: the same rule `history.js:loadRestoreOperation` already
+      // follows. A 404 IS absent -- the API server answered.
+      if (!(error !== null && typeof error === "object" && error.status === 404)) {
+        approvalError = error;
       }
     }
   }
@@ -869,7 +953,8 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
     restore: restore,
     subject: subject,
     approval: approval,
-    found: approvalState(approval, subject),
+    found: approvalError === null ? approvalState(approval, subject) : null,
+    approvalError: approvalError,
     mismatches: routeMismatches(r, subject),
   };
 }
@@ -890,22 +975,20 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
   const r = route || {};
   try {
     if (typeof r.subject !== "string" || r.subject.length === 0) {
+      // NEITHER LIST TAKES THE PAGE AWAY WHEN IT FAILS. Both are caught to a
+      // state and rendered beside the other one, so a viewer who may read only
+      // one of the two kinds -- an approver with `create` on approvals and no
+      // `list`, the commonest shape of this role -- still gets a usable page.
       const lists = await Promise.all([
-        api.list(ns, PLURAL, readOptions(lifecycle)),
-        api.list(ns, RESTORES, readOptions(lifecycle)).then(
-          (restores) => ({ restores: restores, error: null }),
-          (error) => {
-            if (cancelled(error, lifecycle)) {
-              throw error;
-            }
-            return { restores: null, error: error };
-          },
-        ),
+        listOrError(api, ns, PLURAL, lifecycle),
+        listOrError(api, ns, RESTORES, lifecycle),
       ]);
       if (!active(lifecycle)) {
         return;
       }
-      replace(node, parse(renderApprovalsIndex(ns, lists[0], lists[1].restores, undefined, lists[1].error)));
+      replace(node, parse(renderApprovalsIndex(
+        ns, lists[0].collection, lists[1].collection, undefined, lists[1].error, lists[0].error,
+      )));
       return;
     }
     const loaded = await loadApprovalSubject(api, ns, r, lifecycle);
@@ -921,6 +1004,19 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
     }
+  }
+}
+
+/** One list read as a state: `{collection, error}`. A cancelled read is still
+ *  a cancellation and is re-thrown, so a left route renders nothing. */
+async function listOrError(api, ns, plural, lifecycle) {
+  try {
+    return { collection: await api.list(ns, plural, readOptions(lifecycle)), error: null };
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    return { collection: null, error: error };
   }
 }
 

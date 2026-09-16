@@ -168,14 +168,32 @@ export function renderSuspendToggle(object, state) {
 }
 
 /** The words under a toggle: pending, or what the API server said. Success
- *  needs no words -- the badge above changes. */
+ *  needs no words -- the badge above changes.
+ *
+ *  THE STATUS IS TOLD WHAT THE REQUEST WAS. This region renders a PATCH on an
+ *  object that already exists, not a create, so it hands `mutationStatus` the
+ *  verb and the one field the patch sets: an unknown outcome here is safe to
+ *  repeat because repeating it sets the same field to the same value, and not
+ *  because a name is reused and a duplicate would be recognised -- which is
+ *  what the create sentence says, and is not true of this request.
+ *
+ *  `next` is read the same way `renderSuspendToggle` reads it, from the object
+ *  the page last listed: the patch that is pending or failed has not changed
+ *  that object, so its `spec.suspend` is still the value the click inverted. */
 export function renderSuspendStatus(object, state) {
   const s = state || {};
   const name = ((object && object.metadata) || {}).name || "";
   if (s.phase !== "pending" && s.phase !== "failed") {
     return "";
   }
-  return mutationStatus(s, { kind: "BackupSchedule", name: name });
+  const next = ((object && object.spec) || {}).suspend === true ? "false" : "true";
+  return mutationStatus(s, {
+    kind: "BackupSchedule",
+    name: name,
+    verb: "patch",
+    field: "spec.suspend",
+    value: next,
+  });
 }
 
 /** One removable set as a line an operator can read. */
@@ -274,7 +292,7 @@ const SCHEME_SEPARATOR = ":" + "//";
  *  controller's `Ready` condition and the runner's G-GLOB guard are the gate. */
 export function validateSchedule(values) {
   const v = values || {};
-  const problems = {};
+  const problems = Object.create(null);
   if (!isObjectName(v.name)) {
     problems.name = "a BackupSchedule name is lowercase letters, digits, '-' and '.', starting " +
       "and ending with a letter or digit";

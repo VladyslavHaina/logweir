@@ -217,7 +217,7 @@ const HOST_PORT = /^(\[[0-9A-Fa-f:.]+\]|[^\s:[\]]+):([0-9]{1,5})$/;
  *  round trip and a generic 422 into a message beside the field. */
 export function validateCluster(values) {
   const v = values || {};
-  const problems = {};
+  const problems = Object.create(null);
   if (!isObjectName(v.name)) {
     problems.name = "a KafkaCluster name is lowercase letters, digits, '-' and '.', starting and " +
       "ending with a letter or digit";

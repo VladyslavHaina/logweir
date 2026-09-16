@@ -514,19 +514,32 @@ export function fieldErrorLine(id, messages) {
 }
 
 /** THE ONE MUTATION STATUS every form renders: pending, succeeded or failed,
- *  in words, for the object `subject` names (`{kind, name}`).
+ *  in words, for the object `subject` names.
  *
- *  THE WORDS FOR A FAILURE SAY WHAT IS KNOWN. A refusal says nothing was
- *  created and the input is kept. An UNKNOWN outcome -- no answer, a timeout,
- *  a 5xx -- says exactly that, and says why submitting again is safe: the
- *  retry reuses the name, and an existing object with the same content is
- *  recognised rather than duplicated. A conflict names the object that is in
- *  the way. `unmatched` is the API server's field causes no input claimed. */
+ *  `subject` is `{kind, name}` plus, when the request is not a create, what it
+ *  actually was:
+ *
+ *    `verb`      -- `"create"` (the default) or `"patch"`;
+ *    `field`     -- for a patch, the ONE field it sets (`spec.suspend`);
+ *    `value`     -- for a patch, the value it sets that field to;
+ *    `resubmits` -- `false` when submitting the form as it stands now would
+ *                   send a DIFFERENT request than the attempt these words are
+ *                   about, so "submit again" cannot resolve this outcome.
+ *
+ *  THE WORDS FOR A FAILURE SAY WHAT IS KNOWN, AND SAY IT ABOUT THE REQUEST
+ *  THAT WAS MADE. A create's unknown outcome is safe to retry because the name
+ *  is chosen before the request and an object that already exists with exactly
+ *  this content is recognised rather than duplicated. NONE OF THAT IS TRUE OF
+ *  A PATCH: it creates nothing, it is safe to repeat because it sets a named
+ *  field of an object that already exists to the same value, and saying the
+ *  create sentence over a suspend toggle would be narration this tree does not
+ *  do. `unmatched` is the API server's field causes no input claimed. */
 export function mutationStatus(state, subject, unmatched) {
   const s = state || {};
   const who = subject || {};
   const kind = esc(who.kind);
   const name = esc(who.name);
+  const patch = who.verb === "patch";
   if (s.phase === "pending") {
     return statusRegion(
       "pending",
@@ -534,11 +547,19 @@ export function mutationStatus(state, subject, unmatched) {
         "disabled until it answers, so one click makes one request.</p>",
     );
   }
+  const kept = patch ? "" : " Your input is kept.";
   if (s.phase === "succeeded") {
     const result = s.result || {};
     const meta = ((result.object || {}).metadata) || {};
     const shown = esc(typeof meta.name === "string" && meta.name.length > 0 ? meta.name : who.name);
     const uid = esc(meta.uid);
+    if (patch) {
+      return statusRegion(
+        "succeeded",
+        "<p>" + esc(who.field) + " is now " + esc(String(who.value)) + " on " + kind + " " +
+          name + ". Nothing was created.</p>",
+      );
+    }
     return statusRegion(
       "succeeded",
       result.outcome === "existing"
@@ -555,18 +576,16 @@ export function mutationStatus(state, subject, unmatched) {
     ? "<ul class=\"field-error-list\">" + unmatched.map((m) => "<li>" + esc(m) + "</li>").join("") + "</ul>"
     : "";
   if (s.kind === "unknown") {
+    const silence = s.timedOut === true
+      ? "The API server did not answer in time"
+      : "No answer reached this page";
     return statusRegion(
       "unknown",
-      "<p>" + (s.timedOut === true
-        ? "The API server did not answer in time"
-        : "No answer reached this page") +
-        ", so whether " + kind + " " + name + " was created is unknown. Your input is kept. " +
-        "Submitting again is safe: it reuses the name " + name + ", and an object that already " +
-        "exists with exactly this content is recognised instead of duplicated.</p>" +
+      "<p>" + silence + ", so " + unknownOutcome(who, patch, kind, name) + "</p>" +
         errorBlock(error, false),
     );
   }
-  if (s.kind === "conflict") {
+  if (s.kind === "conflict" && !patch) {
     const existing = error.existing || {};
     const differences = Array.isArray(error.differences) ? error.differences : [];
     return statusRegion(
@@ -581,8 +600,10 @@ export function mutationStatus(state, subject, unmatched) {
   if (s.kind === "invalid") {
     return statusRegion(
       "failed",
-      "<p>" + kind + " " + name + " was not created: fix the fields marked below. Your input is " +
-        "kept.</p>" + extra + (typeof error.status === "number" ? errorBlock(error, false) : ""),
+      "<p>" + kind + " " + name + (patch
+        ? " was not changed: the API server refused the change."
+        : " was not created: fix the fields marked below." + kept) + "</p>" +
+        extra + (typeof error.status === "number" ? errorBlock(error, false) : ""),
     );
   }
   if (s.kind === "refused") {
@@ -593,8 +614,33 @@ export function mutationStatus(state, subject, unmatched) {
   }
   return statusRegion(
     "failed",
-    "<p>The API server refused " + kind + " " + name + ". Your input is kept.</p>" + extra +
-      errorBlock(error, false),
+    "<p>The API server refused " + (patch ? "the change to " : "") + kind + " " + name + "." +
+      (patch ? " Nothing was changed." : kept) + "</p>" + extra + errorBlock(error, false),
+  );
+}
+
+/** What an unknown outcome leaves undecided, and what repeating the request
+ *  would actually do. One sentence per verb, each true of its own request. */
+function unknownOutcome(who, patch, kind, name) {
+  if (patch) {
+    return (
+      "whether " + kind + " " + name + " was changed is unknown. Nothing was created either " +
+      "way: the request sets " + esc(who.field) + " to " + esc(String(who.value)) + " on an " +
+      "object that already exists. Sending it again sets the same field to the same value, so " +
+      "it either makes the change or finds it already made."
+    );
+  }
+  if (who.resubmits === false) {
+    return (
+      "whether " + kind + " " + name + " was created is unknown. The values on this page have " +
+      "changed since it was sent, so submitting now is a DIFFERENT request under a different " +
+      "name and would not settle this one; " + name + " stays unknown until it is opened."
+    );
+  }
+  return (
+    "whether " + kind + " " + name + " was created is unknown. Your input is kept. Submitting " +
+    "again is safe: it reuses the name " + name + ", and an object that already exists with " +
+    "exactly this content is recognised instead of duplicated."
   );
 }
 

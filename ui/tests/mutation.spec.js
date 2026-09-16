@@ -25,6 +25,7 @@ import { createHash } from "node:crypto";
 import { apiError } from "../api.js";
 import { createRouteLifecycle } from "../app.js";
 import {
+  carriesKeyMaterial,
   compareSpec,
   createMutation,
   fieldErrors,
@@ -35,7 +36,7 @@ import {
 } from "../lifecycle.js";
 import { PRIVATE_KEY_REFUSAL } from "../render.js";
 import { CLUSTER_DRAFT_FIELDS, CLUSTER_FORM, mountClusters } from "../pages/clusters.js";
-import { SCHEDULE_FORM, mountSchedules } from "../pages/schedules.js";
+import { SCHEDULE_FORM, mountSchedules, renderSuspendStatus } from "../pages/schedules.js";
 import {
   WIZARD_FORM,
   initialState,
@@ -49,7 +50,9 @@ import {
   approvalState,
   formOffered,
   mountApprovals,
+  refuseKeyMaterial,
   renderApprovalState,
+  renderApprovalsIndex,
   submitApproval,
   subjectOf,
 } from "../pages/approvals.js";
@@ -362,9 +365,16 @@ test("a_draft_keeps_only_declared_fields_and_never_private_key_text", () => {
     note: "-----BEGIN PRIVATE KEY-----\nMIG\n",
     tls: true,
   }, ["name", "note", "tls"]);
-  assert.deepEqual(kept, { name: "orders", tls: true },
+  assert.deepEqual({ ...kept }, { name: "orders", tls: true },
     "an undeclared field (password) is never captured, and private-key text is dropped even from a declared field");
-  assert.deepEqual(readDraft(key), { name: "orders", tls: true });
+  assert.deepEqual({ ...readDraft(key) }, { name: "orders", tls: true });
+  // A BAG READ BY A FIELD NAME HAS NO PROTOTYPE. `constructor` is a legal
+  // form-field name and a legal Kubernetes name, and a plain `{}` answers it
+  // out of `Object.prototype`; these two are read by name, so they answer
+  // nothing they were not given.
+  assert.equal(Object.getPrototypeOf(kept), null, "a kept draft has no prototype");
+  assert.equal(Object.getPrototypeOf(readDraft(key)), null, "and neither does a copy of one");
+  assert.equal(readDraft(key).constructor, undefined, "a field nobody declared reads undefined");
   assert.equal(readDraft(formKey("other-ns", "any-form")), null, "a draft belongs to its namespace");
   assert.ok(!CLUSTER_DRAFT_FIELDS.some((f) => /pass|secretValue|token/i.test(f)),
     "the cluster form declares no credential field; its Secret field is a NAME");
@@ -1009,8 +1019,272 @@ test("api_errors_keep_the_status_details_for_field_messages", () => {
   });
   assert.equal(error.status, 422);
   assert.equal(error.reason, "Invalid");
-  assert.deepEqual(fieldErrors(error, [["spec.topics", "topics"]]), {
-    fields: { topics: ["glob refused"] },
-    unmatched: [],
+  const found = fieldErrors(error, [["spec.topics", "topics"]]);
+  assert.deepEqual({ ...found.fields }, { topics: ["glob refused"] });
+  assert.deepEqual(found.unmatched, []);
+  assert.equal(Object.getPrototypeOf(found.fields), null, "field messages are read by name, so no prototype");
+  assert.equal(found.fields.constructor, undefined);
+});
+
+// ------------------------------------ review fixes (2026-09-16), F1-F4 and F6
+
+test("a_restore_whose_approval_is_named_constructor_is_classified_from_the_cluster", () => {
+  // `constructor` is a valid DNS-1123 subdomain, so it is a name a Restore's
+  // `spec.approvalRef` may legitimately hold. Read out of a plain `{}` it
+  // resolves through the prototype chain to `Object`, and this table then
+  // reports "bound to another subject" -- a statement about a cluster object
+  // that does not exist. The mutant is `new Map()` back to `{}`.
+  const ns = "proto-ns";
+  const restores = { items: [{
+    apiVersion: "logweir.dev/v1alpha1", kind: "Restore",
+    metadata: { name: "restore-proto", uid: "uid-proto", creationTimestamp: "2026-09-16T00:00:00Z" },
+    spec: { approvalRef: { name: "constructor" }, planBytes: "plan\n" },
+    status: { phase: "Pending" },
+  }] };
+  const html = renderApprovalsIndex(ns, { items: [] }, restores, undefined, null, null);
+  assert.ok(html.includes("none recorded"), "no Approval named constructor exists, and that is what it says");
+  assert.equal(html.includes("bound to another subject"), false,
+    "Object.prototype is not an Approval and must never be read as one");
+
+  // The same rule at the other name-keyed lookups this page and its lifecycle
+  // hold: a name nobody created reads `undefined`, not a function.
+  const key = formKey(ns, "proto-form");
+  keepDraft(key, { constructor: "x", name: "kept" }, ["name"]);
+  assert.equal(readDraft(key).constructor, undefined);
+  assert.deepEqual({ ...readDraft(key) }, { name: "kept" });
+});
+
+test("an_unreadable_approvals_list_warns_beside_the_selection_instead_of_replacing_the_page", async () => {
+  // An approver-only role -- `create` on approvals, no `list` -- is the role
+  // this page is for. Before the fix the 403 propagated and the whole page
+  // became an error box, so that viewer could not reach any Restore.
+  const ns = "rbac-index-ns";
+  const { k8s, restore } = await restoreAwaitingApproval(ns);
+  const forbidden = statusError(403, "Forbidden", "approvals is forbidden: User cannot list resource \"approvals\"");
+  const guarded = Object.assign({}, k8s, {
+    async list(listNs, plural, options) {
+      if (plural === "approvals") {
+        throw forbidden;
+      }
+      return k8s.list(listNs, plural, options);
+    },
   });
+  const view = fakeView();
+  await mountApprovals(view.root, ns, { ns: ns, subject: "", hash: "", name: "" }, parse, guarded, createRouteLifecycle().begin());
+  const html = view.html();
+  assert.ok(
+    html.includes("<a href=\"#/approvals?subject=" + restore.metadata.name + "&amp;ns=" + ns + "\">"),
+    "the waiting Restore is still selectable",
+  );
+  assert.ok(html.includes("The Approvals in this namespace could not be listed"), "and the failure is said, in place");
+  assert.ok(html.includes("403 Forbidden"), "with what the API server answered");
+  assert.ok(html.includes("unknown -- not readable"),
+    "an unreadable list is not an absent approval, so the column does not claim 'none recorded'");
+  assert.equal(html.includes("<div class=\"error\""), false, "the page was not replaced by an error box");
+
+  // And the converse: a restores failure is still rendered in place, beside a
+  // readable approvals list.
+  const other = fakeView();
+  const noRestores = Object.assign({}, k8s, {
+    async list(listNs, plural, options) {
+      if (plural === "restores") {
+        throw forbidden;
+      }
+      return k8s.list(listNs, plural, options);
+    },
+  });
+  await mountApprovals(other.root, ns, { ns: ns, subject: "", hash: "", name: "" }, parse, noRestores, createRouteLifecycle().begin());
+  assert.ok(other.html().includes("The Restores in this namespace could not be listed"));
+  assert.ok(other.html().includes("Recorded approvals"));
+});
+
+test("an_unreadable_approval_leaves_the_subject_page_and_its_form_standing", async () => {
+  const ns = "rbac-subject-ns";
+  const { k8s, prepared, restore } = await restoreAwaitingApproval(ns);
+  const forbidden = statusError(403, "Forbidden", "approvals is forbidden: User cannot get resource \"approvals\"");
+  const guarded = Object.assign({}, k8s, {
+    async get(getNs, plural, name, options) {
+      if (plural === "approvals") {
+        throw forbidden;
+      }
+      return k8s.get(getNs, plural, name, options);
+    },
+  });
+  const view = fakeView();
+  await mountApprovals(view.root, ns, { ns: ns, subject: restore.metadata.name, hash: "", name: "" }, parse, guarded, createRouteLifecycle().begin());
+  const form = view.find("#approval-form");
+  assert.ok(form !== null, "the form the approver came for is offered");
+  assert.ok(view.html().includes("state unknown"), "and the Approval's state is called unknown, not absent");
+  assert.ok(view.html().includes("403 Forbidden"));
+  assert.equal(view.html().includes("<div class=\"error\""), false, "the page was not replaced by an error box");
+  // Every value it would submit still came from the Restore, which WAS read.
+  assert.equal(form.elements.subjectUid.value, restore.metadata.uid);
+  assert.equal(form.elements.approvalName.value, prepared.approvalName);
+
+  form.elements.approvalBytes.value = "{\"plan_hash\": \"x\"}\n";
+  form.elements.sidecarBytes.value = "{\"signatures\": []}\n";
+  form.dispatch("input");
+  await view.find("#approval-form").dispatch("submit");
+  await settled(12);
+  assert.equal(k8s.creates("approvals").length, 1, "and it can actually record the approval");
+  assert.equal(k8s.creates("approvals")[0].body.metadata.name, prepared.approvalName);
+});
+
+test("a_suspend_patch_says_what_repeating_the_patch_does_and_never_the_create_sentence", async () => {
+  const object = {
+    apiVersion: "logweir.dev/v1alpha1", kind: "BackupSchedule", metadata: { name: "hourly" },
+    spec: { schedule: "0 * * * *", sourceRef: { name: "demo" }, topics: ["orders"], archive: { url: "s3://b/p" }, suspend: false },
+  };
+  const timedOut = renderSuspendStatus(object, {
+    phase: "failed", kind: "unknown", timedOut: true, attempt: 1, result: null, about: null,
+    error: { message: "no answer from the API server within 30 s" },
+  });
+  assert.ok(timedOut.includes("was changed is unknown"), "a PATCH does not create, so nothing says it might have");
+  assert.ok(timedOut.includes("sets spec.suspend to true"), "it names the field and the value it sends");
+  assert.ok(timedOut.includes("sets the same field to the same value"), "and why repeating it is safe");
+  for (const invented of ["was created is unknown", "reuses the name", "recognised instead of duplicated", "Your input is kept"]) {
+    assert.equal(timedOut.includes(invented), false, "a create sentence over a patch: " + invented);
+  }
+  // Resuming a suspended schedule names the other value.
+  const resuming = renderSuspendStatus(
+    Object.assign(clone(object), { spec: Object.assign(clone(object.spec), { suspend: true }) }),
+    { phase: "failed", kind: "unknown", timedOut: false, attempt: 1, result: null, about: null, error: { message: "Failed to fetch" } },
+  );
+  assert.ok(resuming.includes("sets spec.suspend to false"));
+  assert.ok(resuming.includes("No answer reached this page"));
+
+  // The API server refusing the patch, and succeeding at it, say the same
+  // thing about creation: there was none.
+  const refused = renderSuspendStatus(object, {
+    phase: "failed", kind: "rejected", timedOut: false, attempt: 1, result: null, about: null,
+    error: statusError(403, "Forbidden", "backupschedules is forbidden"),
+  });
+  assert.ok(refused.includes("refused the change to BackupSchedule hourly"));
+  assert.ok(refused.includes("Nothing was changed."));
+  assert.equal(refused.includes("Your input is kept"), false, "a toggle has no input to keep");
+});
+
+test("the_key_material_guard_reads_every_pem_variant_in_any_case_and_spacing", () => {
+  // The old guard was `text.indexOf("PRIVATE KEY") !== -1`: case-sensitive and
+  // whitespace-exact, so a lower-case paste or a reflowed header walked past
+  // it while the prose promised "a value carrying private-key text is never
+  // kept at all". Each row below is a shape the guard now reads.
+  const refusedText = [
+    ["PKCS#8", "-----BEGIN PRIVATE KEY-----\nMIG\n-----END PRIVATE KEY-----\n"],
+    ["PKCS#1 RSA", "-----BEGIN RSA PRIVATE KEY-----\nMII\n"],
+    ["SEC1 EC", "-----BEGIN EC PRIVATE KEY-----\nMHc\n"],
+    ["DSA", "-----BEGIN DSA PRIVATE KEY-----\nMII\n"],
+    ["encrypted PKCS#8", "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMII\n"],
+    ["OpenSSH", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"],
+    ["lower case", "-----begin private key-----\nmig\n"],
+    ["mixed case", "-----Begin Rsa Private Key-----\n"],
+    ["wide spacing", "-----BEGIN   PRIVATE   KEY-----\n"],
+    ["a line break between the words", "-----BEGIN PRIVATE\nKEY-----\n"],
+    ["a dashed PEM label", "-----BEGIN RSA PRIVATE-KEY-----\n"],
+    ["an underscored PEM label", "-----begin openssh private_key-----\n"],
+  ];
+  for (const [what, text] of refusedText) {
+    assert.equal(carriesKeyMaterial(text), true, what + " is read as key material");
+    assert.equal(refuseKeyMaterial("approval.json", text), PRIVATE_KEY_REFUSAL, what + " is refused");
+    const key = formKey("key-variants-ns", "any-form/" + what);
+    assert.equal(keepDraft(key, { note: text }, ["note"]), null, what + " is never kept in a draft");
+  }
+
+  const refusedName = ["approval.pem", "APPROVAL.KEY", "bundle.p12", "store.jks", "putty.ppk", "id_rsa", "id_ed25519.pub", "/home/me/.ssh/id_ecdsa"];
+  for (const name of refusedName) {
+    assert.equal(refuseKeyMaterial(name, "{}\n"), PRIVATE_KEY_REFUSAL, name + " is refused on its name alone");
+  }
+
+  // The documents this form is FOR are not refused, and neither is a name that
+  // merely contains the letters.
+  const approval = "{\"payloadType\": \"application/vnd.logweir.approval+json\", \"payload\": \"eyJ9\"}\n";
+  assert.equal(carriesKeyMaterial(approval), false);
+  assert.equal(refuseKeyMaterial("approval.json", approval), null);
+  assert.equal(refuseKeyMaterial("approval.sig", "{\"signatures\": [{\"keyid\": \"k1\", \"sig\": \"AA\"}]}\n"), null,
+    "a signature names a keyid and is not key material");
+  assert.equal(refuseKeyMaterial("rapid_test.json", "{}\n"), null, "id_ is a prefix of the NAME, not a substring of it");
+
+  // AND THE FALSE POSITIVE THAT WOULD BITE EVERY OTHER FORM. This test also
+  // runs over ordinary draft fields, and `private-key` joined by a dash or an
+  // underscore is a legal Kubernetes object name -- an archive Secret may
+  // honestly be called one. Only a PEM BEGIN line spells it that way here.
+  for (const name of ["minio-private-key", "db_private_key", "private-key"]) {
+    assert.equal(carriesKeyMaterial(name), false, name + " is a Secret's name, not key material");
+    const key = formKey("secret-names-ns", "any-form/" + name);
+    assert.deepEqual({ ...keepDraft(key, { archiveSecret: name }, ["archiveSecret"]) }, { archiveSecret: name });
+  }
+
+  // THE HONEST LIMIT, asserted so the prose cannot drift back to promising
+  // more than this: a blob that spells nothing and is named nothing is not
+  // caught here. `ui/README.md` and the module comments say exactly this.
+  assert.equal(refuseKeyMaterial("blob.bin", "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg\n"), null,
+    "a headerless base64 body is beyond a guard that reads words");
+});
+
+test("an_edit_after_a_timed_out_restore_submit_still_settles_the_late_answer", async () => {
+  // The defect: `refresh` cleared the record on every field change, including
+  // a timed-out (UNKNOWN) one. That took the attempt number with it, so the
+  // late 201 for the Restore the attempt had named found no answerable attempt
+  // and was dropped -- the warning vanished and the object was never mentioned
+  // again. The mutant is `record.clear()` back to unconditional.
+  const ns = "wizard-late-ns";
+  const key = formKey(ns, WIZARD_FORM);
+  let fire = null;
+  const record = mutationFor(key, {
+    timeoutMs: 1000,
+    setTimer: (fn) => { fire = fn; return 1; },
+    clearTimer: () => {},
+  });
+  const k8s = wizardKubernetes(ns);
+  let release;
+  k8s.holdNextCreate = new Promise((resolve) => { release = resolve; });
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    const view = fakeView();
+    await mountRestoreWizard(view.root, ns, parse, k8s, createRouteLifecycle().begin());
+    const submitted = view.html().match(/<code>(restore-[0-9a-f]{8})<\/code>/)[1];
+    await view.find("#create-restore").dispatch("click");
+    await settled();
+    assert.equal(record.state.phase, "pending");
+
+    fire();
+    await settled();
+    assert.equal(record.state.kind, "unknown");
+    assert.ok(view.html().includes("whether Restore " + submitted + " was created is unknown"));
+
+    // The operator changes a field to retry. The plan -- and the name it mints
+    // -- moves; the outstanding attempt does not.
+    const prefix = view.find("#topic-prefix");
+    prefix.value = "incident-9001-";
+    await prefix.dispatch("change");
+    await settled();
+    assert.equal(record.state.kind, "unknown", "an edit does not settle an outcome it cannot settle");
+    assert.equal(readDraft(key).topicPrefix, "incident-9001-", "and the edit is a draft at once");
+    const minted = view.html().match(/<code>(restore-[0-9a-f]{8})<\/code>/)[1];
+    assert.notEqual(minted, submitted, "the edited plan mints a different name");
+    assert.ok(view.html().includes("whether Restore " + submitted + " was created is unknown"),
+      "the warning still names the Restore that was actually sent");
+    assert.ok(view.html().includes("would not settle this one"),
+      "and no longer claims that submitting again resolves it");
+    assert.equal(view.html().includes("Submitting again is safe: it reuses the name"), false);
+
+    // The late answer arrives for that attempt.
+    release();
+    await settled(12);
+    assert.equal(record.state.phase, "succeeded", "the late answer settles the attempt it belongs to");
+    assert.equal(k8s.count(ns, "restores"), 1);
+    assert.equal(k8s.creates("restores")[0].body.metadata.name, submitted);
+    const html = view.html();
+    assert.ok(html.includes("Created Restore " + submitted), "and says so");
+    assert.ok(html.includes("<a href=\"#/history?ns=" + ns + "&amp;name=" + submitted + "\">Open Restore " + submitted + "</a>"),
+      "with the durable link, which is the whole point of not dropping it");
+    assert.ok(html.includes("not the plan shown above"), "said to be about the submitted plan, not the one on screen");
+    assert.equal(globalThis.window.location.hash, "#/restore?ns=" + ns,
+      "an outcome about another plan does not navigate away from the edits");
+    assert.equal(readDraft(key).topicPrefix, "incident-9001-", "and does not consume them");
+    assert.equal(view.find("#topic-prefix").value, "incident-9001-");
+  } finally {
+    globalThis.window = originalWindow;
+  }
 });

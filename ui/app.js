@@ -111,7 +111,9 @@ export function parseHash(hash, initialNamespace) {
   const route = question === -1 ? text : text.slice(0, question);
   let ns = typeof initialNamespace === "string" ? initialNamespace : DEFAULT_NAMESPACE;
   let name = "";
-  const params = {};
+  // NO PROTOTYPE: the keys are whatever the address bar spells, and a bag read
+  // by an outside name must not answer `constructor` with a function.
+  const params = Object.create(null);
   if (question !== -1) {
     for (const pair of text.slice(question + 1).split("&")) {
       const equals = pair.indexOf("=");

@@ -24,8 +24,11 @@
 // API refusal, a network failure, a timeout and navigation between routes of
 // the same loaded page -- and it does not survive a reload or a closed tab.
 // That is the whole persistence contract. Only the fields a form declares are
-// kept, and a value carrying private-key text is never kept at all, whatever
-// field it arrived in.
+// kept, and a value spelling the words that open a private-key PEM is dropped
+// even from a declared field, whatever field it arrived in. That test is what
+// `carriesKeyMaterial` below does and all it does: it reads words, so a
+// headerless blob that spells none is beyond it, and the paragraph over that
+// function says so rather than promising otherwise.
 //
 // WHY A RETRY CANNOT DUPLICATE AN OBJECT. Every create this page issues names
 // its object: a name the viewer typed, or a name minted from the plan bytes.
@@ -87,9 +90,35 @@ export function whenLeft(lifecycle, release) {
  *  cannot be un-sent -- and a late answer still settles the record. */
 export const MUTATION_TIMEOUT_MS = 30000;
 
-/** The words that open a private-key PEM. A draft never keeps a value that
- *  carries them, whichever field it was typed into. */
-const KEY_MARKER = "PRIVATE KEY";
+/** THE WORDS THAT OPEN A PRIVATE-KEY PEM, and only those.
+ *
+ *  Every label OpenSSL and OpenSSH write for a private key spells the same two
+ *  words -- `PRIVATE KEY` (PKCS#8), `RSA`/`EC`/`DSA PRIVATE KEY` (PKCS#1 and
+ *  SEC1), `ENCRYPTED PRIVATE KEY`, `OPENSSH PRIVATE KEY` -- so the two words
+ *  are the first alternative, IN ANY CASE and across any run of whitespace
+ *  including a line break. The earlier `indexOf("PRIVATE KEY")` matched
+ *  neither a lower-case paste nor a reflowed header, and a guard either of
+ *  those walks past is not a guard.
+ *
+ *  The second alternative is a PEM `BEGIN` line whose label joins the words
+ *  with a dash or an underscore. It is deliberately NOT the first
+ *  alternative's job: `private-key` and `private_key` on their own are legal
+ *  Kubernetes object names, and this test also runs over a draft's ordinary
+ *  fields -- an archive Secret honestly called `minio-private-key` must not be
+ *  silently dropped from a form.
+ *
+ *  WHAT IT DOES NOT CATCH, said here rather than promised away: a headerless
+ *  base64 body, a DER or PKCS#12 blob, and anything else that never spells the
+ *  words. `refuseKeyMaterial` in `pages/approvals.js` carries the other half
+ *  of the rule -- the file's NAME -- for exactly that reason. */
+const KEY_MARKER = /private\s+key|-{3,}\s*begin[^\n]{0,40}?private[\s_-]*key/i;
+
+/** Whether `text` spells the words that open a private-key PEM. Pure, so it is
+ *  checkable without a browser, and used by both halves of the rule: a draft
+ *  never keeps such a value, and the approvals form never sends one. */
+export function carriesKeyMaterial(text) {
+  return typeof text === "string" && KEY_MARKER.test(text);
+}
 
 /** The key a draft and a mutation record share: one per form per namespace,
  *  plus an optional subject for forms that are about one object. A namespace
@@ -101,10 +130,15 @@ export function formKey(ns, form, subject) {
 
 const drafts = new Map();
 
-/** A copy of the draft kept under `key`, or `null`. */
+/** A copy of the draft kept under `key`, or `null`.
+ *
+ *  THE COPY HAS NO PROTOTYPE, because a page reads it by field name and a
+ *  field name is data. `{}.constructor` is a function; `Object.create(null)`
+ *  has no such answer to give, so a lookup that finds nothing reads
+ *  `undefined` -- see the same rule in `renderApprovalsIndex`. */
 export function readDraft(key) {
   const kept = drafts.get(key);
-  return kept === undefined ? null : Object.assign({}, kept);
+  return kept === undefined ? null : Object.assign(Object.create(null), kept);
 }
 
 /** Keeps the declared `fields` of `values`, and nothing else.
@@ -114,13 +148,13 @@ export function readDraft(key) {
  *  safe default for a new field is "forgotten". A string carrying private-key
  *  text is dropped even from a declared field. Returns the kept copy. */
 export function keepDraft(key, values, fields) {
-  const kept = {};
+  const kept = Object.create(null);
   const source = values || {};
   for (const field of Array.isArray(fields) ? fields : []) {
     const value = source[field];
     if (typeof value === "boolean") {
       kept[field] = value;
-    } else if (typeof value === "string" && value.indexOf(KEY_MARKER) === -1) {
+    } else if (typeof value === "string" && !carriesKeyMaterial(value)) {
       kept[field] = value;
     }
   }
@@ -129,7 +163,7 @@ export function keepDraft(key, values, fields) {
     return null;
   }
   drafts.set(key, kept);
-  return Object.assign({}, kept);
+  return Object.assign(Object.create(null), kept);
 }
 
 /** Forgets a draft: after the object it described exists, or on request. */
@@ -194,9 +228,12 @@ export function invalidInput(fields, message) {
  *  `spec.bootstrapServers` or `metadata.name`. `paths` maps a path prefix to a
  *  form field; the longest matching prefix wins. A cause no prefix matches is
  *  returned in `unmatched`, so it is still shown -- beside the form rather than
- *  beside a field. The API server's messages are passed on verbatim. */
+ *  beside a field. The API server's messages are passed on verbatim.
+ *
+ *  `fields` has no prototype: a page reads it as `errors[name]`, and a bag
+ *  read by a name is never a plain `{}` in this tree. */
 export function fieldErrors(error, paths) {
-  const fields = {};
+  const fields = Object.create(null);
   const unmatched = [];
   const own = (error || {}).fields;
   if (own !== null && typeof own === "object") {
@@ -447,6 +484,7 @@ const IDLE = Object.freeze({
   error: null,
   kind: null,
   timedOut: false,
+  about: null,
 });
 
 /** One form's mutation record: `idle`, `pending`, `succeeded` or `failed`.
@@ -464,7 +502,14 @@ const IDLE = Object.freeze({
  *  `timeoutMs` the record reads `failed` with `kind: "unknown"` and
  *  `timedOut: true`, and the promise resolves so the form can offer a retry.
  *  The request itself is left alone; if it answers later and no newer attempt
- *  has started, its answer replaces the timeout. */
+ *  has started, its answer replaces the timeout.
+ *
+ *  AN ATTEMPT SAYS WHAT IT WAS ABOUT. `run(executor, {about})` copies `about`
+ *  onto every state that attempt publishes, so a form can tell an outcome
+ *  about the values on screen now from an outcome about the values that were
+ *  on screen when the button was clicked. It is the form's own small record
+ *  (the wizard keeps the plan hash and the minted name there) and nothing
+ *  here reads inside it. */
 export function createMutation(options) {
   const opts = options || {};
   const setTimer = typeof opts.setTimer === "function"
@@ -526,7 +571,12 @@ export function createMutation(options) {
       const timeoutMs = typeof configured === "number" && configured > 0
         ? configured
         : (typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : MUTATION_TIMEOUT_MS);
-      publish({ phase: "pending", attempt: attempt, result: null, error: null, kind: null, timedOut: false });
+      const about = (runOptions || {}).about;
+      const said = about === undefined ? null : about;
+      publish({
+        phase: "pending", attempt: attempt, result: null, error: null, kind: null,
+        timedOut: false, about: said,
+      });
       return new Promise((resolve) => {
         let answered = false;
         const answer = () => {
@@ -543,7 +593,8 @@ export function createMutation(options) {
             );
             late.kind = "unknown";
             publish({
-              phase: "failed", attempt: attempt, result: null, error: late, kind: "unknown", timedOut: true,
+              phase: "failed", attempt: attempt, result: null, error: late, kind: "unknown",
+              timedOut: true, about: said,
             });
           }
           answer();
@@ -562,7 +613,8 @@ export function createMutation(options) {
                 publish(Object.assign({}, IDLE, { attempt: attempt }));
               } else {
                 publish({
-                  phase: "succeeded", attempt: attempt, result: result, error: null, kind: null, timedOut: false,
+                  phase: "succeeded", attempt: attempt, result: result, error: null, kind: null,
+                  timedOut: false, about: said,
                 });
               }
             }
@@ -573,7 +625,7 @@ export function createMutation(options) {
             if (answerable(attempt)) {
               publish({
                 phase: "failed", attempt: attempt, result: null, error: error,
-                kind: failureKind(error), timedOut: false,
+                kind: failureKind(error), timedOut: false, about: said,
               });
             }
             answer();
