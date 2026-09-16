@@ -120,7 +120,8 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-04.1 defect (P0) | In progress (fix committed, live proof pending) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
 | PLAT-06.1 | In progress | plat06-live | Source, controller-double tests (weirkeeper 321/321, thirteen killed mutants) and docs are complete on `claude/plat06` (report `claude/plat06.result.md` §1-4, §6); the live docker-desktop run (manual, hostile annotation, scheduled under the shipped role, restart, deleted Job, snapshot equality, duplicate name) and its report sections are in progress. |
 | PLAT-07.1 | In progress | plat07-finish | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
-| PLAT-13.2, PLAT-12.1 (immediate), PLAT-12.2 (subject slice) | In progress (implemented, under review) | ui-correct → ui-correct-review | Implemented on `claude/ui-correct` with 88 behaviour rows, 27 new mutation rows, a Playwright harness (`scripts/plat12-13-ui-e2e.mjs`) whose live run passed 10/10 journeys with a failing negative control, and a server-side fix (`Approval.spec.planHash` is now compared). Retry identity (PLAT-12.2) deferred. Independent code/Rust/security review in progress. |
+| PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
+| PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.1 (stage 1) | In progress | plat17-api-finish | New `crates/logweir-api`: bounded `/api/v1` routes over current resources, local-admin mode only, idempotency, problem responses, cursors, static assets; mock-API tests and live smoke. OIDC/roles (PLAT-17.2), console image/chart and UI migration follow. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. d1w1-cadence-finish in progress (pure cadence engine, `chrono-tz` decision). |
 | PLAT-03.x, 08.x, 09.1 | Contract decided | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. |
@@ -710,9 +711,28 @@ each slice's acceptance evidence is present.
 subject binding changes. Capture an authorized flow, a pending-approval flow
 and a rejected subject mismatch.
 
+**Partial record (2026-09-16) — PLAT-12.1 immediate slice and PLAT-12.2 subject
+slice landed with PLAT-13.2 (`3cca821`, `6b34af9`, `8020876`); both tasks stay
+In progress.** 12.1: `Create the Restore` is the one guided action (validate →
+reviewed-plan hash check → idempotent create → route to the operation view when
+the referenced Approval already authorises exactly this Restore, else to Awaiting
+approval); double click, lost response, refresh and API rejection are covered by
+node rows and the live journeys above. Not done: the complete selection flow
+(PLAT-11.2) and configurable policy routing (PLAT-19.2). 12.2: the approvals page
+derives kind/name/UID/plan hash from the Restore, refuses an edited or forged
+subject (0 POSTs, live), refuses a route that disagrees with its Restore, offers a
+standalone selection or an empty state even when the approvals list is unreadable,
+renders absent/awaiting/verified/refused/expired and the never-reused
+foreign-subject/foreign-execution/plan-mismatch bindings, and the controller now
+refuses an Approval whose `spec.planHash` names another plan (`PlanHashMismatch`,
+live: a forged binding written directly to the API left the Restore
+`Failed/ApprovalSubjectMismatch` with no Job). Not done: retry identity (a
+fresh-target/new-approval retry) and the verified-approval live route (the lab
+approver key is not available; covered by node rows over a fake cluster).
+
 ## PLAT-13 — Prevent stale UI actions and preserve user work
 
-**Priority P1 · In progress.** These correctness fixes can land before the new
+**Priority P1 · Done (2026-09-16).** These correctness fixes can land before the new
 API or a frontend framework change.
 
 ### PLAT-13.1 — Isolate navigation and namespace request lifetimes
@@ -770,6 +790,44 @@ idempotency.
 **Migration/safety and done evidence:** Keep read cancellation separate from
 durable operation cancellation. Attach a delayed-response namespace regression
 and error/retry browser journey.
+
+**Completion record — Done (2026-09-16), PLAT-13.2.** Landed in main as
+`2a34abd` (drafts and one mutation state), `3cca821` (guided submit, approvals
+page bound to its subject), `9018782` (live browser harness
+`scripts/plat12-13-ui-e2e.mjs`), `6b34af9` (controller: `Approval.spec.planHash`
+is compared) and `8020876` (review fixes). Contract (`ui/README.md`): drafts live
+in page memory keyed by namespace and form, survive validation/API/network
+failures and route changes, never a reload, never an unlisted field and never key
+material (`localStorage`/`sessionStorage`/cookies stay forbidden by
+`check-ui-offline.sh` and `ui_lint`); one `createMutation()` state machine per
+form with `invalid | conflict | rejected | refused | unknown` failure kinds; the
+pending guard, not the disabled button, prevents duplicate submission; creates
+are idempotent by typed or plan-derived names and a `409 AlreadyExists` is
+resolved by spec comparison; a timeout reports an unknown outcome and a late
+answer still settles the record with the durable link; read cancellation stays
+separate from durable acknowledgement. Verified at `8020876`:
+`ui/tests/*.spec.js` 94/94 (27 mutation rows added), `check-ui-behaviour.sh`
+94/94 with the plan golden byte-identical, `check-ui-offline.sh` 16 files,
+`ui_lint` 26/26, `chart_lint` 27/27, `approval_controller` 34/34, strict clippy
+and fmt clean; twelve mutants killed across the two review rounds. Live
+docker-desktop browser journeys (Chromium via `kubectl --context docker-desktop
+proxy`, own namespace, lab controller reconciling): 10/10 before the review
+fixes (`artifacts/ui-correct/live-result-20260915T231433Z.json`) and 10/10 after
+them (`live-result-20260916T133923Z.json`, namespace UID `48492aa0…`, deleted
+after an owner-label and UID check), with a failing negative control against the
+pre-change UI; journeys cover invalid field keeping the draft, double click
+creating one object, a real lost 201 resolved by retry to the same UID,
+navigation neither cancelling an accepted create nor letting a left form write,
+and the wizard resubmission after reload creating nothing. Independent review
+`claude/ui-correct.review.md`: ACCEPT-WITH-FIXES (six low) then ACCEPT after
+`8020876`. Migration: none for the UI (static assets, sixteen files unchanged);
+for the controller the `planHash` check is fail-closed and needs no conversion
+(a previously verified approval whose recorded hash disagrees flips to
+`Verified=False`; rollback restores the old behaviour). Limitations: drafts do
+not survive a reload by design; a headerless key blob (DER/PKCS#12) cannot be
+recognised by the text guard and the README says so; the 30 s timeout is not
+configurable; the wizard's mount-time draft drop after a late success while
+away is a documented edge.
 
 ## PLAT-14 — Show protection health and durable execution progress
 
