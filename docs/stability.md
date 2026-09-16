@@ -29,6 +29,33 @@ after a release is the one most likely to be treated as if the release had not
 happened. It has. **Do not let the first post-release addition inherit a
 pre-release ruling by accident.**
 
+### The product API's OpenAPI document is pre-release, and says so
+
+`schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
+only one the rule above does **not** cover. `info.version` is
+`1.0.0-alpha.1`: `logweir-api` is `publish = false`, no image builds it, the
+chart does not deploy it, and nothing outside this repository reads the
+document. It is therefore still in the "internal edit" state the scorecard left
+behind at v0.1.0.
+
+While that holds, adding, retyping or removing a field is a pre-release bump of
+the `-alpha.N` suffix and needs no maintainer approval — but it is never a
+silent edit, because two gates compare the checked-in bytes against the
+generator: `just schema-check` regenerates and `diff -u`s it (as
+`scripts/ci-check.sh` does), and
+`crates/logweir-api/tests/contract.rs::the_checked_in_openapi_document_is_what_the_types_generate`
+does the same comparison in-process. Regenerate with `just schema` and review
+the diff.
+
+The rule changes the day anything consumes it — the console image, the typed UI
+client (PLAT-18.1), or any client outside this repository. From then on the
+scorecard's rule applies verbatim: **adding an optional field is MINOR,
+removing or retyping one is MAJOR**, and the asymmetry decides what goes in. It
+is why `Operation` carries no `jobName`: PLAT-14.1 owns the final normalized
+operation mapping, and a field left out today costs a MINOR bump to add,
+whereas a field frozen in today costs a MAJOR bump to remove. Prefer the
+reversible direction until the owning task rules.
+
 ## Known limitations of v0.1
 
 - **The PagerDuty `dedup_key` is an interim key, not a durable drill

@@ -47,7 +47,6 @@ localAdmin:
 namespaces: [team-a]                   # explicit grants; core Namespaces are never listed
 kubernetes:
   source: kubeconfig                   # or `inCluster`
-  kubeconfig: ~/.kube/config
   context: docker-desktop              # required; `current-context` is never used
 cursorKeyFile: ./cursor.key            # at least 32 bytes
 ```
@@ -56,6 +55,17 @@ cursorKeyFile: ./cursor.key            # at least 32 bytes
 $ head -c 32 /dev/urandom > cursor.key && chmod 600 cursor.key
 $ cargo run -p logweir-api -- --config config.yaml
 ```
+
+**Paths in this file are taken literally.** A relative one — `./ui`,
+`./cursor.key` above — resolves against the **configuration file's own
+directory**, not the working directory, so moving the file moves what it names.
+A leading `~` is **not** expanded: `kubeconfig: ~/.kube/config` would look for a
+directory actually named `~`, and the service would exit 2 saying it cannot read
+that file. Write an absolute path, or omit `kubernetes.kubeconfig` entirely as
+the example does — with the key absent the usual `KUBECONFIG`-then-`~/.kube/config`
+lookup applies, performed by the Kubernetes client library and by the shell
+conventions it implements, which is the only place that expansion belongs.
+`kubernetes.context` is required either way.
 
 Exit codes: `0` after a clean `SIGTERM`/`SIGINT`, `2` when the configuration is
 refused — before any Kubernetes client or socket exists — and `1` for any other
