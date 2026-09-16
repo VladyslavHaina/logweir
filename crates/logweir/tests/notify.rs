@@ -597,9 +597,21 @@ fn every_notification_post_goes_through_the_bounded_agent() {
     // named beside its file. The Kubernetes API client is not a notification
     // sink, so it is its own policy; its bounds are asserted below because no
     // behavioural row in this file exercises them.
+    //
+    // `notify.rs`, not `drill/phase7_verify.rs`: D3 §3.4 moved the whole
+    // notification half to `crates/logweir/src/notify.rs` so `logweir notify
+    // deliver` can reach it without reaching into a drill phase, and
+    // `phase7_verify` re-exports every public item. THIS TABLE IS THE ONE ROW
+    // OF THIS FILE THE MOVE HAD TO CHANGE, because it names the file the
+    // builder lives in rather than the path the builder is reached by — which
+    // is the point of it: a re-export cannot satisfy "exactly one reviewed
+    // timeout policy", only the definition site can.
+    // The order is the SORTED one, because `found` below is sorted before the
+    // comparison; `drill/phase7_verify.rs` happened to sort ahead of
+    // `identity.rs` and `notify.rs` does not.
     const SANCTIONED: [(&str, &str); 2] = [
-        ("drill/phase7_verify.rs", "fn notify_agent_with("),
         ("identity.rs", "fn kubernetes_agent("),
+        ("notify.rs", "fn notify_agent_with("),
     ];
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
