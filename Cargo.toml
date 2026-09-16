@@ -83,6 +83,38 @@ repository = "https://github.com/VladyslavHaina/logweir"
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+# THE IANA TIME-ZONE DATABASE, COMPILED INTO THE BINARY — decision D1 §4.3,
+# and the FIRST new third-party package this workspace has taken since the
+# Kubernetes pair above, so it is recorded here in the same practice.
+#
+#   chrono-tz  0.10.4   MIT OR Apache-2.0   rust-version 1.65
+#
+# It brings three further runtime packages and no more: `phf 0.12`, its
+# `phf_shared` and `siphasher`. The optional `chrono-tz-build` GENERATOR is a
+# build-dependency of the `case-insensitive` and `filter-by-regex` features
+# only; neither is taken, so the crate compiles from its checked-in
+# `src/prebuilt/` sources and nothing here runs a code generator, reads
+# `/usr/share/zoneinfo` or reaches a network. Its `chrono` requirement is
+# `>=0.4.25, default-features = false`, which the line above already resolves
+# (`chrono 0.4.45` in `Cargo.lock`), so no second `chrono` enters the graph.
+#
+# WHY A COMPILED-IN DATABASE AND NOT THE HOST'S. `weirkeeper`, the API and the
+# test images would otherwise each carry whatever tzdata their base image
+# shipped and compute DIFFERENT UTC instants for the same `spec.timeZone` —
+# a scheduled backup that fires at two different times depending on which
+# container evaluated it. The cost is that a tz rule change needs a release,
+# which is why `weirkeeper::cadence::TZDB_SOURCE` names the exact version and
+# `tests/cadence.rs::the_tzdb_source_is_the_version_cargo_lock_resolves` pins
+# the two together.
+#
+# DECLARED HERE AND TAKEN AS `chrono-tz.workspace = true`, so the version and
+# feature set stay this manifest's single decision — the same practice every
+# entry in this block follows.
+#
+# `default-features = false` with `std` re-stated: `std` IS chrono-tz's whole
+# default set today, and writing it out is what keeps a future upstream
+# default from arriving unannounced.
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 insta = { version = "1", features = ["json", "yaml"] }

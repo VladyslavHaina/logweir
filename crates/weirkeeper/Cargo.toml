@@ -146,6 +146,25 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 #
 # `chrono` below is the only thing `slot.rs` needs, and it was already declared
 # for `crds::Time`. This task adds no manifest ENTRY of any kind.
+#
+# D1 W1 — AND THIS ONE DOES, FOR THE HALF A HAND-WRITTEN PARSER CANNOT HOLD.
+# The paragraph above still stands for the cron GRAMMAR: five integer fields do
+# not justify a dependency edge. The IANA time-zone DATABASE is the opposite
+# case — it is 350-odd zones of historical rules amended several times a year
+# by an external body, and a hand-written reader of it would be a second,
+# unmaintained tzdb that decides when a customer's backup runs. `chrono-tz`
+# 0.10.4 (MIT OR Apache-2.0, `rust-version = "1.65"`, under this workspace's
+# 1.89 floor) is the compiled-in database decision D1 §4.3 records; the root
+# manifest's `[workspace.dependencies]` entry carries the full reasoning,
+# including why the host's `/usr/share/zoneinfo` was rejected and which three
+# packages come with it.
+#
+# `workspace = true`, so the version and feature set are the root manifest's
+# single decision — which is also why this entry is outside
+# `tests/linkage.rs::claimed_already_resolved`'s set: that test measures the
+# entries whose justification is "already in `Cargo.lock`", and this one's
+# justification is the opposite, a recorded and notice-generating ADDITION.
+chrono-tz.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

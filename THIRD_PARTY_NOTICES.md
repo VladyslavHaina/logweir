@@ -14,7 +14,7 @@ re-derives the expected set from `Cargo.lock` and fails naming any `name@version
 this file has lost, so a hand edit is caught by a test that reads the lockfile
 rather than this document.
 
-**Packages in the resolved graph: 396.**
+**Packages in the resolved graph: 400.**
 
 ## What this file is, and what `deny.toml` is
 
@@ -61,8 +61,8 @@ attributed in [NOTICE](NOTICE) instead.
 
 | arm | entries |
 |---|---|
-| licence file | 302 |
-| `authors` field | 67 |
+| licence file | 305 |
+| `authors` field | 68 |
 | neither; the fact is stated | 16 |
 | this workspace | 11 |
 
@@ -305,6 +305,13 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2014, Kang Seonghoon.
+- Copyright source: licence file
+
+### chrono-tz@0.10.4
+
+- SPDX: `MIT OR Apache-2.0`
+- Copyright: Copyright (c) 2016-2024 Benjamin Sago & the chronotope maintainers
+- Copyright: Copyright 2016 Djzin
 - Copyright source: licence file
 
 ### clang-sys@1.9.1
@@ -1403,6 +1410,18 @@ attributed in [NOTICE](NOTICE) instead.
 - Copyright: Dragoș Tiselice <dragostiselice@gmail.com>
 - Copyright source: `authors` field
 
+### phf@0.12.1
+
+- SPDX: `MIT`
+- Copyright: Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+- Copyright source: licence file
+
+### phf_shared@0.12.1
+
+- SPDX: `MIT`
+- Copyright: Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+- Copyright source: licence file
+
 ### pin-project@1.1.13
 
 - SPDX: `Apache-2.0 OR MIT`
@@ -1883,6 +1902,12 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `Apache-2.0`
 - Copyright: Armin Ronacher <armin.ronacher@active-4.com>, Pierre-Étienne Meunier <pe@pijul.org>, Brandon Williams <bwilliams.eng@gmail.com>
+- Copyright source: `authors` field
+
+### siphasher@1.0.3
+
+- SPDX: `MIT/Apache-2.0`
+- Copyright: Frank Denis <github@pureftpd.org>
 - Copyright source: `authors` field
 
 ### slab@0.4.12
