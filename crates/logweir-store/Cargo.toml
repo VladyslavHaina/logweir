@@ -36,3 +36,12 @@ serde_json.workspace = true
 
 [features]
 default = []
+# The repository's gating convention for a test that needs a live backend
+# (`crates/logweir-kafka/tests/live.rs`, `crates/logweir/tests/backup_run.rs`):
+# the test FILE opens with `#![cfg(feature = "e2e")]`, so under the default
+# feature set it compiles to nothing and the suite skips it cleanly. `just e2e`
+# is the entry point that turns it on, after `just e2e-up` has brought the
+# compose stack up. `crates/logweir/tests/no_network_in_unit_tests.rs` reads
+# that same attribute to decide which files are allowed to name a dialling
+# constructor.
+e2e = []
