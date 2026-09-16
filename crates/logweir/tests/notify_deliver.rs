@@ -27,12 +27,14 @@
 //! 2026-09-15.
 
 use logweir::notify::{
-    deliver_with, exhaustive_claim_offences, pagerduty_event, parse_event, protection_dedup_key,
-    read_event, recovery_completed_dedup_key, slack_body, slack_text, webhook_body, Alert,
-    AlertAction, AlertKind, DeliveryOutcome, EventSink, Health, LastAvailablePoint, PolicyRef,
-    ProtectionEvent, SinkRoutes, VerificationScope, MAX_EVENT_BYTES, NOTIFY_RESULT_LINE,
-    PAGERDUTY_ENDPOINT_ENV, PAGERDUTY_SILENCED, PROTECTION_DEDUP_PREFIX,
-    PROTECTION_EVENT_FORMAT_VERSION, ROUTING_KEY_ENV, SLACK_WEBHOOK_URL_ENV, WEBHOOK_URL_ENV,
+    deliver_with, exhaustive_claim_offences, insecure_sink_refusal, pagerduty_event, parse_event,
+    protection_dedup_key, read_event, recovery_completed_dedup_key, sanitize_exhaustive_claims,
+    scope_offences, slack_body, slack_text, webhook_body, Alert, AlertAction, AlertKind,
+    DeliveryOutcome, EventSink, Health, LastAvailablePoint, PolicyAlertKind, PolicyRef,
+    ProtectionEvent, SinkRoutes, VerificationScope, ALLOW_INSECURE_SINKS_ENV, CLAIM_REDACTED,
+    EXHAUSTIVE_CLAIMS, MAX_EVENT_BYTES, NOTIFY_RESULT_LINE, PAGERDUTY_ENDPOINT_ENV,
+    PAGERDUTY_SILENCED, PROTECTION_DEDUP_PREFIX, PROTECTION_EVENT_FORMAT_VERSION, ROUTING_KEY_ENV,
+    SAMPLE_DISCLAIMER, SLACK_WEBHOOK_URL_ENV, WEBHOOK_URL_ENV,
 };
 
 // ----------------------------------------------------------------- fixtures
@@ -53,6 +55,9 @@ const TEST_WEBHOOK_URL: &str = "https://sink.example/hooks/protection?token=WEBH
 /// The policy UID every fixture is about.
 const POLICY_UID: &str = "11111111-2222-3333-4444-555555555555";
 
+/// The Restore UID a `RecoveryCompleted` fixture keys on.
+const RESTORE_UID: &str = "99999999-8888-7777-6666-555555555555";
+
 fn event_of(kind: AlertKind, action: AlertAction, health: Health) -> ProtectionEvent {
     ProtectionEvent {
         format_version: PROTECTION_EVENT_FORMAT_VERSION.to_string(),
@@ -63,7 +68,13 @@ fn event_of(kind: AlertKind, action: AlertAction, health: Health) -> ProtectionE
             uid: POLICY_UID.to_string(),
         },
         alert: Alert {
-            key: protection_dedup_key(POLICY_UID, kind),
+            key: match kind.policy_keyed() {
+                Some(k) => protection_dedup_key(POLICY_UID, k),
+                // The fifth kind keys on a Restore UID and the builder that
+                // takes a policy UID cannot be reached for it — see
+                // `the_wrong_key_builder_does_not_compile_for_a_recovery`.
+                None => recovery_completed_dedup_key(RESTORE_UID),
+            },
             kind,
             action,
             transition: 3,
@@ -89,22 +100,40 @@ fn stale_event() -> ProtectionEvent {
     event_of(AlertKind::Staleness, AlertAction::Trigger, Health::Stale)
 }
 
-/// D3 §3.4's own worked example, as JSON text, so the parser is driven over
-/// the bytes the decision document shows rather than over a struct this file
-/// built. A field renamed in the Rust type and not in the decision would fail
-/// HERE, which is the only place it could.
+/// The worked example **read out of the published format document**, so the
+/// page an operator reads and the Rust type are pinned to each other.
+///
+/// It was a hand-typed copy inside this file, and the report claimed it pinned
+/// the decision's example. It pinned the copy: the copy and
+/// `docs/formats/protection-event.md` had already drifted in `event_id`, and a
+/// field the document renamed would have passed here in silence. Now the
+/// fenced ```json block in that page IS the fixture, so a rename that the page
+/// does not carry fails on the next line, and a page whose example stops
+/// parsing fails too.
+///
+/// D3 §3.4's own block is not readable the same way — its `event_id` is the
+/// prose placeholder `<sha256 of policyUID|alertKey|transition>` and its
+/// `uid` is `...`, so it is an illustration rather than a document. The format
+/// page is where the example became real, and that is the one to pin.
 fn decision_example_json() -> String {
-    format!(
-        r##"{{"format_version":"1.0.0","event_id":"<sha256 of policyUID|alertKey|transition>",
- "policy":{{"namespace":"team-a","name":"orders-prod","uid":"{POLICY_UID}"}},
- "alert":{{"key":"logweir-protection-{POLICY_UID}-Staleness","kind":"Staleness","action":"trigger","transition":3}},
- "health":"Stale","summary":"orders-prod: newest available recovery point is 31h old (objective 26h)",
- "last_available_point":{{"point_id":"lwp1-aaa","recovery_point_at":"2026-09-15T01:00:00Z","age_seconds":111600,"evidence":"Valid"}},
- "consecutive_failed_runs":2,"missed_slots":1,
- "verification_scope":"sampled",
- "details_route":"#/protection?ns=team-a&name=orders-prod",
- "generated_at":"2026-09-16T08:00:00Z"}}"##
-    )
+    let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/formats/protection-event.md");
+    let text = std::fs::read_to_string(&doc)
+        .unwrap_or_else(|e| panic!("{} is readable: {e}", doc.display()));
+    let open = text
+        .find("```json\n")
+        .expect("docs/formats/protection-event.md carries a fenced ```json worked example");
+    let body = &text[open + "```json\n".len()..];
+    let close = body.find("```").expect("the fenced block closes");
+    let json = body[..close].to_string();
+    // The fixture must really be a protection event and not, say, the first
+    // JSON block of some later section: an unchecked extraction that silently
+    // returned the wrong block would make every row below a test of nothing.
+    assert!(
+        json.contains("\"format_version\"") && json.contains("\"verification_scope\""),
+        "the first ```json block in the format doc is not the worked event:\n{json}"
+    );
+    json
 }
 
 /// The `EventSink` a test uses instead of a network.
@@ -166,10 +195,115 @@ fn all_three() -> SinkRoutes {
     ])
 }
 
-/// The whole of stdout plus every diagnostic, as one string — what a pod log
-/// holds after this process ran, modulo interleaving.
+/// The five alert kinds, the five health states and the three verification
+/// scopes, as tables the cross-product rows walk.
+const EVERY_KIND: [AlertKind; 5] = [
+    AlertKind::BackupFailure,
+    AlertKind::Staleness,
+    AlertKind::ArchiveUnavailable,
+    AlertKind::RehearsalFailure,
+    AlertKind::RecoveryCompleted,
+];
+const EVERY_HEALTH: [Health; 5] = [
+    Health::Healthy,
+    Health::AtRisk,
+    Health::Stale,
+    Health::Unprotected,
+    Health::Unknown,
+];
+const EVERY_POLICY_KIND: [PolicyAlertKind; 4] = [
+    PolicyAlertKind::BackupFailure,
+    PolicyAlertKind::Staleness,
+    PolicyAlertKind::ArchiveUnavailable,
+    PolicyAlertKind::RehearsalFailure,
+];
+const EVERY_SCOPE: [VerificationScope; 3] = [
+    VerificationScope::Sampled,
+    VerificationScope::Degraded,
+    VerificationScope::None,
+];
+
+/// The whole of stdout plus every diagnostic, as one string.
+///
+/// **Not the whole of a pod log** — see [`deliver_capturing_logs`], which adds
+/// the `tracing` half. Rows that are not about disclosure use this one.
 fn everything(o: &DeliveryOutcome) -> String {
     format!("{}\n{}", o.stdout, o.diagnostics.join("\n"))
+}
+
+/// Install one permissive global subscriber, once per test binary, before any
+/// thread-local capture below.
+///
+/// The same cure `crates/logweir/tests/notify.rs::ensure_global_subscriber`
+/// documents at length: tracing caches each callsite's `Interest`
+/// process-wide, and with no global default a callsite first registered from
+/// an uncaptured thread caches `Interest::never()` — so a capturing test's log
+/// comes back empty, intermittently, depending on test order. A permissive
+/// global makes the registering thread always resolve to a subscriber that
+/// says `always`.
+fn ensure_global_subscriber() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
+/// Deliver with a JSON `tracing` subscriber installed on this thread, and hand
+/// back the outcome **and every surface a pod log would carry**: stdout, the
+/// stderr diagnostics, and the tracing events.
+///
+/// # This helper is the fix for a mutant that survived
+///
+/// `deliver_with` writes five `tracing` events, and a pod log is stdout and
+/// stderr merged — `GET …/pods/{pod}/log` has no stream selector — so the
+/// tracing line **is** the surface a log aggregator reads. The disclosure row
+/// folded only `stdout` and `diagnostics`, so a mutant that leaked the routing
+/// key as a `tracing` FIELD (rather than into a diagnostic string) left all 56
+/// rows green while the shipped binary printed the key in full on stderr.
+///
+/// Folding the captured JSON in closes it: any leak through any of the three
+/// channels now fails the same assertion.
+fn deliver_capturing_logs(
+    ev: &ProtectionEvent,
+    routes: &SinkRoutes,
+    sink: &dyn EventSink,
+) -> (DeliveryOutcome, String) {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    ensure_global_subscriber();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(Buf(captured.clone()))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, || deliver_with(ev, routes, sink));
+    let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let folded = format!("{}\n{}\n{log}", out.stdout, out.diagnostics.join("\n"));
+    (out, folded)
 }
 
 // ------------------------------------------------------ the event document
@@ -324,13 +458,17 @@ fn the_format_version_major_is_checked_before_the_shape() {
 /// would print a recovery point that does not exist into an incident.
 #[test]
 fn an_unprotected_policy_has_no_last_available_point() {
-    let text = decision_example_json()
-        .replace(r#""health":"Stale""#, r#""health":"Unprotected""#)
-        .replace(
-            r#" "last_available_point":{"point_id":"lwp1-aaa","recovery_point_at":"2026-09-15T01:00:00Z","age_seconds":111600,"evidence":"Valid"},
-"#,
-            "",
-        );
+    // The field is removed by re-serializing rather than by splicing text: the
+    // fixture is now the published document's own block and its whitespace is
+    // the page's, not this file's.
+    let mut v: serde_json::Value = serde_json::from_str(&decision_example_json()).unwrap();
+    let obj = v.as_object_mut().unwrap();
+    obj.insert("health".into(), serde_json::json!("Unprotected"));
+    assert!(
+        obj.remove("last_available_point").is_some(),
+        "the published example carries the field this row removes"
+    );
+    let text = v.to_string();
     let ev = parse_event(text.as_bytes()).expect("an Unprotected event needs no point");
     assert_eq!(ev.health, Health::Unprotected);
     assert!(ev.last_available_point.is_none());
@@ -343,111 +481,269 @@ fn an_unprotected_policy_has_no_last_available_point() {
 
 // ------------------------------------------------ the exhaustive-claim gate
 
-/// **No body any sink receives claims exhaustive verification — over the whole
-/// cross-product of kind, health and scope.**
+/// **No prose any sink receives claims exhaustive verification — over the
+/// whole cross-product of kind, health and scope.**
 ///
-/// The table is 5 × 5 × 3 = 75 events, each rendered into all three bodies, so
-/// 225 bodies are scanned. The `RecoveryCompleted` rows are the ones that
-/// matter twice: they carry the literal word "Completed" in `alert.kind` and
-/// in `alert.key`, and they must PASS. A gate on the bare word `complete`
-/// would fail every one of them — a permanent false red, which is how a gate
-/// stops meaning anything — so what is forbidden is the CLAIM and not the
-/// word.
+/// 5 × 5 × 3 = 75 events, each scanned on both prose surfaces this module
+/// produces: the event's own `summary` and the Slack line `slack_text`
+/// composes from it. The `RecoveryCompleted` rows are the ones that matter
+/// twice: they carry the literal word "Completed" in `alert.kind` and in
+/// `alert.key`, and they must PASS.
 ///
-/// KILLS: composing a body that says "fully verified"; widening the gate to
-/// the bare word and making `RecoveryCompleted` unpublishable.
+/// KILLS: composing prose that says "fully verified"; widening the gate to the
+/// bare word and making `RecoveryCompleted` unpublishable.
 #[test]
-fn no_sink_body_claims_exhaustive_verification_for_any_event() {
-    let kinds = [
-        AlertKind::BackupFailure,
-        AlertKind::Staleness,
-        AlertKind::ArchiveUnavailable,
-        AlertKind::RehearsalFailure,
-        AlertKind::RecoveryCompleted,
-    ];
-    let healths = [
-        Health::Healthy,
-        Health::AtRisk,
-        Health::Stale,
-        Health::Unprotected,
-        Health::Unknown,
-    ];
-    let scopes = [
-        VerificationScope::Sampled,
-        VerificationScope::Degraded,
-        VerificationScope::None,
-    ];
+fn no_prose_any_sink_receives_claims_exhaustive_verification() {
     let mut checked = 0usize;
-    for kind in kinds {
-        for health in healths {
-            for scope in scopes {
+    for kind in EVERY_KIND {
+        for health in EVERY_HEALTH {
+            for scope in EVERY_SCOPE {
                 let mut ev = event_of(kind, AlertAction::Trigger, health);
                 ev.verification_scope = scope;
-                for (name, body) in [
-                    ("webhook", webhook_body(&ev)),
-                    ("slack", slack_body(&ev)),
-                    ("pagerduty", pagerduty_event(&ev, TEST_ROUTING_KEY)),
-                ] {
+                for (name, prose) in [("summary", ev.summary.clone()), ("slack", slack_text(&ev))] {
                     checked += 1;
                     assert!(
-                        exhaustive_claim_offences(&body).is_empty(),
-                        "{name} body for {kind:?}/{health:?}/{scope:?} claims an \
-                         exhaustive check: {:?}\n{body}",
-                        exhaustive_claim_offences(&body)
+                        exhaustive_claim_offences(&prose).is_empty(),
+                        "{name} prose for {kind:?}/{health:?}/{scope:?} claims an \
+                         exhaustive check: {:?}\n{prose}",
+                        exhaustive_claim_offences(&prose)
                     );
+                }
+                // And the composed bodies carry a legal scope, which is the
+                // half that still refuses to post.
+                for body in [
+                    webhook_body(&ev),
+                    slack_body(&ev),
+                    pagerduty_event(&ev, TEST_ROUTING_KEY),
+                ] {
+                    assert!(scope_offences(&body).is_empty(), "{body}");
                 }
             }
         }
     }
     assert_eq!(
         checked,
-        5 * 5 * 3 * 3,
+        5 * 5 * 3 * 2,
         "the table must actually have walked"
     );
 }
 
-/// **The gate has teeth: a claim smuggled through the controller's own
-/// free-text `summary` is caught, and the body is NOT posted.**
+/// **THE REVIEWER'S REPRODUCTION. A policy named `exhaustive-backups`
+/// delivers.**
+///
+/// `exhaustive` is a legal DNS-1123 label, so it is a legal
+/// `ProtectionPolicy` name — and the first version of the claim gate scanned
+/// the whole serialized body, which carries `policy.name`,
+/// `policy.namespace`, `alert.key`, `details_route` and `point_id`. Every body
+/// for that policy therefore contained the banned token, every sink refused,
+/// and after the controller's three attempts (D3 §3.4.4: 60/300/900 s) that
+/// policy's `Stale` and `Unprotected` pages reached **nobody, permanently and
+/// silently**.
+///
+/// That is the outcome `dedup_key_advice`'s own rationale rejects in so many
+/// words — a gate that converts a naming choice into a total loss of alerting
+/// is strictly worse than the thing it catches — and the argument had not been
+/// applied here.
+///
+/// KILLS: re-widening the scan to the serialized body, to `alert.key`, to
+/// `details_route`, or to any other identifier field.
+#[test]
+fn a_policy_whose_name_contains_a_banned_word_still_delivers() {
+    let mut ev = stale_event();
+    ev.policy.name = "exhaustive-backups".to_string();
+    ev.policy.namespace = "exhaustive-verification-team".to_string();
+    ev.alert.key = "logweir-protection-exhaustive-uid-Staleness".to_string();
+    ev.details_route =
+        "#/protection?ns=exhaustive-verification-team&name=exhaustive-backups".to_string();
+    if let Some(p) = ev.last_available_point.as_mut() {
+        p.point_id = "lwp1-exhaustive-0001".to_string();
+    }
+
+    let sink = RecordingSink::default();
+    let out = deliver_with(&ev, &all_three(), &sink);
+    assert_eq!(
+        out.stdout,
+        "notify-result=pagerduty:ok\n\
+         notify-result=webhook:ok\n\
+         notify-result=slack:ok\n",
+        "an operator's NAMING CHOICE must never silence their own alerts; \
+         diagnostics were {:?}",
+        out.diagnostics
+    );
+    assert_eq!(out.code as u8, 0);
+    assert_eq!(sink.posts().len(), 3);
+    // The identifiers travel intact — sanitizing an identifier would be a
+    // second defect, since `alert.key` IS PagerDuty's incident identity.
+    let pd = sink
+        .posts()
+        .into_iter()
+        .find(|(u, _)| u.contains("pagerduty"))
+        .unwrap();
+    assert_eq!(
+        pd.1["dedup_key"],
+        "logweir-protection-exhaustive-uid-Staleness"
+    );
+    assert_eq!(
+        pd.1["payload"]["source"],
+        "exhaustive-verification-team/exhaustive-backups"
+    );
+}
+
+/// **The scan's subject is prose, and only prose.** The unit-level half of the
+/// row above: every identifier shape asserted clean one at a time, so a
+/// regression names which field was re-admitted.
+#[test]
+fn an_identifier_is_never_scanned_as_prose() {
+    for identifier in [
+        "exhaustive-backups",
+        "exhaustive-verification-team",
+        "logweir-protection-exhaustive-uid-Staleness",
+        "#/protection?ns=team-a&name=exhaustive",
+        "lwp1-exhaustive-0001",
+        "sha256:exhaustivelyhashed",
+    ] {
+        let mut ev = stale_event();
+        ev.policy.name = identifier.to_string();
+        ev.policy.namespace = identifier.to_string();
+        ev.alert.key = identifier.to_string();
+        ev.details_route = identifier.to_string();
+        ev.event_id = identifier.to_string();
+        let out = deliver_with(&ev, &all_three(), &RecordingSink::default());
+        assert_eq!(
+            out.code as u8, 0,
+            "`{identifier}` in an identity field must not stop delivery: {:?}",
+            out.diagnostics
+        );
+        assert_eq!(out.stdout.matches(":ok").count(), 3, "{identifier}");
+    }
+}
+
+/// **The disclaimer this module writes is a CONSTANT and carries no claim.**
+///
+/// The prose scan's subject is the controller's `summary`; the prose *this*
+/// module authors needs a different guard, one an operator's naming choice
+/// cannot trip and that cannot be edited without changing the source. This is
+/// it.
+///
+/// KILLS: rewriting `SAMPLE_DISCLAIMER` as "not an exhaustive comparison" —
+/// the wording the first draft used, which a truncating channel clips into
+/// the claim itself.
+#[test]
+fn the_disclaimer_logweir_writes_carries_no_claim() {
+    assert!(
+        exhaustive_claim_offences(SAMPLE_DISCLAIMER).is_empty(),
+        "`{SAMPLE_DISCLAIMER}` claims what Logweir does not do: {:?}",
+        exhaustive_claim_offences(SAMPLE_DISCLAIMER)
+    );
+    assert!(
+        slack_text(&stale_event()).contains(SAMPLE_DISCLAIMER),
+        "the disclaimer has to actually reach the Slack line"
+    );
+    // The list itself has teeth: every phrase in it is found in itself.
+    for claim in EXHAUSTIVE_CLAIMS {
+        assert_eq!(
+            exhaustive_claim_offences(&format!("orders-prod: {claim} yesterday")),
+            vec![claim],
+            "`{claim}` is in the list and must be found"
+        );
+    }
+}
+
+/// **A claim in the controller's `summary` is EDITED OUT and the alert is
+/// still delivered.**
 ///
 /// `summary` is the one field this subcommand does not compose — it arrives
-/// from the controller and reaches a PagerDuty incident title verbatim. A gate
-/// that only checked the fields this module writes would not be checking the
-/// field most likely to carry a sentence somebody wrote in a hurry.
+/// from the controller and reaches a PagerDuty incident title verbatim — so it
+/// is the field most likely to carry a sentence somebody wrote in a hurry.
 ///
-/// KILLS: scanning only the typed `verification_scope`; logging the offence
-/// and posting anyway.
+/// It used to SUPPRESS the post. That was the wrong half of the trade, and the
+/// same one `dedup_key_advice` already rejects: the alert underneath a badly
+/// worded summary is still real and still needs a human, so dropping the page
+/// punishes the responder for the controller's wording. Sanitizing costs them
+/// one marker and keeps the page; the removal is reported on a named line so
+/// the producer gets fixed.
+///
+/// KILLS: forwarding the claim unedited; suppressing the alert; sanitizing
+/// only the body that happens to be composed first.
 #[test]
-fn a_claim_in_the_controllers_summary_is_caught_and_the_post_is_suppressed() {
+fn a_claim_in_the_controllers_summary_is_edited_out_and_the_alert_still_goes() {
     let mut ev = stale_event();
     ev.summary = "orders-prod: verification is complete and every record was verified".to_string();
 
-    let offences = exhaustive_claim_offences(&webhook_body(&ev));
+    let offences = exhaustive_claim_offences(&ev.summary);
     assert!(
-        offences.contains(&"verification is complete".to_string())
-            && offences.contains(&"every record was verified".to_string()),
+        offences.contains(&"verification is complete")
+            && offences.contains(&"every record was verified"),
         "both claims must be named: {offences:?}"
     );
 
     let sink = RecordingSink::default();
     let out = deliver_with(&ev, &all_three(), &sink);
-    assert!(
-        sink.posts().is_empty(),
-        "NOTHING may go on the wire: a sink that has already received the claim \
-         cannot be un-notified. Posted: {:?}",
-        sink.posts()
-    );
     assert_eq!(
         out.stdout,
-        "notify-result=pagerduty:failed\n\
-         notify-result=webhook:failed\n\
-         notify-result=slack:failed\n"
+        "notify-result=pagerduty:ok\n\
+         notify-result=webhook:ok\n\
+         notify-result=slack:ok\n",
+        "the page still goes: {:?}",
+        out.diagnostics
     );
-    assert_eq!(out.code as u8, 1);
+    assert_eq!(out.code as u8, 0);
     assert!(
         everything(&out).contains("exhaustive"),
-        "the refusal has to say why: {}",
+        "…and the edit is on a line an operator can grep: {}",
         everything(&out)
     );
+
+    // EVERY body is composed from the sanitized event — a sink that has already
+    // received the unedited sentence cannot be un-notified.
+    assert_eq!(sink.posts().len(), 3);
+    for (url, body) in sink.posts() {
+        let text = body.to_string().to_lowercase();
+        for claim in ["verification is complete", "every record was verified"] {
+            assert!(!text.contains(claim), "`{claim}` reached {url}:\n{body}");
+        }
+        assert!(
+            text.contains(&CLAIM_REDACTED.to_lowercase()),
+            "the edit must be VISIBLE in the body, not a silent deletion:\n{body}"
+        );
+    }
+}
+
+/// **The sanitizer is pure, case-insensitive, and leaves the rest of the
+/// sentence alone.**
+#[test]
+fn sanitizing_removes_the_claim_and_nothing_else() {
+    for (input, want_removed) in [
+        ("orders-prod is fine", vec![]),
+        ("orders-prod: FULLY VERIFIED", vec!["fully verified"]),
+        (
+            "orders-prod: Verification Is Complete; exhaustive too",
+            vec!["exhaustive", "verification is complete"],
+        ),
+    ] {
+        let (clean, removed) = sanitize_exhaustive_claims(input);
+        let mut got: Vec<&str> = removed.clone();
+        got.sort_unstable();
+        let mut want = want_removed.clone();
+        want.sort_unstable();
+        assert_eq!(got, want, "{input}");
+        assert!(
+            exhaustive_claim_offences(&clean).is_empty(),
+            "sanitizing must leave nothing behind: `{clean}`"
+        );
+        if want_removed.is_empty() {
+            assert_eq!(clean, input, "an innocent sentence is returned untouched");
+        } else {
+            assert!(
+                clean.contains(CLAIM_REDACTED),
+                "the edit is marked, never silent: `{clean}`"
+            );
+            assert!(
+                clean.starts_with("orders-prod"),
+                "the surrounding prose survives: `{clean}`"
+            );
+        }
+    }
 }
 
 /// **`RecoveryCompleted` is publishable.** The narrow half of the gate above,
@@ -461,18 +757,19 @@ fn a_recovery_completed_event_is_not_mistaken_for_a_verification_claim() {
         Health::Healthy,
     );
     assert!(ev.alert.key.contains("RecoveryCompleted"));
-    for body in [
-        webhook_body(&ev),
-        slack_body(&ev),
-        pagerduty_event(&ev, TEST_ROUTING_KEY),
-    ] {
+    for prose in [ev.summary.clone(), slack_text(&ev)] {
         assert!(
-            exhaustive_claim_offences(&body).is_empty(),
+            exhaustive_claim_offences(&prose).is_empty(),
             "a restore that COMPLETED is a fact about a restore, not a claim about an \
              archive: {:?}",
-            exhaustive_claim_offences(&body)
+            exhaustive_claim_offences(&prose)
         );
     }
+    // And it really delivers, key and all.
+    let sink = RecordingSink::default();
+    let out = deliver_with(&ev, &all_three(), &sink);
+    assert_eq!(out.code as u8, 0, "{:?}", out.diagnostics);
+    assert_eq!(sink.posts().len(), 2, "webhook and Slack, never PagerDuty");
 }
 
 // --------------------------------------------------------- the dedup keys
@@ -488,16 +785,10 @@ fn a_recovery_completed_event_is_not_mistaken_for_a_verification_claim() {
 #[test]
 fn the_protection_dedup_key_is_the_policy_uid_and_the_kind() {
     assert_eq!(
-        protection_dedup_key(POLICY_UID, AlertKind::Staleness),
+        protection_dedup_key(POLICY_UID, PolicyAlertKind::Staleness),
         format!("logweir-protection-{POLICY_UID}-Staleness")
     );
-    for kind in [
-        AlertKind::BackupFailure,
-        AlertKind::Staleness,
-        AlertKind::ArchiveUnavailable,
-        AlertKind::RehearsalFailure,
-        AlertKind::RecoveryCompleted,
-    ] {
+    for kind in EVERY_POLICY_KIND {
         let a = protection_dedup_key("uid-a", kind);
         let b = protection_dedup_key("uid-b", kind);
         assert_ne!(a, b, "two policies must never share an incident");
@@ -508,18 +799,48 @@ fn the_protection_dedup_key_is_the_policy_uid_and_the_kind() {
         );
         assert!(a.ends_with(kind.as_str()));
     }
-    // One kind per key: a policy's Staleness page is not its BackupFailure page.
-    let keys: std::collections::BTreeSet<String> = [
-        AlertKind::BackupFailure,
-        AlertKind::Staleness,
-        AlertKind::ArchiveUnavailable,
-        AlertKind::RehearsalFailure,
-        AlertKind::RecoveryCompleted,
-    ]
-    .iter()
-    .map(|k| protection_dedup_key(POLICY_UID, *k))
-    .collect();
+    // One kind per key: a policy's Staleness page is not its BackupFailure page,
+    // and the fifth kind's key comes from the other builder entirely.
+    let mut keys: std::collections::BTreeSet<String> = EVERY_POLICY_KIND
+        .iter()
+        .map(|k| protection_dedup_key(POLICY_UID, *k))
+        .collect();
+    keys.insert(recovery_completed_dedup_key(RESTORE_UID));
     assert_eq!(keys.len(), 5);
+}
+
+/// **THE WRONG BUILDER DOES NOT COMPILE.**
+///
+/// `protection_dedup_key` used to take an `AlertKind` and cheerfully answer
+/// `logweir-protection-<policyUID>-RecoveryCompleted` — a WELL-FORMED key for
+/// the wrong object, which is the worst kind of wrong: W6 would have keyed
+/// every recovery of a policy onto one incident, so the second restore of the
+/// day overwrites the first one's message and a responder reads about the
+/// wrong restore. `dedup_key_advice` returned `None` early for that kind, so
+/// nothing would even have warned.
+///
+/// The narrowing is now a TYPE. This row is the runtime half of it: the
+/// narrowing is total for the four, and empty for the fifth. The compile-time
+/// half cannot be written as a test — `protection_dedup_key(uid,
+/// AlertKind::RecoveryCompleted)` is a type error — so it is asserted here
+/// that the only bridge between the enums refuses exactly that one kind.
+#[test]
+fn the_wrong_key_builder_does_not_compile_for_a_recovery() {
+    for kind in EVERY_KIND {
+        match kind.policy_keyed() {
+            Some(narrowed) => {
+                assert_ne!(kind, AlertKind::RecoveryCompleted);
+                assert_eq!(narrowed.as_str(), kind.as_str(), "one wire spelling");
+                assert_eq!(AlertKind::from(narrowed), kind, "the bridge round-trips");
+            }
+            None => assert_eq!(
+                kind,
+                AlertKind::RecoveryCompleted,
+                "`{kind:?}` is policy-keyed and must narrow"
+            ),
+        }
+    }
+    assert!(AlertKind::RecoveryCompleted.policy_keyed().is_none());
 }
 
 /// **A UID that identifies nothing falls back rather than degenerating.**
@@ -534,7 +855,7 @@ fn the_protection_dedup_key_is_the_policy_uid_and_the_kind() {
 #[test]
 fn a_blank_uid_cannot_degenerate_into_a_shared_key() {
     for blank in ["", " ", "\t", "\n  "] {
-        let k = protection_dedup_key(blank, AlertKind::Staleness);
+        let k = protection_dedup_key(blank, PolicyAlertKind::Staleness);
         assert_eq!(k, "logweir-protection-unknown-Staleness");
         assert!(!k.contains("--"), "the degenerate shape is the defect: {k}");
         assert_eq!(
@@ -546,8 +867,8 @@ fn a_blank_uid_cannot_degenerate_into_a_shared_key() {
     // one — otherwise a projected field with a trailing newline opens a
     // SECOND incident for the same policy.
     assert_eq!(
-        protection_dedup_key("  abc\n", AlertKind::Staleness),
-        protection_dedup_key("abc", AlertKind::Staleness)
+        protection_dedup_key("  abc\n", PolicyAlertKind::Staleness),
+        protection_dedup_key("abc", PolicyAlertKind::Staleness)
     );
 }
 
@@ -564,26 +885,86 @@ fn recovery_completed_keys_on_the_restore_uid() {
     let b = recovery_completed_dedup_key("restore-bbb");
     assert_eq!(a, "logweir-protection-restore-aaa-RecoveryCompleted");
     assert_ne!(a, b, "two restores are two recoveries");
-    // The two builders produce the SAME SHAPE — deliberately. What differs is
-    // the identity handed in, and that is the whole decision: `<restoreUID>`
-    // for a completed recovery, `<policyUID>` for the four conditions. A
-    // controller that reaches for the wrong builder produces a well-formed key
-    // for the wrong object rather than a malformed one, which is why W6 has a
-    // test of its own for WHICH uid it passes.
-    assert_eq!(
-        a,
-        protection_dedup_key("restore-aaa", AlertKind::RecoveryCompleted),
-        "one shape, two identities"
-    );
+    // The shape is the family's — same prefix, same kind tail — so the key is
+    // recognisably a protection key and cannot collide with a drill one.
+    assert!(a.starts_with(PROTECTION_DEDUP_PREFIX) && a.ends_with("RecoveryCompleted"));
+    // What differs is the identity, and `protection_dedup_key` can no longer
+    // be handed a `RecoveryCompleted` to get it wrong with — see
+    // `the_wrong_key_builder_does_not_compile_for_a_recovery`.
     assert_ne!(
         a,
-        protection_dedup_key(POLICY_UID, AlertKind::RecoveryCompleted),
+        recovery_completed_dedup_key(POLICY_UID),
         "a recovery is keyed on the RESTORE, so two restores of one policy's points \
          are two messages and not one overwriting the other"
     );
 }
 
 // ------------------------------------------------------ the sink selection
+
+/// **A delivery with NO configured sink is `none:unconfigured` and exit 1 —
+/// never a bare, silent success.**
+///
+/// The review's F3. "Nothing was configured" and "every sink accepted" used to
+/// be the SAME machine-readable answer: empty stdout, exit 0. A `secretKeyRef`
+/// that was rotated, renamed or left blank projects `Ok("")`, the emptiness
+/// filter correctly reports it as unconfigured — and W6 then recorded
+/// `delivery.state=Delivered` for an alert that reached nobody. D3 §3.4.2's
+/// "exits 0 only when every configured sink accepted" was vacuously satisfied.
+///
+/// Both shapes are driven — nothing set at all, and all three set to a blank
+/// value — because they are one finding with two causes and an operator fixes
+/// them in different places.
+///
+/// KILLS: returning `ExitCode::Ok` with empty stdout for a delivery that
+/// reached nobody; printing `none:failed`, which would be indistinguishable
+/// from a sink that refused.
+#[test]
+fn a_delivery_with_no_sink_says_so_and_does_not_report_success() {
+    for (arm, r) in [
+        ("nothing is set", routes(&[])),
+        (
+            "every variable is present and blank",
+            routes(&[
+                (ROUTING_KEY_ENV, ""),
+                (WEBHOOK_URL_ENV, ""),
+                (SLACK_WEBHOOK_URL_ENV, "   "),
+            ]),
+        ),
+    ] {
+        let sink = RecordingSink::default();
+        let out = deliver_with(&stale_event(), &r, &sink);
+        assert_eq!(
+            out.stdout, "notify-result=none:unconfigured\n",
+            "{arm}: the one line that says the alert reached nobody"
+        );
+        assert_eq!(
+            out.code as u8, 1,
+            "{arm}: a delivery Job that delivered nothing did not deliver"
+        );
+        assert!(sink.posts().is_empty(), "{arm}");
+        assert!(
+            everything(&out).contains("BLANK"),
+            "{arm}: the diagnostic must point at the projected Secret keys, which is \
+             where the operator fixes it:\n{}",
+            everything(&out)
+        );
+    }
+}
+
+/// **`none` can never be mistaken for a sink.** The line is machine-readable
+/// precisely because the pseudo-sink name collides with nothing.
+#[test]
+fn the_unconfigured_line_is_distinguishable_from_every_sink_result() {
+    let out = deliver_with(&stale_event(), &routes(&[]), &RecordingSink::default());
+    for real in ["pagerduty", "webhook", "slack"] {
+        assert!(
+            !out.stdout.contains(&format!("notify-result={real}")),
+            "`none` must not look like `{real}`: {}",
+            out.stdout
+        );
+    }
+    assert!(!out.stdout.contains(":ok") && !out.stdout.contains(":failed"));
+}
 
 /// **A sink is configured exactly when its variable holds a NON-BLANK value.**
 ///
@@ -608,8 +989,11 @@ fn a_blank_variable_is_not_a_configured_sink() {
             "`{blank:?}` is not a credential"
         );
         let out = deliver_with(&stale_event(), &r, &RecordingSink::default());
-        assert_eq!(out.stdout, "", "no sink, no contract line");
-        assert_eq!(out.code as u8, 0, "nothing configured is not a failure");
+        assert_eq!(
+            out.stdout, "notify-result=none:unconfigured\n",
+            "a blank credential is not a credential, and the outcome says so"
+        );
+        assert_eq!(out.code as u8, 1);
     }
 }
 
@@ -684,12 +1068,14 @@ fn a_recovery_completed_event_is_webhook_and_slack_only() {
         sink.posts()
     );
 
-    // And with ONLY the routing key set, there is no sink at all — which is
-    // exit 0 with a named diagnostic, not a silent success.
+    // And with ONLY the routing key set, there is no sink at all for this kind
+    // — which is `none:unconfigured` and exit 1, not a silent success. An
+    // operator who configured a page for their recoveries and got nothing must
+    // be able to see that from the Job, not from prose.
     let only_pd = routes(&[(ROUTING_KEY_ENV, TEST_ROUTING_KEY)]);
     let out = deliver_with(&ev, &only_pd, &RecordingSink::default());
-    assert_eq!(out.stdout, "");
-    assert_eq!(out.code as u8, 0);
+    assert_eq!(out.stdout, "notify-result=none:unconfigured\n");
+    assert_eq!(out.code as u8, 1);
     assert!(
         everything(&out).contains("webhook/Slack only"),
         "an operator who set only a routing key must be told why nothing was sent: {}",
@@ -912,6 +1298,115 @@ fn a_key_from_another_family_is_named() {
     );
 }
 
+/// **A `http://` webhook or Slack URL is refused before a request, unless the
+/// operator set the documented override.**
+///
+/// A webhook URL is a bearer credential in its own right — a signed webhook
+/// puts the token in the query, a Slack incoming webhook puts it in the path —
+/// and the whole protection event travels beside it. `http://` puts both on
+/// the wire in cleartext with no refusal and no warning, which is the review's
+/// F7.
+///
+/// PagerDuty's endpoint has been https-only since fix round 1, one layer up,
+/// through `pagerduty_endpoint`; this is the same rule for the other two, and
+/// the refusal names the SCHEME only because the rest of the URL is where the
+/// token lives and this string reaches a log.
+///
+/// KILLS: dropping the check; honouring the override by default; naming the
+/// whole URL in the refusal.
+#[test]
+fn a_plaintext_webhook_is_refused_unless_the_override_is_set() {
+    let insecure = "http://sink.example/hooks?token=WEBHOOKSECRET";
+
+    let strict = routes(&[
+        (WEBHOOK_URL_ENV, insecure),
+        (SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &strict, &sink);
+    assert_eq!(
+        out.stdout, "notify-result=webhook:failed\nnotify-result=slack:ok\n",
+        "the https sink still goes: a responder reachable by one channel must be"
+    );
+    assert_eq!(out.code as u8, 1);
+    assert!(
+        !sink.posts().iter().any(|(u, _)| u.starts_with("http://")),
+        "nothing may be posted in cleartext: {:?}",
+        sink.posts()
+    );
+    let surfaces = everything(&out);
+    assert!(
+        surfaces.contains("refusing scheme `http`") && surfaces.contains(ALLOW_INSECURE_SINKS_ENV),
+        "the refusal must name the scheme AND the way out: {surfaces}"
+    );
+    assert!(
+        !surfaces.contains("WEBHOOKSECRET") && !surfaces.contains("token="),
+        "…and must not echo the token it is protecting: {surfaces}"
+    );
+
+    // The override, which is what the loopback rows below rely on.
+    let permissive = routes(&[
+        (WEBHOOK_URL_ENV, insecure),
+        (SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+        (ALLOW_INSECURE_SINKS_ENV, "1"),
+    ]);
+    let sink = RecordingSink::default();
+    let out = deliver_with(&stale_event(), &permissive, &sink);
+    assert_eq!(
+        out.stdout,
+        "notify-result=webhook:ok\nnotify-result=slack:ok\n"
+    );
+    assert_eq!(out.code as u8, 0);
+    assert_eq!(sink.posts().len(), 2);
+}
+
+/// **The scheme rule and its override, as a pure table.**
+///
+/// The override is an explicit affirmative only: `0`, `false` and a blank
+/// value all mean "no", so an operator who switches it off does not discover
+/// it was still on.
+#[test]
+fn the_scheme_rule_is_https_or_an_explicit_override() {
+    for (url, allow, ok) in [
+        ("https://sink.example/h", false, true),
+        ("https://sink.example/h", true, true),
+        ("http://sink.example/h", false, false),
+        ("http://sink.example/h", true, true),
+        ("http://127.0.0.1:8080/h", false, false),
+        ("ftp://sink.example/h", false, false),
+        ("sink.example/h", false, false),
+    ] {
+        assert_eq!(
+            insecure_sink_refusal(url, allow).is_ok(),
+            ok,
+            "{url} with allow_insecure={allow}"
+        );
+    }
+    // Loopback is NOT special-cased. A special case for `127.0.0.1` reads as
+    // safe and is not: it would also have to decide about `localhost`, about
+    // an IPv6 loopback, and about a pod-network address that merely looks
+    // local. One greppable variable in a Job spec is a decision an operator
+    // makes on purpose; a hostname rule is one they inherit.
+    assert!(insecure_sink_refusal("http://127.0.0.1:9/h", false).is_err());
+
+    for (value, want) in [
+        ("1", true),
+        ("true", true),
+        ("TRUE", true),
+        ("yes", true),
+        ("0", false),
+        ("false", false),
+        ("", false),
+        ("maybe", false),
+    ] {
+        assert_eq!(
+            routes(&[(ALLOW_INSECURE_SINKS_ENV, value)]).allow_insecure_sinks,
+            want,
+            "{ALLOW_INSECURE_SINKS_ENV}={value:?}"
+        );
+    }
+}
+
 // ------------------------------------------------------------- disclosure
 
 /// **NOTHING this subcommand writes carries a routing key or an unredacted
@@ -969,14 +1464,43 @@ fn no_surface_carries_a_routing_key_or_an_unredacted_sink_url() {
             RecordingSink::default(),
         ),
         (
-            "the body is refused for claiming an exhaustive check",
+            "the summary is sanitized for claiming an exhaustive check",
             claiming,
             all_three(),
             RecordingSink::default(),
         ),
+        (
+            "a plaintext webhook is refused for its scheme",
+            stale_event(),
+            routes(&[
+                (ROUTING_KEY_ENV, TEST_ROUTING_KEY),
+                (
+                    WEBHOOK_URL_ENV,
+                    "http://sink.example/hooks?token=WEBHOOKSECRET",
+                ),
+                (SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+            ]),
+            RecordingSink::default(),
+        ),
+        (
+            "nothing is configured at all",
+            stale_event(),
+            routes(&[(ROUTING_KEY_ENV, "")]),
+            RecordingSink::default(),
+        ),
     ] {
-        let out = deliver_with(&event, &routes, &sink);
-        let surfaces = format!("{arm}\n{}", everything(&out));
+        // THE TRACING HALF IS FOLDED IN. A pod log is stdout and stderr
+        // merged, so a `tracing` field is a surface a log aggregator reads —
+        // and a mutant that leaked the routing key as a FIELD rather than into
+        // a diagnostic string survived every row of both suites until this
+        // helper existed.
+        let (out, surfaces) = deliver_capturing_logs(&event, &routes, &sink);
+        let surfaces = format!("{arm}\n{surfaces}");
+        assert!(
+            surfaces.contains("logweir::notify"),
+            "{arm}: no tracing event was captured, so the tracing half of this \
+             assertion is vacuous:\n{surfaces}"
+        );
         for secret in [
             TEST_ROUTING_KEY,
             "T00SECRET",
@@ -993,8 +1517,11 @@ fn no_surface_carries_a_routing_key_or_an_unredacted_sink_url() {
             );
         }
         // …while the sink is still IDENTIFIABLE, which is the whole diagnostic
-        // value of naming it at all.
-        if !out.diagnostics.is_empty() {
+        // value of naming it at all. Not asserted on the arm that HAS no sink:
+        // "nothing was configured" is a diagnostic about the Job's projection,
+        // not about a sink, and demanding a host in it would be demanding a
+        // fact that does not exist.
+        if !out.diagnostics.is_empty() && !out.stdout.contains("none:unconfigured") {
             assert!(
                 surfaces.contains("hooks.slack.example")
                     || surfaces.contains("sink.example")
@@ -1004,6 +1531,88 @@ fn no_surface_carries_a_routing_key_or_an_unredacted_sink_url() {
             );
         }
     }
+}
+
+/// **STRUCTURAL: no `tracing` call in `notify.rs` names a credential-bearing
+/// field, redacted or not.**
+///
+/// The behavioural rows above catch a leak that a test happens to drive. This
+/// one catches the SHAPE, which is what a reviewer scanning a diff needs: the
+/// four `SinkRoutes` fields that can hold a credential — and the raw `url`
+/// binding they are copied into — must never appear inside a `tracing!`
+/// invocation. A URL reaches a log line only as `redact_url(…)` or as the
+/// `shown` binding that holds its result.
+///
+/// This is the discipline `every_notification_post_goes_through_the_bounded_agent`
+/// already uses next door: when the property is "there is exactly one way to
+/// do this", assert over the source rather than hope a behavioural test covers
+/// the next way someone adds.
+///
+/// KILLS: `routing_key = %routes.pagerduty_routing_key…`, `endpoint = %url`,
+/// `webhook = %routes.webhook_url…` — the reviewer's surviving mutant and
+/// every sibling of it.
+#[test]
+fn no_tracing_call_names_a_credential_bearing_binding() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/notify.rs");
+    let text = std::fs::read_to_string(&src).unwrap();
+
+    // Every `tracing::<level>!( … );` invocation, by brace-free paren match —
+    // these are all single-call macros with no nested parens beyond `%foo(…)`.
+    let mut calls = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("tracing::") {
+        let from = &rest[at..];
+        let Some(open) = from.find('(') else { break };
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in from[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        calls.push(from[..=end].to_string());
+        rest = &from[end..];
+    }
+    assert!(
+        calls.len() >= 10,
+        "the scan found only {} tracing calls in {} — it is not looking at the file \
+         it claims to be checking",
+        calls.len(),
+        src.display()
+    );
+
+    const FORBIDDEN: [&str; 6] = [
+        "pagerduty_routing_key",
+        "webhook_url",
+        "slack_webhook_url",
+        "pagerduty_endpoint",
+        "%url",
+        "?url",
+    ];
+    let mut offenders = Vec::new();
+    for call in &calls {
+        for needle in FORBIDDEN {
+            if call.contains(needle) {
+                offenders.push(format!("`{needle}` in: {}", call.replace('\n', " ")));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a `tracing` field is a surface a log aggregator reads — a pod log is stdout \
+         and stderr merged, with no stream selector. A credential-bearing binding may \
+         reach one only through `redact_url`, and a routing key not at all.\n  {}",
+        offenders.join("\n  ")
+    );
 }
 
 /// **`SinkRoutes`' `Debug` discloses presence and nothing else.**
@@ -1245,6 +1854,7 @@ fn the_shipped_subcommand_delivers_on_loopback_and_reports_both_arms() {
             .arg(&event)
             .env_remove(ROUTING_KEY_ENV)
             .env_remove(SLACK_WEBHOOK_URL_ENV)
+            .env(ALLOW_INSECURE_SINKS_ENV, "1")
             .env(WEBHOOK_URL_ENV, &ok_url),
         deadline,
     );
@@ -1271,6 +1881,7 @@ fn the_shipped_subcommand_delivers_on_loopback_and_reports_both_arms() {
             .arg(&event)
             .env_remove(ROUTING_KEY_ENV)
             .env_remove(SLACK_WEBHOOK_URL_ENV)
+            .env(ALLOW_INSECURE_SINKS_ENV, "1")
             .env(WEBHOOK_URL_ENV, &bad_url),
         deadline,
     );
@@ -1332,6 +1943,7 @@ fn a_refused_event_document_exits_three_with_no_contract_line() {
                 .arg(&event)
                 .env_remove(ROUTING_KEY_ENV)
                 .env_remove(SLACK_WEBHOOK_URL_ENV)
+                .env(ALLOW_INSECURE_SINKS_ENV, "1")
                 .env(WEBHOOK_URL_ENV, &url),
             deadline,
         );
@@ -1395,6 +2007,7 @@ fn no_delivery_outcome_is_ever_reported_as_a_drill_result() {
                 .arg(&event)
                 .env_remove(ROUTING_KEY_ENV)
                 .env_remove(SLACK_WEBHOOK_URL_ENV)
+                .env(ALLOW_INSECURE_SINKS_ENV, "1")
                 .env(WEBHOOK_URL_ENV, &url),
             deadline,
         );
@@ -1406,7 +2019,83 @@ fn no_delivery_outcome_is_ever_reported_as_a_drill_result() {
     }
 }
 
+/// **THE SHIPPED PROCESS, WITH A ROUTING KEY ACTUALLY SET, PRINTS IT NOWHERE.**
+///
+/// The review's F2, second half. Every other process row does
+/// `env_remove(ROUTING_KEY_ENV)`, so until this one existed **no test ran the
+/// shipped binary with a routing key present at all** — the mutated binary
+/// printed `routing_key=…` on stderr in full and the suite stayed green.
+///
+/// The arms are chosen to be the ones that write the most: a refused PagerDuty
+/// region (the `PAGERDUTY_SILENCED` branch, which is the branch that has the
+/// key in scope), a sink that answers 500, and a delivery that succeeds. Both
+/// streams are captured and folded, because a pod log has no stream selector.
+///
+/// `RUST_LOG=trace` is set so the child's own subscriber emits every event
+/// this could leak through; its default is `warn`, which would have made the
+/// INFO success line invisible to the assertion.
+///
+/// KILLS: a routing key in a `tracing` field; an unredacted endpoint on
+/// stderr; a `ureq::Error` whose `Display` embeds the URL.
+#[test]
+fn the_shipped_process_never_prints_the_routing_key_on_either_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = write_event(dir.path(), &decision_example_json());
+    let deadline = std::time::Duration::from_secs(30);
+    let (ok_url, _) = listener("202 Accepted");
+    let (bad_url, _) = listener("500 Internal Server Error");
+
+    for (arm, endpoint, webhook) in [
+        (
+            "a refused PagerDuty region",
+            "http://events.pagerduty.example/v2/enqueue",
+            ok_url.clone(),
+        ),
+        (
+            "a sink that answers 500",
+            "https://events.pagerduty.example/v2/enqueue",
+            bad_url.clone(),
+        ),
+        (
+            "a sink that accepts",
+            "https://events.pagerduty.example/v2/enqueue",
+            ok_url.clone(),
+        ),
+    ] {
+        let run = bounded_output(
+            bin()
+                .args(["notify", "deliver", "--event"])
+                .arg(&event)
+                .env("RUST_LOG", "trace")
+                .env(ROUTING_KEY_ENV, TEST_ROUTING_KEY)
+                .env(PAGERDUTY_ENDPOINT_ENV, endpoint)
+                .env(ALLOW_INSECURE_SINKS_ENV, "1")
+                .env(WEBHOOK_URL_ENV, &webhook)
+                .env(SLACK_WEBHOOK_URL_ENV, TEST_SLACK_URL),
+            deadline,
+        );
+        // BOTH STREAMS, folded — that is the point of the row.
+        let surfaces = format!("{arm}\n{}\n{}", run.stdout, run.stderr);
+        assert!(
+            run.stderr.contains("logweir::notify"),
+            "{arm}: the child emitted no tracing event, so this assertion is \
+             vacuous:\n{surfaces}"
+        );
+        for secret in [TEST_ROUTING_KEY, "T00SECRET", "zzTOKENzz"] {
+            assert!(
+                !surfaces.contains(secret),
+                "{arm}: `{secret}` reached a stream a pod log carries:\n{surfaces}"
+            );
+        }
+        assert!(
+            run.stdout.contains(NOTIFY_RESULT_LINE),
+            "{arm}: the contract lines are still on stdout:\n{surfaces}"
+        );
+    }
+}
+
 /// **`--event` is required, and a missing one is a usage error (exit 1), not a
+/// delivery result.**/// **`--event` is required, and a missing one is a usage error (exit 1), not a
 /// delivery result.**
 ///
 /// The same property `cli_exit_codes.rs` asserts for every other subcommand:

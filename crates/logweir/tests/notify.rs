@@ -1971,13 +1971,14 @@ fn the_drill_path_re_exports_the_drill_half_and_nothing_more() {
 #[test]
 fn the_three_dedup_key_families_cannot_collide() {
     use logweir::notify::{
-        protection_dedup_key, recovery_completed_dedup_key, AlertKind, PROTECTION_DEDUP_PREFIX,
+        protection_dedup_key, recovery_completed_dedup_key, PolicyAlertKind,
+        PROTECTION_DEDUP_PREFIX,
     };
 
     let sc = scorecard_pass();
     let drill = logweir::drill::phase7_verify::dedup_key(Some("nightly"), &sc);
     let preflight = logweir::drill::phase7_verify::failure_dedup_key(Some("nightly"));
-    let protection = protection_dedup_key("uid-1", AlertKind::Staleness);
+    let protection = protection_dedup_key("uid-1", PolicyAlertKind::Staleness);
     let recovery = recovery_completed_dedup_key("restore-1");
 
     let keys = [&drill, &preflight, &protection, &recovery];
