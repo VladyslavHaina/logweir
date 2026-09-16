@@ -11,8 +11,9 @@ use axum::extract::State;
 use axum::response::Response;
 use http::{HeaderMap, StatusCode, Uri};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use weirkeeper::crds::kafka_cluster::{AuthBlock, AuthMode, KafkaCluster, KafkaClusterSpec};
-use weirkeeper::crds::LocalRef;
+use weirkeeper::crds::kafka_cluster::{
+    AuthBlock, AuthMode, CredentialSecretRef, KafkaCluster, KafkaClusterSpec, UnrecognizedFields,
+};
 
 use super::{authorize, create_idempotent, get_object, json, list_page, list_query, ApiPath};
 use crate::app::AppState;
@@ -195,16 +196,31 @@ pub fn build(
                     ConnectionAuthMode::ScramSha512 => AuthMode::ScramSha512,
                 },
                 username: request.auth.username.clone(),
-                secret_ref: request.auth.credential_ref.as_ref().map(|r| LocalRef {
-                    name: r.name.clone(),
-                }),
+                // PLAT-07.1's contract v1 added `passwordKey` and `tlsCa`.
+                // The API does not accept either yet, and ABSENT is the
+                // contract's documented legacy behaviour — `password`, and the
+                // runner image's own trust store — so an object this route
+                // creates is exactly the object it created before the fields
+                // existed. Surfacing them is PLAT-17.2's own decision.
+                secret_ref: request
+                    .auth
+                    .credential_ref
+                    .as_ref()
+                    .map(|r| CredentialSecretRef {
+                        name: r.name.clone(),
+                        password_key: None,
+                        unrecognized_fields: UnrecognizedFields::default(),
+                    }),
                 tls: request.auth.tls,
+                tls_ca: None,
+                unrecognized_fields: UnrecognizedFields::default(),
             },
             role: match request.role {
                 ConnectionRole::Source => "source".to_string(),
                 ConnectionRole::Target => "target".to_string(),
             },
             marker_topic: request.marker_topic.clone(),
+            unrecognized_fields: UnrecognizedFields::default(),
         },
         status: None,
     }

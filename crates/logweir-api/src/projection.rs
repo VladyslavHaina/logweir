@@ -62,7 +62,14 @@ pub fn connection(cluster: &KafkaCluster) -> Connection {
                 AuthMode::ScramSha512 => ConnectionAuthMode::ScramSha512,
             },
             username: cluster.spec.auth.username.clone(),
-            credential_ref: cluster.spec.auth.secret_ref.as_ref().map(name_ref),
+            // PLAT-07.1 gave the credential reference a `passwordKey`. The
+            // projection stays NAME-ONLY: a data key is not a value, but which
+            // key a Secret holds a password under is still a detail of the
+            // reference, and widening this view is PLAT-17's decision to make
+            // deliberately rather than a consequence of a rebase.
+            credential_ref: cluster.spec.auth.secret_ref.as_ref().map(|r| NameRef {
+                name: r.name.clone(),
+            }),
             tls: cluster.spec.auth.tls,
         },
         marker_topic: cluster.spec.marker_topic.clone(),
