@@ -117,6 +117,7 @@
 
 pub mod backup_execution;
 pub mod cadence;
+pub mod check;
 pub mod conditions;
 pub mod connection;
 pub mod controllers;
