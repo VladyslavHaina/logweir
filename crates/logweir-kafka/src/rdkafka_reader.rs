@@ -30,8 +30,30 @@ pub struct RdKafkaReader {
 }
 
 impl RdKafkaReader {
-    pub fn connect(bootstrap: &[String], auth: AuthConfig) -> Result<Self, KafkaError> {
-        // Shared by both clients this constructs.
+    /// The exact `ClientConfig` [`RdKafkaReader::connect`] dials with, before
+    /// the consumer-only keys are added.
+    ///
+    /// **EXTRACTED SO THE SECURITY-CRITICAL SETTINGS ARE ASSERTABLE WITHOUT A
+    /// BROKER.** Two of the keys below are controls, not tuning:
+    /// `ssl.endpoint.identification.algorithm` (hostname verification) and
+    /// `ssl.ca.location` (which trust anchor). While they were built inline
+    /// inside `connect`, no test could read either without opening a socket —
+    /// and a review mutant that turned hostname verification off, and one that
+    /// denied this reader the projected CA, both survived the whole suite. A
+    /// `ClientConfig` is a map until `create()` is called, so
+    /// `tests::the_tls_client_pins_hostname_verification_and_the_projected_ca`
+    /// asserts them with `ClientConfig::get` and dials nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::Client`] for a CA supplied without TLS (the silent
+    /// downgrade `AuthConfig::with_tls_ca_file` also refuses), and for
+    /// [`AuthConfig::Token`], which SP4 introduces.
+    pub fn client_config(
+        bootstrap: &[String],
+        auth: &AuthConfig,
+    ) -> Result<ClientConfig, KafkaError> {
+        // Shared by both clients `connect` constructs.
         let mut base = ClientConfig::new();
         base.set("bootstrap.servers", bootstrap.join(","))
             .set("client.id", "logweir-drill")
@@ -54,13 +76,14 @@ impl RdKafkaReader {
                 tls,
                 tls_ca_file,
             } => {
+                let tls = *tls;
                 base.set(
                     "security.protocol",
                     if tls { "SASL_SSL" } else { "SASL_PLAINTEXT" },
                 )
                 .set("sasl.mechanism", "SCRAM-SHA-512")
-                .set("sasl.username", username)
-                .set("sasl.password", password);
+                .set("sasl.username", username.as_str())
+                .set("sasl.password", password.as_str());
                 if tls {
                     // Explicit rather than relying on the default, for the
                     // reason `allow.auto.create.topics` is above: hostname
@@ -73,7 +96,7 @@ impl RdKafkaReader {
                     // librdkafka/CONFIGURATION.md: ssl.endpoint.identification.algorithm
                     // `none, https`, default `https`.]
                     base.set("ssl.endpoint.identification.algorithm", "https");
-                    if let Some(ca) = tls_ca_file {
+                    if let Some(ca) = tls_ca_file.as_deref() {
                         // `SSL_CTX_load_verify_locations` on this file ONLY:
                         // with `ssl.ca.location` set, librdkafka skips the
                         // default verify paths, so the connection trusts
@@ -98,6 +121,11 @@ impl RdKafkaReader {
                 ));
             }
         }
+        Ok(base)
+    }
+
+    pub fn connect(bootstrap: &[String], auth: AuthConfig) -> Result<Self, KafkaError> {
+        let base = Self::client_config(bootstrap, &auth)?;
         // Fix round 2, nit M7: these four properties are meaningful only to
         // a CONSUMER. Setting them on `base` and sharing `base` with the
         // admin client's `create()` (the previous shape) made librdkafka log
@@ -701,6 +729,96 @@ mod tests {
     //! (`BorrowedMessage` has no public constructor) and is not attempted
     //! here — see the Task 10 fix report's "unproven without a live broker"
     //! list.
+
+    /// **THE TLS CLIENT PINS HOSTNAME VERIFICATION AND TRUSTS THE PROJECTED
+    /// CA** — PLAT-07.1 review findings H1 and H2.
+    ///
+    /// Both are CONTROLS and both were unguarded: a review planted
+    /// `ssl.endpoint.identification.algorithm = "none"` and a mutant that
+    /// denied this reader the projected CA, and each survived all 725 rows of
+    /// `-p logweir -p logweir-kafka`. A librdkafka upgrade, a merge resolution
+    /// or a refactor could turn either off and CI would say nothing; the only
+    /// signal would be a live TLS run nobody does per commit.
+    ///
+    /// `https` is librdkafka 2.x's own default, so this pin is not a change of
+    /// behaviour — it is the statement that a future default change cannot
+    /// quietly weaken us, and the engine's rustls client verifies the hostname
+    /// with no way to turn that off, so the two clients must agree.
+    ///
+    /// NO SOCKET. `ClientConfig` is a `HashMap` until `create()` is called,
+    /// and `create()` is never called here.
+    #[test]
+    fn the_tls_client_pins_hostname_verification_and_the_projected_ca() {
+        use super::RdKafkaReader;
+        use crate::reader::AuthConfig;
+        const CA: &str = "/connection/source-ca/ca.crt";
+        let bootstrap = vec!["b0.orders:9093".to_string(), "b1.orders:9093".to_string()];
+        let scram = |tls: bool, ca: Option<&str>| AuthConfig::ScramSha512 {
+            username: "logweir".to_string(),
+            password: "pw".to_string(),
+            tls,
+            tls_ca_file: ca.map(str::to_string),
+        };
+
+        // H1 — TLS, with and without a private CA: hostname verification is
+        // `https` in BOTH, because a public-root connection needs it just as
+        // much as a private-CA one.
+        for ca in [None, Some(CA)] {
+            let cfg = RdKafkaReader::client_config(&bootstrap, &scram(true, ca))
+                .expect("a TLS SCRAM connection configures");
+            assert_eq!(cfg.get("security.protocol"), Some("SASL_SSL"));
+            assert_eq!(
+                cfg.get("ssl.endpoint.identification.algorithm"),
+                Some("https"),
+                "broker hostnames are verified; `none` would accept any certificate that chains \
+                 to a trusted root, for ANY host"
+            );
+        }
+
+        // H2 — the CA the controller projected reaches librdkafka, as the
+        // path and nothing derived from it. With `ssl.ca.location` set,
+        // librdkafka skips the default verify paths, so the connection trusts
+        // exactly this file.
+        let with_ca =
+            RdKafkaReader::client_config(&bootstrap, &scram(true, Some(CA))).expect("configures");
+        assert_eq!(
+            with_ca.get("ssl.ca.location"),
+            Some(CA),
+            "the projected CA reaches THIS client too, not the engine's alone (Global \
+             Constraint 29)"
+        );
+        // …and no CA means no key at all — never an empty string, which
+        // librdkafka would read as a path.
+        let no_ca =
+            RdKafkaReader::client_config(&bootstrap, &scram(true, None)).expect("configures");
+        assert_eq!(no_ca.get("ssl.ca.location"), None);
+
+        // The addresses are the ones handed in, comma-joined, and the
+        // password is in the config and never in a bootstrap string.
+        assert_eq!(
+            with_ca.get("bootstrap.servers"),
+            Some("b0.orders:9093,b1.orders:9093")
+        );
+
+        // A non-TLS transport carries neither key, and a CA on one is refused
+        // rather than dropped — dropping it would dial in the clear a
+        // connection whose author configured it to verify.
+        for auth in [AuthConfig::Plaintext, scram(false, None)] {
+            let cfg = RdKafkaReader::client_config(&bootstrap, &auth).expect("configures");
+            assert_eq!(cfg.get("ssl.endpoint.identification.algorithm"), None);
+            assert_eq!(cfg.get("ssl.ca.location"), None);
+        }
+        let err = RdKafkaReader::client_config(&bootstrap, &scram(false, Some(CA)))
+            .expect_err("a CA without TLS is refused");
+        assert!(
+            matches!(err, crate::reader::KafkaError::Client(_)),
+            "{err:?}"
+        );
+        assert!(
+            !err.to_string().contains("pw"),
+            "and the refusal names no credential: {err}"
+        );
+    }
 
     #[test]
     fn partition_eof_is_a_dedicated_variant_the_old_string_match_never_caught() {
