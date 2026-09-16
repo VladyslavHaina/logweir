@@ -1003,10 +1003,12 @@ async fn reconcile_cluster_inner(
         ));
     }
 
-    // STEP 0b. THE CONNECTION, BEFORE ANY `GET` OR `POST` (PLAT-07.1). Pure,
-    // like the name check above, and NOT terminal: it is re-evaluated on every
-    // reconcile, so a controller upgrade that understands the object — or a
-    // rollback fixed by rolling forward — clears the refusal with no edit.
+    // STEP 0b. THE CONNECTION, RESOLVED BEFORE ANY `GET` OR `POST`
+    // (PLAT-07.1). Pure, like the name check above, and NOT terminal: it is
+    // re-evaluated on every reconcile, so a controller upgrade that
+    // understands the object — or a rollback fixed by rolling forward —
+    // clears the refusal with no edit. A refusal creates no Job; it does read
+    // for one it did not create, for the reason the refusal branch states.
     if let Err(refusal) = connection::resolve(cluster, ConnectionUse::Probe) {
         warn!(
             cluster = %name,
@@ -1023,14 +1025,57 @@ async fn reconcile_cluster_inner(
             connection_refused_status_patch(cluster, refusal.reason, &refusal.message, now),
         )
         .await?;
+        // A REFUSAL DOES NOT MAKE AN EXISTING PROBE JOB DISAPPEAR (review
+        // finding L2). Roll a controller forward while a probe is mid-flight
+        // against an object the new build refuses — the lab's
+        // `missing-reference` was exactly that during PLAT-07.1's live swap —
+        // and the earlier build's Job is still there. Returning `AwaitChange`
+        // without looking at it meant nothing ever gave it a TTL, and `spec`
+        // is immutable, so nothing would look again.
+        //
+        // WHAT IS AND IS NOT DONE WITH IT. The Job is ADOPTED for collection
+        // only: a finished one gets the same `ttlSecondsAfterFinished` STEP 3
+        // gives it, and an in-flight one holds the reconciler on the requeue
+        // clock until it finishes and a later pass can. Its LOG IS NEVER READ
+        // and `reachable` is never written from it — it dialled settings this
+        // build refuses to dial, so a verdict from it would be an observation
+        // the controller does not stand behind, which is the same reason the
+        // refusal clears `reachable` in the first place.
+        let existing = jobs
+            .get_opt(&job_name)
+            .await
+            .map_err(KafkaClusterError::Api)?;
+        let (ttl_patched, requeue) = match existing {
+            None => (false, Requeue::AwaitChange),
+            Some(job) if backup::job_finished(&job) => {
+                jobs.patch(
+                    &job_name,
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({
+                        "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
+                    })),
+                )
+                .await
+                .map_err(KafkaClusterError::Api)?;
+                info!(
+                    cluster = %name,
+                    namespace = %namespace,
+                    job = %job_name,
+                    "the refused connection left a finished probe Job behind; it is given the \
+                     usual TTL so it is collected, and its log is not read"
+                );
+                (true, Requeue::AwaitChange)
+            }
+            Some(_) => (false, Requeue::After(REQUEUE_SECS)),
+        };
         return Ok(ProbeOutcome {
             job_name,
             created: false,
             reachable: None,
             cluster_id: None,
             reason: Some(refusal.reason.to_string()),
-            ttl_patched: false,
-            requeue: Requeue::AwaitChange,
+            ttl_patched,
+            requeue,
         });
     }
 

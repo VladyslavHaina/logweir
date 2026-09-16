@@ -754,9 +754,14 @@ async fn a_connection_that_does_not_resolve_is_refused_before_any_job() {
     );
     assert_eq!(
         count(&seen, "GET", "/jobs/logweir-probe-orders-prod"),
-        0,
-        "and the connection is resolved BEFORE the Job is even looked for"
+        1,
+        "the connection is resolved BEFORE the Job is looked for, and the Job is then looked \
+         for exactly once — not to decide anything about this cluster, but because a refusal \
+         does not make an earlier build's probe Job disappear (review finding L2). With none \
+         there, nothing else happens."
     );
+    assert_eq!(count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"), 0);
+    assert!(!outcome.ttl_patched, "there was no Job to give a TTL to");
     let statuses = patched_statuses(&seen);
     assert_eq!(statuses.len(), 1, "exactly one status patch");
     assert_eq!(
@@ -788,6 +793,131 @@ async fn a_connection_that_does_not_resolve_is_refused_before_any_job() {
         Requeue::AwaitChange,
         "`spec` is immutable, so nothing about this object will change by itself — but the          refusal is re-evaluated on every reconcile, so a controller that understands the          object clears it with no edit"
     );
+}
+
+/// **A REFUSED CONNECTION STILL ADOPTS THE PROBE JOB AN EARLIER BUILD LEFT
+/// BEHIND** — PLAT-07.1 review finding L2.
+///
+/// Rolling a controller forward while a probe is in flight against an object
+/// the new build refuses is not hypothetical: PLAT-07.1's own live swap moved
+/// the lab's `missing-reference` from `ProbeReportedUnreachable` to
+/// `CredentialNotRenderable` with its Job already created. Before this fix the
+/// refusal `return`ed before the Job was even looked for, so a FINISHED one
+/// never got the `ttlSecondsAfterFinished` that collects it and, with
+/// `Requeue::AwaitChange` over a CEL-immutable `spec`, nothing ever looked
+/// again.
+///
+/// TWO SHAPES, TWO ANSWERS, AND A THIRD THING THAT MUST NOT HAPPEN:
+/// * finished → the same TTL STEP 3 writes, and `AwaitChange`;
+/// * in flight → left alone, but the reconciler comes back on the requeue
+///   clock so a later pass can collect it once it finishes;
+/// * neither → its LOG IS NEVER READ and `reachable` is never written from
+///   it. The Job dialled settings this build refuses to dial, so a verdict
+///   from it would be an observation the controller does not stand behind —
+///   which is the same reason the refusal clears `reachable`.
+#[tokio::test]
+async fn a_refused_connection_adopts_an_existing_probe_job_without_reading_it() {
+    // `scramSha512` with no `secretRef` — the lab's `missing-reference` shape.
+    let cluster: KafkaCluster = serde_json::from_str(&cluster_json(
+        NAME,
+        r#"{ "mode": "scramSha512", "username": "logweir", "tls": true }"#,
+        r#"{ "reachable": true, "clusterId": "OLDOBSERVATION000000001" }"#,
+    ))
+    .expect("the fixture is a KafkaCluster");
+
+    for (what, body, expect_ttl, expect_requeue) in [
+        (
+            "a finished Job",
+            job_body("Complete"),
+            true,
+            Requeue::AwaitChange,
+        ),
+        (
+            "an in-flight Job",
+            running_job_body(),
+            false,
+            Requeue::After(REQUEUE_SECS),
+        ),
+    ] {
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body,
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body: job_body("Complete"),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/status",
+                status: 200,
+                body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
+            },
+        ];
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&cluster, &client, now())
+            .await
+            .expect("a refusal is an outcome, not an error");
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+
+        // The refusal itself is unchanged: no new Job, `reachable` cleared.
+        assert_eq!(
+            count(&seen, "POST", "/jobs"),
+            0,
+            "{what}: no probe is created"
+        );
+        let statuses = patched_statuses(&seen);
+        assert_eq!(statuses.len(), 1, "{what}: exactly one status patch");
+        assert_eq!(
+            conditions_of(&statuses[0]),
+            vec![(
+                CONDITION_REACHABLE.to_string(),
+                "Unknown".to_string(),
+                TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE.to_string()
+            )],
+            "{what}"
+        );
+        assert!(statuses[0]["reachable"].is_null(), "{what}");
+
+        // NOTHING WAS READ FROM THE JOB. The double panics on an unrouted
+        // request, so these zeros are "the reconciler did not ask".
+        assert_eq!(mentioning(&seen, "/pods"), 0, "{what}: no pod list, no log");
+        assert_eq!(outcome.reachable, None, "{what}");
+        assert_eq!(outcome.cluster_id, None, "{what}");
+
+        // …and the Job itself is handled by its state.
+        assert_eq!(
+            count(&seen, "PATCH", "/jobs/logweir-probe-orders-prod"),
+            usize::from(expect_ttl),
+            "{what}: the TTL patch"
+        );
+        assert_eq!(outcome.ttl_patched, expect_ttl, "{what}");
+        assert_eq!(
+            outcome.requeue, expect_requeue,
+            "{what}: an in-flight Job holds the reconciler on the clock so a later pass can \
+             collect it; a finished one is already collected and `spec` cannot change"
+        );
+        if expect_ttl {
+            let patch: Value = serde_json::from_str(
+                &seen
+                    .iter()
+                    .find(|b| b.method == "PATCH" && path(&b.uri).ends_with(JOB))
+                    .expect("the TTL patch")
+                    .body,
+            )
+            .expect("the patch is JSON");
+            assert_eq!(
+                patch["spec"]["ttlSecondsAfterFinished"], PROBE_TTL_SECONDS,
+                "the same TTL the observed path writes, so a refused probe is collected on the \
+                 same schedule as a read one"
+            );
+        }
+    }
 }
 
 /// A probe Job that finished with no terminated `runner` container leaves
