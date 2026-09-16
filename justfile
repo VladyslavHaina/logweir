@@ -44,9 +44,19 @@ golden:
 # Regenerates the checked-in schemas. Tag 1 ships two (Global Constraint 13
 # as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
 # THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
-# document generated from `crates/logweir-api`'s DTOs. The drift arm for it is
+# document generated from `crates/logweir-api`'s DTOs; PLAT-15.1 adds a
+# FOURTH, `schemas/logweir-catalog-point-1.0.0.json`, the recovery catalog's
+# point record, generated from `crates/logweir`'s own type (the type is runner
+# vocabulary, so its emitter lives beside it rather than in `logweir-core`).
+# `logweir schema` still accepts exactly the two names Global Constraint 13
+# names — the catalog schema is a published FILE and not a subcommand.
+#
+# The OpenAPI document's drift arm is
 # `crates/logweir-api/tests/contract.rs`, which compares the checked-in bytes
-# with the generator IN-PROCESS as well, so the gate holds with no subprocess. The CI drift arms at
+# with the generator IN-PROCESS as well, so the gate holds with no subprocess;
+# the catalog point's is `crates/logweir/tests/catalog.rs::
+# the_checked_in_catalog_point_schema_is_the_one_the_type_generates`, in the
+# same shape and for the same reason. The CI drift arms at
 # .github/workflows/ci.yml regenerate each one into /tmp and `diff -u` it
 # against the file here, so a schema that stopped describing its type is a diff
 # a reviewer sees rather than a surprise at validation time.
@@ -59,6 +69,7 @@ schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
+    cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-1.0.0.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -70,9 +81,11 @@ schema-check:
     cargo run --locked -p logweir-core --example emit_schema > "$tmp/scorecard.json"
     cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
+    cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
     diff -u schemas/logweir-drill-scorecard-1.0.0.json "$tmp/scorecard.json"
     diff -u schemas/logweir-backup-receipt-1.0.0.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
+    diff -u schemas/logweir-catalog-point-1.0.0.json "$tmp/catalog-point.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

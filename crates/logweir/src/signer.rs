@@ -5,12 +5,12 @@ use std::path::Path;
 /// The value deliberately owns the parsed key. Callers keep it for the whole
 /// execution so replacing or removing the mounted file cannot change the
 /// identity used by later evidence documents.
-pub(crate) struct ValidatedSigner {
+pub struct ValidatedSigner {
     key: logweir_evidence::keys::SigningKey,
 }
 
 impl ValidatedSigner {
-    pub(crate) fn load(
+    pub fn load(
         path: &Path,
         probe_payload_type: &str,
         probe: &[u8],
@@ -80,11 +80,11 @@ impl ValidatedSigner {
         Ok(Self { key })
     }
 
-    pub(crate) fn verifying_key(&self) -> logweir_evidence::keys::VerifyingKey {
+    pub fn verifying_key(&self) -> logweir_evidence::keys::VerifyingKey {
         self.key.verifying_key()
     }
 
-    pub(crate) fn sign(
+    pub fn sign(
         &self,
         payload_type: &str,
         bytes: &[u8],

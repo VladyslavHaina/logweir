@@ -119,6 +119,16 @@ pub struct BackupOutcome {
     pub engine: logweir_core::engine::EngineId,
     /// The archive prefix everything the engine wrote lives under.
     pub archive_prefix: String,
+    /// WHERE the archive is — the spec's own `storage` location, carried
+    /// whole.
+    ///
+    /// Added for PLAT-15.1: the catalog point record publishes an
+    /// `archive.location_id` (`s3://<bucket>/<prefix>`), and `archive_prefix`
+    /// above is only half of that — a prefix with no bucket names no place. It
+    /// is the value `execute_with` was already given, copied rather than
+    /// re-derived, so the record and the plan cannot disagree about which
+    /// bucket the archive is in.
+    pub storage: logweir_core::engine::StorageUrl,
     /// Filled from `spec.source.auth`; `phase_run::build_receipt` renders it
     /// into `BackupReceipt.source.auth`.
     pub source_auth: AuthRender,
@@ -138,6 +148,16 @@ pub struct BackupOutcome {
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`. The runner's FINAL
     /// stdout line (**I7**).
     pub sidecar_key: String,
+    /// `logweir/catalog/v1/points/<pointId>/record.json` when the recovery
+    /// catalog point was written, `None` when the catalog write failed
+    /// (PLAT-15.1, D3 §5.2).
+    ///
+    /// `None` is NOT a failure of the run: `phase_run::write_catalog_point`
+    /// warns and returns it, because the archive and its signed receipt are
+    /// already in the bucket by then. Printed as the CONDITIONAL
+    /// `catalog-key=` line — see `exiting` for why it comes BEFORE interface
+    /// I7's two lines and not after them.
+    pub catalog_key: Option<String>,
 }
 
 /// The backup path's error type, with the same GC11 mapping discipline
@@ -450,6 +470,7 @@ fn execute_with_signer(
         topics: inputs.spec.source.topics.clone(),
         engine: engine_id,
         archive_prefix: inputs.spec.storage.prefix().to_string(),
+        storage: inputs.spec.storage.clone(),
         // From the SPEC, by the explicit match — the only field here that is
         // not measured, because there is nothing to measure it against: a
         // broker does not report which mechanism a client chose.
@@ -466,6 +487,7 @@ fn execute_with_signer(
         // outcome only after the puts succeeded, and a failure is an `Err`.
         receipt_key: String::new(),
         sidecar_key: String::new(),
+        catalog_key: None,
     };
 
     // **I6 / I7 / GC6.** The archive exists; now it gets evidence. Validate,
@@ -474,6 +496,7 @@ fn execute_with_signer(
     let persisted = phase_run::persist_receipt(&outcome, signer, receipt_out_path(args), evidence)?;
     outcome.receipt_key = persisted.receipt_key;
     outcome.sidecar_key = persisted.sidecar_key;
+    outcome.catalog_key = persisted.catalog_key;
 
     Ok(outcome)
 }
@@ -532,6 +555,14 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         Ok(o) => Some((o.receipt_key.clone(), o.sidecar_key.clone())),
         Err(_) => None,
     };
+    // PLAT-15.1. Carried separately from the pair above because it is
+    // CONDITIONAL: a run whose catalog write failed still has both evidence
+    // keys, and folding the three into one value would make the optional one
+    // look like part of interface I7's mandatory pair.
+    let catalog_key: Option<String> = match &outcome {
+        Ok(o) => o.catalog_key.clone(),
+        Err(_) => None,
+    };
     let code = match &outcome {
         Ok(o) => {
             tracing::info!(
@@ -553,7 +584,13 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
             e.exit_code()
         }
     };
-    exiting(run_id, code, refusal_message.as_deref(), evidence_keys)
+    exiting(
+        run_id,
+        code,
+        refusal_message.as_deref(),
+        evidence_keys,
+        catalog_key,
+    )
 }
 
 /// One line on stdout so `backup run` is not silent, quoting only measured
@@ -585,6 +622,7 @@ fn exiting(
     code: ExitCode,
     refusal_message: Option<&str>,
     evidence_keys: Option<(String, String)>,
+    catalog_key: Option<String>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => {
@@ -638,6 +676,27 @@ fn exiting(
     // tell stdout from stderr through the pod log API. Printed only on exit 0:
     // on any other code there is no pair of keys to name, and a line naming a
     // key nothing was written to would be the worst possible output.
+    // **PLAT-15.1's conditional line, and it comes BEFORE I7's pair.**
+    //
+    // I7's contract is "`receipt-key=` then `sidecar-key=`, as the FINAL two
+    // stdout lines of a successful run, WITH NOTHING AFTER THEM", and two
+    // landed tests read it that way — `crates/logweir/tests/backup_run.rs`'s
+    // I7 row takes the last two lines, and `e2e/tests/backup_argv.rs` asserts
+    // the final stdout line starts `sidecar-key=`. A new line after them would
+    // break a published interface for the sake of a metadata index, so the
+    // optional one goes in front: a reader looking for `catalog-key=` finds it
+    // by PREFIX (which is how every controller reads these lines,
+    // `weirkeeper::controllers::backup::SIDECAR_KEY_PREFIX`), and the two
+    // mandatory lines stay exactly where they were.
+    //
+    // ABSENT when the catalog write failed, and that is the point of it being
+    // conditional: a line naming a key nothing was written to would be the
+    // worst possible output. The warning on the log says what to do instead.
+    if code == ExitCode::Ok {
+        if let Some(catalog_key) = catalog_key {
+            println!("catalog-key={catalog_key}");
+        }
+    }
     if let (ExitCode::Ok, Some((receipt_key, sidecar_key))) = (code, evidence_keys) {
         println!("receipt-key={receipt_key}");
         println!("sidecar-key={sidecar_key}");

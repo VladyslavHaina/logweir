@@ -4,6 +4,10 @@
 pub mod approve;
 /// GC18's phase −1: `logweir backup run`, the source-side capture.
 pub mod backup;
+/// PLAT-15.1 / decision D3 §5: the durable recovery catalog — the signed point
+/// record `logweir backup run` writes beside every receipt, and the two
+/// operator subcommands that read and backfill it.
+pub mod catalog;
 pub mod cli;
 pub mod doctor;
 pub mod drill;
@@ -26,7 +30,14 @@ pub mod notify;
 pub mod probe;
 pub mod schema;
 pub mod show;
-mod signer;
+/// ONE execution signer, and it is `pub` so the second document type that
+/// signs with it — the catalog point record (D3 §5.2) — can name the handle in
+/// the signature of its own testable seam rather than growing a parallel
+/// signing abstraction beside it. Global Constraint 27 is a claim about
+/// LINKAGE (`scripts/check-one-signer.sh`), which visibility does not widen:
+/// there is still exactly one type in this workspace that holds a parsed
+/// private key, and it is still the only thing that can sign.
+pub mod signer;
 /// PLAT-07.1: the ONE read of a projected private-CA location, shared by
 /// every command that dials Kafka over TLS.
 pub mod tls_ca;

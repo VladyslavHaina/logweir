@@ -1,0 +1,337 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json",
+  "title": "CatalogPoint",
+  "description": "The signed durable record of one recovery point.\n\nField order IS byte order: `serde_json` is built with `preserve_order` and `logweir_core::det_json::to_deterministic_json` walks the value, so declaration order here is the order in the bytes that get signed. Do not reorder without regenerating `schemas/logweir-catalog-point-1.0.0.json` (`just schema`).\n\n**Nothing here may hold a credential.** `source.bootstrap_servers` is addressing and `source.auth_mode` is a mechanism name — the same two values `BackupReceipt` publishes, and for the same reason (`logweir_core::backup_receipt::ReceiptAuth`: \"never a password, and no field that could hold one\"). There is deliberately no `username` here even though the receipt has one: a catalog is the surface an operator lists in bulk, and a principal name is not a fact a recovery point needs.",
+  "type": "object",
+  "required": [
+    "archive",
+    "backup_id",
+    "capture",
+    "covered",
+    "format_version",
+    "point_id",
+    "receipt",
+    "recorded_at",
+    "run_id",
+    "signing",
+    "source",
+    "topics"
+  ],
+  "properties": {
+    "archive": {
+      "$ref": "#/definitions/RecordArchive"
+    },
+    "backup_id": {
+      "description": "Receipt-derived (rule 3). The archive SET identifier; two runs appending to one set share it and are still two points.",
+      "type": "string"
+    },
+    "capture": {
+      "description": "Receipt-derived (rule 3). `started_at` is the RECOVERY POINT (D3 §3.2): freshness is measured from the capture start, never from the newest record instant, because an idle topic would otherwise look stale forever.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RecordCapture"
+        }
+      ]
+    },
+    "covered": {
+      "description": "Receipt-derived (rule 3). Half-open, epoch milliseconds, end EXCLUSIVE — interface I22, the receipt's own convention, copied and never reinterpreted.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RecordCovered"
+        }
+      ]
+    },
+    "execution": {
+      "description": "ABSENT means the provenance is UNKNOWN — an archive imported from another installation, or a run this build could not identify. Never read as \"no execution\" and never defaulted (rule 2).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RecordExecution"
+        }
+      ],
+      "nullable": true
+    },
+    "format_version": {
+      "description": "Semver of THIS format. Major `1`; a higher major is [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry, never fatal for the sync (D3 §5.2 rule 1).",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
+    },
+    "installation": {
+      "description": "The installation whose key signed the RECEIPT — i.e. who produced the backup, which is a different question from who wrote this record. On a backfill the two differ. ABSENT means unknown (rule 2).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RecordInstallation"
+        }
+      ],
+      "nullable": true
+    },
+    "point_id": {
+      "description": "`lwp1-<32 hex>` — [`point_id`] over the receipt bytes.",
+      "type": "string"
+    },
+    "receipt": {
+      "$ref": "#/definitions/RecordReceipt"
+    },
+    "recorded_at": {
+      "description": "When this RECORD was written. Not a fact about the backup: the backup's own instants are `capture` below.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "description": "Receipt-derived (rule 3). The run that produced the receipt.",
+      "type": "string"
+    },
+    "signing": {
+      "description": "The key that signed THIS record.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RecordSigning"
+        }
+      ]
+    },
+    "source": {
+      "$ref": "#/definitions/RecordSource"
+    },
+    "topics": {
+      "description": "One entry per topic the receipt names, in the receipt's own order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RecordTopic"
+      }
+    }
+  },
+  "definitions": {
+    "RecordArchive": {
+      "description": "Where the archive itself is, as the writer saw it.",
+      "type": "object",
+      "required": [
+        "location_id",
+        "manifest_key",
+        "manifest_sha256",
+        "prefix"
+      ],
+      "properties": {
+        "location_id": {
+          "description": "`s3://<bucket>/<prefix>`, `gs://…`, `az://<account>/<container>/…` or `file://<path>` — bucket and prefix only, never an endpoint and never a credential.\n\nIt is the LOCATION half of D3 §5.1's \"the same archive copied to a second bucket yields the same point with two `locations[]`\": identity is content-derived and excludes this field entirely, so two records for one point id that differ only here describe one point in two places.",
+          "type": "string"
+        },
+        "manifest_key": {
+          "description": "Receipt-derived (rule 3).",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "description": "Receipt-derived (rule 3). `sha256:<hex>`.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "The archive's own key prefix, as the receipt records it.",
+          "type": "string"
+        }
+      }
+    },
+    "RecordCapture": {
+      "type": "object",
+      "required": [
+        "finished_at",
+        "started_at"
+      ],
+      "properties": {
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_at": {
+          "description": "The engine subprocess's start — **the recovery point** (D3 §3.2).",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "RecordCovered": {
+      "type": "object",
+      "required": [
+        "from_ms",
+        "to_ms"
+      ],
+      "properties": {
+        "from_ms": {
+          "description": "INCLUSIVE start, epoch milliseconds.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "to_ms": {
+          "description": "*EXCLUSIVE** end, epoch milliseconds (I22).",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "RecordExecution": {
+      "description": "The Kubernetes execution that produced the backup.\n\n**Every field is optional and nothing here is invented.** D-SEAMS S4: `inputs_sha256` belongs to PLAT-06.1's `execution-inputs.json` grammar and this record may CITE it and may never redefine it. A Backup Job on this build carries no execution-contract environment at all (`crates/weirkeeper/src/controllers/backup.rs` sets none), so `logweir backup run` writes no `execution` block and the reader reports provenance as unknown — which is the honest answer, and is why rule 2 forbids defaulting it.",
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "description": "`Backup.status.execution.id` (PLAT-06.1), cited and never redefined.",
+          "type": "string",
+          "nullable": true
+        },
+        "inputs_sha256": {
+          "description": "`Backup.status.execution.inputsSha256` (PLAT-06.1, D-SEAMS S4), cited and never redefined: this record does not describe what went into that digest and does not recompute it.",
+          "type": "string",
+          "nullable": true
+        },
+        "kind": {
+          "type": "string",
+          "nullable": true
+        },
+        "name": {
+          "type": "string",
+          "nullable": true
+        },
+        "namespace": {
+          "type": "string",
+          "nullable": true
+        },
+        "schedule": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecordSchedule"
+            }
+          ],
+          "nullable": true
+        },
+        "triggered_by": {
+          "description": "The receipt's `triggered_by`, verbatim. Free text; never a metric label.",
+          "type": "string",
+          "nullable": true
+        },
+        "uid": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "RecordInstallation": {
+      "type": "object",
+      "required": [
+        "key_id"
+      ],
+      "properties": {
+        "key_id": {
+          "type": "string"
+        }
+      }
+    },
+    "RecordReceipt": {
+      "description": "Where the signed receipt this point is derived from lives, and what it hashes to. **The verification root**: every other field here is either recomputed from these bytes or informational.",
+      "type": "object",
+      "required": [
+        "key",
+        "payload_type",
+        "sha256",
+        "sidecar_key"
+      ],
+      "properties": {
+        "key": {
+          "description": "`logweir/backups/<backup_id>/<run_id>.receipt.json`",
+          "type": "string"
+        },
+        "payload_type": {
+          "description": "The receipt's DSSE media type, so a reader knows which verifier to run without guessing from the bytes.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "`sha256:<hex>` over the receipt bytes EXACTLY as stored. The binding; `point_id` is its 128-bit display form.",
+          "type": "string"
+        },
+        "sidecar_key": {
+          "description": "`logweir/backups/<backup_id>/<run_id>.receipt.sig`",
+          "type": "string"
+        }
+      }
+    },
+    "RecordSchedule": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "nullable": true
+        },
+        "slot": {
+          "type": "string",
+          "nullable": true
+        },
+        "uid": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "RecordSigning": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "key_id"
+      ],
+      "properties": {
+        "algorithm": {
+          "description": "`p256` or `ed25519`, as `logweir_evidence::keys::VerifyingKey` names them.",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "The lowercase-hex sha256 of the key's DER SPKI — the same number `openssl` prints (`docs/keys.md`).",
+          "type": "string"
+        }
+      }
+    },
+    "RecordSource": {
+      "type": "object",
+      "required": [
+        "auth_mode",
+        "bootstrap_servers",
+        "cluster_id"
+      ],
+      "properties": {
+        "auth_mode": {
+          "description": "`plaintext` or `scramSha512` — the receipt's closed two-value set, one spelling in this product.",
+          "type": "string"
+        },
+        "bootstrap_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cluster_id": {
+          "description": "Read from the broker at phase −1 and carried by the receipt — never from a spec.",
+          "type": "string"
+        }
+      }
+    },
+    "RecordTopic": {
+      "type": "object",
+      "required": [
+        "name",
+        "records"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "partitions": {
+          "description": "ABSENT means the partition count is UNKNOWN (rule 2), which is the truthful state for every record this build writes: a backup receipt records per-topic RECORD counts and the named topic set, and no partition count at all. A `0` here would read as \"this topic has no partitions\" and would let D3 §4.2's `maxPartitions` filter accept a point it has no size information about.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "records": {
+          "description": "Records this run captured for the topic, from the receipt.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

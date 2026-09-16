@@ -52,6 +52,21 @@ pub enum Command {
     /// Deliver one protection event to the configured notification sinks.
     #[command(subcommand)]
     Notify(NotifyCmd),
+    // PLAT-15.1 / decision D3 §5. A SUBCOMMAND GROUP under `catalog`, for the
+    // reason `Backup` records for its own: `catalog verify`, `catalog show`
+    // and the disaster-import half (PLAT-15.2) have somewhere to land without
+    // changing either of these two argv surfaces.
+    //
+    // These are the OPERATOR's commands and not a runner surface. D-SEAMS S1
+    // fixes one check runner, and a controller that wants a catalog
+    // synchronised runs `logweir check run` with D2's `catalogSync` plan kind
+    // in a Job — see `crates/logweir/src/catalog/cli.rs`'s module header for
+    // the four differences that keep these two from being a second execution
+    // path.
+    /// Read and backfill the durable recovery catalog in an archive's
+    /// evidence root.
+    #[command(subcommand)]
+    Catalog(CatalogCmd),
     // Chain L, Task 15c, interface I14. A PURPOSE-BUILT LIVENESS PROBE, and
     // not `doctor` with fewer flags: `doctor` takes two more MANDATORY paths,
     // cannot be told which auth to use, refuses unless the cluster is in a
@@ -510,4 +525,111 @@ impl SubjectKindArg {
             Self::Backup => "Backup",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PLAT-15.1 — the recovery catalog's two operator subcommands
+// ---------------------------------------------------------------------------
+
+/// The flags `catalog sync` and `catalog list` share: WHERE the archive is.
+///
+/// **One `Args` struct flattened into both**, for the reason
+/// [`RestoreRunArgs`] records: "the two subcommands take the same location
+/// flags" is then a property of the type rather than a promise in a doc
+/// comment, and there is no second list to forget to update.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct CatalogLocationArgs {
+    /// The archive's object-store location: `s3://<bucket>`, `gs://<bucket>`,
+    /// `az://<account>/<container>`, `file:///absolute/path`, or an absolute
+    /// path. The evidence root `logweir/` is imposed, not read off the URL —
+    /// a deeper key prefix is refused rather than silently used (Global
+    /// Constraint 6).
+    ///
+    /// A URL carrying userinfo (`s3://key:secret@bucket`) is REFUSED: a
+    /// credential on an argv is visible in every process listing on the host.
+    /// Credentials come from the environment the object-store client already
+    /// reads.
+    #[arg(long)]
+    pub url: String,
+    #[arg(long)]
+    pub region: Option<String>,
+    /// A custom S3-compatible endpoint. It does NOT enable plaintext
+    /// transport: pass `--allow-http` for that, deliberately and separately.
+    #[arg(long)]
+    pub endpoint: Option<String>,
+    #[arg(long)]
+    pub path_style: bool,
+    /// Permit plaintext HTTP to the endpoint. **Never derived** from the
+    /// endpoint's scheme, from the addressing style or from any environment
+    /// value (D-SEAMS S5, defects SEC-ENVHTTP and UI-HTTPDOWNGRADE): a global
+    /// setting must never override what the operator asked for.
+    #[arg(long)]
+    pub allow_http: bool,
+}
+
+impl From<&CatalogLocationArgs> for crate::catalog::cli::Location {
+    fn from(a: &CatalogLocationArgs) -> Self {
+        crate::catalog::cli::Location {
+            url: a.url.clone(),
+            region: a.region.clone(),
+            endpoint: a.endpoint.clone(),
+            path_style: a.path_style,
+            allow_http: a.allow_http,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum CatalogCmd {
+    /// Walk the evidence root's backup receipts and write a signed catalog
+    /// point record for every one that does not have one yet.
+    ///
+    /// Writes ONLY under `logweir/catalog/v1/`, create-only: nothing is ever
+    /// rewritten and nothing is ever deleted. Re-running it is idempotent —
+    /// point identity is derived from the receipt's own bytes, so a second run
+    /// over the same archive produces the same ids and reports them as already
+    /// present.
+    ///
+    /// A receipt whose DSSE signature verifies under none of the
+    /// `--public-key` values gets NO record: the receipt's signature is the
+    /// verification root, and a record derived from bytes nobody could
+    /// authenticate would assert facts this command never established.
+    Sync {
+        #[command(flatten)]
+        location: CatalogLocationArgs,
+        /// The key the point records are signed with. Loaded, exercised and
+        /// self-verified before the store is dialled.
+        #[arg(long)]
+        signing_key: std::path::PathBuf,
+        /// A public key a backup receipt may verify under. REPEATABLE, one
+        /// flag per key, and at least one is required — there is deliberately
+        /// no "trust whatever is in the bucket" mode. A public key found
+        /// beside an archive is a CLAIM and is never trusted merely by
+        /// proximity (`docs/keys.md`).
+        //
+        // NO `value_delimiter`, for the reason `--approver-key-ids` records:
+        // one accepted shape means a comma-joined value is one path, matches
+        // nothing, and refuses loudly instead of being reinterpreted.
+        #[arg(long)]
+        public_key: Vec<std::path::PathBuf>,
+        /// Resume the receipt walk strictly AFTER this object key — the value
+        /// a previous run printed as `catalog-next=`.
+        #[arg(long)]
+        since: Option<String>,
+        /// How many objects to examine in this run.
+        #[arg(long, default_value_t = crate::catalog::cli::DEFAULT_MAX)]
+        max: usize,
+    },
+    /// Print the newest recovery points in an archive's catalog, newest
+    /// first. Reads only; writes nothing and signs nothing.
+    List {
+        #[command(flatten)]
+        location: CatalogLocationArgs,
+        /// Only index entries whose key is strictly greater than this one.
+        #[arg(long)]
+        since: Option<String>,
+        /// How many rows to print.
+        #[arg(long, default_value_t = 50)]
+        max: usize,
+    },
 }

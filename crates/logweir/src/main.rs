@@ -59,6 +59,33 @@ fn main() -> std::process::ExitCode {
         cli::Command::Notify(cli::NotifyCmd::Deliver { event }) => {
             logweir::notify::run(&logweir::notify::DeliverArgs { event })
         }
+        // PLAT-15.1 / decision D3 §5. Dispatched here for the structural
+        // reason the comment at the end of this match records: the arm list is
+        // exhaustive with no catch-all, so a `catalog` subcommand added to
+        // `cli.rs` and not wired here is a COMPILE error rather than a runtime
+        // stub.
+        cli::Command::Catalog(cli::CatalogCmd::Sync {
+            location,
+            signing_key,
+            public_key,
+            since,
+            max,
+        }) => logweir::catalog::cli::run_sync(&logweir::catalog::cli::SyncArgs {
+            location: (&location).into(),
+            signing_key,
+            public_keys: public_key,
+            since,
+            max,
+        }),
+        cli::Command::Catalog(cli::CatalogCmd::List {
+            location,
+            since,
+            max,
+        }) => logweir::catalog::cli::run_list(&logweir::catalog::cli::ListArgs {
+            location: (&location).into(),
+            since,
+            max,
+        }),
         cli::Command::Backup(cli::BackupCmd::Run {
             spec,
             allowed_clusters,

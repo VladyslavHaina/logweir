@@ -23,7 +23,7 @@ use logweir_engine_oso::storage::Store;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(crate) fn load_signer(path: &Path) -> Result<ValidatedSigner, BackupError> {
+pub fn load_signer(path: &Path) -> Result<ValidatedSigner, BackupError> {
     ValidatedSigner::load(
         path,
         logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
@@ -209,6 +209,16 @@ pub struct Persisted {
     pub receipt_key: String,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`
     pub sidecar_key: String,
+    /// `logweir/catalog/v1/points/<pointId>/record.json`, when the catalog
+    /// point record was written (PLAT-15.1, D3 §5.2).
+    ///
+    /// `None` when the catalog write FAILED — which is a warning and nothing
+    /// more. See `persist_receipt`'s step 6: the archive and its signed
+    /// evidence already exist by then, so a metadata index that could not be
+    /// written must not change this run's exit code, its receipt or its two
+    /// evidence keys. The `catalog sync` backfill exists precisely to close
+    /// that gap later.
+    pub catalog_key: Option<String>,
 }
 
 /// The evidence keys for one run — Global Constraint 6's `logweir/` root, and
@@ -223,6 +233,10 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
     Persisted {
         receipt_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.json"),
         sidecar_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.sig"),
+        // Not knowable from the two ids: the point id is derived from the
+        // receipt's BYTES (D3 §5.1), which do not exist yet at this call.
+        // Filled in by `persist_receipt`'s step 6.
+        catalog_key: None,
     }
 }
 
@@ -373,13 +387,34 @@ pub(crate) fn persist_receipt(
     // 4. Create-only puts. An object that already exists is REFUSED
     //    (`StoreError::AlreadyExists`), never overwritten, so one run can
     //    never silently replace another's evidence.
-    let keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
+    let mut keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
     store
         .put_create_only(&keys.receipt_key, &bytes)
         .map_err(|e| sig(e.to_string()))?;
     store
         .put_create_only(&keys.sidecar_key, &sidecar_bytes)
         .map_err(|e| sig(e.to_string()))?;
+
+    // 6. **THE CATALOG POINT** (PLAT-15.1, D3 §5.2) — the fifth, sixth and
+    //    seventh create-only puts, and the only ones in this function whose
+    //    failure is a WARNING.
+    //
+    //    It is here, after the two receipt puts and before the local copy,
+    //    because the point's identity is `sha256` of the receipt bytes and
+    //    those bytes are only final at step 2 — and because a record that
+    //    named a receipt key nothing had been put to would index evidence
+    //    that does not exist.
+    //
+    //    **A failed catalog write does not change the exit code, the receipt,
+    //    or the two evidence keys.** By the time this runs, the archive
+    //    exists, the receipt is signed and both objects are in the bucket:
+    //    the run's result is established. The catalog is a durable INDEX over
+    //    evidence that is already durable, so a bucket that refused a metadata
+    //    put must not turn a successful backup into a failure an operator has
+    //    to investigate. `logweir catalog sync` backfills exactly this case,
+    //    which is why the backfill exists at all (D3 §5.2, "the scanner
+    //    backfills").
+    keys.catalog_key = write_catalog_point(outcome, &receipt, &bytes, &keys, signer, store);
 
     // 5. **I6.** The local pair, with the sidecar beside the document under the
     //    extension `.sig` — the pairing `drill run --out` already uses
@@ -412,4 +447,69 @@ pub(crate) fn persist_receipt(
     }
 
     Ok(keys)
+}
+
+/// **PLAT-15.1, D3 §5.2** — the catalog point record for this run, written as
+/// three create-only puts under `logweir/catalog/v1/`.
+///
+/// Returns the record's key when it was written, and `None` on ANY failure —
+/// having logged it at `warn`. This function returns no `Result` on purpose:
+/// a `Result` here would invite a caller to add a `?` one day, and that `?`
+/// would turn a bucket that refused a metadata put into a failed backup whose
+/// archive and signed receipt are both sitting in the bucket. The type is the
+/// guarantee.
+///
+/// **It measures nothing.** Every field of the record is a value the receipt
+/// already carries plus the location and the signing key, so this write cannot
+/// disagree with the receipt it indexes. `recorded_at` is the one clock read,
+/// and it is a fact about the record and not about the backup.
+///
+/// `installation` is this run's own signing key: `ValidatedSigner::load` has
+/// already signed and independently VERIFIED a probe with it, and it is the
+/// key that just signed the receipt this record names — so "the installation
+/// whose key signed the receipt" is established here rather than assumed.
+/// `execution` is absent: a Backup Job carries no execution-contract
+/// environment on this build, so provenance is UNKNOWN, which is what an
+/// absent optional field means (D3 §5.2 rule 2) and is the only honest value.
+fn write_catalog_point(
+    outcome: &crate::backup::BackupOutcome,
+    receipt: &BackupReceipt,
+    receipt_bytes: &[u8],
+    keys: &Persisted,
+    signer: &ValidatedSigner,
+    store: &Store,
+) -> Option<String> {
+    use crate::catalog::writer::{from_receipt, put_point, RecordInputs};
+    let inputs = RecordInputs {
+        receipt_key: keys.receipt_key.clone(),
+        sidecar_key: keys.sidecar_key.clone(),
+        location_id: crate::catalog::record::location_id(&outcome.storage),
+        recorded_at: chrono::Utc::now(),
+        signing: crate::catalog::signing_of(&signer.verifying_key()),
+        installation: Some(crate::catalog::RecordInstallation {
+            key_id: signer.verifying_key().key_id(),
+        }),
+        execution: None,
+    };
+    let warn = |what: &str, detail: String| {
+        tracing::warn!(
+            run_id = %outcome.run_id,
+            backup_id = %outcome.backup_id,
+            receipt_key = %keys.receipt_key,
+            error = %detail,
+            "the recovery-catalog point record could not be {what}; the archive and its signed \
+             receipt ARE in the bucket and this run's result is unchanged. Run `logweir catalog \
+             sync` against this archive to backfill the record."
+        );
+        None::<String>
+    };
+    let point = match from_receipt(receipt, receipt_bytes, &inputs) {
+        Ok(p) => p,
+        Err(e) => return warn("derived", e),
+    };
+    let entry = crate::catalog::CatalogLogEntry::of(&point);
+    match put_point(&point, &entry, signer, store) {
+        Ok(o) => Some(o.keys.record_key),
+        Err(e) => warn("written", e),
+    }
 }

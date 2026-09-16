@@ -4,8 +4,8 @@ use logweir_core::outcome::Outcome;
 use logweir_core::scorecard::Scorecard;
 use logweir_evidence::{
     keys::VerifyingKey, verify::verify_detached, Error as EvidenceError, Sidecar,
-    PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_PUT_RECEIPT, PAYLOAD_TYPE_SCORECARD,
-    PAYLOAD_TYPE_TEARDOWN,
+    PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_CATALOG_POINT, PAYLOAD_TYPE_PUT_RECEIPT,
+    PAYLOAD_TYPE_SCORECARD, PAYLOAD_TYPE_TEARDOWN,
 };
 use std::path::Path;
 
@@ -26,11 +26,19 @@ use std::path::Path;
 ///    turn into "unexpected payloadType" downstream and read like a bad
 ///    artifact rather than a bad command line.
 ///
-/// Four arms over the four constants `logweir-verify` DECLARES, so there is
-/// no fifth spelling of a media type anywhere in this binary.
+/// Five arms over the five constants `logweir-verify` DECLARES, so there is
+/// no sixth spelling of a media type anywhere in this binary.
+///
+/// `catalog-point` joined them with decision D3's recovery catalog
+/// (PLAT-15.1). It is a SIGNATURE-ONLY document for this command — see
+/// `Verdict::SignatureOnly` — because the catalog record's own facts are
+/// recomputed from the verified backup receipt, not asserted by the record
+/// (D3 §5.2 rule 3), and an exit 0 here must not be read as "this point is
+/// available".
 pub fn resolve_payload_type(name: &str) -> Result<&'static str, String> {
-    const TYPES: [(&str, &str); 4] = [
+    const TYPES: [(&str, &str); 5] = [
         ("backup-receipt", PAYLOAD_TYPE_BACKUP_RECEIPT),
+        ("catalog-point", PAYLOAD_TYPE_CATALOG_POINT),
         ("receipt", PAYLOAD_TYPE_PUT_RECEIPT),
         ("scorecard", PAYLOAD_TYPE_SCORECARD),
         ("teardown", PAYLOAD_TYPE_TEARDOWN),

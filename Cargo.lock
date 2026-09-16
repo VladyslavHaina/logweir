@@ -1822,6 +1822,7 @@ dependencies = [
  "logweir-kafka",
  "p256",
  "rustls",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
