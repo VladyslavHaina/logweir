@@ -15,9 +15,19 @@
 //! `state`, `nonce` AND THE PKCE VERIFIER LIVE IN A SEALED COOKIE, not in
 //! process memory: a login begun on one replica must be finishable on another,
 //! and a restart between the redirect and the callback must not strand the
-//! browser. The cookie is `__Host-` prefixed, `HttpOnly`, ten-minute-lived, and
-//! cleared the instant the callback consumes it — so a replayed code cannot be
-//! paired with the same `state` twice through this service.
+//! browser. The cookie is `__Host-` prefixed, `HttpOnly` and ten-minute-lived,
+//! and the callback clears it on success and on every refusal.
+//!
+//! WHAT THAT CLEARING IS AND IS NOT. It is advice to the browser, so it ends the
+//! attempt for an honest client and nothing more: this service keeps no record
+//! of a consumed `state`, so someone holding BOTH the login cookie and the code
+//! could re-drive the callback. The bound on replaying a code is the provider's
+//! single-use code, which is where OAuth puts it. What the cookie DOES carry is
+//! the `state`↔browser binding that defeats login CSRF — an attacker's code
+//! cannot be paired with a victim's cookie, because the `state` in it is not
+//! the attacker's — and that is asserted three ways in `tests/oidc_login.rs`
+//! (wrong `state`, no cookie, another login's cookie), each also asserting the
+//! code was never exchanged.
 //!
 //! THE BROWSER NEVER SEES A PROVIDER TOKEN, and the redirect that ends a
 //! successful login carries no fragment, no query and no credential: it is
@@ -240,6 +250,14 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
         }
     };
 
+    // THE SESSION CARRIES ONLY BINDABLE GROUPS, AND ONLY IF IT FITS. See
+    // `crate::auth::session::MAX_SET_COOKIE_BYTES` and
+    // `crate::authz::Authorizer::bindable_groups` (review finding F-2).
+    let bindable = state.authorizer().bindable_groups();
+    let identity = super::oidc::Identity {
+        groups: session::session_groups(&identity.groups, bindable.as_ref()),
+        ..identity
+    };
     let session_id = shared.keys.random_token(ENTROPY_BYTES);
     let claims = SessionClaims::issue(
         &identity,
@@ -248,6 +266,30 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
         state.now(),
         shared.session_max_age_seconds,
     );
+    let session_cookie = session::set_cookie(&shared.keys, &claims, state.now());
+    if session_cookie.len() > session::MAX_SET_COOKIE_BYTES {
+        // A browser would discard this cookie without a word, and the next
+        // request would bounce back here forever. Refusing says so once.
+        audit.set_actor(
+            super::AuthenticationMode::Oidc.as_str(),
+            &format!("{}#{}", claims.iss, claims.sub),
+            &claims.name,
+            Some(&claims.sid),
+        );
+        audit.set_failure("session_too_large");
+        audit.note("sessionCookieBytes", &session_cookie.len().to_string());
+        tracing::warn!(
+            bytes = session_cookie.len(),
+            limit = session::MAX_SET_COOKIE_BYTES,
+            groups = claims.groups.len(),
+            "refusing a sign-in whose session cookie a browser would discard"
+        );
+        return refuse(
+            "session_too_large",
+            "The identity claims for this account do not fit in a session cookie. Reduce the \
+             group claims the identity provider sends, or bind fewer groups.",
+        );
+    }
     audit.set_actor(
         super::AuthenticationMode::Oidc.as_str(),
         &format!("{}#{}", claims.iss, claims.sub),
@@ -264,10 +306,7 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
     );
     redirect(
         &login_state.next,
-        &[
-            session::set_cookie(&shared.keys, &claims, state.now()),
-            session::clear_cookie(session::LOGIN_COOKIE),
-        ],
+        &[session_cookie, session::clear_cookie(session::LOGIN_COOKIE)],
     )
 }
 

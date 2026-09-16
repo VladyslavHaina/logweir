@@ -673,9 +673,11 @@ async fn every_request_produces_exactly_one_record() {
             assert!(!record["failureCode"].as_str().unwrap().is_empty());
         }
     }
-    // The refusals name their own reasons.
-    assert_eq!(log.record(&ids[4])["failureCode"], "http_421");
-    assert_eq!(log.record(&ids[5])["failureCode"], "http_400");
+    // The refusals name the CHECK that refused them, not the status they used
+    // (review finding F-1; the dedicated test is
+    // `every_transport_refusal_names_itself_in_the_audit_record`).
+    assert_eq!(log.record(&ids[4])["failureCode"], "misdirected_request");
+    assert_eq!(log.record(&ids[5])["failureCode"], "header_not_allowed");
 }
 
 /// **A dependency cannot print an unredacted upstream body, even at
@@ -791,4 +793,125 @@ async fn a_forwarded_address_is_recorded_only_for_a_trusted_peer() {
     // an input to anything.
     assert_eq!(actor_a, actor_b);
     assert_eq!(actor_a, format!("{ISSUER}#u-op"));
+}
+
+/// **Every transport-boundary refusal names the check that refused it, not the
+/// status it happened to use.**
+///
+/// REGRESSION REASON (review finding F-1). The four refusals in
+/// `crate::http` returned without calling `AuditContext::set_failure`, so
+/// `finish()` substituted `http_<status>`. The branch's own live `server.log`
+/// shows it: the `Impersonate-User` refusal recorded `http_400`, the foreign
+/// and missing `Origin` refusals BOTH `http_403`, the poisoned `Host`
+/// `http_421`. Those are exactly the attack-shaped refusals, and an operator
+/// reading the log could not tell a cross-origin write from a bad CSRF token.
+/// The HTTP body always named the code; only the record did not.
+#[tokio::test]
+async fn every_transport_refusal_names_itself_in_the_audit_record() {
+    let (log, _guard) = capture();
+    let app = app_with(seeded());
+    let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
+
+    let post = |extra: Vec<(&'static str, String)>| {
+        let cookie = cookie.clone();
+        async move {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/api/v1/namespaces/team-a/schedules")
+                .header("host", SHARED_HOST)
+                .header("cookie", &cookie)
+                .header("idempotency-key", "transport-refusal-1");
+            for (name, value) in extra {
+                builder = builder.header(name, value);
+            }
+            builder.body(Body::from("{}")).unwrap()
+        }
+    };
+
+    // 1. Impersonation, refused in `boundary_guard` before routing.
+    let impersonation = app
+        .app
+        .send(
+            post(vec![
+                ("origin", SHARED_ORIGIN.to_string()),
+                ("content-type", "application/json".to_string()),
+                ("impersonate-user", "cluster-admin".to_string()),
+            ])
+            .await,
+        )
+        .await;
+    assert_eq!(impersonation.code(), "header_not_allowed");
+
+    // 2. A Host this listener does not serve, also in `boundary_guard`.
+    let poisoned = app
+        .app
+        .send(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/session")
+                .header("host", "console.evil.example")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(poisoned.code(), "misdirected_request");
+
+    // 3 and 4. The two `unsafe_request_guard` refusals.
+    let cross_origin = app
+        .app
+        .send(
+            post(vec![
+                ("origin", "https://evil.example".to_string()),
+                ("content-type", "application/json".to_string()),
+            ])
+            .await,
+        )
+        .await;
+    assert_eq!(cross_origin.code(), "origin_mismatch");
+
+    let wrong_type = app
+        .app
+        .send(
+            post(vec![
+                ("origin", SHARED_ORIGIN.to_string()),
+                ("content-type", "text/plain".to_string()),
+            ])
+            .await,
+        )
+        .await;
+    assert_eq!(wrong_type.code(), "unsupported_media_type");
+
+    for (label, response, code, status) in [
+        (
+            "impersonation",
+            &impersonation,
+            "header_not_allowed",
+            400u16,
+        ),
+        ("Host poisoning", &poisoned, "misdirected_request", 421),
+        (
+            "a cross-origin write",
+            &cross_origin,
+            "origin_mismatch",
+            403,
+        ),
+        (
+            "a non-JSON body",
+            &wrong_type,
+            "unsupported_media_type",
+            415,
+        ),
+    ] {
+        let record = log.record(&request_id(response));
+        assert_eq!(record["httpStatus"], status, "{label}");
+        assert_eq!(record["decision"], "deny", "{label}");
+        assert_eq!(
+            record["failureCode"], code,
+            "{label}: the record must name the check, not the status"
+        );
+        // And the body said the same thing all along.
+        assert_eq!(response.json()["code"], code, "{label}");
+    }
+    assert_eq!(app.app.fake.count("backupschedules", NS_A), 0);
 }

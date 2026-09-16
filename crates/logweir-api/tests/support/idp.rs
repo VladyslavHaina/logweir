@@ -192,6 +192,7 @@ struct IdpState {
     jwks_down: bool,
     discovery_down: bool,
     issuer_override: Option<String>,
+    endpoint_overrides: BTreeMap<String, String>,
     jwks_fetches: usize,
     discovery_fetches: usize,
     token_calls: usize,
@@ -258,6 +259,20 @@ impl MockIdp {
         self.with(|s| s.issuer_override = issuer.map(str::to_string));
     }
 
+    /// Serve a discovery document whose named endpoint is something else — a
+    /// compromised or misconfigured provider.
+    pub fn set_endpoint_override(&self, endpoint: &str, value: Option<&str>) {
+        self.with(|s| match value {
+            Some(value) => {
+                s.endpoint_overrides
+                    .insert(endpoint.to_string(), value.to_string());
+            }
+            None => {
+                s.endpoint_overrides.remove(endpoint);
+            }
+        });
+    }
+
     /// How many times JWKS has been fetched.
     pub fn jwks_fetches(&self) -> usize {
         self.with(|s| s.jwks_fetches)
@@ -305,11 +320,18 @@ impl HttpClient for MockIdp {
                         .issuer_override
                         .clone()
                         .unwrap_or_else(|| idp.inner.issuer.clone());
+                    let endpoint = |name: &str, default: String| {
+                        s.endpoint_overrides.get(name).cloned().unwrap_or(default)
+                    };
                     Ok(serde_json::to_vec(&json!({
                         "issuer": issuer,
-                        "authorization_endpoint": format!("{}/authorize", idp.inner.issuer),
-                        "token_endpoint": format!("{}/token", idp.inner.issuer),
-                        "jwks_uri": format!("{}/jwks", idp.inner.issuer),
+                        "authorization_endpoint": endpoint(
+                            "authorization_endpoint",
+                            format!("{}/authorize", idp.inner.issuer)),
+                        "token_endpoint": endpoint(
+                            "token_endpoint", format!("{}/token", idp.inner.issuer)),
+                        "jwks_uri": endpoint(
+                            "jwks_uri", format!("{}/jwks", idp.inner.issuer)),
                         "response_types_supported": ["code"],
                     }))
                     .unwrap())

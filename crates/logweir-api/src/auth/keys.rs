@@ -321,8 +321,8 @@ impl CookieKeys {
     /// memory for it.
     #[must_use]
     pub fn csrf_token(&self, session_id: &str) -> String {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.csrf).expect("HMAC takes any key length");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.csrf.as_ref())
+            .expect("HMAC takes any key length");
         mac.update(b"logweir-api/csrf/v1\n");
         mac.update(session_id.as_bytes());
         B64.encode(mac.finalize().into_bytes())

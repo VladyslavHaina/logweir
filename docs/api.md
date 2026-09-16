@@ -239,6 +239,7 @@ read at startup; no request performs file-system I/O.
 mode: shared
 listen: "0.0.0.0:8484"                       # any address; TLS terminates in front
 publicBaseUrl: "https://console.example.com" # EXACT, HTTPS, no path, no trailing slash
+allowedHosts: ["console.internal.example"]   # EXTRA Host values; see below
 uiDirectory: /srv/ui
 oidc:
   issuer: https://idp.example.com/realms/logweir   # EXACT, as the discovery document states it
@@ -273,6 +274,17 @@ namespaces: [team-a, team-b]
 kubernetes:
   source: inCluster
 ```
+
+**`allowedHosts` widens a security guard, so it is not a convenience.** The
+`Host` allowlist is the DNS-rebinding defence: a request arriving under a name
+this listener does not serve is `421`, which is what stops a page on an
+attacker's domain that resolves to the console's address from driving it. The
+allowlist is `publicBaseUrl`'s own authority **plus** whatever `allowedHosts`
+adds, so each entry is one more name a rebinding page may use. Add one only for
+a second name that genuinely reaches this service — a Service DNS name a
+sidecar uses, say — and never a wildcard, which the field does not support.
+`/healthz` and `/readyz` are exempt from the allowlist regardless, because a
+kubelet addresses the Pod by IP; neither reads a header, a cookie or a body.
 
 A key file is two lines:
 

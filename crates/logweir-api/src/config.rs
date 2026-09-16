@@ -561,9 +561,24 @@ impl Config {
         let public_base_url = parse_public_base_url(&raw_base)?;
         let redirect_uri = format!("{public_base_url}{}", crate::auth::login::CALLBACK_SUFFIX);
 
+        // `allowedHosts` WIDENS THE DNS-REBINDING GUARD, so each entry is
+        // validated as an authority rather than as a line of text: a `Host` a
+        // browser could never send is a typo that silently does nothing, and a
+        // value carrying a scheme, a path or a space is a misunderstanding of
+        // what the field is. `docs/api.md` states the consequence of adding
+        // one. Review finding F-5.
         let mut allowed = vec![authority_of(&public_base_url)];
         for extra in file.allowed_hosts.unwrap_or_default() {
-            validate::check_single_line(&extra, 253).map_err(|code| field("allowedHosts", code))?;
+            if !is_host_authority(&extra) {
+                return Err(field(
+                    "allowedHosts",
+                    format!(
+                        "`{extra}` is not a Host value: each entry is `host` or \
+                         `host:port` with no scheme, userinfo, path or whitespace, and \
+                         there is no wildcard"
+                    ),
+                ));
+            }
             if !allowed.iter().any(|h| h == &extra) {
                 allowed.push(extra);
             }
@@ -775,6 +790,56 @@ fn parse_public_base_url(value: &str) -> Result<String, ConfigError> {
         return Err(refuse("the authority carries no host"));
     }
     Ok(value.to_string())
+}
+
+/// `host` or `host:port`, the two shapes a `Host` header takes, plus the
+/// bracketed IPv6 literal. No scheme, no userinfo, no path, no whitespace, and
+/// no wildcard.
+fn is_host_authority(value: &str) -> bool {
+    if value.is_empty() || value.len() > 261 {
+        return false;
+    }
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        let Some((inner, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
+            return false;
+        }
+        match after {
+            "" => (inner, None),
+            other => match other.strip_prefix(':') {
+                Some(port) => (inner, Some(port)),
+                None => return false,
+            },
+        }
+    } else {
+        match value.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (value, None),
+        }
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !host.starts_with('.')
+        && !host.starts_with('-')
+        && !host.ends_with('.')
+        && !host.ends_with('-');
+    if !host_ok {
+        return false;
+    }
+    match port {
+        None => true,
+        Some(port) => {
+            !port.is_empty()
+                && port.len() <= 5
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u32>().is_ok_and(|p| (1..=65_535).contains(&p))
+        }
+    }
 }
 
 fn authority_of(url: &str) -> String {
@@ -1279,9 +1344,14 @@ mod tests {
             shared.redirect_uri,
             "https://console.example.com/auth/callback"
         );
+        // `publicBaseUrl`'s own authority FIRST, then whatever `allowedHosts`
+        // adds — and the document explains what adding one costs (F-5).
         assert_eq!(
             config.allowed_hosts,
-            vec!["console.example.com".to_string()]
+            vec![
+                "console.example.com".to_string(),
+                "console.internal.example".to_string()
+            ]
         );
         assert_eq!(shared.session_max_age_seconds, 900);
         assert_eq!(shared.roles.bindings.len(), 3);
@@ -1297,7 +1367,7 @@ mod tests {
 
         // AND THE REFUSALS THE DOCUMENT TABULATES ARE REAL. Each row below
         // changes exactly one line of the accepted example.
-        let refusals: [(&str, &str, &str); 8] = [
+        let refusals: [(&str, &str, &str); 9] = [
             (
                 "publicBaseUrl: \"https://console.example.com\"",
                 "publicBaseUrl: \"http://console.example.com\"",
@@ -1333,6 +1403,11 @@ mod tests {
                 "sessionMaxAgeSeconds: 900",
                 "sessionMaxAgeSeconds: 86400",
                 "sessionMaxAgeSeconds",
+            ),
+            (
+                "allowedHosts: [\"console.internal.example\"]",
+                "allowedHosts: [\"a host with spaces\"]",
+                "allowedHosts",
             ),
         ];
         for (from, to, expected_field) in refusals {

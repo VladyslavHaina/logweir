@@ -166,6 +166,24 @@ pub trait Authorizer: Send + Sync + 'static {
     fn hides_unbound_namespaces(&self) -> bool {
         false
     }
+
+    /// The exact group strings this authorizer's bindings could ever match, or
+    /// `None` when the mode has no bindings.
+    ///
+    /// A SESSION CARRIES ONLY THESE. A provider that emits a thousand group
+    /// claims emits a thousand strings that cannot grant anything, and putting
+    /// them in a cookie costs the browser's 4 KB ceiling and tells anyone who
+    /// steals the cookie the whole directory membership of its owner. Keeping
+    /// only the bindable ones is smaller AND less to leak.
+    ///
+    /// THE TRADE, STATED: a binding ADDED for a group an actor already holds
+    /// takes effect on that actor's next sign-in rather than its next request.
+    /// Removing a binding still takes effect immediately, because the roles are
+    /// still derived per request from the current table — and revocation is the
+    /// direction that matters.
+    fn bindable_groups(&self) -> Option<BTreeSet<String>> {
+        None
+    }
 }
 
 // ======================================================================
@@ -419,6 +437,16 @@ impl Authorizer for SharedAuthorizer {
 
     fn hides_unbound_namespaces(&self) -> bool {
         true
+    }
+
+    fn bindable_groups(&self) -> Option<BTreeSet<String>> {
+        Some(
+            self.bindings()
+                .bindings
+                .iter()
+                .flat_map(|binding| binding.groups.iter().cloned())
+                .collect(),
+        )
     }
 }
 

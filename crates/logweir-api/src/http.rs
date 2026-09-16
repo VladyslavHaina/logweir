@@ -307,7 +307,7 @@ pub async fn boundary_guard(
             "not_allowed",
             "Impersonate-* headers are not accepted",
         ));
-        return axum::response::IntoResponse::into_response(error);
+        return refuse(&req, error);
     }
     // An EXACT path match, against the router's own paths. No prefix and no
     // normalisation, so `/healthz/../api/v1/session` is not exempt — it is not
@@ -326,12 +326,35 @@ pub async fn boundary_guard(
         }
     };
     if !host_ok {
-        return axum::response::IntoResponse::into_response(ApiError::new(
-            ProblemCode::MisdirectedRequest,
-            "The Host header does not name an authority this listener serves.",
-        ));
+        return refuse(
+            &req,
+            ApiError::new(
+                ProblemCode::MisdirectedRequest,
+                "The Host header does not name an authority this listener serves.",
+            ),
+        );
     }
     next.run(req).await
+}
+
+/// Render a transport-boundary refusal AND attribute it.
+///
+/// THE AUDIT RECORD MUST NAME THE CHECK THAT REFUSED, NOT THE STATUS.
+/// Without this the four refusals below reached `AuditContext::finish` with no
+/// failure code, which substitutes `http_<status>` — so an operator reading the
+/// log saw `http_400` for an impersonation attempt and `http_403` for both a
+/// forged `Origin` and a missing one, and could not tell a cross-origin write
+/// from a bad CSRF token. These are precisely the attack-shaped refusals, and
+/// D0's "Audit attribution" asks the record to keep the real reason. Review
+/// finding F-1.
+///
+/// The response is unchanged; only the record gains the code the body already
+/// carried.
+fn refuse(req: &Request, error: ApiError) -> Response {
+    if let Some(audit) = req.extensions().get::<Arc<AuditContext>>() {
+        audit.set_failure(error.code.as_str());
+    }
+    axum::response::IntoResponse::into_response(error)
 }
 
 /// Remove every identity-claiming header, returning the names removed.
@@ -368,17 +391,23 @@ pub async fn unsafe_request_guard(
             _ => false,
         };
         if !origin_ok {
-            return axum::response::IntoResponse::into_response(ApiError::new(
-                ProblemCode::OriginMismatch,
-                "Unsafe requests must carry an Origin header equal to the configured public \
-                 origin.",
-            ));
+            return refuse(
+                &req,
+                ApiError::new(
+                    ProblemCode::OriginMismatch,
+                    "Unsafe requests must carry an Origin header equal to the configured public \
+                     origin.",
+                ),
+            );
         }
         if !is_json_content_type(req.headers()) {
-            return axum::response::IntoResponse::into_response(ApiError::new(
-                ProblemCode::UnsupportedMediaType,
-                "Unsafe requests must send Content-Type: application/json.",
-            ));
+            return refuse(
+                &req,
+                ApiError::new(
+                    ProblemCode::UnsupportedMediaType,
+                    "Unsafe requests must send Content-Type: application/json.",
+                ),
+            );
         }
     }
     next.run(req).await

@@ -104,6 +104,10 @@ tracing-subscriber.workspace = true
 # this impure crate is allowed to do (Global Constraint 1 binds logweir-core).
 ulid.workspace = true
 weirkeeper = { path = "../weirkeeper" }
+# Already in `Cargo.lock` at 1.8.2 (rustls and the RustCrypto family pull it);
+# declaring it adds no package. It wipes the session key file's bytes, the
+# derived CSRF subkey and the OIDC client secret on drop (review finding F-6).
+zeroize = "1"
 
 [dev-dependencies]
 

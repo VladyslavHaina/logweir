@@ -15,6 +15,8 @@ mod support;
 
 use axum::body::Body;
 use http::Request;
+use logweir_api::app::Clock as _;
+use logweir_api::authz::Role;
 use serde_json::{json, Value};
 use support::idp::{Alg, Grant, MockIdp, TestKey};
 use support::{FakeKube, SharedApp, SharedOptions, TestResponse, ISSUER, SHARED_HOST};
@@ -889,4 +891,278 @@ async fn an_algorithm_off_the_allowlist_is_refused_even_with_a_published_key() {
             .as_u16(),
         303
     );
+}
+
+/// **A session that would not fit in a browser cookie is refused at sign-in,
+/// and a session carries only the groups the binding table could match.**
+///
+/// REGRESSION REASON (review finding F-2). Nothing measured the sealed cookie.
+/// Up to 64 group strings of up to 256 bytes each went into it, which is ~22 KB
+/// of `Set-Cookie` against the ~4096-byte ceiling Chrome and Firefox enforce.
+/// The callback answered `303`, the browser silently discarded the cookie,
+/// `/ui/` read `401 session_expired` and bounced back to `/auth/login`: an
+/// unbreakable sign-in loop with nothing in the log saying why, hitting exactly
+/// the large-directory installations shared mode exists for. Fail-closed, but
+/// unusable and undiagnosable.
+#[tokio::test]
+async fn a_session_that_would_not_fit_a_cookie_is_refused_at_sign_in() {
+    let key = TestKey::ec("k-ec-1");
+
+    // Every group is BOUND, so the filtering below cannot be what saves us.
+    let huge: Vec<String> = (0..60)
+        .map(|i| format!("lw-{i:02}-{}", "g".repeat(240)))
+        .collect();
+    let bindings = support::RoleBindings {
+        revision: "huge".into(),
+        bindings: huge
+            .iter()
+            .map(|g| support::binding(Role::Viewer, support::NS_A, &[g.as_str()]))
+            .collect(),
+    };
+
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let app = SharedApp::new(
+        FakeKube::new(),
+        idp.clone(),
+        SharedOptions {
+            bindings,
+            ..SharedOptions::default()
+        },
+    );
+    let (_, started) = start_login(&app, "").await;
+    let started = started.expect("login redirects");
+    let mut claims = claims(&started.nonce);
+    claims["groups"] = json!(huge);
+    idp.grant(
+        "code-huge",
+        Grant {
+            id_token: key.mint(&claims),
+            code_challenge: None,
+            redirect_uri: None,
+        },
+    );
+    let refused = finish_login(&app, &started, "code-huge").await;
+    assert_eq!(refused.status.as_u16(), 401, "{}", refused.code());
+    assert!(
+        session_cookie_of(&refused).is_none(),
+        "a cookie the browser would discard must not be emitted at all"
+    );
+    let detail = refused.json()["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        detail.contains("session cookie"),
+        "the refusal must say why: {detail}"
+    );
+
+    // The SAME account with a workable number of groups signs in, and the
+    // cookie it gets is under the ceiling a browser enforces.
+    let modest: Vec<String> = huge.iter().take(4).cloned().collect();
+    let (_, started) = start_login(&app, "").await;
+    let started = started.expect("login redirects");
+    let mut claims = claims_for(&started.nonce, &modest);
+    claims["groups"] = json!(modest);
+    idp.grant(
+        "code-modest",
+        Grant {
+            id_token: key.mint(&claims),
+            code_challenge: None,
+            redirect_uri: None,
+        },
+    );
+    let accepted = finish_login(&app, &started, "code-modest").await;
+    assert_eq!(accepted.status.as_u16(), 303, "{}", accepted.code());
+    let cookie = session_cookie_of(&accepted).expect("a session cookie is set");
+    assert!(
+        cookie.len() <= logweir_api::auth::session::MAX_SET_COOKIE_BYTES,
+        "{} bytes",
+        cookie.len()
+    );
+    assert!(
+        cookie.len() <= 4096,
+        "{} bytes exceeds the browser ceiling",
+        cookie.len()
+    );
+}
+
+fn claims_for(nonce: &str, groups: &[String]) -> Value {
+    let mut c = claims(nonce);
+    c["groups"] = json!(groups);
+    c
+}
+
+/// **A session carries only the group claims the binding table could ever
+/// match.**
+///
+/// A claim that cannot grant anything has no business in a cookie: it costs the
+/// browser's 4 KB ceiling and it tells anyone who steals the cookie the whole
+/// directory membership of its owner. Part of review finding F-2's fix.
+#[tokio::test]
+async fn a_session_carries_only_bindable_group_claims() {
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let app = SharedApp::new(
+        FakeKube::new(),
+        idp.clone(),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "bindable".into(),
+                bindings: vec![support::binding(
+                    Role::Operator,
+                    support::NS_A,
+                    &["lw-a-operators"],
+                )],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    let (_, started) = start_login(&app, "").await;
+    let started = started.expect("login redirects");
+    let mut c = claims(&started.nonce);
+    c["groups"] = json!([
+        "lw-a-operators",
+        "everyone",
+        "building-access-floor-3",
+        "payroll-viewers",
+    ]);
+    idp.grant(
+        "code-1",
+        Grant {
+            id_token: key.mint(&c),
+            code_challenge: None,
+            redirect_uri: None,
+        },
+    );
+    let done = finish_login(&app, &started, "code-1").await;
+    assert_eq!(done.status.as_u16(), 303);
+    let cookie = session_cookie_of(&done)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // The bound group still decides the role.
+    let session = app.get("/api/v1/session", &cookie).await.json();
+    assert_eq!(session["namespaces"][0]["roles"][0], "operator");
+
+    // And the three unbindable ones are gone: the claims the cookie carries are
+    // exactly what the authorizer sees.
+    let claims_now = logweir_api::auth::session::from_headers(
+        &app.keys,
+        &{
+            let mut headers = http::HeaderMap::new();
+            headers.insert(http::header::COOKIE, cookie.parse().unwrap());
+            headers
+        },
+        app.app.clock.now(),
+    )
+    .expect("the cookie opens");
+    assert_eq!(claims_now.groups, vec!["lw-a-operators".to_string()]);
+}
+
+/// **`azp`, when present, must be this client — whatever shape `aud` took.**
+///
+/// REGRESSION REASON (review finding F-3). `azp` was verified only in the
+/// multi-audience branch, so a token with `aud: "logweir-console"` and `azp:
+/// "another-client"` was accepted: an authorized party this client is not.
+/// OIDC Core §3.1.3.7(6) says it must be checked whenever the claim is present.
+#[tokio::test]
+async fn azp_is_checked_whenever_it_is_present() {
+    let key = TestKey::ec("k-ec-1");
+
+    for (label, aud, azp, expected) in [
+        ("single aud, no azp", json!(support::CLIENT_ID), None, 303),
+        (
+            "single aud, our azp",
+            json!(support::CLIENT_ID),
+            Some(support::CLIENT_ID),
+            303,
+        ),
+        (
+            "single aud, SOMEONE ELSE'S azp",
+            json!(support::CLIENT_ID),
+            Some("another-client"),
+            401,
+        ),
+        (
+            "array of one, someone else's azp",
+            json!([support::CLIENT_ID]),
+            Some("another-client"),
+            401,
+        ),
+        (
+            "two auds, our azp",
+            json!([support::CLIENT_ID, "another-client"]),
+            Some(support::CLIENT_ID),
+            303,
+        ),
+        (
+            "two auds, no azp",
+            json!([support::CLIENT_ID, "another-client"]),
+            None,
+            401,
+        ),
+    ] {
+        let idp = MockIdp::new(ISSUER, &[&key]);
+        let app = app(&idp);
+        let (_, started) = start_login(&app, "").await;
+        let started = started.expect("login redirects");
+        let mut c = claims(&started.nonce);
+        c["aud"] = aud;
+        match azp {
+            Some(value) => c["azp"] = json!(value),
+            None => {
+                c.as_object_mut().unwrap().remove("azp");
+            }
+        }
+        idp.grant(
+            "code-1",
+            Grant {
+                id_token: key.mint(&c),
+                code_challenge: None,
+                redirect_uri: None,
+            },
+        );
+        let response = finish_login(&app, &started, "code-1").await;
+        assert_eq!(response.status.as_u16(), expected, "{label}");
+    }
+}
+
+/// **A discovery document may not point the browser, or the client secret, at a
+/// plain-HTTP endpoint.**
+///
+/// REGRESSION REASON (review finding F-4). `authorization_endpoint` goes
+/// straight into a `Location` header and `token_endpoint` RECEIVES the client
+/// secret, and neither was scheme-checked. The discovery fetch itself is
+/// HTTPS-pinned except for the loopback affordance — so this needs a
+/// compromised or misconfigured issuer — but under that affordance the client
+/// is built `https_or_http()`, which is precisely where the secret would have
+/// left in cleartext.
+#[tokio::test]
+async fn a_discovery_document_may_not_name_a_plain_http_endpoint() {
+    let key = TestKey::ec("k-ec-1");
+    for endpoint in ["authorization_endpoint", "token_endpoint", "jwks_uri"] {
+        let idp = MockIdp::new(ISSUER, &[&key]);
+        idp.set_endpoint_override(endpoint, Some("http://idp.test/hijacked"));
+        let app = app(&idp);
+        let (response, _) = start_login(&app, "").await;
+        assert_eq!(
+            response.status.as_u16(),
+            503,
+            "a plain-http `{endpoint}` was accepted"
+        );
+        // The refusal names no endpoint and no host to the caller.
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(!body.contains("hijacked"), "{body}");
+    }
+
+    // An https endpoint on another host is still fine — the check is about the
+    // scheme, and a provider legitimately federates its endpoints.
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    idp.set_endpoint_override("jwks_uri", Some("https://keys.idp.test/jwks"));
+    let app = app(&idp);
+    let (response, _) = start_login(&app, "").await;
+    assert_eq!(response.status.as_u16(), 303);
 }

@@ -189,15 +189,20 @@ pub struct OidcSettings {
     pub token_auth_method: TokenAuthMethod,
 }
 
-/// A string that does not print itself.
+/// A string that does not print itself and is wiped when it is dropped.
+///
+/// `Zeroizing` is best effort and says so: the compiler may have copied the
+/// value before it got here, and anything that can read this process's memory
+/// already holds every live session. It costs one wrapper and removes the
+/// client secret from a core dump. Review finding F-6.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Secret(String);
+pub struct Secret(zeroize::Zeroizing<String>);
 
 impl Secret {
     /// Wrap a secret.
     #[must_use]
     pub fn new(value: String) -> Self {
-        Self(value)
+        Self(zeroize::Zeroizing::new(value))
     }
 
     /// The secret, at the one place that sends it to the token endpoint.
@@ -372,6 +377,25 @@ impl Provider {
                     .to_string(),
             ));
         }
+        // THE DOCUMENT'S ENDPOINTS ARE NOT TRUSTED TO BE HTTPS JUST BECAUSE THE
+        // DOCUMENT WAS. `authorization_endpoint` goes straight into a
+        // `Location` header and `token_endpoint` RECEIVES THE CLIENT SECRET, so
+        // an issuer that is compromised or merely misconfigured could name
+        // `http://…` and — under the loopback escape hatch, where the client is
+        // built `https_or_http()` — the secret would leave in cleartext.
+        // Review finding F-4.
+        for (name, endpoint) in [
+            ("authorization_endpoint", &discovery.authorization_endpoint),
+            ("token_endpoint", &discovery.token_endpoint),
+            ("jwks_uri", &discovery.jwks_uri),
+        ] {
+            if !self.endpoint_scheme_allowed(endpoint) {
+                return Err(OidcError::ProviderMetadata(format!(
+                    "the discovery document's `{name}` is not https (a plain-http endpoint is \
+                     accepted only for a loopback host under `oidc.insecureLoopbackIssuer`)"
+                )));
+            }
+        }
         self.cache
             .lock()
             .expect("the cache lock is never poisoned")
@@ -380,6 +404,41 @@ impl Provider {
             fetched: Instant::now(),
         });
         Ok(discovery)
+    }
+
+    /// Whether an endpoint URL's scheme is one this provider may be reached
+    /// on: `https` always, and `http` only for a loopback host when the issuer
+    /// itself is the plain-HTTP loopback affordance.
+    fn endpoint_scheme_allowed(&self, url: &str) -> bool {
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return false;
+        };
+        if scheme == "https" {
+            return true;
+        }
+        if scheme != "http" {
+            return false;
+        }
+        // The same rule `crate::config` applies to the issuer, applied again to
+        // whatever the issuer then points at.
+        if !self.settings.issuer.starts_with("http://") {
+            return false;
+        }
+        let authority = rest.split('/').next().unwrap_or("");
+        let host = match authority.rsplit_once(':') {
+            Some((host, _)) => host,
+            None => authority,
+        };
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| match ip {
+                    std::net::IpAddr::V4(v4) => v4.is_loopback(),
+                    std::net::IpAddr::V6(v6) => {
+                        v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+                    }
+                })
     }
 
     async fn jwks(&self, force: bool) -> Result<Vec<Jwk>, OidcError> {
@@ -591,9 +650,15 @@ impl Provider {
     }
 }
 
-/// The most group strings a session carries. A provider that emits thousands
-/// would otherwise put them all in a cookie.
-pub const MAX_GROUPS: usize = 64;
+/// The most group strings this module will read out of one ID token.
+///
+/// A PARSE BOUND, NOT A POLICY BOUND. It stops a hostile or broken provider
+/// from turning one token into unbounded memory. It is set far above any real
+/// directory's per-user membership precisely so that it cannot become a silent
+/// grant loss: which groups reach the session is
+/// `crate::auth::session::session_groups` (the bindable ones, all of them), and
+/// whether they FIT is one explicit refusal in `crate::auth::login::callback`.
+pub const MAX_GROUPS: usize = 512;
 
 /// `application/x-www-form-urlencoded` encoding of one value.
 ///
@@ -624,21 +689,30 @@ fn claim_time(claims: &BTreeMap<String, serde_json::Value>, name: &str) -> Optio
 }
 
 fn audience_matches(claims: &BTreeMap<String, serde_json::Value>, client_id: &str) -> bool {
-    match claims.get("aud") {
+    let audience_names_us = match claims.get("aud") {
         Some(serde_json::Value::String(one)) => one == client_id,
         Some(serde_json::Value::Array(all)) => {
-            let contains = all.iter().any(|v| v.as_str() == Some(client_id));
-            if !contains {
+            // OpenID Connect Core §3.1.3.7(3): with more than one audience the
+            // `azp` claim MUST be present.
+            if all.len() > 1 && !claims.contains_key("azp") {
                 return false;
             }
-            // OpenID Connect Core §3.1.3.7: with more than one audience the
-            // `azp` claim must be present and must be this client.
-            if all.len() > 1 {
-                return claims.get("azp").and_then(|v| v.as_str()) == Some(client_id);
-            }
-            true
+            all.iter().any(|v| v.as_str() == Some(client_id))
         }
         _ => false,
+    };
+    if !audience_names_us {
+        return false;
+    }
+    // §3.1.3.7(6): if `azp` is present it MUST be this client — whatever shape
+    // `aud` took. The previous version checked it only in the multi-audience
+    // branch, so a token with `aud: "logweir-console"` and `azp:
+    // "another-client"` was accepted: an authorized party this client is not.
+    // Low impact, because `aud` already names us, but this is the one function
+    // whose whole job is exactness. Review finding F-3.
+    match claims.get("azp") {
+        None => true,
+        Some(azp) => azp.as_str() == Some(client_id),
     }
 }
 

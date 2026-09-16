@@ -37,6 +37,20 @@ pub const LOGIN_STATE_SECONDS: i64 = 600;
 /// The synchronizer-token header.
 pub const CSRF_HEADER: &str = "x-csrf-token";
 
+/// The largest `Set-Cookie` value this service will emit.
+///
+/// BROWSERS SILENTLY DROP AN OVERSIZED COOKIE. Chrome and Firefox enforce a
+/// ~4096-byte per-cookie ceiling (RFC 6265 §6.1 asks for at least 4096 bytes
+/// per cookie and they take that as the cap). A callback that answers `303`
+/// with a `Set-Cookie` above it gets no cookie stored, `/ui/` then reads `401`
+/// and bounces back to `/auth/login`: an unbreakable sign-in loop with nothing
+/// in the log saying why, hitting exactly the large-directory installations
+/// shared mode exists for. So the size is measured and the sign-in is REFUSED
+/// with a named reason instead. Review finding F-2.
+///
+/// The margin below 4096 is for the attributes, which are counted here too.
+pub const MAX_SET_COOKIE_BYTES: usize = 3900;
+
 /// The attributes both cookies carry, verbatim.
 pub const SESSION_ATTRIBUTES: &str = "Path=/; Secure; HttpOnly; SameSite=Lax";
 
@@ -64,6 +78,31 @@ pub struct SessionClaims {
     pub auth: i64,
     /// The session key version that sealed it.
     pub kv: u32,
+}
+
+/// The group strings a session will carry: exactly the claimed ones the
+/// authorization table could ever match.
+///
+/// `bindable` is that set; when it is `Some`, everything else is dropped. A
+/// claim that cannot grant anything has no business in a cookie — it costs the
+/// browser's 4 KB ceiling, and it tells anyone who steals the cookie the whole
+/// directory membership of its owner.
+///
+/// THERE IS NO SIZE BOUND HERE, DELIBERATELY. Dropping a group to make a cookie
+/// fit is silently dropping a GRANT: the actor signs in, sees fewer namespaces
+/// than it has, and nothing says why. The size decision is made once, in
+/// `crate::auth::login::callback`, and its answer is a refusal that names the
+/// reason.
+#[must_use]
+pub fn session_groups(
+    claimed: &[String],
+    bindable: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<String> {
+    claimed
+        .iter()
+        .filter(|group| bindable.is_none_or(|set| set.contains(*group)))
+        .cloned()
+        .collect()
 }
 
 impl SessionClaims {
