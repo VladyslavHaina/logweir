@@ -462,7 +462,10 @@ done
 # clean run — the failure mode `scripts/check-pure-core.sh` records.
 hits=""
 if [ -n "$roots" ]; then
-  hits="$(grep -rnE 'sign_detached|SigningKey' $roots --include='*.rs' \
+  # WHOLE TOKENS ONLY, with POSIX classes rather than `\b` (see above): the pure
+  # check vocabulary names codes such as `SigningKeyMissing`, which is a reason
+  # string about a runner prerequisite, not the `SigningKey` type or a call.
+  hits="$(grep -rnE '(^|[^A-Za-z0-9_])(sign_detached|SigningKey)([^A-Za-z0-9_]|$)' $roots --include='*.rs' \
           | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' \
           | grep -v '^[^:]*:[0-9]*:[[:space:]]*///' || true)"
 fi
