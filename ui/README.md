@@ -166,7 +166,11 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 |---|---|
 | `index.html` | the shell. Loads `./app.js` as a module; every reference relative. |
 | `app.js` | the hash router and the frame. Seven routes: `#/clusters`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. Two of them carry an identity in the hash -- see *The restore route, and the point it names*. |
-| `api.js` | the **only** module that issues a network request. |
+| `api.js` | the **only** module that issues a network request, in either mode. One `fetch`, on one line, and every identifier built by `path(...)`. |
+| `client.js` | **which API is in front of this page**, decided once at boot, and the one object every page reads through. See *Two modes, one page*. |
+| `contract.js` | the typed contract: JSDoc types and strict decoders for every DTO the page consumes, in both modes. A required field that is absent is a **contract failure the page renders**, never an empty cell. |
+| `validate.js` | one set of checks and **one vocabulary of field paths**, so a disagreement from either server lands beside the field it is about. |
+| `workflow.js` | the state machines: named transitions, and a transition error for a move a state does not accept. |
 | `render.js` | DOM helpers. Sets text, never `innerHTML`. |
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
 | `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
@@ -181,6 +185,9 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/pages.spec.js` | the behaviour suite over the page modules: the badge rules, the wizard, the approval form, the roster. |
 | `tests/design.spec.js` | the design system's guarantees: the token layer, both schemes, reduced motion, the focus ring, badges with words, the stepper. |
 | `tests/mutation.spec.js` | drafts, one mutation state, idempotent creates, the guided submit and the approval subject -- driven through the real mount halves over a fake node and an in-memory API. |
+| `tests/contract.spec.js` | the decoders against `schemas/logweir-api-v1.openapi.json` itself: every console fixture is an instance of the published schema, and every decoder requires exactly what the schema requires. |
+| `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
+| `tests/workflow.spec.js` | the named transitions, the transition errors and the wizard's six steps as a machine. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is written from
@@ -215,6 +222,99 @@ listing for any subdirectory that has no `index.html`. An empty index is the
 whole guard. `tests/` is the one directory a local `just ui` will list, and the
 release artefact excludes it, so no test harness and no fixture is ever
 published over HTTP.
+
+## Two modes, one page
+
+The same twenty files are served two ways, and **they decide which one they are
+looking at exactly once**.
+
+**Legacy mode** is what ships today and what every section above describes:
+`kubectl proxy` serves these files and proxies kube-apiserver on the same
+origin, attaching the viewer's own kubeconfig credential to every request it
+forwards. The page addresses `/apis/logweir.dev/v1alpha1/...` and holds no
+credential of its own.
+
+**Console mode** is `logweir-api` (`docs/api.md`) serving these files at `/ui/`
+and a bounded product API at `/api/v1` on one origin. The page addresses
+`/api/v1/namespaces/<ns>/...`, every error is `application/problem+json`, every
+durable create carries an `Idempotency-Key`, lists are cursor-paged, and the
+namespaces come from `GET /api/v1/session` rather than from `runtime.js`.
+
+### How the choice is made
+
+At boot, `client.js` asks `GET /api/v1/session` **once**. An answer that decodes
+as a session document is console mode. Anything else -- the refusal a `kubectl
+proxy` path filter gives, a body that is not JSON, a decode that found a
+required field missing, or no answer within five seconds -- is legacy mode. The
+answer is recorded for the life of the loaded page and never asked again: a
+mode chosen per request is a page that can change APIs between a read and the
+write that follows it.
+
+That one probe is the only behavioural difference a legacy installation sees.
+It is answered by the proxy's own path filter, it is not retried, and the page
+renders before it returns.
+
+### What does not change
+
+* **One network call site.** Both modes go through the same `fetch` in
+  `api.js`, and `crates/logweir/tests/ui_lint.rs::every_api_path_is_relative`
+  still asserts there is exactly one in the whole tree.
+* **No credential in the page, and no browser storage.** Console mode
+  authenticates with a session cookie the browser attaches by itself; this page
+  never reads or writes one. The synchroniser token the session document
+  carries lives in `client.js`'s memory for the life of the loaded page and
+  nowhere else -- the same place a draft lives, gone on reload.
+* **Navigation cancels reads and never mutations.** A view's read carries the
+  route's `AbortSignal` in both modes; a create carries none in either.
+* **The plan bytes.** `plan.js` produces the document once and hands the same
+  frozen object back for the same bytes, so the hash shown in the review step
+  and the bytes submitted are one object. In console mode the `planHash` the
+  product API takes beside `planBytes` comes from that object; bytes this page
+  never prepared are refused before anything is sent.
+
+### What console mode cannot show, named
+
+The product API's projections are not the custom resources byte for byte, and
+the adapter records what it cannot supply on every object it projects, under
+`__contract.absent`:
+
+| kind | absent in console mode |
+|---|---|
+| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed) |
+| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**) |
+| `Backup` | `status.manifestSha256`, `status.jobRef` |
+| `Restore` | `status.integrity`, `status.jobRef` |
+
+Two further differences are worth stating outright, because they are not
+absences:
+
+* **The product API mints an object's name** from the idempotency scope. The
+  name typed into a create form is therefore what makes that submission
+  repeatable -- the same name composes the same `Idempotency-Key`, so a double
+  click, a lost response and a reload all resolve to the object the first
+  request made -- and the object's real name comes back in the response and is
+  what the outcome line shows.
+* **Ten normalized operation states, four phases.** `pending`, `running`,
+  `succeeded` and `failed` are the resource's own phase words. `queued`,
+  `preparing`, `verifying`, `refused`, `cancelled` and `unknown` are
+  distinctions `logweir-api` draws that the resource does not record, and the
+  page shows the API's own word for them rather than rounding it to a phase the
+  controller never wrote.
+
+The `TrustRoster` has **no product route at all**: it is cluster-scoped and
+admin-only, and the `#/keys` page says so by name in console mode instead of
+asking for a route that does not exist.
+
+### Where a contract failure comes from
+
+A response that is not what the contract says it is -- a required field absent,
+a field of the wrong type, an enum member the contract does not declare -- is an
+Error with `reason: ContractViolation` and `status: 0`, rendered by the same
+error box every API refusal uses, naming the DTO and the JSON path. It is never
+absorbed into an empty cell, because an empty cell is also what an absent
+optional field looks like and a reader cannot tell the two apart. An **unknown**
+field is the opposite case and is tolerated: decision D0 requires an older
+client to accept a newer field, so it is recorded rather than refused.
 
 ## What a form keeps, and what one click can do
 
