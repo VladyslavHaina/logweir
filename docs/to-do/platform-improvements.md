@@ -123,8 +123,8 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
-| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. d1w1-cadence-finish in progress (pure cadence engine, `chrono-tz` decision). |
-| PLAT-03.x, 08.x, 09.1 | Contract decided | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. |
+| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. |
+| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment); W3+W5 (`d2-kafka-check`) in progress. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | Contract decided | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. |
 
 ### Decision records
@@ -139,6 +139,18 @@ check runner rather than two, discovery results are never execution inputs, one
 completeness vocabulary, one frozen execution-inputs grammar, transport
 security is never derived, pod identity is verified by owner UID, status writes
 use conditional merge PATCH, and a new kind needs a recorded amendment.
+
+Amendments recorded at integration (binding on later workers, detail in
+`/tmp/logweir-roadmap-run/claude/d2-core.result.md` §7 and its review): D2 W1/W2
+landed in main as `c13b0cc..56bd074` with these deviations from D2's text —
+`DestinationRole` lives in `logweir_core::destination` (W7 re-exports it);
+`validate_ca_bundle` is a separate function from `validate`; `StaleReason` gains
+a sixth, additive `inputsDigestChanged` (§6.6's list is no longer closed at five);
+`CheckRequest` is externally tagged on the wire (W4 and W5 must serialise plans
+that way); `StoreOptions` carries `request_timeout` and `max_retries`;
+`Store::from_url` is byte-compatible for legacy callers and no credential source
+inherits endpoint, region, addressing or transport from the environment (closing
+SEC-ENVHTTP at the store layer once controllers render explicit options).
 
 D2 and D3 add eight kinds (`BackupDestination`, `TopicDiscovery`, `Preflight`,
 `TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog`,
@@ -413,6 +425,31 @@ long downtime, invalid cron, retry exhaustion and duplicate reconciliation.
 **Migration/safety and done evidence:** Preserve existing UTC behavior unless
 the user changes policy; document defaults applied to old schedules. Publish
 a policy truth table and live overlap/restart results.
+
+**Partial record (2026-09-16) — PLAT-04.2: D1 W1, the pure cadence engine,
+landed; the task stays In progress until W2 (schedule controller), W6 (API
+previews) and W7 (UI) consume it.** `weirkeeper::cadence` (`15ce4b6`) is the
+one clock-free evaluator for time zones, presets and previews: an absent
+`timeZone` delegates to the legacy UTC `Cron` walk (asserted structurally and
+by a zoned-versus-legacy property comparison), IANA zones come from a compiled-in
+`chrono-tz` database (`6eedc0a`; four new packages, notices regenerated, `cargo
+deny` clean, kept out of the pure layer), the D1 §4.3 rule holds (a nonexistent
+local time fires once at the transition, a repeated hour fires both occurrences,
+interval schedules keep cadence, slot identity stays the UTC instant), presets
+compile to canonical cron and round-trip through one alias table, previews carry
+one adjustment marker chosen by one rule (`marker_supersedes`), and the policy
+inputs (`startingDeadlineSeconds`, `catchUpPolicy`, bounded retries with `-r<k>`
+names that fit the DNS limit, the closed retryable classification where unknown
+is not retryable) are validated pure functions with a deadline table
+(`validate_deadlines`). `ui/tests/fixtures/cadence-presets.json` is generated
+from the Rust table and checked against it. Verified at `4b54a5c`: cadence
+41/41, weirkeeper 363/363, linkage 17/17, strict clippy and fmt, `pure-core`;
+eleven planted mutants killed including the reviewer's three medium findings
+(marker disagreement between walk paths, the load-bearing `EDGE_DAYS` slack now
+pinned by the 1867 America/Sitka day, the tautological delegation test) and
+the earlier UTC preview-horizon bug the worker found and fixed. Independent
+review `claude/d1w1-cadence.review.md`: ACCEPT-WITH-FIXES then ACCEPT. No CRD
+or controller change yet; migration is none until W2 adds the fields.
 
 **Completion record — Done (2026-09-16), PLAT-04.1.** Scheduler source and
 live acceptance were closed at `4956785` (closure verification
