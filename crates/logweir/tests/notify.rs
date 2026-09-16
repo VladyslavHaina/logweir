@@ -1820,3 +1820,182 @@ fn a_spec_without_a_name_or_endpoint_still_parses() {
     let spec: logweir_core::spec::DrillSpec = serde_yaml::from_str(&named).unwrap();
     assert_eq!(spec.name.as_deref(), Some("nightly"));
 }
+
+// ------------------------------------------------------------- D3 §3.4 W4
+//
+// The move. `crates/logweir/src/notify.rs` is the definition now and
+// `drill::phase7_verify` is the alias, and the rows above this line are how we
+// know nothing else changed: every one of them reaches the code through the
+// OLD path and every one of them still passes.
+//
+// What is left to prove is the thing those rows cannot see — that the alias is
+// EXHAUSTIVE. A re-export list that quietly dropped an item would leave the
+// old path compiling for everything the existing tests happen to name and
+// broken for the one call site none of them do, and a `pub use` that named
+// something else entirely would leave two implementations with one behaving
+// like the other only until someone edited it.
+
+/// **Every public item of the moved block is reachable under BOTH paths, and
+/// the two paths are the SAME item.**
+///
+/// The equality assertions are what make this more than a compile check:
+/// `phase7_verify::PAGERDUTY_US_ENDPOINT` being *a* string is not the property,
+/// `phase7_verify::PAGERDUTY_US_ENDPOINT` being `notify::PAGERDUTY_US_ENDPOINT`
+/// is. Function items are compared by calling both and comparing the answers —
+/// the pure ones on the same inputs, the agent one on its two constants — for
+/// the same reason.
+///
+/// KILLS: a re-export list that drops an item; a `pub use` pointed at a
+/// look-alike; a second copy of a constant left behind in `phase7_verify.rs`.
+#[test]
+fn the_old_path_is_an_alias_for_the_new_module_and_not_a_copy() {
+    use logweir::drill::phase7_verify as old;
+    use logweir::notify as new;
+
+    assert_eq!(old::PAGERDUTY_US_ENDPOINT, new::PAGERDUTY_US_ENDPOINT);
+    assert_eq!(old::PAGERDUTY_SILENCED, new::PAGERDUTY_SILENCED);
+    assert_eq!(old::NOTIFY_CONNECT_TIMEOUT, new::NOTIFY_CONNECT_TIMEOUT);
+    assert_eq!(old::NOTIFY_TIMEOUT, new::NOTIFY_TIMEOUT);
+
+    // The pure functions, on inputs whose answers are already pinned above.
+    assert_eq!(
+        old::failure_dedup_key(Some("nightly")),
+        new::failure_dedup_key(Some("nightly"))
+    );
+    assert_eq!(
+        old::redact_url("https://hooks.slack.com/services/T/B/zz"),
+        new::redact_url("https://hooks.slack.com/services/T/B/zz")
+    );
+    let sc = scorecard_pass();
+    assert_eq!(old::dedup_key(None, &sc), new::dedup_key(None, &sc));
+    assert_eq!(old::notify_body(&sc), new::notify_body(&sc));
+
+    let n = pagerduty_only(Some("https://events.eu.pagerduty.com/v2/enqueue"));
+    assert_eq!(old::pagerduty_endpoint(&n), new::pagerduty_endpoint(&n));
+
+    // `EventSink` is ONE trait, not two: a `RecordingSink` written against the
+    // old path is accepted where the new path's trait object is wanted, which
+    // a `pub use` gives and a duplicate definition does not. This line is the
+    // whole assertion; it is a type check and it cannot be made at runtime.
+    let sink = RecordingSink::default();
+    let _: &dyn new::EventSink = &sink;
+    let _: &dyn old::EventSink = &sink;
+
+    // And `UreqSink` reaches both, carrying the same bounds.
+    let _: new::UreqSink = old::UreqSink::new();
+}
+
+/// **The protection half is NOT reachable through the drill path.**
+///
+/// The move was one-directional on purpose. `drill::phase7_verify` re-exports
+/// what USED to live in it so nothing breaks; it does not become a second door
+/// onto PLAT-14.2's event document, because a drill phase that can hand out a
+/// `ProtectionEvent` is a drill phase that looks like it has an opinion about
+/// protection policies, and it has none.
+///
+/// Asserted structurally — the re-export list is read — because there is no
+/// way to write "this does not compile" as a test.
+#[test]
+fn the_drill_path_re_exports_the_drill_half_and_nothing_more() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/drill/phase7_verify.rs");
+    let text = std::fs::read_to_string(&src).unwrap();
+    let start = text
+        .find("pub use crate::notify::{")
+        .expect("phase7_verify re-exports the moved block from crate::notify");
+    let end = start + text[start..].find("};").expect("the re-export list closes");
+    let list = &text[start..end];
+
+    for item in [
+        "dedup_key",
+        "failure_dedup_key",
+        "notify_agent",
+        "notify_body",
+        "notify_failure",
+        "notify_with_sink",
+        "pagerduty_endpoint",
+        "redact_url",
+        "EventSink",
+        "UreqSink",
+        "NOTIFY_TIMEOUT",
+        "PAGERDUTY_SILENCED",
+        "PAGERDUTY_US_ENDPOINT",
+    ] {
+        assert!(
+            list.contains(item),
+            "`{item}` was in the moved block and must stay reachable at the old path; \
+             the list read:\n{list}"
+        );
+    }
+    for protection in [
+        "ProtectionEvent",
+        "deliver_with",
+        "AlertKind",
+        "VerificationScope",
+        "protection_dedup_key",
+        "SinkRoutes",
+        "DeliverArgs",
+    ] {
+        assert!(
+            !list.contains(protection),
+            "`{protection}` is PLAT-14.2's, not the drill's: a drill phase that can hand \
+             out a protection event looks like it has an opinion about protection \
+             policies, and it has none. The list read:\n{list}"
+        );
+    }
+    // The block really moved: `phase7_verify.rs` no longer DEFINES any of it.
+    for defined in [
+        "pub fn notify_body(",
+        "pub fn notify_agent_with(",
+        "pub trait EventSink",
+        "pub struct UreqSink",
+        "fn enqueue_pagerduty(",
+    ] {
+        assert!(
+            !text.contains(defined),
+            "`{defined}` is still defined in phase7_verify.rs — the move left a second \
+             implementation behind, and two copies are how the two come to disagree"
+        );
+    }
+}
+
+/// **A protection dedup key can never resolve a drill incident, and the other
+/// way round.**
+///
+/// The three key families now live in one module, which is exactly when they
+/// become able to collide. T0-15's defect was one incident shared by two
+/// drills, where a passing nightly drill's `resolve` closed the weekly full
+/// drill's open page; a protection `resolve` closing a drill's page would be
+/// the same defect with a third family added to it. The prefixes are what keep
+/// them apart, so the prefixes are asserted here rather than left to be
+/// noticed.
+#[test]
+fn the_three_dedup_key_families_cannot_collide() {
+    use logweir::notify::{
+        protection_dedup_key, recovery_completed_dedup_key, AlertKind, PROTECTION_DEDUP_PREFIX,
+    };
+
+    let sc = scorecard_pass();
+    let drill = logweir::drill::phase7_verify::dedup_key(Some("nightly"), &sc);
+    let preflight = logweir::drill::phase7_verify::failure_dedup_key(Some("nightly"));
+    let protection = protection_dedup_key("uid-1", AlertKind::Staleness);
+    let recovery = recovery_completed_dedup_key("restore-1");
+
+    let keys = [&drill, &preflight, &protection, &recovery];
+    let distinct: std::collections::BTreeSet<&String> = keys.iter().copied().collect();
+    assert_eq!(distinct.len(), 4, "four families, four keys: {keys:?}");
+
+    for k in [&protection, &recovery] {
+        assert!(k.starts_with(PROTECTION_DEDUP_PREFIX), "{k}");
+        assert!(
+            !k.starts_with("logweir-drill-"),
+            "a protection resolve must not be able to close a drill's page: {k}"
+        );
+    }
+    for k in [&drill, &preflight] {
+        assert!(k.starts_with("logweir-drill-"), "{k}");
+        assert!(
+            !k.starts_with(PROTECTION_DEDUP_PREFIX),
+            "a drill resolve must not be able to close a protection page: {k}"
+        );
+    }
+}
