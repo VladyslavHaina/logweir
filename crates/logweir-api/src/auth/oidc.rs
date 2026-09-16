@@ -397,7 +397,15 @@ impl Provider {
                     return Ok(cached.value.clone());
                 }
             }
-            state.last_jwks_attempt = Some(Instant::now());
+            // ONLY A FORCED REFETCH COUNTS AGAINST THE WINDOW. The first fetch
+            // — the cold cache — is not an attacker-provoked one, and counting
+            // it would delay the FIRST key rotation after startup by a minute
+            // for no security gain. What the window exists to bound is the
+            // "unknown kid, go and ask again" path, and that is exactly the
+            // `force` path.
+            if force {
+                state.last_jwks_attempt = Some(Instant::now());
+            }
         }
         let uri = self.discovery().await?.jwks_uri;
         let fetched = self.http.get(&uri).await;

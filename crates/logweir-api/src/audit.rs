@@ -282,6 +282,50 @@ impl AuditContext {
     }
 }
 
+/// Dependency log targets pinned below DEBUG, whatever `RUST_LOG` says.
+///
+/// THIS IS A LEAK PATH, NOT TIDINESS. `kube_client` logs the upstream
+/// `ErrorResponse` VERBATIM at DEBUG — body, message and all — which is exactly
+/// the text `crate::kube::redact` exists to keep out of this service's logs. An
+/// operator who turns on `RUST_LOG=debug` to debug a 503 would otherwise print
+/// the unredacted Kubernetes message next to the redacted one. The same is true
+/// in a smaller way of the transport crates, which log request lines.
+///
+/// A directive added after the environment's wins for its own target, so this
+/// holds even against an explicit `RUST_LOG=kube_client=trace`. Raising one of
+/// these is a deliberate edit here, not an environment variable.
+pub const SILENCED_TARGETS: [&str; 7] = [
+    "kube_client",
+    "kube",
+    "hyper",
+    "hyper_util",
+    "rustls",
+    "tower",
+    "h2",
+];
+
+/// The log filter this service runs with: the environment's `RUST_LOG`, or
+/// `info`, with [`SILENCED_TARGETS`] pinned at `warn`.
+#[must_use]
+pub fn log_filter() -> tracing_subscriber::EnvFilter {
+    log_filter_from(&std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+}
+
+/// [`log_filter`] over an explicit specification, so a test can prove the
+/// pinning survives `debug`.
+#[must_use]
+pub fn log_filter_from(spec: &str) -> tracing_subscriber::EnvFilter {
+    let mut filter = tracing_subscriber::EnvFilter::new(spec);
+    for target in SILENCED_TARGETS {
+        filter = filter.add_directive(
+            format!("{target}=warn")
+                .parse()
+                .expect("a constant directive parses"),
+        );
+    }
+    filter
+}
+
 /// The audit context of the current request.
 ///
 /// The middleware inserts one before routing, so every extractor and handler

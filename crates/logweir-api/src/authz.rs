@@ -536,23 +536,67 @@ pub fn authorize(
     namespace: &str,
     action: Action,
 ) -> Result<(), ApiError> {
-    if !authorizer.namespaces(actor).iter().any(|n| n == namespace) {
-        return Err(if authorizer.hides_unbound_namespaces() {
-            // Byte-for-byte what a nonexistent object answers. The audit
-            // record still carries `namespace_forbidden` as the failure code.
-            ApiError::not_found()
-        } else {
-            ApiError::new(
+    decide(authorizer, actor, namespace, action)
+        .map_err(|denial| denial.response(authorizer.hides_unbound_namespaces()))
+}
+
+/// Why a request was refused — the REAL reason, which is not always the reason
+/// the response is allowed to state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Denial {
+    /// The namespace is not bound to this actor.
+    NamespaceNotGranted,
+    /// The namespace is bound, but not for this action.
+    ActionNotPermitted,
+}
+
+impl Denial {
+    /// The stable code the AUDIT record carries. It always names the real
+    /// reason, even when the response withholds it for enumeration resistance:
+    /// hiding a namespace from a caller must not also hide an authorization
+    /// problem from the operator reading the log.
+    #[must_use]
+    pub const fn audit_code(self) -> &'static str {
+        match self {
+            Denial::NamespaceNotGranted => ProblemCode::NamespaceForbidden.as_str(),
+            Denial::ActionNotPermitted => ProblemCode::Forbidden.as_str(),
+        }
+    }
+
+    /// The response. With `hide_unbound`, an ungranted namespace answers
+    /// exactly what a nonexistent object answers.
+    #[must_use]
+    pub fn response(self, hide_unbound: bool) -> ApiError {
+        match self {
+            Denial::NamespaceNotGranted if hide_unbound => ApiError::not_found(),
+            Denial::NamespaceNotGranted => ApiError::new(
                 ProblemCode::NamespaceForbidden,
                 "The namespace is not granted to this actor.",
-            )
-        });
+            ),
+            Denial::ActionNotPermitted => ApiError::new(
+                ProblemCode::Forbidden,
+                "The actor is not permitted this action in this namespace.",
+            ),
+        }
+    }
+}
+
+/// The decision itself: namespace grant first, then the action.
+///
+/// # Errors
+///
+/// The [`Denial`] that applies.
+pub fn decide(
+    authorizer: &dyn Authorizer,
+    actor: &Actor,
+    namespace: &str,
+    action: Action,
+) -> Result<(), Denial> {
+    if !authorizer.namespaces(actor).iter().any(|n| n == namespace) {
+        return Err(Denial::NamespaceNotGranted);
     }
     if !action.implemented() || !authorizer.allows(actor, namespace, action) {
-        return Err(ApiError::new(
-            ProblemCode::Forbidden,
-            "The actor is not permitted this action in this namespace.",
-        ));
+        return Err(Denial::ActionNotPermitted);
     }
     Ok(())
 }

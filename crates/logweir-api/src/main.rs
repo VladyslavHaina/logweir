@@ -67,10 +67,10 @@ fn main() -> ExitCode {
 
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        // NOT a bare `try_from_default_env`: see `audit::SILENCED_TARGETS`. A
+        // dependency that logs the upstream error body at DEBUG would undo
+        // this service's redaction the moment someone set RUST_LOG=debug.
+        .with_env_filter(logweir_api::audit::log_filter())
         .init();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()

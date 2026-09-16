@@ -849,7 +849,7 @@ use logweir_api::auth::oidc::{OidcSettings, Provider, Secret, TokenAuthMethod};
 use logweir_api::auth::ratelimit::{RateLimiter, StreamSlots};
 use logweir_api::auth::session::{self, SessionClaims};
 use logweir_api::auth::shared::SessionAuthenticator;
-use logweir_api::authz::{Role, RoleBinding, RoleBindings, SharedAuthorizer};
+pub use logweir_api::authz::{Role, RoleBinding, RoleBindings, SharedAuthorizer};
 
 /// How a shared-mode test app is put together.
 pub struct SharedOptions {

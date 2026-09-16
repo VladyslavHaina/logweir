@@ -84,7 +84,7 @@ pub fn authorize(
     action: Action,
 ) -> Result<(), ApiError> {
     let authorizer = state.authorizer();
-    let outcome = authz::authorize(authorizer, actor, namespace, action);
+    let outcome = authz::decide(authorizer, actor, namespace, action);
     // THE DECISION IS ATTRIBUTED WHERE IT IS MADE. The audit record keeps the
     // REAL reason even when the response hides it: an ungranted namespace
     // answers 404 in shared mode so a caller cannot enumerate, and this line is
@@ -105,10 +105,13 @@ pub fn authorize(
             crate::audit::Decision::Deny
         },
     );
-    if let Err(error) = &outcome {
-        actor.audit.set_failure(error.code.as_str());
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(denial) => {
+            actor.audit.set_failure(denial.audit_code());
+            Err(denial.response(authorizer.hides_unbound_namespaces()))
+        }
     }
-    outcome
 }
 
 /// Record the object a route touched, for the audit line.
@@ -341,6 +344,21 @@ where
     actor
         .audit
         .set_create_hashes(&identity.scope_hash, &identity.request_hash);
+    // THE PLAN HASH, NEVER THE PLAN BYTES. D0 asks the audit record to carry
+    // the canonical plan hash; it is read from the validated request rather
+    // than passed in by each route, so a future route that submits a plan
+    // cannot forget to attribute it.
+    if let Some(plan_hash) = serde_json::from_slice::<serde_json::Value>(&canonical)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("planHash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+    {
+        actor.audit.set_plan_hash(&plan_hash);
+    }
     let object = build(
         identity.name.clone(),
         idempotency::annotations(&identity, request_id, actor),
