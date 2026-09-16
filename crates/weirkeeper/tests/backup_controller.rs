@@ -4693,6 +4693,18 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         "the second pass over an unchanged object writes NOTHING. At REQUEUE_SECS = 15 that is \
          5,760 API writes a day per running Backup this reconciler no longer makes: {second:?}"
     );
+    // A RESTART WITH THE JOB PRESENT READS THE JOB AND NOTHING ELSE (PLAT-06.1):
+    // the frozen inputs are not re-read, re-rendered or re-created while a Job
+    // this Backup controls is running.
+    assert_eq!(
+        calls(&second),
+        vec![(
+            "GET".to_string(),
+            format!("/apis/batch/v1/namespaces/{NS}/jobs/{NAME}")
+        )],
+        "the running pass is one Job read: {:?}",
+        calls(&second)
+    );
 }
 
 // ===========================================================================
