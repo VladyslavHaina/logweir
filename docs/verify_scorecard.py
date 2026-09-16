@@ -341,13 +341,13 @@ FORMAT_VERSION = "1.0.0"
 # writes — `integrity.result: fail` with a reason PRESENT, and the same
 # document with it ABSENT — so `index.json` gains both as ACCEPT cases. No new
 # field, no new arm, and no change to the frozen top-level shape.
-SCRIPT_VERSION = "1.13.0"
+SCRIPT_VERSION = "1.14.0"
 
-# The FOUR payload types Logweir signs. Keep byte-for-byte in step with
+# The FIVE payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
-# PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_PUT_RECEIPT and
-# PAYLOAD_TYPE_TEARDOWN; `docs/test_verify_scorecard.py::
-# test_the_four_payload_types_match_the_rust_constants` fails if they ever
+# PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_PUT_RECEIPT, PAYLOAD_TYPE_TEARDOWN
+# and PAYLOAD_TYPE_CATALOG_POINT; `docs/test_verify_scorecard.py::
+# test_the_five_payload_types_match_the_rust_constants` fails if they ever
 # drift.
 #
 # THE PATH FOLLOWED THE CONSTANTS. Task 14 moved them into the verify-only
@@ -360,9 +360,19 @@ SCRIPT_VERSION = "1.13.0"
 # readback of a SCORECARD; `backup-receipt` is the signed record of one
 # `logweir backup run`. Two documents, two media types, and the short names
 # are the ones `logweir drill verify --payload-type` takes.
+#
+# `catalog-point` (PLAT-15.1, decision D3 §5.2) is the recovery catalog's point
+# record. It is checked SIGNATURE-ONLY by both readers, deliberately: the
+# record's receipt-derived facts are recomputed from the VERIFIED backup
+# receipt it names (D3 §5.2 rule 3), so the receipt's signature — not this one
+# — is the verification root, and an exit 0 here means "these bytes were signed
+# by this key" and nothing about whether the point is still available. The
+# script's fall-through arm at the bottom of `main` is what produces that
+# verdict, and it says so in as many words.
 PAYLOAD_TYPES = {
     "scorecard": PAYLOAD_TYPE,
     "backup-receipt": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+    "catalog-point": "application/vnd.logweir.catalog-point+json;version=1.0.0",
     "receipt": "application/vnd.logweir.drill-put-receipt+json;version=1.0.0",
     "teardown": "application/vnd.logweir.drill-teardown+json;version=1.0.0",
 }
@@ -1734,6 +1744,35 @@ def main(
         print(
             "       This signature covers the receipt only. Verify the scorecard "
             "separately, then check sha256(scorecard.json) equals the digest above."
+        )
+        return 0
+
+    if payload_type_wanted == PAYLOAD_TYPES["catalog-point"]:
+        # SIGNATURE-ONLY, and the lines below say why rather than leaving an
+        # exit 0 to be read as more than it is. A catalog point record is an
+        # INDEX over evidence that already exists; every fact in it that
+        # matters is recomputed from the backup receipt it names, and this
+        # script deliberately does not fetch that receipt — it was handed three
+        # local files and it phones nothing.
+        print(f"VALID  payloadType={payload_type_wanted}")
+        print(f"       {len(payload)} bytes verified under the presented key")
+        if isinstance(doc, dict):
+            print(
+                f"       point_id={doc.get('point_id')} backup_id={doc.get('backup_id')} "
+                f"run_id={doc.get('run_id')}"
+            )
+            receipt = doc.get("receipt")
+            if isinstance(receipt, dict):
+                # The binding an auditor goes and checks with. The short
+                # point_id is its display form; this digest is the thing.
+                print(f"       receipt {receipt.get('key')}")
+                print(f"       receipt_sha256={receipt.get('sha256')}")
+        print(
+            "       This signature covers the record only. It is NOT a claim that the point "
+            "is available, that its archive is readable, or that its copied facts are true: "
+            "fetch the backup receipt named above, verify it with --payload-type "
+            "backup-receipt, and compare. No invariant of this document type is evaluated "
+            "by this build."
         )
         return 0
 

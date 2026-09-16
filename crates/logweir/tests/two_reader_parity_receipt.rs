@@ -16,8 +16,8 @@
 //!   produce the recorded refusal text, byte for byte, once each reader's own
 //!   prefix is stripped.
 //! * `the_two_payload_type_resolvers_agree` — the two `resolve_payload_type`
-//!   implementations are one contract: the same four short names mapping to
-//!   the same four media types, a full media type passing through in both, and
+//!   implementations are one contract: the same five short names mapping to
+//!   the same five media types, a full media type passing through in both, and
 //!   byte-identical error text on a value neither accepts.
 //! * `the_corpus_index_carries_the_arm_field` — interface **I31**'s six-field
 //!   shape, and `arm` byte-equal to the reason its arm returns.
@@ -386,7 +386,7 @@ fn rust_payload_types() -> Vec<(String, String)> {
     let verify_src = std::fs::read_to_string(root().join("crates/logweir-verify/src/lib.rs"))
         .expect("read crates/logweir-verify/src/lib.rs");
     let body = src
-        .split_once("const TYPES: [(&str, &str); 4] = [")
+        .split_once("const TYPES: [(&str, &str); 5] = [")
         .expect("crates/logweir/src/verify.rs declares the TYPES table")
         .1
         .split_once("];")
@@ -409,9 +409,9 @@ fn rust_payload_types() -> Vec<(String, String)> {
             .split_once(&decl)
             .unwrap_or_else(|| {
                 panic!(
-                    "crates/logweir-verify/src/lib.rs does not declare {}; the four media \
-                     types are declared in the VERIFY-ONLY crate (chain V, Task 14) and \
-                     nowhere else",
+                    "crates/logweir-verify/src/lib.rs does not declare {}; the five media \
+                     types are declared in the VERIFY-ONLY crate (chain V, Task 14, plus \
+                     decision D3's catalog point) and nowhere else",
                     constant.trim()
                 )
             })
@@ -433,7 +433,7 @@ fn the_two_payload_type_resolvers_agree() {
     let py = require_python();
     let root = root();
 
-    // (a) the same four keys mapping to the same four values.
+    // (a) the same five keys mapping to the same five values.
     //
     // Compared as SETS (sorted), because the two declarations are ordered for
     // two different reasons and both are right: Python's dict leads with
@@ -442,15 +442,15 @@ fn the_two_payload_type_resolvers_agree() {
     // table is asserted separately below, against that message.
     let rust = rust_payload_types();
     let python = python_payload_types();
-    assert_eq!(rust.len(), 4, "the Rust map has four entries: {rust:?}");
+    assert_eq!(rust.len(), 5, "the Rust map has five entries: {rust:?}");
     let mut rust_sorted = rust.clone();
     rust_sorted.sort();
     let mut python_sorted = python.clone();
     python_sorted.sort();
     assert_eq!(
         rust_sorted, python_sorted,
-        "the two readers' payload-type maps differ. They must have the same four short \
-         names mapping to the same four media types."
+        "the two readers' payload-type maps differ. They must have the same five short \
+         names mapping to the same five media types."
     );
     assert_eq!(
         rust, rust_sorted,

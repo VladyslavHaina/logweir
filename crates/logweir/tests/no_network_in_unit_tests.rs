@@ -108,7 +108,7 @@ const DIAL_TOKENS: [&str; 16] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 21] = [
+const ALLOWED: [(&str, &str); 23] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -136,6 +136,28 @@ const ALLOWED: [(&str, &str); 21] = [
         "production: `run` constructs the backup path's reader, its read-only archive \
          handle and (Task 5b) the WRITABLE evidence handle the signed receipt is put \
          through; `run_with` takes them as parameters and names none of the three",
+    ),
+    (
+        "crates/logweir/src/catalog/cli.rs",
+        "production: PLAT-15.1's two operator subcommands. `run_sync` and `run_list` are \
+         the ONLY functions in `crates/logweir/src/catalog/` that name a store \
+         constructor — every other function there, including both testable seams \
+         (`sync_with`, `list_with`), takes a `&Store` it does not build, which is what \
+         keeps `crates/logweir/tests/catalog.rs` socket-free against `Store::in_memory`. \
+         `Store::from_url` and not `from_url_with` on purpose: these are an operator's \
+         commands run with the operator's own ambient credentials, and the explicit \
+         constructor is for destination-backed Jobs (D-SEAMS S5)",
+    ),
+    (
+        "crates/logweir/tests/catalog.rs",
+        "PLAT-15.1: ONE `Store::from_url` over a TEMPDIR filesystem URL — no endpoint and \
+         no network, the same case `crates/logweir-store/tests/storage.rs` is listed for. \
+         It is the failure injection `a_catalog_write_that_fails_leaves_the_run_and_its_\
+         receipt_untouched` needs: a regular file planted at `logweir/catalog/v1/points` \
+         makes the catalog put fail with a store error that is NOT AlreadyExists while \
+         `logweir/backups/` stays writable, which `Store::in_memory` cannot do. Every \
+         other row in the file uses `Store::in_memory` (measured: the whole binary runs \
+         in 0.3 s)",
     ),
     (
         "crates/logweir/tests/backup_run.rs",

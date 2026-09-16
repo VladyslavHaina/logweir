@@ -103,6 +103,10 @@ SCORECARD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # RECEIPT_TYPE above, which is the drill's post-put storage readback of a
 # SCORECARD. Two documents, two media types.
 BACKUP_RECEIPT_TYPE = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+# The recovery catalog's point record (PLAT-15.1, decision D3 §5.2). Checked
+# SIGNATURE-ONLY by both readers — see `CATALOG_POINT` below for what that
+# costs and why it is the right answer.
+CATALOG_POINT_TYPE = "application/vnd.logweir.catalog-point+json;version=1.0.0"
 
 
 def _sign(payload_type: str, payload: bytes) -> dict:
@@ -219,6 +223,110 @@ def test_a_teardown_attestation_verifies_without_scorecard_specific_checks():
         assert "Traceback" not in r.stderr
 
 
+# A catalog point record (PLAT-15.1, decision D3 §5.2), in the shape
+# `crates/logweir/src/catalog/record.rs` serialises. Written out here rather
+# than imported, for the reason `_sign` gives about PAE: a fixture derived from
+# the thing under test cannot disagree with it.
+CATALOG_POINT = {
+    "format_version": "1.0.0",
+    "point_id": "lwp1-" + "a" * 32,
+    "recorded_at": "2026-09-16T00:00:00Z",
+    "receipt": {
+        "key": "logweir/backups/nightly-20260915/01J9X2QK7C4V0R8YB3ZP6MTS5A.receipt.json",
+        "sha256": "sha256:" + "a" * 64,
+        "sidecar_key":
+            "logweir/backups/nightly-20260915/01J9X2QK7C4V0R8YB3ZP6MTS5A.receipt.sig",
+        "payload_type": BACKUP_RECEIPT_TYPE,
+    },
+    "backup_id": "nightly-20260915",
+    "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+    "archive": {
+        "location_id": "s3://kafka-backups/prod",
+        "manifest_key": "prod/nightly-20260915/manifest.json",
+        "manifest_sha256": "sha256:" + "b" * 64,
+        "prefix": "prod",
+    },
+    "covered": {"from_ms": 1757980800000, "to_ms": 1757984400000},
+    "capture": {
+        "started_at": "2026-09-15T03:00:00Z",
+        "finished_at": "2026-09-15T03:04:00Z",
+    },
+    "topics": [{"name": "orders", "records": 1234}],
+    "source": {
+        "cluster_id": "SOURCE-CLUSTER-000001",
+        "bootstrap_servers": ["kafka-source:9092"],
+        "auth_mode": "scramSha512",
+    },
+    "signing": {"key_id": "c" * 64, "algorithm": "ecdsa-p256-sha256"},
+}
+
+
+def test_a_catalog_point_verifies_signature_only_under_its_own_payload_type():
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "point", CATALOG_POINT_TYPE, CATALOG_POINT)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "VALID" in r.stdout
+        assert "Traceback" not in r.stderr
+        # The two facts an auditor goes and checks with: the receipt key and
+        # the digest that binds it. The short point id is a lookup key; the
+        # digest is the binding (D3 §5.1).
+        assert CATALOG_POINT["receipt"]["key"] in r.stdout
+        assert CATALOG_POINT["receipt"]["sha256"] in r.stdout
+        # THE HONEST LINE. Exit 0 here must not read like exit 0 for a
+        # scorecard: nothing about availability was checked, and the record's
+        # copied facts are only worth what the receipt they name is worth.
+        assert "This signature covers the record only" in r.stdout
+        assert "No invariant of this document type is evaluated" in r.stdout
+
+
+def test_a_catalog_point_evaluates_no_invariant_of_its_own():
+    # A record that is internally absurd — a covered window running backwards,
+    # a `point_id` that its own receipt digest does not imply — still verifies,
+    # because this reader makes no semantic claim about the type. The test
+    # exists so that a later build which DOES evaluate invariants has to change
+    # it deliberately rather than discovering the difference in production.
+    doc = dict(CATALOG_POINT)
+    doc["covered"] = {"from_ms": 99, "to_ms": 1}
+    doc["point_id"] = "lwp1-" + "f" * 32
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "absurd", CATALOG_POINT_TYPE, doc)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "No invariant of this document type is evaluated" in r.stdout
+
+
+def test_a_catalog_point_never_verifies_as_a_scorecard_or_a_receipt():
+    # Substitution: a genuinely signed document of one type handed over in
+    # place of another. The payloadType comparison is what refuses it, and it
+    # must keep refusing now that a fifth type exists.
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "point", CATALOG_POINT_TYPE, CATALOG_POINT)
+        for asked in ("scorecard", "backup-receipt", "receipt", "teardown"):
+            r = run_typed(asked, p, s, FIX / "public.pem")
+            assert r.returncode == 1, (asked, r.stdout)
+            assert "unexpected payloadType" in r.stdout + r.stderr
+
+
+def test_a_scorecard_never_verifies_as_a_catalog_point():
+    r = run_typed("catalog-point", FIX / "scorecard.json",
+                  FIX / "scorecard.sig", FIX / "public.pem")
+    assert r.returncode == 1
+    assert "unexpected payloadType" in r.stdout + r.stderr
+
+
+def test_a_flipped_byte_in_a_catalog_point_fails_under_the_right_type():
+    # Selecting the right payload type must not become a way to pass.
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "point", CATALOG_POINT_TYPE, CATALOG_POINT)
+        raw = bytearray(p.read_bytes())
+        raw[raw.index(b"nightly")] = ord("N")
+        p.write_bytes(bytes(raw))
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 1
+        assert "does not verify" in r.stdout + r.stderr
+
+
 def test_an_unknown_payload_type_is_a_usage_error_not_a_bad_artifact():
     r = run_typed("sideways", FIX / "scorecard.json",
                   FIX / "scorecard.sig", FIX / "public.pem")
@@ -234,7 +342,7 @@ def test_the_full_media_type_may_be_passed_instead_of_the_short_name():
     assert "VALID" in r.stdout
 
 
-def test_the_four_payload_types_match_the_rust_constants():
+def test_the_five_payload_types_match_the_rust_constants():
     # The verifier is only independent if it agrees with the signer on the
     # exact media types. A drift here means one of them signs or checks a
     # string the other never uses, and every fixture would still pass.
@@ -244,15 +352,20 @@ def test_the_four_payload_types_match_the_rust_constants():
     # with `pub use logweir_verify::*;`, and a re-export contains none of the
     # three media-type literals — so reading the old file would assert a
     # property of a `pub use` line. Read the file that DECLARES them.
+    # PLAT-15.1's catalog point is declared in the same file, for the same
+    # reason the backup receipt is: the control plane links the verify-only
+    # crate and never the signer.
+    types = (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, CATALOG_POINT_TYPE,
+             RECEIPT_TYPE, TEARDOWN_TYPE)
     rust = (ROOT / "crates" / "logweir-verify" / "src" / "lib.rs").read_text()
-    for t in (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
+    for t in types:
         assert t in rust, f"{t} is not declared in logweir-verify/src/lib.rs"
     py = VERIFIER.read_text()
-    for t in (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, RECEIPT_TYPE, TEARDOWN_TYPE):
+    for t in types:
         assert t in py, f"{t} is not declared in verify_scorecard.py"
-    # …and the map really has FOUR entries, so a fifth type added to the Rust
+    # …and the map really has FIVE entries, so a sixth type added to the Rust
     # crate and forgotten here is not silently covered by the loop above.
-    assert len(_verifier_module().PAYLOAD_TYPES) == 4
+    assert len(_verifier_module().PAYLOAD_TYPES) == 5
 
 
 # ------------------------------------------------------------------ PAE lengths
@@ -769,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.13.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.14.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2056,11 +2169,20 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # one-sided disagreement measured in Task 9b's re-review (NIT-1). One more
     # arm; map still four; no new field and no top-level shape change, so the
     # scorecard stays at format_version 1.0.0 with its 21 properties.
+    #
+    # 1.14.0 (PLAT-15.1, decision D3 §5.2) is the FIRST bump since 5b that
+    # moves the payload-type map itself: `catalog-point` is a fifth entry. It
+    # adds no invariant arm — the record is checked SIGNATURE-ONLY, because its
+    # receipt-derived facts are recomputed from the verified backup receipt it
+    # names and this script is handed three local files and fetches nothing —
+    # so the new arm is a verdict PRINTER that says exactly that. Map five;
+    # scorecard and backup-receipt invariant sets unchanged.
     mod = _verifier_module()
-    assert len(mod.PAYLOAD_TYPES) == 4, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.13.0", mod.SCRIPT_VERSION
+    assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
+    assert mod.SCRIPT_VERSION == "1.14.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
+    assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
 
 
 def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():
