@@ -415,10 +415,15 @@ fn primitive_dependencies_have_an_explicit_allowlist() {
         primitive,
         [
             "logweir",
+            "logweir-api",
             "logweir-evidence",
             "logweir-verify",
             "weirkeeper"
-        ]
+        ],
+        "PLAT-17.1 added the fifth name, `logweir-api`: it links `weirkeeper` for the CRD types \
+         and the green-badge rules and therefore reaches both primitives. The reason is recorded \
+         above ALLOWED_PRIMITIVE in scripts/check-one-signer.sh; a SIXTH name is the mutant this \
+         assertion exists to kill, and `ALLOWED_LINK`/`ALLOWED_SOURCE` below are unchanged."
     );
 }
 
@@ -430,8 +435,16 @@ fn signing_and_verification_have_separate_allowed_consumers() {
         ("ALLOWED_LINK", vec!["e2e", "logweir"]),
         ("ALLOWED_SOURCE", vec!["e2e", "logweir", "logweir-evidence"]),
         (
+            // `logweir-api` links `weirkeeper`, which links the verifying
+            // crate. It is on NEITHER signing allowlist above.
             "ALLOWED_VERIFY_LINK",
-            vec!["e2e", "logweir", "logweir-evidence", "weirkeeper"],
+            vec![
+                "e2e",
+                "logweir",
+                "logweir-api",
+                "logweir-evidence",
+                "weirkeeper",
+            ],
         ),
     ] {
         let mut actual = allowlist(&src, name);

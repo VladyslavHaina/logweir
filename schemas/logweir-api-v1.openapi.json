@@ -1,0 +1,3884 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Logweir product API",
+    "version": "1.0.0-alpha.1",
+    "description": "The bounded shared-console product API (PLAT-17.1). Not a Kubernetes proxy: no generic resource path, no Secret, Pod, log, exec or Job access, no delete, and no arbitrary patch. Every error is application/problem+json. Unsafe methods require Content-Type: application/json and an Origin equal to the configured public origin. Durable creates require Idempotency-Key. Capabilities without a route are advertised false in /api/v1/session."
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealthz",
+        "summary": "Process liveness.",
+        "responses": {
+          "200": {
+            "description": "Alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "misdirected_request"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadyz",
+        "summary": "Readiness: configuration valid and Kubernetes reachable. No detail is returned.",
+        "responses": {
+          "200": {
+            "description": "Ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "kubernetes_unavailable",
+          "misdirected_request"
+        ]
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "The actor, explicit namespace grants and capability flags.",
+        "responses": {
+          "200": {
+            "description": "The session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "internal_error",
+          "method_not_allowed",
+          "misdirected_request",
+          "session_expired",
+          "unauthenticated"
+        ]
+      }
+    },
+    "/api/v1/namespaces": {
+      "get": {
+        "operationId": "listNamespaces",
+        "summary": "The configured namespace grants. Core Namespace objects are never listed.",
+        "responses": {
+          "200": {
+            "description": "The grants.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "header_not_allowed",
+          "internal_error",
+          "method_not_allowed",
+          "misdirected_request",
+          "session_expired",
+          "unauthenticated"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/connections": {
+      "get": {
+        "operationId": "listConnections",
+        "summary": "KafkaCluster projections. Secret reference names only.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createConnection",
+        "summary": "Create a KafkaCluster that references an existing credential Secret by name.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request; the same object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/connections/{name}": {
+      "get": {
+        "operationId": "getConnection",
+        "summary": "One KafkaCluster projection.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/schedules": {
+      "get": {
+        "operationId": "listSchedules",
+        "summary": "BackupSchedule projections.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createSchedule",
+        "summary": "Create a BackupSchedule.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScheduleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request; the same object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/schedules/{name}": {
+      "get": {
+        "operationId": "getSchedule",
+        "summary": "One BackupSchedule projection.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension": {
+      "post": {
+        "operationId": "setScheduleSuspension",
+        "summary": "Set spec.suspend, the schedule's one mutable field, if expectedResourceVersion is current. Idempotency-Key is refused.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSuspensionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated schedule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_key_invalid",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "precondition_failed",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/backups": {
+      "get": {
+        "operationId": "listBackups",
+        "summary": "Backup projections with a status summary.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/backups/{name}": {
+      "get": {
+        "operationId": "getBackup",
+        "summary": "One Backup projection.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/restores": {
+      "get": {
+        "operationId": "listRestores",
+        "summary": "Restore projections with a status summary; planBytes omitted.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createRestore",
+        "summary": "Create a Restore. planBytes is opaque, checked against planHash and stored unchanged.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRestoreRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request; the same object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/restores/{name}": {
+      "get": {
+        "operationId": "getRestore",
+        "summary": "One Restore projection, planBytes included.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/approvals": {
+      "get": {
+        "operationId": "listApprovals",
+        "summary": "Approval metadata; no documents.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/approvals/{name}": {
+      "get": {
+        "operationId": "getApproval",
+        "summary": "One Approval's metadata; no documents.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/approvals/{name}/packet": {
+      "get": {
+        "operationId": "getApprovalPacket",
+        "summary": "The approval and sidecar documents, verbatim.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalPacketResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/operations/{kind}/{name}": {
+      "get": {
+        "operationId": "getOperation",
+        "summary": "The normalized status of one Backup or Restore. Result and evidence verification are separate; NotAttempted is never verified success.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "description": "backup or restore.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "backup",
+                "restore"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActorView": {
+        "description": "The authenticated actor.",
+        "type": "object",
+        "required": [
+          "displayName",
+          "id",
+          "issuer",
+          "subject"
+        ],
+        "properties": {
+          "displayName": {
+            "description": "A display name. Never used for authorization.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The stable actor ID, `<issuer>#<subject>`.",
+            "type": "string"
+          },
+          "issuer": {
+            "description": "The identity issuer.",
+            "type": "string"
+          },
+          "subject": {
+            "description": "The subject.",
+            "type": "string"
+          }
+        }
+      },
+      "Approval": {
+        "description": "Public approval metadata. The documents themselves are only on the packet route.",
+        "type": "object",
+        "required": [
+          "approvalBytesLength",
+          "conditions",
+          "name",
+          "namespace",
+          "planHash",
+          "resourceVersion",
+          "sidecarBytesLength",
+          "subjectRef",
+          "uid"
+        ],
+        "properties": {
+          "approvalBytesLength": {
+            "description": "The approval document's length in bytes.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "approver": {
+            "description": "The approver subject from the roster.",
+            "type": "string",
+            "nullable": true
+          },
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "matchedKeyId": {
+            "description": "The approver key that verified it.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "planHash": {
+            "description": "The plan hash the create form supplied.",
+            "type": "string"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion.",
+            "type": "string"
+          },
+          "selfAttestedRisk": {
+            "description": "Whether approver and requester may be the same principal.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "sidecarBytesLength": {
+            "description": "The sidecar's length in bytes.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "subjectRef": {
+            "description": "The subject.",
+            "$ref": "#/components/schemas/SubjectRefView"
+          },
+          "ticket": {
+            "description": "The change ticket the document names.",
+            "type": "string",
+            "nullable": true
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "verified": {
+            "description": "Whether the controller verified the approval.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "verifiedSubject": {
+            "description": "The exact verified subject.",
+            "$ref": "#/components/schemas/VerifiedSubjectView",
+            "nullable": true
+          }
+        }
+      },
+      "ApprovalList": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Approval"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalPacket": {
+        "description": "`GET .../approvals/{name}/packet`: the raw documents, verbatim.",
+        "type": "object",
+        "required": [
+          "approvalBytes",
+          "name",
+          "namespace",
+          "planHash",
+          "sidecarBytes",
+          "subjectRef",
+          "uid"
+        ],
+        "properties": {
+          "approvalBytes": {
+            "description": "The approval document text, verbatim.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "planHash": {
+            "description": "The plan hash the create form supplied.",
+            "type": "string"
+          },
+          "sidecarBytes": {
+            "description": "The DSSE sidecar text, verbatim.",
+            "type": "string"
+          },
+          "subjectRef": {
+            "description": "The subject.",
+            "$ref": "#/components/schemas/SubjectRefView"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalPacketResponse": {
+        "description": "`GET .../approvals/{name}/packet`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The packet.",
+            "$ref": "#/components/schemas/ApprovalPacket"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalResponse": {
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Approval"
+          },
+          "replayed": {
+            "description": "On a durable create: whether this response replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ArchiveRequest": {
+        "description": "An archive location in a request.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "credentialRef": {
+            "description": "An existing Secret in this namespace carrying the object-store credential.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "url": {
+            "description": "`s3://`, `gs://`, `az://` or `file:///`; no userinfo.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ArchiveView": {
+        "description": "An archive location and the name of the Secret that reaches it.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "credentialRef": {
+            "description": "The name of the Secret carrying the object-store credential. A name only; this service never reads Secrets.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "url": {
+            "description": "The object-store URL, with any userinfo redacted.",
+            "type": "string"
+          }
+        }
+      },
+      "AuthenticationMode": {
+        "description": "How the current actor was authenticated.",
+        "oneOf": [
+          {
+            "description": "The explicit loopback administrator mode of this stage.",
+            "type": "string",
+            "enum": [
+              "localAdmin"
+            ]
+          }
+        ]
+      },
+      "Backup": {
+        "description": "A backup run.",
+        "type": "object",
+        "required": [
+          "archive",
+          "deadlineSeconds",
+          "name",
+          "namespace",
+          "operation",
+          "resourceVersion",
+          "sourceRef",
+          "topics",
+          "triggeredBy",
+          "uid"
+        ],
+        "properties": {
+          "archive": {
+            "description": "Where the archive is written.",
+            "$ref": "#/components/schemas/ArchiveView"
+          },
+          "backupId": {
+            "description": "The archive backup ID.",
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "deadlineSeconds": {
+            "description": "The Job deadline.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "manifestKey": {
+            "description": "The manifest key.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "observedAuth": {
+            "description": "The identity the run presented: mode and username, never a password.",
+            "$ref": "#/components/schemas/ObservedAuthView",
+            "nullable": true
+          },
+          "operation": {
+            "description": "The normalized status summary.",
+            "$ref": "#/components/schemas/OperationSummary"
+          },
+          "records": {
+            "description": "Records archived.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion.",
+            "type": "string"
+          },
+          "schedule": {
+            "description": "The schedule that created the run.",
+            "type": "string",
+            "nullable": true
+          },
+          "slot": {
+            "description": "The schedule slot.",
+            "type": "string",
+            "nullable": true
+          },
+          "sourceRef": {
+            "description": "The source connection.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "topics": {
+            "description": "Named topics.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "triggeredBy": {
+            "description": "`schedule` or `manual`.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "windowCovered": {
+            "description": "The covered window, epoch milliseconds, end exclusive.",
+            "$ref": "#/components/schemas/WindowCoveredView",
+            "nullable": true
+          }
+        }
+      },
+      "BackupList": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Backup"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "BackupResponse": {
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Backup"
+          },
+          "replayed": {
+            "description": "On a durable create: whether this response replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "Capabilities": {
+        "description": "The capability flags of one namespace grant.\n\nEvery flag is `implemented && allowed`. The eight domains that have no route in this build are always `false`.",
+        "type": "object",
+        "required": [
+          "approvalPacketRead",
+          "approvalSubmit",
+          "approvalsRead",
+          "backupsRead",
+          "connectionCreate",
+          "connectionTest",
+          "connectionsRead",
+          "credentialWrite",
+          "destinations",
+          "manualBackupCreate",
+          "operationEvents",
+          "operationsRead",
+          "preflight",
+          "restoreCreate",
+          "restoresRead",
+          "scheduleCreate",
+          "scheduleSetSuspension",
+          "schedulesRead",
+          "topicDiscovery"
+        ],
+        "properties": {
+          "approvalPacketRead": {
+            "description": "`GET .../approvals/{name}/packet`.",
+            "type": "boolean"
+          },
+          "approvalSubmit": {
+            "description": "Approval submission (PLAT-19.2): no route.",
+            "type": "boolean"
+          },
+          "approvalsRead": {
+            "description": "`GET .../approvals[/{name}]`.",
+            "type": "boolean"
+          },
+          "backupsRead": {
+            "description": "`GET .../backups[/{name}]`.",
+            "type": "boolean"
+          },
+          "connectionCreate": {
+            "description": "`POST .../connections`.",
+            "type": "boolean"
+          },
+          "connectionTest": {
+            "description": "Connection tests (PLAT-07.2): no route.",
+            "type": "boolean"
+          },
+          "connectionsRead": {
+            "description": "`GET .../connections[/{name}]`.",
+            "type": "boolean"
+          },
+          "credentialWrite": {
+            "description": "Write-only credential input (PLAT-07.1): no route.",
+            "type": "boolean"
+          },
+          "destinations": {
+            "description": "Saved destinations (PLAT-08): no route.",
+            "type": "boolean"
+          },
+          "manualBackupCreate": {
+            "description": "Manual backup creation (PLAT-06.1/06.2): no route.",
+            "type": "boolean"
+          },
+          "operationEvents": {
+            "description": "Operation event streams: no route.",
+            "type": "boolean"
+          },
+          "operationsRead": {
+            "description": "`GET .../operations/{kind}/{name}`.",
+            "type": "boolean"
+          },
+          "preflight": {
+            "description": "Preflight checks (PLAT-03): no route.",
+            "type": "boolean"
+          },
+          "restoreCreate": {
+            "description": "`POST .../restores`.",
+            "type": "boolean"
+          },
+          "restoresRead": {
+            "description": "`GET .../restores[/{name}]`.",
+            "type": "boolean"
+          },
+          "scheduleCreate": {
+            "description": "`POST .../schedules`.",
+            "type": "boolean"
+          },
+          "scheduleSetSuspension": {
+            "description": "`POST .../schedules/{name}:set-suspension`.",
+            "type": "boolean"
+          },
+          "schedulesRead": {
+            "description": "`GET .../schedules[/{name}]`.",
+            "type": "boolean"
+          },
+          "topicDiscovery": {
+            "description": "Topic discovery (PLAT-09.1): no route.",
+            "type": "boolean"
+          }
+        }
+      },
+      "ConcurrencyPolicy": {
+        "description": "Whether a slot may start while an earlier run is unfinished.",
+        "oneOf": [
+          {
+            "description": "Never overlap (the default).",
+            "type": "string",
+            "enum": [
+              "Forbid"
+            ]
+          },
+          {
+            "description": "Permit overlapping slots.",
+            "type": "string",
+            "enum": [
+              "Allow"
+            ]
+          }
+        ]
+      },
+      "ConditionView": {
+        "description": "A status condition, with a bounded message.",
+        "type": "object",
+        "required": [
+          "status",
+          "type"
+        ],
+        "properties": {
+          "lastTransitionTime": {
+            "description": "When the condition last changed status or reason.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "message": {
+            "description": "The message, at most 1024 bytes.",
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "description": "`True`, `False` or `Unknown`.",
+            "type": "string"
+          },
+          "type": {
+            "description": "The condition type.",
+            "type": "string"
+          }
+        }
+      },
+      "Connection": {
+        "description": "A saved connection.",
+        "type": "object",
+        "required": [
+          "auth",
+          "bootstrapServers",
+          "name",
+          "namespace",
+          "reachability",
+          "resourceVersion",
+          "role",
+          "uid"
+        ],
+        "properties": {
+          "auth": {
+            "description": "Authentication settings.",
+            "$ref": "#/components/schemas/ConnectionAuthView"
+          },
+          "bootstrapServers": {
+            "description": "Bootstrap addresses.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "markerTopic": {
+            "description": "The marker topic.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "reachability": {
+            "description": "The controller's reachability observation.",
+            "$ref": "#/components/schemas/ReachabilityView"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role label.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "ConnectionAuthMode": {
+        "description": "The SASL mechanism, or `plaintext` for none.",
+        "oneOf": [
+          {
+            "description": "No SASL.",
+            "type": "string",
+            "enum": [
+              "plaintext"
+            ]
+          },
+          {
+            "description": "SASL/SCRAM-SHA-512.",
+            "type": "string",
+            "enum": [
+              "scramSha512"
+            ]
+          }
+        ]
+      },
+      "ConnectionAuthRequest": {
+        "description": "Authentication for a new connection. Existing credentials only: this request names a Secret; it never carries a password.",
+        "type": "object",
+        "required": [
+          "mode",
+          "tls"
+        ],
+        "properties": {
+          "credentialRef": {
+            "description": "An existing Secret in this namespace holding the SASL password; required for `scramSha512`, refused for `plaintext`.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "mode": {
+            "description": "`plaintext` or `scramSha512`.",
+            "$ref": "#/components/schemas/ConnectionAuthMode"
+          },
+          "tls": {
+            "description": "Whether the transport is TLS.",
+            "type": "boolean"
+          },
+          "username": {
+            "description": "The SASL principal; required for `scramSha512`, refused for `plaintext`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConnectionAuthView": {
+        "description": "Authentication settings of a stored connection.",
+        "type": "object",
+        "required": [
+          "mode",
+          "tls"
+        ],
+        "properties": {
+          "credentialRef": {
+            "description": "The credential Secret's NAME. Never its data.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "mode": {
+            "description": "`plaintext` or `scramSha512`.",
+            "$ref": "#/components/schemas/ConnectionAuthMode"
+          },
+          "tls": {
+            "description": "Whether the transport is TLS.",
+            "type": "boolean"
+          },
+          "username": {
+            "description": "The SASL principal.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ConnectionList": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Connection"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ConnectionResponse": {
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Connection"
+          },
+          "replayed": {
+            "description": "On a durable create: whether this response replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ConnectionRole": {
+        "description": "What a connection is to Logweir.",
+        "oneOf": [
+          {
+            "description": "A cluster backed up from.",
+            "type": "string",
+            "enum": [
+              "source"
+            ]
+          },
+          {
+            "description": "A cluster restored into.",
+            "type": "string",
+            "enum": [
+              "target"
+            ]
+          }
+        ]
+      },
+      "CreateConnectionRequest": {
+        "description": "`POST /api/v1/namespaces/{ns}/connections`.",
+        "type": "object",
+        "required": [
+          "auth",
+          "bootstrapServers",
+          "role"
+        ],
+        "properties": {
+          "auth": {
+            "description": "How Logweir authenticates.",
+            "$ref": "#/components/schemas/ConnectionAuthRequest"
+          },
+          "bootstrapServers": {
+            "description": "Broker bootstrap addresses, `host:port`, 1 to 16 entries.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "markerTopic": {
+            "description": "The marker topic that proves a scratch target.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "role": {
+            "description": "`source` or `target`.",
+            "$ref": "#/components/schemas/ConnectionRole"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateRestoreRequest": {
+        "description": "`POST /api/v1/namespaces/{ns}/restores`.\n\n`planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of exactly these bytes and stores them unchanged. It never parses or re-emits the plan document.",
+        "type": "object",
+        "required": [
+          "approvalRef",
+          "backupSetRef",
+          "deadlineSeconds",
+          "planBytes",
+          "planHash",
+          "pointInTime",
+          "sourceArchive",
+          "target"
+        ],
+        "properties": {
+          "approvalRef": {
+            "description": "The Approval that will authorise this restore, in this namespace. It need not exist yet: the controller holds the restore until it verifies.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "backupSetRef": {
+            "description": "The backup set ID inside the archive.",
+            "type": "string"
+          },
+          "deadlineSeconds": {
+            "description": "The Job deadline, 60 to 86400 seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "planBytes": {
+            "description": "The exact plan document bytes the approval will bind, at most 256 KiB.",
+            "type": "string"
+          },
+          "planHash": {
+            "description": "`sha256:<lowercase hex>` of `planBytes`, as the client computed it.",
+            "type": "string"
+          },
+          "pointInTime": {
+            "description": "The RFC 3339 point in time to restore to.",
+            "type": "string"
+          },
+          "sourceArchive": {
+            "description": "The archive to restore from.",
+            "$ref": "#/components/schemas/ArchiveRequest"
+          },
+          "target": {
+            "description": "Where the restore writes.",
+            "$ref": "#/components/schemas/RestoreTargetRequest"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateScheduleRequest": {
+        "description": "`POST /api/v1/namespaces/{ns}/schedules`.",
+        "type": "object",
+        "required": [
+          "archive",
+          "schedule",
+          "sourceRef",
+          "suspended",
+          "topics"
+        ],
+        "properties": {
+          "archive": {
+            "description": "Where backups are written.",
+            "$ref": "#/components/schemas/ArchiveRequest"
+          },
+          "concurrencyPolicy": {
+            "description": "`Forbid` (default) or `Allow`.",
+            "default": null,
+            "$ref": "#/components/schemas/ConcurrencyPolicy",
+            "nullable": true
+          },
+          "retention": {
+            "description": "Retention reporting.",
+            "default": null,
+            "$ref": "#/components/schemas/RetentionRequest",
+            "nullable": true
+          },
+          "schedule": {
+            "description": "A five-field UTC cron expression or `@hourly`/`@daily`/`@weekly`, parsed by the controller's own parser.",
+            "type": "string"
+          },
+          "sourceRef": {
+            "description": "The source connection, in this namespace.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "suspended": {
+            "description": "Whether the schedule starts suspended.",
+            "type": "boolean"
+          },
+          "topics": {
+            "description": "Named topics, 1 to 256; patterns are refused.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "FieldError": {
+        "description": "One field-level validation failure.",
+        "type": "object",
+        "required": [
+          "code",
+          "field",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "description": "A stable machine-readable code for this field, e.g. `required`.",
+            "type": "string"
+          },
+          "field": {
+            "description": "The JSON path of the field, e.g. `topics[2]`, or a header or query parameter name.",
+            "type": "string"
+          },
+          "message": {
+            "description": "A human-readable sentence. Never echoes a credential.",
+            "type": "string"
+          }
+        }
+      },
+      "HealthStatus": {
+        "description": "Health and readiness bodies.",
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "description": "`ok` (liveness), `ready` or `notReady`.",
+            "type": "string"
+          }
+        }
+      },
+      "NameRef": {
+        "description": "A same-namespace reference by name.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "description": "The referenced object's name, in the same namespace.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NamespaceGrant": {
+        "description": "One explicitly granted namespace.",
+        "type": "object",
+        "required": [
+          "capabilities",
+          "name"
+        ],
+        "properties": {
+          "capabilities": {
+            "description": "What the actor may do there. Domains without a route are `false`.",
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "name": {
+            "description": "The namespace name.",
+            "type": "string"
+          }
+        }
+      },
+      "NamespaceListResponse": {
+        "description": "`GET /api/v1/namespaces`.",
+        "type": "object",
+        "required": [
+          "items",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The configured grants. Core `Namespace` objects are never listed.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceGrant"
+            }
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ObservedAuthView": {
+        "description": "The identity a run presented.",
+        "type": "object",
+        "properties": {
+          "mode": {
+            "description": "`plaintext` or `scramSha512`.",
+            "type": "string",
+            "nullable": true
+          },
+          "username": {
+            "description": "The SASL principal presented.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "Operation": {
+        "description": "The normalized status of one Backup or Restore.",
+        "type": "object",
+        "required": [
+          "conditions",
+          "evidence",
+          "kind",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "result",
+          "state",
+          "terminal",
+          "uid",
+          "verification",
+          "verifiedSuccess"
+        ],
+        "properties": {
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "evidence": {
+            "description": "Evidence object references.",
+            "$ref": "#/components/schemas/OperationEvidence"
+          },
+          "jobName": {
+            "description": "The runner Job name, when one exists.",
+            "type": "string",
+            "nullable": true
+          },
+          "kind": {
+            "description": "`backup` or `restore`.",
+            "$ref": "#/components/schemas/OperationKind"
+          },
+          "lastUpdatedAt": {
+            "description": "The most recent condition transition or verification instant.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "message": {
+            "description": "The message of the condition that carries the reason, bounded.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this status was read at.",
+            "type": "string"
+          },
+          "result": {
+            "description": "The result, separate from verification.",
+            "$ref": "#/components/schemas/OperationResult"
+          },
+          "state": {
+            "description": "The lifecycle state.",
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "stateReason": {
+            "description": "The CamelCase reason for the state.",
+            "type": "string",
+            "nullable": true
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "verification": {
+            "description": "Evidence verification, separate from the result.",
+            "$ref": "#/components/schemas/OperationVerification"
+          },
+          "verifiedSuccess": {
+            "description": "True only when the result passed AND the evidence verified `Valid` (the controller's green-badge rule). `NotAttempted` is never verified success.",
+            "type": "boolean"
+          }
+        }
+      },
+      "OperationEvidence": {
+        "description": "Evidence object references. Keys and digests only.",
+        "type": "object",
+        "properties": {
+          "offsetReportKey": {
+            "description": "The restore offset report key.",
+            "type": "string",
+            "nullable": true
+          },
+          "offsetReportSha256": {
+            "description": "The restore offset report SHA-256.",
+            "type": "string",
+            "nullable": true
+          },
+          "payloadKey": {
+            "description": "The signed receipt (backup) or scorecard (restore) key.",
+            "type": "string",
+            "nullable": true
+          },
+          "payloadSha256": {
+            "description": "Its recorded SHA-256.",
+            "type": "string",
+            "nullable": true
+          },
+          "sidecarKey": {
+            "description": "The detached DSSE sidecar key.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "OperationKind": {
+        "description": "The two operation kinds with a status route in this build.",
+        "oneOf": [
+          {
+            "description": "A `Backup`.",
+            "type": "string",
+            "enum": [
+              "backup"
+            ]
+          },
+          {
+            "description": "A `Restore`.",
+            "type": "string",
+            "enum": [
+              "restore"
+            ]
+          }
+        ]
+      },
+      "OperationResponse": {
+        "description": "`GET .../operations/{kind}/{name}`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The normalized operation.",
+            "$ref": "#/components/schemas/Operation"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "OperationResult": {
+        "description": "The result half of an operation.",
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "exitCode": {
+            "description": "The runner's exit code, when one was recovered.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "exitReason": {
+            "description": "The wire exit reason or terminal state.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastPhaseCompleted": {
+            "description": "The last restore phase slot completed.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "outcome": {
+            "description": "The restore scorecard outcome (`pass`, `fail-objective`, ...).",
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "description": "The result class.",
+            "$ref": "#/components/schemas/ResultStatus"
+          }
+        }
+      },
+      "OperationState": {
+        "description": "The product lifecycle state.",
+        "oneOf": [
+          {
+            "description": "Accepted and waiting: not yet observed by the controller, or held for an approval.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "Waiting for execution capacity. Not produced by current resources.",
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          {
+            "description": "The controller is materializing execution inputs.",
+            "type": "string",
+            "enum": [
+              "preparing"
+            ]
+          },
+          {
+            "description": "The runner Job exists and has not finished.",
+            "type": "string",
+            "enum": [
+              "running"
+            ]
+          },
+          {
+            "description": "The run finished and its signed evidence has not been verified yet.",
+            "type": "string",
+            "enum": [
+              "verifying"
+            ]
+          },
+          {
+            "description": "The run exited 0.",
+            "type": "string",
+            "enum": [
+              "succeeded"
+            ]
+          },
+          {
+            "description": "The run finished without a pass, crashed, or failed operationally.",
+            "type": "string",
+            "enum": [
+              "failed"
+            ]
+          },
+          {
+            "description": "A guard or the controller refused the run before anything executed.",
+            "type": "string",
+            "enum": [
+              "refused"
+            ]
+          },
+          {
+            "description": "Cancelled. Not produced by current resources (no cancel exists).",
+            "type": "string",
+            "enum": [
+              "cancelled"
+            ]
+          },
+          {
+            "description": "A phase this build does not recognise.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "OperationSummary": {
+        "description": "The status summary carried by list items.",
+        "type": "object",
+        "required": [
+          "state",
+          "terminal",
+          "verificationState",
+          "verifiedSuccess"
+        ],
+        "properties": {
+          "state": {
+            "description": "The lifecycle state.",
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "stateReason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "verificationState": {
+            "description": "The verification state.",
+            "$ref": "#/components/schemas/VerificationState"
+          },
+          "verifiedSuccess": {
+            "description": "Result pass AND verification `Valid`.",
+            "type": "boolean"
+          }
+        }
+      },
+      "OperationVerification": {
+        "description": "The verification half of an operation.",
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "description": "Why the verdict is what it is, at most 512 bytes.",
+            "type": "string",
+            "nullable": true
+          },
+          "matchedKeyId": {
+            "description": "The TrustRoster signing key that verified the evidence.",
+            "type": "string",
+            "nullable": true
+          },
+          "payloadType": {
+            "description": "The DSSE payload type verified.",
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "description": "The verification state.",
+            "$ref": "#/components/schemas/VerificationState"
+          },
+          "verifiedAt": {
+            "description": "When the verdict was reached.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "Page": {
+        "description": "One page of a list.",
+        "type": "object",
+        "required": [
+          "limit"
+        ],
+        "properties": {
+          "limit": {
+            "description": "The page size that was applied.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "nextCursor": {
+            "description": "An opaque cursor for the next page, valid for fifteen minutes for the same actor, route, namespace and filters; absent on the last page.",
+            "type": "string",
+            "nullable": true
+          },
+          "snapshot": {
+            "description": "The Kubernetes list resourceVersion this page was read at.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "Problem": {
+        "description": "The rendered problem document.",
+        "type": "object",
+        "required": [
+          "code",
+          "detail",
+          "requestId",
+          "retryable",
+          "status",
+          "title",
+          "type"
+        ],
+        "properties": {
+          "code": {
+            "description": "The stable code.",
+            "$ref": "#/components/schemas/ProblemCode"
+          },
+          "detail": {
+            "description": "A sentence this service wrote. Never a Kubernetes message.",
+            "type": "string"
+          },
+          "errors": {
+            "description": "Field-level failures, when the code is `validation_failed`.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          },
+          "requestId": {
+            "description": "The request ID, also returned as `X-Request-ID`.",
+            "type": "string"
+          },
+          "retryable": {
+            "description": "Whether repeating the identical request later can succeed.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "The HTTP status, repeated.",
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0.0
+          },
+          "title": {
+            "description": "A fixed title for the code.",
+            "type": "string"
+          },
+          "type": {
+            "description": "`https://logweir.dev/problems/<code>`.",
+            "type": "string"
+          }
+        }
+      },
+      "ProblemCode": {
+        "description": "The stable problem codes. Clients branch on `code`, never on `detail`.\n\nThe decision's baseline set is here verbatim (`unauthenticated`, `session_expired`, `forbidden`, `namespace_forbidden`, `not_found`, `idempotency_conflict`, `state_conflict`, `approval_required`, `policy_mismatch`, `precondition_failed`, `validation_failed`, `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the cursor pair). The remainder name transport-level refusals the baseline did not enumerate; each is documented in the OpenAPI document.",
+        "oneOf": [
+          {
+            "description": "400 — the body is not JSON, a query string is malformed or carries an unknown or repeated parameter.",
+            "type": "string",
+            "enum": [
+              "malformed_request"
+            ]
+          },
+          {
+            "description": "400 — a header this service refuses outright (`Impersonate-*`).",
+            "type": "string",
+            "enum": [
+              "header_not_allowed"
+            ]
+          },
+          {
+            "description": "400 — a durable POST arrived without `Idempotency-Key`.",
+            "type": "string",
+            "enum": [
+              "idempotency_key_required"
+            ]
+          },
+          {
+            "description": "400 — `Idempotency-Key` is not 8–128 visible ASCII characters, or is present on a route that does not accept it.",
+            "type": "string",
+            "enum": [
+              "idempotency_key_invalid"
+            ]
+          },
+          {
+            "description": "400 — a list cursor failed authentication or names another scope.",
+            "type": "string",
+            "enum": [
+              "cursor_invalid"
+            ]
+          },
+          {
+            "description": "401 — no authenticated actor (PLAT-17.2 authenticators).",
+            "type": "string",
+            "enum": [
+              "unauthenticated"
+            ]
+          },
+          {
+            "description": "401 — the session is past its signed expiry (PLAT-17.2).",
+            "type": "string",
+            "enum": [
+              "session_expired"
+            ]
+          },
+          {
+            "description": "403 — the actor is not permitted this action.",
+            "type": "string",
+            "enum": [
+              "forbidden"
+            ]
+          },
+          {
+            "description": "403 — the namespace is not explicitly granted to the actor.",
+            "type": "string",
+            "enum": [
+              "namespace_forbidden"
+            ]
+          },
+          {
+            "description": "403 — an unsafe method without an `Origin` exactly equal to the configured public origin.",
+            "type": "string",
+            "enum": [
+              "origin_mismatch"
+            ]
+          },
+          {
+            "description": "404 — no such route or no such object.",
+            "type": "string",
+            "enum": [
+              "not_found"
+            ]
+          },
+          {
+            "description": "405 — the route exists and does not accept this method.",
+            "type": "string",
+            "enum": [
+              "method_not_allowed"
+            ]
+          },
+          {
+            "description": "409 — the idempotency key was already used with a different request.",
+            "type": "string",
+            "enum": [
+              "idempotency_conflict"
+            ]
+          },
+          {
+            "description": "409 — the deterministic object exists but was not created by this idempotency scope; it is never adopted.",
+            "type": "string",
+            "enum": [
+              "state_conflict"
+            ]
+          },
+          {
+            "description": "409 — an approval is required first (PLAT-19.2).",
+            "type": "string",
+            "enum": [
+              "approval_required"
+            ]
+          },
+          {
+            "description": "409 — the bound approval policy does not match (PLAT-19.2).",
+            "type": "string",
+            "enum": [
+              "policy_mismatch"
+            ]
+          },
+          {
+            "description": "410 — the list cursor expired or Kubernetes compacted its continue token; restart the list without a cursor.",
+            "type": "string",
+            "enum": [
+              "cursor_expired"
+            ]
+          },
+          {
+            "description": "412 — `expectedResourceVersion` is not the object's current version.",
+            "type": "string",
+            "enum": [
+              "precondition_failed"
+            ]
+          },
+          {
+            "description": "413 — the request body exceeds its limit.",
+            "type": "string",
+            "enum": [
+              "payload_too_large"
+            ]
+          },
+          {
+            "description": "415 — an unsafe method without `Content-Type: application/json`.",
+            "type": "string",
+            "enum": [
+              "unsupported_media_type"
+            ]
+          },
+          {
+            "description": "421 — the `Host` header names an authority this listener does not serve (DNS-rebinding defence).",
+            "type": "string",
+            "enum": [
+              "misdirected_request"
+            ]
+          },
+          {
+            "description": "422 — the request is well-formed JSON and fails validation.",
+            "type": "string",
+            "enum": [
+              "validation_failed"
+            ]
+          },
+          {
+            "description": "429 — Kubernetes throttled the request; see `Retry-After`.",
+            "type": "string",
+            "enum": [
+              "rate_limited"
+            ]
+          },
+          {
+            "description": "500 — an invariant this service holds did not hold.",
+            "type": "string",
+            "enum": [
+              "internal_error"
+            ]
+          },
+          {
+            "description": "503 — Kubernetes could not be reached or refused this service's own identity.",
+            "type": "string",
+            "enum": [
+              "kubernetes_unavailable"
+            ]
+          },
+          {
+            "description": "504 — the Kubernetes call exceeded its 10-second deadline.",
+            "type": "string",
+            "enum": [
+              "upstream_timeout"
+            ]
+          }
+        ]
+      },
+      "ReachabilityState": {
+        "description": "The controller's last reachability observation.",
+        "oneOf": [
+          {
+            "description": "The last probe reached a broker.",
+            "type": "string",
+            "enum": [
+              "reachable"
+            ]
+          },
+          {
+            "description": "The last probe did not.",
+            "type": "string",
+            "enum": [
+              "unreachable"
+            ]
+          },
+          {
+            "description": "No completed probe.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "ReachabilityView": {
+        "description": "Reachability, as the controller recorded it.",
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "clusterId": {
+            "description": "The cluster ID read from the broker.",
+            "type": "string",
+            "nullable": true
+          },
+          "observedAt": {
+            "description": "When the probe ran.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "reason": {
+            "description": "The controller's CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "description": "The state.",
+            "$ref": "#/components/schemas/ReachabilityState"
+          }
+        }
+      },
+      "RemovableSetView": {
+        "description": "One set retention would remove. It is still in the archive.",
+        "type": "object",
+        "required": [
+          "backupId",
+          "newestRecordAt",
+          "reason"
+        ],
+        "properties": {
+          "backupId": {
+            "description": "The backup set ID.",
+            "type": "string"
+          },
+          "days": {
+            "description": "The configured keepDays, for `OlderThanKeepDays`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "newestRecordAt": {
+            "description": "The newest record instant in the set.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "rank": {
+            "description": "The newest-first rank, for `BeyondKeepLast`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "reason": {
+            "description": "`OlderThanKeepDays` or `BeyondKeepLast`.",
+            "type": "string"
+          }
+        }
+      },
+      "Restore": {
+        "description": "A restore run.",
+        "type": "object",
+        "required": [
+          "approvalRef",
+          "backupSetRef",
+          "deadlineSeconds",
+          "name",
+          "namespace",
+          "newTopics",
+          "operation",
+          "planBytesLength",
+          "planHash",
+          "pointInTime",
+          "resourceVersion",
+          "sourceArchive",
+          "target",
+          "uid"
+        ],
+        "properties": {
+          "approvalRef": {
+            "description": "The Approval name this restore waits for.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "backupSetRef": {
+            "description": "The backup set ID.",
+            "type": "string"
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "deadlineSeconds": {
+            "description": "The Job deadline.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "newTopics": {
+            "description": "The topics this run created.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "operation": {
+            "description": "The normalized status summary.",
+            "$ref": "#/components/schemas/OperationSummary"
+          },
+          "planBytes": {
+            "description": "The stored plan bytes, unchanged. Present on the single-object read only; lists omit it.",
+            "type": "string",
+            "nullable": true
+          },
+          "planBytesLength": {
+            "description": "The stored plan bytes' length in bytes.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "planHash": {
+            "description": "`sha256:<hex>` of the stored plan bytes, computed by this service.",
+            "type": "string"
+          },
+          "pointInTime": {
+            "description": "The point in time.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion.",
+            "type": "string"
+          },
+          "sourceArchive": {
+            "description": "The archive restored from.",
+            "$ref": "#/components/schemas/ArchiveView"
+          },
+          "target": {
+            "description": "Where it writes.",
+            "$ref": "#/components/schemas/RestoreTargetView"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "RestoreList": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Restore"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "RestoreMode": {
+        "description": "`scratch` (a drill) or `newTopic`.",
+        "oneOf": [
+          {
+            "description": "A drill into a proven scratch cluster, torn down afterwards.",
+            "type": "string",
+            "enum": [
+              "scratch"
+            ]
+          },
+          {
+            "description": "A real restore into new topics.",
+            "type": "string",
+            "enum": [
+              "newTopic"
+            ]
+          }
+        ]
+      },
+      "RestoreResponse": {
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Restore"
+          },
+          "replayed": {
+            "description": "On a durable create: whether this response replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "RestoreTargetRequest": {
+        "description": "Where a restore writes.",
+        "type": "object",
+        "required": [
+          "clusterRef",
+          "mode",
+          "topicNaming"
+        ],
+        "properties": {
+          "clusterRef": {
+            "description": "The target connection, in this namespace.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "mode": {
+            "description": "`scratch` or `newTopic`.",
+            "$ref": "#/components/schemas/RestoreMode"
+          },
+          "topicNaming": {
+            "description": "Topic naming.",
+            "$ref": "#/components/schemas/TopicNamingRequest"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RestoreTargetView": {
+        "description": "A restore target, as stored.",
+        "type": "object",
+        "required": [
+          "clusterRef",
+          "mode",
+          "topicPrefix"
+        ],
+        "properties": {
+          "clusterRef": {
+            "description": "The target connection.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "mode": {
+            "description": "`scratch` or `newTopic`.",
+            "$ref": "#/components/schemas/RestoreMode"
+          },
+          "topicPrefix": {
+            "description": "The topic prefix.",
+            "type": "string"
+          }
+        }
+      },
+      "ResultStatus": {
+        "description": "The operation's result, separate from evidence verification.",
+        "oneOf": [
+          {
+            "description": "No result yet.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "Exit 0 (and, for a restore, outcome `pass` when recorded).",
+            "type": "string",
+            "enum": [
+              "pass"
+            ]
+          },
+          {
+            "description": "Exit 2: a signed result that is not a pass.",
+            "type": "string",
+            "enum": [
+              "notPass"
+            ]
+          },
+          {
+            "description": "Exit 3, or a controller refusal before execution.",
+            "type": "string",
+            "enum": [
+              "refused"
+            ]
+          },
+          {
+            "description": "Exit 1 or 4, a crash, or a terminal failure without a code.",
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          {
+            "description": "A combination this build does not recognise.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "RetentionReportView": {
+        "description": "The controller's retention report, bounded to 100 entries per list.",
+        "type": "object",
+        "required": [
+          "mcRemovalCommands",
+          "removalCommands",
+          "setsKept",
+          "setsThatWouldBeRemoved",
+          "skippedManifests",
+          "truncated"
+        ],
+        "properties": {
+          "evaluatedAt": {
+            "description": "When retention was last evaluated.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "keepDays": {
+            "description": "keepDays as applied.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "keepLast": {
+            "description": "keepLast as applied.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "mcRemovalCommands": {
+            "description": "The same commands in `mc` spelling.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "description": "Why nothing would be removed, when that is not \"nothing to remove\".",
+            "type": "string",
+            "nullable": true
+          },
+          "removalCommands": {
+            "description": "Removal commands in the archive scheme's own CLI. Reported, never run.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "setsKept": {
+            "description": "Kept set IDs, newest first.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "setsThatWouldBeRemoved": {
+            "description": "Sets that would be removed, newest first. Nothing was deleted.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemovableSetView"
+            }
+          },
+          "skippedManifests": {
+            "description": "How many manifests could not be read.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "truncated": {
+            "description": "Whether any list above was cut at 100 entries.",
+            "type": "boolean"
+          }
+        }
+      },
+      "RetentionRequest": {
+        "description": "Retention reporting settings. Logweir deletes nothing.",
+        "type": "object",
+        "properties": {
+          "keepDays": {
+            "description": "Keep sets newer than N days.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "keepLast": {
+            "description": "Keep the newest N sets.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "RetentionView": {
+        "description": "Retention settings of a stored schedule.",
+        "type": "object",
+        "properties": {
+          "keepDays": {
+            "description": "Keep sets newer than N days.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "keepLast": {
+            "description": "Keep the newest N sets.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "Schedule": {
+        "description": "A saved schedule.",
+        "type": "object",
+        "required": [
+          "archive",
+          "concurrencyPolicy",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "schedule",
+          "sourceRef",
+          "status",
+          "suspended",
+          "topics",
+          "uid"
+        ],
+        "properties": {
+          "archive": {
+            "description": "Where backups are written.",
+            "$ref": "#/components/schemas/ArchiveView"
+          },
+          "concurrencyPolicy": {
+            "description": "`Forbid` or `Allow`.",
+            "$ref": "#/components/schemas/ConcurrencyPolicy"
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion; send it back as `expectedResourceVersion`.",
+            "type": "string"
+          },
+          "retention": {
+            "description": "Retention reporting settings.",
+            "$ref": "#/components/schemas/RetentionView",
+            "nullable": true
+          },
+          "schedule": {
+            "description": "The cron expression.",
+            "type": "string"
+          },
+          "sourceRef": {
+            "description": "The source connection.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "status": {
+            "description": "What the controller recorded.",
+            "$ref": "#/components/schemas/ScheduleStatusView"
+          },
+          "suspended": {
+            "description": "Whether the schedule is suspended.",
+            "type": "boolean"
+          },
+          "topics": {
+            "description": "Named topics.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "ScheduleList": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Schedule"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ScheduleResponse": {
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Schedule"
+          },
+          "replayed": {
+            "description": "On a durable create: whether this response replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ScheduleStatusView": {
+        "description": "What the schedule controller last recorded.",
+        "type": "object",
+        "properties": {
+          "activeBackup": {
+            "description": "The running Backup's name.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastFireTime": {
+            "description": "When the schedule last created a Backup.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastMissedSlot": {
+            "description": "The most recent skipped slot.",
+            "type": "string",
+            "nullable": true
+          },
+          "nextFireTime": {
+            "description": "When it will next create one.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "pendingBackup": {
+            "description": "A reserved Backup name whose creation is not yet confirmed.",
+            "type": "string",
+            "nullable": true
+          },
+          "ready": {
+            "description": "The `Ready` condition.",
+            "$ref": "#/components/schemas/ConditionView",
+            "nullable": true
+          },
+          "retentionReport": {
+            "description": "The retention report.",
+            "$ref": "#/components/schemas/RetentionReportView",
+            "nullable": true
+          }
+        }
+      },
+      "SessionResponse": {
+        "description": "`GET /api/v1/session`.",
+        "type": "object",
+        "required": [
+          "actor",
+          "authenticationMode",
+          "capabilities",
+          "namespaces",
+          "requestId"
+        ],
+        "properties": {
+          "actor": {
+            "description": "The actor.",
+            "$ref": "#/components/schemas/ActorView"
+          },
+          "authenticationMode": {
+            "description": "How the actor was authenticated.",
+            "$ref": "#/components/schemas/AuthenticationMode"
+          },
+          "capabilities": {
+            "description": "The union of the grants' capabilities.",
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "csrfToken": {
+            "description": "The CSRF token for unsafe requests; `null` in localAdmin mode, which relies on the loopback listener and the exact Origin check.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When the session expires; `null` in localAdmin mode, which has no session.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "namespaces": {
+            "description": "The explicitly granted namespaces.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceGrant"
+            }
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "SetSuspensionRequest": {
+        "description": "`POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension`.",
+        "type": "object",
+        "required": [
+          "expectedResourceVersion",
+          "suspended"
+        ],
+        "properties": {
+          "expectedResourceVersion": {
+            "description": "The resourceVersion the client last read. A stale value is `precondition_failed`.",
+            "type": "string"
+          },
+          "suspended": {
+            "description": "The desired value of the schedule's one mutable field.",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SubjectRefView": {
+        "description": "What an approval is about.",
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "description": "`Restore` or `Backup`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The subject name.",
+            "type": "string"
+          }
+        }
+      },
+      "TopicNamingRequest": {
+        "description": "How restored topics are named.",
+        "type": "object",
+        "required": [
+          "prefix"
+        ],
+        "properties": {
+          "prefix": {
+            "description": "Prepended to each source topic name.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "VerificationState": {
+        "description": "Whether the controller verified the signed evidence.",
+        "oneOf": [
+          {
+            "description": "Not finished, or evidence exists and no verdict is recorded yet.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "The controller verified the signature and digest.",
+            "type": "string",
+            "enum": [
+              "valid"
+            ]
+          },
+          {
+            "description": "The controller verified and the answer was no.",
+            "type": "string",
+            "enum": [
+              "invalid"
+            ]
+          },
+          {
+            "description": "The controller could not attempt verification. NOT a verified result.",
+            "type": "string",
+            "enum": [
+              "notAttempted"
+            ]
+          },
+          {
+            "description": "The finished run recorded no signed evidence to verify.",
+            "type": "string",
+            "enum": [
+              "noEvidence"
+            ]
+          },
+          {
+            "description": "A verdict string this build does not recognise.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "VerifiedSubjectView": {
+        "description": "The exact object whose bytes the controller verified.",
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "namespace",
+          "uid"
+        ],
+        "properties": {
+          "kind": {
+            "description": "The subject kind.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The subject name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The subject namespace.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "The subject UID.",
+            "type": "string"
+          }
+        }
+      },
+      "WindowCoveredView": {
+        "description": "The covered window.",
+        "type": "object",
+        "required": [
+          "fromMs",
+          "toMs"
+        ],
+        "properties": {
+          "fromMs": {
+            "description": "Inclusive start, epoch milliseconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "toMs": {
+            "description": "Exclusive end, epoch milliseconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      }
+    }
+  },
+  "x-logweir-reserved-problem-codes": [
+    "approval_required",
+    "policy_mismatch"
+  ]
+}

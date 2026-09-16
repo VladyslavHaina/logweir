@@ -1,0 +1,78 @@
+[package]
+name = "logweir-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# NOT A RELEASE ARTIFACT YET. The console image (`Dockerfile.console`) and the
+# chart's `console.*` templates are later PLAT-17 stages. `publish = false`
+# keeps `dist plan` from treating this binary as a third release archive
+# before anything packages or checks it.
+publish = false
+
+# THE BOUNDED PRODUCT API (PLAT-17.1). It serves the static UI and `/api/v1`
+# on one origin and talks to Kubernetes through ONE adapter module
+# (`src/kube.rs`) with a closed set of typed resources. It is not a proxy.
+#
+# WHAT IT LINKS, AND WHAT IT MUST NOT. `weirkeeper` for the CRD types, the
+# cron parser and the green-badge rules (so this API and the controller cannot
+# disagree about what "verified" means), and `logweir-core` for the one
+# SHA-256 spelling. Through `weirkeeper` it reaches `logweir-verify` — the
+# verifying half — and NEVER `logweir-evidence` (the signer) or
+# `logweir-engine-oso` (the engine wrapper). `scripts/check-one-signer.sh`
+# names this crate on the verify/primitive allowlists and on neither signing
+# allowlist; `tests/linkage.rs` asserts both halves from `cargo metadata`.
+
+[lib]
+name = "logweir_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "logweir-api"
+path = "src/main.rs"
+
+[dependencies]
+# THE ONE NEW DEPENDENCY DECISION. axum over the Tokio/Hyper/Tower family the
+# workspace already resolves (hyper 1.11, hyper-util 0.1.20, tower 0.5.3). It
+# adds exactly three packages to `Cargo.lock` — axum 0.8.9, axum-core 0.5.6
+# and matchit 0.8.4 — and changes no existing entry's version. Default features
+# are OFF: no `json`, `query` or `form` extractors (their rejections are not
+# problem+json, so this crate parses bodies and queries itself), no `tracing`,
+# no `matched-path`. `http1` + `tokio` are what `axum::serve` needs.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+base64.workspace = true
+chrono.workspace = true
+hex.workspace = true
+# Already in Cargo.lock (0.12.1); the cursor MAC.
+hmac = "0.12"
+http = "1"
+http-body-util = "0.1"
+k8s-openapi = { version = "0.24", features = ["v1_29"] }
+# A subset of weirkeeper's feature list; the resolved feature set is the union.
+kube = { version = "0.99", default-features = false, features = ["client", "rustls-tls"] }
+logweir-core = { path = "../logweir-core" }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Already in Cargo.lock (0.7.1); strict query parsing with problem+json errors.
+serde_urlencoded = "0.7"
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+# `signal` for SIGTERM/SIGINT, `rt-multi-thread` for the server runtime, `sync`
+# for the readiness cache. All three are features of the already-resolved
+# tokio and add no package.
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync"] }
+tower = { version = "0.5", features = ["util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Request IDs. `ulid`'s default features read the clock and OS entropy, which
+# this impure crate is allowed to do (Global Constraint 1 binds logweir-core).
+ulid.workspace = true
+weirkeeper = { path = "../weirkeeper" }
+
+[dev-dependencies]
+
+[features]
+default = []

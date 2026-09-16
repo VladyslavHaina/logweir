@@ -133,14 +133,27 @@ ALLOWED_SOURCE="logweir-evidence logweir e2e"
 # ALLOWED_LINK seen from the other end, because verification shares the
 # primitives with signing. `logweir-verify` is here because a verifier needs
 # both primitives; `weirkeeper` is here because it links `logweir-verify`
-# (spec §8). FOUR NAMES, IN THIS ORDER, AND NO FIFTH — a fifth is the mutant
-# `check_two_states_the_narrowed_claim` exists to kill.
-ALLOWED_PRIMITIVE="logweir-evidence logweir logweir-verify weirkeeper"
+# (spec §8).
+#
+# THE FIFTH NAME IS `logweir-api`, ADDED BY PLAT-17.1, AND IT IS RECORDED HERE
+# RATHER THAN SLIPPED IN. The product API links `weirkeeper` for the six CRD
+# Rust types, the cron parser and the two green-badge rules — so that the API
+# and the controller cannot disagree about what "verified" means — and through
+# that edge it reaches `logweir-verify` and therefore both primitive crates. It
+# reaches NO signing API: `ALLOWED_LINK` and `ALLOWED_SOURCE` below are
+# unchanged and name neither it nor `weirkeeper`, and
+# `crates/logweir-api/tests/linkage.rs` asserts from `cargo metadata` that the
+# crate reaches `weirkeeper`, `logweir-core` and `logweir-verify` and never
+# `logweir-evidence`, `logweir-engine-oso` or `logweir-kafka`.
+# `crates/logweir/tests/one_signer_gate.rs` holds this list to exactly these
+# five names, so a sixth is the mutant that test exists to kill.
+ALLOWED_PRIMITIVE="logweir-evidence logweir logweir-verify weirkeeper logweir-api"
 # Crates permitted to LINK the VERIFYING crate (any dependency kind). A FOURTH,
 # SEPARATE allowlist: it governs `logweir-verify`, which holds no `SigningKey`,
 # no `sign_detached` and no entropy source, and it leaves ALLOWED_LINK and
-# ALLOWED_SOURCE untouched.
-ALLOWED_VERIFY_LINK="logweir-evidence logweir weirkeeper e2e"
+# ALLOWED_SOURCE untouched. `logweir-api` joins it for the reason recorded
+# above `ALLOWED_PRIMITIVE`: it links `weirkeeper`, which links the verifier.
+ALLOWED_VERIFY_LINK="logweir-evidence logweir weirkeeper e2e logweir-api"
 # The primitive crates check 2 walks are NOT a literal here any more (Task 32,
 # stage-2 carried item). `PRIMITIVES="p256 ed25519-dalek"` was a fixed list, so
 # a THIRD signing primitive added to `logweir-evidence` passed this gate in

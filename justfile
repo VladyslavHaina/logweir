@@ -41,8 +41,12 @@ test:
 golden:
     INSTA_UPDATE=always cargo test --workspace
 
-# Regenerates BOTH checked-in schemas. Tag 1 ships two (Global Constraint 13
-# as revised): the drill scorecard and the backup receipt. The CI drift arms at
+# Regenerates the checked-in schemas. Tag 1 ships two (Global Constraint 13
+# as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
+# THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
+# document generated from `crates/logweir-api`'s DTOs. The drift arm for it is
+# `crates/logweir-api/tests/contract.rs`, which compares the checked-in bytes
+# with the generator IN-PROCESS as well, so the gate holds with no subprocess. The CI drift arms at
 # .github/workflows/ci.yml regenerate each one into /tmp and `diff -u` it
 # against the file here, so a schema that stopped describing its type is a diff
 # a reviewer sees rather than a surprise at validation time.
@@ -54,6 +58,7 @@ golden:
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-1.0.0.json
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-1.0.0.json
+    cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -64,8 +69,10 @@ schema-check:
     trap 'rm -rf "$tmp"' EXIT
     cargo run --locked -p logweir-core --example emit_schema > "$tmp/scorecard.json"
     cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
+    cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     diff -u schemas/logweir-drill-scorecard-1.0.0.json "$tmp/scorecard.json"
     diff -u schemas/logweir-backup-receipt-1.0.0.json "$tmp/receipt.json"
+    diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

@@ -14,7 +14,7 @@ re-derives the expected set from `Cargo.lock` and fails naming any `name@version
 this file has lost, so a hand edit is caught by a test that reads the lockfile
 rather than this document.
 
-**Packages in the resolved graph: 392.**
+**Packages in the resolved graph: 396.**
 
 ## What this file is, and what `deny.toml` is
 
@@ -61,10 +61,10 @@ attributed in [NOTICE](NOTICE) instead.
 
 | arm | entries |
 |---|---|
-| licence file | 299 |
+| licence file | 302 |
 | `authors` field | 67 |
 | neither; the fact is stated | 16 |
-| this workspace | 10 |
+| this workspace | 11 |
 
 ## The inventory
 
@@ -189,6 +189,18 @@ attributed in [NOTICE](NOTICE) instead.
 - Copyright: Copyright (C) 2017 - 2025, Stephan Mueller <smueller@chronox.de>.
 - Copyright: Copyright 2008 Google Inc.
 - Copyright: Copyright (c) The Go Authors. All rights reserved.
+- Copyright source: licence file
+
+### axum@0.8.9
+
+- SPDX: `MIT`
+- Copyright: Copyright (c) 2019 axum Contributors
+- Copyright source: licence file
+
+### axum-core@0.5.6
+
+- SPDX: `MIT`
+- Copyright: Copyright (c) 2019–2025 axum Contributors
 - Copyright source: licence file
 
 ### backon@1.6.0
@@ -1136,6 +1148,12 @@ attributed in [NOTICE](NOTICE) instead.
 - Copyright: Copyright 2026 The Logweir Authors
 - Copyright source: this workspace
 
+### logweir-api@0.1.0
+
+- SPDX: `Apache-2.0`
+- Copyright: Copyright 2026 The Logweir Authors
+- Copyright source: this workspace
+
 ### logweir-core@0.1.0
 
 - SPDX: `Apache-2.0`
@@ -1188,6 +1206,13 @@ attributed in [NOTICE](NOTICE) instead.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2019 Eliza Weisman
+- Copyright source: licence file
+
+### matchit@0.8.4
+
+- SPDX: `MIT AND BSD-3-Clause`
+- Copyright: Copyright (c) 2022 Ibraheem Ahmed
+- Copyright: Copyright (c) 2013, Julien Schmidt
 - Copyright source: licence file
 
 ### md-5@0.11.0
