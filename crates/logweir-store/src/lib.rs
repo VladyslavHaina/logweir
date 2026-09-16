@@ -607,6 +607,107 @@ impl Store {
         })
     }
 
+    /// ONE BOUNDED PAGE of keys under `prefix`, in ascending key order,
+    /// starting strictly AFTER `start_after`, together with the cursor that
+    /// resumes the walk — `None` when this page exhausted the prefix.
+    ///
+    /// Decision D3 §5.2: this is the ONE new store capability the recovery
+    /// catalog needs, and it deliberately adds no write and no delete. It
+    /// exists because [`Store::list_keys`] is an UNBOUNDED, in-memory, sorted
+    /// list: a catalog of a hundred thousand points cannot be read by a
+    /// controller materialising a bounded Kubernetes view, and a CLI printing
+    /// fifty rows must not first hold every key in the bucket.
+    ///
+    /// # What `max` bounds, and what it does not
+    ///
+    /// It bounds the RESULT and this call's MEMORY: at most `max` keys are
+    /// retained at any moment, whatever the prefix holds.
+    ///
+    /// It does NOT bound how many objects the backend streams. `object_store`
+    /// 0.14.1 contracts no list ordering — "Note: the order of returned
+    /// `ObjectMeta` is not guaranteed" sits above `list_with_offset` itself
+    /// ([VERIFIED object_store-0.14.1/src/lib.rs:1238-1252]) — so a page that
+    /// took the first `max` keys off the stream and called them "the smallest
+    /// `max`" would be non-deterministic across backends, and its `next`
+    /// cursor could skip keys a later page would then never return. A catalog
+    /// that silently loses points is worse than one that lists slowly. The
+    /// walk is therefore complete and the SELECTION is bounded, and the design
+    /// keeps `n` small by day-sharding the log (D3 §5.2) rather than by
+    /// trusting an ordering the crate does not promise.
+    ///
+    /// `prefix` is evaluated on a PATH SEGMENT basis, which is
+    /// `ObjectStore::list`'s own rule and not this method's: `foo/bar` is a
+    /// prefix of `foo/bar/x` and **not** of `foo/bar_baz/x` ([VERIFIED
+    /// object_store-0.14.1/src/lib.rs:1233-1236]). A caller that wants
+    /// "everything whose key starts with this STRING" must list the containing
+    /// segment and filter; a partial segment matches nothing at all rather
+    /// than matching loosely, which is the safer of the two failure modes and
+    /// is why it is written down here.
+    ///
+    /// `start_after` is EXCLUSIVE, which is `list_with_offset`'s own contract
+    /// ("objects at exactly `offset` will not be included", ibid.), so feeding
+    /// the returned cursor straight back in returns the next page and never
+    /// repeats its last row.
+    ///
+    /// `max == 0` returns an empty page and no cursor: a caller asking for
+    /// nothing is answered with nothing rather than with everything.
+    pub fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<(Vec<String>, Option<String>), EngineError> {
+        use futures::StreamExt as _;
+        if max == 0 {
+            return Ok((Vec::new(), None));
+        }
+        let rt = &self.rt;
+        rt.block_on(async {
+            let p = OPath::from(prefix);
+            // `list_with_offset` when the caller gave a cursor, `list`
+            // otherwise. NOT `list` plus a filter: on S3 and GCS the offset is
+            // pushed down into the request, which is the whole reason D3 names
+            // this method rather than a slice of `list_keys`.
+            let mut st = match start_after {
+                Some(after) => self.inner.list_with_offset(Some(&p), &OPath::from(after)),
+                None => self.inner.list(Some(&p)),
+            };
+            // The bounded selection: `page` holds at most `max` keys, sorted
+            // ascending, and a key that is not smaller than the largest one
+            // held is discarded on arrival once the buffer is full. That is
+            // the whole memory bound.
+            let mut page: Vec<String> = Vec::with_capacity(max);
+            let mut more = false;
+            while let Some(m) = st.next().await {
+                let m = m.map_err(|e| EngineError::Operational(e.to_string()))?;
+                let key = m.location.to_string();
+                // `list_with_offset`'s default implementation filters on
+                // `location > offset`, but a backend may push the offset down
+                // itself; re-asserting it here means the exclusivity is this
+                // method's own property on every backend rather than a
+                // behaviour inherited from whichever one is configured.
+                if start_after.is_some_and(|after| key.as_str() <= after) {
+                    continue;
+                }
+                if page.len() == max {
+                    // SAFETY of the index: `max >= 1` and the buffer is full.
+                    if key >= page[max - 1] {
+                        more = true;
+                        continue;
+                    }
+                    page.pop();
+                    more = true;
+                }
+                let at = page.partition_point(|k| k.as_str() < key.as_str());
+                page.insert(at, key);
+            }
+            // The cursor is the page's LAST key and not the largest key seen:
+            // resuming from anything else would skip the keys between them.
+            let next = if more { page.last().cloned() } else { None };
+            Ok((page, next))
+        })
+    }
+
     /// Every key under `prefix` ending `/manifest.json` — exactly what the CLI's
     /// `list` scans (GT-10). Expressed as `list_keys` plus the filter, so the
     /// two can never disagree about what "under this prefix" means.
