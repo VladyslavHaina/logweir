@@ -42,6 +42,7 @@ import {
   MUTATION_MACHINE,
   MUTATION_PHASES,
   startMachine,
+  transitionError,
 } from "./workflow.js";
 
 // ============================================================== route half
@@ -552,6 +553,17 @@ export function createMutation(options) {
   const listeners = [];
 
   function publish(event, next) {
+    // A SETTLE THAT CANNOT MOVE MOVES NOTHING, AND SAYS SO WHERE SOMEBODY IS
+    // LISTENING. `run()`'s two settle handlers publish from inside a promise
+    // chain nobody awaits, so a TransitionError thrown here would leave the
+    // browser with an unhandled rejection and no record of what happened. The
+    // machine's table is the contract and an illegal move is still refused --
+    // `send` above throws for every caller that can catch it, including the
+    // exported `send` the suite drives -- but the answer to a move this record
+    // cannot make is to leave the record where it is.
+    if (!run.can(event)) {
+      return transitionError(MUTATION_MACHINE.name, run.state, event, run.accepts());
+    }
     run.send(event);
     const shape = MUTATION_PHASES[run.state];
     state = Object.freeze(
@@ -564,6 +576,7 @@ export function createMutation(options) {
         // A view's listener cannot corrupt the record other views read.
       }
     }
+    return null;
   }
 
   function answerable(attempt) {

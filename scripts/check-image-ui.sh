@@ -325,7 +325,7 @@ while IFS= read -r f; do
   image_count=$((image_count + 1))
 done < <(find "$work/ui" -type f | LC_ALL=C sort)
 
-# SIXTEEN, NAMED. A gate whose expected count came from the tree alone would
+# TWENTY, NAMED. A gate whose expected count came from the tree alone would
 # stay green if someone deleted seven files from both sides at once.
 if [ "$tree_count" -ne 20 ]; then
   fail "check 1 (the page): the tree holds $tree_count shipped UI file(s), not twenty." \

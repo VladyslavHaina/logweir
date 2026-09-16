@@ -16,7 +16,7 @@
 //! # The properties
 //!
 //! * The chart's `crds/` and `ui/` are byte-identical copies of `config/crd/`
-//!   and the sixteen shipped UI files — asserted here with `std::fs` and in
+//!   and the twenty shipped UI files — asserted here with `std::fs` and in
 //!   the script with `cmp`, so the property holds whichever runs first.
 //! * The DEFAULT render and `logweir.yaml` agree on the substance of the
 //!   control plane: the Deployment's args, every other env name and value,
@@ -285,7 +285,7 @@ fn is_digest_reference(reference: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
-/// The sixteen shipped UI files: everything under `ui/` except `*.md` and
+/// The twenty shipped UI files: everything under `ui/` except `*.md` and
 /// `tests/` — `scripts/check-ui-offline.sh`'s scope, by construction.
 fn shipped_ui_files() -> Vec<String> {
     let files: Vec<String> = files_under("ui")
@@ -372,7 +372,7 @@ fn chart_lint_crds_are_byte_identical_copies() {
 /// hash gate meaningless; a narrowly mounted `/ui/runtime` context does not.
 #[test]
 fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_context() {
-    // The sixteen are in the tree, where the image gate hashes
+    // The twenty are in the tree, where the image gate hashes
     // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
     // comparing against the wrong set.
     let shipped = shipped_ui_files();
@@ -1407,7 +1407,7 @@ const ACCEPT_PATHS: &str = "--accept-paths=^/(ui/|apis/logweir\\.dev/v1alpha1/)"
 /// not "stay green unedited": they would panic looking for it. They moved, and
 /// each of them got stronger on the way:
 ///
-///   * the sixteen files' BYTES -> `scripts/check-image-ui.sh` check 1, which
+///   * the twenty files' BYTES -> `scripts/check-image-ui.sh` check 1, which
 ///     hashes what the image serves against `ui/` rather than what a template
 ///     inlined;
 ///   * "and nothing else" -> the same check, which fails naming every extra
@@ -1433,7 +1433,7 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     assert_eq!(
         Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
         c["image"].as_str(),
-        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the sixteen \
+        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the twenty \
          shipped files copied in at /ui — under the namespace the runner pin names, at \
          `:{LOGWEIR_TAG}` like the other two Logweir images. A bare kubectl digest here is the \
          page back in a ConfigMap."

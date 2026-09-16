@@ -340,15 +340,31 @@ const CONDITION = shapeOf(
 
 const ARCHIVE = shapeOf("ArchiveView", { url: str }, { credentialRef: objectOf(NAME_REF) });
 
+/** The two authentication modes a connection may declare. */
+export const CONNECTION_AUTH_MODES = Object.freeze(["plaintext", "scramSha512"]);
+
+/** The two roles a connection may carry. */
+export const CONNECTION_ROLES = Object.freeze(["source", "target"]);
+
+/** The two concurrency policies a schedule may carry. */
+export const CONCURRENCY_POLICIES = Object.freeze(["Forbid", "Allow"]);
+
+/** The two target modes a restore may ask for. Byte for byte the runner's
+ *  `TargetMode` and the CRD's own enum -- see `ui/plan.js`. */
+export const RESTORE_MODES = Object.freeze(["scratch", "newTopic"]);
+
 const CONNECTION_AUTH = shapeOf(
   "ConnectionAuthView",
   { mode: str, tls: bool },
   { username: str, credentialRef: objectOf(NAME_REF) },
 );
 
+/** The reachability verdicts `crates/logweir-api/src/projection.rs` emits. */
+export const REACHABILITY_STATES = Object.freeze(["reachable", "unreachable", "unknown"]);
+
 const REACHABILITY = shapeOf(
   "ReachabilityView",
-  { state: oneOf(["reachable", "unreachable", "unknown"]) },
+  { state: oneOf(REACHABILITY_STATES) },
   { clusterId: str, observedAt: str, reason: str },
 );
 
@@ -500,9 +516,14 @@ const OPERATION_EVIDENCE = shapeOf(
   },
 );
 
+/** The result verdicts the same module emits. */
+export const RESULT_STATUSES = Object.freeze([
+  "pending", "pass", "notPass", "refused", "error", "unknown",
+]);
+
 const OPERATION_RESULT = shapeOf(
   "OperationResult",
-  { status: oneOf(["pending", "pass", "notPass", "refused", "error", "unknown"]) },
+  { status: oneOf(RESULT_STATUSES) },
   { exitCode: int, exitReason: str, outcome: str, lastPhaseCompleted: int },
 );
 
@@ -512,10 +533,13 @@ const OPERATION_VERIFICATION = shapeOf(
   { payloadType: str, matchedKeyId: str, verifiedAt: str, detail: str },
 );
 
+/** The two operation kinds the product API's route accepts. */
+export const OPERATION_KINDS = Object.freeze(["backup", "restore"]);
+
 const OPERATION = shapeOf(
   "Operation",
   {
-    kind: oneOf(["backup", "restore"]),
+    kind: oneOf(OPERATION_KINDS),
     name: str, namespace: str, uid: str, resourceVersion: str,
     state: oneOf(OPERATION_STATES), terminal: bool,
     result: objectOf(OPERATION_RESULT),
@@ -540,8 +564,17 @@ const BACKUP_LIST = envelope("BackupList");
 const RESTORE_LIST = envelope("RestoreList");
 const APPROVAL_LIST = envelope("ApprovalList");
 
+// A single-item response for a route that CREATES: `replayed` is how the
+// product API says "this idempotency key had already made this object".
 function item(name, itemShape) {
   return shapeOf(name, { item: objectOf(itemShape), requestId: str }, { replayed: bool });
+}
+
+// A single-item response for a route that only READS. It has no `replayed`,
+// and declaring one here would have been this client tolerating a field the
+// schema does not publish -- which the drift arm now refuses.
+function readOnlyItem(name, itemShape) {
+  return shapeOf(name, { item: objectOf(itemShape), requestId: str });
 }
 
 const CONNECTION_RESPONSE = item("ConnectionResponse", CONNECTION);
@@ -549,8 +582,110 @@ const SCHEDULE_RESPONSE = item("ScheduleResponse", SCHEDULE);
 const BACKUP_RESPONSE = item("BackupResponse", BACKUP);
 const RESTORE_RESPONSE = item("RestoreResponse", RESTORE);
 const APPROVAL_RESPONSE = item("ApprovalResponse", APPROVAL);
-const APPROVAL_PACKET_RESPONSE = item("ApprovalPacketResponse", APPROVAL_PACKET);
-const OPERATION_RESPONSE = item("OperationResponse", OPERATION);
+const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL_PACKET);
+const OPERATION_RESPONSE = readOnlyItem("OperationResponse", OPERATION);
+
+
+// ===========================================================================
+// the console REQUEST DTOs -- the other half of the contract
+// ===========================================================================
+//
+// WHY THESE ARE DECLARED AND NOT ONLY BUILT. `ui/client.js` hand-writes the
+// body of every product-API create. Nothing compared those bodies with the
+// published request schemas, so a field that became REQUIRED on a create route
+// would have been a 422 in front of an operator rather than a red test -- the
+// mirror image of the read-side failure this module exists to stop. They are
+// declared here, `ui/tests/contract.spec.js` holds them to
+// `schemas/logweir-api-v1.openapi.json` exactly as it holds the response
+// shapes, and `ui/tests/client.spec.js` validates the body `requestBody`
+// actually builds against them.
+//
+// THEY ARE NOT USED TO BUILD A REQUEST. A decoder is a reader; making it also
+// a writer would put a second opinion about the plan bytes in this tree.
+
+const ARCHIVE_REQUEST = shapeOf("ArchiveRequest", { url: str }, { credentialRef: objectOf(NAME_REF) });
+
+const CONNECTION_AUTH_REQUEST = shapeOf(
+  "ConnectionAuthRequest",
+  { mode: oneOf(CONNECTION_AUTH_MODES), tls: bool },
+  { username: str, credentialRef: objectOf(NAME_REF) },
+);
+
+const CREATE_CONNECTION_REQUEST = shapeOf(
+  "CreateConnectionRequest",
+  {
+    role: oneOf(CONNECTION_ROLES),
+    bootstrapServers: listOf(str),
+    auth: objectOf(CONNECTION_AUTH_REQUEST),
+  },
+  { markerTopic: str },
+);
+
+const RETENTION_REQUEST = shapeOf("RetentionRequest", {}, { keepLast: int, keepDays: int });
+
+const CREATE_SCHEDULE_REQUEST = shapeOf(
+  "CreateScheduleRequest",
+  {
+    schedule: str,
+    sourceRef: objectOf(NAME_REF),
+    topics: listOf(str),
+    archive: objectOf(ARCHIVE_REQUEST),
+    suspended: bool,
+  },
+  { concurrencyPolicy: oneOf(CONCURRENCY_POLICIES), retention: objectOf(RETENTION_REQUEST) },
+);
+
+const TOPIC_NAMING_REQUEST = shapeOf("TopicNamingRequest", { prefix: str });
+
+const RESTORE_TARGET_REQUEST = shapeOf(
+  "RestoreTargetRequest",
+  {
+    clusterRef: objectOf(NAME_REF),
+    mode: oneOf(RESTORE_MODES),
+    topicNaming: objectOf(TOPIC_NAMING_REQUEST),
+  },
+);
+
+const CREATE_RESTORE_REQUEST = shapeOf(
+  "CreateRestoreRequest",
+  {
+    planBytes: opaque,
+    planHash: str,
+    approvalRef: objectOf(NAME_REF),
+    sourceArchive: objectOf(ARCHIVE_REQUEST),
+    backupSetRef: str,
+    pointInTime: str,
+    target: objectOf(RESTORE_TARGET_REQUEST),
+    deadlineSeconds: int,
+  },
+);
+
+const SET_SUSPENSION_REQUEST = shapeOf(
+  "SetSuspensionRequest",
+  { suspended: bool, expectedResourceVersion: str },
+);
+
+/** The request shapes, by the plural whose create route takes them, plus the
+ *  one update. `ui/client.js` builds a body for each; the suite checks the
+ *  body it built against the shape, and the shape against the schema. */
+export const CONSOLE_REQUESTS = Object.freeze({
+  connections: CREATE_CONNECTION_REQUEST,
+  schedules: CREATE_SCHEDULE_REQUEST,
+  restores: CREATE_RESTORE_REQUEST,
+  "schedules:set-suspension": SET_SUSPENSION_REQUEST,
+});
+
+/** Checks a body this client BUILT against the shape the server publishes.
+ *  Returns [`Decoded`]; an unknown field is recorded here as it is on a
+ *  response, but a mutation input that carries one is a `422` from the product
+ *  API, so `ui/tests/client.spec.js` asserts the list is empty. */
+export function decodeRequest(name, value) {
+  const shape = CONSOLE_REQUESTS[name];
+  if (shape === undefined) {
+    throw contractFailure("ConsoleRequest", name, "no request shape is declared for this route");
+  }
+  return decodeWith(shape, value);
+}
 
 /** Every console DTO this client decodes, by the name the OpenAPI document
  *  gives it. `ui/tests/contract.spec.js` walks this map against
@@ -589,6 +724,51 @@ export const CONSOLE_SHAPES = Object.freeze({
   OperationResult: OPERATION_RESULT,
   OperationVerification: OPERATION_VERIFICATION,
   Operation: OPERATION,
+  ConnectionList: CONNECTION_LIST,
+  ScheduleList: SCHEDULE_LIST,
+  BackupList: BACKUP_LIST,
+  RestoreList: RESTORE_LIST,
+  ApprovalList: APPROVAL_LIST,
+  ConnectionResponse: CONNECTION_RESPONSE,
+  ScheduleResponse: SCHEDULE_RESPONSE,
+  BackupResponse: BACKUP_RESPONSE,
+  RestoreResponse: RESTORE_RESPONSE,
+  ApprovalResponse: APPROVAL_RESPONSE,
+  ApprovalPacketResponse: APPROVAL_PACKET_RESPONSE,
+  OperationResponse: OPERATION_RESPONSE,
+  ArchiveRequest: ARCHIVE_REQUEST,
+  ConnectionAuthRequest: CONNECTION_AUTH_REQUEST,
+  CreateConnectionRequest: CREATE_CONNECTION_REQUEST,
+  RetentionRequest: RETENTION_REQUEST,
+  CreateScheduleRequest: CREATE_SCHEDULE_REQUEST,
+  TopicNamingRequest: TOPIC_NAMING_REQUEST,
+  RestoreTargetRequest: RESTORE_TARGET_REQUEST,
+  CreateRestoreRequest: CREATE_RESTORE_REQUEST,
+  SetSuspensionRequest: SET_SUSPENSION_REQUEST,
+});
+
+/** EVERY CLOSED SET THIS CLIENT HOLDS, by the name the OpenAPI document gives
+ *  it. Each one was hand-copied out of that document, and a hand-copied list
+ *  is a list that drifts: a server that adds an eleventh `OperationState`
+ *  would turn every console list of that kind into a whole-page contract
+ *  failure, and no test would have gone red first. `ui/tests/contract.spec.js`
+ *  compares each of these with the union of the schema's own `oneOf[].enum`.
+ *
+ *  THE COPIES ELSEWHERE IN THE TREE ARE JOINED TO THESE. `ui/validate.js`
+ *  imports the two it enforces rather than keeping its own. `ui/plan.js`'s
+ *  `TARGET_MODES` stays its own -- it is the RUNNER's grammar, not the product
+ *  API's, and the two are equal by agreement rather than by construction -- so
+ *  the suite asserts that agreement instead of assuming it. */
+export const CONSOLE_ENUMS = Object.freeze({
+  ReachabilityState: REACHABILITY_STATES,
+  ResultStatus: RESULT_STATUSES,
+  OperationKind: OPERATION_KINDS,
+  OperationState: OPERATION_STATES,
+  VerificationState: VERIFICATION_STATES,
+  ConnectionAuthMode: CONNECTION_AUTH_MODES,
+  ConnectionRole: CONNECTION_ROLES,
+  ConcurrencyPolicy: CONCURRENCY_POLICIES,
+  RestoreMode: RESTORE_MODES,
 });
 
 /** @returns {Decoded} */
@@ -695,7 +875,13 @@ const LEGACY_SPECS = Object.freeze({
 });
 
 /** The `kind` a legacy object of each plural declares. Checked, because a
- *  proxy misconfigured onto another group would otherwise render silently. */
+ *  proxy misconfigured onto another group would otherwise render silently.
+ *
+ *  ON A LIST IT IS THE LIST'S OWN `kind` THAT CARRIES THIS. Kubernetes omits
+ *  `apiVersion` and `kind` on the items inside a `List`, so the per-item check
+ *  below never fires for a list member and could not be made to; what stands
+ *  there instead is the required `spec` fields, and what stands for the list is
+ *  `<Kind>List` on the envelope, checked in `decodeLegacyList`. */
 const LEGACY_KINDS = Object.freeze({
   kafkaclusters: "KafkaCluster",
   backupschedules: "BackupSchedule",
@@ -744,9 +930,17 @@ export function decodeLegacyList(plural, value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw contractFailure(LEGACY_KINDS[plural] + "List", "", "expected an object, got " + typeName(value));
   }
+  const listKind = LEGACY_KINDS[plural] + "List";
+  if (typeof value.kind === "string" && value.kind !== listKind) {
+    throw contractFailure(
+      listKind,
+      "kind",
+      "expected " + listKind + ", got " + JSON.stringify(value.kind),
+    );
+  }
   if (!Array.isArray(value.items)) {
     throw contractFailure(
-      LEGACY_KINDS[plural] + "List",
+      listKind,
       "items",
       "the field is required by the contract and is " + typeName(value.items),
     );

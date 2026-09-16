@@ -60,6 +60,7 @@ import {
   decodeLegacyObject,
   decodeOperation,
   decodeSession,
+  isContractFailure,
 } from "./contract.js";
 import { preparedFor } from "./plan.js";
 import { causesFrom, validateRequest } from "./validate.js";
@@ -422,7 +423,6 @@ const ABSENT_IN_CONSOLE = Object.freeze({
   backups: Object.freeze([
     "status.manifestSha256",
     "status.jobRef",
-    "spec.archive.prefix",
   ]),
   restores: Object.freeze(["status.integrity", "status.jobRef"]),
   approvals: Object.freeze([]),
@@ -740,19 +740,67 @@ function checked(plural, object, send) {
   return Promise.reject(error);
 }
 
+/** The page size the console client asks for. The product API's documented
+ *  maximum; a smaller one only means more round trips for the same rows. */
+export const LIST_PAGE_SIZE = 200;
+
+/** How many pages one list may follow before this page refuses to go on.
+ *  [`LIST_PAGE_SIZE`] times this is the most rows a console list will read. */
+export const LIST_PAGE_BUDGET = 25;
+
 const consoleApi = Object.freeze({
   async list(ns, plural, options) {
     const route = consolePlural(plural);
     requireGrant(ns, READ_CAPABILITY[route]);
-    const decoded = decodeConsoleList(route, await consoleList(ns, route, options));
     const project = PROJECT[plural];
-    return {
-      apiVersion: "logweir.dev/v1alpha1",
-      kind: KIND_OF[plural] + "List",
-      metadata: { resourceVersion: decoded.value.page.snapshot || "" },
-      items: decoded.value.items.map((item) => note(project(item), plural, decoded.unknown)),
-      __page: decoded.value.page,
-    };
+    // THE CURSOR IS FOLLOWED, AND A LIST IS NEVER SILENTLY SHORTENED.
+    //
+    // The product API pages; `kubectl proxy` does not, and every page in this
+    // tree was written against a list that holds the namespace. A console mode
+    // that stopped at the first fifty rows would show fewer Backups than the
+    // legacy mode shows, in the same table, with nothing on screen saying so --
+    // and `#/history` is the inventory somebody reads during an incident. So
+    // the pages are followed to the end.
+    //
+    // AND THE END IS BOUNDED. A namespace larger than the budget below is not
+    // quietly cut off either: it raises an error the page RENDERS, naming how
+    // many rows were read and what to run instead. A prefix presented as the
+    // whole is the failure this arm exists to prevent; a refusal that says so
+    // is not that failure. Rendering "showing the first N, more exist" beside
+    // the table would be better still, and it is PLAT-18.2's to add -- the
+    // table, its footer and its copy belong to that task.
+    const items = [];
+    const unknown = [];
+    let page = null;
+    let cursor = null;
+    for (let read = 0; read < LIST_PAGE_BUDGET; read += 1) {
+      const query = Object.assign({}, options || {}, { limit: LIST_PAGE_SIZE });
+      if (cursor !== null) {
+        query.cursor = cursor;
+      }
+      const decoded = decodeConsoleList(route, await consoleList(ns, route, query));
+      for (const item of decoded.value.items) {
+        items.push(note(project(item), plural, decoded.unknown));
+      }
+      for (const path of decoded.unknown) {
+        if (unknown.indexOf(path) === -1) {
+          unknown.push(path);
+        }
+      }
+      page = decoded.value.page;
+      cursor = page.nextCursor;
+      if (cursor === null) {
+        return {
+          apiVersion: "logweir.dev/v1alpha1",
+          kind: KIND_OF[plural] + "List",
+          metadata: { resourceVersion: page.snapshot || "" },
+          items: items,
+          __page: { limit: page.limit, nextCursor: null, snapshot: page.snapshot },
+          __unknown: unknown,
+        };
+      }
+    }
+    throw tooMany(ns, plural, items.length);
   },
   async get(ns, plural, name, options) {
     const route = consolePlural(plural);
@@ -925,11 +973,35 @@ function requestArchive(ref) {
   return out;
 }
 
+/** True for a refusal that means "this view does not get that extra", and
+ *  false for one that means "the answer was not what the contract says".
+ *
+ *  THE DISTINCTION IS THE WHOLE POINT OF [`enrich`]. A 403 or a 404 from the
+ *  operation route or the packet route is a fact about this actor or this
+ *  object -- the detail view stands without them and always did. A CONTRACT
+ *  FAILURE is a fact about the SERVER: the evidence block would render empty,
+ *  and an empty evidence block is exactly what "the controller recorded
+ *  nothing" looks like. `ui/contract.js`'s own header names that cell as the
+ *  thing this module exists to stop, and `ui/README.md` promises it is never
+ *  absorbed. So it is not absorbed. Nor is a 5xx or a timeout, which say the
+ *  server could not answer rather than that it would not. */
+function isMissingExtra(error) {
+  if (isContractFailure(error)) {
+    return false;
+  }
+  const status = (error || {}).status;
+  return status === 403 || status === 404;
+}
+
 /** A detail read's second half: the fields the product API keeps on their own
  *  routes. The operation carries the evidence and the exit; the approval
  *  packet carries the document bytes, and is read ONLY through the route that
- *  is named for it and ONLY when the session grants it. A refusal on either is
- *  not a failure of the detail view: the object is returned without them. */
+ *  is named for it and ONLY when the session grants it.
+ *
+ *  A refusal that means the extra is not for this view is not a failure of the
+ *  detail view and the object is returned without it. Anything else -- a
+ *  contract failure, a 5xx, a transport failure -- is raised, so the page shows
+ *  what went wrong instead of a cell that cannot be told from an empty one. */
 async function enrich(ns, plural, name, object, options) {
   if (plural === "backups" || plural === "restores") {
     if (!granted(ns, "operationsRead")) {
@@ -941,7 +1013,10 @@ async function enrich(ns, plural, name, object, options) {
       );
       return mergeOperation(object, decoded.value.item);
     } catch (unread) {
-      return object;
+      if (isMissingExtra(unread)) {
+        return object;
+      }
+      throw unread;
     }
   }
   if (plural === "approvals" && granted(ns, "approvalPacketRead")) {
@@ -952,11 +1027,30 @@ async function enrich(ns, plural, name, object, options) {
       object.spec.approvalBytes = decoded.value.item.approvalBytes;
       object.spec.sidecarBytes = decoded.value.item.sidecarBytes;
     } catch (unread) {
-      // The metadata view stands on its own; the bytes are an extra.
-      return object;
+      // The metadata view stands on its own; the bytes are an extra -- but
+      // only when the answer was a refusal and not a broken promise.
+      if (!isMissingExtra(unread)) {
+        throw unread;
+      }
     }
   }
   return object;
+}
+
+/** A namespace with more objects than one console list will read. `status` is
+ *  0 because the server answered every page it was asked for; what could not
+ *  be done was done here. */
+function tooMany(ns, plural, read) {
+  const error = new Error(
+    "namespace " + String(ns) + " holds more than " + String(read) + " " + String(plural) +
+      ", which is more than this page reads in one list. It is not showing you the first " +
+      String(read) + " as if they were all of them. Read them with kubectl, or narrow the " +
+      "namespace.",
+  );
+  error.kind = "refused";
+  error.status = 0;
+  error.reason = "ListTooLarge";
+  return error;
 }
 
 // --------------------------------------------------------------- the facade

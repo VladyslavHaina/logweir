@@ -29,6 +29,8 @@
 //
 // THIS MODULE ISSUES NO REQUEST, READS NO CLOCK AND TOUCHES NO DOM.
 
+import { CONNECTION_AUTH_MODES, RESTORE_MODES } from "./contract.js";
+
 /** A lowercase RFC 1123 subdomain: what Kubernetes accepts as an object name. */
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
 
@@ -184,8 +186,12 @@ function text(errors, value, path, what) {
   }
 }
 
-const AUTH_MODES = Object.freeze(["plaintext", "scramSha512"]);
-const TARGET_MODES = Object.freeze(["scratch", "newTopic"]);
+// THE TWO CLOSED SETS THIS MODULE ENFORCES, imported rather than copied.
+// `ui/contract.js` holds them against the published schema, so a set that
+// moved on the server fails a test here instead of refusing an operator's
+// input for a reason nobody wrote down.
+const AUTH_MODES = CONNECTION_AUTH_MODES;
+const TARGET_MODES = RESTORE_MODES;
 
 /** The checks for one kind, over the custom-resource-shaped body both modes
  *  build. Returns `FieldError[]` in the product API's own shape, with field

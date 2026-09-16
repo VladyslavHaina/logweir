@@ -152,13 +152,22 @@ export function startMachine(machine, options) {
 // duplicate-submission guard: `run()` asks `can("start")` and declines, and a
 // caller that sends it anyway gets a transition error naming the state it is
 // in.
+//
+// `unanswered` ACCEPTS EVERY ANSWER `pending` DOES, AND THAT INCLUDES
+// `abandon`. A submit that passes the timeout and then finds its route gone
+// settles as abandoned -- the wizard's `submitRestore` returns `null` for
+// exactly that, and the record must go back to `idle` where the operator left
+// it. Without this arm that late answer raised a TransitionError from inside a
+// promise nobody was awaiting, and the record stayed `unanswered` for good.
 export const MUTATION_MACHINE = defineMachine({
   name: "mutation",
   initial: "idle",
   states: {
     idle: { start: "pending", clear: "idle" },
     pending: { succeed: "succeeded", fail: "failed", timeout: "unanswered", abandon: "idle" },
-    unanswered: { succeed: "succeeded", fail: "failed", start: "pending", clear: "idle" },
+    unanswered: {
+      succeed: "succeeded", fail: "failed", abandon: "idle", start: "pending", clear: "idle",
+    },
     succeeded: { start: "pending", clear: "idle" },
     failed: { start: "pending", clear: "idle" },
   },
@@ -187,10 +196,24 @@ export const MUTATION_PHASES = Object.freeze({
 //
 // `replayWizard` takes the wizard's OWN derived step states -- the array
 // `pages/restore-wizard.js`'s `stepStates` returns -- and walks this machine
-// through them. A derivation that says "you are on the target step" while the
-// point in time is not whole cannot be walked, and the walk says so with a
-// transition error naming the step. That is a guard with a mutant: swap two
-// entries of the derivation and the walk stops.
+// through them, stopping at the first step that is not finished. THE ONE
+// INVARIANT IT HOLDS is that the step the walk stops on is the step the
+// derivation calls `current`: the stepper may not point a viewer at a place
+// the same derivation says is not reachable yet.
+//
+// IT IS NOT "NO LATER STEP MAY BE FINISHED", and an earlier draft of this
+// function said that and was wrong about the page. All six sections are on
+// screen at once and each reports its OWN completeness, so a wizard with no
+// recovery point chosen still has a reachable target cluster and step 5 reads
+// `done` while step 1 does not. Driving this over the real `stepStates` output
+// is what found that; the rule below is the one the page actually keeps.
+//
+// THIS MACHINE IS A TEST-TIME INVARIANT AND THE PAGE DOES NOT ENFORCE IT.
+// `stepStates` and `validateRestore` legitimately disagree today -- the
+// stepper wants a reachable target and the submit does not -- so wiring the
+// walk into the render path would CHANGE BEHAVIOUR, which PLAT-18.1 must not.
+// PLAT-18.2 owns the stepper and is where the two are reconciled and this is
+// enforced. `ui/README.md` says the same, so no reader assumes otherwise.
 export const WIZARD_STEPS = Object.freeze([
   "archive", "recoveryPoint", "pointInTime", "target", "preflight", "plan",
 ]);
@@ -216,11 +239,14 @@ export const WIZARD_MACHINE = defineMachine({
 
 /** Walks [`WIZARD_MACHINE`] through the step states the wizard derived.
  *
- *  Every step the derivation calls `done` is a named move forward; the first
- *  step it does not is where the walk stops, and that step must be the one the
- *  derivation calls `current`. Returns `{state, events, current}`. Throws a
- *  transition error when the derivation skipped a step, and a TypeError when
- *  it is not six steps in the declared order. */
+ *  Every finished step is a named move forward; the first unfinished one is
+ *  where the walk stops, and that step must be the one the derivation calls
+ *  `current`. A derivation with nothing left must call the LAST step current,
+ *  because that is where a viewer with every input whole is standing.
+ *
+ *  Returns `{state, events, current}`. Throws a transition error when the
+ *  derivation points somewhere the walk cannot reach, and a TypeError when it
+ *  is not six steps. */
 export function replayWizard(steps) {
   const list = Array.isArray(steps) ? steps : [];
   if (list.length !== WIZARD_STEPS.length) {
@@ -245,25 +271,18 @@ export function replayWizard(steps) {
   }
   const at = blocked === -1 ? WIZARD_STEPS.length : blocked;
   const current = at === WIZARD_STEPS.length ? "submitted" : WIZARD_STEPS[at];
-  if (blocked !== -1) {
-    // TWO WAYS A DERIVATION CAN STOP DESCRIBING THE WIZARD, and both land here
-    // as a move the machine cannot make from where it is standing. The first:
-    // the step it stopped on is not the step it calls current, so the stepper
-    // is pointing somewhere the viewer cannot be. The second: a LATER step
-    // claims to be finished, which is a step skipped over -- the machine has
-    // no event from here that reaches it, and that is exactly what the error
-    // says.
-    const skipped = list.findIndex(
-      (step, i) => i > blocked && (step.status === "done" || step.status === "ready"),
+  // WHERE THE DERIVATION SAYS THE VIEWER IS. One entry carries `current`, and
+  // it must be the step the walk stopped on -- or, for a derivation with
+  // nothing left to do, the last one.
+  const claimed = list.findIndex((step) => step.current === true);
+  const expected = blocked === -1 ? WIZARD_STEPS.length - 1 : blocked;
+  if (claimed !== expected) {
+    throw transitionError(
+      WIZARD_MACHINE.name,
+      run.state,
+      "resume:" + (claimed === -1 ? "nowhere" : WIZARD_STEPS[claimed]),
+      run.accepts(),
     );
-    if (list[blocked].current !== true || skipped !== -1) {
-      throw transitionError(
-        WIZARD_MACHINE.name,
-        run.state,
-        "resume:" + WIZARD_STEPS[skipped === -1 ? blocked : skipped],
-        run.accepts(),
-      );
-    }
   }
   return { state: run.state, events: run.events, current: current };
 }

@@ -384,6 +384,12 @@ function boot() {
     if (record.mode === CONSOLE && applyGrants(context, grantedNamespaces())) {
       renderCurrent();
     }
+  }, () => {
+    // `selectMode` resolves for every answer including a refusal, so this arm
+    // is for a throw inside `renderCurrent` above -- which would otherwise be
+    // an unhandled rejection with nothing on screen to say a render failed.
+    // The first render has already happened; there is nothing further to do
+    // here but not disappear silently.
   });
 }
 

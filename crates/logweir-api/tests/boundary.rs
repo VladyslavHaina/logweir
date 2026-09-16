@@ -410,8 +410,8 @@ async fn every_shipped_asset_is_served_byte_for_byte() {
     let files = shipped_ui_files();
     assert_eq!(
         files.len(),
-        16,
-        "the shipped UI is sixteen files: {files:?}"
+        20,
+        "the shipped UI is twenty files: {files:?}"
     );
     for rel in &files {
         let source = std::fs::read(support::repo_root().join(rel)).unwrap();

@@ -1,7 +1,7 @@
 {{/*
 `ui.enabled` — THE UI IN-CLUSTER, WITH ITS AUTHORITY STATED.
 
-One Deployment running `kubectl proxy`, which serves the sixteen shipped UI
+One Deployment running `kubectl proxy`, which serves the twenty shipped UI
 files out of the `logweir-ui` IMAGE at `/ui` (Task 39: `ui.image`, built by
 `Dockerfile.ui`, whose served bytes `scripts/check-image-ui.sh` hashes against
 the tree's `ui/`) AND proxies the Kubernetes API on the same origin, attaching
@@ -35,7 +35,7 @@ is right for a Service whose reachability IS the authorisation boundary. The
 image is Logweir's own `logweir-ui` at `:latest` (Task 37's tag ruling, the
 same shape the controller and runner images carry here); it is kubectl at the
 cluster's minor version — from the Kubernetes project's own registry, pinned by
-digest in `Dockerfile.ui` — with the sixteen shipped files copied in at `/ui`
+digest in `Dockerfile.ui` — with the twenty shipped files copied in at `/ui`
 and nothing else. Nothing in this file renders unless the flag is on.
 */}}
 {{- if .Values.ui.enabled }}

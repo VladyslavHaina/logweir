@@ -454,7 +454,15 @@ function writeInit(body, options) {
   return { method: "POST", headers: headers, body: JSON.stringify(body) };
 }
 
-// Reads a product-API response, raising the problem document on a non-2xx.
+// Reads a product-API response, raising the problem document on a non-2xx and
+// a NAMED contract violation on a 2xx whose body is not JSON.
+//
+// The second half is not hypothetical politeness: something between this page
+// and the product API -- a captive portal, a proxy's own error page -- answers
+// 200 with HTML, and a bare `JSON.parse` puts `Unexpected token '<'` in the
+// error box of a page whose whole contract story is that a body which is not
+// what it promised is said so by name. This file already builds that failure
+// for a non-2xx; it builds the same one here.
 async function problemBody(response) {
   const text = await response.text();
   if (!response.ok) {
@@ -463,7 +471,24 @@ async function problemBody(response) {
   if (text.length === 0) {
     return null;
   }
-  return JSON.parse(text);
+  return parsed(response, text);
+}
+
+// The same reading for the legacy half: a 2xx that is not JSON is named
+// rather than reported as a parser's complaint about a byte.
+function parsed(response, text) {
+  try {
+    return JSON.parse(text);
+  } catch (notJson) {
+    const error = new Error(
+      "the server answered " + String(response.status) + " with a body that is not JSON, and " +
+        "every successful answer of this API is: " + text.slice(0, 200),
+    );
+    error.status = response.status;
+    error.reason = "ContractViolation";
+    error.kind = "contract";
+    throw error;
+  }
 }
 
 // Refuses a product kind this page may not create, by name, before anything is
@@ -488,7 +513,7 @@ async function body(response) {
   if (text.length === 0) {
     return null;
   }
-  return JSON.parse(text);
+  return parsed(response, text);
 }
 
 // Refuses a plural the page may not write, by name, before anything is sent.
