@@ -194,6 +194,27 @@ arrives as a reviewable diff. Do not hand-edit those files.
 `Switchover` is tag 2 and ships in none of the above, not even as a value of
 `Approval.spec.subjectRef.kind`. `MetadataSnapshot` is reserved and unbuilt.
 
+**Absent-field behaviour for the D1 run contract.** `Backup.spec` gained
+`trigger {kind, attempt, retryOf, timeZone}`, three optional fields inside
+`scheduleRef` (`uid`, `generation`, `runPolicySha256`), `allUserTopics` and
+`status.selection`. Every one of them is optional. A `Backup` with no `trigger`
+is read as `Scheduled`/attempt 0 when `triggeredBy` is `schedule` and `Manual`
+otherwise — **exactly what the controller that created it did**, so upgrading
+converts nothing and writes nothing. A scheduled run with no
+`scheduleRef.uid` still takes its UID from the `BackupSchedule` controller
+ownerReference, as before.
+
+`spec.topics` STAYS REQUIRED. A dynamic run carries `topics: []` beside
+`spec.allUserTopics`, so an older controller still deserializes the object,
+renders an empty list and its runner refuses before contacting the engine; an
+absent `topics` would instead be a reflector decode error that stalls every
+`Backup` reconcile in the namespace. `allUserTopics.incompleteDiscovery` is
+**required and has no default**: Kafka silently omits topics a principal cannot
+describe, so no discovery proves whole-cluster visibility, and both possible
+defaults are wrong in a way an operator would not notice. A run records what it
+actually covered in `status.selection.coverage`, and no surface renders "all
+topics" unless that reads `AllUserTopicsAttested`.
+
 **Absent-field behaviour for the D3 additions.** `Backup.status.progress`,
 `Backup.status.capture`, `Restore.status.progress`, `Restore.status.completion`,
 `Restore.status.teardown` and the `signedAt` / `trust` fields inside

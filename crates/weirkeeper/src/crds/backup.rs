@@ -11,7 +11,100 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::selection::{AllUserTopics, SelectionStatus, TOPIC_NAME_PATTERN};
 use super::{ArchiveRef, Condition, EvidenceVerification, LocalRef, RunProgress, SpecRule, Time};
+
+/// The `spec.trigger.kind` values, and what each one means for identity.
+///
+/// # Why the trigger is a field and not an inference
+///
+/// `triggeredBy` already said `schedule` or `manual`, and that was enough
+/// while every scheduled run was attempt 0 of a slot that fired on time. It is
+/// not enough once a slot can be started LATE (a catch-up) or started AGAIN (a
+/// retry): all three are `schedule`, all three produce a different execution
+/// id, and a controller that had to infer which one it was looking at would be
+/// inferring it from a status field or a clock — the two inputs D1 §3.1 rule 7
+/// keeps out of the naming function.
+///
+/// `triggeredBy` is UNCHANGED and still what the signed receipt carries.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+pub enum TriggerKind {
+    /// A slot that fired at its own instant. `attempt` is 0.
+    Scheduled,
+    /// Slot S, started late because the controller was not running when it came
+    /// due. Its name and execution id are Scheduled's — **it is the same slot**,
+    /// and giving a catch-up an identity of its own would let a restart produce
+    /// a second archive of one window.
+    CatchUp,
+    /// Attempt `k` of slot S, `1..=3`. A NEW execution id, never a second write
+    /// under the old one: a failed attempt may have written part of an archive,
+    /// and reusing its `backup_id` would append into that partial prefix.
+    Retry,
+    /// Created by a person, the API or the console. No slot, and the execution
+    /// id is this object's own UID.
+    Manual,
+}
+
+/// What caused this run, in the form identity is derived from.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Trigger {
+    /// Which kind of run this is.
+    pub kind: TriggerKind,
+    /// `0` for `Scheduled` and `CatchUp`, `1..=3` for `Retry`, `0` for
+    /// `Manual`.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 3))]
+    pub attempt: i32,
+    /// The attempt this one retries — `name(S, attempt - 1)`, checked rather
+    /// than trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<LocalRef>,
+    /// The IANA zone the slot was computed in.
+    ///
+    /// INFORMATIONAL, AND THAT IS THE POINT. The slot itself is UTC; this
+    /// records the zone it was computed in so a history row keeps its local
+    /// time after somebody edits the schedule's `timeZone`. Nothing resolves a
+    /// run from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub time_zone: Option<String>,
+}
+
+/// The `BackupSchedule` this run belongs to, and the revision of its policy.
+///
+/// # Why this grew four fields
+///
+/// It was a bare name, which was enough while a schedule's spec was immutable.
+/// PLAT-05.1 makes the policy editable, so "which schedule" stops answering
+/// "under which policy": `uid` distinguishes a same-named replacement,
+/// `generation` names the revision, and `runPolicySha256` is the digest of the
+/// fields that decide WHAT a run does — so a `suspend` flip visibly leaves it
+/// unchanged while a topic-list edit visibly does not.
+///
+/// Every field but `name` is optional, because a `Backup` created before they
+/// existed has none of them and must keep resolving exactly as it did.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRef {
+    /// The `BackupSchedule` name, in this namespace.
+    pub name: String,
+    /// Its UID. A schedule deleted and recreated under the same name is a
+    /// different schedule and must not adopt this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// Its `metadata.generation` when this run was admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+    /// `sha256:<lowercase hex>` over the run policy this run copied.
+    ///
+    /// AN INTEGRITY CHECK AGAINST BUGS, NOT A SECURITY BOUNDARY (D1 §8.7).
+    /// `Backup.spec` is CEL-immutable and the controller recomputes this from
+    /// the object's own fields; a mismatch means the copy and the fields
+    /// disagree, which is a control-plane defect and terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_policy_sha256: Option<String>,
+}
 
 /// The CEL rule that ties `spec.destinationRef` to the sentinel in
 /// `spec.archive.url`, on every create as well as every update.
@@ -168,7 +261,19 @@ pub struct BackupSpec {
     pub source_ref: LocalRef,
     /// NAMED topics, never patterns — guard **G-GLOB**, as on
     /// `BackupSchedule`.
+    ///
+    /// `[]` WITH `allUserTopics` SET IS DYNAMIC MODE, and the field stays
+    /// required in both: an older controller reading a dynamic object
+    /// deserializes it, renders an empty list, and the runner refuses before
+    /// it contacts the engine. Making this optional would have made a rollback
+    /// a reflector decode error across the whole kind.
+    #[schemars(inner(regex(path = "TOPIC_NAME_PATTERN")))]
     pub topics: Vec<String>,
+    /// Dynamic selection: every user topic this run's principal can see, minus
+    /// the exclusions. Set with `topics: []`, and never beside a non-empty
+    /// `topics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_user_topics: Option<AllUserTopics>,
     /// Where the archive is written.
     ///
     /// With `destinationRef` set this is the sentinel
@@ -184,9 +289,10 @@ pub struct BackupSpec {
     /// terminally, which is the intended rollback behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_ref: Option<LocalRef>,
-    /// The `BackupSchedule` that created this object, when one did.
+    /// The `BackupSchedule` that created this object, when one did, and the
+    /// revision of the policy it copied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schedule_ref: Option<LocalRef>,
+    pub schedule_ref: Option<ScheduleRef>,
     /// The schedule slot this run is for, `yyyymmdd-hhmmss` in UTC. Part of
     /// this object's name and of `status.backupId`; guard **G-SLOT**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,7 +300,20 @@ pub struct BackupSpec {
     /// What caused this run — `schedule` or `manual`. Recorded rather than
     /// inferred from the presence of `scheduleRef`, because the receipt
     /// carries it and an auditor reads the receipt.
+    ///
+    /// UNCHANGED, AND STILL THE RECEIPT'S. `trigger` beside it is finer —
+    /// `Scheduled`, `CatchUp`, `Retry`, `Manual` — and is what run IDENTITY is
+    /// derived from; this stays the two-value vocabulary the signed document
+    /// carries, so no existing receipt or fixture changes meaning.
     pub triggered_by: String,
+    /// The finer trigger, and the attempt inside its slot.
+    ///
+    /// Optional, because a `Backup` created before it existed has none: such a
+    /// run is read as `Scheduled`/attempt 0 when `triggeredBy` is `schedule`
+    /// and `Manual` otherwise (D1 §3.1 rule 4), which is exactly what the
+    /// earlier controller did with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Trigger>,
     /// The Job's `activeDeadlineSeconds`.
     pub deadline_seconds: i64,
 }
@@ -267,6 +386,10 @@ pub struct BackupStatus {
     /// The Job that ran, or is running, this backup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<LocalRef>,
+    /// What the run's topic resolution found, and what it may claim to have
+    /// covered. Absent on a run frozen before dynamic selection existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionStatus>,
     /// What this run is doing right now, and why it is taking as long as it
     /// is. **Absent on a `Backup` an older controller reconciled**, which is
     /// the documented absent-field behaviour and not a degraded state.

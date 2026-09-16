@@ -1670,8 +1670,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        24,
-        "the twenty-four terminal states that are NOT an exit code — the original ten, plus \
+        34,
+        "the thirty-four terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -1680,7 +1680,13 @@ fn every_exit_code_maps_to_its_wire_reason() {
          interface I19, so it lives in `CONDITION_REASONS`), plus `ExecutionSpecInvalid` \
          (PLAT-06.1: a typed spec that states no runnable identity), plus PLAT-07.1's four \
          saved-connection refusals `ConnectionConfigInvalid` / `ConnectionReferenceInvalid` / \
-         `ConnectionFieldUnsupported` / `ConnectionPlanMismatch`; got {TERMINAL_STATES:?}"
+         `ConnectionFieldUnsupported` / `ConnectionPlanMismatch`, plus D1 §3.4's ten — the \
+         three identity refusals `ScheduledIdentityMismatch` / `ScheduleNotFound` / \
+         `RunPolicyDigestMismatch` and the seven selection and discovery refusals \
+         `InvalidTopicSelection` / `DiscoveryFailed` / `DiscoveryIncomplete` / \
+         `DiscoveryResultUnreadable` / `SelectionEmpty` / `SelectionTooLarge` / \
+         `SourceChangedDuringResolution`, of which only `DiscoveryFailed` is retryable; \
+         got {TERMINAL_STATES:?}"
     );
     for state in TERMINAL_STATES {
         assert!(

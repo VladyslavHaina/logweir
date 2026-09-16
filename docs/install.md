@@ -526,6 +526,10 @@ status blocks on `Backup`, `BackupSchedule` and `Restore`, and one additive
 enum value on `Approval`. **No kind is removed**: `TrustRoster` is deprecated in
 its description and still served, and with no `TrustPolicy` present the
 controller synthesises `legacy-roster-v1` from it, so nothing has to be migrated.
+`Backup` additionally gains the D1 run contract — `spec.trigger`, three fields
+inside `spec.scheduleRef`, `spec.allUserTopics` and `status.selection` — all
+optional, and a `Backup` with none of them is read exactly as the controller
+that created it read it.
 No existing object is converted, nothing is rewritten, and an object that names
 none of the new fields resolves exactly as it did. The one field that stopped
 being required — `Restore.spec.approvalRef` — is still required in effect: CEL

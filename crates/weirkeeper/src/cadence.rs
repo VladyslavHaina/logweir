@@ -734,15 +734,17 @@ pub struct TerminalOutcome<'a> {
 /// the product already made. A guard refusal, a not-a-pass drill and a signing
 /// failure are all decisions, and D1 §4.6 never retries a decision.
 ///
-/// `"DiscoveryFailed"` IS SPELLED OUT because D1 §3.4 assigns the constant to
-/// `conditions.rs` and D1 §11.1 assigns that file to another worker; the
-/// spelling is pinned by `retry_classification_is_a_closed_match_and_unknown_is_not_retryable`,
-/// and the constant replaces the literal when it lands.
+/// `DiscoveryFailed` WAS A LITERAL HERE and is now
+/// [`crate::conditions::TERMINAL_STATE_DISCOVERY_FAILED`]: D1 §3.4 assigns the
+/// constant to `conditions.rs`, D1 §11.1 assigned that file to W3a, and W3a
+/// has landed it. The VALUE is unchanged, which is what
+/// `retry_classification_is_a_closed_match_and_unknown_is_not_retryable`
+/// asserts by naming the exact list.
 pub const RETRYABLE_TERMINAL_STATES: &[&str] = &[
     crate::conditions::TERMINAL_STATE_DISRUPTED_MID_DRILL,
     crate::conditions::TERMINAL_STATE_POD_UNSCHEDULABLE,
     crate::conditions::TERMINAL_STATE_NO_EXIT_CODE,
-    "DiscoveryFailed",
+    crate::conditions::TERMINAL_STATE_DISCOVERY_FAILED,
 ];
 
 /// Whether D1 §4.6 retries this terminal record.

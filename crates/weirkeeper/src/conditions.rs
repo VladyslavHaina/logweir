@@ -174,6 +174,16 @@ pub const TERMINAL_STATES: &[&str] = &[
     TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
     TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
     TERMINAL_STATE_CONNECTION_PLAN_MISMATCH,
+    TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+    TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+    TERMINAL_STATE_RUN_POLICY_DIGEST_MISMATCH,
+    TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+    TERMINAL_STATE_DISCOVERY_FAILED,
+    TERMINAL_STATE_DISCOVERY_INCOMPLETE,
+    TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+    TERMINAL_STATE_SELECTION_EMPTY,
+    TERMINAL_STATE_SELECTION_TOO_LARGE,
+    TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
 ];
 
 /// The typed `Backup.spec` cannot produce a runner execution: `triggeredBy` is
@@ -584,7 +594,154 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_JOB_INPUTS_MISMATCH,
     REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
+    REASON_DISCOVERY_RUNNING,
+    REASON_RESOLVED,
+    REASON_RETAINED,
+    REASON_HISTORY_LARGE,
+    REASON_LEGACY_OWNER_REFERENCES_REMAIN,
+    REASON_ACTIVE_LEGACY_RUNS_OWNED,
+    REASON_MIGRATION_BLOCKED,
+    REASON_CAUGHT_UP,
+    REASON_CATCH_UP_BLOCKED,
+    REASON_RETRY_SCHEDULED,
+    REASON_RETRY_PENDING,
+    REASON_RETRY_BLOCKED,
+    REASON_RETRY_EXHAUSTED,
+    REASON_RUN_FAILED,
+    REASON_SLOT_NAME_UNAVAILABLE,
+    REASON_ACTIVE_RUN_LIMIT,
+    REASON_UNKNOWN_TIME_ZONE,
+    REASON_INVALID_TOPIC_SELECTION,
+    REASON_INVALID_RUN_POLICY,
+    REASON_CRD_OUTDATED,
 ];
+
+// ===========================================================================
+// D1 §3.4 — the cadence, selection and identity vocabulary
+// ===========================================================================
+
+/// The identity a scheduled `Backup` claims is not the one its own fields
+/// compose (D1 §3.1 rules 1 and 3).
+///
+/// TERMINAL, AND NEVER RE-READ AS A MANUAL RUN. A manual run executes under
+/// its own UID, so quietly accepting a misnamed scheduled object would let it
+/// write a second archive of a window a scheduled run already owns.
+pub const TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH: &str = "ScheduledIdentityMismatch";
+
+/// A scheduled `Backup` whose `spec.scheduleRef` names a schedule this
+/// namespace does not have (D1 §3.1 rule 2).
+///
+/// **Deleting a schedule stops future work.** Checked only BEFORE the freeze:
+/// once a run's inputs exist, nothing is re-checked, so deleting a schedule
+/// never kills a run that is already executing.
+pub const TERMINAL_STATE_SCHEDULE_NOT_FOUND: &str = "ScheduleNotFound";
+
+/// `spec.scheduleRef.runPolicySha256` disagrees with the digest recomputed
+/// from this object's own policy fields (D1 §3.1 rule 5).
+pub const TERMINAL_STATE_RUN_POLICY_DIGEST_MISMATCH: &str = "RunPolicyDigestMismatch";
+
+/// `spec.topics` and `spec.allUserTopics` do not form one of the two legal
+/// selection shapes, or a name in either is not Kafka-legal.
+pub const TERMINAL_STATE_INVALID_TOPIC_SELECTION: &str = "InvalidTopicSelection";
+
+/// The discovery Job did not produce a usable result — unreachable broker,
+/// timeout, authentication failure, a non-zero exit.
+///
+/// **RETRYABLE**, and the one member of [`crate::cadence::RETRYABLE_TERMINAL_STATES`]
+/// this task adds: a broker that was down can be up in five minutes, and
+/// nothing was decided.
+pub const TERMINAL_STATE_DISCOVERY_FAILED: &str = "DiscoveryFailed";
+
+/// Discovery could not prove it saw every topic and the policy says `Refuse`.
+///
+/// NOT RETRYABLE. Re-running would ask the same principal the same question
+/// and get the same partial answer; what changes it is an ACL or an
+/// administrator attestation.
+pub const TERMINAL_STATE_DISCOVERY_INCOMPLETE: &str = "DiscoveryIncomplete";
+
+/// The discovery output was malformed: a missing or duplicated summary, a
+/// count or digest that does not match the lines, a name no broker could have
+/// produced. NOT retryable — malformed output is a defect, not a blip.
+pub const TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE: &str = "DiscoveryResultUnreadable";
+
+/// Dynamic selection resolved to nothing: every user topic excluded, or an
+/// empty cluster. **The runner is never started**, because a backup of no
+/// topics is not a backup.
+pub const TERMINAL_STATE_SELECTION_EMPTY: &str = "SelectionEmpty";
+
+/// Dynamic selection resolved to more than the run may carry.
+pub const TERMINAL_STATE_SELECTION_TOO_LARGE: &str = "SelectionTooLarge";
+
+/// The source connection resolved to something different between discovery and
+/// the freeze — a `KafkaCluster` edited or replaced mid-resolution.
+pub const TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION: &str = "SourceChangedDuringResolution";
+
+/// `phase` while a dynamic run is resolving its topic list.
+///
+/// NONTERMINAL, and safe to add: `backup_is_terminal` already treats a phase
+/// it does not recognise as active, so an older controller reading a
+/// `Resolving` Backup does not mistake it for a finished one.
+pub const PHASE_RESOLVING: &str = "Resolving";
+
+/// The condition type carrying a dynamic run's topic resolution.
+pub const CONDITION_TOPICS_RESOLVED: &str = "TopicsResolved";
+
+/// `TopicsResolved=False` while the discovery Job is running.
+pub const REASON_DISCOVERY_RUNNING: &str = "DiscoveryRunning";
+
+/// `TopicsResolved=True` once the list is frozen.
+pub const REASON_RESOLVED: &str = "Resolved";
+
+/// The condition type carrying whether a schedule's run history is retained
+/// independently of the schedule object (PLAT-05.2).
+pub const CONDITION_HISTORY_RETAINED: &str = "HistoryRetained";
+
+/// `HistoryRetained=True`: no run is owned by the schedule any more.
+pub const REASON_RETAINED: &str = "Retained";
+
+/// `HistoryRetained=True` with a warning: the retained history is large enough
+/// to be worth an operator's attention.
+pub const REASON_HISTORY_LARGE: &str = "HistoryLarge";
+
+/// `HistoryRetained=False`: legacy controller ownerReferences remain.
+pub const REASON_LEGACY_OWNER_REFERENCES_REMAIN: &str = "LegacyOwnerReferencesRemain";
+
+/// `HistoryRetained=False`: a run the schedule still owns is active, so its
+/// ownerReference is not removed yet.
+pub const REASON_ACTIVE_LEGACY_RUNS_OWNED: &str = "ActiveLegacyRunsOwned";
+
+/// `HistoryRetained=False`: the migration cannot proceed.
+pub const REASON_MIGRATION_BLOCKED: &str = "MigrationBlocked";
+
+/// `BackupSchedule` `Ready` reason: every missed slot has been caught up.
+pub const REASON_CAUGHT_UP: &str = "CaughtUp";
+/// `Ready` reason: a catch-up is due but something blocks it.
+pub const REASON_CATCH_UP_BLOCKED: &str = "CatchUpBlocked";
+/// `Ready` reason: a retry has been admitted.
+pub const REASON_RETRY_SCHEDULED: &str = "RetryScheduled";
+/// `Ready` reason: a retry is waiting out its delay.
+pub const REASON_RETRY_PENDING: &str = "RetryPending";
+/// `Ready` reason: a retry is due but concurrency or a newer slot blocks it.
+pub const REASON_RETRY_BLOCKED: &str = "RetryBlocked";
+/// `Ready` reason: the chain reached `maxRetries` without succeeding.
+pub const REASON_RETRY_EXHAUSTED: &str = "RetryExhausted";
+/// `Ready` reason: the last run failed and the policy does not retry it.
+pub const REASON_RUN_FAILED: &str = "RunFailed";
+/// `Ready` reason: the deterministic name for a due slot is already taken by
+/// an object this schedule does not own.
+pub const REASON_SLOT_NAME_UNAVAILABLE: &str = "SlotNameUnavailable";
+/// `Ready` reason: the per-schedule active-run ceiling is reached.
+pub const REASON_ACTIVE_RUN_LIMIT: &str = "ActiveRunLimit";
+/// `Ready=False`: `spec.timeZone` names a zone this build's tzdb does not
+/// have. **Fail closed**: a zone nobody can resolve is not silently UTC.
+pub const REASON_UNKNOWN_TIME_ZONE: &str = "UnknownTimeZone";
+/// `Ready=False`: the topic selection is not one of the two legal shapes.
+pub const REASON_INVALID_TOPIC_SELECTION: &str = "InvalidTopicSelection";
+/// `Ready=False`: the run policy has a field-level problem.
+pub const REASON_INVALID_RUN_POLICY: &str = "InvalidRunPolicy";
+/// `Ready=False`: the object uses a field the installed CRD declares and this
+/// controller does not understand — a CRD applied ahead of its controller.
+pub const REASON_CRD_OUTDATED: &str = "CrdOutdated";
 
 /// The condition TYPES a `Backup` can carry, in one list.
 ///
@@ -601,6 +758,8 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_VERIFIED,
     CONDITION_EXECUTION_INPUTS_UNVERIFIED,
     CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
+    CONDITION_TOPICS_RESOLVED,
+    CONDITION_HISTORY_RETAINED,
 ];
 
 /// `phase` for a `Restore` whose admission has not passed yet — **interface

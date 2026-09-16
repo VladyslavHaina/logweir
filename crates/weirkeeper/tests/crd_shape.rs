@@ -3211,6 +3211,176 @@ fn a_restore_carries_exactly_one_authorization_and_additive_status_is_optional()
 }
 
 // ---------------------------------------------------------------------------
+// D1 W3a: the run contract on `Backup`
+// ---------------------------------------------------------------------------
+
+/// `Backup.spec` carries the trigger, the schedule revision and the selection,
+/// and **every one of them is optional or unchanged**.
+#[test]
+fn the_backup_run_contract_is_additive_to_the_last_field() {
+    let doc = crd("backups.yaml");
+    let spec = spec_schema(&doc);
+
+    assert_eq!(
+        required(spec),
+        vec![
+            "archive".to_string(),
+            "deadlineSeconds".to_string(),
+            "sourceRef".to_string(),
+            "topics".to_string(),
+            "triggeredBy".to_string(),
+        ],
+        "THE REQUIRED SET DID NOT MOVE. Every field D1 W3a adds is optional, because every \
+         stored `Backup` in every cluster has none of them and a new required field would make \
+         all of them invalid on upgrade. `topics` in particular STAYS required: a dynamic run \
+         carries `topics: []`, so an older controller still deserializes it and its runner \
+         refuses on the empty list — where an absent `topics` would be a reflector decode \
+         error across the whole kind."
+    );
+
+    let trigger = at(spec, &["properties", "trigger"]);
+    assert_eq!(
+        enum_values(at(trigger, &["properties", "kind"])),
+        vec!["Scheduled", "CatchUp", "Retry", "Manual"],
+        "four trigger kinds; `triggeredBy` keeps its own two-value vocabulary, which is what \
+         the signed receipt carries"
+    );
+    assert_eq!(
+        required(trigger),
+        vec!["kind"],
+        "only `kind` is required inside the trigger: `attempt` defaults to 0 and the other two \
+         are absent for everything but a retry"
+    );
+    assert_eq!(
+        at(trigger, &["properties", "attempt", "default"]).as_u64(),
+        Some(0),
+    );
+    assert_eq!(
+        at(trigger, &["properties", "attempt", "maximum"]).as_u64(),
+        Some(3),
+        "at most three retries, which is also why the retry suffix is three characters and the \
+         schedule-name budget is 29"
+    );
+
+    let schedule_ref = at(spec, &["properties", "scheduleRef"]);
+    assert_eq!(
+        required(schedule_ref),
+        vec!["name"],
+        "`scheduleRef` grew `uid`, `generation` and `runPolicySha256` and every one of them is \
+         optional — a `Backup` created before they existed carries only the name and must keep \
+         resolving exactly as it did"
+    );
+    for field in ["name", "uid", "generation", "runPolicySha256"] {
+        assert!(
+            at(schedule_ref, &["properties"]).get(field).is_some(),
+            "scheduleRef.{field} must exist"
+        );
+    }
+}
+
+/// The two selection shapes, and the field with no default.
+#[test]
+fn the_selection_shape_is_declared_and_incomplete_discovery_has_no_default() {
+    let doc = crd("backups.yaml");
+    let spec = spec_schema(&doc);
+    let dynamic = at(spec, &["properties", "allUserTopics"]);
+
+    assert_eq!(
+        required(dynamic),
+        vec!["incompleteDiscovery"],
+        "`incompleteDiscovery` is REQUIRED: Kafka omits topics a principal cannot describe, so \
+         no discovery can prove whole-cluster visibility, and the user must choose what happens \
+         then"
+    );
+    let mode = at(dynamic, &["properties", "incompleteDiscovery"]);
+    assert_eq!(enum_values(mode), vec!["Refuse", "BackUpVisibleTopics"]);
+    assert!(
+        mode.get("default").is_none(),
+        "AND IT HAS NO DEFAULT, deliberately. Defaulting to `Refuse` makes dynamic mode \
+         unusable out of the box; defaulting to `BackUpVisibleTopics` silently weakens the \
+         promise the mode's own name makes. An operator who has not thought about it must not \
+         be able to ship either answer by omission."
+    );
+
+    // The exclusions are NAMES AND LITERAL PREFIXES. Guard G-GLOB is a pattern
+    // on both, so `orders*` is not writable in an exclusion any more than in
+    // an allowlist.
+    let exclude = at(dynamic, &["properties", "exclude", "properties"]);
+    for (field, max) in [("topics", 1000_u64), ("prefixes", 32)] {
+        let node = at(exclude, &[field]);
+        assert_eq!(
+            node.get("maxItems").and_then(Value::as_u64),
+            Some(max),
+            "exclude.{field} is bounded — an unbounded list in a spec is an unbounded CEL cost \
+             and an unbounded object"
+        );
+        assert_eq!(
+            at(node, &["items", "pattern"]).as_str(),
+            Some(weirkeeper::crds::selection::TOPIC_NAME_PATTERN),
+            "exclude.{field} items carry the Kafka name grammar, which contains no glob \
+             metacharacter"
+        );
+    }
+    assert_eq!(
+        at(spec, &["properties", "topics", "items", "pattern"]).as_str(),
+        Some(weirkeeper::crds::selection::TOPIC_NAME_PATTERN),
+        "and the allowlist itself, which is where guard G-GLOB started"
+    );
+
+    // `status.selection` records what the run may CLAIM, and carries no names.
+    let status = at(status_schema(&doc), &["properties", "selection"]);
+    assert_eq!(
+        enum_values(at(status, &["properties", "coverage"])),
+        vec![
+            "NamedTopics",
+            "AllUserTopicsAttested",
+            "VisibleUserTopicsOnly"
+        ],
+        "three coverage labels, and only the middle one may ever be rendered as `all topics`"
+    );
+    let properties = at(status, &["properties"])
+        .as_mapping()
+        .expect("selection has properties");
+    for key in properties.keys().filter_map(Value::as_str) {
+        assert!(
+            !key.ends_with("Topics") || key == "allUserTopics",
+            "status.selection carries COUNTS and a digest, never names: a resolved list is \
+             unbounded and a status is not a store. Found `{key}`"
+        );
+    }
+    assert!(
+        at(status, &["properties"])
+            .get("resolvedTopicCount")
+            .is_some()
+            && at(status, &["properties"]).get("discoverySha256").is_some(),
+        "the count and the digest are what make a frozen selection checkable without storing it"
+    );
+}
+
+/// The `Backup.spec` seal still covers every field, including the new ones.
+///
+/// THE MUTANT THIS KILLS is adding a field to `BackupSpec` and forgetting that
+/// `self == oldSelf` is what makes a run's inputs the run. It cannot be
+/// forgotten here — the seal is object-level and covers the whole spec — so
+/// this asserts the seal is still the WHOLE-spec one and not a narrowed
+/// enumeration somebody wrote while adding `trigger`.
+#[test]
+fn the_backup_spec_is_still_sealed_whole() {
+    let doc = crd("backups.yaml");
+    let seals: Vec<String> = attached_rules(&doc)
+        .into_iter()
+        .filter(|r| r.path == ["spec"] && r.rule.contains("oldSelf"))
+        .map(|r| r.rule)
+        .collect();
+    assert_eq!(
+        seals,
+        vec![weirkeeper::crds::SPEC_IMMUTABLE_RULE.to_string()],
+        "a `Backup`'s spec is its run's inputs, and they are sealed WHOLE — never as an \
+         enumeration that a new field could be left out of"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The runner image, the recipe, and the drift gate
 // ---------------------------------------------------------------------------
 

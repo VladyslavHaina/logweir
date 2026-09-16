@@ -90,7 +90,7 @@ use logweir_store::Store;
 
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
-use crate::crds::backup::{Backup, BackupSpec};
+use crate::crds::backup::{Backup, BackupSpec, ScheduleRef, Trigger, TriggerKind};
 use crate::crds::backup_schedule::{
     BackupSchedule, BackupScheduleSpec, ConcurrencyPolicy, Retention,
 };
@@ -556,11 +556,33 @@ pub fn scheduled_backup(
             // `destinationRef` stay the pair the admission rule requires; the
             // Backup controller is what resolves it, once, before it freezes.
             destination_ref: schedule.spec.destination_ref.clone(),
-            schedule_ref: Some(LocalRef {
+            // `name` AND `uid`, because a schedule deleted and recreated under
+            // the same name is a different schedule and must not adopt this
+            // run. `generation` and `runPolicySha256` are D1 W2's — the
+            // scheduler that knows which revision it admitted under fills
+            // them; this builder records only what it has in hand.
+            schedule_ref: Some(ScheduleRef {
                 name: schedule_name,
+                uid: Some(schedule_uid.to_string()),
+                generation: None,
+                run_policy_sha256: None,
             }),
             slot: Some(slot.to_string()),
             triggered_by: TRIGGERED_BY_SCHEDULE.to_string(),
+            // The finer trigger, written explicitly rather than left to D1
+            // §3.1 rule 4's legacy reading. It says exactly what that rule
+            // would infer from `triggeredBy: schedule` — Scheduled, attempt 0
+            // — so nothing about this child changes meaning; catch-up and
+            // retry are the scheduler's to write, in W2.
+            trigger: Some(Trigger {
+                kind: TriggerKind::Scheduled,
+                attempt: 0,
+                retry_of: None,
+                time_zone: None,
+            }),
+            // Dynamic selection is a schedule-spec field D1 W2 adds; until it
+            // exists a schedule-created Backup is always a named allowlist.
+            all_user_topics: None,
             deadline_seconds: SCHEDULED_DEADLINE_SECONDS,
         },
         status: None,

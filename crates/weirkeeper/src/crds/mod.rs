@@ -55,6 +55,7 @@ pub mod recovery_catalog;
 pub mod rehearsal_schedule;
 pub mod restore;
 pub mod retention_policy;
+pub mod selection;
 pub mod topic_discovery;
 pub mod trust_policy;
 pub mod trust_roster;
