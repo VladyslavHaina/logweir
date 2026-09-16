@@ -37,5 +37,36 @@ spec:
     # `plaintext` or `scramSha512`. For `scramSha512`, set `username` and a
     # `secretRef` naming a Secret with a `password` key — the controller
     # projects it as a `secretKeyRef` and never reads it.
+    #
+    # SAVED-CONNECTION CONTRACT v1 (docs/kubernetes.md §20) adds two optional
+    # fields, both REFERENCES into THIS namespace and never values:
+    #
+    #   auth:
+    #     mode: scramSha512
+    #     username: logweir
+    #     secretRef:
+    #       name: kafka-sasl
+    #       # The data key holding the password. Absent means `password`, which
+    #       # is the only key releases before contract v1 projected — so an
+    #       # object written without this field resolves exactly as it did.
+    #       passwordKey: sasl-password
+    #     # `tls` IS THE ONLY SWITCH THAT TURNS TLS ON. `tlsCa` only adds trust
+    #     # material to a transport that is already TLS, which is what makes a
+    #     # rollback fail closed instead of dialling in the clear: an older
+    #     # controller ignores `tlsCa`, still reads `tls`, and simply fails to
+    #     # verify the broker certificate.
+    #     tls: true
+    #     # EXACTLY ONE OF secretKeyRef / configMapKeyRef, holding PEM CA
+    #     # certificate(s). A CA certificate is public, so a ConfigMap is an
+    #     # ordinary home for it; a CA PRIVATE KEY belongs in neither and is
+    #     # not part of this contract. The key is projected read-only into the
+    #     # runner pod and its PATH — never the text — reaches both of the
+    #     # runner's TLS clients.
+    #     tlsCa:
+    #       configMapKeyRef: { name: kafka-ca, key: ca.crt }
+    #
+    # `tlsCa` without `tls: true` is REFUSED, at admission by a CEL rule and
+    # again by the controller — a trust anchor beside a clear dial is the
+    # silent downgrade the refusal exists to prevent.
     mode: plaintext
     tls: false

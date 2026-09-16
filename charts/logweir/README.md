@@ -368,6 +368,19 @@ The rendered objects go in the release namespace with the chart's labels, and
 the probe Job runs under the `logweir-runner` ServiceAccount the chart already
 creates there.
 
+**Two connection-contract fields have no `kafka:` value, deliberately.** The
+`KafkaCluster` CRD accepts `auth.secretRef.passwordKey` (a password under a key
+other than `password`) and `auth.tlsCa` (a private CA in a Secret or ConfigMap
+key, for brokers whose certificate the runner image does not already trust) —
+see `docs/kubernetes.md` §20. The flat `kafka:` block renders neither: it
+exists so a stranger can point the chart at a cluster without writing a custom
+resource, and both of those are choices an adopter with a private CA or a
+managed secret store makes on the object itself. Write the `KafkaCluster` by
+hand (leave `kafka.enabled: false`) when you need them; nothing else about the
+install changes, and no chart value or controller permission is involved,
+because both fields are references the kubelet resolves in the Job's own
+namespace.
+
 ## Node placement, and where it does not reach
 
 `kubernetes.nodeSelector`, `kubernetes.tolerations` and `kubernetes.affinity`

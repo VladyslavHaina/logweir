@@ -176,7 +176,7 @@ arrives as a reviewable diff. Do not hand-edit those files.
 
 | Kind | Scope | What it is |
 |---|---|---|
-| `KafkaCluster` | Namespaced | A cluster connection: bootstrap servers, `auth{mode, username, secretRef, tls}`, role, and the marker topic that proves a scratch target. `status.clusterId` is read from the broker, never from the spec. |
+| `KafkaCluster` | Namespaced | A saved connection (contract v1, §20): bootstrap servers, `auth{mode, username, secretRef, tls, tlsCa}`, role, and the marker topic that proves a scratch target. The password and the private CA are REFERENCES into this namespace, never values. `status.clusterId` is read from the broker, never from the spec. |
 | `BackupSchedule` | Namespaced | A recurring backup of a **named** topic set (no wildcard, no glob metacharacter). `spec.concurrencyPolicy` is `Forbid` by default or explicitly `Allow`; `spec.suspend` is the only mutable field. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
 | `Backup` | Namespaced | One archive run, as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets `AlreadyExists` rather than a second partial archive. |
 | `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
@@ -767,11 +767,14 @@ it carries **three keys**:
 
 - **`execution-inputs.json`** — the canonical typed snapshot of everything the
   run executes: the identity and trigger above, the source `KafkaCluster`'s
-  **UID**, bootstrap addresses, SCRAM username and TLS flag, the topic
-  allowlist, the archive URL with the resolved `storage` block and the
-  object-store addressing variables this controller forwards, and the runner
-  argv, deadline and engine tunables. Its grammar is versioned
-  (`logweir.dev/backup-execution-inputs/v1`).
+  **UID**, and everything the one resolver (§20) decided about its connection —
+  bootstrap addresses, auth mode, SCRAM username, the TLS flag and the
+  `auth.tlsCa` reference — plus the topic allowlist, the archive URL with the
+  resolved `storage` block and the object-store addressing variables this
+  controller forwards, and the runner argv, deadline and engine tunables. Its
+  grammar is versioned (`logweir.dev/backup-execution-inputs/v1`); `tlsCa` is
+  absent for a connection that names no CA, so a snapshot frozen before that
+  field existed is still read and re-encoded unchanged.
 - **`backup.yaml`** — the typed `BackupSpec` document `logweir backup run
   --spec` parses, rendered **from that snapshot**. `source.bootstrapServers`
   and `source.auth` come from the `KafkaCluster` that `spec.sourceRef` names,
@@ -815,7 +818,8 @@ One difference is informational and deliberate: a newly observed
 `KafkaCluster.status.clusterId` changes the snapshot's bytes but not its
 executable inputs, so a probe that lands between the freeze and the Job does
 not invalidate the run. Everything else — a recreated source cluster (its UID
-is pinned), different bootstrap addresses, a different topic list, a different
+is pinned), different bootstrap addresses, a changed auth mode, username or TLS
+flag, a changed `auth.tlsCa` reference, a different topic list, a different
 archive or endpoint — does.
 
 **A Job that disappears from a nonterminal `Backup` is re-created from those
@@ -825,17 +829,29 @@ start of another. The Job keeps the `Backup`'s name, so the pod carrying the
 exit code is selected by the job-name label **and** by its owner Job's UID: a
 deleted Job's pod is never read as the new Job's evidence.
 
-The source connection is configured once on `KafkaCluster`. The probe and each
-backup reuse that object's bootstrap servers, SCRAM username, TLS setting and
-`auth.secretRef`. For SCRAM, both project the Secret's `password` key into
-`LOGWEIR_SOURCE_PASSWORD` with `valueFrom.secretKeyRef`. The controller never
-reads the password, and **no Secret name and no credential key is written into
-the snapshot or the status**: the references are fixed by the pinned
-`KafkaCluster` UID and the CEL-immutable `KafkaCluster.spec` and `Backup.spec`,
-so the Job builder derives them from those objects and the ConfigMap — which
-has no encryption at rest and a much wider read surface than a Secret — names
-none of them. Archive credentials remain separate, under
-`Backup.spec.archive.secretRef`.
+The source connection is configured once on `KafkaCluster`, and one resolver
+(§20) turns it into every Job: the probe and each backup reuse that object's
+bootstrap servers, SCRAM username, TLS setting, `auth.secretRef` and
+`auth.tlsCa`. For SCRAM, both project the Secret's `auth.secretRef.passwordKey`
+(default `password`) into `LOGWEIR_SOURCE_PASSWORD` with
+`valueFrom.secretKeyRef`; a named `auth.tlsCa` is projected as a read-only file
+and its pod-local path handed to the runner in `LOGWEIR_SOURCE_TLS_CA_FILE`.
+The controller reads neither object.
+
+**What the snapshot carries, and what it deliberately does not.** The frozen
+inputs record everything the resolver decided about the connection — bootstrap
+addresses, auth mode, SCRAM username, the TLS flag and the `auth.tlsCa`
+reference — so a later pass that re-resolves the same `KafkaCluster` compares
+equal, and a connection edited after the freeze is `PlanConfigMapConflict`
+rather than frozen plan bytes executed against a changed connection. A CA
+*certificate* is public material, which is why the object holding it may be
+named there. **No credential Secret name and no credential key is written into
+the snapshot or the status**: the password reference and the object-store
+credential reference are fixed by the pinned `KafkaCluster` UID and the
+CEL-immutable `KafkaCluster.spec` and `Backup.spec`, so the Job builder derives
+them from those objects and the ConfigMap — which has no encryption at rest and
+a much wider read surface than a Secret — names neither. Archive credentials
+remain separate, under `Backup.spec.archive.secretRef`.
 
 These Jobs open separate connections: a completed probe leaves no running
 client to share with a later backup or its engine subprocess. Each new pod
@@ -844,9 +860,12 @@ without copying credentials into every Backup. A successful probe establishes
 reachability at that time; backup permissions and the engine's credential
 rendering restrictions are still checked by the backup runner.
 
-A SCRAM source with a missing or blank `auth.secretRef.name` produces
-`CredentialNotRenderable` before a plan or Job is created. An absent Secret or
-missing `password` key is reported by Kubernetes when it starts the pod.
+A SCRAM source with a missing or blank `auth.secretRef.name` or `auth.username`
+produces `CredentialNotRenderable` before a plan or Job is created, and every
+other conflicting connection is refused just as early with its own named state
+(§20.4). An absent Secret or a missing password key is reported by Kubernetes
+when it starts the pod -- the controller holds no `get` on Secrets and cannot
+know it earlier.
 
 If an older controller created a Job that failed with
 `LOGWEIR_SOURCE_PASSWORD is unset`, deploy the corrected **controller** image
@@ -1288,7 +1307,12 @@ The object-store credential reaches the pod as `secretKeyRef` env
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) from
 `spec.sourceArchive.secretRef` — the Secret this install calls `logweir-s3`.
 A `scramSha512` target additionally gets `LOGWEIR_TARGET_PASSWORD` from that
-`KafkaCluster`'s own `auth.secretRef`, key `password`.
+`KafkaCluster`'s own `auth.secretRef`, under `passwordKey` (default
+`password`), and a `auth.tlsCa` target gets the projected CA file and
+`LOGWEIR_TARGET_TLS_CA_FILE` (§20.2). The approved plan's `target` must name
+the same connection the `clusterRef` resolves to, or the Restore is refused
+with `ConnectionPlanMismatch` before any Job exists: the runner dials the
+PLAN's address with THIS connection's credential.
 
 ### The credential is validated by the RUNNER, and the controller checks nothing
 
@@ -1995,6 +2019,226 @@ that the chart's default registry references are published. A local walk on
 matched the checkout, with the same three allowed and two rejected requests.
 Consult
 [tag1-checklist.md](tag1-checklist.md) for release gates.
+
+## 20. The saved-connection contract (`KafkaCluster`), version 1
+
+One `KafkaCluster` is one saved connection, and **one function resolves it**:
+`weirkeeper::connection::resolve(cluster, use)`. The probe Job, the backup Job
+and the restore Job are all built from that single resolution, so a probe can
+never report `reachable: true` for settings a backup then dials differently.
+The `use` argument selects the runner variable family (source or target) and
+the execution context; it never changes an answer, so a future discovery or
+preflight check refuses exactly what a run refuses.
+
+`spec` stays CEL-immutable. Changing a connection means creating a new object.
+
+### 20.1 The fields, and what each one is
+
+| Field | Absent means | Reference or value |
+|---|---|---|
+| `bootstrapServers` | required, at least one entry | value (public address) |
+| `auth.mode` | required: `plaintext` or `scramSha512` | value |
+| `auth.username` | required for `scramSha512` | value (public identity) |
+| `auth.secretRef.name` | required for `scramSha512` | **reference** to a Secret in this namespace |
+| `auth.secretRef.passwordKey` | `password` | key name, not a value |
+| `auth.tls` | `false` | value (the only switch that turns TLS on) |
+| `auth.tlsCa` | the runner image's `ca-certificates` and the engine's bundled roots | **reference** to a Secret or ConfigMap key in this namespace |
+| `role` | required: `source` or `target` | value |
+| `markerTopic` | no marker topic; a `mode: scratch` restore against this cluster is refused | value |
+
+**Every absent field above behaves exactly as it did before contract v1
+existed.** An object that names neither `passwordKey` nor `tlsCa` produces the
+same Job environment, the same mounts, the same ServiceAccount, the same
+`backup.yaml` and the same `allowed-clusters.json`, byte for byte; the
+`legacy-golden` fixtures in `crates/weirkeeper/tests/fixtures/connection/` are
+output captured from the pre-contract controller at `4956785` and are compared
+against, not re-derived. Two differences in that comparison are **PLAT-06.1's**
+and not this contract's, and the fixture test names them rather than tolerating
+them: the runner argv is derived from the run identity instead of read off the
+`logweir.dev/runner-argv` annotation, and the plan ConfigMap gained the
+`execution-inputs.json` snapshot, `immutable: true` and its two annotations
+(§9).
+
+A credential and a certificate are **references, never values**. The
+controller holds no `get` on Secrets (§9); it validates only that a reference
+has a legal shape (a DNS-1123 name, a legal `data` key) and writes it into the
+pod spec. Whether the named object exists is answered by the kubelet when it
+starts the pod, not by a controller read.
+
+### 20.2 TLS and the private CA
+
+`auth.tls` is the transport switch and `auth.tlsCa` is trust material. A CA
+reference can only **add** trust to a transport that is already TLS; it never
+turns TLS on. That separation is the whole rollback story in §20.5.
+
+`auth.tlsCa` names exactly one of `secretKeyRef` or `configMapKeyRef` — one
+object name and one key holding PEM certificate(s). A CA certificate is
+public, so a ConfigMap is an ordinary home for it. The key is projected
+read-only into the runner pod as `ca.crt` under `/connection/source-ca` or
+`/connection/target-ca`, and its path — **the path, never the certificate
+text** — is the value of `LOGWEIR_SOURCE_TLS_CA_FILE` or
+`LOGWEIR_TARGET_TLS_CA_FILE`.
+
+A runner has **two** TLS clients with two trust stores: librdkafka uses the
+image's `ca-certificates`, and the engine its bundled roots (Global Constraint
+29). The runner reads that one variable once and hands the path to both —
+librdkafka's `ssl.ca.location` and the engine's `ssl_ca_location` — so they
+cannot disagree about what they trust. With `ssl.ca.location` set, librdkafka
+does **not** also consult the default verify paths: the connection trusts
+exactly the projected CA. `ssl.endpoint.identification.algorithm` is pinned to
+`https`, so broker hostnames are verified and an upgrade cannot quietly stop
+verifying them.
+
+**A private CA is a trust anchor and not an extra.** Supplying `tlsCa` for a
+connection that is not TLS is refused at three independent points — the CRD's
+CEL rule, the resolver, and the runner's own client construction — because an
+author who configured a trust anchor believes the connection is verified, and
+dialling it in the clear would be a silent downgrade. Removing the CA from a
+TLS connection that needs it makes the dial **fail**, closed; it never falls
+back to plaintext.
+
+### 20.3 Rotation
+
+Nothing is copied, so nothing has to be re-entered.
+
+Rotating the password means writing the new value into the Secret the
+connection already names. The **next** Job the controller creates resolves the
+reference at container start and gets the new value; a Job already running
+keeps the environment it started with and finishes against the credential it
+began with. The same holds for the CA file, which the kubelet projects at pod
+start. No `KafkaCluster` edit, no new Secret and no re-approval is involved.
+
+A Job that starts **after** the broker credential changed but **before** the
+Secret did — or the reverse — fails the way it always has: the runner cannot
+render or authenticate the credential and exits 3 with
+`CredentialNotRenderable`, or the broker rejects the SASL exchange and the run
+reports the cluster unreachable. Rotate the Secret and the broker together,
+then start a new run.
+
+The username, the bootstrap servers and the TLS switch are **identity, not
+credentials**: a restore plan binds them in `planBytes` and therefore in the
+approval's plan hash, so changing them invalidates an existing approval. The
+password and the CA are bound by no hash at all — binding them would turn
+every rotation into a re-approval.
+
+### 20.4 What is refused, and when
+
+Every refusal below happens **before any ConfigMap, plan or Job exists**, and
+lands on the object's status as a named terminal state with the offending
+field. None of them is ever dialled.
+
+| Configuration | State |
+|---|---|
+| `auth.mode: plaintext` with `auth.tls: true` (TLS without SASL) | `ConnectionConfigInvalid` |
+| `auth.tlsCa` with `auth.tls: false` | `ConnectionConfigInvalid` (also rejected at admission by CEL) |
+| `auth.tlsCa` naming both or neither of `secretKeyRef`/`configMapKeyRef` | `ConnectionConfigInvalid` (also CEL) |
+| no `bootstrapServers`, or an entry that is empty or carries a comma or whitespace | `ConnectionConfigInvalid` |
+| `auth.mode: scramSha512` with no `auth.username` | `CredentialNotRenderable` |
+| `auth.mode: scramSha512` with no `auth.secretRef.name` | `CredentialNotRenderable` |
+| a Secret/ConfigMap name that is not a DNS-1123 subdomain, or a key that is not a legal `data` key | `ConnectionReferenceInvalid` |
+| a Job in a namespace other than the `KafkaCluster`'s | `ConnectionReferenceInvalid` |
+| a field the running controller does not implement | `ConnectionFieldUnsupported` |
+| an approved restore plan whose `target` is not this connection | `ConnectionPlanMismatch` |
+
+**References never cross a namespace.** `auth.secretRef` and `auth.tlsCa` have
+no `namespace` field, by construction: a cross-namespace reference is a
+privilege-escalation surface, because the referrer's RBAC does not cover the
+referent's namespace. A Secret that exists only in another namespace is simply
+not found by the kubelet, and the pod never starts.
+
+A refusal on the `KafkaCluster` itself **clears `status.reachable`** rather
+than leaving a stale `true`. A `Restore` admits a target only on
+`reachable: true`, and a `true` written by an earlier controller that dialled
+different settings is not an observation this controller stands behind.
+
+### 20.5 Upgrade and rollback
+
+**Upgrade: apply the CRD, then the controller.** Helm installs CRDs from
+`crds/` but never upgrades them (§19), so apply
+`config/crd/kafkaclusters.yaml` yourself before rolling the controller:
+
+```
+kubectl --context <ctx> apply -f config/crd/kafkaclusters.yaml
+kubectl --context <ctx> -n <ns> set image deployment/weirkeeper weirkeeper=<new image>
+```
+
+In the other order the API server **prunes** `passwordKey` and `tlsCa` from
+any object that names them, because pruning is what an installed CRD that does
+not declare a field does. An object would then resolve without the CA its
+author asked for. The new controller therefore also refuses an object carrying
+a field it does not implement (`ConnectionFieldUnsupported`, naming the
+field) instead of resolving a connection whose meaning it does not know.
+
+**Rollback: the CRD may stay ahead of the controller, and a TLS-CA object
+fails closed.** Roll the controller Deployment back to the previous image and
+leave the CRD in place. Then:
+
+- An object that names **neither** new field is unaffected. This is the
+  measured legacy case: same Job, same plan, same environment.
+- An object that names only `auth.secretRef.passwordKey` reverts to the old
+  controller's behaviour, which always projects the `password` key. If the
+  Secret carries the password under a different key, the pod fails to start
+  with `CreateContainerConfigError` naming the missing key — **visible and
+  closed**, never a run with no credential.
+- An object that names `auth.tlsCa` is the case that matters. The old
+  controller does not know the field, so it projects no CA volume and no
+  `LOGWEIR_*_TLS_CA_FILE`. It still reads `auth.tls`, so it still builds a
+  **TLS** connection — and that connection then fails to verify the broker
+  certificate, because a private CA is by definition not in the image's public
+  roots. The run **fails closed** with a TLS handshake error. It does not, and
+  cannot, fall back to a plaintext dial: `auth.tls` alone decides the
+  transport, and the CA reference can only ever add trust to it. That is why
+  the TLS switch was not folded into `auth.tlsCa`.
+
+An old **runner** image behaves the same way: it ignores an environment
+variable it does not read, so it dials TLS with the image's default roots and
+fails to verify. Roll the runner image forward with the controller.
+
+### 20.6 A frozen run and a changed connection
+
+A `Backup` freezes what this resolver decided **before** its Job exists (§9):
+the bootstrap addresses, the auth mode, the SCRAM username, the TLS flag and
+the `auth.tlsCa` reference go into the immutable `execution-inputs.json`
+snapshot. The password reference does not — it is derived from the pinned
+`KafkaCluster` at Job-build time and resolved by the kubelet, so a rotation
+needs no new plan (§20.3).
+
+That is what makes a changed connection visible rather than silent. A later
+pass re-resolves the same `KafkaCluster` and compares; a `tlsCa` that now names
+another object or another key, a changed address list, a changed username or a
+flipped TLS switch is terminal `PlanConfigMapConflict`, and the frozen plan
+bytes are never executed against it. A snapshot frozen before `tlsCa` existed
+carries no `tlsCa` key, re-encodes to the same bytes and is still admitted
+under grammar `logweir.dev/backup-execution-inputs/v1`.
+
+### 20.7 Redaction: no credential value leaves the Secret
+
+For this contract the statement is unconditional and is asserted by seeding
+recognisable values and grepping every rendered output
+(`crates/weirkeeper/tests/connection.rs`):
+
+- **No API response or status field** carries a password or a CA private key.
+  A refusal message names fields, object names and data keys, and the resolver
+  has no value to name in the first place.
+- **No log line** carries one. The controller never reads a Secret, and
+  `AuthConfig`'s `Debug` prints `password: "***"` by hand rather than by
+  derive.
+- **No ConfigMap** carries one. The plan ConfigMap holds bootstrap servers,
+  auth mode, username, TLS and — in the frozen snapshot only — the `auth.tlsCa`
+  reference, all of them public settings or a pointer to public certificate
+  material. The credential `secretKeyRef`, its `passwordKey` and the
+  object-store credential reference are not written into it at all (§9).
+- **No Job manifest** carries one: the password is `valueFrom.secretKeyRef`
+  and the CA is a projected volume, both resolved by the kubelet.
+- **No download or evidence artifact** carries one. A receipt records the
+  username, which is identity.
+- **No readback path exists.** `connection::credential` can build a
+  credential Secret for a write-only entry flow and can never read one; the
+  caller keeps `metadata` from the create response and nothing else.
+
+The CA **certificate** is public by nature and may be held in a ConfigMap. A
+CA **private key** has no place in this contract, in any object Logweir reads,
+or in a ConfigMap (§9).
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

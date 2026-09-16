@@ -29,9 +29,13 @@
 //! * **A custom `type`, deliberately.** `create` on Secrets is broad: in a
 //!   namespace it can mint a `kubernetes.io/service-account-token` Secret for
 //!   any ServiceAccount there. A distinct, immutable-after-create `type` is
-//!   what a ValidatingAdmissionPolicy scoped to the API's ServiceAccount can
-//!   require (see `config/samples/validatingadmissionpolicy.yaml`), so the
-//!   API's create permission cannot be spent on anything but this shape.
+//!   what a ValidatingAdmissionPolicy scoped to the API's ServiceAccount could
+//!   require, so the API's create permission cannot be spent on anything but
+//!   this shape. NO SUCH POLICY SHIPS:
+//!   `config/samples/validatingadmissionpolicy.yaml` carries the one example
+//!   this tree has, and a policy for this type belongs with the product API
+//!   that creates the Secret (PLAT-17), not with the resolver that only names
+//!   one.
 //! * **Not `immutable`.** Rotation by an administrator or a secret manager
 //!   updates `data.password` in place, and the next Job uses it
 //!   (`super`'s header). The product API itself never updates.
