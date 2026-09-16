@@ -81,10 +81,12 @@ fn main() -> std::process::ExitCode {
             location,
             since,
             max,
+            days,
         }) => logweir::catalog::cli::run_list(&logweir::catalog::cli::ListArgs {
             location: (&location).into(),
             since,
             max,
+            days,
         }),
         cli::Command::Backup(cli::BackupCmd::Run {
             spec,

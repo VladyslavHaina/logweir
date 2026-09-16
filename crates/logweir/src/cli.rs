@@ -631,5 +631,20 @@ pub enum CatalogCmd {
         /// How many rows to print.
         #[arg(long, default_value_t = 50)]
         max: usize,
+        /// How many DAY SHARDS back from today to look.
+        ///
+        /// The listing walks days newest-first and stops the moment `--max`
+        /// rows are held, so on an archive with a recent backup this costs one
+        /// or two small listings whatever it is set to. It only matters when
+        /// the newest point is old — and the output always prints
+        /// `catalog-searched-days=` and `catalog-oldest-day-searched=`, so an
+        /// empty page says which window it is empty for rather than implying
+        /// the catalog is empty.
+        //
+        // 400 is decision D3 §5.3's own histogram bound (`maxItems: 400`), so
+        // the CLI's default window and the Kubernetes view's are one number
+        // rather than two.
+        #[arg(long, default_value_t = 400)]
+        days: u32,
     },
 }

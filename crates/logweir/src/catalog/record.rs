@@ -245,13 +245,27 @@ pub struct RecordSource {
 ///
 /// **Every field is optional and nothing here is invented.** D-SEAMS S4:
 /// `inputs_sha256` belongs to PLAT-06.1's `execution-inputs.json` grammar and
-/// this record may CITE it and may never redefine it. A Backup Job on this
-/// build carries no execution-contract environment at all
-/// (`crates/weirkeeper/src/controllers/backup.rs` sets none), so
-/// `logweir backup run` writes no `execution` block and the reader reports
-/// provenance as unknown — which is the honest answer, and is why rule 2
-/// forbids defaulting it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// this record may CITE it and may never redefine it.
+///
+/// # What the runner can and cannot establish (review finding F4)
+///
+/// PLAT-06.1 HAS landed: the controller records `Backup.status.execution` and
+/// freezes `execution-inputs.json`. What it does not do is hand any of that to
+/// the runner — `weirkeeper::backup_execution::runner_argv` passes
+/// `--backup-id-override <execution_id>` and no namespace, name, UID or
+/// `inputsSha256` — so `logweir backup run` genuinely cannot fill those fields
+/// and writes them ABSENT, which rule 2 makes mean UNKNOWN.
+///
+/// `triggered_by` is the exception and IS filled: `BackupReceipt::triggered_by`
+/// is always present in the receipt, so dropping it would have discarded
+/// provenance the runner had in hand.
+///
+/// `execution_id` stays absent even on a controller-driven run although
+/// `backup_id` happens to equal it there: the runner cannot tell an execution
+/// id from a schedule slot (`--backup-id-override` carries both), and a field
+/// that is right on one path and a fabrication on the other is worse than an
+/// absent one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -277,6 +291,18 @@ pub struct RecordExecution {
     pub triggered_by: Option<String>,
 }
 
+impl RecordExecution {
+    /// True when the block establishes nothing at all.
+    ///
+    /// A block of eight `None`s is not "provenance unknown" written down, it is
+    /// an empty object pretending to be a fact. The writer drops it, so absent
+    /// stays the one spelling of unknown (rule 2).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordSchedule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,13 +313,60 @@ pub struct RecordSchedule {
     pub slot: Option<String>,
 }
 
+/// The two values [`RecordSigning::algorithm`] may take. One spelling in this
+/// product: these are the strings
+/// `crates/logweir/src/identity.rs::public_material` publishes for the SAME key
+/// in the installation's public identity ConfigMap.
+///
+/// Declared as data rather than as prose so the PUBLISHED SCHEMA can carry the
+/// vocabulary — see [`algorithm_schema`].
+pub const SIGNING_ALGORITHMS: [&str; 2] = ["ecdsa-p256-sha256", "ed25519"];
+
+/// The JSON Schema for [`RecordSigning::algorithm`]: a string with an explicit
+/// `enum`, generated from [`SIGNING_ALGORITHMS`].
+///
+/// **Review finding F2.** Without it the checked-in schema carried only a free
+/// `"type": "string"` and a doc comment naming `p256` — the very spelling this
+/// record rejects — so a consumer generating its type from the one artifact
+/// that exists to publish the vocabulary would have matched on a value no
+/// record ever carries, and nothing mechanical would have noticed. An `enum`
+/// rather than a `pattern` because the set really is closed and a reader
+/// should be able to READ it out of the schema, not infer it from a regex.
+fn algorithm_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::String.into()),
+        enum_values: Some(
+            SIGNING_ALGORITHMS
+                .iter()
+                .map(|a| serde_json::Value::String((*a).to_string()))
+                .collect(),
+        ),
+        metadata: Some(Box::new(schemars::schema::Metadata {
+            description: Some(
+                "How the key that signed this record signs. A CLOSED SET OF TWO, and the \
+                 same two strings the installation's public identity ConfigMap publishes for \
+                 the same key (`logweir identity bootstrap`): one spelling in this product. \
+                 Decision D3 §5.2's illustrative JSON writes `p256`; that is not a value any \
+                 record carries."
+                    .to_string(),
+            ),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordSigning {
     /// The lowercase-hex sha256 of the key's DER SPKI — the same number
     /// `openssl` prints (`docs/keys.md`).
     pub key_id: String,
-    /// `p256` or `ed25519`, as `logweir_evidence::keys::VerifyingKey` names
-    /// them.
+    /// `ecdsa-p256-sha256` or `ed25519` — [`SIGNING_ALGORITHMS`], and the same
+    /// two strings `logweir identity bootstrap` publishes for the same key.
+    /// **Never `p256`**, which is D3 §5.2's illustrative spelling and is not a
+    /// value this product writes anywhere.
+    #[schemars(schema_with = "algorithm_schema")]
     pub algorithm: String,
 }
 

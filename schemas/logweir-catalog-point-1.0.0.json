@@ -167,7 +167,7 @@
       }
     },
     "RecordExecution": {
-      "description": "The Kubernetes execution that produced the backup.\n\n**Every field is optional and nothing here is invented.** D-SEAMS S4: `inputs_sha256` belongs to PLAT-06.1's `execution-inputs.json` grammar and this record may CITE it and may never redefine it. A Backup Job on this build carries no execution-contract environment at all (`crates/weirkeeper/src/controllers/backup.rs` sets none), so `logweir backup run` writes no `execution` block and the reader reports provenance as unknown — which is the honest answer, and is why rule 2 forbids defaulting it.",
+      "description": "The Kubernetes execution that produced the backup.\n\n**Every field is optional and nothing here is invented.** D-SEAMS S4: `inputs_sha256` belongs to PLAT-06.1's `execution-inputs.json` grammar and this record may CITE it and may never redefine it.\n\n# What the runner can and cannot establish (review finding F4)\n\nPLAT-06.1 HAS landed: the controller records `Backup.status.execution` and freezes `execution-inputs.json`. What it does not do is hand any of that to the runner — `weirkeeper::backup_execution::runner_argv` passes `--backup-id-override <execution_id>` and no namespace, name, UID or `inputsSha256` — so `logweir backup run` genuinely cannot fill those fields and writes them ABSENT, which rule 2 makes mean UNKNOWN.\n\n`triggered_by` is the exception and IS filled: `BackupReceipt::triggered_by` is always present in the receipt, so dropping it would have discarded provenance the runner had in hand.\n\n`execution_id` stays absent even on a controller-driven run although `backup_id` happens to equal it there: the runner cannot tell an execution id from a schedule slot (`--backup-id-override` carries both), and a field that is right on one path and a fabrication on the other is worse than an absent one.",
       "type": "object",
       "properties": {
         "execution_id": {
@@ -275,8 +275,12 @@
       ],
       "properties": {
         "algorithm": {
-          "description": "`p256` or `ed25519`, as `logweir_evidence::keys::VerifyingKey` names them.",
-          "type": "string"
+          "description": "`ecdsa-p256-sha256` or `ed25519` — [`SIGNING_ALGORITHMS`], and the same two strings `logweir identity bootstrap` publishes for the same key. **Never `p256`**, which is D3 §5.2's illustrative spelling and is not a value this product writes anywhere.",
+          "type": "string",
+          "enum": [
+            "ecdsa-p256-sha256",
+            "ed25519"
+          ]
         },
         "key_id": {
           "description": "The lowercase-hex sha256 of the key's DER SPKI — the same number `openssl` prints (`docs/keys.md`).",

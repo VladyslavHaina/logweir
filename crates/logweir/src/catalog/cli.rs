@@ -39,6 +39,7 @@ use crate::catalog::reader::{self, CrossCheck, RecordVerdict};
 use crate::catalog::record::*;
 use crate::catalog::writer::{self, RecordInputs};
 use crate::exit::ExitCode;
+use chrono::Datelike;
 use logweir_core::engine::StorageUrl;
 use logweir_engine_oso::storage::{Store, StoreError};
 use logweir_evidence::keys::VerifyingKey;
@@ -88,9 +89,15 @@ pub struct ListArgs {
     pub location: Location,
     /// Only rows whose log key is strictly greater than this. Combined with
     /// newest-first output it is a way to ask "what arrived after the last
-    /// thing I saw".
+    /// thing I saw", and it also stops the backward shard walk at that key's
+    /// own day.
     pub since: Option<String>,
     pub max: usize,
+    /// How many DAY SHARDS back from today to look. The listing stops as soon
+    /// as `--max` rows are held, so this only costs anything on a catalog whose
+    /// newest point is old — and the report says how far it looked, so an empty
+    /// page is never mistaken for an empty catalog.
+    pub days: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -430,20 +437,40 @@ pub fn sync_with(
             }
         };
         let entry = CatalogLogEntry::of(&point);
+        // **THE EXIT-CODE DECISION, AND IT IS MADE ON THE ERROR'S KIND, NOT ON
+        // HOW FAR THE WALK GOT** (review finding F1).
+        //
+        // Global Constraint 11's exit 4 says "signing or lock-proof failed —
+        // and NOTHING was uploaded". The first version of this arm mapped the
+        // FIRST point's failure to 4 whatever caused it, so a denied PUT under
+        // `logweir/catalog/*` or a 503 told an operator to rotate signing
+        // material over a bucket policy — and, in the case where `record.json`
+        // landed and `record.sig` did not, asserted "nothing was uploaded"
+        // while an unsigned record sat in the bucket.
+        //
+        // `PutError::nothing_was_uploaded()` answers the only question exit 4
+        // actually asks. A store failure is exit 1 with a message that says
+        // which key, what the store said, and what is and is not in the bucket.
         let outcome = writer::put_point(&point, &entry, signer, evidence).map_err(|e| {
-            // A put failure after other points have already been written is
-            // OPERATIONAL: the catalog is append-only and what landed is
-            // valid, so the remedy is to re-run from the printed cursor, not
-            // to distrust the evidence.
-            if report.written > 0 {
-                SyncError::Operational(format!(
-                    "{e} — {} record(s) were written before this failure and are valid; re-run \
-                     with --since to continue",
+            if e.nothing_was_uploaded() {
+                return SyncError::Signing(format!(
+                    "{e} — no catalog object was written for this point; {} record(s) written \
+                     earlier in this run are signed and valid",
                     report.written
-                ))
-            } else {
-                SyncError::Signing(e)
+                ));
             }
+            SyncError::Operational(format!(
+                "the object store refused or could not complete a catalog write: {e}. This says \
+                 nothing about the signing key — the record was signed before any put was \
+                 attempted. Part of this point may already be stored, and nothing under \
+                 `logweir/` is ever rewritten, so re-running is safe: {} record(s) written \
+                 earlier in this run are valid, and `--since {}` resumes the walk.",
+                report.written,
+                report.points.last().map_or_else(
+                    || args.since.clone().unwrap_or_default(),
+                    |(k, _, _)| k.clone()
+                )
+            ))
         })?;
         report.record(
             &key,
@@ -533,28 +560,125 @@ fn verified_signer(
 // list
 // ---------------------------------------------------------------------------
 
-/// **The testable seam** for `list`: the newest `max` index entries under the
-/// day-sharded log, newest first.
+/// What one `list` established: the rows, and what it could NOT read.
 ///
-/// # How "newest first" stays bounded
+/// The counts are not decoration. `docs/formats/catalog-point.md` promises
+/// "refusal is per entry, not per catalog", and a listing that silently
+/// dropped what it skipped would keep that promise while breaking the one
+/// underneath it — an operator would read a short page as "these are all the
+/// points" (review finding F3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ListReport {
+    /// Newest first.
+    pub rows: Vec<CatalogLogEntry>,
+    /// Rule 1: index entries whose `format_version` major this build does not
+    /// implement.
+    pub unsupported_format: usize,
+    /// Could not tell: a `get` that failed, bytes that are not JSON, a shape
+    /// major 1 cannot hold.
+    pub unreadable: usize,
+    /// Review finding F6: an entry whose `record_key` is not the one its
+    /// `point_id` implies, or whose `point_id` is malformed.
+    pub inconsistent: usize,
+    /// How many day shards this run looked in.
+    pub days_searched: u32,
+    /// The oldest day shard searched, `yyyy-mm-dd`, so an EMPTY page says
+    /// which window it is empty for rather than "there are no points".
+    pub oldest_day_searched: String,
+    /// True when `--max` filled before the lookback ran out: there are older
+    /// points this page did not reach.
+    pub truncated: bool,
+}
+
+/// **The testable seam** for `list`: the newest `max` index entries, newest
+/// first, read one DAY SHARD at a time.
 ///
-/// The log key embeds the recovery point as a fixed-width millisecond inside a
-/// `yyyy/mm/dd` shard, so ascending key order IS ascending time order. This
-/// walks forward through `Store::list_page` and keeps a ring of the newest
-/// `max` keys, then reverses: memory is `max` keys plus one page, whatever the
-/// catalog holds. What it does not do is stop early — there is no "list
-/// backwards" in `object_store` 0.14 — and that cost is the honest price of
-/// not inventing an index of the index.
+/// # Why it walks shards and not the whole prefix (review finding F5)
 ///
-/// Reading each entry's BODY happens only for the rows that survive, so a
-/// catalog of fifty thousand points costs fifty `get`s at `--max 50`.
-pub fn list_with(args: &ListArgs, store: &Store) -> Result<Vec<CatalogLogEntry>, String> {
+/// The first version paged forward over the entire `logweir/catalog/v1/log/`
+/// prefix keeping a ring of the newest `max` keys. That is correct and it is
+/// O(n²/page) object-metadata reads, because `Store::list_page` walks the whole
+/// post-offset prefix on every call — 50 000 points cost about 1.25 million
+/// streamed entries to print fifty rows. It also made the day shard buy
+/// nothing, which is the one structure D3 §5.2 introduced precisely so that
+/// "newest first" would be bounded.
+///
+/// So: walk days BACKWARDS from `today`, list one shard at a time, and stop the
+/// moment `max` rows are held. On an archive with a recent backup that is one
+/// or two small listings. The lookback is `args.days`, and the report says how
+/// far it looked, so an empty page is "nothing in the last N days" and never
+/// "there are no points".
+///
+/// `today` is a parameter: this function reads no clock, so a test can pin the
+/// window.
+///
+/// Reading each entry's BODY happens only for keys that survive the shard
+/// selection, so `--max 50` costs fifty `get`s whatever the catalog holds.
+pub fn list_with(
+    args: &ListArgs,
+    store: &Store,
+    today: chrono::NaiveDate,
+) -> Result<ListReport, String> {
+    let mut report = ListReport::default();
+    if args.max == 0 {
+        report.oldest_day_searched = today.to_string();
+        return Ok(report);
+    }
+    // `--since` is a lower bound on the KEY, so it is also a lower bound on the
+    // day: there is nothing to find in a shard that sorts entirely below it.
+    let floor_day = args.since.as_deref().and_then(day_of_log_key);
+    for back in 0..args.days {
+        let Some(day) = today.checked_sub_days(chrono::Days::new(u64::from(back))) else {
+            break;
+        };
+        let shard = format!(
+            "{LOG_PREFIX}{:04}/{:02}/{:02}/",
+            day.year(),
+            day.month(),
+            day.day()
+        );
+        // The floor is checked BEFORE the day is counted: a shard the walk
+        // decided not to look in must not appear in `days_searched`, or the
+        // number an operator reads as "how far did it look" is one too many.
+        if floor_day.is_some_and(|floor| day < floor) {
+            break;
+        }
+        report.days_searched += 1;
+        report.oldest_day_searched = day.to_string();
+        for key in newest_keys_in(store, &shard, args)? {
+            match read_one(store, &key) {
+                reader::LogEntryVerdict::Entry(e) => report.rows.push(*e),
+                reader::LogEntryVerdict::UnsupportedFormat { .. } => report.unsupported_format += 1,
+                reader::LogEntryVerdict::Unreadable(_) => report.unreadable += 1,
+                reader::LogEntryVerdict::Inconsistent(_) => report.inconsistent += 1,
+            }
+            if report.rows.len() == args.max {
+                // More days remain unlooked-at, so there are almost certainly
+                // older points. Said as `truncated`, not as a resume cursor:
+                // a windowed query over older points is an ADVERTISED-ABSENT
+                // capability (D3 §5.3), and inventing a `--until` nothing
+                // consumes would be the fake stub that section forbids.
+                report.truncated = back + 1 < args.days;
+                return Ok(report);
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// The newest keys in ONE day shard, descending, at most `args.max` of them and
+/// never fewer than the shard holds.
+///
+/// Bounded memory: the deque keeps the LAST `max` keys of an ascending walk,
+/// which are the largest, and the log key's fixed-width millisecond makes
+/// largest mean newest.
+fn newest_keys_in(store: &Store, shard: &str, args: &ListArgs) -> Result<Vec<String>, String> {
     let mut newest: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut cursor = args.since.clone();
     loop {
         let (page, next) = store
-            .list_page(LOG_PREFIX, cursor.as_deref(), LIST_PAGE)
-            .map_err(|e| format!("cannot list `{LOG_PREFIX}`: {e}"))?;
+            .list_page(shard, cursor.as_deref(), LIST_PAGE)
+            .map_err(|e| format!("cannot list `{shard}`: {e}"))?;
         for key in page {
             if !key.ends_with(".json") {
                 continue;
@@ -569,16 +693,28 @@ pub fn list_with(args: &ListArgs, store: &Store) -> Result<Vec<CatalogLogEntry>,
             None => break,
         }
     }
-    let mut out = Vec::with_capacity(newest.len());
-    for key in newest.iter().rev() {
-        let (bytes, _version) = store
-            .get(key)
-            .map_err(|e| format!("cannot read the index entry `{key}`: {e}"))?;
-        let entry: CatalogLogEntry = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("`{key}` is not a catalog log entry: {e}"))?;
-        out.push(entry);
+    Ok(newest.into_iter().rev().collect())
+}
+
+/// One index entry, with a `get` failure folded into the same per-entry
+/// vocabulary as a malformed body: both mean "this row could not be read",
+/// and neither is a reason to abandon the listing.
+fn read_one(store: &Store, key: &str) -> reader::LogEntryVerdict {
+    match store.get(key) {
+        Ok((bytes, _)) => reader::read_log_entry(&bytes),
+        Err(e) => reader::LogEntryVerdict::Unreadable(format!("{key}: {e}")),
     }
-    Ok(out)
+}
+
+/// The UTC day a log key's shard names, or `None` when the key is not one of
+/// ours. `logweir/catalog/v1/log/2026/09/15/…` -> 2026-09-15.
+fn day_of_log_key(key: &str) -> Option<chrono::NaiveDate> {
+    let rest = key.strip_prefix(LOG_PREFIX)?;
+    let mut parts = rest.split('/');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    chrono::NaiveDate::from_ymd_opt(y, m, d)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,9 +826,11 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
             return ExitCode::Operational;
         }
     };
-    match list_with(args, &store) {
-        Ok(rows) => {
-            print_list(&rows);
+    // The ONE clock read on this path, taken here so `list_with` stays pure in
+    // the window it searches and a test can pin it.
+    match list_with(args, &store, chrono::Utc::now().date_naive()) {
+        Ok(report) => {
+            print_list(&report);
             ExitCode::Ok
         }
         Err(e) => {
@@ -711,8 +849,8 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
 /// the verification root is the backup receipt it names. A listing that did
 /// not say so would be a surface presenting unverified metadata as evidence,
 /// which is the one thing PLAT-15.1's acceptance forbids.
-pub fn print_list(rows: &[CatalogLogEntry]) {
-    for e in rows {
+pub fn print_list(report: &ListReport) {
+    for e in &report.rows {
         println!(
             "{}  {}  covered [{}, {})  backup={} run={}  {}",
             e.point_id,
@@ -726,7 +864,25 @@ pub fn print_list(rows: &[CatalogLogEntry]) {
             e.record_key
         );
     }
-    println!("catalog-listed={}", rows.len());
+    println!("catalog-listed={}", report.rows.len());
+    // WHAT WAS SKIPPED, ALWAYS PRINTED (review finding F3). Refusal is per
+    // entry and never fatal — and a page that dropped what it could not read
+    // without saying so would let a short listing read as "these are all the
+    // points".
+    println!("catalog-unsupported-format={}", report.unsupported_format);
+    println!("catalog-unreadable={}", report.unreadable);
+    println!("catalog-inconsistent={}", report.inconsistent);
+    // WHICH WINDOW this page is about, so an empty one is "nothing in the last
+    // N days" and never "there are no points".
+    println!("catalog-searched-days={}", report.days_searched);
+    println!("catalog-oldest-day-searched={}", report.oldest_day_searched);
+    if report.truncated {
+        // NOT a resume cursor. A windowed query over older points is an
+        // advertised-absent capability (D3 §5.3), and a `catalog-next=` that
+        // nothing consumes would be the fake stub that section forbids. Raise
+        // `--max`, or narrow with `--since`.
+        println!("catalog-truncated=true");
+    }
     println!(
         "note: these rows come from the UNSIGNED day-sharded index. Fetch the record.json named \
          on each row and verify it (`logweir drill verify --payload-type catalog-point`), then \

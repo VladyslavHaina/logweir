@@ -26,9 +26,14 @@ pub struct RecordInputs {
     /// that produced the backup. `None` when the writer has no verified
     /// signer identity to record, which the reader reports as unknown.
     pub installation: Option<RecordInstallation>,
-    /// `None` on this build: a Backup Job carries no execution-contract
-    /// environment, so provenance is unknown rather than defaulted. See
-    /// [`RecordExecution`].
+    /// What the CALLER knows about the execution. `None` on both of this
+    /// build's paths — the Backup Job's argv hands the runner no execution
+    /// identity, and a backfill sees a receipt and a bucket and no Kubernetes
+    /// object at all.
+    ///
+    /// It is not the whole block: [`from_receipt`] merges the receipt's own
+    /// `triggered_by` on top (review finding F4), so a record carries the
+    /// provenance that was actually in hand and nothing else.
     pub execution: Option<RecordExecution>,
 }
 
@@ -103,10 +108,33 @@ pub fn from_receipt(
             bootstrap_servers: receipt.source.bootstrap_servers.clone(),
             auth_mode: receipt.source.auth.mode.clone(),
         },
-        execution: inputs.execution.clone(),
+        execution: execution_block(receipt, inputs),
         signing: inputs.signing.clone(),
         installation: inputs.installation.clone(),
     })
+}
+
+/// The `execution` block, from what the caller knows PLUS what the receipt
+/// already carries — and nothing else (review finding F4).
+///
+/// `BackupReceipt::triggered_by` is always present in the document (it is the
+/// empty string when the operator passed no `--triggered-by`), so a record that
+/// dropped it was discarding provenance the writer had in hand. An EMPTY
+/// `triggered_by` is not copied: `""` means "the operator said nothing", and
+/// writing it would turn an absence into a value.
+///
+/// A block that ends up establishing nothing is returned as `None`, so absent
+/// stays the one spelling of unknown (D3 §5.2 rule 2).
+fn execution_block(receipt: &BackupReceipt, inputs: &RecordInputs) -> Option<RecordExecution> {
+    let mut block = inputs.execution.clone().unwrap_or_default();
+    if block.triggered_by.is_none() && !receipt.triggered_by.trim().is_empty() {
+        block.triggered_by = Some(receipt.triggered_by.clone());
+    }
+    if block.is_empty() {
+        None
+    } else {
+        Some(block)
+    }
 }
 
 /// The three keys one point occupies.
@@ -181,7 +209,7 @@ pub fn put_point(
     entry: &CatalogLogEntry,
     signer: &crate::signer::ValidatedSigner,
     evidence: &Store,
-) -> Result<WriteOutcome, String> {
+) -> Result<WriteOutcome, PutError> {
     let expected = point
         .receipt
         .sha256
@@ -189,19 +217,26 @@ pub fn put_point(
         .filter(|hex| hex.len() >= 32)
         .map(|hex| format!("{POINT_ID_PREFIX}{}", &hex[..32]));
     if expected.as_deref() != Some(point.point_id.as_str()) {
-        return Err(format!(
+        return Err(PutError::SelfContradicting(format!(
             "refusing to sign a catalog point whose id `{}` is not the one its receipt digest \
              `{}` implies ({}). The id is the digest's display form (D3 §5.1); a record where \
              they disagree would answer a lookup with a different backup's window.",
             point.point_id,
             point.receipt.sha256,
             expected.as_deref().unwrap_or("<not a sha256: digest>")
-        ));
+        )));
     }
-    let bytes = point.canonical_bytes()?;
-    let entry_bytes = entry.canonical_bytes()?;
-    let sidecar = signer.sign(super::PAYLOAD_TYPE_CATALOG_POINT, &bytes)?;
-    let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(|e| format!("DSSE sidecar: {e}"))?;
+    let bytes = point
+        .canonical_bytes()
+        .map_err(PutError::SelfContradicting)?;
+    let entry_bytes = entry
+        .canonical_bytes()
+        .map_err(PutError::SelfContradicting)?;
+    let sidecar = signer
+        .sign(super::PAYLOAD_TYPE_CATALOG_POINT, &bytes)
+        .map_err(PutError::Signing)?;
+    let sidecar_bytes = serde_json::to_vec(&sidecar)
+        .map_err(|e| PutError::Signing(format!("DSSE sidecar: {e}")))?;
 
     let keys = Written {
         point_id: point.point_id.clone(),
@@ -226,10 +261,54 @@ pub fn put_point(
 /// Folding the two would be the defect this whole layer is about: "could not
 /// tell" (a 403, a timeout) reported as "already there" would make a sync
 /// silently skip points it never managed to look at.
-fn create_only(store: &Store, key: &str, bytes: &[u8]) -> Result<PutState, String> {
+fn create_only(store: &Store, key: &str, bytes: &[u8]) -> Result<PutState, PutError> {
     match store.put_create_only(key, bytes) {
         Ok(_) => Ok(PutState::Created),
         Err(StoreError::AlreadyExists(_)) => Ok(PutState::AlreadyPresent),
-        Err(e) => Err(format!("{key}: {e}")),
+        Err(e) => Err(PutError::Store {
+            key: key.to_string(),
+            detail: e.to_string(),
+        }),
+    }
+}
+
+/// **Why [`put_point`] returns a typed error and not a `String` (review
+/// finding F1).**
+///
+/// Global Constraint 11's exit 4 means "signing or lock-proof failed — **and
+/// nothing was uploaded**". A `String` error made every caller map a denied
+/// PUT, a 503 or a timeout onto that code, which is false twice over: it sends
+/// an operator to rotate signing material over a bucket policy, and it asserts
+/// "nothing was uploaded" in the one case — `record.json` stored, `record.sig`
+/// refused — where something was. The distinction is knowable exactly here, so
+/// it is made exactly here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PutError {
+    /// The document contradicts itself and was NOT signed. Nothing was
+    /// uploaded, because the refusal precedes every put.
+    SelfContradicting(String),
+    /// Signing failed. Nothing was uploaded, for the same reason: step 3
+    /// precedes step 4.
+    Signing(String),
+    /// The store refused or could not complete a put. Says NOTHING about the
+    /// signing key, and an earlier object of this point may already be stored.
+    Store { key: String, detail: String },
+}
+
+impl std::fmt::Display for PutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SelfContradicting(m) | Self::Signing(m) => write!(f, "{m}"),
+            Self::Store { key, detail } => write!(f, "{key}: {detail}"),
+        }
+    }
+}
+
+impl PutError {
+    /// True only when the failure happened BEFORE any put was attempted, so a
+    /// caller may still truthfully say "nothing was uploaded".
+    #[must_use]
+    pub const fn nothing_was_uploaded(&self) -> bool {
+        matches!(self, Self::SelfContradicting(_) | Self::Signing(_))
     }
 }

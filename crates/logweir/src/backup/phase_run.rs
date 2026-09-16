@@ -510,6 +510,6 @@ fn write_catalog_point(
     let entry = crate::catalog::CatalogLogEntry::of(&point);
     match put_point(&point, &entry, signer, store) {
         Ok(o) => Some(o.keys.record_key),
-        Err(e) => warn("written", e),
+        Err(e) => warn("written", e.to_string()),
     }
 }

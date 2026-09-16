@@ -297,3 +297,109 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     locations.dedup();
     Duplicate::SameIdentity { locations }
 }
+
+// ---------------------------------------------------------------------------
+// The INDEX half of the layout (review finding F3)
+// ---------------------------------------------------------------------------
+
+/// What reading ONE day-sharded index entry established.
+///
+/// **Rule 1 applies here too, and it did not before.** `docs/formats/
+/// catalog-point.md` promises "refusal is per entry, not per catalog"; the
+/// first version of this module implemented that for `record.json` and let a
+/// single unreadable object under `logweir/catalog/v1/log/` abort a whole
+/// listing. A `v2` Logweir that renames a field in the index, a truncated
+/// object or one transient `get` would have taken `logweir catalog list` down
+/// wholesale instead of listing what it could.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogEntryVerdict {
+    Entry(Box<CatalogLogEntry>),
+    /// Rule 1: a `format_version` major this build does not implement.
+    UnsupportedFormat {
+        format_version: String,
+    },
+    /// Not an index entry at all: not JSON, no `format_version`, not semver,
+    /// or a shape major 1 cannot hold.
+    Unreadable(String),
+    /// **Review finding F6.** The entry contradicts itself: its `record_key`
+    /// is not the one its `point_id` implies, or its `point_id` is not a
+    /// well-formed `lwp1-<32 hex>`.
+    ///
+    /// The log prefix is create-only but not append-restricted, so anyone who
+    /// can write a NEW key under it can publish a row attributing an arbitrary
+    /// `record_key` to a chosen `point_id`. The index is not evidence and
+    /// `logweir catalog list` says so on every run — but a row whose own two
+    /// halves disagree is free to drop, and dropping it costs nothing and
+    /// touches no trust decision.
+    Inconsistent(String),
+}
+
+/// **Rule 1 and the self-consistency check, for one index entry.**
+///
+/// `format_version` is read from an untyped `Value` first, for the reason
+/// [`read_record`] gives: a major-2 entry may have any shape, and reaching for
+/// a typed field in it would report "not an entry" for something this build
+/// merely does not implement yet.
+pub fn read_log_entry(bytes: &[u8]) -> LogEntryVerdict {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(e) => return LogEntryVerdict::Unreadable(format!("not valid JSON: {e}")),
+    };
+    let Some(version) = value
+        .get("format_version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return LogEntryVerdict::Unreadable(
+            "no `format_version` string, so this object declares no format at all".to_string(),
+        );
+    };
+    let Some(major) = major_of(&version) else {
+        return LogEntryVerdict::Unreadable(format!(
+            "`format_version` {version:?} is not a semver major.minor.patch"
+        ));
+    };
+    if major != 1 {
+        return LogEntryVerdict::UnsupportedFormat {
+            format_version: version,
+        };
+    }
+    let entry: CatalogLogEntry = match serde_json::from_value(value) {
+        Ok(e) => e,
+        Err(e) => {
+            return LogEntryVerdict::Unreadable(format!(
+                "declares format_version {version:?} but is not a major-1 catalog index entry: {e}"
+            ))
+        }
+    };
+    if !is_point_id(&entry.point_id) {
+        return LogEntryVerdict::Inconsistent(format!(
+            "`point_id` {:?} is not a `lwp1-` identifier followed by 32 lowercase hex characters",
+            entry.point_id
+        ));
+    }
+    let implied = record_key(&entry.point_id);
+    if entry.record_key != implied {
+        return LogEntryVerdict::Inconsistent(format!(
+            "`record_key` {:?} is not the key `point_id` {:?} implies ({implied:?}); the entry \
+             attributes one point's identity to another object",
+            entry.record_key, entry.point_id
+        ));
+    }
+    LogEntryVerdict::Entry(Box::new(entry))
+}
+
+/// `lwp1-` followed by exactly 32 LOWERCASE hex characters.
+///
+/// Lowercase, because [`point_id`] emits lowercase and two spellings of one
+/// identity is the defect the id's own doc comment argues against.
+#[must_use]
+pub fn is_point_id(id: &str) -> bool {
+    let Some(hex) = id.strip_prefix(POINT_ID_PREFIX) else {
+        return false;
+    };
+    hex.len() == 32
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
