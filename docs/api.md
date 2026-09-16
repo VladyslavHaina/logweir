@@ -343,7 +343,8 @@ fails closed.
 | | |
 |---|---|
 | cookie | `__Host-logweir_session`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, **no `Domain`** |
-| contents | session id, issuer, subject, display claim, group claims, issued/expiry/auth times, key version — **never** a provider token |
+| contents | session id, issuer, subject, display claim, the group claims that appear in some role binding (unbound groups are not carried), issued/expiry/auth times, key version — **never** a provider token |
+| size | the sealed `Set-Cookie` is measured at sign-in; a session that would exceed the browser cookie limit is refused by name (`session_too_large`) rather than truncated, because dropping a group silently drops a grant |
 | protection | ChaCha20-Poly1305, with the cookie's own name and the key version as associated data |
 | lifetime | at most 15 minutes; there is no refresh token and no server-side session table |
 | CSRF token | `HMAC-SHA-256(session key, session id)`, returned by `GET /api/v1/session`, required in `X-CSRF-Token` on every unsafe method |
@@ -353,8 +354,11 @@ Because the session is stateless, a restart or a second replica does not log
 anyone out and nothing has to be replicated. What that costs is that revocation
 before expiry is bounded by the expiry: removing an identity at the provider
 takes effect within fifteen minutes. **Roles are not in the cookie** — they are
-re-derived per request from the claims plus the current binding table — so
-removing a role binding takes effect on the *next request*.
+re-derived per request from the carried claims plus the current binding table —
+so removing a role binding takes effect on the *next request*. Because only the
+groups that were bindable at sign-in are carried, a binding *added* for a group
+the session does not carry takes effect at the next sign-in, not the next
+request.
 
 ### What can never be an identity
 
