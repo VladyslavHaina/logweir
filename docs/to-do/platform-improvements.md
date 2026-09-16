@@ -116,9 +116,9 @@ Wave 2 resumes every branch in place with the prompts under
 | --- | --- | --- | --- |
 | PLAT-01.1 / 01.2 / 02.1 / 02.2 | Done | plat01-02-live-finish, plat01-02-live-review | Completion records under PLAT-01 and PLAT-02. Integrated into main as `4b7a1f6` (chart bootstrap digest pin) and `fbd124e` (the two live harnesses). |
 | PLAT-13.1 | Done | closure-0413 | Completion record under PLAT-13.1. |
-| PLAT-04.1 | In progress (defect found) | closure-0413, w0-reservation, plat06-live | Source identity, focused tests (schedule_controller 44/44, crd_shape 24/24, retention 48/48) and published controller digest `sha256:bdaaf374…` verified at `4956785`; overlap, two-replica, restart, stale-finalizer and Allow cases have live evidence. Two gaps block Done: the deleted-Job case has controller-double evidence only (plat06's live run adds it), and the slot reservation is unauthorized by the shipped role (below), so the accepted live evidence does not describe a shipped install. |
-| PLAT-04.1 defect (P0) | In progress (fix committed, live proof pending) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
-| PLAT-06.1 | In progress | plat06-live | Source, controller-double tests (weirkeeper 321/321, thirteen killed mutants) and docs are complete on `claude/plat06` (report `claude/plat06.result.md` §1-4, §6); the live docker-desktop run (manual, hostile annotation, scheduled under the shipped role, restart, deleted Job, snapshot equality, duplicate name) and its report sections are in progress. |
+| PLAT-04.1 | Done | closure-0413, w0-reservation, plat06-live, plat06-review | Completion record under PLAT-04.1. The two gaps closed live in `10f6c28`'s run: the deleted-Job case (e) and the reservation under the unmodified shipped role (c). |
+| PLAT-04.1 defect (P0) | Fixed (`bdd26dc`, live-proved) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
+| PLAT-06.1 | Done | plat06-live, plat06-review | Completion record under PLAT-06.1. Integrated into main as `8e362f9..10f6c28`. |
 | PLAT-07.1 | In progress | plat07-finish | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
@@ -155,13 +155,15 @@ surviving. None is fixed yet except where a worker is named.
 
 | Id | Defect | Owner |
 | --- | --- | --- |
-| P0-RESERVE | `backup_schedule.rs:1359` reserves a slot with `replace_status` (PUT, verb `update`) while the shipped role grants only `patch` on `backupschedules/status`; default `Forbid` schedules therefore never create a Backup on a shipped install. Confirmed live (`auth can-i`: update no, patch yes). | w0-reservation (dispatched) |
+| P0-RESERVE | `backup_schedule.rs:1359` reserves a slot with `replace_status` (PUT, verb `update`) while the shipped role grants only `patch` on `backupschedules/status`; default `Forbid` schedules therefore never create a Backup on a shipped install. Confirmed live (`auth can-i`: update no, patch yes). **Fixed** in `bdd26dc` (resourceVersion-conditional merge PATCH) with the reverse "every call has a grant" lint (`40fd7cb`); live-proved under the unmodified shipped role in the PLAT-06.1 run (reservation set at rv 2332382, cleared at 2332386). | w0-reservation, plat06-live (done) |
 | SEC-ENVHTTP | The controller forwards its own `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into every runner Job (`controllers/backup.rs:192`, `restore.rs:1297`); the engine's `from_env()` then honours them, so a forwarded `AWS_ALLOW_HTTP=true` enables plaintext transport even when the approved plan says `allow_http: false`. A global setting overrides approved execution inputs. | PLAT-08.1 destination resolver (D2 W6b) |
 | SEC-PODLOG | Pod lookup for exit codes and evidence keys matches on labels alone and takes the first result (`controllers/backup.rs:1683`, `restore.rs:2519`, `kafka_cluster.rs:832`); a tenant able to create a pod with `batch.kubernetes.io/job-name=<job>` can have its log read as the run's outcome. The pod's controller owner UID is never checked. | queued after plat06/plat07 merge |
 | UI-HTTPDOWNGRADE | The restore wizard sets `allowHttp` from the path-style checkbox (`ui/pages/restore-wizard.js:1142`) and applies one endpoint/region/addressing to both the source archive and evidence store (`:1135`). | PLAT-08.2 UI slice, after ui-correct |
 | UI-FAKEPREFLIGHT | Wizard step 5 "Target-topic preflight" shows only the target cluster's cached `status.reachable` (`ui/pages/restore-wizard.js:424`), and restore admission gates on the same cached value (`controllers/restore.rs:638`). | PLAT-03.2 |
 | RET-WRONGBUCKET | Retention lists manifests through the controller's single global store while rendering commands for the schedule's own URL (`backup_schedule.rs:1417`), so a schedule on another bucket is reported against the wrong catalog. | PLAT-16.1 |
 | ENGINE-PATHSTYLE | The pinned engine ignores `path_style` and forces path-style addressing whenever an endpoint is set (`kafka-backup-core storage/s3.rs:66`), so virtual-hosted addressing with a custom endpoint cannot be honoured and must be refused rather than advertised. | PLAT-08.1 (documented refusal) |
+| RECEIPT-DUP | A Backup Job re-created from its frozen inputs (PLAT-06.1 case e) writes a second run-id receipt under the same execution id while overwriting the manifest at the same key; if the topic advanced between the runs, the first signed receipt's digests no longer match and a verifier reports it Invalid. Found by plat06-review (M1); run identity is idempotent, signed evidence is not. | PLAT-15.1 catalog / D3 W3 (point identity is content-derived from the receipt) |
+| LINT-INLINE-CALL | The reverse RBAC lint (`manifest_lint::every_call_site_has_a_grant`) and its forward twin do not see an inline `Api::<T>::namespaced(…).delete(…)` call shape (plat06-review L1), so a future controller call written that way would escape both. | PLAT-20.1 regression set; fix alongside the next controller task that adds a call |
 
 ### Codex batch history (2026-09-14, superseded by the table above)
 
@@ -412,6 +414,31 @@ long downtime, invalid cron, retry exhaustion and duplicate reconciliation.
 the user changes policy; document defaults applied to old schedules. Publish
 a policy truth table and live overlap/restart results.
 
+**Completion record — Done (2026-09-16), PLAT-04.1.** Scheduler source and
+live acceptance were closed at `4956785` (closure verification
+`claude/closure-0413.result.md`: overlap under Forbid, explicit Allow with the
+owned/foreign/ownerless/old-UID 409 winners, two controllers admitting from one
+resourceVersion, restart after reservation and after child creation, stale
+finalizer 409, safe replacement; schedule_controller 44/44, crd_shape 24/24,
+retention 48/48; published controller digest `sha256:bdaaf374…`). The two
+remaining gaps closed with PLAT-06.1's live run on `10f6c28`: the deleted-Job
+case (a scheduled Backup's Job deleted under Forbid keeps the Backup
+conservatively active, the schedule admits no new slot until it is terminal,
+and the Job is re-created from the identical frozen inputs) and the slot
+reservation under the unmodified shipped ClusterRole (`auth can-i
+--subresource=status`: `patch` yes, `update` no on all five status
+subresources; `pendingBackupRef` set at rv 2332382 and cleared at 2332386 with
+zero namespace-local grants). The P0-RESERVE defect is fixed in `bdd26dc`
+(resourceVersion-conditional merge PATCH, D-SEAMS S7) and guarded by
+`manifest_lint::every_call_site_has_a_grant` (`40fd7cb`), whose
+`replace_status` mutant fails by name. Independent review
+`claude/plat06.review.md`: ACCEPT. Migration: none beyond PLAT-06.1's additive
+CRD field; `docs/kubernetes.md` §9 records that status writes are
+preconditioned merge patches. Earlier evidence used custom namespace Roles
+(`/tmp/logweir-roadmap-run/plat04-live*.result.md`); the
+`artifacts/w0-reservation/can-i-matrix-before.txt` capture is superseded and
+annotated (it queried `status` as an object name).
+
 ## PLAT-05 — Edit future protection without losing recovery history
 
 **Priority P1 · Proposed.** Immutable schedules force replacement, and their
@@ -481,6 +508,55 @@ paused schedule, failed preflight and successful scheduled-policy copy.
 
 **Migration/safety and done evidence:** Do not mutate an existing execution to
 retry it. Demonstrate the same manual CR path through CLI/API and UI.
+
+**Completion record — Done (2026-09-16), PLAT-06.1.** Landed in main as
+`8e362f9` (typed runner inputs), `3c7e629` (contract docs), `bdd26dc`,
+`40fd7cb`, `ae39b35` (the P0-RESERVE fix, reverse RBAC lint and its doc) and
+`10f6c28` (live harness `scripts/test-plat06-live.py`). Contract
+(`docs/kubernetes.md` §10, `config/samples/backup.yaml`): a `Backup` no longer
+executes the `logweir.dev/runner-argv` annotation; run identity is server-derived
+(`manual` → the object UID, `schedule` → `backup_id_for(schedule UID, slot)` with
+the deterministic name and owner reference required); the controller freezes the
+whole resolved input set in a create-only `immutable: true` ConfigMap
+`<backup>-plan` (`execution-inputs.json` grammar
+`logweir.dev/backup-execution-inputs/v1` plus the documents rendered from it),
+records `status.execution {id, inputsRef, inputsSha256}` before any Job exists,
+and admits an existing plan only after re-resolving and comparing every
+executable field (`PlanConfigMapConflict` otherwise, nothing patched, replaced,
+deleted or adopted); a Job not controlled by exactly this Backup is
+`JobNameConflict`; a vanished Job is re-created from the frozen inputs; the pod
+carrying the exit code is selected by job-name label and owner Job UID; an
+annotation is surfaced by size and digest only (`RunnerArgvAnnotationIgnored`)
+and a Job an older controller created is observed unchanged
+(`ExecutionInputsUnverified`). No Secret name or credential appears in the
+snapshot or status. Verified at `10f6c28`: weirkeeper 321/321 (backup_controller
+63, schedule_controller 44), the nine lint suites 105/105, strict clippy and fmt,
+`crds-check`/`chart-check`/`schema-check`/`render-install --check`, fourteen
+planted mutants killed. Live docker-desktop run (namespace
+`lw-plat06-20260916t131700z`, controller and runner images built from the
+branch, lab restored byte-equal, lock 13:02:51–13:36:09Z; evidence
+`artifacts/plat06/`, 106 files): 7/7 cases — manual Backup with no annotation to
+a signed receipt independently verified by `docs/verify_scorecard.py`; hostile
+annotation ignored (argv unchanged, attacker prefix absent from the bucket);
+scheduled Backup under the shipped Forbid role (the P0-RESERVE proof); controller
+restart mid-run keeps the Job and inputs; deleted Job re-created from identical
+inputs under Forbid; two Backups with identical inputs freeze byte-identical
+snapshots apart from identity; a duplicate name is the API server's
+`AlreadyExists`. Independent review `claude/plat06.review.md`: ACCEPT (two
+medium, five low, none blocking). Migration (`docs/kubernetes.md` §10): apply
+`config/crd/backups.yaml` before the controller (the additive `status.execution`
+field is otherwise pruned and every run reports `ExecutionInputsUnverified`);
+in-flight Jobs finish unchanged; a Backup caught between an older controller's
+plan write and its Job create becomes `PlanConfigMapConflict` and is re-created;
+rollback fails safe (an older controller creates nothing for an annotation-less
+Backup and refuses a frozen three-key plan); leave the CRD in place. Limitations:
+no live failure path ran (`ExecutionSpecInvalid`, `PlanConfigMapConflict`,
+`JobNameConflict`, legacy observation and the rollback leg rest on
+controller-double coverage; the reviewer verified both code halves and asks for
+one live legacy/upgrade/rollback leg before a release branch — carried to
+PLAT-20.2); the SEC-PODLOG ownerless-pod fallback in `select_job_pod` and the
+SEC-ENVHTTP forwarded `AWS_ALLOW_HTTP` remain open under their own rows; the
+RECEIPT-DUP finding is recorded in the defects table for D3.
 
 ## PLAT-07 — Reuse saved cluster connections everywhere
 
