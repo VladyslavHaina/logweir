@@ -1,0 +1,2512 @@
+//! The PURE contract shared by every Logweir check: the plan a runner is
+//! handed, the result frames it prints, the closed code vocabulary both sides
+//! name, the redactor every message passes through, the visibility policy and
+//! the binding digest (decision D2 §4.1).
+//!
+//! ONE runner, not two (D-SEAMS S1). `logweir check run` serves topic
+//! inventory, operation readiness, restore preflight, destination access and
+//! evidence fetch; the controller side (`weirkeeper::check`) and the API read
+//! the same frames through the same decoder. Everything here is pure: no I/O,
+//! no clock, no entropy (Global Constraint 1, `scripts/check-pure-core.sh`).
+//!
+//! Two properties this module exists to make provable:
+//!
+//! 1. **A credential value can never reach a frame, a status or a log.**
+//!    [`redact`] is the single chokepoint, its rules are a LIST so each one can
+//!    be deleted in a test and observed to leak (`redaction_rules`), and every
+//!    message field is capped at [`MESSAGE_MAX_CHARS`].
+//! 2. **A successful Kafka listing never means "all topics".** [`visibility`]
+//!    can answer `attestedComplete` only from an administrator attestation
+//!    that matches the observed cluster id and principal and has not expired
+//!    (D-SEAMS S3).
+
+use crate::destination::DestinationRole;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// The contract string a check PLAN carries. A runner that does not know it
+/// refuses before it builds a client.
+pub const CHECK_PLAN_CONTRACT: &str = "logweir.dev/check-plan/v1";
+/// The contract string the end frame carries.
+pub const CHECK_RESULT_CONTRACT: &str = "logweir.dev/check-result/v1";
+/// The value of `--check-contract-version` and `LOGWEIR_CHECK_CONTRACT_VERSION`.
+pub const CHECK_CONTRACT_VERSION: u32 = 1;
+/// The topic-inventory result format string (`status.result.format`).
+pub const TOPIC_INVENTORY_FORMAT: &str = "logweir.dev/topic-inventory/v1";
+
+/// Every frame line, INCLUDING its newline, stays under this. CRI splits a
+/// container log line at 16 KiB; staying at 4 KiB keeps a frame whole through
+/// the split and through the controller's `LogParams` read.
+pub const FRAME_MAX_BYTES: usize = 4096;
+/// Base64 characters per `logweir-check-part` frame.
+pub const PART_MAX_BASE64_CHARS: usize = 3000;
+/// Messages and remedies are capped here, after redaction.
+pub const MESSAGE_MAX_CHARS: usize = 512;
+/// The default relay budget for topic lines (D2 §5.5): 6 MiB.
+pub const DEFAULT_RELAY_BUDGET_BYTES: usize = 6 * 1024 * 1024;
+/// `spec.request.expectedTopics` maxItems.
+pub const MAX_EXPECTED_TOPICS: usize = 500;
+/// `topicInventory` hard ceiling, matching `policy.discovery.hardMaxTopics`.
+pub const MAX_TOPICS_CEILING: u32 = 50_000;
+/// `operationReadiness` topic cap.
+pub const MAX_READINESS_TOPICS: usize = 1_000;
+/// `evidenceFetch` object cap.
+pub const MAX_EVIDENCE_OBJECTS: usize = 3;
+/// `evidenceFetch` payload cap: 1 MiB.
+pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = 1024 * 1024;
+/// `evidenceFetch` sidecar cap: 64 KiB.
+pub const MAX_EVIDENCE_SIDECAR_BYTES: u64 = 64 * 1024;
+/// A result carries at most this many per-check entries (D2 §6.4).
+pub const MAX_CHECK_ENTRIES: usize = 64;
+
+/// Frame prefixes. Public because `weirkeeper::check::relay` and the runner
+/// both write and read them, and a second spelling is a second contract.
+pub const TOPIC_FRAME_PREFIX: &str = "logweir-check-topic=";
+/// See [`TOPIC_FRAME_PREFIX`].
+pub const PART_FRAME_PREFIX: &str = "logweir-check-part=";
+/// See [`TOPIC_FRAME_PREFIX`].
+pub const END_FRAME_PREFIX: &str = "logweir-check-end=";
+
+// ---------------------------------------------------------------- vocabulary
+
+/// A macro for the two closed vocabularies below.
+///
+/// Both the code table and the id table are CLOSED on purpose: a controller
+/// that could invent a reason string would put an unreviewed value into a
+/// `metav1.Condition.reason` (which Kubernetes validates against
+/// `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`) and into a UI that has no
+/// remedy text for it. Generating `as_str`, `FromStr` and `ALL` from ONE list
+/// means the three can never disagree — the defect a hand-written second match
+/// arm always eventually has.
+macro_rules! closed_vocabulary {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[non_exhaustive]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            /// The wire spelling.
+            #[must_use]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text),+
+                }
+            }
+
+            /// Every member, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The wire spelling back to a member. `None` for anything not in
+            /// the table — never a fallback member, because "I did not
+            /// recognise this" and "this specific thing happened" are two
+            /// different facts.
+            #[must_use]
+            pub fn parse(s: &str) -> Option<Self> {
+                match s {
+                    $($text => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let s = String::deserialize(d)?;
+                Self::parse(&s).ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        concat!("`{}` is not a ", stringify!($name)),
+                        s
+                    ))
+                })
+            }
+        }
+    };
+}
+
+closed_vocabulary! {
+    /// The CLOSED code vocabulary (D2 §4.2 classification, §4.3 waiting
+    /// classification, §6.3 check catalogue, §3.3 destination validation).
+    ///
+    /// Every spelling is CamelCase so it can be a `metav1.Condition.reason`
+    /// verbatim; `every_code_is_a_valid_condition_reason` asserts it.
+    CheckCode {
+        // -- object store (D2 §4.2) --------------------------------------
+        AccessDenied => "AccessDenied",
+        InvalidCredentials => "InvalidCredentials",
+        BucketNotFound => "BucketNotFound",
+        ObjectNotFound => "ObjectNotFound",
+        EndpointUnreachable => "EndpointUnreachable",
+        TlsTrustFailed => "TlsTrustFailed",
+        RegionMismatch => "RegionMismatch",
+        Timeout => "Timeout",
+        StoreErrorUnclassified => "StoreErrorUnclassified",
+        // -- Kafka (D2 §4.2) ---------------------------------------------
+        BrokerUnreachable => "BrokerUnreachable",
+        AuthenticationFailed => "AuthenticationFailed",
+        TlsHandshakeFailed => "TlsHandshakeFailed",
+        MetadataTimeout => "MetadataTimeout",
+        ClusterAuthorizationFailed => "ClusterAuthorizationFailed",
+        TopicAuthorizationFailed => "TopicAuthorizationFailed",
+        UnknownTopicOrPartition => "UnknownTopicOrPartition",
+        // -- pod / Job waiting classification (D2 §4.3) ------------------
+        CredentialSecretNotFound => "CredentialSecretNotFound",
+        CredentialSecretKeyMissing => "CredentialSecretKeyMissing",
+        TrustBundleNotFound => "TrustBundleNotFound",
+        RunnerImagePullFailed => "RunnerImagePullFailed",
+        RunnerImageNotPresent => "RunnerImageNotPresent",
+        RunnerImageInvalid => "RunnerImageInvalid",
+        PodUnschedulable => "PodUnschedulable",
+        SigningKeyMissing => "SigningKeyMissing",
+        VolumeMountFailed => "VolumeMountFailed",
+        RunnerServiceAccountMissing => "RunnerServiceAccountMissing",
+        PodCreateRejected => "PodCreateRejected",
+        DisruptedMidCheck => "DisruptedMidCheck",
+        ForeignPodIgnored => "ForeignPodIgnored",
+        // -- ready codes (D2 §6.3) ---------------------------------------
+        Resolved => "Resolved",
+        Projected => "Projected",
+        Authenticated => "Authenticated",
+        ClusterIdentityMatches => "ClusterIdentityMatches",
+        TopicsDescribable => "TopicsDescribable",
+        DestinationValid => "DestinationValid",
+        ArchiveListable => "ArchiveListable",
+        MarkerWritten => "MarkerWritten",
+        MarkerAlreadyPresent => "MarkerAlreadyPresent",
+        EvidenceReadable => "EvidenceReadable",
+        SignerUsable => "SignerUsable",
+        SignerRostered => "SignerRostered",
+        ImageAvailable => "ImageAvailable",
+        PodStarted => "PodStarted",
+        ContractSupported => "ContractSupported",
+        PolicyLoaded => "PolicyLoaded",
+        PlanParsed => "PlanParsed",
+        PlanMatchesReferences => "PlanMatchesReferences",
+        MappedNamesLegal => "MappedNamesLegal",
+        RecoveryPointSucceeded => "RecoveryPointSucceeded",
+        ManifestReadable => "ManifestReadable",
+        PointInTimeCovered => "PointInTimeCovered",
+        SegmentsPresent => "SegmentsPresent",
+        TargetAllowed => "TargetAllowed",
+        MarkerHealthy => "MarkerHealthy",
+        MappedTopicsAbsent => "MappedTopicsAbsent",
+        TopicCreateValidated => "TopicCreateValidated",
+        TimestampWithinBound => "TimestampWithinBound",
+        ApprovalVerified => "ApprovalVerified",
+        ApproverKeyValid => "ApproverKeyValid",
+        Valid => "Valid",
+        Succeeded => "Succeeded",
+        // -- notReady codes (D2 §6.3, §3.3, §3.4) ------------------------
+        ConnectionNotFound => "ConnectionNotFound",
+        ConnectionInvalid => "ConnectionInvalid",
+        CredentialReferenceMissing => "CredentialReferenceMissing",
+        ClusterIdentityChanged => "ClusterIdentityChanged",
+        SourceIsAllowlistedTarget => "SourceIsAllowlistedTarget",
+        TopicNotFound => "TopicNotFound",
+        TopicNotAuthorized => "TopicNotAuthorized",
+        DestinationNotFound => "DestinationNotFound",
+        DestinationNotValid => "DestinationNotValid",
+        DestinationRoleNotConfigured => "DestinationRoleNotConfigured",
+        ExecutionContextConflict => "ExecutionContextConflict",
+        CaBundleUnsupportedByEngine => "CaBundleUnsupportedByEngine",
+        CaBundleNotFound => "CaBundleNotFound",
+        CaBundleKeyMissing => "CaBundleKeyMissing",
+        CaBundleTooLarge => "CaBundleTooLarge",
+        CaBundleInvalid => "CaBundleInvalid",
+        AddressingUnsupportedByEngine => "AddressingUnsupportedByEngine",
+        ControllerIdentityNotAllowlisted => "ControllerIdentityNotAllowlisted",
+        WorkloadIdentityNotInjected => "WorkloadIdentityNotInjected",
+        SigningKeyUnreadable => "SigningKeyUnreadable",
+        SigningKeyInvalid => "SigningKeyInvalid",
+        TrustRosterNotFound => "TrustRosterNotFound",
+        TrustRosterNotLoaded => "TrustRosterNotLoaded",
+        SignerNotRostered => "SignerNotRostered",
+        SignerKeyExpired => "SignerKeyExpired",
+        RunnerContractUnsupported => "RunnerContractUnsupported",
+        PolicyUnreadable => "PolicyUnreadable",
+        PlanUnparseable => "PlanUnparseable",
+        PlanHashMismatch => "PlanHashMismatch",
+        PlanDestinationMismatch => "PlanDestinationMismatch",
+        PlanEvidenceDestinationMismatch => "PlanEvidenceDestinationMismatch",
+        PlanTargetMismatch => "PlanTargetMismatch",
+        PlanTopicsNotInRecoveryPoint => "PlanTopicsNotInRecoveryPoint",
+        MappedTopicNameIllegal => "MappedTopicNameIllegal",
+        TopicMappingIdentity => "TopicMappingIdentity",
+        GlobInTopic => "GlobInTopic",
+        ExpansionInTopic => "ExpansionInTopic",
+        RecoveryPointNotFound => "RecoveryPointNotFound",
+        RecoveryPointNotSucceeded => "RecoveryPointNotSucceeded",
+        RecoveryPointUidChanged => "RecoveryPointUidChanged",
+        RecoveryPointLocationMismatch => "RecoveryPointLocationMismatch",
+        BackupSetNotFound => "BackupSetNotFound",
+        ManifestUnreadable => "ManifestUnreadable",
+        PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
+        PointInTimeAfterCoverage => "PointInTimeAfterCoverage",
+        TopicNotInBackupSet => "TopicNotInBackupSet",
+        SegmentMissing => "SegmentMissing",
+        TargetNotAllowlisted => "TargetNotAllowlisted",
+        TargetEqualsSource => "TargetEqualsSource",
+        MarkerTopicMissing => "MarkerTopicMissing",
+        MarkerTopicErrored => "MarkerTopicErrored",
+        MappedTopicExists => "MappedTopicExists",
+        TopicCreateNotAuthorized => "TopicCreateNotAuthorized",
+        TopicConfigRejected => "TopicConfigRejected",
+        ReplicationFactorExceedsBrokers => "ReplicationFactorExceedsBrokers",
+        TimestampBoundExceeded => "TimestampBoundExceeded",
+        ApprovalNotVerified => "ApprovalNotVerified",
+        ApprovalExpired => "ApprovalExpired",
+        ApprovalPlanMismatch => "ApprovalPlanMismatch",
+        ApprovalSubjectMismatch => "ApprovalSubjectMismatch",
+        ApproverKeyExpiresBeforeDeadline => "ApproverKeyExpiresBeforeDeadline",
+        ArchiveUrlUnreadable => "ArchiveUrlUnreadable",
+        NotReady => "NotReady",
+        // -- unknown / execution-only codes (D2 §6.3) --------------------
+        PodNotStarted => "PodNotStarted",
+        BlockedByPrerequisite => "BlockedByPrerequisite",
+        ClusterIdentityNotObserved => "ClusterIdentityNotObserved",
+        TopicVisibilityUnknown => "TopicVisibilityUnknown",
+        WriteNotProbed => "WriteNotProbed",
+        EvidenceReadNotConfigured => "EvidenceReadNotConfigured",
+        SignerKeyIdNotObserved => "SignerKeyIdNotObserved",
+        ReadVerifiedOnlyAtExecution => "ReadVerifiedOnlyAtExecution",
+        ArchivePrefixWriteVerifiedOnlyAtExecution => "ArchivePrefixWriteVerifiedOnlyAtExecution",
+        NetworkPolicyEnforcementNotObservable => "NetworkPolicyEnforcementNotObservable",
+        SegmentListTooLarge => "SegmentListTooLarge",
+        MappedTopicVisibilityUnknown => "MappedTopicVisibilityUnknown",
+        TopicCreateValidationUnsupported => "TopicCreateValidationUnsupported",
+        BrokerConfigsNotReadable => "BrokerConfigsNotReadable",
+        LogAppendTimeOverrideVerifiedOnlyAtExecution => "LogAppendTimeOverrideVerifiedOnlyAtExecution",
+        ApprovalPending => "ApprovalPending",
+        SubjectNotCreated => "SubjectNotCreated",
+        // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
+        CheckContractMismatch => "CheckContractMismatch",
+        ResultUnreadable => "ResultUnreadable",
+        DeadlineExceeded => "DeadlineExceeded",
+        CancelRequested => "CancelRequested",
+        Stalled => "Stalled",
+        ConcurrencyLimited => "ConcurrencyLimited",
+        CheckPlanConflict => "CheckPlanConflict",
+        ResultStorageConflict => "ResultStorageConflict",
+    }
+}
+
+closed_vocabulary! {
+    /// The CLOSED check-id vocabulary (D2 §6.3). Dotted `category.name`, so
+    /// [`CheckId::category`] is the part before the dot and needs no second
+    /// table.
+    CheckId {
+        ConnectionResolved => "connection.resolved",
+        ConnectionCredentialProjected => "connection.credentialProjected",
+        ConnectionAuthenticated => "connection.authenticated",
+        ConnectionClusterIdentity => "connection.clusterIdentity",
+        ConnectionTopicsDescribable => "connection.topicsDescribable",
+        ConnectionTopicsReadable => "connection.topicsReadable",
+        DestinationResolved => "destination.resolved",
+        DestinationCredentialProjected => "destination.credentialProjected",
+        DestinationArchiveListable => "destination.archiveListable",
+        DestinationEvidenceWritable => "destination.evidenceWritable",
+        DestinationArchivePrefixWritable => "destination.archivePrefixWritable",
+        DestinationEvidenceReadable => "destination.evidenceReadable",
+        SignerPrivateKeyUsable => "signer.privateKeyUsable",
+        SignerRostered => "signer.rostered",
+        RunnerImage => "runner.image",
+        RunnerPod => "runner.pod",
+        RunnerContract => "runner.contract",
+        ConfigurationPolicy => "configuration.policy",
+        ConfigurationEgress => "configuration.egress",
+        TargetResolved => "target.resolved",
+        TargetCredentialProjected => "target.credentialProjected",
+        TargetAuthenticated => "target.authenticated",
+        TargetClusterIdentity => "target.clusterIdentity",
+        TargetScratchMarker => "target.scratchMarker",
+        TargetMappedTopics => "target.mappedTopics",
+        TargetTopicCreate => "target.topicCreate",
+        TargetTimestampBound => "target.timestampBound",
+        TargetLogAppendTime => "target.logAppendTime",
+        PlanParse => "plan.parse",
+        PlanBindings => "plan.bindings",
+        PlanNames => "plan.names",
+        RecoveryPointState => "recoveryPoint.state",
+        ArchiveBackupSet => "archive.backupSet",
+        ArchiveCoverage => "archive.coverage",
+        ArchiveSegments => "archive.segments",
+        ApprovalState => "approval.state",
+        ApprovalKeyValidity => "approval.keyValidity",
+    }
+}
+
+impl CheckId {
+    /// The part before the dot — `status.result.checks[].category`.
+    #[must_use]
+    pub fn category(self) -> &'static str {
+        let s = self.as_str();
+        match s.split_once('.') {
+            Some((head, _)) => head,
+            None => s,
+        }
+    }
+}
+
+/// A per-check state (D2 §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckState {
+    Ready,
+    NotReady,
+    Unknown,
+    Skipped,
+}
+
+/// Whether a check's verdict gates the operation (D2 §6.3 legend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Gating {
+    /// A `notReady` here makes the whole operation `notReady`.
+    Blocking,
+    /// Reported as a warning; never changes the aggregate.
+    Advisory,
+    /// Cannot be checked before execution. Always `unknown`, always excluded
+    /// from aggregation — an execution-only check that could turn the
+    /// aggregate `unknown` would make every operation permanently `unknown`.
+    ExecutionOnly,
+}
+
+/// Who observed the fact (D2 §6.4 `authority`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Authority {
+    /// The controller, with no credential.
+    Controller,
+    /// The credential-consuming check Job's own output.
+    CheckJob,
+    /// Pod status or Kubernetes events.
+    PodStatus,
+}
+
+/// The aggregate of a result (D2 §6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OverallState {
+    Ready,
+    NotReady,
+    Unknown,
+}
+
+/// The object a check is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CheckScope {
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+}
+
+/// One per-check record — the shape D2 §6.4 publishes in
+/// `status.result.checks[]`.
+///
+/// `message` and `remedy` are REDACTED and capped by [`CheckOutcome::new`];
+/// the struct's fields are public so a decoder can round-trip a record it
+/// read, but every construction site in Logweir goes through the constructor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CheckOutcome {
+    pub id: CheckId,
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<CheckScope>,
+    pub state: CheckState,
+    pub gating: Gating,
+    pub authority: Authority,
+    pub code: CheckCode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remedy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Non-secret facts a UI shows verbatim: `clusterId`, `brokerCount`,
+    /// `imageID`, `signerKeyId`. Values pass [`redact`] like every other
+    /// relayed string.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub facts: BTreeMap<String, String>,
+    /// Bounded structured detail (`{"count":2,"sample":[…]}`). The full list
+    /// goes to the details `ConfigMap`, never here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+impl CheckOutcome {
+    /// The ONE construction site. It fills `category` from the id, redacts and
+    /// caps `message` and `remedy`, and forces an execution-only check to
+    /// `unknown` — D2 §6.3: "E checks are always reported `unknown` with a
+    /// note".
+    #[must_use]
+    pub fn new(
+        id: CheckId,
+        state: CheckState,
+        gating: Gating,
+        authority: Authority,
+        code: CheckCode,
+    ) -> Self {
+        let state = if gating == Gating::ExecutionOnly {
+            CheckState::Unknown
+        } else {
+            state
+        };
+        Self {
+            id,
+            category: id.category().to_string(),
+            scope: None,
+            state,
+            gating,
+            authority,
+            code,
+            message: String::new(),
+            remedy: String::new(),
+            observed_at: None,
+            expires_at: None,
+            facts: BTreeMap::new(),
+            detail: None,
+        }
+    }
+
+    /// Sets a redacted, capped message.
+    #[must_use]
+    pub fn with_message(mut self, message: &str) -> Self {
+        self.message = redact(message);
+        self
+    }
+
+    /// Sets a redacted, capped remedy.
+    #[must_use]
+    pub fn with_remedy(mut self, remedy: &str) -> Self {
+        self.remedy = redact(remedy);
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope(mut self, scope: CheckScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    #[must_use]
+    pub fn with_times(mut self, observed_at: DateTime<Utc>, expires_at: DateTime<Utc>) -> Self {
+        self.observed_at = Some(observed_at);
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// Adds a non-secret fact. The value is redacted like any relayed string.
+    #[must_use]
+    pub fn with_fact(mut self, key: &str, value: &str) -> Self {
+        self.facts.insert(key.to_string(), redact(value));
+        self
+    }
+
+    #[must_use]
+    pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+}
+
+/// D2 §6.4's aggregation, and nothing else:
+///
+/// - `notReady` if any BLOCKING check is `notReady`;
+/// - otherwise `unknown` if any BLOCKING check is `unknown` or `skipped`;
+/// - otherwise `ready`.
+///
+/// Advisory checks are warnings and execution-only checks are excluded
+/// entirely. An EMPTY set is `unknown`, never `ready`: "nothing was checked"
+/// is not "everything passed", and a bug that dropped every check would
+/// otherwise report a green readiness.
+#[must_use]
+pub fn aggregate(checks: &[CheckOutcome]) -> OverallState {
+    let blocking: Vec<&CheckOutcome> = checks
+        .iter()
+        .filter(|c| c.gating == Gating::Blocking)
+        .collect();
+    if blocking.is_empty() {
+        return OverallState::Unknown;
+    }
+    if blocking.iter().any(|c| c.state == CheckState::NotReady) {
+        return OverallState::NotReady;
+    }
+    if blocking
+        .iter()
+        .any(|c| matches!(c.state, CheckState::Unknown | CheckState::Skipped))
+    {
+        return OverallState::Unknown;
+    }
+    OverallState::Ready
+}
+
+/// The minimum `expiresAt` over non-skipped checks (D2 §6.4). `None` when no
+/// non-skipped check carries one.
+#[must_use]
+pub fn aggregate_expires_at(checks: &[CheckOutcome]) -> Option<DateTime<Utc>> {
+    checks
+        .iter()
+        .filter(|c| c.state != CheckState::Skipped)
+        .filter_map(|c| c.expires_at)
+        .min()
+}
+
+/// Advisory checks that are `notReady` — the warnings a UI shows beside a
+/// `ready` verdict.
+#[must_use]
+pub fn advisory_warnings(checks: &[CheckOutcome]) -> Vec<&CheckOutcome> {
+    checks
+        .iter()
+        .filter(|c| c.gating == Gating::Advisory && c.state == CheckState::NotReady)
+        .collect()
+}
+
+// --------------------------------------------------------------- check plan
+
+/// Which of the five plan kinds a request is (D2 §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckPlanKind {
+    TopicInventory,
+    OperationReadiness,
+    RestorePreflight,
+    DestinationAccess,
+    EvidenceFetch,
+}
+
+impl CheckPlanKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TopicInventory => "topicInventory",
+            Self::OperationReadiness => "operationReadiness",
+            Self::RestorePreflight => "restorePreflight",
+            Self::DestinationAccess => "destinationAccess",
+            Self::EvidenceFetch => "evidenceFetch",
+        }
+    }
+
+    /// The two-letter Job-name discriminator of D2 §4.3 (`td`, `rd`, `rp`,
+    /// `da`, `ev`). It lives here so the controller and any tooling that has
+    /// to recognise a check Job by name read one table.
+    #[must_use]
+    pub fn job_discriminator(self) -> &'static str {
+        match self {
+            Self::TopicInventory => "td",
+            Self::OperationReadiness => "rd",
+            Self::RestorePreflight => "rp",
+            Self::DestinationAccess => "da",
+            Self::EvidenceFetch => "ev",
+        }
+    }
+
+    pub const ALL: [Self; 5] = [
+        Self::TopicInventory,
+        Self::OperationReadiness,
+        Self::RestorePreflight,
+        Self::DestinationAccess,
+        Self::EvidenceFetch,
+    ];
+}
+
+/// Which operation a readiness request is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CheckOperation {
+    Backup,
+    Restore,
+    DestinationAccess,
+}
+
+/// How a Kafka connection is authenticated, spelled as the plan spells it.
+/// The plan carries NO credential value: a password reaches the runner only as
+/// a projected environment variable named by the Kubernetes Secret key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConnectionPlan {
+    pub bootstrap_servers: Vec<String>,
+    /// `plaintext` | `scramSha256` | `scramSha512`, matching
+    /// `logweir_core::spec::AuthSpec::mode_str`.
+    pub auth_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// The NAME of the environment variable the password is projected into —
+    /// never the password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<bool>,
+    /// A path inside the pod, e.g. `/check/source-ca.pem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
+    /// `User:<name>` or `User:ANONYMOUS` (D2 §5.4).
+    pub principal: String,
+}
+
+/// A destination, rendered into the plan from the resolved `BackupDestination`
+/// so the runner never resolves anything itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DestinationPlan {
+    pub name: String,
+    pub uid: String,
+    pub location: crate::destination::DestinationLocation,
+    pub location_digest: String,
+    /// A path inside the pod, e.g. `/check/archive-ca.pem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
+    /// How the credential for each requested role reaches the process. Never
+    /// a value: `static` means "read `AWS_ACCESS_KEY_ID` and friends, which
+    /// the kubelet projected", `workloadIdentity` means "use the injected web
+    /// identity only", `ambient` means the object_store chain.
+    pub credentials: CredentialMode,
+}
+
+/// How the store credential reaches the process (D2 §3.5,
+/// `LOGWEIR_ARCHIVE_CREDENTIALS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CredentialMode {
+    /// Explicit static keys, projected by the kubelet into the pod.
+    Static,
+    /// Web identity / container credentials ONLY. Static keys in the
+    /// environment are ignored, and a missing injection is a refusal
+    /// (`WorkloadIdentityNotInjected`), never a silent fall-through to a node
+    /// role.
+    WorkloadIdentity,
+    /// The object_store chain as configured for this process. Only the
+    /// controller's own allowlisted `ControllerIdentity` reads uses it.
+    Ambient,
+}
+
+/// `topicInventory` (D2 §4.2, §5.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TopicInventoryRequest {
+    pub connection: ConnectionPlan,
+    #[serde(default)]
+    pub include_internal: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_topics: Vec<String>,
+    pub max_topics: u32,
+    /// Bytes of topic LINES the runner may relay before it truncates with
+    /// `RelayLimit`.
+    pub relay_budget_bytes: u64,
+}
+
+/// `operationReadiness` (D2 §4.2, §6.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OperationReadinessRequest {
+    pub operation: CheckOperation,
+    pub connection: ConnectionPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<DestinationPlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<DestinationRole>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
+    /// A path inside the pod; the runner loads it with
+    /// `logweir::signer::ValidatedSigner::load` and reports the PUBLIC key id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_path: Option<String>,
+    /// `writeProbe: CreateOnlyMarker` on the destination.
+    #[serde(default)]
+    pub write_probe: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_checks: Vec<CheckId>,
+}
+
+/// `restorePreflight` (D2 §4.2, §6.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RestorePreflightRequest {
+    /// Where the verbatim plan bytes are mounted, e.g. `/check/plan.yaml`.
+    pub plan_file: String,
+    /// `sha256:<64 hex>` of those bytes; the runner recomputes and refuses a
+    /// mismatch before it opens a socket.
+    pub plan_sha256: String,
+    pub target: ConnectionPlan,
+    pub source_destination: DestinationPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_destination: Option<DestinationPlan>,
+    pub backup_id: String,
+    pub manifest_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_checks: Vec<CheckId>,
+}
+
+/// `destinationAccess` (D2 §4.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DestinationAccessRequest {
+    pub destination: DestinationPlan,
+    pub roles: Vec<DestinationRole>,
+    /// The optional create-only marker probe. `logweir/readiness/<uid>.json`
+    /// is the ONLY key a check may ever write (D2 §4.2).
+    #[serde(default)]
+    pub write_probe: bool,
+}
+
+/// One object an `evidenceFetch` relays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EvidenceObjectRequest {
+    pub role: DestinationRole,
+    pub key: String,
+    pub max_bytes: u64,
+    /// Which relay stream the bytes go to.
+    pub stream: Stream,
+}
+
+/// `evidenceFetch` (D2 §4.2, §3.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EvidenceFetchRequest {
+    pub destination: DestinationPlan,
+    pub objects: Vec<EvidenceObjectRequest>,
+}
+
+/// The five requests, externally tagged so an unknown kind is a parse error
+/// with the kind named, and so each variant keeps its own
+/// `deny_unknown_fields`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckRequest {
+    TopicInventory(TopicInventoryRequest),
+    // Boxed: these two carry a connection AND one or two destinations, which
+    // makes them several hundred bytes larger than the other three. A plan is
+    // deserialised once per process, so the indirection costs nothing and
+    // keeps `CheckRequest` small enough to pass by value.
+    OperationReadiness(Box<OperationReadinessRequest>),
+    RestorePreflight(Box<RestorePreflightRequest>),
+    DestinationAccess(DestinationAccessRequest),
+    EvidenceFetch(EvidenceFetchRequest),
+}
+
+impl CheckRequest {
+    #[must_use]
+    pub fn kind(&self) -> CheckPlanKind {
+        match self {
+            Self::TopicInventory(_) => CheckPlanKind::TopicInventory,
+            Self::OperationReadiness(_) => CheckPlanKind::OperationReadiness,
+            Self::RestorePreflight(_) => CheckPlanKind::RestorePreflight,
+            Self::DestinationAccess(_) => CheckPlanKind::DestinationAccess,
+            Self::EvidenceFetch(_) => CheckPlanKind::EvidenceFetch,
+        }
+    }
+}
+
+/// The document mounted at `/check/check-plan.json` (D2 §4.2).
+///
+/// `deny_unknown_fields` everywhere: a plan a newer controller wrote with a
+/// field this runner does not understand is refused BEFORE a client is built,
+/// which is the whole point of the version handshake. Silently ignoring an
+/// unknown field is how a runner ends up doing less than the controller
+/// believes it did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CheckPlan {
+    pub contract: String,
+    pub contract_version: u32,
+    /// The UID of the object that owns this check. The runner refuses unless
+    /// it equals `LOGWEIR_CHECK_SUBJECT_UID`, so a plan `ConfigMap` swapped
+    /// under a Job cannot be executed against the wrong subject.
+    pub subject_uid: String,
+    pub timeout_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_digest: Option<String>,
+    pub request: CheckRequest,
+}
+
+/// Why a plan was refused. Every variant maps to
+/// [`CheckCode::CheckContractMismatch`] and exit 3: the runner has printed no
+/// frame and has opened no socket.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CheckPlanError {
+    #[error("check plan contract `{0}` is not `{CHECK_PLAN_CONTRACT}`")]
+    Contract(String),
+    #[error("check plan contract version {0} is not {CHECK_CONTRACT_VERSION}")]
+    ContractVersion(u32),
+    #[error("check plan does not parse: {0}")]
+    Parse(String),
+    #[error("check plan subject uid `{got}` is not the expected `{want}`")]
+    SubjectUid { got: String, want: String },
+    #[error("check plan sha256 `{got}` is not the expected `{want}`")]
+    PlanSha256 { got: String, want: String },
+    #[error("check plan field {field}: {message}")]
+    Field { field: String, message: String },
+}
+
+impl CheckPlanError {
+    /// Always [`CheckCode::CheckContractMismatch`] — the runner refused before
+    /// it built a client, so there is nothing else to report.
+    #[must_use]
+    pub fn code(&self) -> CheckCode {
+        CheckCode::CheckContractMismatch
+    }
+
+    fn field(field: &str, message: impl Into<String>) -> Self {
+        Self::Field {
+            field: field.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+impl CheckPlan {
+    /// Steps 2-4 of D2 §4.2's startup order, as ONE function so no caller can
+    /// do them out of order: hash the bytes, compare them against the digest
+    /// the Job env pins, parse strictly, check the subject UID, validate the
+    /// bounds.
+    ///
+    /// Nothing here opens anything. The caller reads the bytes (step 2) and
+    /// builds clients (step 5) only after this returns `Ok`.
+    pub fn parse_and_verify(
+        bytes: &[u8],
+        expected_sha256: &str,
+        expected_subject_uid: &str,
+    ) -> Result<Self, CheckPlanError> {
+        let got = crate::ids::sha256_prefixed(bytes);
+        if got != expected_sha256 {
+            return Err(CheckPlanError::PlanSha256 {
+                got,
+                want: expected_sha256.to_string(),
+            });
+        }
+        let plan: Self =
+            serde_json::from_slice(bytes).map_err(|e| CheckPlanError::Parse(e.to_string()))?;
+        if plan.contract != CHECK_PLAN_CONTRACT {
+            return Err(CheckPlanError::Contract(plan.contract));
+        }
+        if plan.contract_version != CHECK_CONTRACT_VERSION {
+            return Err(CheckPlanError::ContractVersion(plan.contract_version));
+        }
+        if plan.subject_uid != expected_subject_uid {
+            return Err(CheckPlanError::SubjectUid {
+                got: plan.subject_uid,
+                want: expected_subject_uid.to_string(),
+            });
+        }
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> CheckPlanKind {
+        self.request.kind()
+    }
+
+    /// Every bound D2 §4.2 states, checked on the READ side as well as the
+    /// write side. A controller that rendered 5,000 expected topics is a
+    /// controller bug, and the runner must not act on it: the budgets are what
+    /// make the relay, the etcd footprint and the Kafka call count bounded.
+    pub fn validate(&self) -> Result<(), CheckPlanError> {
+        if self.timeout_seconds == 0 || self.timeout_seconds > 600 {
+            return Err(CheckPlanError::field(
+                "timeoutSeconds",
+                format!("{} is outside 1..=600", self.timeout_seconds),
+            ));
+        }
+        match &self.request {
+            CheckRequest::TopicInventory(r) => {
+                if r.expected_topics.len() > MAX_EXPECTED_TOPICS {
+                    return Err(CheckPlanError::field(
+                        "request.topicInventory.expectedTopics",
+                        format!(
+                            "{} entries exceeds the cap of {MAX_EXPECTED_TOPICS}",
+                            r.expected_topics.len()
+                        ),
+                    ));
+                }
+                if r.max_topics == 0 || r.max_topics > MAX_TOPICS_CEILING {
+                    return Err(CheckPlanError::field(
+                        "request.topicInventory.maxTopics",
+                        format!("{} is outside 1..={MAX_TOPICS_CEILING}", r.max_topics),
+                    ));
+                }
+                if r.relay_budget_bytes == 0 {
+                    return Err(CheckPlanError::field(
+                        "request.topicInventory.relayBudgetBytes",
+                        "a zero relay budget would return nothing",
+                    ));
+                }
+            }
+            CheckRequest::OperationReadiness(r) => {
+                if r.topics.len() > MAX_READINESS_TOPICS {
+                    return Err(CheckPlanError::field(
+                        "request.operationReadiness.topics",
+                        format!(
+                            "{} entries exceeds the cap of {MAX_READINESS_TOPICS}",
+                            r.topics.len()
+                        ),
+                    ));
+                }
+                if r.write_probe && r.destination.is_none() {
+                    return Err(CheckPlanError::field(
+                        "request.operationReadiness.writeProbe",
+                        "a write probe needs a destination",
+                    ));
+                }
+            }
+            CheckRequest::RestorePreflight(r) => {
+                if !is_sha256_prefixed(&r.plan_sha256) {
+                    return Err(CheckPlanError::field(
+                        "request.restorePreflight.planSha256",
+                        "planSha256 is sha256:<64 lowercase hex>",
+                    ));
+                }
+            }
+            CheckRequest::DestinationAccess(r) => {
+                if r.roles.is_empty() || r.roles.len() > DestinationRole::ALL.len() {
+                    return Err(CheckPlanError::field(
+                        "request.destinationAccess.roles",
+                        format!("{} roles is outside 1..=4", r.roles.len()),
+                    ));
+                }
+            }
+            CheckRequest::EvidenceFetch(r) => {
+                if r.objects.is_empty() || r.objects.len() > MAX_EVIDENCE_OBJECTS {
+                    return Err(CheckPlanError::field(
+                        "request.evidenceFetch.objects",
+                        format!(
+                            "{} objects is outside 1..={MAX_EVIDENCE_OBJECTS}",
+                            r.objects.len()
+                        ),
+                    ));
+                }
+                for (i, o) in r.objects.iter().enumerate() {
+                    if o.role != DestinationRole::EvidenceRead {
+                        return Err(CheckPlanError::field(
+                            &format!("request.evidenceFetch.objects[{i}].role"),
+                            "an evidence fetch reads with the evidenceRead grant and no other",
+                        ));
+                    }
+                    let cap = match o.stream {
+                        Stream::EvidenceSidecar => MAX_EVIDENCE_SIDECAR_BYTES,
+                        _ => MAX_EVIDENCE_PAYLOAD_BYTES,
+                    };
+                    if o.max_bytes == 0 || o.max_bytes > cap {
+                        return Err(CheckPlanError::field(
+                            &format!("request.evidenceFetch.objects[{i}].maxBytes"),
+                            format!("{} is outside 1..={cap}", o.max_bytes),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `sha256:` plus 64 lowercase hex characters — the form
+/// [`crate::ids::sha256_prefixed`] produces and the form CEL rule P9 enforces.
+#[must_use]
+pub fn is_sha256_prefixed(s: &str) -> bool {
+    match s.strip_prefix("sha256:") {
+        Some(hex) => {
+            hex.len() == 64
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        }
+        None => false,
+    }
+}
+
+// ------------------------------------------------------------------- frames
+
+/// The four relay streams. A closed enum, so an unknown stream name in a frame
+/// is `ResultUnreadable` rather than a silently dropped part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Stream {
+    /// The structured [`CheckResult`] document.
+    Result,
+    /// Bounded structured detail (missing segments, collisions), JSON lines.
+    Details,
+    /// Evidence bytes: the receipt or the scorecard.
+    #[serde(rename = "evidence.payload")]
+    EvidencePayload,
+    /// The DSSE sidecar for the payload.
+    #[serde(rename = "evidence.sidecar")]
+    EvidenceSidecar,
+}
+
+impl Stream {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Result => "result",
+            Self::Details => "details",
+            Self::EvidencePayload => "evidence.payload",
+            Self::EvidenceSidecar => "evidence.sidecar",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "result" => Some(Self::Result),
+            "details" => Some(Self::Details),
+            "evidence.payload" => Some(Self::EvidencePayload),
+            "evidence.sidecar" => Some(Self::EvidenceSidecar),
+            _ => None,
+        }
+    }
+
+    pub const ALL: [Self; 4] = [
+        Self::Result,
+        Self::Details,
+        Self::EvidencePayload,
+        Self::EvidenceSidecar,
+    ];
+}
+
+/// Why an inventory stopped early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TruncationReason {
+    /// The request's `maxTopics` was reached.
+    MaxTopics,
+    /// The relay budget was reached. This is the bound that keeps the pod log
+    /// under the kubelet's `containerLogMaxSize`.
+    RelayLimit,
+}
+
+/// One inventory entry, exactly as a topic frame carries it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TopicEntry {
+    pub name: String,
+    pub partitions: u32,
+    #[serde(default)]
+    pub internal: bool,
+    #[serde(default)]
+    pub expected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CheckCode>,
+}
+
+impl TopicEntry {
+    #[must_use]
+    pub fn new(name: &str, partitions: u32) -> Self {
+        Self {
+            name: name.to_string(),
+            partitions,
+            internal: false,
+            expected: false,
+            error: None,
+        }
+    }
+
+    /// D2 §5.3: a topic is internal IFF its name starts with `__`. Kafka's
+    /// reserved-name convention, and the ONLY rule — `_schemas`,
+    /// `_confluent-*` and Connect internal topics have configurable names and
+    /// are never guessed (a wrong "this is internal" silently drops a user's
+    /// data from a backup).
+    #[must_use]
+    pub fn name_is_internal(name: &str) -> bool {
+        name.starts_with("__")
+    }
+
+    /// The flags field of a topic frame: `-`, or a comma list in this fixed
+    /// order so the canonical TSV is byte-stable.
+    #[must_use]
+    pub fn flags(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.internal {
+            parts.push("internal".to_string());
+        }
+        if self.expected {
+            parts.push("expected".to_string());
+        }
+        if let Some(code) = self.error {
+            parts.push(format!("error:{code}"));
+        }
+        if parts.is_empty() {
+            "-".to_string()
+        } else {
+            parts.join(",")
+        }
+    }
+
+    /// The canonical TSV line, `name \t partitions \t flags \n` (D2 §5.5).
+    /// This is the ONE rendering: the relay frame carries it after a prefix,
+    /// the result `ConfigMap` chunks store it verbatim, and `topicsSha256` is
+    /// taken over it. Three consumers, one function, so they cannot disagree
+    /// about what was hashed.
+    #[must_use]
+    pub fn tsv_line(&self) -> String {
+        format!("{}\t{}\t{}\n", self.name, self.partitions, self.flags())
+    }
+}
+
+/// The canonical TSV of a whole inventory, and the bytes `topicsSha256` and
+/// the end frame's `topicLines.sha256` are taken over.
+#[must_use]
+pub fn topic_tsv(entries: &[TopicEntry]) -> String {
+    entries.iter().map(TopicEntry::tsv_line).collect()
+}
+
+/// `sha256:<hex>` over [`topic_tsv`].
+#[must_use]
+pub fn topic_tsv_sha256(entries: &[TopicEntry]) -> String {
+    crate::ids::sha256_prefixed(topic_tsv(entries).as_bytes())
+}
+
+/// One stream's summary in the end frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StreamSummary {
+    pub parts: u32,
+    pub sha256: String,
+}
+
+/// The topic-line summary in the end frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TopicLineSummary {
+    pub count: u32,
+    pub sha256: String,
+}
+
+/// `logweir-check-end=<compact JSON>` — the LAST stdout line. Its presence is
+/// what distinguishes "the check ran and produced a result" from "the process
+/// died halfway through printing one".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EndFrame {
+    pub contract: String,
+    pub plan_sha256: String,
+    pub subject_uid: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub streams: BTreeMap<String, StreamSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_lines: Option<TopicLineSummary>,
+}
+
+/// What a decoder must be able to prove about the frames it read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameExpectations {
+    pub plan_sha256: String,
+    pub subject_uid: String,
+}
+
+/// Everything one check Job relayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckRelay {
+    pub topics: Vec<TopicEntry>,
+    pub streams: BTreeMap<Stream, Vec<u8>>,
+    pub end: EndFrame,
+}
+
+impl CheckRelay {
+    #[must_use]
+    pub fn stream(&self, s: Stream) -> Option<&[u8]> {
+        self.streams.get(&s).map(Vec::as_slice)
+    }
+
+    /// The `result` stream, parsed. `None` when the check relayed none (an
+    /// evidence fetch does not).
+    pub fn result(&self) -> Option<Result<CheckResult, serde_json::Error>> {
+        self.stream(Stream::Result).map(serde_json::from_slice)
+    }
+}
+
+/// Why a relay could not be read. Every variant is reported as
+/// [`CheckCode::ResultUnreadable`], WITHOUT the log content: a relay that does
+/// not decode is exactly the case where echoing what was read would put
+/// unvalidated bytes into a status.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FrameError {
+    #[error("a frame line is {0} bytes, over the {FRAME_MAX_BYTES}-byte limit")]
+    LineTooLong(usize),
+    #[error("malformed {kind} frame")]
+    Malformed { kind: &'static str },
+    #[error("unknown relay stream")]
+    UnknownStream,
+    #[error("stream {stream} part {seq} arrived twice")]
+    DuplicatePart { stream: &'static str, seq: u32 },
+    #[error("stream {stream} is missing part {seq} of {total}")]
+    MissingPart {
+        stream: &'static str,
+        seq: u32,
+        total: u32,
+    },
+    #[error("stream {stream} declared {declared} parts and {got} arrived")]
+    PartCountMismatch {
+        stream: &'static str,
+        declared: u32,
+        got: u32,
+    },
+    #[error("stream {stream} does not match its declared digest")]
+    StreamDigestMismatch { stream: &'static str },
+    #[error("the end frame declares stream {0}, which no part carried")]
+    UndeclaredStream(String),
+    #[error("{got} topic lines arrived and the end frame declares {declared}")]
+    TopicCountMismatch { declared: u32, got: u32 },
+    #[error("the topic lines do not match the digest the end frame declares")]
+    TopicDigestMismatch,
+    #[error("no end frame: the check printed no complete result")]
+    MissingEndFrame,
+    #[error("a frame arrived after the end frame")]
+    FrameAfterEnd,
+    #[error("the end frame's contract is not `{CHECK_RESULT_CONTRACT}`")]
+    ResultContract,
+    #[error("the end frame's planSha256 is not the plan this Job was given")]
+    PlanShaMismatch,
+    #[error("the end frame's subjectUid is not the subject this Job was created for")]
+    SubjectUidMismatch,
+    #[error("the relay exceeded its {0}-byte budget")]
+    BudgetExceeded(usize),
+    #[error("a part frame does not decode as base64")]
+    Base64,
+}
+
+impl FrameError {
+    /// Always [`CheckCode::ResultUnreadable`] (D2 §4.3).
+    #[must_use]
+    pub fn code(&self) -> CheckCode {
+        CheckCode::ResultUnreadable
+    }
+}
+
+/// The frame writer and the incremental decoder.
+pub mod frames {
+    use super::{
+        CheckRelay, EndFrame, FrameError, FrameExpectations, Stream, StreamSummary, TopicEntry,
+        TopicLineSummary, CHECK_RESULT_CONTRACT, END_FRAME_PREFIX, FRAME_MAX_BYTES,
+        PART_FRAME_PREFIX, PART_MAX_BASE64_CHARS, TOPIC_FRAME_PREFIX,
+    };
+    use base64::Engine as _;
+    use std::collections::BTreeMap;
+
+    fn b64() -> base64::engine::general_purpose::GeneralPurpose {
+        base64::engine::general_purpose::STANDARD
+    }
+
+    /// One inventory line. `Err` when the rendered line would break the frame
+    /// bound — a Kafka topic name is at most 249 characters, so this is
+    /// unreachable for legal names and is a refusal rather than a truncation
+    /// for anything else.
+    pub fn write_topic_line(entry: &TopicEntry) -> Result<String, FrameError> {
+        // The TSV line ends in `\n`; the frame carries its body.
+        let body = entry.tsv_line();
+        let line = format!("{TOPIC_FRAME_PREFIX}{}", body.trim_end_matches('\n'));
+        check_len(&line)?;
+        Ok(line)
+    }
+
+    /// One stream's bytes as an ordered list of part frames. An EMPTY payload
+    /// still yields one part, so "the stream was present and empty" and "the
+    /// stream was absent" stay distinguishable in the end frame.
+    pub fn write_parts(stream: Stream, payload: &[u8]) -> Result<Vec<String>, FrameError> {
+        let encoded = b64().encode(payload);
+        let chunks: Vec<&str> = if encoded.is_empty() {
+            vec![""]
+        } else {
+            encoded
+                .as_bytes()
+                .chunks(PART_MAX_BASE64_CHARS)
+                // base64 output is ASCII, so a byte chunk is a char boundary.
+                .map(|c| std::str::from_utf8(c).expect("base64 output is ASCII"))
+                .collect()
+        };
+        let total = chunks.len();
+        let mut out = Vec::with_capacity(total);
+        for (i, c) in chunks.iter().enumerate() {
+            let line = format!(
+                "{PART_FRAME_PREFIX}{}:{}/{}:{}",
+                stream.as_str(),
+                i + 1,
+                total,
+                c
+            );
+            check_len(&line)?;
+            out.push(line);
+        }
+        Ok(out)
+    }
+
+    /// The summary a caller passes to [`write_end`] for one stream.
+    #[must_use]
+    pub fn stream_summary(payload: &[u8], parts: usize) -> StreamSummary {
+        StreamSummary {
+            parts: parts as u32,
+            sha256: crate::ids::sha256_prefixed(payload),
+        }
+    }
+
+    /// The last line. Compact JSON, because pretty JSON would carry newlines
+    /// and a frame is one line by definition.
+    pub fn write_end(end: &EndFrame) -> Result<String, FrameError> {
+        let json = serde_json::to_string(end).map_err(|_| FrameError::Malformed { kind: "end" })?;
+        let line = format!("{END_FRAME_PREFIX}{json}");
+        check_len(&line)?;
+        Ok(line)
+    }
+
+    /// Builds the end frame from what was actually written, so the declared
+    /// counts and digests cannot drift from the parts.
+    #[must_use]
+    pub fn end_frame(
+        plan_sha256: &str,
+        subject_uid: &str,
+        streams: &BTreeMap<Stream, (Vec<u8>, usize)>,
+        topics: Option<&[TopicEntry]>,
+    ) -> EndFrame {
+        EndFrame {
+            contract: CHECK_RESULT_CONTRACT.to_string(),
+            plan_sha256: plan_sha256.to_string(),
+            subject_uid: subject_uid.to_string(),
+            streams: streams
+                .iter()
+                .map(|(s, (bytes, parts))| (s.as_str().to_string(), stream_summary(bytes, *parts)))
+                .collect(),
+            topic_lines: topics.map(|t| TopicLineSummary {
+                count: t.len() as u32,
+                sha256: super::topic_tsv_sha256(t),
+            }),
+        }
+    }
+
+    fn check_len(line: &str) -> Result<(), FrameError> {
+        // +1 for the newline the writer appends.
+        if line.len() + 1 > FRAME_MAX_BYTES {
+            return Err(FrameError::LineTooLong(line.len() + 1));
+        }
+        Ok(())
+    }
+
+    /// The incremental decoder. Fed one stdout line at a time, it holds only
+    /// what it has seen, so a controller can stream an 8 MiB pod log through
+    /// it without buffering a second copy of the frames.
+    ///
+    /// Lines that are not frames are IGNORED: the `KafkaCluster` probe prints
+    /// its own I14 lines on the same stdout, and a decoder that refused them
+    /// could not be reused there (D2 §4.5).
+    #[derive(Debug)]
+    pub struct Decoder {
+        topics: Vec<TopicEntry>,
+        parts: BTreeMap<Stream, BTreeMap<u32, String>>,
+        totals: BTreeMap<Stream, u32>,
+        end: Option<EndFrame>,
+        used: usize,
+        budget: usize,
+    }
+
+    impl Default for Decoder {
+        fn default() -> Self {
+            Self::with_budget(super::DEFAULT_RELAY_BUDGET_BYTES + (2 * 1024 * 1024))
+        }
+    }
+
+    impl Decoder {
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// A decoder that refuses to accumulate more than `budget` bytes of
+        /// frame content. The controller reads at most 8 MiB of log, and this
+        /// is the second, independent bound on what a runner can make it hold.
+        #[must_use]
+        pub fn with_budget(budget: usize) -> Self {
+            Self {
+                topics: Vec::new(),
+                parts: BTreeMap::new(),
+                totals: BTreeMap::new(),
+                end: None,
+                used: 0,
+                budget,
+            }
+        }
+
+        /// Feeds one line, WITHOUT its newline.
+        pub fn push_line(&mut self, line: &str) -> Result<(), FrameError> {
+            let is_frame = line.starts_with(TOPIC_FRAME_PREFIX)
+                || line.starts_with(PART_FRAME_PREFIX)
+                || line.starts_with(END_FRAME_PREFIX);
+            if !is_frame {
+                return Ok(());
+            }
+            if line.len() + 1 > FRAME_MAX_BYTES {
+                return Err(FrameError::LineTooLong(line.len() + 1));
+            }
+            if self.end.is_some() {
+                return Err(FrameError::FrameAfterEnd);
+            }
+            self.used = self.used.saturating_add(line.len());
+            if self.used > self.budget {
+                return Err(FrameError::BudgetExceeded(self.budget));
+            }
+            if let Some(body) = line.strip_prefix(TOPIC_FRAME_PREFIX) {
+                self.topics.push(parse_topic(body)?);
+                return Ok(());
+            }
+            if let Some(body) = line.strip_prefix(PART_FRAME_PREFIX) {
+                return self.push_part(body);
+            }
+            let body = line
+                .strip_prefix(END_FRAME_PREFIX)
+                .expect("the prefix set is exhaustive");
+            let end: EndFrame =
+                serde_json::from_str(body).map_err(|_| FrameError::Malformed { kind: "end" })?;
+            self.end = Some(end);
+            Ok(())
+        }
+
+        fn push_part(&mut self, body: &str) -> Result<(), FrameError> {
+            let (stream_name, rest) = body
+                .split_once(':')
+                .ok_or(FrameError::Malformed { kind: "part" })?;
+            let stream = Stream::parse(stream_name).ok_or(FrameError::UnknownStream)?;
+            let (counter, payload) = rest
+                .split_once(':')
+                .ok_or(FrameError::Malformed { kind: "part" })?;
+            let (seq, total) = counter
+                .split_once('/')
+                .ok_or(FrameError::Malformed { kind: "part" })?;
+            let seq: u32 = seq
+                .parse()
+                .map_err(|_| FrameError::Malformed { kind: "part" })?;
+            let total: u32 = total
+                .parse()
+                .map_err(|_| FrameError::Malformed { kind: "part" })?;
+            if seq == 0 || total == 0 || seq > total {
+                return Err(FrameError::Malformed { kind: "part" });
+            }
+            match self.totals.get(&stream) {
+                Some(t) if *t != total => {
+                    return Err(FrameError::PartCountMismatch {
+                        stream: stream.as_str(),
+                        declared: *t,
+                        got: total,
+                    })
+                }
+                _ => {
+                    self.totals.insert(stream, total);
+                }
+            }
+            let slot = self.parts.entry(stream).or_default();
+            if slot.insert(seq, payload.to_string()).is_some() {
+                return Err(FrameError::DuplicatePart {
+                    stream: stream.as_str(),
+                    seq,
+                });
+            }
+            Ok(())
+        }
+
+        /// Requires the end frame, its contract, its plan digest, its subject
+        /// UID, every declared part, every declared stream digest and the
+        /// topic-line count and digest. Any mismatch is an error, which the
+        /// caller reports as `ResultUnreadable` (D2 §4.3).
+        pub fn finish(self, expect: &FrameExpectations) -> Result<CheckRelay, FrameError> {
+            let end = self.end.ok_or(FrameError::MissingEndFrame)?;
+            if end.contract != CHECK_RESULT_CONTRACT {
+                return Err(FrameError::ResultContract);
+            }
+            if end.plan_sha256 != expect.plan_sha256 {
+                return Err(FrameError::PlanShaMismatch);
+            }
+            if end.subject_uid != expect.subject_uid {
+                return Err(FrameError::SubjectUidMismatch);
+            }
+
+            let mut streams: BTreeMap<Stream, Vec<u8>> = BTreeMap::new();
+            for (name, summary) in &end.streams {
+                let stream = Stream::parse(name).ok_or(FrameError::UnknownStream)?;
+                let Some(got) = self.parts.get(&stream) else {
+                    return Err(FrameError::UndeclaredStream(name.clone()));
+                };
+                if got.len() as u32 != summary.parts {
+                    return Err(FrameError::PartCountMismatch {
+                        stream: stream.as_str(),
+                        declared: summary.parts,
+                        got: got.len() as u32,
+                    });
+                }
+                let mut encoded = String::new();
+                for seq in 1..=summary.parts {
+                    let Some(chunk) = got.get(&seq) else {
+                        return Err(FrameError::MissingPart {
+                            stream: stream.as_str(),
+                            seq,
+                            total: summary.parts,
+                        });
+                    };
+                    encoded.push_str(chunk);
+                }
+                let bytes = b64()
+                    .decode(encoded.as_bytes())
+                    .map_err(|_| FrameError::Base64)?;
+                if crate::ids::sha256_prefixed(&bytes) != summary.sha256 {
+                    return Err(FrameError::StreamDigestMismatch {
+                        stream: stream.as_str(),
+                    });
+                }
+                streams.insert(stream, bytes);
+            }
+            // A part for a stream the end frame does NOT declare is a
+            // mismatch too: it means the writer and its own summary disagree.
+            for stream in self.parts.keys() {
+                if !end.streams.contains_key(stream.as_str()) {
+                    return Err(FrameError::PartCountMismatch {
+                        stream: stream.as_str(),
+                        declared: 0,
+                        got: self.parts[stream].len() as u32,
+                    });
+                }
+            }
+
+            match &end.topic_lines {
+                Some(t) => {
+                    if self.topics.len() as u32 != t.count {
+                        return Err(FrameError::TopicCountMismatch {
+                            declared: t.count,
+                            got: self.topics.len() as u32,
+                        });
+                    }
+                    if super::topic_tsv_sha256(&self.topics) != t.sha256 {
+                        return Err(FrameError::TopicDigestMismatch);
+                    }
+                }
+                None => {
+                    if !self.topics.is_empty() {
+                        return Err(FrameError::TopicCountMismatch {
+                            declared: 0,
+                            got: self.topics.len() as u32,
+                        });
+                    }
+                }
+            }
+
+            Ok(CheckRelay {
+                topics: self.topics,
+                streams,
+                end,
+            })
+        }
+    }
+
+    fn parse_topic(body: &str) -> Result<TopicEntry, FrameError> {
+        let mut it = body.split('\t');
+        let (Some(name), Some(partitions), Some(flags), None) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            return Err(FrameError::Malformed { kind: "topic" });
+        };
+        if name.is_empty() {
+            return Err(FrameError::Malformed { kind: "topic" });
+        }
+        let partitions: u32 = partitions
+            .parse()
+            .map_err(|_| FrameError::Malformed { kind: "topic" })?;
+        let mut entry = TopicEntry::new(name, partitions);
+        if flags != "-" {
+            for f in flags.split(',') {
+                match f {
+                    "internal" => entry.internal = true,
+                    "expected" => entry.expected = true,
+                    other => {
+                        let code = other
+                            .strip_prefix("error:")
+                            .and_then(super::CheckCode::parse)
+                            .ok_or(FrameError::Malformed { kind: "topic" })?;
+                        entry.error = Some(code);
+                    }
+                }
+            }
+        }
+        Ok(entry)
+    }
+}
+
+// ------------------------------------------------------------ result stream
+
+/// How one expected topic resolved (D2 §5.2 step 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExpectedTopicState {
+    /// Present in the listing, or a targeted request answered with metadata.
+    Visible,
+    /// The broker answered `TOPIC_AUTHORIZATION_FAILED` — which it does for a
+    /// principal without `DESCRIBE` whether or not the topic exists, so this
+    /// says nothing about existence and everything about visibility.
+    NotAuthorized,
+    /// `UNKNOWN_TOPIC_OR_PARTITION`.
+    NotFound,
+    /// The targeted request did not complete within its budget.
+    Unknown,
+}
+
+/// The per-name results of the expected-topic probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExpectedTopicResult {
+    pub name: String,
+    pub state: ExpectedTopicState,
+}
+
+/// The counts D2 §5.1 publishes under `status.result.expected`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExpectedSummary {
+    pub requested: u32,
+    pub visible: u32,
+    pub not_authorized: u32,
+    pub not_found: u32,
+    pub unknown: u32,
+}
+
+/// `status.result.counts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InventoryCounts {
+    /// Entries the broker returned.
+    pub listed: u32,
+    /// Entries relayed after internal exclusion and truncation.
+    pub returned: u32,
+    pub internal_excluded: u32,
+    pub errored: u32,
+}
+
+/// The inventory half of a check result. Carries SIGNALS, never a visibility
+/// verdict: [`visibility`] is computed by the controller, which is the only
+/// side that holds the administrator attestation (D2 §5.2 step 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InventoryResult {
+    pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_count: Option<u32>,
+    pub counts: InventoryCounts,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<TruncationReason>,
+    /// (i) of D2 §5.4: a listing entry carried `TopicAuthorizationFailed`.
+    #[serde(default)]
+    pub topic_authorization_error_in_listing: bool,
+    pub expected: ExpectedSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_results: Vec<ExpectedTopicResult>,
+    /// `sha256:` over [`topic_tsv`] of the relayed entries.
+    pub topics_sha256: String,
+}
+
+/// One relayed evidence object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EvidenceObjectResult {
+    pub key: String,
+    pub stream: Stream,
+    /// `true` only when the object was read. `false` requires a `NotFound`
+    /// from the backend — a denial is `present: false` with a `code`, never a
+    /// claim of absence (the `NotFound` versus `Io` distinction
+    /// `logweir_store::StoreError` already makes).
+    pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<CheckCode>,
+    /// `true` when the object was longer than the request's `maxBytes`, so the
+    /// relayed bytes are a prefix and the digest is NOT the object's digest.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The `result` stream document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CheckResult {
+    pub contract: String,
+    pub kind: CheckPlanKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<InventoryResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckOutcome>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceObjectResult>,
+}
+
+impl CheckResult {
+    #[must_use]
+    pub fn new(kind: CheckPlanKind) -> Self {
+        Self {
+            contract: CHECK_RESULT_CONTRACT.to_string(),
+            kind,
+            inventory: None,
+            checks: Vec::new(),
+            evidence: Vec::new(),
+        }
+    }
+
+    /// Canonical bytes for the `result` stream: the repository's deterministic
+    /// JSON, so the digest the end frame declares is reproducible by anyone
+    /// holding the same document.
+    pub fn to_canonical_json(&self) -> Result<Vec<u8>, crate::det_json::DetJsonError> {
+        crate::det_json::to_deterministic_json(self)
+    }
+}
+
+// ---------------------------------------------------------------- redaction
+
+/// One redaction rule. The rules are a LIST rather than one function body so
+/// that a test can run every rule BUT ONE and observe the secret survive —
+/// "a guard without a mutant is not a guard", and a redactor is the guard
+/// where a silently deleted clause is least likely to be noticed.
+#[derive(Clone, Copy)]
+pub struct RedactionRule {
+    pub name: &'static str,
+    pub apply: fn(&str) -> String,
+}
+
+impl std::fmt::Debug for RedactionRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedactionRule")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+/// The marker every rule substitutes.
+pub const REDACTED: &str = "[redacted]";
+
+/// The rules, IN THE ORDER [`redact`] applies them. PEM first, because a PEM
+/// body would otherwise be chopped up by the long-run rule and the marker
+/// lines left behind; the S3 XML rule next, because it discards a whole body
+/// and the later rules would only rewrite parts of it.
+#[must_use]
+pub fn redaction_rules() -> &'static [RedactionRule] {
+    &[
+        RedactionRule {
+            name: "pem",
+            apply: redact_pem,
+        },
+        RedactionRule {
+            name: "s3-xml",
+            apply: redact_s3_xml,
+        },
+        RedactionRule {
+            name: "url-userinfo",
+            apply: redact_url_userinfo,
+        },
+        RedactionRule {
+            name: "secret-key-value",
+            apply: redact_key_values,
+        },
+        RedactionRule {
+            name: "aws-access-key-id",
+            apply: redact_access_key_ids,
+        },
+        RedactionRule {
+            name: "long-base64-or-hex-run",
+            apply: redact_long_runs,
+        },
+    ]
+}
+
+/// THE chokepoint. Every `message`, `remedy`, relayed status message and
+/// relayed fact passes through it before it can reach a `ConfigMap`, a status,
+/// a log line or an API response (D2 §4.1, §6.5).
+///
+/// It removes URL userinfo, AWS access key ids, secret/password/token value
+/// forms, PEM blocks, S3 XML bodies (keeping only `<Code>`) and base64 or hex
+/// runs of 40 characters or more, then caps the result at
+/// [`MESSAGE_MAX_CHARS`] characters.
+#[must_use]
+pub fn redact(s: &str) -> String {
+    cap(&apply_rules(s, redaction_rules()))
+}
+
+/// [`redact`] with an explicit rule list — the entry point the mutant tests
+/// use to delete one rule and observe the leak.
+#[must_use]
+pub fn apply_rules(s: &str, rules: &[RedactionRule]) -> String {
+    rules.iter().fold(s.to_string(), |acc, r| (r.apply)(&acc))
+}
+
+/// Truncates to [`MESSAGE_MAX_CHARS`] CHARACTERS (not bytes — a cap that split
+/// a multi-byte character would panic on the slice).
+#[must_use]
+pub fn cap(s: &str) -> String {
+    if s.chars().count() <= MESSAGE_MAX_CHARS {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(MESSAGE_MAX_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
+fn redact_pem(s: &str) -> String {
+    // A PEM block is `-----BEGIN <label>-----` … `-----END <label>-----`.
+    // Anything between the two markers goes, and so do the markers.
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("-----BEGIN ") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        match tail.find("-----END ") {
+            Some(end_at) => {
+                // Consume through the closing marker's own terminator when
+                // there is one, so the label does not survive.
+                let after_end = &tail[end_at..];
+                let consumed = match after_end
+                    .find("-----\n")
+                    .or_else(|| after_end.find("-----"))
+                {
+                    Some(i) => end_at + i + 5,
+                    None => tail.len(),
+                };
+                out.push_str(REDACTED);
+                rest = &tail[consumed..];
+            }
+            None => {
+                // An unterminated block: everything from the marker on is
+                // suspect, so none of it is kept.
+                out.push_str(REDACTED);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn redact_s3_xml(s: &str) -> String {
+    // An S3 error body is `<?xml …?><Error><Code>…</Code><Message>…</Message>
+    // <RequestId>…</RequestId><HostId>…</HostId></Error>`. Only `<Code>` is
+    // kept: `Message`, `RequestId` and `HostId` carry the request's own
+    // identifiers and sometimes the key, and no remedy needs them.
+    let Some(start) = s.find("<Error>") else {
+        return s.to_string();
+    };
+    let end = match s[start..].find("</Error>") {
+        Some(i) => start + i + "</Error>".len(),
+        None => s.len(),
+    };
+    let body = &s[start..end];
+    let code = body
+        .find("<Code>")
+        .and_then(|i| {
+            let after = &body[i + "<Code>".len()..];
+            after.find("</Code>").map(|j| &after[..j])
+        })
+        .filter(|c| {
+            !c.is_empty() && c.len() <= 64 && c.chars().all(|ch| ch.is_ascii_alphanumeric())
+        })
+        .unwrap_or("Unknown");
+    // A leading `<?xml …?>` declaration is part of the body for our purposes.
+    let head_end = s[..start].rfind("<?xml").unwrap_or(start);
+    format!(
+        "{}<Error><Code>{code}</Code></Error>{}",
+        &s[..head_end],
+        &s[end..]
+    )
+}
+
+fn redact_url_userinfo(s: &str) -> String {
+    // `scheme://user:password@host…` -> `scheme://host…`.
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        // The authority ends at the first `/`, `?`, `#`, whitespace or quote.
+        let auth_end = tail
+            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace() || c == '"')
+            .unwrap_or(tail.len());
+        let (authority, after) = tail.split_at(auth_end);
+        match authority.rsplit_once('@') {
+            Some((_creds, host)) => out.push_str(host),
+            None => out.push_str(authority),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The keyword set of D2 §4.1: `aws_secret_access_key`,
+/// `secret[_-]?access[_-]?key`, `password`, `sasl.password`, `token`.
+///
+/// Matched case-insensitively against the identifier immediately before a
+/// `=`, `:` or `=>`, so `password=hunter2`, `password: hunter2`,
+/// `sasl.password="hunter2"` and `--token hunter2` all lose their value.
+fn redact_key_values(s: &str) -> String {
+    const KEYWORDS: [&str; 7] = [
+        "aws_secret_access_key",
+        "secret_access_key",
+        "secret-access-key",
+        "secretaccesskey",
+        "sasl.password",
+        "password",
+        "token",
+    ];
+    let lower = s.to_ascii_lowercase();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    'outer: while i < bytes.len() {
+        for kw in KEYWORDS {
+            if lower[i..].starts_with(kw) {
+                // The keyword must start at an identifier boundary, so
+                // `mypassword` is caught but `crossword` is not.
+                let boundary = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                if !boundary {
+                    continue;
+                }
+                let mut j = i + kw.len();
+                // Optional whitespace, then a separator.
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                let sep = if lower[j..].starts_with("=>") {
+                    2
+                } else if j < bytes.len() && (bytes[j] == b'=' || bytes[j] == b':') {
+                    1
+                } else if j > i + kw.len() {
+                    // `--token hunter2`: whitespace alone separates them.
+                    0
+                } else {
+                    continue;
+                };
+                let mut k = j + sep;
+                while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                    k += 1;
+                }
+                let quote = bytes.get(k).copied();
+                let (value_start, terminator): (usize, fn(u8) -> bool) = match quote {
+                    Some(b'"') => (k + 1, |c| c == b'"'),
+                    Some(b'\'') => (k + 1, |c| c == b'\''),
+                    _ => (k, |c| {
+                        c == b' ' || c == b'\t' || c == b'\n' || c == b',' || c == b';' || c == b'&'
+                    }),
+                };
+                let mut e = value_start;
+                while e < bytes.len() && !terminator(bytes[e]) {
+                    e += 1;
+                }
+                if e == value_start {
+                    // Nothing to redact after the separator.
+                    out.push_str(&s[i..j + sep]);
+                    i = j + sep;
+                    continue 'outer;
+                }
+                out.push_str(&s[i..value_start]);
+                out.push_str(REDACTED);
+                // Keep the closing quote so the text stays readable.
+                i = e;
+                continue 'outer;
+            }
+        }
+        // Not a keyword start: copy one character (by char, not by byte, so
+        // UTF-8 survives).
+        let ch = s[i..].chars().next().expect("i is a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn redact_access_key_ids(s: &str) -> String {
+    // `(AKIA|ASIA)[A-Z0-9]{16}` — an AWS access key id. 20 characters, which
+    // is under the long-run rule's threshold, so it needs its own rule.
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let looks = (s[i..].starts_with("AKIA") || s[i..].starts_with("ASIA"))
+            && bytes.len() >= i + 20
+            && bytes[i + 4..i + 20]
+                .iter()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        if looks {
+            out.push_str(REDACTED);
+            i += 20;
+            continue;
+        }
+        let ch = s[i..].chars().next().expect("i is a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// A run of 40 or more characters from the base64 / hex alphabet, unbroken by
+/// anything else. An AWS secret access key is EXACTLY 40 characters of
+/// `[A-Za-z0-9/+=]`, which is what sets the threshold.
+fn redact_long_runs(s: &str) -> String {
+    fn is_run_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '_' || c == '-'
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut run = String::new();
+    for c in s.chars() {
+        if is_run_char(c) {
+            run.push(c);
+            continue;
+        }
+        flush_run(&mut out, &mut run);
+        out.push(c);
+    }
+    flush_run(&mut out, &mut run);
+    out
+}
+
+fn flush_run(out: &mut String, run: &mut String) {
+    if run.chars().count() >= 40 {
+        out.push_str(REDACTED);
+    } else {
+        out.push_str(run);
+    }
+    run.clear();
+}
+
+// --------------------------------------------------------------- visibility
+
+/// The completeness vocabulary — `unknown | limited | attestedComplete`, and
+/// nothing else, everywhere (D-SEAMS S3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VisibilityState {
+    /// A successful listing ALONE. Kafka silently omits topics the principal
+    /// may not `DESCRIBE`, so this is the honest default and not a degraded
+    /// answer.
+    Unknown,
+    /// An authorization failure was OBSERVED — in a listing entry or on a
+    /// targeted request for an expected topic.
+    Limited,
+    /// An administrator attestation matched the observed cluster id and
+    /// principal and has not expired. Logweir did not verify the claim; it
+    /// records who made it and when.
+    AttestedComplete,
+}
+
+impl VisibilityState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Limited => "limited",
+            Self::AttestedComplete => "attestedComplete",
+        }
+    }
+}
+
+/// Why the state is what it is. Sorted, deduplicated and bounded, so a UI can
+/// render an explanation without a second computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VisibilityBasis {
+    ListingOnly,
+    TopicAuthorizationErrorInListing,
+    ExpectedTopicNotAuthorized,
+    ExpectedTopicsAllVisible,
+    Truncated,
+    AdministratorAttestation,
+    AttestationExpired,
+    AttestationPrincipalMismatch,
+    AttestationClusterIdMismatch,
+}
+
+/// An administrator's attestation, read from the installation policy
+/// `ConfigMap` (D2 §4.4). Only a principal who can write that `ConfigMap` in
+/// the release namespace can create one; a namespace operator cannot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Attestation {
+    pub id: String,
+    pub namespace: String,
+    pub kafka_cluster: String,
+    pub cluster_id: String,
+    pub principal: String,
+    pub attested_by: String,
+    pub attested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub statement: String,
+}
+
+/// What an attestation-backed result records. Never a claim Logweir verified:
+/// the UI renders "attested by <attestedBy> at <attestedAt>; not verified by
+/// Logweir" (D2 §5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AttestationRef {
+    pub id: String,
+    pub attested_by: String,
+    pub attested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// What was OBSERVED, which is the only input to [`visibility`] besides the
+/// attestation and the clock reading the caller passes in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct VisibilitySignals {
+    pub namespace: String,
+    pub kafka_cluster: String,
+    /// The cluster id the runner read from the broker, not the one cached on
+    /// the `KafkaCluster` status.
+    pub cluster_id: String,
+    /// `User:<name>` or `User:ANONYMOUS`.
+    pub principal: String,
+    /// (i) of D2 §5.4.
+    pub topic_authorization_error_in_listing: bool,
+    pub expected: ExpectedSummary,
+    pub truncated: bool,
+}
+
+/// The computed verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Visibility {
+    pub state: VisibilityState,
+    pub basis: Vec<VisibilityBasis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<AttestationRef>,
+}
+
+/// D2 §5.4's state algorithm, and NOTHING else may compute completeness.
+///
+/// ```text
+/// limited          if topicAuthorizationErrorInListing || expected.notAuthorized > 0
+/// attestedComplete else if an attestation matches (namespace, kafkaCluster name,
+///                         observed clusterId, principal) && now < expiresAt && !truncated
+/// unknown          otherwise
+/// ```
+///
+/// `now` is a PARAMETER: this crate reads no clock (Global Constraint 1), and
+/// making the caller supply the instant is also what makes expiry testable.
+///
+/// An attestation whose namespace or `kafkaCluster` name does not match is not
+/// a candidate at all and leaves no basis entry — it is about a different
+/// cluster. A principal or cluster-id mismatch DOES leave one, because those
+/// are the two dimensions an operator would expect the attestation to cover
+/// and silently ignoring them is how "attested" would drift onto the wrong
+/// credential.
+#[must_use]
+pub fn visibility(
+    signals: &VisibilitySignals,
+    attestation: Option<&Attestation>,
+    now: DateTime<Utc>,
+) -> Visibility {
+    let mut basis: Vec<VisibilityBasis> = Vec::new();
+    let limited =
+        signals.topic_authorization_error_in_listing || signals.expected.not_authorized > 0;
+    if signals.topic_authorization_error_in_listing {
+        basis.push(VisibilityBasis::TopicAuthorizationErrorInListing);
+    }
+    if signals.expected.not_authorized > 0 {
+        basis.push(VisibilityBasis::ExpectedTopicNotAuthorized);
+    }
+    if signals.expected.requested > 0
+        && signals.expected.not_authorized == 0
+        && signals.expected.visible == signals.expected.requested
+    {
+        basis.push(VisibilityBasis::ExpectedTopicsAllVisible);
+    }
+    if signals.truncated {
+        basis.push(VisibilityBasis::Truncated);
+    }
+
+    // Is there a candidate attestation, and does it apply?
+    let candidate = attestation
+        .filter(|a| a.namespace == signals.namespace && a.kafka_cluster == signals.kafka_cluster);
+    let mut attested: Option<AttestationRef> = None;
+    if let Some(a) = candidate {
+        let mut applies = true;
+        if a.principal != signals.principal {
+            basis.push(VisibilityBasis::AttestationPrincipalMismatch);
+            applies = false;
+        }
+        if a.cluster_id != signals.cluster_id {
+            basis.push(VisibilityBasis::AttestationClusterIdMismatch);
+            applies = false;
+        }
+        if now >= a.expires_at {
+            basis.push(VisibilityBasis::AttestationExpired);
+            applies = false;
+        }
+        if applies && !limited && !signals.truncated {
+            basis.push(VisibilityBasis::AdministratorAttestation);
+            attested = Some(AttestationRef {
+                id: a.id.clone(),
+                attested_by: a.attested_by.clone(),
+                attested_at: a.attested_at,
+                expires_at: a.expires_at,
+            });
+        }
+    }
+
+    let state = if limited {
+        VisibilityState::Limited
+    } else if attested.is_some() {
+        VisibilityState::AttestedComplete
+    } else {
+        VisibilityState::Unknown
+    };
+
+    if basis.is_empty() {
+        basis.push(VisibilityBasis::ListingOnly);
+    }
+    basis.sort_unstable();
+    basis.dedup();
+    Visibility {
+        state,
+        basis,
+        attestation: attested,
+    }
+}
+
+// ------------------------------------------------------------ binding digest
+
+/// One object a check result depends on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Referent {
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+    /// `None` for a kind whose generation is not meaningful (a `Backup` is
+    /// identified by UID alone in D2 §6.2's example).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+}
+
+/// One destination's CA bundle digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CaBundleRef {
+    pub destination_uid: String,
+    pub sha256: String,
+}
+
+/// The `TrustRoster` a signer check was evaluated against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RosterRef {
+    pub uid: String,
+    pub generation: i64,
+}
+
+/// The `Approval` a restore preflight was evaluated against. The RESOURCE
+/// VERSION is in the digest on purpose: it changes when verification status
+/// moves, so a preflight taken while an approval was pending goes stale the
+/// moment it is verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ApprovalRef {
+    pub uid: String,
+    pub resource_version: String,
+}
+
+/// Everything a check result is bound to (D2 §6.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingInputs {
+    pub operation: CheckOperation,
+    pub plan_hash: Option<String>,
+    /// Backup only: the exact topic set. Sorted by [`inputs_digest`].
+    pub topics: Option<Vec<String>>,
+    pub referents: Vec<Referent>,
+    pub ca_bundles: Vec<CaBundleRef>,
+    pub roster: RosterRef,
+    pub approval: Option<ApprovalRef>,
+    pub policy_digest: String,
+}
+
+/// The canonical document [`inputs_digest`] hashes. Declaration order IS the
+/// serialisation order (`det_json`), so the bytes are reproducible.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalBinding<'a> {
+    version: u32,
+    operation: CheckOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_hash: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topics: Option<Vec<&'a String>>,
+    referents: Vec<&'a Referent>,
+    ca_bundles: Vec<&'a CaBundleRef>,
+    roster: &'a RosterRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval: Option<&'a ApprovalRef>,
+    policy_digest: &'a String,
+}
+
+/// `sha256:` over the canonical JSON of [`BindingInputs`] (D2 §6.6).
+///
+/// The API recomputes this from CURRENT objects and compares it with the
+/// recorded one; any difference makes the stored result inapplicable. That is
+/// the whole invalidation mechanism, so the normalisation (sorting topics,
+/// referents and CA bundles) happens HERE and not at any call site — two
+/// callers sorting differently would make a result spuriously stale, and a
+/// caller that forgot to sort would make it spuriously fresh.
+#[must_use]
+pub fn inputs_digest(b: &BindingInputs) -> String {
+    let mut topics: Option<Vec<&String>> = b.topics.as_ref().map(|t| t.iter().collect());
+    if let Some(t) = topics.as_mut() {
+        t.sort();
+        t.dedup();
+    }
+    let mut referents: Vec<&Referent> = b.referents.iter().collect();
+    referents
+        .sort_by(|a, c| (&a.kind, &a.namespace, &a.name).cmp(&(&c.kind, &c.namespace, &c.name)));
+    let mut ca_bundles: Vec<&CaBundleRef> = b.ca_bundles.iter().collect();
+    ca_bundles.sort_by(|a, c| a.destination_uid.cmp(&c.destination_uid));
+    let doc = CanonicalBinding {
+        version: 1,
+        operation: b.operation,
+        plan_hash: b.plan_hash.as_ref(),
+        topics,
+        referents,
+        ca_bundles,
+        roster: &b.roster,
+        approval: b.approval.as_ref(),
+        policy_digest: &b.policy_digest,
+    };
+    let bytes = crate::det_json::to_deterministic_json(&doc)
+        .expect("the canonical binding carries no float and cannot fail to serialise");
+    crate::ids::sha256_prefixed(&bytes)
+}
+
+/// Why a stored check result is no longer applicable (D2 §6.6).
+///
+/// D2's five reasons, plus [`StaleReason::InputsDigestChanged`]. The sixth is
+/// ADDITIVE and exists so this function can never report "stale" without
+/// saying why: the recorded and recomputed digests can differ through a field
+/// the other five do not name (the topic set of a Backup readiness request,
+/// for instance). A consumer that knows only D2's five renders it as a
+/// generic "the inputs changed", which is exactly what it means.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StaleReason {
+    Expired,
+    PlanHashChanged,
+    /// `referentChanged:<Kind>/<name>`.
+    ReferentChanged(String),
+    CaBundleChanged,
+    PolicyChanged,
+    InputsDigestChanged,
+}
+
+impl std::fmt::Display for StaleReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expired => f.write_str("expired"),
+            Self::PlanHashChanged => f.write_str("planHashChanged"),
+            Self::ReferentChanged(w) => write!(f, "referentChanged:{w}"),
+            Self::CaBundleChanged => f.write_str("caBundleChanged"),
+            Self::PolicyChanged => f.write_str("policyChanged"),
+            Self::InputsDigestChanged => f.write_str("inputsDigestChanged"),
+        }
+    }
+}
+
+/// The applicability test of D2 §6.6, as ONE function so the API and the UI
+/// cannot each implement half of it.
+///
+/// `recorded` is the binding the check stored; `current` is the binding the
+/// caller recomputed from live objects. The returned list is EMPTY exactly
+/// when the result still applies, and every entry names a concrete reason:
+/// a stale flag with no reason is the defect PLAT-03.2 is about ("a green
+/// preview cannot bypass a later collision" needs the user to know WHY the
+/// preview went away).
+///
+/// `now` is a parameter for the same reason it is in [`visibility`].
+#[must_use]
+pub fn stale_reasons(
+    recorded: &BindingInputs,
+    recorded_expires_at: Option<DateTime<Utc>>,
+    current: &BindingInputs,
+    now: DateTime<Utc>,
+) -> Vec<StaleReason> {
+    let mut out: Vec<StaleReason> = Vec::new();
+    if recorded_expires_at.is_none_or(|e| now >= e) {
+        out.push(StaleReason::Expired);
+    }
+    if recorded.plan_hash != current.plan_hash {
+        out.push(StaleReason::PlanHashChanged);
+    }
+
+    // Referents, by identity (kind, namespace, name), so an added, removed or
+    // re-created object is each named.
+    let key = |r: &Referent| (r.kind.clone(), r.namespace.clone(), r.name.clone());
+    let recorded_map: BTreeMap<_, _> = recorded.referents.iter().map(|r| (key(r), r)).collect();
+    let current_map: BTreeMap<_, _> = current.referents.iter().map(|r| (key(r), r)).collect();
+    let mut names: Vec<&(String, String, String)> =
+        recorded_map.keys().chain(current_map.keys()).collect();
+    names.sort();
+    names.dedup();
+    for k in names {
+        let a = recorded_map.get(k);
+        let b = current_map.get(k);
+        let changed = match (a, b) {
+            (Some(a), Some(b)) => a.uid != b.uid || a.generation != b.generation,
+            _ => true,
+        };
+        if changed {
+            out.push(StaleReason::ReferentChanged(format!("{}/{}", k.0, k.2)));
+        }
+    }
+
+    if recorded.roster != current.roster {
+        out.push(StaleReason::ReferentChanged(format!(
+            "TrustRoster/{}",
+            current.roster.uid
+        )));
+    }
+    if recorded.approval != current.approval {
+        let uid = current
+            .approval
+            .as_ref()
+            .or(recorded.approval.as_ref())
+            .map_or_else(String::new, |a| a.uid.clone());
+        out.push(StaleReason::ReferentChanged(format!("Approval/{uid}")));
+    }
+    if recorded.ca_bundles != current.ca_bundles {
+        out.push(StaleReason::CaBundleChanged);
+    }
+    if recorded.policy_digest != current.policy_digest {
+        out.push(StaleReason::PolicyChanged);
+    }
+
+    // The catch-all, last: the digest is the authority on "did anything
+    // change", and a difference no named reason explains must still be
+    // reported rather than swallowed.
+    let digests_differ = inputs_digest(recorded) != inputs_digest(current);
+    let only_expiry = out.iter().all(|r| *r == StaleReason::Expired);
+    if digests_differ && only_expiry {
+        out.push(StaleReason::InputsDigestChanged);
+    }
+    out
+}
