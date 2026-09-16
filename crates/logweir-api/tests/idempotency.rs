@@ -378,3 +378,176 @@ async fn an_object_deleted_between_conflict_and_read_is_created_again() {
     assert_eq!(methods, vec!["POST", "GET", "POST"]);
     other.fake.assert_strict();
 }
+
+/// **Two replicas, one key, one object.**
+///
+/// D0's required-test list names "concurrent replicas" separately from
+/// "concurrent requests", and the difference is the point. The existing
+/// concurrency test runs eight tasks against ONE `AppState`, so anything
+/// process-local — a map, a lock, a cache — would make it pass. This builds two
+/// independent `TestApp`s: separate routers, separate `AppState`s, separate
+/// `KubeAdapter`s, sharing only the cluster. Nothing but Kubernetes can
+/// coordinate them, which is exactly the claim: "API process memory is never
+/// the source of truth".
+#[tokio::test]
+async fn two_replicas_sending_one_key_create_one_object() {
+    let fake = FakeKube::new();
+    let replica_a = Arc::new(TestApp::with(fake.clone(), Options::default()));
+    let replica_b = Arc::new(TestApp::with(fake.clone(), Options::default()));
+    // Not the same router, and not the same state.
+    assert!(!std::ptr::eq(
+        Arc::as_ptr(&replica_a).cast::<u8>(),
+        Arc::as_ptr(&replica_b).cast::<u8>()
+    ));
+
+    let body = support::schedule_body().to_string();
+    let key = "two-replicas-key-01";
+
+    let mut handles = Vec::new();
+    for replica in [&replica_a, &replica_b] {
+        for _ in 0..4 {
+            let replica = Arc::clone(replica);
+            let body = body.clone();
+            handles.push(tokio::spawn(async move {
+                replica
+                    .post(&path(NS_A, "schedules"), Some(key), &body)
+                    .await
+            }));
+        }
+    }
+
+    let mut statuses = Vec::new();
+    let mut uids = std::collections::BTreeSet::new();
+    for handle in handles {
+        let response = handle.await.unwrap();
+        statuses.push(response.status.as_u16());
+        uids.insert(
+            response.json()["item"]["uid"]
+                .as_str()
+                .expect("every answer carries the object")
+                .to_string(),
+        );
+    }
+    statuses.sort_unstable();
+
+    assert_eq!(
+        uids.len(),
+        1,
+        "the replicas disagreed about which object the key names: {uids:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 201).count(),
+        1,
+        "exactly one request may create; got {statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        7,
+        "the other seven must replay; got {statuses:?}"
+    );
+    assert_eq!(
+        fake.count("backupschedules", NS_A),
+        1,
+        "two replicas produced two custom resources from one Idempotency-Key"
+    );
+
+    // And the key keeps meaning that object for a third replica that was not
+    // even running during the race.
+    let replica_c = TestApp::with(fake.clone(), Options::default());
+    let late = replica_c
+        .post(&path(NS_A, "schedules"), Some(key), &body)
+        .await;
+    assert_eq!(late.status, 200);
+    assert_eq!(
+        late.json()["item"]["uid"].as_str().unwrap(),
+        uids.iter().next().unwrap()
+    );
+    assert_eq!(fake.count("backupschedules", NS_A), 1);
+    fake.assert_strict();
+}
+
+/// **A client that disappears does not retract what it already submitted, and
+/// aborting a read cancels only that read.**
+///
+/// D0: "Aborting a list/get or leaving a UI route cancels only that HTTP and
+/// Kubernetes read. It never retracts an accepted mutation." The review found
+/// no test exercising a disconnect at all — the design answers it, but the
+/// required test did not exist.
+///
+/// A dropped future IS the disconnect: dropping it cancels the handler exactly
+/// where a closed connection would. The fake's delay puts the drop in the one
+/// window that matters — after Kubernetes accepted the write, before the
+/// response could be read. That is the "lost response" case, and it is why the
+/// Idempotency-Key is the client's way back to its own object rather than a way
+/// to make a second one.
+#[tokio::test]
+async fn an_aborted_request_retracts_nothing_and_cancels_only_its_own_read() {
+    let fake = FakeKube::new();
+    let app = TestApp::with(fake.clone(), Options::default());
+    let body = support::schedule_body().to_string();
+    let key = "aborted-key-01";
+
+    // The create will be accepted by the cluster and then stall before the
+    // response comes back.
+    fake.slow_next(
+        "POST",
+        "/backupschedules",
+        std::time::Duration::from_secs(30),
+    );
+
+    let schedules = path(NS_A, "schedules");
+    let submitting = app.post(&schedules, Some(key), &body);
+    let abandoned = tokio::time::timeout(std::time::Duration::from_millis(200), submitting).await;
+    assert!(
+        abandoned.is_err(),
+        "the create was supposed to be still in flight when the client left"
+    );
+    // The future is dropped here: the handler is cancelled mid-call, and no
+    // response ever reached a client.
+
+    // Kubernetes accepted it anyway. The object exists with nobody holding a
+    // response to it — the exact state a lost connection leaves behind.
+    assert_eq!(
+        fake.count("backupschedules", NS_A),
+        1,
+        "the abandoned request did not reach the cluster, so this test proves nothing"
+    );
+
+    // The client comes back with the same key and gets ITS object, not a second
+    // one. This is the whole reason the key exists.
+    let recovered = app.post(&path(NS_A, "schedules"), Some(key), &body).await;
+    assert_eq!(recovered.status, 200, "{}", recovered.code());
+    assert_eq!(recovered.json()["replayed"], true);
+    let uid = recovered.json()["item"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        fake.count("backupschedules", NS_A),
+        1,
+        "abandoning a create and retrying it made two custom resources"
+    );
+
+    // Now abort a READ, with the mutation already durable.
+    fake.slow_next(
+        "GET",
+        "/backupschedules",
+        std::time::Duration::from_secs(30),
+    );
+    let listing = app.get(&schedules);
+    let aborted = tokio::time::timeout(std::time::Duration::from_millis(200), listing).await;
+    assert!(
+        aborted.is_err(),
+        "the list should still have been in flight"
+    );
+
+    // The mutation is untouched, and the next reader is served normally: the
+    // abort took the one read with it and nothing else.
+    assert_eq!(fake.count("backupschedules", NS_A), 1);
+    let after = app.get(&path(NS_A, "schedules")).await;
+    assert_eq!(after.status, 200);
+    let items = after.json()["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["uid"].as_str().unwrap(), uid);
+    fake.assert_strict();
+}

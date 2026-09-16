@@ -223,7 +223,17 @@ fn no_source_here_names_a_forbidden_kubernetes_api() {
         "Api::all_with",
         ".delete(",
         ".delete_collection(",
-        ".replace(&",
+        // The PUT verbs, in the shapes `kube::Api` actually offers them. The
+        // first spelling here used to be `".replace(&"`, which matches NOTHING:
+        // the call is `api.replace(name, &params, object)`, so the `&` belongs
+        // to the SECOND argument. A compiling PUT in the sealed adapter passed
+        // this test. `str::replace` is why the plain method needs the `api.`
+        // prefix, and `the_adapter_calls_only_the_four_permitted_kubernetes_verbs`
+        // below is what makes that prefix trustworthy.
+        "api.replace(",
+        ".replace_status(",
+        ".patch_status(",
+        ".entry(",
         "Patch::Json",
         "Patch::Apply",
         "Patch::Strategic",
@@ -262,6 +272,129 @@ fn no_source_here_names_a_forbidden_kubernetes_api() {
         hits.is_empty(),
         "forbidden Kubernetes API in this crate:\n{}",
         hits.join("\n")
+    );
+}
+
+/// Every `<prefix><ident>(` on a code line, as a set of `<ident>`.
+///
+/// The character before `prefix` must not be part of an identifier, so
+/// `"api."` does not also match `myapi.`.
+fn methods_called_on(text: &str, prefix: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (_, line) in code_lines(text) {
+        let mut cursor = 0usize;
+        while let Some(offset) = line[cursor..].find(prefix) {
+            let at = cursor + offset;
+            let boundary_ok = line[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            let after = &line[at + prefix.len()..];
+            let ident: String = after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if boundary_ok && !ident.is_empty() && after[ident.len()..].starts_with('(') {
+                out.insert(ident);
+            }
+            cursor = at + prefix.len();
+        }
+    }
+    out
+}
+
+/// Every `<ident>: Api<…>` binding name on a code line.
+fn api_binding_names(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (_, line) in code_lines(text) {
+        if let Some(at) = line.find(": Api<") {
+            let ident: String = line[..at]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<Vec<char>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !ident.is_empty() {
+                out.insert(ident);
+            }
+        }
+    }
+    out
+}
+
+/// **The D-SEAMS S7 guard: no PUT, on the object or on its status.**
+///
+/// AN ALLOWLIST, BECAUSE A DENYLIST IS ALWAYS ONE SPELLING BEHIND. The guard
+/// above used to be the only enforcement of S7 in this crate, and it could not
+/// fail: it listed `".replace(&"`, which is not how `kube::Api::replace` is
+/// called, and it did not mention `replace_status` at all. An independent
+/// reviewer planted a compiling `api.replace(name, &params, object)` in the
+/// sealed adapter and the whole linkage suite passed. A guard that cannot fail
+/// is worse than no guard, because the next person to touch `kube.rs` will
+/// reasonably trust it.
+///
+/// So this test does not enumerate what is forbidden. It pins the exact set of
+/// `kube` verbs the adapter calls, and every other method `kube::Api` offers —
+/// `replace`, `replace_status`, `patch_status`, `delete`, `delete_collection`,
+/// `entry`, `get_status`, `get_metadata`, `watch`, and whatever a future
+/// version adds — fails it without ever being named.
+///
+/// It also pins the binding name and the constructor, because both are what
+/// make the scan honest: rename `api` and the verb scan would find nothing;
+/// swap `Api::namespaced` for `Api::all` and the namespace bound disappears.
+#[test]
+fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("kube.rs");
+    let text = std::fs::read_to_string(&path).expect("src/kube.rs is readable");
+
+    assert_eq!(
+        api_binding_names(&text),
+        BTreeSet::from(["api".to_string()]),
+        "every `Api<…>` in {} must be bound to a variable named `api`; the verb \
+         allowlist below scans `api.<method>(` and a rename would silently empty it",
+        path.display()
+    );
+
+    assert_eq!(
+        methods_called_on(&text, "Api::"),
+        BTreeSet::from(["namespaced".to_string()]),
+        "the only `Api` constructor permitted here is `Api::namespaced`: a cluster-wide \
+         handle would drop the namespace bound every route authorizes against"
+    );
+
+    assert_eq!(
+        methods_called_on(&text, "api."),
+        BTreeSet::from([
+            "create".to_string(),
+            "get".to_string(),
+            "list".to_string(),
+            "patch".to_string(),
+        ]),
+        "the adapter may call exactly `list`, `get`, `create` and `patch` on an `Api` \
+         handle. Anything else is a verb this service does not have: PUT (`replace`, \
+         `replace_status`) is refused by D-SEAMS S7 — status writes are conditional merge \
+         PATCH — and delete is refused by the product contract. Adding one here is a \
+         contract change, not a refactor."
+    );
+
+    assert_eq!(
+        methods_called_on(&text, "self.client."),
+        BTreeSet::from(["apiserver_version".to_string(), "clone".to_string()]),
+        "the raw client is used only to build namespaced handles and to ask the API \
+         server its version for `/readyz`; `request`, `request_text` and the other raw \
+         entry points would take a path, which is exactly what this adapter does not do"
+    );
+
+    // The one PATCH is a MERGE patch. `Patch::Json`, `Patch::Apply` and
+    // `Patch::Strategic` are in the forbidden-token list above; this asserts
+    // the positive so that removing them from that list is not enough.
+    assert!(
+        text.contains("Patch::Merge("),
+        "the single update must be a merge patch"
     );
 }
 
@@ -315,6 +448,32 @@ fn the_manifest_pins_the_one_new_dependency() {
         assert!(
             !entries.iter().any(|l| l.starts_with(forbidden)),
             "{forbidden} must not be a dependency of this crate"
+        );
+    }
+
+    // THE TRANSPORT-LIMIT DEPENDENCIES ADD NO PACKAGE (review finding R4). The
+    // accept loop in `src/main.rs` needs hyper's http1 builder, which
+    // `axum::serve` does not expose. Both crates were ALREADY in the resolved
+    // graph — axum is built on them, and `kube-client` pulls `hyper-util` —
+    // so declaring them turns on features of packages already in `Cargo.lock`.
+    // That is the claim the manifest comment makes, and this is where it is
+    // checked: every direct dependency of this crate must already appear in the
+    // lockfile, and `THIRD_PARTY_NOTICES.md` must already name it.
+    let lock = std::fs::read_to_string(workspace_root().join("Cargo.lock")).unwrap();
+    let notices = std::fs::read_to_string(workspace_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
+    for name in ["hyper", "hyper-util"] {
+        assert!(
+            entries.iter().any(|l| l.starts_with(&format!("{name} ="))),
+            "{name} is declared for the transport limits"
+        );
+        assert!(
+            lock.contains(&format!("name = \"{name}\"")),
+            "{name} is not in Cargo.lock: it would be a NEW package, which is a \
+             dependency decision and needs THIRD_PARTY_NOTICES.md regenerated"
+        );
+        assert!(
+            notices.contains(&format!("### {name}@")),
+            "{name} is not attributed in THIRD_PARTY_NOTICES.md"
         );
     }
 }

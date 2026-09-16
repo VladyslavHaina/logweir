@@ -454,6 +454,80 @@ mod tests {
         );
     }
 
+    /// **The configuration in `docs/api.md` is a configuration this code
+    /// accepts, and its paths mean what the prose says.**
+    ///
+    /// REGRESSION REASON (review finding R2). The example used to write
+    /// `kubeconfig: ~/.kube/config`. Nothing here expands `~` — [`resolve`]
+    /// joins any relative path onto the configuration file's own directory — so
+    /// the documented example resolved to `<config-dir>/~/.kube/config`, which
+    /// does not exist, and a first-time reader following the guide verbatim got
+    /// exit 2 and no service. A documented example that cannot start is worse
+    /// than no example, because the reader debugs their cluster instead of the
+    /// line they copied.
+    ///
+    /// So the block is parsed from the document rather than retyped here: the
+    /// two cannot drift.
+    #[test]
+    fn the_documented_example_configuration_parses() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/logweir-api sits two levels under the workspace root")
+            .join("docs/api.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/api.md is readable");
+        let block = text
+            .split("```yaml")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("docs/api.md has a ```yaml block");
+        assert!(
+            block.contains("# config.yaml"),
+            "the first yaml block in docs/api.md is no longer the configuration example"
+        );
+
+        let config = Config::parse(block, Path::new("/etc/logweir"))
+            .expect("the documented example is a configuration this code accepts");
+        assert_eq!(config.listen.port(), 8484);
+        assert_eq!(config.namespaces, vec!["team-a".to_string()]);
+        // Relative paths resolve against the CONFIG FILE's directory, as the
+        // prose under the block says.
+        assert_eq!(config.ui_directory, PathBuf::from("/etc/logweir/ui"));
+        assert_eq!(
+            config.cursor_key_file,
+            PathBuf::from("/etc/logweir/cursor.key")
+        );
+        // The example omits `kubeconfig`, so the client library's own
+        // KUBECONFIG/home lookup applies — the only place `~` expansion belongs.
+        assert_eq!(
+            config.kubernetes,
+            KubeSource::Kubeconfig {
+                path: None,
+                context: "docker-desktop".into()
+            }
+        );
+    }
+
+    /// A leading `~` is a directory name here, not a home reference. Pinned so
+    /// that the sentence in `docs/api.md` stays true, and so that adding
+    /// expansion later is a deliberate change rather than a silent one.
+    #[test]
+    fn a_tilde_in_a_path_is_not_expanded() {
+        let text = text("127.0.0.1:8484", "http://127.0.0.1:8484").replace(
+            "  context: docker-desktop\n",
+            "  kubeconfig: ~/.kube/config\n  context: docker-desktop\n",
+        );
+        let config = Config::parse(&text, Path::new("/etc/logweir")).unwrap();
+        assert_eq!(
+            config.kubernetes,
+            KubeSource::Kubeconfig {
+                path: Some(PathBuf::from("/etc/logweir/~/.kube/config")),
+                context: "docker-desktop".into()
+            },
+            "`~` must be joined literally; if this ever expands, docs/api.md says it does not"
+        );
+    }
+
     #[test]
     fn ipv6_loopback_is_accepted() {
         assert!(Config::parse(&text("[::1]:8484", "http://[::1]:8484"), Path::new(".")).is_ok());

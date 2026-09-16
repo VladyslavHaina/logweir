@@ -483,3 +483,264 @@ fn the_binary_serves_loopback_and_stops_on_sigterm() {
     };
     assert_eq!(exit.code(), Some(0), "SIGTERM must be a clean stop");
 }
+
+/// Start the server on a free port and return it with the port. The caller
+/// keeps the `Reaped` alive for as long as it wants the server.
+fn start_server(fixture: &Fixture) -> (Reaped, u16) {
+    let port = free_port();
+    let config = fixture.config(&config_text(
+        fixture,
+        &format!("127.0.0.1:{port}"),
+        &format!("http://127.0.0.1:{port}"),
+        "fixture",
+    ));
+    let child = Reaped(
+        Command::new(binary())
+            .arg("--config")
+            .arg(&config)
+            .env_remove("KUBECONFIG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary starts"),
+    );
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let deadline = Instant::now() + SERVE_LIMIT;
+    while Instant::now() < deadline {
+        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+            return (child, port);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("the server did not listen on 127.0.0.1:{port} within {SERVE_LIMIT:?}");
+}
+
+/// **A connection that never finishes its headers is closed, and does not hold
+/// the server.**
+///
+/// REGRESSION REASON (review finding R4). `axum::serve` builds its hyper
+/// connection with no header-read deadline, so a client that opened a socket and
+/// sent one byte held a task and a descriptor for as long as it liked — the
+/// slow-loris shape. `main::HEADER_READ_TIMEOUT` is ten seconds; this asserts
+/// that the connection really is closed after it, and that a normal request on
+/// another connection is answered throughout.
+#[test]
+fn a_connection_that_never_sends_its_headers_is_closed() {
+    let fixture = Fixture::new("slowloris");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut slow = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    // A request line with no terminating blank line: hyper is still waiting for
+    // the head when the deadline expires.
+    slow.write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        .unwrap();
+
+    // While it hangs there, the server still serves.
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+
+    // And the hung connection is closed by the server, not by us. Read to EOF
+    // with a read timeout well past the ten-second deadline: a server that
+    // never closed would time out here instead of returning.
+    slow.set_read_timeout(Some(Duration::from_secs(25)))
+        .unwrap();
+    let started = Instant::now();
+    let mut sink = Vec::new();
+    let read = slow.read_to_end(&mut sink);
+    let elapsed = started.elapsed();
+    assert!(
+        read.is_ok(),
+        "the server never closed the headerless connection: {read:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(25),
+        "the connection outlived the header deadline by too much: {elapsed:?}"
+    );
+
+    // The server is still healthy afterwards.
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **An oversized request head is refused rather than buffered.**
+///
+/// The BODY has always been bounded, by `http::read_json`. The HEAD was not:
+/// hyper reads the request line and headers into a buffer before any route
+/// matches, so the cap has to be set on the connection.
+#[test]
+fn an_oversized_request_head_is_refused() {
+    let fixture = Fixture::new("bighead");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let padding = "x".repeat(4096);
+    let mut head = format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    // Comfortably past the 32 KiB cap.
+    for i in 0..32 {
+        head.push_str(&format!("X-Pad-{i}: {padding}\r\n"));
+    }
+    head.push_str("\r\n");
+    // A refused head may close the connection mid-write; that is the refusal.
+    let _ = stream.write_all(head.as_bytes());
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.is_empty() || !text.starts_with("HTTP/1.1 200"),
+        "an oversized head was served: {}",
+        &text[..text.len().min(200)]
+    );
+
+    // The cap is per connection and the server carries on.
+    let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
+    assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+}
+
+/// **At the connection ceiling the server stops accepting, and recovers the
+/// moment a connection closes.**
+///
+/// `main::MAX_CONNECTIONS` is 256. The permit is taken BEFORE the accept, so at
+/// the ceiling further connections wait in the kernel backlog instead of each
+/// becoming a task — which is the difference between a bounded server and one
+/// that runs out of memory politely.
+///
+/// The test is deterministic rather than timing-based in the part that matters:
+/// the pending request is unanswered while every permit is held, and answered
+/// after exactly one connection is dropped.
+#[test]
+fn the_connection_ceiling_holds_and_then_releases() {
+    const CEILING: usize = 256;
+    let fixture = Fixture::new("ceiling");
+    let (_server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    // Fill every permit with connections that are accepted and then idle.
+    let mut held = Vec::with_capacity(CEILING);
+    for i in 0..CEILING {
+        let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("connection {i}: {e}"));
+        held.push(stream);
+    }
+    // Give the accept loop time to take all of them.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // A further request connects (the backlog accepts the TCP handshake) but is
+    // not served, because no permit is free.
+    let mut pending = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    pending
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        pending,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    pending
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut buffer = [0u8; 64];
+    assert!(
+        pending.read(&mut buffer).is_err(),
+        "the server answered past its connection ceiling"
+    );
+
+    // Free exactly one permit.
+    drop(held.pop().expect("one to drop"));
+
+    // Now it is served. The read timeout is the assertion: a permit that never
+    // came back would fail here.
+    pending
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut response = Vec::new();
+    pending
+        .read_to_end(&mut response)
+        .expect("the freed permit lets the waiting connection through");
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("\"status\":\"ok\""), "{text}");
+}
+
+/// **A client holding a connection open cannot hold the shutdown open.**
+///
+/// REGRESSION REASON (review finding R4). Graceful shutdown with no deadline is
+/// not a shutdown: one idle keep-alive connection could keep the process past
+/// any supervisor's patience and turn a clean stop into a SIGKILL.
+/// `main::SHUTDOWN_GRACE` is ten seconds, and the exit is still 0 — the process
+/// stopped when it was told to.
+#[test]
+fn a_held_connection_does_not_block_shutdown_past_the_grace_period() {
+    let fixture = Fixture::new("shutdown");
+    let (mut server, port) = start_server(&fixture);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    // A complete request on a keep-alive connection, answered, then held open:
+    // hyper is waiting for the next request on a connection that will never
+    // send one.
+    let mut held = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+    held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(
+        held,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+    )
+    .unwrap();
+    let mut first = [0u8; 12];
+    held.read_exact(&mut first).unwrap();
+    assert!(
+        String::from_utf8_lossy(&first).starts_with("HTTP/1.1 200"),
+        "{:?}",
+        String::from_utf8_lossy(&first)
+    );
+
+    let mut kill = Command::new("kill");
+    kill.arg("-TERM").arg(server.0.id().to_string());
+    assert!(bounded_output(kill, "kill -TERM").status.success());
+
+    // Past the grace period plus slack, but nowhere near forever.
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(25);
+    let exit = loop {
+        if let Some(exit) = server.0.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a single held connection kept the process alive past the shutdown grace period"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "stopping with a connection held open is still a clean stop"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the held connection delayed the exit past the grace period: {:?}",
+        started.elapsed()
+    );
+    drop(held);
+}
+
+// WHAT THIS PAIR DOES AND DOES NOT PROVE. The test above holds an IDLE
+// keep-alive connection, and hyper closes those at once — between requests
+// there is nothing in flight to finish — so it exits in milliseconds rather
+// than after the grace period. That is the behaviour worth having, and it is
+// what the assertion checks: a held connection cannot delay the exit.
+//
+// The deadline itself — `main::SHUTDOWN_GRACE` elapsing and the remaining
+// connections being dropped — is NOT exercised here, because every handler in
+// this service answers in microseconds and none of them can be made to hang
+// from the outside. Reaching it would need a deliberately slow route, and
+// adding one to the product router to test the server would be the wrong
+// trade. It is recorded as unexercised in the task report rather than implied
+// by a passing test.

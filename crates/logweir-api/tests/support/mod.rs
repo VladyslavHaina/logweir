@@ -77,7 +77,23 @@ struct State {
     requests: Vec<Recorded>,
     unexpected: Vec<String>,
     faults: Vec<Fault>,
+    slow: Vec<Slow>,
     expire_continue_tokens: bool,
+}
+
+/// A delay applied to the NORMAL answer, after it has taken effect.
+///
+/// `Fault` short-circuits: it returns its status instead of doing the work, so
+/// a delayed `Fault` on a POST never creates anything. That makes the one case
+/// D0 asks about untestable — the write Kubernetes ACCEPTED whose response the
+/// client never read. This delays the real answer instead, so the object is
+/// stored and the response is still in flight.
+#[derive(Clone, Debug)]
+pub struct Slow {
+    pub method: &'static str,
+    pub path_contains: String,
+    pub delay: Duration,
+    pub remaining: usize,
 }
 
 /// The fake API server.
@@ -246,6 +262,16 @@ impl FakeKube {
         self.state.lock().unwrap().faults.push(fault);
     }
 
+    /// Delay the next matching request's real answer. See [`Slow`].
+    pub fn slow_next(&self, method: &'static str, path_contains: &str, delay: Duration) {
+        self.state.lock().unwrap().slow.push(Slow {
+            method,
+            path_contains: path_contains.to_string(),
+            delay,
+            remaining: 1,
+        });
+    }
+
     pub fn expire_continue_tokens(&self) {
         self.state.lock().unwrap().expire_continue_tokens = true;
     }
@@ -269,6 +295,28 @@ impl FakeKube {
 }
 
 fn answer(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Duration>, u16, String) {
+    // Taken BEFORE the answer and applied AFTER it, so the work really happens
+    // and only the response is late. The lock is released before `answer_inner`
+    // takes it again.
+    let slow = {
+        let mut s = state.lock().unwrap();
+        s.slow
+            .iter()
+            .position(|e| {
+                e.remaining > 0
+                    && e.method.eq_ignore_ascii_case(&recorded.method)
+                    && recorded.path.contains(&e.path_contains)
+            })
+            .map(|i| {
+                s.slow[i].remaining -= 1;
+                s.slow[i].delay
+            })
+    };
+    let (delay, status, body) = answer_inner(state, recorded);
+    (slow.or(delay), status, body)
+}
+
+fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Duration>, u16, String) {
     let mut s = state.lock().unwrap();
     s.requests.push(recorded.clone());
 

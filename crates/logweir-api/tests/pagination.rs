@@ -255,3 +255,127 @@ async fn label_selectors_are_equality_only_and_bound_into_the_cursor() {
         .assert_problem(400, "malformed_request");
     app.fake.assert_strict();
 }
+
+/// **A catalog far past the maximum page size pages through with cursor
+/// continuity, and never collects more than one page at a time.**
+///
+/// D0's required-test list names "large catalogs and bounded memory"; the live
+/// smoke only reached 56 objects, which is one page and proves nothing about
+/// either. 900 objects at the 200 maximum is five pages.
+///
+/// THE MEMORY CLAIM IS ASSERTED, not asserted-about. Every outbound list the
+/// adapter issued carried a `limit`, none exceeded the requested page size, and
+/// the number of list calls equals the number of pages served — so the API
+/// never collected the catalog to serve a page of it. That is the thing D0 is
+/// actually worried about: a substring search or a sort implemented by reading
+/// everything.
+#[tokio::test]
+async fn a_large_catalog_pages_through_with_cursor_continuity_and_bounded_reads() {
+    const TOTAL: usize = 900;
+    const LIMIT: usize = 200;
+    let app = TestApp::new();
+    seed_backups(&app.fake, NS_A, TOTAL);
+    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    app.fake.clear_requests();
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut snapshots: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0usize;
+
+    loop {
+        pages += 1;
+        assert!(
+            pages <= 10,
+            "the catalog did not terminate in {pages} pages"
+        );
+        let url = match &cursor {
+            None => format!("{base}?limit={LIMIT}"),
+            Some(c) => format!("{base}?limit={LIMIT}&cursor={}", percent_encode(c.as_str())),
+        };
+        let page = app.get(&url).await.json();
+        let items = page["items"].as_array().unwrap();
+        assert!(
+            items.len() <= LIMIT,
+            "page {pages} returned {} items for limit {LIMIT}",
+            items.len()
+        );
+        sizes.push(items.len());
+        for item in items {
+            seen.push(item["name"].as_str().unwrap().to_string());
+        }
+        if let Some(snapshot) = page["page"]["snapshot"].as_str() {
+            snapshots.insert(snapshot.to_string());
+        }
+        match page["page"]["nextCursor"].as_str() {
+            Some(next) => cursor = Some(next.to_string()),
+            None => break,
+        }
+    }
+
+    assert_eq!(pages, 5, "sizes: {sizes:?}");
+    assert_eq!(sizes, vec![200, 200, 200, 200, 100]);
+
+    // Continuity: every object exactly once, in order, with no gap and no
+    // repeat across the cursor boundaries.
+    assert_eq!(seen.len(), TOTAL, "duplicate or missing rows");
+    let unique: std::collections::BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), TOTAL, "a row appeared on two pages");
+    let mut expected: Vec<String> = (0..TOTAL).map(|i| format!("backup-{i:04}")).collect();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "the pages did not cover the catalog in order"
+    );
+
+    // Bounded reads: one Kubernetes list per page, each with a limit, none
+    // asking for more than the page the client asked for.
+    let lists: Vec<_> = app
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "GET" && r.path.ends_with("/backups"))
+        .collect();
+    assert_eq!(
+        lists.len(),
+        pages,
+        "{} Kubernetes lists for {pages} pages: the API is reading more than it serves",
+        lists.len()
+    );
+    for (index, list) in lists.iter().enumerate() {
+        let query: std::collections::BTreeMap<String, String> =
+            serde_urlencoded::from_str(&list.query).unwrap();
+        let limit: usize = query
+            .get("limit")
+            .unwrap_or_else(|| panic!("list {index} carried no limit: {}", list.query))
+            .parse()
+            .unwrap();
+        assert!(
+            limit <= LIMIT,
+            "list {index} asked Kubernetes for {limit} rows to serve at most {LIMIT}"
+        );
+        assert_eq!(
+            index > 0,
+            query.contains_key("continue"),
+            "list {index} continue-token handling: {}",
+            list.query
+        );
+    }
+    app.fake.assert_strict();
+}
+
+/// Percent-encode a cursor for a query string. Cursors are base64url plus a
+/// `.`, so only `=` padding would need it — but the encoding is applied rather
+/// than assumed, so a cursor format change does not silently break this test.
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}

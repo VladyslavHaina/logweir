@@ -234,6 +234,94 @@ async fn a_host_this_listener_does_not_serve_is_refused() {
     }
 }
 
+/// The two probes answer whatever `Host` the kubelet sends, and still say
+/// nothing.
+///
+/// WHY THE EXEMPTION EXISTS: a kubelet HTTP probe addresses the Pod and sends
+/// `Host: <podIP>:<port>`. That authority is in no `publicOrigin` and no
+/// administrator's configuration, so with the `Host` allowlist applied to
+/// `/healthz` and `/readyz` a deployed console would answer both probes 421 and
+/// never become ready.
+///
+/// WHY IT IS SAFE, asserted rather than asserted-about: the bodies are the same
+/// bytes for every `Host`, so a rebinding page that reaches them learns nothing
+/// it did not already know from the connection succeeding. The exemption is an
+/// EXACT path match, so it does not extend to `/healthz/`, to a prefix, or to
+/// any `/api/v1` route — those still answer 421. And `Impersonate-*` is still
+/// refused on the exempt paths.
+#[tokio::test]
+async fn the_probes_answer_any_host_and_nothing_else_does() {
+    let app = TestApp::new();
+    let foreign = ["evil.example", "10.244.1.7:8484", "[fd00::1]:8484"];
+
+    let mut healthz_bodies = std::collections::BTreeSet::new();
+    let mut readyz_bodies = std::collections::BTreeSet::new();
+    for host in foreign.iter().chain(["127.0.0.1:8484"].iter()) {
+        for (path, bodies) in [
+            ("/healthz", &mut healthz_bodies),
+            ("/readyz", &mut readyz_bodies),
+        ] {
+            let response = app
+                .send(
+                    Request::builder()
+                        .uri(path)
+                        .header("host", *host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(response.status, 200, "{path} with Host: {host}");
+            bodies.insert(String::from_utf8_lossy(&response.body).into_owned());
+        }
+    }
+    // One distinct body each: the answer does not vary with the Host, so there
+    // is nothing for a foreign Host to learn by asking.
+    assert_eq!(healthz_bodies.len(), 1, "{healthz_bodies:?}");
+    assert_eq!(readyz_bodies.len(), 1, "{readyz_bodies:?}");
+    assert_eq!(
+        healthz_bodies.iter().next().unwrap(),
+        r#"{"status":"ok"}"#,
+        "the liveness body is a constant"
+    );
+
+    // The exemption is exact. Nothing near those paths inherits it.
+    for path in [
+        "/healthz/",
+        "/healthzz",
+        "/readyz/x",
+        "/api/v1/session",
+        "/ui/",
+        "/",
+    ] {
+        let response = app
+            .send(
+                Request::builder()
+                    .uri(path)
+                    .header("host", "evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        response.assert_problem(421, "misdirected_request");
+    }
+
+    // And the impersonation refusal is not exempted with it.
+    for path in ["/healthz", "/readyz"] {
+        let response = app
+            .send(
+                Request::builder()
+                    .uri(path)
+                    .header("host", "10.244.1.7:8484")
+                    .header("impersonate-user", "system:admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        response.assert_problem(400, "header_not_allowed");
+    }
+    app.fake.assert_strict();
+}
+
 #[tokio::test]
 async fn unsafe_methods_need_the_exact_origin_and_json_before_anything_else() {
     let app = TestApp::new();

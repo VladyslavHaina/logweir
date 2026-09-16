@@ -17,6 +17,8 @@
 
 mod support;
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use logweir_api::contract::{Operation, OperationState, ResultStatus, VerificationState};
 use logweir_api::status::{backup_operation, restore_operation};
@@ -218,10 +220,6 @@ fn every_backup_status_the_controller_writes() {
             V::Pending,
             false,
         ),
-    );
-    assert_eq!(
-        backup_operation(&backup_of(&running)).job_name.as_deref(),
-        Some("b1")
     );
 
     let keys = EvidenceKeys {
@@ -874,4 +872,137 @@ async fn the_operations_route_serves_the_normalized_status() {
         .await
         .assert_problem(404, "not_found");
     app.fake.assert_strict();
+}
+
+/// **No infrastructure detail is frozen into the versioned operation contract.**
+///
+/// REGRESSION REASON (review finding R5). The projection used to copy the
+/// controller's runner Job name into `Operation.jobName`. PLAT-17.1's own
+/// problem statement is that direct CR manipulation "exposes infrastructure
+/// details", and D0 hands PLAT-14.1 the final normalized mapping, listing what
+/// stays visible: reason, message, exit code, last phase, timestamps and
+/// evidence references. A Job name is on none of them.
+///
+/// The asymmetry is what decides it: adding a field to this document later is a
+/// MINOR change, removing one is MAJOR. So the field waits for the task that
+/// owns the ruling — and this test is what stops it, or any other Job/Pod/image
+/// detail, from arriving by accident in the meantime.
+///
+/// The key set is asserted whole rather than one absent name at a time, so a
+/// field added under a different spelling fails too.
+#[test]
+fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
+    let base = base_backup();
+    let typed = backup_of(&base);
+    // A Job name that cannot be confused with the object's own name, so the
+    // byte scan below means something.
+    let job = "logweir-backup-b1-20260916t131321z-runner";
+    let (running, _) = patched::<Backup>(
+        base.clone(),
+        &backup_ctl::running_status_patch(&typed, job, now()),
+    );
+
+    // The controller really did record it: the scan is not vacuous.
+    assert_eq!(
+        running
+            .pointer("/status/jobRef/name")
+            .and_then(Value::as_str),
+        Some(job),
+        "the fixture must carry a jobRef for this test to prove anything"
+    );
+
+    // The PUBLISHED field set, from the generated document rather than from one
+    // serialized instance: an optional field is absent from an instance whether
+    // it was removed or merely unset, and only one of those is a contract change.
+    let document: Value =
+        serde_json::from_str(&logweir_api::openapi::openapi_document()).expect("JSON");
+    let declared: BTreeSet<&str> = document["components"]["schemas"]["Operation"]["properties"]
+        .as_object()
+        .expect("Operation is an object schema")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        declared,
+        BTreeSet::from([
+            "conditions",
+            "createdAt",
+            "evidence",
+            "kind",
+            "lastUpdatedAt",
+            "message",
+            "name",
+            "namespace",
+            "resourceVersion",
+            "result",
+            "state",
+            "stateReason",
+            "terminal",
+            "uid",
+            "verification",
+            "verifiedSuccess",
+        ]),
+        "the operation contract's field set changed. Adding one is a MINOR change to \
+         schemas/logweir-api-v1.openapi.json and needs `just schema`; adding an \
+         infrastructure identifier — a Job, Pod, node or image name — is a contract \
+         decision PLAT-14.1 owns, not a projection detail."
+    );
+
+    // NO FIELD *IS* THE JOB NAME — under `jobName` or any other spelling.
+    //
+    // The distinction this draws is deliberate. D0 keeps the controller's
+    // `reason` and `message` visible, and the controller's running message says
+    // "the runner Job <name> exists and has not finished". Prose that mentions
+    // an object is not a machine-readable handle to it: a client cannot select
+    // on it, and PLAT-14.1 owns that message's final wording anyway. A field
+    // whose VALUE is exactly the Job name is the handle, and that is what stays
+    // out until PLAT-14.1 rules.
+    for (operation, label) in [
+        (backup_operation(&backup_of(&running)), "Backup"),
+        (
+            {
+                let restore_object = base_restore();
+                let restore_typed = restore_of(&restore_object);
+                let (restore_running, _) = patched::<Restore>(
+                    restore_object.clone(),
+                    &restore_ctl::running_status_patch(&restore_typed, job, true, now()),
+                );
+                restore_operation(&restore_of(&restore_running))
+            },
+            "Restore",
+        ),
+    ] {
+        let value = serde_json::to_value(&operation).expect("the DTO serializes");
+        let mut carriers = Vec::new();
+        collect_fields_equal_to(&value, "", job, &mut carriers);
+        assert!(
+            carriers.is_empty(),
+            "{label}: these fields carry the runner Job name as their value, which makes it a \
+             handle rather than prose: {carriers:?}"
+        );
+        // Not vacuous: the name IS present in the controller's message.
+        assert!(
+            serde_json::to_string(&value).unwrap().contains(job),
+            "{label}: the fixture's message no longer mentions the Job, so the check above \
+             proves nothing — pick a status that does"
+        );
+    }
+}
+
+/// Every JSON path whose string value is exactly `needle`.
+fn collect_fields_equal_to(value: &Value, path: &str, needle: &str, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) if text == needle => out.push(path.to_string()),
+        Value::Object(map) => {
+            for (key, child) in map {
+                collect_fields_equal_to(child, &format!("{path}/{key}"), needle, out);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                collect_fields_equal_to(child, &format!("{path}/{index}"), needle, out);
+            }
+        }
+        _ => {}
+    }
 }
