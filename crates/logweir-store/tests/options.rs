@@ -245,6 +245,61 @@ fn explicit_allow_http_false_wins_over_aws_allow_http_true() {
     );
 }
 
+/// PLAT-08.1's "without global configuration leakage", as a property rather
+/// than an enumeration: an explicit store reads NO `AWS_*` variable except the
+/// ones its credential source NAMES.
+///
+/// The tripwire is a variable whose value object_store parses at `build()`
+/// time. An unparseable `AWS_CONDITIONAL_PUT` makes a `from_env()`-based build
+/// FAIL and leaves a `new()`-based build untouched, so the two cases are
+/// distinguishable with no socket, no server and no request. The second half
+/// of the test is what makes the first half mean anything: with the SAME
+/// poison, the ambient source really does fail, so the tripwire is armed.
+///
+/// MUTANT: making every credential source start from
+/// `AmazonS3Builder::from_env()` — which is invisible to every other test in
+/// this file, because they all set an explicit endpoint and region that
+/// override the poisoned ones — turns the first assertion red. A destination
+/// whose `region` or `endpoint` is ABSENT is the case that would otherwise
+/// silently inherit the controller's own.
+#[test]
+fn an_explicit_store_reads_no_unnamed_aws_variable() {
+    let _l = env_lock();
+    let _g = EnvGuard::clear(&AWS_VARS);
+    let tripwires = [
+        "AWS_CONDITIONAL_PUT",
+        "AWS_CHECKSUM_ALGORITHM",
+        "AWS_SERVER_SIDE_ENCRYPTION",
+        "AWS_REQUEST_PAYER",
+    ];
+    for var in tripwires {
+        let _poison = EnvGuard::set(&[(var, "definitely-not-a-valid-value")]);
+
+        // Armed: the ambient source DOES read the environment, so the poison
+        // reaches object_store and the build fails.
+        assert!(
+            Store::read_only_with(&https_tls(), &StoreOptions::ambient()).is_err(),
+            "{var} is not a tripwire: the ambient build accepted it, so this test \
+             proves nothing about the explicit one"
+        );
+
+        // And the explicit sources do not.
+        for (name, opts) in [
+            ("static", StoreOptions::static_keys("AKIADEST", "s", None)),
+            ("staticFromEnv", StoreOptions::static_from_env()),
+        ] {
+            let _keys = EnvGuard::set(&[
+                ("AWS_ACCESS_KEY_ID", "AKIAPROJECTED0000001"),
+                ("AWS_SECRET_ACCESS_KEY", "projected"),
+            ]);
+            assert!(
+                Store::read_only_with(&https_tls(), &opts).is_ok(),
+                "credential source `{name}` read {var}, which no destination named"
+            );
+        }
+    }
+}
+
 /// The addressing half of the same override. `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`
 /// in the environment must not move a path-style destination.
 #[test]

@@ -512,6 +512,55 @@ fn a_broken_relay_is_result_unreadable() {
     assert!(relay_of(&extra_stream, &expect).is_err());
 }
 
+/// The count and the digest are TWO guards, and each catches a case the other
+/// cannot. Asserted separately so neither can be deleted as "redundant": the
+/// first mutant round for this file found that disabling the count check alone
+/// left every other test green, because every case they shared was also a
+/// digest change.
+#[test]
+fn the_topic_count_and_the_topic_digest_are_separate_guards() {
+    let topics = vec![TopicEntry::new("orders", 3)];
+    let expect = expectations("sha256:plan", "uid-1");
+
+    // (a) only the COUNT catches this: the digest is the correct digest of the
+    // one line that arrived, and the end frame claims five.
+    let mut lines = write_all(&topics, &[], "sha256:plan", "uid-1");
+    let end = EndFrame {
+        contract: CHECK_RESULT_CONTRACT.into(),
+        plan_sha256: "sha256:plan".into(),
+        subject_uid: "uid-1".into(),
+        streams: BTreeMap::new(),
+        topic_lines: Some(logweir_core::check_contract::TopicLineSummary {
+            count: 5,
+            sha256: topic_tsv_sha256(&topics),
+        }),
+    };
+    *lines.last_mut().unwrap() = frames::write_end(&end).unwrap();
+    let err = relay_of(&lines, &expect).unwrap_err();
+    assert!(format!("{err}").contains("topic lines arrived"), "{err}");
+
+    // (b) only the DIGEST catches this: one line arrived, the end frame claims
+    // one, and it is a different line.
+    let other = vec![TopicEntry::new("payments", 3)];
+    let mut lines = write_all(&topics, &[], "sha256:plan", "uid-1");
+    let end = EndFrame {
+        contract: CHECK_RESULT_CONTRACT.into(),
+        plan_sha256: "sha256:plan".into(),
+        subject_uid: "uid-1".into(),
+        streams: BTreeMap::new(),
+        topic_lines: Some(logweir_core::check_contract::TopicLineSummary {
+            count: 1,
+            sha256: topic_tsv_sha256(&other),
+        }),
+    };
+    *lines.last_mut().unwrap() = frames::write_end(&end).unwrap();
+    let err = relay_of(&lines, &expect).unwrap_err();
+    assert!(
+        format!("{err}").contains("do not match the digest"),
+        "{err}"
+    );
+}
+
 /// Non-frame lines are IGNORED, so the same decoder serves the `KafkaCluster`
 /// probe, which prints its own I14 lines on the same stdout (D2 §4.5).
 #[test]
