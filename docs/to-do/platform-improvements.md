@@ -121,6 +121,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-06.1 | Done | plat06-live, plat06-review | Completion record under PLAT-06.1. Integrated into main as `8e362f9..10f6c28`. |
 | PLAT-07.1 | In progress | plat07-finish | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
+| PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. |
@@ -170,7 +171,7 @@ surviving. None is fixed yet except where a worker is named.
 | P0-RESERVE | `backup_schedule.rs:1359` reserves a slot with `replace_status` (PUT, verb `update`) while the shipped role grants only `patch` on `backupschedules/status`; default `Forbid` schedules therefore never create a Backup on a shipped install. Confirmed live (`auth can-i`: update no, patch yes). **Fixed** in `bdd26dc` (resourceVersion-conditional merge PATCH) with the reverse "every call has a grant" lint (`40fd7cb`); live-proved under the unmodified shipped role in the PLAT-06.1 run (reservation set at rv 2332382, cleared at 2332386). | w0-reservation, plat06-live (done) |
 | SEC-ENVHTTP | The controller forwards its own `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into every runner Job (`controllers/backup.rs:192`, `restore.rs:1297`); the engine's `from_env()` then honours them, so a forwarded `AWS_ALLOW_HTTP=true` enables plaintext transport even when the approved plan says `allow_http: false`. A global setting overrides approved execution inputs. | PLAT-08.1 destination resolver (D2 W6b) |
 | SEC-PODLOG | Pod lookup for exit codes and evidence keys matches on labels alone and takes the first result (`controllers/backup.rs:1683`, `restore.rs:2519`, `kafka_cluster.rs:832`); a tenant able to create a pod with `batch.kubernetes.io/job-name=<job>` can have its log read as the run's outcome. The pod's controller owner UID is never checked. | queued after plat06/plat07 merge |
-| UI-HTTPDOWNGRADE | The restore wizard sets `allowHttp` from the path-style checkbox (`ui/pages/restore-wizard.js:1142`) and applies one endpoint/region/addressing to both the source archive and evidence store (`:1135`). | PLAT-08.2 UI slice, after ui-correct |
+| UI-HTTPDOWNGRADE | The restore wizard sets `allowHttp` from the path-style checkbox (`ui/pages/restore-wizard.js:1142`) and applies one endpoint/region/addressing to both the source archive and evidence store (`:1135`). **First half fixed** in `6c2c95e` (D2 W13a): path-style never sets `allowHttp`; an explicit, separate "allow insecure HTTP" control defaulting off is the only source of `allow_http: true`, guarded by a behaviour row and a live journey that reads the plan bytes the API server holds. The one-endpoint-for-archive-and-evidence half remains PLAT-08.2. | PLAT-08.2 UI slice |
 | UI-FAKEPREFLIGHT | Wizard step 5 "Target-topic preflight" shows only the target cluster's cached `status.reachable` (`ui/pages/restore-wizard.js:424`), and restore admission gates on the same cached value (`controllers/restore.rs:638`). | PLAT-03.2 |
 | RET-WRONGBUCKET | Retention lists manifests through the controller's single global store while rendering commands for the schedule's own URL (`backup_schedule.rs:1417`), so a schedule on another bucket is reported against the wrong catalog. | PLAT-16.1 |
 | ENGINE-PATHSTYLE | The pinned engine ignores `path_style` and forces path-style addressing whenever an endpoint is set (`kafka-backup-core storage/s3.rs:66`), so virtual-hosted addressing with a custom endpoint cannot be honoured and must be refused rather than advertised. | PLAT-08.1 (documented refusal) |
@@ -759,6 +760,44 @@ submission. **Tests:** New completion during the wizard, missing selected point,
 gapped/unavailable coverage, inclusive boundary, different schedules and empty
 catalog. **Dependencies:** None for existing Backup history; PLAT-15.1 for
 imported points.
+
+**Completion record — Done (2026-09-16), PLAT-11.1 (imported points deferred to
+PLAT-15.1 by the dependency above).** Landed in main as `5a6b1a8` (the wizard bound
+to a chosen recovery point), `a447791` (live journeys), `3fd6985` and `02426c8`
+(review fixes), alongside `6c2c95e` (D2 W13a). Contract (`ui/README.md`): the route
+is `#/restore?ns=<ns>&backup=<name>&uid=<uid>` — the Backup UID is the identity, the
+name is for display and refusals, a name-only link pins the UID it resolved; history
+rows and schedule cards carry a "Restore this point" link built by one helper; with
+no identity the wizard shows a searchable newest-first selector of `Succeeded`
+Backups (schedule, slot, topics, records, signed verdict, availability as the run
+recorded it) or an empty state; the selection never changes while newer Backups
+arrive, across re-reads, route changes and reloads; the requested timestamp is
+constrained to the point's disclosed window with an inclusive boundary and an
+out-of-window value is a field error that keeps the draft; a missing or
+non-`Succeeded` point is a refusal naming it with no plan, no hash, no submit and
+never a substitution; the reviewed plan hash changes with the point. Verified at
+`02426c8`: node rows 104/104 (ten new), `check-ui-behaviour.sh` 104 with the plan
+golden byte-identical, `check-ui-offline.sh` sixteen files, `ui_lint` 26, `chart_lint`
+28, the three demo lints, `chart-check`; thirteen mutants killed including two
+planted on the reachable re-read path after review. Live docker-desktop browser
+journeys (own namespace, lab controller reconciling, no lock): 14/15 twice
+(`artifacts/ui-restore-selection/live-result-20260916T142437Z.json` and
+`…T145850Z`): selector with zero POSTs and no plan; a history link pre-selects by
+UID; an older point survives a newer Backup completing mid-wizard across a route
+change and a reload with the same plan hash three times; path-style leaves
+`allow_http: false` in the plan bytes the API server holds; a deleted point is
+refused without substitution; a failing negative control against the pre-change
+UI. The 15th journey (a forged subject binding refused terminally by the
+controller) fails only because the shared lab controller image predates the
+`ApprovalSubjectMismatch` check — the same journey passed on 2026-09-16 13:39Z
+while a current-source controller was swapped in; it is re-run after the lab tag
+is rebuilt from main. Independent review `claude/ui-restore-selection.review.md`:
+ACCEPT-WITH-FIXES (seven low) then ACCEPT. Migration: none (static assets, sixteen
+files; deep links to `#/restore?ns=` still work and land on the selector; the
+`plat13` harness and the demo steps were updated to enter the wizard on a point).
+Limitations: "archive availability" reflects what the run recorded, not the bucket
+(PLAT-15.1's catalog is the fix); intra-window coverage gaps are not
+representable until PLAT-15.1.
 
 ### PLAT-11.2 — Preview target topic subset, mapping and recovery limits
 
