@@ -4729,8 +4729,8 @@ use weirkeeper::conditions::{
     TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
 };
 use weirkeeper::controllers::backup::{
-    desired_execution_inputs, plan_config_map, runner_job, running_status_patch, select_job_pod,
-    with_status_patch,
+    desired_execution_inputs, plan_config_map, runner_job, runner_job_spec_from_inputs,
+    running_status_patch, select_job_pod, with_status_patch,
 };
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 
@@ -6130,4 +6130,295 @@ async fn a_surfaced_annotation_on_a_running_backup_is_steady() {
     .await
     .unwrap();
     assert_eq!(status_patch_count(&bodies.lock().unwrap()), 0);
+}
+
+// ---------------------------------------------------------------------------
+// PLAT-06.1 × PLAT-07.1: the frozen inputs and the ONE connection resolver
+// ---------------------------------------------------------------------------
+
+/// The `execution-inputs.json` bytes the controller froze for [`backup`] and
+/// [`prod_cluster`] **before the saved-connection contract was merged**,
+/// captured from `main 10f6c28` (PLAT-06.1, pre-rebase) and stored as bytes.
+///
+/// A LITERAL, NOT A RE-DERIVATION. A fixture regenerated from the build it is
+/// supposed to constrain proves nothing about compatibility; these bytes are
+/// what the older controller actually wrote.
+const PRE_CONTRACT_INPUTS: &str =
+    include_str!("fixtures/backup_execution/pre-connection-contract-inputs.json");
+
+/// A `KafkaCluster` that is [`kafka_cluster_json`] plus an `auth.tlsCa`.
+fn cluster_with_ca(ca: Value) -> String {
+    let mut value: Value =
+        serde_json::from_str(&kafka_cluster_json()).expect("the fixture is JSON");
+    value["spec"]["auth"]["tlsCa"] = ca;
+    value.to_string()
+}
+
+/// [`create_routes`] answering the `KafkaCluster` GET with `cluster_json`.
+fn create_routes_for(
+    configmap_status: u16,
+    existing_configmap: String,
+    cluster_json: String,
+) -> Vec<Route> {
+    let mut routes = create_routes(configmap_status, existing_configmap);
+    for route in &mut routes {
+        if route.path_suffix == "/kafkaclusters/prod" {
+            route.body = cluster_json.clone();
+        }
+    }
+    routes
+}
+
+/// A plan ConfigMap carrying exactly `snapshot` as its `execution-inputs.json`,
+/// with the two runner documents rendered from it and both annotations
+/// recomputed — the object an older controller would have left behind.
+fn config_map_around(snapshot: &str) -> Value {
+    let parsed: BackupExecutionInputs =
+        serde_json::from_str(snapshot).expect("the snapshot parses under this grammar");
+    let frozen = FrozenInputs::freeze(parsed).expect("it freezes");
+    let mut cm = frozen_config_map(&backup());
+    cm["data"] = serde_json::to_value(frozen.documents().expect("documents render")).unwrap();
+    cm["metadata"]["annotations"][INPUTS_SHA256_ANNOTATION] =
+        serde_json::json!(frozen.sha256.clone());
+    cm["metadata"]["annotations"][EXECUTION_ID_ANNOTATION] =
+        serde_json::json!(frozen.inputs.execution.id.clone());
+    cm
+}
+
+/// Reconcile [`backup`] with a `409` that hands back `existing`, against
+/// `cluster_json`.
+async fn reconcile_against(
+    existing: &Value,
+    cluster_json: String,
+) -> (Option<String>, Vec<SeenBody>) {
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(create_routes_for(409, existing.to_string(), cluster_json));
+    let outcome = reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("a refusal is an outcome");
+    let bodies = bodies.lock().expect("readable").clone();
+    (outcome.terminal_state, bodies)
+}
+
+/// **A PLAN FROZEN BEFORE THE SAVED-CONNECTION CONTRACT IS STILL ADMITTED,
+/// UNCHANGED** — grammar `…/backup-execution-inputs/v1` did not fork when
+/// PLAT-07.1 added the CA reference to the source block.
+///
+/// The CA reference is `skip_serializing_if = "Option::is_none"`, so a
+/// connection that names no CA freezes the same bytes it always did: the older
+/// controller's snapshot parses, re-encodes to ITSELF, renders the same two
+/// runner documents, and the run continues into its Job.
+///
+/// KILLS: bumping the grammar version for an additive optional field;
+/// serialising `tlsCa: null` into a no-CA snapshot (either would make every
+/// in-flight `Backup` on an upgraded controller terminal
+/// `PlanConfigMapConflict` at its next pass).
+#[tokio::test]
+async fn a_plan_frozen_before_the_connection_contract_is_still_admitted() {
+    // The fixture really is the older grammar: no CA key at all.
+    assert!(
+        !PRE_CONTRACT_INPUTS.contains("tlsCa"),
+        "the pre-contract fixture names no CA; it was captured before the field existed"
+    );
+    let parsed: BackupExecutionInputs = serde_json::from_str(PRE_CONTRACT_INPUTS)
+        .expect("the older snapshot parses under the merged grammar");
+    assert_eq!(parsed.version, INPUTS_VERSION, "the grammar did not fork");
+    assert_eq!(
+        FrozenInputs::freeze(parsed).expect("it freezes").canonical,
+        PRE_CONTRACT_INPUTS,
+        "the merged controller re-encodes the older snapshot to the SAME BYTES; anything else \
+         is a digest that no longer matches its annotation and a run that cannot continue"
+    );
+
+    // And it is byte-identical to what this controller freezes now.
+    assert_eq!(
+        desired_for(&backup()).canonical,
+        PRE_CONTRACT_INPUTS,
+        "a connection that names no CA freezes exactly what it froze before PLAT-07.1"
+    );
+
+    // The whole pass: the older object is admitted and the Job is created.
+    let (terminal, bodies) = reconcile_against(
+        &config_map_around(PRE_CONTRACT_INPUTS),
+        kafka_cluster_json(),
+    )
+    .await;
+    assert_eq!(terminal, None, "no refusal: {:?}", calls(&bodies));
+    let job = posted_job(&bodies).expect("the Job is created from the older frozen inputs");
+    assert_eq!(
+        job["spec"]["template"]["spec"]["containers"][0]["args"],
+        serde_json::json!(runner_argv(ExecutionTrigger::Manual, UID)),
+        "the Job runs the argv the older snapshot froze"
+    );
+    assert!(
+        !rewrote_a_config_map(&bodies),
+        "the older plan is never rewritten"
+    );
+}
+
+/// **A SOURCE `KafkaCluster` WITH `auth.tlsCa` FREEZES THE CA REFERENCE THE
+/// RESOLVER DECIDED, AND A CHANGED REFERENCE IS A CONFLICT** — PLAT-07.1's
+/// projection is inside PLAT-06.1's comparison, not beside it.
+///
+/// The Job's CA mount is not an extra the Job builder adds after the fact: the
+/// object, the key and the kind are in the immutable snapshot, so a `tlsCa`
+/// edited after the freeze cannot be combined with approved plan bytes. Without
+/// this the controller would mount a CA nobody froze — the run would verify the
+/// broker against a root the plan was never approved for, silently.
+///
+/// KILLS: leaving `tls_ca` out of `SourceInputs`; clearing it in
+/// `BackupExecutionInputs::executable()`; comparing only the CA's name.
+#[tokio::test]
+async fn a_source_cluster_with_a_private_ca_freezes_its_reference_and_a_change_is_a_conflict() {
+    let ca = serde_json::json!({ "configMapKeyRef": { "name": "kafka-ca", "key": "ca.crt" } });
+    let cluster_json = cluster_with_ca(ca);
+    let cluster: KafkaCluster = serde_json::from_str(&cluster_json).expect("still a KafkaCluster");
+    let frozen = desired_execution_inputs(&backup(), &cluster).expect("it resolves");
+
+    // THE SNAPSHOT NAMES THE REFERENCE, and still names no credential.
+    let snapshot: Value = serde_json::from_str(&frozen.canonical).expect("the snapshot is JSON");
+    assert_eq!(
+        snapshot["source"]["tlsCa"],
+        serde_json::json!({ "kind": "configMap", "name": "kafka-ca", "key": "ca.crt" }),
+        "the frozen inputs carry the CA reference the ONE resolver decided"
+    );
+    assert_eq!(
+        frozen.inputs.executable().source.tls_ca,
+        frozen.inputs.source.tls_ca,
+        "and it is EXECUTABLE — unlike `observedClusterId`, a CA reference changes what the run \
+         trusts, so `verify_frozen_config_map`'s comparison must see it"
+    );
+    for forbidden in ["prod-sasl", "logweir-s3", "password"] {
+        assert!(
+            !frozen.canonical.contains(forbidden),
+            "a CA reference is public certificate material; a CREDENTIAL reference still reaches \
+             no ConfigMap: `{forbidden}` in {}",
+            frozen.canonical
+        );
+    }
+
+    // THE JOB MOUNTS IT, from that same resolution.
+    let (terminal, bodies) =
+        reconcile_against(&config_map_around(&frozen.canonical), cluster_json.clone()).await;
+    assert_eq!(
+        terminal,
+        None,
+        "the CA connection runs: {:?}",
+        calls(&bodies)
+    );
+    let job = posted_job(&bodies).expect("the Job is created");
+    let pod = &job["spec"]["template"]["spec"];
+    let env = pod["containers"][0]["env"]
+        .as_array()
+        .expect("the container has env");
+    let ca_file = env
+        .iter()
+        .find(|v| v["name"] == "LOGWEIR_SOURCE_TLS_CA_FILE")
+        .expect("the CA path is handed to the runner");
+    assert_eq!(ca_file["value"], "/connection/source-ca/ca.crt");
+    assert!(
+        ca_file.get("valueFrom").is_none(),
+        "a PATH, never certificate text and never a readback"
+    );
+    let volume = pod["volumes"]
+        .as_array()
+        .expect("volumes")
+        .iter()
+        .find(|v| v["name"] == "source-ca")
+        .expect("the CA volume");
+    assert_eq!(volume["configMap"]["name"], "kafka-ca");
+    assert_eq!(
+        volume["configMap"]["items"],
+        serde_json::json!([{ "key": "ca.crt", "path": "ca.crt" }])
+    );
+    let mount = pod["containers"][0]["volumeMounts"]
+        .as_array()
+        .expect("mounts")
+        .iter()
+        .find(|m| m["name"] == "source-ca")
+        .expect("the CA mount");
+    assert_eq!(mount["mountPath"], "/connection/source-ca");
+    assert_eq!(mount["readOnly"], true);
+
+    // AND A CHANGED REFERENCE IS A CONFLICT, in every part of it.
+    let plan = config_map_around(&frozen.canonical);
+    for (what, now) in [
+        (
+            "another object",
+            serde_json::json!({ "configMapKeyRef": { "name": "kafka-ca-2", "key": "ca.crt" } }),
+        ),
+        (
+            "another key",
+            serde_json::json!({ "configMapKeyRef": { "name": "kafka-ca", "key": "other.crt" } }),
+        ),
+        (
+            "another kind",
+            serde_json::json!({ "secretKeyRef": { "name": "kafka-ca", "key": "ca.crt" } }),
+        ),
+    ] {
+        let (terminal, bodies) = reconcile_against(&plan, cluster_with_ca(now)).await;
+        assert_eq!(
+            terminal.as_deref(),
+            Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT),
+            "a CA reference that now names {what} is a conflict: {:?}",
+            calls(&bodies)
+        );
+        assert!(posted_job(&bodies).is_none(), "{what}: ZERO Job POSTs");
+        assert!(!rewrote_a_config_map(&bodies), "{what}: never rewritten");
+    }
+
+    // …and so is a CA that was frozen and has since been REMOVED.
+    let (terminal, bodies) = reconcile_against(&plan, kafka_cluster_json()).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT),
+        "a removed CA is a conflict, not a quiet fall back to the image's public roots: {:?}",
+        calls(&bodies)
+    );
+    assert!(posted_job(&bodies).is_none());
+
+    // AND THE PURE BUILDER REFUSES IT TOO, without the reconciler's verify pass:
+    // `runner_job_spec_from_inputs` is public, and a consumer holding frozen
+    // inputs may reach it directly. It must not combine them with a connection
+    // they did not come from.
+    let other_ca: KafkaCluster = serde_json::from_str(&cluster_with_ca(
+        serde_json::json!({ "configMapKeyRef": { "name": "kafka-ca-2", "key": "ca.crt" } }),
+    ))
+    .expect("still a KafkaCluster");
+    let refusal = runner_job_spec_from_inputs(&backup(), &other_ca, &frozen)
+        .expect_err("a changed CA reference cannot be combined with frozen inputs");
+    assert!(
+        matches!(
+            refusal,
+            weirkeeper::controllers::backup::BackupError::Refused(
+                TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+                _
+            )
+        ),
+        "a terminal conflict, not a requeue: {refusal}"
+    );
+    assert!(
+        runner_job_spec_from_inputs(&backup(), &cluster, &frozen).is_ok(),
+        "and the connection it DID come from still builds"
+    );
+
+    // The mirror of the row above: a plan frozen with NO CA is refused against a
+    // cluster that has since grown one, so the two directions are both closed.
+    let (terminal, _bodies) = reconcile_against(
+        &config_map_around(PRE_CONTRACT_INPUTS),
+        cluster_with_ca(
+            serde_json::json!({ "configMapKeyRef": { "name": "kafka-ca", "key": "ca.crt" } }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT)
+    );
 }

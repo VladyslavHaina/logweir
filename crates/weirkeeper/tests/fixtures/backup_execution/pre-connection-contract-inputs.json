@@ -1,0 +1,70 @@
+{
+  "version": "logweir.dev/backup-execution-inputs/v1",
+  "execution": {
+    "id": "3f1c8a5e-0000-4000-8000-0000000000a1",
+    "trigger": "manual",
+    "backup": {
+      "namespace": "logweir-t17",
+      "name": "logweir-backup-nightly-20261109-031700",
+      "uid": "3f1c8a5e-0000-4000-8000-0000000000a1"
+    }
+  },
+  "source": {
+    "cluster": {
+      "namespace": "logweir-t17",
+      "name": "prod",
+      "uid": "7a2b9c1d-0000-4000-8000-0000000000c1"
+    },
+    "bootstrapServers": [
+      "broker-0.prod:9093",
+      "broker-1.prod:9093"
+    ],
+    "auth": {
+      "mode": "scramSha512",
+      "username": "logweir",
+      "tls": true
+    },
+    "observedClusterId": "MkU3OEVBNTcwNTJENDM2Qk"
+  },
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "archive": {
+    "url": "s3://kafka-backups/logweir",
+    "storage": {
+      "backend": "s3",
+      "bucket": "kafka-backups",
+      "prefix": "logweir",
+      "region": null,
+      "endpoint": null,
+      "path_style": true,
+      "allow_http": false
+    }
+  },
+  "runner": {
+    "args": [
+      "backup",
+      "run",
+      "--spec",
+      "/plan/backup.yaml",
+      "--allowed-clusters",
+      "/plan/allowed-clusters.json",
+      "--signing-key",
+      "/signing/key.pem",
+      "--receipt-out",
+      "/work/receipt.json",
+      "--triggered-by",
+      "manual",
+      "--backup-id-override",
+      "3f1c8a5e-0000-4000-8000-0000000000a1"
+    ],
+    "deadlineSeconds": 3600,
+    "settings": {
+      "compression": "zstd",
+      "segmentMaxRecords": 1000,
+      "segmentMaxBytes": 10485760,
+      "maxConcurrentPartitions": 3
+    }
+  }
+}
