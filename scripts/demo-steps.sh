@@ -1190,6 +1190,15 @@ step_10b() {
   [ -n "$ui_backup_id" ] || die "status.backupId is empty on $ui_backup — the controller image predates the field"
   echo "    status.backupId, written by the controller: $ui_backup_id"
 
+  # THE UID, because the restore wizard resolves a recovery point BY UID
+  # (PLAT-11.1) and the instruction below prints a link somebody pastes. A
+  # Backup deleted and recreated under the same name is a different run over a
+  # different archive window, and a link carrying only the name would follow
+  # the new one without saying so.
+  ui_backup_uid=$(kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get backup "$ui_backup" -o jsonpath='{.metadata.uid}')
+  [ -n "$ui_backup_uid" ] || die "no metadata.uid on $ui_backup"
+  echo "    metadata.uid, which is what the wizard route names: $ui_backup_uid"
+
   # AND IT IS THE ARCHIVE'S OWN PREFIX. `status.evidence.receiptKey` is
   # `logweir/backups/<backup_id>/<run_id>.receipt.json`, so its third path
   # segment is the id the runner actually wrote under: the status and the
@@ -1207,13 +1216,21 @@ step_10b() {
     Spec §10: "under kubectl proxy --www=, a create of a Restore FROM THE PAGE
     returns 201". curl is not the page. Do this by hand:
 
-      1. open $PROXY_BASE/ui/#/restore
-      2. walk the wizard's six steps (namespace $NS, cluster demo, the archive
-         $ARCHIVE_URL, a point in time, a target prefix) -- change ANYTHING
-         from the scripted run so the plan bytes differ and the minted names do
-         too; the six steps end on the rendered bytes, their sha256 and the two
-         names
-      3. press "Create the Restore"
+      1. open $PROXY_BASE/ui/#/restore?ns=$NS -- since PLAT-11.1 this page does
+         NOT pick a backup for you: it lists the recovery points this namespace
+         holds, newest completion first, and waits
+      2. choose the recovery point this run produced -- press "Restore this
+         point" on the row for $ui_backup (backup set $ui_backup_id). The
+         wizard then opens bound to THAT point, by uid, and its address says
+         so; the same link is on that Backup's row under History and on its
+         schedule's card. To skip the selector, open
+         $PROXY_BASE/ui/#/restore?ns=$NS&backup=$ui_backup&uid=$ui_backup_uid
+      3. walk the wizard's six steps (namespace $NS, cluster demo, the archive
+         $ARCHIVE_URL, a point in time WITHIN the coverage step 2 discloses, a
+         target prefix) -- change ANYTHING from the scripted run so the plan
+         bytes differ and the minted names do too; the six steps end on the
+         rendered bytes, their sha256 and the two names
+      4. press "Create the Restore"
 
     NOTHING TYPES A PRIVATE KEY INTO THAT PAGE. The create needs no key; the
     approval is minted on this host at step 11 and only approval.json and

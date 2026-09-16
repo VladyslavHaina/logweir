@@ -578,7 +578,16 @@ async function staleRestorePreparation(browser) {
     page.on("request", (request) => {
       if (request.method() === "POST" && request.url().includes("/restores")) posts.push(request.url());
     });
-    await page.goto(`${base}#/restore?ns=${encodeURIComponent(primary)}`);
+    // THE WIZARD IS ENTERED ON A RECOVERY POINT (PLAT-11.1). `#/restore?ns=`
+    // alone is the point SELECTOR and renders no plan and no submit: the page
+    // no longer picks a Backup for the operator. `fixtureA` is patched to
+    // Succeeded with a backupId and a covered window above, so it IS one, and
+    // its uid is the identity the route resolves by.
+    await page.goto(
+      `${base}#/restore?ns=${encodeURIComponent(primary)}` +
+        `&backup=${encodeURIComponent(fixtureA)}` +
+        `&uid=${encodeURIComponent(createdIdentity(fixtureA).uid)}`,
+    );
     await page.waitForSelector("#create-restore");
     await page.locator("#create-restore").click();
     await page.evaluate((ns) => { location.hash = `#/backups?ns=${encodeURIComponent(ns)}`; }, second || primary);
