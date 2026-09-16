@@ -126,7 +126,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment); W3+W5 (`d2-kafka-check`) in progress. |
-| PLAT-14.x, 15.x, 16.x, 19.1 | Contract decided | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W4 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`) in progress; W0 (CRD shapes) waits for PLAT-07.1's merge. |
 
 ### Decision records
 
@@ -1032,6 +1032,34 @@ failed verification, cleanup failure and successful evidence retention.
 **Migration/safety and done evidence:** Do not label a signature as exhaustive
 data verification. Record state mappings, notification deduplication behavior
 and the incident-facing completion screen.
+
+**Partial record (2026-09-16) — PLAT-14.2: the delivery path (D3 W4) landed;
+the task stays In progress until the `ProtectionPolicy` kind and controller (D3
+W0, W6) exist.** `crates/logweir/src/notify.rs` now holds the notification half
+moved verbatim out of the drill (re-exported from its old path; the structural
+guards in `tests/notify.rs` unchanged), the protection event document
+(`application/vnd.logweir.protection-event+json;version=1.0.0`, strict parsing,
+`verification_scope` limited to `sampled | degraded | none`, `docs/formats/protection-event.md`),
+the pure dedup key builders W6 will call, and the subcommand `logweir notify
+deliver --event <path>`: one PagerDuty event (`trigger`/`resolve` under the alert
+key), one webhook and one Slack POST as configured by `PAGERDUTY_ROUTING_KEY`,
+`NOTIFY_WEBHOOK_URL`, `NOTIFY_SLACK_WEBHOOK_URL` (https required unless
+`NOTIFY_ALLOW_INSECURE_SINKS`), `notify-result=<sink>:<ok|failed>` as the final
+stdout lines, exit 0 only when every configured sink accepted, exit 1 when one
+refused or none is configured (`notify-result=none:unconfigured`), exit 3 when the
+document is unreadable and nothing was posted (`docs/stability.md`). A summary
+that claims exhaustive verification is sanitised to `[claim removed]` and still
+delivered; operator identifiers are never scanned. No routing key, URL or Secret
+value reaches stdout, stderr or tracing (a captured-tracing fold, a real-key
+process row and a structural scan of every `tracing!` call guard it). Verified at
+`d994e4c`: logweir 746/746 (`notify_deliver` 41), strict clippy and fmt, `just lint`.
+Independent review `claude/d3-notify.review.md`: ACCEPT-WITH-FIXES (two high: the
+claim gate scanned policy names; a routing key could reach stderr) then ACCEPT.
+Note for W6: a `RecoveryCompleted` event with PagerDuty-only routes exits 1 by
+design (it is webhook/Slack only) and must be treated as a no-op, not retried.
+A pre-existing defect is recorded, not fixed: the drill path posts raw JSON to
+Slack, which Slack rejects. Migration: none (an unreleased subcommand; no
+controller uses it yet).
 
 ## PLAT-15 — Recover from archives without the original Kubernetes objects
 
