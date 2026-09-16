@@ -54,14 +54,34 @@ use std::path::{Path, PathBuf};
 /// the two constructors, the compose stack's own endpoints, and ureq's
 /// AGENTLESS request builders (which carry no timeout — see
 /// `crates/logweir/tests/notify.rs`).
-const DIAL_TOKENS: [&str; 13] = [
+const DIAL_TOKENS: [&str; 16] = [
     "RdKafkaReader::connect(",
     "Store::from_url(",
     "Store::read_only_from_url(",
+    // D2 W2's EXPLICIT constructors (`crates/logweir-store/src/lib.rs`).
+    // Dialling in exactly the sense the two above are: each returns a handle
+    // whose first method call opens a socket. They are the ones
+    // destination-backed code uses from W4 onwards, so leaving them out would
+    // point this gate at the shrinking half of the surface.
+    "Store::from_url_with(",
+    "Store::read_only_with(",
     "localhost:9092",
     "127.0.0.1:9092",
     "localhost:9000",
     "127.0.0.1:9000",
+    // The dead-loopback address D2 §3.5 pins the instance-metadata endpoint
+    // to, and the one `logweir-store`'s own tests use to prove a request is
+    // refused before the transport. Nothing listens on port 1, so a file that
+    // names it is a file that expects a connection to fail — which is still a
+    // file that opens one, and is still worth seeing on the way in.
+    //
+    // The `http://` form ONLY, and that is deliberate rather than sloppy.
+    // `crates/weirkeeper/tests/linkage.rs:690-699` uses `https://127.0.0.1:1`
+    // as an apiserver address it never contacts, and says in a comment that it
+    // relies on not being a dial token; a bare `127.0.0.1:1` would flag it and
+    // the cheapest fix would be to delete this token again. The plaintext twin
+    // is the one this repository actually dials.
+    "http://127.0.0.1:1",
     // ureq entry points that carry the crate's DEFAULT configuration, i.e. no
     // overall or read timeout.
     //
@@ -88,7 +108,7 @@ const DIAL_TOKENS: [&str; 13] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 19] = [
+const ALLOWED: [(&str, &str); 21] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -136,6 +156,20 @@ const ALLOWED: [(&str, &str); 19] = [
         "crates/logweir-store/tests/storage.rs",
         "Store::from_url over tempdir filesystem URLs — no endpoint, no network \
          (measured 0.05 s for the whole binary)",
+    ),
+    (
+        "crates/logweir-store/src/lib.rs",
+        "production: the store crate IS where object-store handles are built, so it \
+         defines all four constructors by name; `127.0.0.1:1` is DEAD_METADATA_ENDPOINT, \
+         the address D2 §3.5 pins the instance-metadata endpoint to precisely so that a \
+         credential chain reaching it is refused instead of picking up a node role",
+    ),
+    (
+        "crates/logweir-store/tests/options.rs",
+        "D2 W2 explicit store construction: builds handles to assert what they are \
+         CONFIGURED with (read back off AmazonS3Builder, no request), and issues exactly \
+         two `get`s against http://127.0.0.1:1 — one refused by reqwest's https_only \
+         before any socket, one by the closed port. Whole binary measured at 0.01 s",
     ),
     (
         "crates/logweir-engine-oso/tests/engine.rs",
