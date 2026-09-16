@@ -122,7 +122,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-07.1 | In progress | plat07-finish | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
-| PLAT-17.1 (stage 1) | In progress | plat17-api-finish | New `crates/logweir-api`: bounded `/api/v1` routes over current resources, local-admin mode only, idempotency, problem responses, cursors, static assets; mock-API tests and live smoke. OIDC/roles (PLAT-17.2), console image/chart and UI migration follow. |
+| PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. d1w1-cadence-finish in progress (pure cadence engine, `chrono-tz` decision). |
 | PLAT-03.x, 08.x, 09.1 | Contract decided | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | Contract decided | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. |
@@ -1055,6 +1055,44 @@ execution authority; arbitrary Kubernetes paths are unavailable. **Tests:**
 Contract validation, malformed input, duplicate request, timeout/cancellation,
 pagination and restart with existing operations. **Dependencies:** None for
 the boundary; integrate domain contracts from PLAT-06/07/08/09/14 incrementally.
+
+**Partial record (2026-09-16) — D0 stages 1 and 3 landed; PLAT-17.1 stays In
+progress.** `crates/logweir-api` (`4b571d1` service, `077ac48` bounded test
+children, `1a9b631` `docs/api.md`, `586030c`/`c7f13af`/`972415f`/`de0207c`
+review fixes) serves the sixteen static UI files and `/api/v1` on one origin in
+`localAdmin` mode only (loopback-only listener refused before binding
+otherwise), reads and creates the existing kinds through one sealed Kubernetes
+adapter whose verb set is pinned by an allowlist test (`create`, `get`, `list`,
+`patch`; the one update is `BackupSchedule.spec.suspend` under a resourceVersion
+precondition, D-SEAMS S7), refuses `Impersonate-*`, exposes no generic path,
+Secret, Pod, log, exec, Job or delete, renders every rejection as problem+json
+with field paths, names creates deterministically with request-hash replay
+comparison (`idempotency_conflict` on different content), authenticates list
+cursors with an HMAC, normalises Backup/Restore status, checks the third
+checked-in schema `schemas/logweir-api-v1.openapi.json` for drift, and links
+only the verifying half of the signing API (`tests/linkage.rs`,
+`scripts/check-one-signer.sh`). The one dependency decision is axum 0.8 (three
+new packages; `THIRD_PARTY_NOTICES.md` regenerated, `cargo deny` clean).
+Verified at `de0207c`: 106 crate tests, eight planted mutants killed within
+bounded time (including the reviewer's PUT-on-a-renamed-handle and turbofish
+dodges), strict clippy and fmt, `schema-check`, `one-signer`, `pure-core`,
+`no-oso`. Live smoke on docker-desktop (`artifacts/plat17-api/live/`, namespace
+`lw-plat17-20260916131321`, deleted after an owner-label check, no cluster
+lock): 67/67 steps — the shared lab controller reconciled the API-created
+`KafkaCluster` and the API projected its real status while creating no Job,
+Pod or Secret; three POSTs with one key left one object and a restarted process
+replayed the key to the same UID; 56-object pagination with tampered and
+route-replayed cursors rejected; every Kubernetes path 404; traversal refused;
+server logs carry no query strings or raw idempotency keys. Independent review
+`claude/plat17-api.review.md`: ACCEPT-WITH-FIXES (one medium: the S7 lint could
+not fail) then ACCEPT after the fixes. Migration/rollback: none — nothing
+packages or deploys the crate yet (`publish = false`; `docs/api.md` says so).
+Not done: console image and chart with the API's own RBAC (so the closed
+adapter is a source-level bound and `inCluster` is untested), transient-check
+timeout/cancellation (needs PLAT-03/09.1 kinds), `POST …/backups` (PLAT-06.2),
+destinations/credential-write/approval-submit routes, SSE, a browser journey,
+the readiness-cache mutex question (Q1, deferred to stage 7), and all of
+PLAT-17.2.
 
 ### PLAT-17.2 — Enforce user identity, roles and audit attribution
 

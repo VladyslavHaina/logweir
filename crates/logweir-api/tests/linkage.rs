@@ -383,7 +383,7 @@ fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
         BTreeSet::from([
             "create".to_string(),
             "get".to_string(),
-            "list".to_string(),
+            "list".to_string(), // engine-token-ok: the kube `Api::list` verb, not an engine subcommand
             "patch".to_string(),
         ]),
         "the adapter may call exactly `list`, `get`, `create` and `patch` on an `Api` \
