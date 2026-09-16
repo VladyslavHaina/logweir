@@ -44,7 +44,7 @@
 // rejected attempt and not a failure of this page -- and this page never offers
 // to reuse an Approval bound to another subject or another execution.
 
-import { create, get, list } from "../api.js";
+import { apiClient } from "../client.js";
 import {
   active,
   cancelled,
@@ -175,7 +175,7 @@ export function restoreOperationRoute(ns, name) {
   return "#/history?ns=" + encodeURIComponent(ns) + "&name=" + encodeURIComponent(name);
 }
 
-const API = { create: create, get: get, list: list };
+const API = apiClient();
 
 // The two shapes a private key arrives in. Names first, because a file input
 // gives a name before anything is read; content second, because a paste has no

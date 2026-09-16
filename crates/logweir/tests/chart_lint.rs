@@ -293,9 +293,9 @@ fn shipped_ui_files() -> Vec<String> {
         .filter(|p| !p.ends_with(".md") && !p.starts_with("ui/tests/"))
         .collect();
     assert_eq!(
-        16,
+        20,
         files.len(),
-        "the shipped UI is sixteen files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found {files:?}"
+        "the shipped UI is twenty files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found {files:?}"
     );
     files
 }
@@ -376,7 +376,7 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
     // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
     // comparing against the wrong set.
     let shipped = shipped_ui_files();
-    assert_eq!(16, shipped.len());
+    assert_eq!(20, shipped.len());
 
     let under_chart: Vec<String> = files_under("charts/logweir")
         .into_iter()

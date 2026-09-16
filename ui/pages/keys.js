@@ -23,7 +23,7 @@
 // rendering a verdict from a clock the cluster never saw, and would disagree
 // with the controller's own refusal by exactly the skew between them.
 
-import { listCluster } from "../api.js";
+import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   cell,
@@ -50,7 +50,7 @@ export const ROSTER_NAME = "default";
 export const FINGERPRINT_COMMAND =
   "openssl pkey -pubin -outform DER -in <key>.pub.pem | openssl dgst -sha256";
 
-const API = { listCluster: listCluster };
+const API = apiClient();
 
 /** The roster named `default` out of a collection, or `null`. */
 export function rosterOf(collection) {

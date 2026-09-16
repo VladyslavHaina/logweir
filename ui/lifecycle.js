@@ -38,6 +38,12 @@
 // the draft's: the same content is the same operation, resolved to the object
 // that exists; different content is a conflict, reported and never overwritten.
 
+import {
+  MUTATION_MACHINE,
+  MUTATION_PHASES,
+  startMachine,
+} from "./workflow.js";
+
 // ============================================================== route half
 
 export function active(lifecycle) {
@@ -423,10 +429,27 @@ function collectDifferences(left, right, path, out) {
 export async function createOnce(api, ns, plural, body, rules) {
   try {
     const object = await api.create(ns, plural, body);
-    return { outcome: "created", object: object };
+    return { outcome: createdOutcome(object), object: object };
   } catch (error) {
     return resolveExisting(api, ns, plural, body, rules, error);
   }
+}
+
+/** Whether a create MADE the object or RESOLVED TO one that already existed.
+ *
+ *  TWO MODES, ONE ANSWER. In legacy mode a retry after a lost response is a
+ *  `409 AlreadyExists` and [`resolveExisting`] decides; the create that
+ *  actually made the object never carries this marker and reads `created`. In
+ *  console mode the product API resolves the retry itself -- the idempotency
+ *  key is the same, so the same object is returned with `replayed: true` --
+ *  and `ui/client.js` records that on the projected object. Either way the
+ *  form says "already existed" for the one and "created" for the other, and a
+ *  second click can never claim to have made a second object. */
+export function createdOutcome(object) {
+  const record = (object || {}).__contract;
+  return record !== null && typeof record === "object" && record.replayed === true
+    ? "existing"
+    : "created";
 }
 
 /** The second half of [`createOnce`], for a caller that issues its own
@@ -518,11 +541,22 @@ export function createMutation(options) {
   const clearTimer = typeof opts.clearTimer === "function"
     ? opts.clearTimer
     : (id) => globalThis.clearTimeout(id);
+  // THE RECORD'S MOVES ARE NAMED (PLAT-18.1). Every publish below goes through
+  // `workflow.js`'s mutation machine, which refuses an event the current state
+  // does not accept -- so "settle an attempt that is not in flight" and
+  // "start a second attempt over a pending one" are transition ERRORS with a
+  // name, not expressions repeated beside each call site. The published shape
+  // is unchanged: `phase` and `timedOut` come from the machine's own table.
+  const run = startMachine(MUTATION_MACHINE);
   let state = IDLE;
   const listeners = [];
 
-  function publish(next) {
-    state = Object.freeze(next);
+  function publish(event, next) {
+    run.send(event);
+    const shape = MUTATION_PHASES[run.state];
+    state = Object.freeze(
+      Object.assign({}, next, { phase: shape.phase, timedOut: shape.timedOut }),
+    );
     for (const listener of listeners.slice()) {
       try {
         listener(state);
@@ -533,18 +567,34 @@ export function createMutation(options) {
   }
 
   function answerable(attempt) {
-    return (
-      state.attempt === attempt &&
-      (state.phase === "pending" || (state.phase === "failed" && state.timedOut === true))
-    );
+    return state.attempt === attempt && (run.state === "pending" || run.state === "unanswered");
   }
 
   return {
     get state() {
       return state;
     },
+    /** The machine's own state: `idle`, `pending`, `unanswered`, `succeeded`
+     *  or `failed`. `unanswered` is the one the published `phase` cannot tell
+     *  apart from `failed`, and it is the only state a late answer may still
+     *  settle. */
+    get machineState() {
+      return run.state;
+    },
+    /** The names of the transitions this record has taken, in order. */
+    get transitions() {
+      return run.events;
+    },
     pending() {
-      return state.phase === "pending";
+      return run.state === "pending";
+    },
+    /** Sends a named transition directly, and THROWS a `TransitionError` when
+     *  the record is not in a state that accepts it. Nothing on the page calls
+     *  this -- `run` and `clear` below drive the machine -- and it is exported
+     *  so the suite can assert that an illegal move is refused by name rather
+     *  than absorbed. */
+    send(event) {
+      return run.send(event);
     },
     subscribe(listener) {
       listeners.push(listener);
@@ -556,14 +606,20 @@ export function createMutation(options) {
       };
     },
     /** Returns a settled record to `idle`. A pending attempt is never
-     *  cleared: its answer is still on its way. */
+     *  cleared: its answer is still on its way, and the machine has no `clear`
+     *  out of `pending` to express that with. This asks before it sends, so an
+     *  ordinary clear on an in-flight record is a no-op and not a throw --
+     *  which is the behaviour every form on this page already relies on. */
     clear() {
-      if (state.phase !== "pending" && state.phase !== "idle") {
-        publish(Object.assign({}, IDLE, { attempt: state.attempt }));
+      if (run.can("clear") && run.state !== "idle") {
+        publish("clear", Object.assign({}, IDLE, { attempt: state.attempt }));
       }
     },
     run(executor, runOptions) {
-      if (state.phase === "pending") {
+      // `start` is absent from the machine's `pending` state, and that absence
+      // IS the duplicate-submission guard. Asking rather than sending keeps a
+      // second click a no-op for the caller while leaving the move illegal.
+      if (!run.can("start")) {
         return null;
       }
       const attempt = state.attempt + 1;
@@ -573,9 +629,8 @@ export function createMutation(options) {
         : (typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : MUTATION_TIMEOUT_MS);
       const about = (runOptions || {}).about;
       const said = about === undefined ? null : about;
-      publish({
-        phase: "pending", attempt: attempt, result: null, error: null, kind: null,
-        timedOut: false, about: said,
+      publish("start", {
+        attempt: attempt, result: null, error: null, kind: null, about: said,
       });
       return new Promise((resolve) => {
         let answered = false;
@@ -586,15 +641,14 @@ export function createMutation(options) {
           }
         };
         const timer = setTimer(() => {
-          if (state.attempt === attempt && state.phase === "pending") {
+          if (state.attempt === attempt && run.state === "pending") {
             const late = new Error(
               "no answer from the API server within " + String(Math.round(timeoutMs / 1000)) +
                 " s; the request was not cancelled and its outcome is unknown",
             );
             late.kind = "unknown";
-            publish({
-              phase: "failed", attempt: attempt, result: null, error: late, kind: "unknown",
-              timedOut: true, about: said,
+            publish("timeout", {
+              attempt: attempt, result: null, error: late, kind: "unknown", about: said,
             });
           }
           answer();
@@ -610,11 +664,10 @@ export function createMutation(options) {
             clearTimer(timer);
             if (answerable(attempt)) {
               if (result !== null && typeof result === "object" && result.outcome === "abandoned") {
-                publish(Object.assign({}, IDLE, { attempt: attempt }));
+                publish("abandon", Object.assign({}, IDLE, { attempt: attempt }));
               } else {
-                publish({
-                  phase: "succeeded", attempt: attempt, result: result, error: null, kind: null,
-                  timedOut: false, about: said,
+                publish("succeed", {
+                  attempt: attempt, result: result, error: null, kind: null, about: said,
                 });
               }
             }
@@ -623,9 +676,9 @@ export function createMutation(options) {
           (error) => {
             clearTimer(timer);
             if (answerable(attempt)) {
-              publish({
-                phase: "failed", attempt: attempt, result: null, error: error,
-                kind: failureKind(error), timedOut: false, about: said,
+              publish("fail", {
+                attempt: attempt, result: null, error: error,
+                kind: failureKind(error), about: said,
               });
             }
             answer();

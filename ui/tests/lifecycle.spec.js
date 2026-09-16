@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 import { createRouteLifecycle, namespaceContext, parseHash } from "../app.js";
 import { listen } from "../lifecycle.js";
+import { selectMode } from "../client.js";
 import { mountBackups } from "../pages/backups.js";
 import { mountClusters } from "../pages/clusters.js";
 import {
@@ -17,6 +18,16 @@ import {
   recoveryPoints,
   submitRestore,
 } from "../pages/restore-wizard.js";
+
+
+// THE MODE IS PINNED, NOT PROBED (PLAT-18.1). `ui/client.js` decides once per
+// loaded page whether the product API is in front of it, by asking
+// `GET /api/v1/session`. A mount in this suite must not issue that request:
+// it would show up in the stubbed request log every assertion below counts,
+// and it is not what any of these tests are about. Pinning it to the refusal a
+// `kubectl proxy` path filter gives is the legacy mode these tests exercise,
+// recorded before the first mount and never asked again.
+await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
 
 /** The route identity for a fixture's newest recovery point. */
 function newestPoint(list) {
@@ -50,6 +61,21 @@ function deferred() {
   return { promise: promise, resolve: resolve };
 }
 
+// A `BackupList` the API server could have returned. THE SPEC IS REAL, and
+// since PLAT-18.1 it has to be: `ui/contract.js` validates what a read
+// returns, so an object with a name and nothing else is a contract failure --
+// which is the whole point of the typed client, and was worth the two lines
+// this helper grew to say it.
+function backup(name) {
+  return {
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: "Backup",
+    metadata: { name: name, namespace: "team-x", uid: "uid-" + name, resourceVersion: "1" },
+    spec: { sourceRef: { name: "orders-prod" }, topics: ["orders"] },
+    status: {},
+  };
+}
+
 function response(items) {
   return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ items: items })) };
 }
@@ -72,9 +98,9 @@ test("a delayed namespace A response cannot overwrite namespace B", async () => 
     const bMount = mountBackups(target, "team-b", parse, b);
 
     assert.equal(requests[0].init.signal.aborted, true, "B aborts A's view-owned GET");
-    requests[1].next.resolve(response([{ metadata: { name: "from-b" }, status: {} }]));
+    requests[1].next.resolve(response([backup("from-b")]));
     await bMount;
-    requests[0].next.resolve(response([{ metadata: { name: "from-a" }, status: {} }]));
+    requests[0].next.resolve(response([backup("from-a")]));
     await aMount;
 
     assert.equal(target.children.length, 1);

@@ -32,7 +32,7 @@
 // single word, and the recorded `result` and `detail` are rendered in the
 // evidence block beside it so a reader can see which of the four cases it was.
 
-import { get, list } from "../api.js";
+import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   UNVERIFIED,
@@ -54,6 +54,10 @@ import {
 import { itemsOf } from "./clusters.js";
 
 const PLURAL = "backups";
+
+// THE ADAPTER (PLAT-18.1). One object, whichever API is in front of the page:
+// `ui/client.js` decides that once at boot and dispatches every call.
+const API = apiClient();
 
 /** The sentence the backups table carries when the namespace holds none. */
 export const NO_BACKUP_SENTENCE =
@@ -187,7 +191,7 @@ export function renderBackupDetail(object) {
 
 export async function mountBackups(node, ns, parse, lifecycle) {
   try {
-    const collection = await list(ns, PLURAL, readOptions(lifecycle));
+    const collection = await API.list(ns, PLURAL, readOptions(lifecycle));
     if (active(lifecycle)) {
       replace(node, parse(renderBackupList(collection, ns)));
     }
@@ -200,7 +204,7 @@ export async function mountBackups(node, ns, parse, lifecycle) {
 
 export async function mountBackupDetail(node, ns, name, parse, lifecycle) {
   try {
-    const object = await get(ns, PLURAL, name, readOptions(lifecycle));
+    const object = await API.get(ns, PLURAL, name, readOptions(lifecycle));
     if (active(lifecycle)) {
       replace(node, parse(renderBackupDetail(object)));
     }

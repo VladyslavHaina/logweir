@@ -64,7 +64,7 @@
 // Awaiting approval. There is no second button that navigates without
 // creating, and no create that forgets where it was going.
 
-import { create, get, list } from "../api.js";
+import { apiClient } from "../client.js";
 import {
   active,
   cancelled,
@@ -102,7 +102,7 @@ import {
   table,
   windowMessage,
 } from "../render.js";
-import { defaultTopicPrefix, TARGET_MODES, mintNames, planHash, renderPlanBytes } from "../plan.js";
+import { defaultTopicPrefix, TARGET_MODES, preparePlanDocument } from "../plan.js";
 import { isObjectName, itemsOf } from "./clusters.js";
 import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
@@ -155,7 +155,7 @@ const EVIDENCE_PREFIX = "logweir/";
  *  one; there is no DOM and no network under `node --test`, and a page whose
  *  write half could only be exercised in a browser is a page whose write half
  *  is exercised nowhere. */
-const API = { create: create, get: get, list: list };
+const API = apiClient();
 
 // ------------------------------------------- the recovery point (PLAT-11.1)
 
@@ -1487,15 +1487,15 @@ export function draftFrom(object, fields) {
  *  page with two documents and one hash. */
 export async function preparePlan(state) {
   const s = state || {};
-  const bytes =
-    typeof s.planBytes === "string" ? s.planBytes : renderPlanBytes(s.fields);
-  const names = await mintNames(bytes);
-  return {
-    bytes: bytes,
-    hash: await planHash(bytes),
-    restoreName: names.restoreName,
-    approvalName: names.approvalName,
-  };
+  // ONE FUNCTION PRODUCES THE PLAN, FOR REVIEW AND FOR SUBMISSION (PLAT-18.1).
+  // `preparePlanDocument` renders, hashes and mints ONCE per distinct document
+  // and hands back the SAME FROZEN OBJECT for the same bytes, so the document
+  // the review step shows and the document the submit sends are one object and
+  // not two that happen to be equal.
+  return preparePlanDocument(
+    s.fields,
+    typeof s.planBytes === "string" ? { bytes: s.planBytes } : undefined,
+  );
 }
 
 // EVERYTHING BETWEEN THE TWO MARKERS BELOW IS THE SUBMIT REGION, and

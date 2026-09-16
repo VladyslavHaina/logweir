@@ -32,7 +32,7 @@
 // state -- read from the objects themselves and never remembered by the page.
 // A refresh reads them again and creates nothing.
 
-import { get, list } from "../api.js";
+import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   ENGINE_SUBREPORT_LINE,
@@ -67,7 +67,7 @@ const PLURAL = "restores";
 const BACKUPS = "backups";
 const APPROVALS = "approvals";
 
-const API = { get: get, list: list };
+const API = apiClient();
 
 /** The sentence the history table carries when the namespace holds no run. */
 export const NO_HISTORY_SENTENCE =
@@ -308,8 +308,8 @@ export function renderRestoreDetail(object, operation) {
 export async function mountHistory(node, ns, parse, lifecycle) {
   try {
     const collections = await Promise.all([
-      list(ns, PLURAL, readOptions(lifecycle)),
-      list(ns, BACKUPS, readOptions(lifecycle)),
+      API.list(ns, PLURAL, readOptions(lifecycle)),
+      API.list(ns, BACKUPS, readOptions(lifecycle)),
     ]);
     if (active(lifecycle)) {
       replace(node, parse(renderHistoryList(collections[0], collections[1], ns)));

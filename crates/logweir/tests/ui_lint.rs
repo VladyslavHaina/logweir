@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 10] = [
+const API_EXPORTS: [&str; 19] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -85,6 +85,20 @@ const API_EXPORTS: [&str; 10] = [
     "patchSuspend",
     "listCluster",
     "apiError",
+    // The console half (PLAT-18.1, decision D0 stage 6): the product API's
+    // reads, its two writes, its session probe and its problem reader. Every
+    // one of them goes through the SAME `request(path(...))` seam the legacy
+    // half does, which is what `every_api_path_is_relative` holds. Nothing
+    // here is a generic request helper: each names one route.
+    "CONSOLE_WRITABLE_PLURALS",
+    "session",
+    "consoleList",
+    "consoleGet",
+    "consoleSub",
+    "consoleOperation",
+    "consoleCreate",
+    "consoleSetSuspension",
+    "problemError",
 ];
 
 /// Invisible codepoints. The first draft of this plan hid one inside a token so

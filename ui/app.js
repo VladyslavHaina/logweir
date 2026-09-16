@@ -14,6 +14,7 @@
 // address; the seven views arrive with their own tests.
 
 import { GROUP, VERSION, path } from "./api.js";
+import { CONSOLE, applyGrants, grantedNamespaces, selectMode } from "./client.js";
 import { el, replace } from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountSchedules } from "./pages/schedules.js";
@@ -366,6 +367,24 @@ function boot() {
   }
 
   renderCurrent();
+
+  // WHICH API IS IN FRONT OF THIS PAGE, DECIDED ONCE (PLAT-18.1, decision D0
+  // stage 6). `ui/client.js` asks `GET /api/v1/session` exactly once, records
+  // the answer for the life of the loaded page, and every page read and write
+  // goes through that record. The first render above does not wait for it:
+  // in the legacy deployment the answer is a refusal and nothing here changes,
+  // so the page paints exactly as fast as it did before.
+  //
+  // IN CONSOLE MODE THE GRANTS REPLACE THE RUNTIME LIST. The namespaces come
+  // from the session document -- the server knows what this actor may reach --
+  // rather than from the ConfigMap `runtime.js` carries, which is the
+  // installation's list and not the viewer's. A change is one more render;
+  // no change is none.
+  selectMode().then((record) => {
+    if (record.mode === CONSOLE && applyGrants(context, grantedNamespaces())) {
+      renderCurrent();
+    }
+  });
 }
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {

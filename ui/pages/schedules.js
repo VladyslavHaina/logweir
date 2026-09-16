@@ -26,7 +26,7 @@
 // the schedule's own card, leaving the rest of the page -- the create form's
 // draft included -- where it was.
 
-import { list, create, get, patchSuspend } from "../api.js";
+import { apiClient } from "../client.js";
 import {
   active,
   cancelled,
@@ -64,7 +64,7 @@ import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wi
 const PLURAL = "backupschedules";
 const BACKUPS = "backups";
 
-const API = { list: list, get: get, create: create, patchSuspend: patchSuspend };
+const API = apiClient();
 
 /** The create form's identity in the draft and mutation registries. */
 export const SCHEDULE_FORM = "schedule-form";

@@ -227,7 +227,79 @@ export async function mintNames(bytes) {
   return { restoreName: "restore-" + suffix, approvalName: "approval-" + suffix };
 }
 
+/** THE ONE PREPARED PLAN: the bytes, their hash and the two names minted from
+ *  them, as ONE FROZEN OBJECT that is produced ONCE per distinct document.
+ *
+ *  WHY IDENTITY AND NOT EQUALITY (PLAT-18.1's "plan review and submission use
+ *  the same bytes"). Before this, the wizard rendered the plan to review it and
+ *  rendered it AGAIN to submit it, and compared the two hashes. Equal hashes
+ *  are good evidence and they are not the property: a mutant that re-rendered
+ *  on submit produced an equal string and passed, and a mutant that re-rendered
+ *  slightly differently was caught only because the hash changed -- after the
+ *  page had already shown the other one. Here the second call for the same
+ *  bytes returns THE SAME OBJECT, so a test can assert `submitted === reviewed`
+ *  and a reserialisation is a different object and fails.
+ *
+ *  `options.bytes` is a document the caller already has -- the wizard's
+ *  `state.planBytes`, set when a plan is being resubmitted -- and skips the
+ *  renderer. Everything else comes from `renderPlanBytes(fields)` and from
+ *  nothing else: this module still parses nothing it emits.
+ *
+ *  THE MEMO IS BOUNDED. A wizard field change produces a new document, so an
+ *  unbounded table would grow with every keystroke for the life of the loaded
+ *  page. The most recent [`PREPARED_KEPT`] are kept, which is many more than
+ *  the one a review-then-submit needs, and the oldest is dropped first. */
+export async function preparePlanDocument(fields, options) {
+  const supplied = (options || {}).bytes;
+  const bytes = typeof supplied === "string" ? supplied : renderPlanBytes(fields);
+  const already = prepared.get(bytes);
+  if (already !== undefined) {
+    return already;
+  }
+  const hex = await sha256Hex(bytes);
+  const suffix = hex.slice(0, 8);
+  const document = Object.freeze({
+    bytes: bytes,
+    hash: "sha256:" + hex,
+    restoreName: "restore-" + suffix,
+    approvalName: "approval-" + suffix,
+  });
+  keep(bytes, document);
+  return document;
+}
+
+/** How many prepared documents this module remembers. */
+export const PREPARED_KEPT = 16;
+
+/** The prepared document for exactly these bytes, or `null`.
+ *
+ *  SYNCHRONOUS AND ON PURPOSE. `ui/client.js` needs the hash to put beside the
+ *  bytes in a product-API create body, and the ONE hash it may put there is
+ *  the one that was on screen. Asking this module rather than hashing again is
+ *  what makes that true by construction: bytes that were never prepared --
+ *  bytes some other code path produced -- have no answer here, and the create
+ *  is refused rather than sent with a hash nobody reviewed. */
+export function preparedFor(bytes) {
+  const document = prepared.get(bytes);
+  return document === undefined ? null : document;
+}
+
 // --------------------------------------------------------------- private half
+
+// The bounded memo behind `preparePlanDocument`. A Map iterates in insertion
+// order, so the oldest key is the first one it yields.
+const prepared = new Map();
+
+function keep(bytes, document) {
+  prepared.set(bytes, document);
+  while (prepared.size > PREPARED_KEPT) {
+    const oldest = prepared.keys().next();
+    if (oldest.done) {
+      return;
+    }
+    prepared.delete(oldest.value);
+  }
+}
 
 async function sha256Hex(bytes) {
   if (typeof bytes !== "string") {

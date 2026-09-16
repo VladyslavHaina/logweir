@@ -24,7 +24,7 @@
 // resolves to the object the first request made, and a different object under
 // that name is reported as a conflict and never touched.
 
-import { list, get, create } from "../api.js";
+import { apiClient } from "../client.js";
 import {
   active,
   cancelled,
@@ -57,7 +57,7 @@ import {
 
 const PLURAL = "kafkaclusters";
 
-const API = { list: list, get: get, create: create };
+const API = apiClient();
 
 /** The form's identity in the draft and mutation registries. */
 export const CLUSTER_FORM = "cluster-form";
@@ -401,7 +401,7 @@ export async function mountClusters(node, ns, parse, lifecycle, deps) {
 /** Reads one cluster and renders its detail. */
 export async function mountClusterDetail(node, ns, name, parse, lifecycle) {
   try {
-    const object = await get(ns, PLURAL, name, readOptions(lifecycle));
+    const object = await API.get(ns, PLURAL, name, readOptions(lifecycle));
     if (!active(lifecycle)) {
       return;
     }
