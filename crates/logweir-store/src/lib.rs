@@ -341,6 +341,23 @@ impl Store {
         opts: &StoreOptions,
         rt: &tokio::runtime::Runtime,
     ) -> Result<Arc<dyn ObjectStore>, StoreError> {
+        let b = rt.block_on(async { Self::s3_builder(u, opts) })?;
+        let s3: Arc<dyn ObjectStore> =
+            Arc::new(b.build().map_err(|e| StoreError::Io(e.to_string()))?);
+        Ok(s3)
+    }
+
+    /// THE builder, configured and not yet built.
+    ///
+    /// Split out of [`Store::build_backend_with`] so [`s3_builder_config`] can
+    /// read back what a store WILL dial without dialling it. That readback is
+    /// taken off this very builder, not off a second model of it, which is the
+    /// property `s3_effective`'s own doc claims and which the first version of
+    /// this module did not actually have.
+    fn s3_builder(
+        u: &StorageUrl,
+        opts: &StoreOptions,
+    ) -> Result<object_store::aws::AmazonS3Builder, StoreError> {
         let eff = s3_effective(u, opts)?;
         let mut client = object_store::ClientOptions::default().with_allow_http(eff.allow_http);
         for pem in &opts.root_certificates {
@@ -353,32 +370,23 @@ impl Store {
         if let Some(t) = eff.request_timeout {
             client = client.with_timeout(t).with_connect_timeout(t);
         }
-        rt.block_on(async move {
-            let mut b = match &opts.credentials {
-                CredentialSource::Ambient => object_store::aws::AmazonS3Builder::from_env(),
-                _ => object_store::aws::AmazonS3Builder::new(),
-            };
-            b = b
+        {
+            // `AmazonS3Builder::new()`, NEVER `from_env()`, for EVERY source.
+            // `from_env()` sweeps every `AWS_*` variable, including
+            // `AWS_ENDPOINT_URL` and `AWS_REGION`, which would silently
+            // relocate a destination that names neither.
+            let mut b = object_store::aws::AmazonS3Builder::new()
                 .with_bucket_name(&eff.bucket)
-                // Applied AFTER `from_env`, so an explicit value wins over
-                // `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` in the environment.
+                // From the `StorageUrl` and from nothing else.
                 .with_virtual_hosted_style_request(eff.virtual_hosted_style)
-                // THE SINGLE TRANSPORT OVERRIDE, and it is deliberately the
-                // only one. `AmazonS3Builder::with_allow_http` writes into the
-                // builder's own `client_options`, which this call then
-                // REPLACES wholesale — so calling both would leave one of them
-                // dead, and a dead override is how a guard comes to be deleted
-                // as redundant while the live one is deleted as
+                // THE SINGLE TRANSPORT OVERRIDE. `AmazonS3Builder::with_allow_http`
+                // writes into the builder's own `client_options`, which this
+                // call then REPLACES wholesale — so calling both would leave
+                // one of them dead, and a dead override is how a guard comes
+                // to be deleted as redundant while the live one is deleted as
                 // "already covered". `client` was built above from
                 // `eff.allow_http`, which came from the plan's transport and
                 // from nothing else (defect SEC-ENVHTTP, D-SEAMS S5).
-                //
-                // For `Ambient` this also means the new constructors do NOT
-                // inherit `from_env`'s other client options (proxy, timeouts).
-                // That is the point of the explicit path: `Ambient` here means
-                // "credentials from the ambient chain", not "transport from
-                // the environment". `from_url` / `read_only_from_url` are
-                // unchanged and still inherit everything.
                 .with_client_options(client);
             if let Some(r) = &eff.region {
                 b = b.with_region(r);
@@ -392,88 +400,99 @@ impl Store {
             if let Some(n) = eff.max_retries {
                 b = b.with_retry(object_store::RetryConfig {
                     max_retries: n,
+                    // object_store's own default window, unless the caller
+                    // asked for another. Setting `max_retries` alone does not
+                    // shorten it.
                     retry_timeout: eff
-                        .request_timeout
-                        .unwrap_or(std::time::Duration::from_secs(30)),
+                        .retry_timeout
+                        .unwrap_or_else(|| std::time::Duration::from_secs(180)),
                     ..Default::default()
                 });
             }
-            b = match &opts.credentials {
-                CredentialSource::Ambient => b,
+
+            // The credential, projected variable by NAMED variable.
+            // `eff.environment_variables_read` is the complete list, and this
+            // block reads nothing outside it.
+            let mut static_keys: Option<(String, String, Option<String>)> = None;
+            match &opts.credentials {
                 CredentialSource::Static {
                     access_key_id,
                     secret_access_key,
                     session_token,
                 } => {
-                    let mut b = b
-                        .with_access_key_id(access_key_id)
-                        .with_secret_access_key(secret_access_key);
-                    if let Some(t) = session_token {
-                        b = b.with_token(t);
-                    }
-                    b
+                    static_keys = Some((
+                        access_key_id.clone(),
+                        secret_access_key.clone(),
+                        session_token.clone(),
+                    ));
                 }
                 CredentialSource::StaticFromEnv => {
                     // `s3_effective` already established that both are set.
-                    let mut b = b
-                        .with_access_key_id(std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default())
-                        .with_secret_access_key(
-                            std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
-                        );
-                    if let Ok(t) = std::env::var("AWS_SESSION_TOKEN") {
-                        if !t.trim().is_empty() {
-                            b = b.with_token(t);
-                        }
-                    }
-                    b
+                    static_keys = Some((
+                        std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+                        std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+                        env_value("AWS_SESSION_TOKEN"),
+                    ));
                 }
-                CredentialSource::WorkloadIdentity => match eff
-                    .workload_identity
-                    .clone()
-                    .expect("s3_effective refuses this source without an injected identity")
-                {
-                    WorkloadIdentity::WebIdentity {
-                        token_file,
-                        role_arn,
-                        session_name,
-                        sts_endpoint,
-                    } => {
-                        let mut b = b
-                            .with_config(
-                                object_store::aws::AmazonS3ConfigKey::WebIdentityTokenFile,
-                                token_file,
-                            )
-                            .with_config(object_store::aws::AmazonS3ConfigKey::RoleArn, role_arn);
-                        if let Some(n) = session_name {
-                            b = b.with_config(
-                                object_store::aws::AmazonS3ConfigKey::RoleSessionName,
-                                n,
-                            );
-                        }
-                        if let Some(e) = sts_endpoint {
-                            b = b.with_config(object_store::aws::AmazonS3ConfigKey::StsEndpoint, e);
-                        }
-                        b
+                CredentialSource::WorkloadIdentity => {}
+                CredentialSource::Ambient => {
+                    // The chain `s3_effective` resolved, re-read from the same
+                    // named variables. `CredentialKind::Ambient` means it
+                    // resolved to instance metadata, which needs no projection.
+                    if eff.credentials == CredentialKind::Static {
+                        static_keys = Some((
+                            std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+                            std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+                            env_value("AWS_SESSION_TOKEN"),
+                        ));
                     }
-                    WorkloadIdentity::ContainerFullUri { uri, token_file } => b
-                        .with_config(
-                            object_store::aws::AmazonS3ConfigKey::ContainerCredentialsFullUri,
-                            uri,
-                        )
-                        .with_config(
-                            object_store::aws::AmazonS3ConfigKey::ContainerAuthorizationTokenFile,
-                            token_file,
-                        ),
-                    WorkloadIdentity::ContainerRelativeUri { uri } => b.with_config(
-                        object_store::aws::AmazonS3ConfigKey::ContainerCredentialsRelativeUri,
-                        uri,
-                    ),
-                },
-            };
-            let s3: Arc<dyn ObjectStore> =
-                Arc::new(b.build().map_err(|e| StoreError::Io(e.to_string()))?);
-            Ok(s3)
-        })
+                }
+            }
+            if let Some((key_id, secret, token)) = static_keys {
+                b = b.with_access_key_id(key_id).with_secret_access_key(secret);
+                if let Some(t) = token {
+                    b = b.with_token(t);
+                }
+            }
+            if let Some(id) = eff.workload_identity.clone() {
+                b = Self::with_workload_identity(b, id);
+            }
+            Ok(b)
+        }
+    }
+
+    /// The injected identity, variable by named variable. Split out so the
+    /// three shapes are readable and so `build_backend_with` stays one screen.
+    fn with_workload_identity(
+        b: object_store::aws::AmazonS3Builder,
+        id: WorkloadIdentity,
+    ) -> object_store::aws::AmazonS3Builder {
+        use object_store::aws::AmazonS3ConfigKey as K;
+        match id {
+            WorkloadIdentity::WebIdentity {
+                token_file,
+                role_arn,
+                session_name,
+                sts_endpoint,
+            } => {
+                let mut b = b
+                    .with_config(K::WebIdentityTokenFile, token_file)
+                    .with_config(K::RoleArn, role_arn);
+                if let Some(n) = session_name {
+                    b = b.with_config(K::RoleSessionName, n);
+                }
+                if let Some(e) = sts_endpoint {
+                    b = b.with_config(K::StsEndpoint, e);
+                }
+                b
+            }
+            WorkloadIdentity::ContainerFullUri { uri, token_file } => b
+                .with_config(K::ContainerCredentialsFullUri, uri)
+                .with_config(K::ContainerAuthorizationTokenFile, token_file),
+            WorkloadIdentity::ContainerRelativeUri { uri } => {
+                b.with_config(K::ContainerCredentialsRelativeUri, uri)
+            }
+        }
     }
 
     /// Global Constraint 6's construction-time guard, extracted so
@@ -990,6 +1009,24 @@ impl Store {
 // consuming its output. A test can therefore read the decision directly
 // rather than modelling it a second time — a parallel model is exactly how a
 // test comes to assert something the production path does not do.
+//
+// The claim holds for EVERY credential source, including
+// [`CredentialSource::Ambient`], and that is a fix: the first version of this
+// module built `Ambient` from `AmazonS3Builder::from_env()`, which reads every
+// `AWS_*` variable, so a destination naming no endpoint inherited
+// `AWS_ENDPOINT_URL` from the controller's own environment while
+// `s3_effective` reported `endpoint: None`. D2 §3.10 builds the
+// `ControllerIdentity` evidence cache with exactly that source, so a
+// `BackupDestination` on plain AWS S3 would have had its evidence read from
+// the controller's MinIO bucket — G2's "global configuration leakage", the
+// defect PLAT-08.1 exists to close, arriving through the fix for it.
+//
+// No source calls `from_env()` now. Every source starts from
+// `AmazonS3Builder::new()` and takes its location and route from the
+// `StorageUrl` alone; what differs between them is WHICH NAMED credential
+// variables they are allowed to read, and `S3Effective::environment_variables_read`
+// lists exactly those. `from_url` and `read_only_from_url` are untouched and
+// still read the whole environment — they are the legacy inline path.
 
 use std::time::Duration;
 
@@ -1004,13 +1041,27 @@ pub const WORKLOAD_IDENTITY_NOT_INJECTED: &str = "WorkloadIdentityNotInjected";
 pub const DEAD_METADATA_ENDPOINT: &str = "http://127.0.0.1:1";
 
 /// Where the object-store credential comes from.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Debug` is HAND-WRITTEN below: the `Static` variant holds a secret access
+/// key and a session token, and `StoreOptions` derives `Debug`, so one
+/// `tracing` `?opts` or one `expect(&format!("{opts:?}"))` in W4, W7 or W10
+/// would put an AWS secret into a runner or controller log. The struct went
+/// out of its way to keep the secret out of [`S3Effective`]; this is the other
+/// door.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum CredentialSource {
-    /// object_store's own chain over the whole `AWS_*` environment: static
-    /// keys, then web identity, then container credentials, then instance
-    /// metadata. What `from_url` and `read_only_from_url` have always used,
-    /// and what the controller's own allowlisted `ControllerIdentity` reads
-    /// use (D2 §3.10).
+    /// object_store's own credential ORDER — static keys, then web identity,
+    /// then container credentials, then instance metadata — over the NAMED
+    /// credential variables ([`STATIC_CREDENTIAL_VARS`],
+    /// [`WORKLOAD_IDENTITY_VARS`], [`AMBIENT_METADATA_VAR`]) and over nothing
+    /// else. What the controller's allowlisted `ControllerIdentity` evidence
+    /// reads use (D2 §3.10).
+    ///
+    /// It is a CREDENTIAL source and not a configuration source: location,
+    /// region, addressing and transport come from the `StorageUrl` even here.
+    /// `AWS_ENDPOINT_URL` and `AWS_REGION` are read by neither this source nor
+    /// any other — `from_url` and `read_only_from_url` are the legacy path
+    /// that still honours them.
     #[default]
     Ambient,
     /// Explicit values the caller already holds — the shape the restore
@@ -1036,6 +1087,37 @@ pub enum CredentialSource {
     WorkloadIdentity,
 }
 
+impl std::fmt::Debug for CredentialSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ambient => f.write_str("Ambient"),
+            Self::Static {
+                access_key_id,
+                session_token,
+                ..
+            } => f
+                .debug_struct("Static")
+                // The access key id is the PUBLIC half — it travels in every
+                // signed request and naming it is how an operator tells which
+                // principal was used. The secret and the session token are
+                // never rendered, not even truncated.
+                .field("access_key_id", access_key_id)
+                .field("secret_access_key", &"[redacted]")
+                .field(
+                    "session_token",
+                    &if session_token.is_some() {
+                        "[redacted]"
+                    } else {
+                        "absent"
+                    },
+                )
+                .finish(),
+            Self::StaticFromEnv => f.write_str("StaticFromEnv"),
+            Self::WorkloadIdentity => f.write_str("WorkloadIdentity"),
+        }
+    }
+}
+
 /// Which credential provider a built store will use. The observable half of
 /// [`CredentialSource`], with the secret removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1058,11 +1140,24 @@ pub struct StoreOptions {
     /// [`CredentialSource::Ambient`], which is the one case where an instance
     /// role may legitimately be what the operator configured.
     pub pin_instance_metadata: Option<bool>,
-    /// An overall request timeout. A check has a budget; without one,
+    /// An overall request timeout, applied as both `ClientOptions::with_timeout`
+    /// and `with_connect_timeout`. A check has a budget; without one,
     /// object_store's default retry window is three minutes.
     pub request_timeout: Option<Duration>,
-    /// `Some(0)` disables retries. `None` keeps object_store's default.
+    /// `Some(0)` disables retries. `None` keeps object_store's default of 10.
+    ///
+    /// Setting this does NOT shorten the retry window on its own: the window
+    /// is [`StoreOptions::retry_timeout`], which defaults to object_store's
+    /// own 180 s. The first version of this struct silently overwrote the
+    /// window with `request_timeout` (or 30 s) whenever `max_retries` was set,
+    /// which is a coupling a caller reading the field name could not have
+    /// guessed.
     pub max_retries: Option<usize>,
+    /// The maximum time from the initial request after which no further retry
+    /// is attempted. `None` keeps object_store's default of 180 s. Only read
+    /// when [`StoreOptions::max_retries`] is set, because that is the only
+    /// case in which this crate builds a `RetryConfig` at all.
+    pub retry_timeout: Option<Duration>,
 }
 
 impl Default for StoreOptions {
@@ -1073,6 +1168,7 @@ impl Default for StoreOptions {
             pin_instance_metadata: None,
             request_timeout: None,
             max_retries: None,
+            retry_timeout: None,
         }
     }
 }
@@ -1138,6 +1234,14 @@ impl StoreOptions {
         self
     }
 
+    /// See [`StoreOptions::retry_timeout`]. Independent of
+    /// [`StoreOptions::with_request_timeout`] on purpose.
+    #[must_use]
+    pub fn with_retry_timeout(mut self, d: Duration) -> Self {
+        self.retry_timeout = Some(d);
+        self
+    }
+
     /// Whether the instance-metadata endpoint is pinned, after defaulting.
     #[must_use]
     pub fn pins_instance_metadata(&self) -> bool {
@@ -1146,9 +1250,9 @@ impl StoreOptions {
     }
 
     /// Whether building a store with these options reads the process
-    /// environment at all, and if so, which variables. `Ambient` reads every
-    /// `AWS_*` variable; the explicit sources read a NAMED list; `Static`
-    /// reads none.
+    /// environment at all. EVERY source reads a NAMED list and nothing else
+    /// (see [`S3Effective::environment_variables_read`] for the exact one);
+    /// [`CredentialSource::Static`] reads no variable at all.
     #[must_use]
     pub fn reads_environment(&self) -> bool {
         !matches!(self.credentials, CredentialSource::Static { .. })
@@ -1203,9 +1307,46 @@ pub struct S3Effective {
     pub root_certificate_count: usize,
     pub request_timeout: Option<Duration>,
     pub max_retries: Option<usize>,
+    pub retry_timeout: Option<Duration>,
     /// `true` when construction consults the process environment.
     pub reads_environment: bool,
+    /// EXACTLY which environment variables construction may read, sorted.
+    ///
+    /// This is the observable form of "no unnamed `AWS_*` variable reaches an
+    /// explicit store": the list is finite, it is a field a test can assert
+    /// on, and no code path outside [`s3_effective`] and the matching arm of
+    /// `Store::build_backend_with` reads anything else. Empty for
+    /// [`CredentialSource::Static`], which consults nothing.
+    pub environment_variables_read: Vec<&'static str>,
 }
+
+/// The three variables a projected static credential occupies (D2 §3.5).
+pub const STATIC_CREDENTIAL_VARS: [&str; 3] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
+
+/// The variables an injected workload identity occupies. object_store's own
+/// chain reads these; this crate copies them ONE BY ONE rather than letting
+/// `from_env()` sweep the environment, so a variable that is not on this list
+/// cannot reach the client.
+pub const WORKLOAD_IDENTITY_VARS: [&str; 7] = [
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_ENDPOINT_URL_STS",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+];
+
+/// The instance-metadata endpoint, read only by [`CredentialSource::Ambient`]
+/// and only when the caller did not pin it. `AWS_ENDPOINT_URL`, `AWS_REGION`,
+/// `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` are deliberately
+/// NOT here and are on no list: location and route come from the `StorageUrl`
+/// and from nothing else.
+pub const AMBIENT_METADATA_VAR: &str = "AWS_METADATA_ENDPOINT";
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
@@ -1263,9 +1404,42 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
         )));
     };
 
+    // Which NAMED variables this source may read, and what the credential
+    // chain resolves to. Nothing here looks at `AWS_ENDPOINT_URL`,
+    // `AWS_REGION`, `AWS_ALLOW_HTTP` or `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`:
+    // location and route come from the `StorageUrl` alone.
+    let mut read: Vec<&'static str> = Vec::new();
     let (credentials, access_key_id, session_token_present, workload_identity) =
         match &opts.credentials {
-            CredentialSource::Ambient => (CredentialKind::Ambient, None, false, None),
+            CredentialSource::Ambient => {
+                // object_store's own order, resolved HERE so the answer is a
+                // value a test can read instead of a behaviour it must dial to
+                // observe: static keys, then web identity, then container
+                // credentials, then instance metadata.
+                read.extend(STATIC_CREDENTIAL_VARS);
+                read.extend(WORKLOAD_IDENTITY_VARS);
+                if !opts.pins_instance_metadata() {
+                    read.push(AMBIENT_METADATA_VAR);
+                }
+                match (
+                    env_value("AWS_ACCESS_KEY_ID"),
+                    env_value("AWS_SECRET_ACCESS_KEY"),
+                ) {
+                    (Some(key_id), Some(_)) => (
+                        CredentialKind::Static,
+                        Some(key_id),
+                        env_value("AWS_SESSION_TOKEN").is_some(),
+                        None,
+                    ),
+                    _ => match workload_identity_from_env() {
+                        Some(id) => (CredentialKind::WorkloadIdentity, None, false, Some(id)),
+                        // Nothing projected: object_store falls through to the
+                        // instance-metadata provider. That is what `Ambient`
+                        // means and it is reported as such.
+                        None => (CredentialKind::Ambient, None, false, None),
+                    },
+                }
+            }
             CredentialSource::Static {
                 access_key_id,
                 session_token,
@@ -1277,6 +1451,7 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
                 None,
             ),
             CredentialSource::StaticFromEnv => {
+                read.extend(STATIC_CREDENTIAL_VARS);
                 let Some(key_id) = env_value("AWS_ACCESS_KEY_ID") else {
                     return Err(StoreError::Backend(
                         "credential mode `static` needs AWS_ACCESS_KEY_ID and \
@@ -1299,6 +1474,7 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
                 )
             }
             CredentialSource::WorkloadIdentity => {
+                read.extend(WORKLOAD_IDENTITY_VARS);
                 let Some(id) = workload_identity_from_env() else {
                     return Err(StoreError::Backend(format!(
                         "{WORKLOAD_IDENTITY_NOT_INJECTED}: credential mode \
@@ -1311,6 +1487,19 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
                 (CredentialKind::WorkloadIdentity, None, false, Some(id))
             }
         };
+    read.sort_unstable();
+    read.dedup();
+
+    // The metadata endpoint: the dead-loopback pin when asked for, otherwise
+    // the ambient source's own `AWS_METADATA_ENDPOINT` if it is set, otherwise
+    // object_store's default.
+    let metadata_endpoint = if opts.pins_instance_metadata() {
+        Some(DEAD_METADATA_ENDPOINT.to_string())
+    } else if matches!(opts.credentials, CredentialSource::Ambient) {
+        env_value(AMBIENT_METADATA_VAR)
+    } else {
+        None
+    };
 
     Ok(S3Effective {
         bucket: bucket.clone(),
@@ -1323,13 +1512,13 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
         access_key_id,
         session_token_present,
         workload_identity,
-        metadata_endpoint: opts
-            .pins_instance_metadata()
-            .then(|| DEAD_METADATA_ENDPOINT.to_string()),
+        metadata_endpoint,
         root_certificate_count: opts.root_certificates.len(),
         request_timeout: opts.request_timeout,
         max_retries: opts.max_retries,
-        reads_environment: opts.reads_environment(),
+        retry_timeout: opts.retry_timeout,
+        reads_environment: !read.is_empty(),
+        environment_variables_read: read,
     })
 }
 
@@ -1554,6 +1743,42 @@ fn classify_text(text: &str) -> StoreErrorClass {
     }
 
     StoreErrorClass::StoreErrorUnclassified
+}
+
+/// What the S3 client a store would build is ACTUALLY configured with, read
+/// back off `AmazonS3Builder` itself.
+///
+/// [`s3_effective`] states the decision; this states what the object_store
+/// builder ended up holding. They are two different claims, and the gap
+/// between them is precisely where F2 lived: `s3_effective` reported
+/// `endpoint: None` while `from_env()` had already put `AWS_ENDPOINT_URL` into
+/// the builder. A test that reads only the decision cannot see that; this
+/// function makes the second claim checkable with no socket.
+///
+/// Returns `(key, value)` pairs for the location and route keys, sorted. The
+/// secret access key is NEVER included — `AccessKeyId` is the public half.
+pub fn s3_builder_config(
+    u: &StorageUrl,
+    opts: &StoreOptions,
+) -> Result<Vec<(&'static str, String)>, StoreError> {
+    use object_store::aws::AmazonS3ConfigKey as K;
+    let b = Store::s3_builder(u, opts)?;
+    let keys: [(&'static str, K); 7] = [
+        ("bucket", K::Bucket),
+        ("region", K::Region),
+        ("endpoint", K::Endpoint),
+        ("virtual_hosted_style_request", K::VirtualHostedStyleRequest),
+        ("metadata_endpoint", K::MetadataEndpoint),
+        ("access_key_id", K::AccessKeyId),
+        ("web_identity_token_file", K::WebIdentityTokenFile),
+    ];
+    let mut out: Vec<(&'static str, String)> = keys
+        .into_iter()
+        .filter_map(|(name, k)| b.get_config_value(&k).map(|v| (name, v)))
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    out.sort_unstable();
+    Ok(out)
 }
 
 /// `true` when this refusal is D2 §3.5's fail-closed "no injected identity".
