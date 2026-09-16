@@ -114,7 +114,7 @@ Wave 2 resumes every branch in place with the prompts under
 
 | Tasks | State | Worker | Boundary and next evidence |
 | --- | --- | --- | --- |
-| PLAT-01.1 / 01.2 / 02.1 / 02.2 | In progress | plat01-02-live-finish | Source-matched images from `4956785` were rebuilt; the live matrix report is accepted 31/31 (`artifacts/plat01-02-live/matrix/`), the full-chart bootstrap acceptance 18/18 with the bootstrap image pinned to the reviewed runner digest (commit `f58729c` on `claude/plat01-02-live`), and the leftover Codex namespace was deleted with proof. Pending: audit which harness version produced the evidence (the script changed after the run), commit the harnesses, independent review, terminal report. |
+| PLAT-01.1 / 01.2 / 02.1 / 02.2 | Done | plat01-02-live-finish, plat01-02-live-review | Completion records under PLAT-01 and PLAT-02. Integrated into main as `4b7a1f6` (chart bootstrap digest pin) and `fbd124e` (the two live harnesses). |
 | PLAT-13.1 | Done | closure-0413 | Completion record under PLAT-13.1. |
 | PLAT-04.1 | In progress (defect found) | closure-0413, w0-reservation, plat06-live | Source identity, focused tests (schedule_controller 44/44, crd_shape 24/24, retention 48/48) and published controller digest `sha256:bdaaf374…` verified at `4956785`; overlap, two-replica, restart, stale-finalizer and Allow cases have live evidence. Two gaps block Done: the deleted-Job case has controller-double evidence only (plat06's live run adds it), and the slot reservation is unauthorized by the shipped role (below), so the accepted live evidence does not describe a shipped install. |
 | PLAT-04.1 defect (P0) | In progress (fix committed, live proof pending) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
@@ -206,7 +206,7 @@ combined CLI tests must be rechecked after approval startup changes settle.
 
 ## PLAT-01 — Make every restore carry its own approved inputs
 
-**Priority P0 · In progress.** Admission currently verifies a particular Approval,
+**Priority P0 · Done (2026-09-16).** Admission currently verifies a particular Approval,
 while runner Jobs mount one namespace-wide approval bundle. Remove this
 concurrency and deployment coupling without weakening signature validation.
 Scope: approval transport and provenance; approval-policy changes are PLAT-19.
@@ -241,9 +241,39 @@ restores, tampering, lost bundle, upgrade during execution and owned cleanup.
 bundle retention; attach concurrent-run evidence proving distinct mounted
 inputs and successful independent verification.
 
+**Completion record — Done (2026-09-16), PLAT-01.1 and PLAT-01.2.** Source
+`4956785` (backend unchanged since; CI run 35019727967 published
+`vladyslavhaina/weirkeeper` `sha256:bdaaf374…` and `vladyslavhaina/logweir`
+`sha256:2d20f4bd…`). Live docker-desktop matrix with source-matched images
+built from `4956785` and from the pre-PLAT-01 commit `92e0209` (old controller
+and old runner): 31/31 required cases passed, including two simultaneous
+restores mounting only their own bundles (distinct plan/approval/sidecar
+digests, all five `LOGWEIR_EXECUTION_*` digests differing), the Job and
+ConfigMap collision matrix (ownerless, foreign-owner, old-UID, secondary-owner
+all refused with the pre-reconcile object retained), tampered bundle member
+(runner exit 3 on digest, zero notification posts, target topics and archive
+listing unchanged), missing member (exit 1 before any client), controller
+restart in flight (Job UIDs retained), upgrade/drain/rollback during execution
+(seven controller transitions, Job UID unchanged, result `Succeeded`,
+verification `Valid`), legacy in-flight Job observed unchanged, legacy pre-Job
+plan retained at the same UID, owned garbage collection after Restore
+deletion, and independent receipt verification. Harnesses committed as
+`fbd124e` (`scripts/test-plat01-02-live.py`); evidence
+`/tmp/logweir-roadmap-run/claude/artifacts/plat01-02-live/matrix/` (report,
+state, namespace dump with Secret values as digests only); the harness version
+that produced it was established from four independent fingerprints
+(`claude/plat01-02-live.result.md` §2). Independent review
+`claude/plat01-02-live.review.md`: ACCEPT, eight low findings, none blocking.
+Migration: `docs/kubernetes.md` ordered Approval CRD rollout, legacy Job
+adoption rules, rollback fence and bundle retention (each proved by a named
+case). Classified unsupported live, not passed: post-parse software signing
+failure (source-matched unit seam), mutating-admission rewrite (no webhook in
+the lab; no cluster-admin claim), NetworkPolicy enforcement (Docker Desktop
+does not enforce it).
+
 ## PLAT-02 — Bootstrap persistent signing and fail before data work
 
-**Priority P0 · In progress.** Routine signing should be automatic, not removed.
+**Priority P0 · Done (2026-09-16).** Routine signing should be automatic, not removed.
 Scope: installation identity and signing readiness; organization approval and
 rotation are PLAT-19.
 
@@ -277,6 +307,37 @@ early validation; integrate managed identities after PLAT-02.1.
 **Migration/safety and done evidence:** Never mint keys on every chart render
 or discard old verification material. Demonstrate old-archive verification and
 identity retention after upgrade.
+
+**Completion record — Done (2026-09-16), PLAT-02.1 and PLAT-02.2.** PLAT-02.1:
+the chart's identity bootstrap is pinned to the reviewed runner digest
+`docker.io/vladyslavhaina/logweir@sha256:2d20f4bd…` (rev `4956785`, amd64-only)
+in `4b7a1f6`, with `scripts/check-chart.sh` requiring the tree's runner
+repository by digest and four chart-gate mutants failing as required. Full-chart
+acceptance on docker-desktop (`scripts/test-plat02-chart-live.py`, evidence
+`artifacts/plat01-02-live/chart/`): 18/18 cases — fresh default install
+bootstraps an identity with no OpenSSL ceremony, resource-scoped bootstrap RBAC,
+no private material in Helm state, upgrade / controller restart / rollback /
+uninstall-reinstall / restore-first recovery all retain the same key id and
+private-key digest, external key adoption, external mismatch never rotates,
+existing managed Secret adopted, external key unavailable with no fallback,
+denied Secret write fails closed (HTTP 403, no key written) and recovers once
+allowed, concurrent bootstrap converges on one identity (real HTTP 422
+contention), lost private key refused without rotation, owned cleanup and exact
+lab restore. PLAT-02.2: missing, malformed, unreadable (a genuine
+permission-denied regular file) and wrong-type signers exit 4 with only
+`metrics.prom` written and the engine never invoked (Kafka topic set and
+archive listing unchanged); mid-run Secret rotation kept the retained parsed
+signer and the rotated public key fails to verify its output; old archives
+re-verify; successful evidence verified by the independent Python verifier.
+Independent review ACCEPT. Docs: `docs/install.md` (re-pin procedure, amd64
+`nodeSelector` remedy, rollback by re-pin, `identity.enabled: false`, or the
+`Never`-only development override), `charts/logweir/README.md`. Residuals
+carried as release-readiness notes, not open work: the chart harness file's
+mtime falls inside its run window (the reviewer re-applied 24 committed
+assertions to the recorded artifacts); the cold kubelet pull of the exact
+digest is shown by composition (registry pull, sibling-digest cold pull, hook
+Pod ran the exact digest); an emptied pin is caught by `chart_lint`, not by the
+shell gate alone; the `sign_probe` error branch has no direct unit test.
 
 ## PLAT-03 — Report actual prerequisites and reusable preflight
 
