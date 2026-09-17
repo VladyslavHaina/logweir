@@ -46,9 +46,13 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
+  # `create` is one `Backup` per due slot; `patch` is PLAT-05.2's history
+  # migration (D1 §6.8) — a metadata-only merge patch that removes the
+  # schedule's ownerReference from a terminal run. No `update`, no `delete`.
+  # See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
-    verbs: ["create"]
+    verbs: ["create", "patch"]
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals/status

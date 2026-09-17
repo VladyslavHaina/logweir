@@ -215,14 +215,33 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
-  # THE ONE WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
-  # `controllers/backup_schedule.rs` creates one `Backup` per due slot. A
-  # schedule that could not create a backup is a schedule that does nothing.
-  # `create` ONLY: nothing in this crate updates, replaces or deletes a `Backup`
-  # object — the schedule writes its own `status`, not the backup's spec.
+  # THE TWO WRITES TO A CUSTOM RESOURCE THAT ARE NOT A STATUS, AND THEIR
+  # CALLERS.
+  #
+  # `create` — `controllers/backup_schedule.rs` creates one `Backup` per due
+  # slot. A schedule that could not create a backup is a schedule that does
+  # nothing.
+  #
+  # `patch` — D1 §6.8, PLAT-05.2. `controllers/schedule_history.rs`'s migration
+  # detaches a run from its schedule with ONE JSON merge patch per object:
+  # `metadata.ownerReferences` rewritten to everything except the schedule's own
+  # entry, plus the `logweir.dev/schedule-uid` label and the
+  # `logweir.dev/history-retained-from-owner` annotation that membership rule 3
+  # reads. Before it, deleting a schedule handed every run, plan ConfigMap and
+  # Job to the garbage collector.
+  #
+  # WHAT THIS VERB CANNOT DO, which is the security note D1 §6.8 asks for.
+  # `patch` on the MAIN resource does not authorise `backups/status` — that is a
+  # separate resource string with its own rule below — and it cannot change a
+  # sealed `spec`: `Backup.spec` carries the CEL immutability rules, which the
+  # API server evaluates on every update however it is spelled. The caller
+  # writes `metadata.ownerReferences`, one label and one annotation, always with
+  # `metadata.resourceVersion` in the body as the update precondition. There is
+  # still NO `update`, NO `delete` and no `deletecollection` on `backups`, here
+  # or anywhere in this file.
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
-    verbs: ["create"]
+    verbs: ["create", "patch"]
   # THE STATUS SUBRESOURCES, AND NOTHING ELSE OF THE OBJECT. `patch` because
   # every writer in this crate goes through `conditions::apply_merge_patch` and
   # `Api::patch_status` with `Patch::Merge`; NOT `update`, which no reconciler

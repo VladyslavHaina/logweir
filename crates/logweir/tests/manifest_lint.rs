@@ -945,7 +945,19 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["preflights"]),
             v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        (v(&["logweir.dev"]), v(&["backups"]), v(&["create"])),
+        // `create` is one `Backup` per due slot;
+        // `patch` is PLAT-05.2's history migration (D1 §6.8):
+        // `controllers/schedule_history.rs` removes the schedule's own
+        // controller ownerReference from a TERMINAL run with one metadata merge
+        // patch, so that deleting the schedule stops collecting its history.
+        // The verb cannot reach `backups/status` (a separate resource string,
+        // granted separately below) and cannot change a CEL-sealed `spec`. No
+        // `update` and no `delete`, here or anywhere in that file.
+        (
+            v(&["logweir.dev"]),
+            v(&["backups"]),
+            v(&["create", "patch"]),
+        ),
         (
             v(&["logweir.dev"]),
             v(&[
