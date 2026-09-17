@@ -87,16 +87,18 @@ use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
     CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
-    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
-    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
-    REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
-    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
-    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_INVALID_TOPIC_SELECTION,
-    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
-    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_POD_UNSCHEDULABLE,
-    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, CONDITION_TOPICS_RESOLVED, PHASE_FAILED,
+    PHASE_RUNNING, PHASE_SUCCEEDED, REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE,
+    REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_OPERATIONAL,
+    REASON_RUNNER_ARGV_ANNOTATION_IGNORED, REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
+    TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+    TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
+    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
+    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
+use crate::controllers::backup_selection;
 use crate::crds::backup::Backup;
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
@@ -403,44 +405,43 @@ pub fn declared_selection_shape(backup: &Backup) -> Result<SelectionShape, Backu
     })
 }
 
-/// The topic list this run freezes, and where it came from.
+/// The topic list this run freezes, when it can be decided WITHOUT reading the
+/// cluster.
 ///
-/// # THE ONE CALL SITE D1 W5 (PLAT-09.2) REPLACES
+/// # The SYNCHRONOUS half of the selection
 ///
 /// The `SelectedTopics` arm is complete and final: the named allowlist,
-/// verbatim, coverage `NamedTopics`. The `AllUserTopics` arm REFUSES the run
-/// terminally, because this build resolves no discovery — and the alternative
-/// is the one outcome D1 §7.7 and guard G-GLOB exist to prevent, an empty
-/// `spec.topics` rendered into `backup.yaml` as "no allowlist" and handed to
-/// the engine. W5 replaces that arm with
-/// `backup_selection::resolve(backup, client, namespace, now).await`, which
-/// returns the same [`ResolvedSelection`] and freezes through
-/// [`desired_execution_inputs_for`]; nothing else on this path changes.
+/// verbatim, coverage `NamedTopics`. The `AllUserTopics` arm cannot be answered
+/// here at all — it is a topic discovery Job, several reconcile passes and an
+/// installation policy (D1 §7.2, [`backup_selection::resolve`]) — so this pure
+/// entry point says so rather than guessing. What it must never do is fall
+/// through to the freeze with the empty `spec.topics` a dynamic object carries:
+/// an empty allowlist rendered into `backup.yaml` is the "no allowlist means
+/// everything" shape guard **G-GLOB** exists to prevent.
+///
+/// [`desired_execution_inputs`] is the only caller, and it exists for tests and
+/// for callers that hold a `Backup` and a `KafkaCluster` and no client.
+///
+/// [`backup_selection::resolve`]: crate::controllers::backup_selection::resolve
 ///
 /// # Errors
 ///
 /// [`TERMINAL_STATE_INVALID_TOPIC_SELECTION`] for a spec that declares neither
-/// shape, and for a dynamic selection this controller cannot resolve.
+/// shape, and for a dynamic selection, which only the asynchronous resolver can
+/// answer.
 pub fn resolved_selection(backup: &Backup) -> Result<ResolvedSelection, BackupError> {
     match declared_selection_shape(backup)? {
         SelectionShape::SelectedTopics => Ok(ResolvedSelection::named(&backup.spec)),
-        SelectionShape::AllUserTopics => Err(dynamic_selection_unsupported()),
+        SelectionShape::AllUserTopics => Err(BackupError::Refused(
+            TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+            "spec.allUserTopics asks this run to cover every user topic its principal can see, \
+             which is resolved by a per-run topic discovery Job (PLAT-09.2) and not by a pure \
+             function of the spec. This entry point resolves a named allowlist only; the \
+             reconciler resolves the dynamic shape through \
+             `controllers::backup_selection::resolve`"
+                .to_string(),
+        )),
     }
-}
-
-/// The terminal refusal a dynamic selection gets from a build that resolves no
-/// discovery. **D1 W5 deletes this function.**
-fn dynamic_selection_unsupported() -> BackupError {
-    BackupError::Refused(
-        TERMINAL_STATE_INVALID_TOPIC_SELECTION,
-        "spec.allUserTopics asks this run to cover every user topic its principal can see, and \
-         this controller build resolves no topic discovery (PLAT-09.2 / D1 W5). The run is \
-         refused rather than started: `spec.topics` is empty in this mode, and an empty \
-         allowlist rendered into backup.yaml is the `no allowlist means everything` shape guard \
-         G-GLOB exists to prevent. Name the topics explicitly, or run a controller that resolves \
-         dynamic selection"
-            .to_string(),
-    )
 }
 
 /// The typed `BackupSpec` the runner's `--spec` file carries, rendered from
@@ -1295,6 +1296,13 @@ pub fn carry_conditions(
     for r#type in [
         CONDITION_EXECUTION_INPUTS_UNVERIFIED,
         CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
+        // D1 §7.2 R9. `TopicsResolved` is written by
+        // `controllers::backup_selection` and by nothing else, and every other
+        // builder owes it the same debt it owes the two observations above: a
+        // merge patch replaces `status.conditions`, so the `Running` patch that
+        // follows a freeze would otherwise erase the answer to "where did this
+        // run's topic list come from" one line after writing it.
+        CONDITION_TOPICS_RESOLVED,
     ] {
         if conditions
             .iter()
@@ -2516,18 +2524,61 @@ async fn reconcile_backup_inner(
         // when `status.execution` is recorded, the selection is READ BACK from
         // the plan the run was admitted with.
         //
-        // **W5: DO NOT PUT DISCOVERY IN FRONT OF THIS GATE.** Replace only the
-        // `AllUserTopics` arm of the inner match — the unfrozen path — with
-        // `backup_selection::resolve(backup, client, &namespace, now).await?`,
-        // which returns the same `ResolvedSelection`. A frozen dynamic run must
-        // never run a second discovery Job (D1 §12,
-        // `a_frozen_dynamic_backup_never_reruns_discovery`); `stored_selection`
-        // is what makes that true for free.
+        // **DISCOVERY IS NOT IN FRONT OF THIS GATE.** Only the `AllUserTopics`
+        // arm of the inner match — the unfrozen path — resolves anything, and a
+        // frozen dynamic run therefore never runs a second discovery Job (D1
+        // §12, `a_frozen_dynamic_backup_never_reruns_discovery`);
+        // `stored_selection` is what makes that true for free.
+        //
+        // `discovery_job` is `Some` ONLY on the pass that resolved the names
+        // from a runner. It is what D1 §7.2 R9's last line is patched on, after
+        // the freeze's status write — never on a pass that read the plan back.
+        let mut discovery_job: Option<String> = None;
         let selection = match frozen_selection(backup, client, &namespace).await? {
             Some(frozen) => frozen,
             None => match shape {
                 SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
-                SelectionShape::AllUserTopics => return Err(dynamic_selection_unsupported()),
+                SelectionShape::AllUserTopics => {
+                    match backup_selection::resolve(backup, client, &namespace, now).await? {
+                        // The discovery Job exists and has not produced a
+                        // readable result. Nothing else happens this pass; the
+                        // reconciler's own 15 s requeue is D1 §7.2 R2's.
+                        backup_selection::Resolution::Pending => {
+                            return Ok(BackupOutcome {
+                                job_name,
+                                created: false,
+                                exit_code: None,
+                                terminal_state: None,
+                                keys: EvidenceKeys::default(),
+                                ttl_patched: false,
+                            })
+                        }
+                        // TERMINAL, AND THE STATUS IS ALREADY ON THE OBJECT.
+                        // `backup_selection` writes it itself so that `Failed`
+                        // and `TopicsResolved` land in one array; raising a
+                        // `BackupError::Refused` here would have this pass's
+                        // conclusion written a second time, from a view that
+                        // predates the condition.
+                        backup_selection::Resolution::Refused { state } => {
+                            return Ok(BackupOutcome {
+                                job_name,
+                                created: false,
+                                exit_code: None,
+                                terminal_state: Some(state.to_string()),
+                                keys: EvidenceKeys::default(),
+                                ttl_patched: false,
+                            })
+                        }
+                        backup_selection::Resolution::Resolved(resolved) => {
+                            discovery_job = resolved
+                                .selection
+                                .discovery
+                                .as_ref()
+                                .map(|d| d.discovery_job.clone());
+                            *resolved
+                        }
+                    }
+                }
             },
         };
 
@@ -2558,8 +2609,24 @@ async fn reconcile_backup_inner(
         // the ConfigMap first and verifies it against this digest.
         let recorded = execution_status_patch(&frozen);
         patch_status_if_changed(&backups, backup, &name, recorded.clone()).await?;
-        let stored = with_status_patch(backup, &recorded);
-        let view = with_status_patch(&view, &recorded);
+        let mut stored = with_status_patch(backup, &recorded);
+        let mut view = with_status_patch(&view, &recorded);
+
+        // D1 §7.2 R9's LAST TWO STEPS, IN THIS ORDER AND ONLY ON THE PASS THAT
+        // RESOLVED THE NAMES. `TopicsResolved=True` is written after
+        // `status.selection` exists, so the condition is never on an object
+        // whose names are not frozen — and the discovery Job's TTL is patched
+        // only after THAT write returned 200, because the TTL controller
+        // deletes a Job and its pods together and the relay lives on the pod.
+        // Both are `?`-propagated, so a failed write leaves the reconcile
+        // before the next line.
+        if let Some(discovery) = discovery_job.as_deref() {
+            let resolved_patch = backup_selection::resolved_status_patch(&stored, now);
+            patch_status_if_changed(&backups, &stored, &name, resolved_patch.clone()).await?;
+            stored = with_status_patch(&stored, &resolved_patch);
+            view = with_status_patch(&view, &resolved_patch);
+            backup_selection::set_discovery_ttl(client, &namespace, discovery).await?;
+        }
 
         if let Some(annotation) = runner_argv_annotation(backup) {
             let (bytes, sha256) = match &annotation {

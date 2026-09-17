@@ -86,6 +86,7 @@ pub mod approval;
 pub mod backup;
 pub mod backup_destination;
 pub mod backup_schedule;
+pub mod backup_selection;
 pub mod kafka_cluster;
 pub mod preflight;
 pub mod recovery_catalog;
