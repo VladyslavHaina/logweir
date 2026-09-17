@@ -910,6 +910,107 @@ classified code. Reading the first as the second — or either as "the cluster i
 PLAT-09.1 defect the distinction exists to prevent: a successful Kafka listing never proves full
 visibility, because the broker silently omits topics the principal cannot `DESCRIBE`.
 
+### `logweir-retention`'s exit codes, its key lines, and what its record does and does not prove (D3 §6.5)
+
+`logweir-retention run --plan <path> --retention-contract-version 1 [--dry-run]` is the **one**
+supported enforcer, and it is a **separate binary** from `logweir` on purpose. D-SEAMS **S1** says
+there is one check runner; this is its third recorded exception, and the reason is structural
+rather than convenient: *deletion linkage must not be reachable from the everyday binary*. A
+`logweir retention run` subcommand would link `crates/logweir-reaper` — the one crate in the
+workspace that names an object-store delete — into the same executable an operator uses to take a
+backup, verify a receipt or print a scorecard, and `scripts/check-no-archive-write.sh` check 3
+would have nothing left to prove.
+
+**The invocation.** The controller writes it
+(`weirkeeper::controllers::retention_policy::build_job`); nothing else may:
+
+```
+command: logweir-retention
+argv:    run --plan /retention/plan.json --retention-contract-version 1
+env:     LOGWEIR_RETENTION_PLAN_SHA256=sha256:<64 lowercase hex>
+         LOGWEIR_RETENTION_POLICY_UID=<uid>
+         LOGWEIR_RETENTION_POLICY_GENERATION=<int>
+         LOGWEIR_RETENTION_SCOPE_PREFIX=<spec.scope.prefix>
+         LOGWEIR_RETENTION_RUN_ID=<run id>
+         LOGWEIR_RETENTION_APPROVER=<audit id | subject | unattended>
+         LOGWEIR_RETENTION_MAX_DELETIONS / _MAX_OBJECTS
+         LOGWEIR_RETENTION_LOCATION=<the destination's DestinationLocation, as JSON>
+         AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY        ← the DELETE-capable grant
+         LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID / …_SECRET_ACCESS_KEY  ← the evidenceWrite grant
+```
+
+**The contract version is checked before the plan is read.** A newer controller handing this
+binary a plan shape it does not implement is refused by name rather than partially obeyed — the
+same handshake execution contract v2 uses, and for the same reason.
+
+**The scope arrives twice and both copies must agree.** `LOGWEIR_RETENTION_SCOPE_PREFIX` is what
+the Job was told; the plan document carries its own `scope_prefix`. A worker that took the scope
+from the plan alone would accept a plan that widened its own scope, so the two are compared and a
+disagreement is a refusal.
+
+**The exit codes.**
+
+| code | meaning |
+|---|---|
+| **0** | every planned point completed, or `--dry-run` finished having deleted nothing |
+| **1** | at least one point did not complete — `Orphaned` (manifest gone, a segment refused) or `Kept` (the manifest itself refused), with its closed code |
+| **3** | the plan was REFUSED **before anything ran**: a digest that is not the approved one, an unknown field, another media type, another policy or generation, a widened scope, a key outside `<scope>/<backupId>/`, a key under `logweir/`, a plan over a ceiling, or no record sink. **Zero objects deleted.** |
+
+**2 and 4 are never returned**, and that is a contract rather than an accident. Global Constraint
+11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and signed" and 4 for
+"signing or lock-proof failed"; this binary produces no drill result and signs nothing, so either
+code would make a deletion failure indistinguishable from a drill outcome to every reader of the
+exit contract, `weirkeeper::conditions::reason_for_exit` included.
+
+**Stdout is key lines, read by name and never by position**, the same rule `notify-result=` and
+`refusal-reason=` follow:
+
+```
+retention-plan=sha256:… points=3 objects=19
+retention-point=lwp1-… state=Deleted objects=7
+retention-point=lwp1-… state=Orphaned objects=3 code=AccessDenied
+retention-record=logweir/retention/<policyUid>/<runId>.json sha256=sha256:…
+retention-result=deleted=2 failed=1 objects=10
+```
+
+**A dry run asks for no credential at all.** The preview is the validation plus the plan echo, and
+requiring a delete-capable Secret to produce one would make a preview need the authority it exists
+to avoid.
+
+**Bounded retry, by code.** Three attempts per key with 1 s and 4 s between them, and **only** for
+a 5xx or a timeout. `AccessDenied`, `Locked` and `PreconditionFailed` are answered once — a second
+attempt at a policy decision is three seconds of nothing — and `NotFound` is success, because a key
+an interrupted run already removed is a key this run wanted removed. That last rule is what makes
+completion idempotent: a `Orphaned` point's leftover segment keys are exactly what the next plan
+names.
+
+**Execution order per point**: the intent tombstone, then the **manifest**, then the segments, then
+the completion tombstone. Manifest first, so a run interrupted halfway leaves a set the catalog
+reports `Missing` rather than a plausible-looking `Partial` one.
+
+#### The retention record is create-only and **unsigned** in this build
+
+D3 §6.5 calls for the enforcement record to be signed with the runner signing key. **It is not
+signed here**, and the reason is recorded rather than glossed: signing would make
+`logweir-retention` link `crates/logweir-evidence`, whose reaching set
+`scripts/check-one-signer.sh` holds to exactly `{logweir, e2e}`. Widening that allowlist is a
+security decision about the signer, taken in `scripts/check-one-signer.sh` and
+`crates/logweir/tests/one_signer_gate.rs`, and it is not one a deletion feature gets to make on its
+way past.
+
+What the record and the tombstones therefore **do** prove: they are written with
+`PutMode::Create` under `logweir/`, by the `evidenceWrite` grant, to a prefix the run's own
+delete-capable credential cannot reach or remove; they name the policy identity and generation, the
+approved plan digest, the approver reference, the rules as applied, every deleted point with its
+object count and every failure with its closed code. They are therefore tamper-evident against the
+retention principal, and against anyone who can only delete.
+
+What they **do not** prove: anything against a principal holding `s3:PutObject` under `logweir/`
+before the record is written, which a signature would cover and a create-only put does not. Closing
+that is either a reviewed widening of the one-signer allowlist for this binary, or a signing step
+performed by something that already holds the key; **neither is implemented, and no surface may
+describe the record as signed until one is.**
+
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
 Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once

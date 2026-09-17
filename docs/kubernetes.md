@@ -1014,6 +1014,128 @@ projection and never an execution input. An absent `status.alerts` after a
 rollback and re-apply means only that no alert has been recorded yet: the ledger
 is state, not history, and a re-opened condition opens at transition 1 again.
 
+### 7f. A `RetentionPolicy` in `Enforce` is the one thing Logweir does that cannot be undone
+
+Everything else in this product is additive. A backup writes objects, a restore
+writes topics, a verification writes a verdict; a mistake costs storage or a
+scratch cluster. Deleting an archived recovery point costs the point. That
+asymmetry is why retention has its own kind, its own credential, its own binary
+and its own gate, and why **`mode: Report` is the default and deletes nothing at
+all**.
+
+**Four gates stand between a rule and a removed object**, and every one of them
+is observable on the object or in the cluster:
+
+1. `spec.mode` must be `Enforce`. `Report` evaluates and publishes; nothing is
+   created.
+2. `spec.enforcement.approvedPlanSha256` must equal
+   `status.lastEvaluation.planSha256`, and the plan must be younger than
+   `planMaxAgeSeconds`. The digest covers the policy's `metadata.generation`, so
+   **any spec edit invalidates an approval** — nothing has to remember to.
+3. The controller writes `status.lease` with a resourceVersion-preconditioned
+   PATCH and *then* performs a consistent, non-cached, cluster-wide list of
+   `Restore`s. The order is the property: a restore that arrives after the lease
+   is seen by the list.
+4. The worker re-validates every key against `<scope.prefix>/<backupId>/` and
+   refuses the whole plan, deleting nothing, on the first one outside it.
+
+**The controller cannot delete, and that is a link-time fact.** It holds no
+`delete` verb on any resource, no verb on `secrets`, and — the part a grep
+cannot establish — it does not link the code that deletes.
+`crates/logweir-reaper` is the only crate in the workspace that names an
+object-store delete, `logweir-retention` is the only binary that links it, and
+`scripts/check-no-archive-write.sh` check 3 proves that from `cargo metadata`
+over every dependency kind, dev edges included. Adding the edge to `weirkeeper`,
+`logweir-store`, `logweir` or `logweir-api` fails `just lint`.
+
+**Two credentials, and neither alone is enough.**
+
+| credential | where it comes from | what it may do |
+|---|---|---|
+| the delete grant | `spec.enforcement.credentialSecretRef`, projected by `secretKeyRef` into retention Jobs only | `s3:ListBucket` on the bucket with a prefix condition, `s3:GetObject`/`s3:DeleteObject` on `<prefix>/*` **excluding `logweir/*`** |
+| the `evidenceWrite` grant | the `BackupDestination`'s own `spec.access.evidenceWrite` | create-only puts under `logweir/`, and no delete |
+
+The first can remove a point and cannot write the document that attributes its
+removal. The second can write that document and cannot remove anything. A run
+that cannot open its record sink **exits 3 having deleted nothing**, because an
+unattributable deletion is not performed.
+
+The controller never reads either Secret — `config/rbac/role.yaml` grants it no
+verb on `secrets` at all — and never inherits them: the reaper builds its handle
+with `AmazonS3Builder::new()` and the destination's own frozen addressing, never
+`from_env()`, so no ambient `AWS_ENDPOINT_URL` can relocate a deletion
+(seam **S5**).
+
+**What a run writes, and in what order.** Per point: the signed-key intent
+tombstone at `logweir/retention/<policyUid>/<runId>/<pointId>.intent.json`, then
+the **manifest**, then the segment objects, then the completion tombstone. The
+manifest goes first so that a run interrupted halfway leaves a set the catalog
+reports `Missing` rather than a plausible-looking `Partial` one, and the leftover
+segment keys are exactly what the next plan names — completion is idempotent. The
+run's own record lands at `logweir/retention/<policyUid>/<runId>.json` and
+`status.lastEnforcement.recordKey` points at it.
+
+```bash
+kubectl --context docker-desktop -n <namespace> \
+  get retentionpolicy primary -o jsonpath='{.status.lastEvaluation.planSha256}'
+# sha256:…  — copy this into spec.enforcement.approvedPlanSha256 to authorise a run
+```
+
+**`status.guarantees` says who is enforcing what, and never flatters anyone.**
+Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
+`sharedSegments` and `legalHold` reads `LogweirEnforced`,
+`ProviderEnforcedUnverified` or `NotEnforced`. `legalHold` is
+`ProviderEnforcedUnverified` even in `Enforce`: `object_store` 0.14 exposes no
+WORM readback, so "legal hold respected" means exactly *a provider refusal is
+authoritative, recorded, not retried, and excluded from the next plan* — never
+"Logweir knows the hold exists".
+
+**`mode: ExternalLifecycle` is a declaration, not an enforcement.** It records
+that a bucket lifecycle rule exists so a console can stop claiming retention is
+unenforced. `ageExpiry` and `legalHold` become `ProviderEnforcedUnverified`;
+`minUsablePoints`, `activeRestoreProtection` and `sharedSegments` become
+`NotEnforced`, because a lifecycle rule cannot count usable points, cannot see an
+in-flight restore and cannot reason about a segment two manifests share. Logweir
+evaluates nothing in this mode and reads no provider configuration. When the
+declared `expirationDays` is shorter than the policy's `keepDays`,
+`ExternalLifecycleConflict=True` says so — **and the bucket wins**. A Logweir pin
+cannot override a bucket lifecycle rule.
+
+**The evaluation names the right destination, by construction.** Its input is the
+`RecoveryCatalog`'s bounded view of *this* destination (§7d), read out of the page
+`ConfigMap`s the catalog published and digest-checked against
+`status.pages[].sha256`. A point whose `locations[]` does not name this
+destination is not merely excluded from the candidate list — it is not counted in
+`pointsEvaluated` either, so a console cannot read another tenant's total as its
+own. Two `RetentionPolicy` objects covering one destination put **both** in
+`Ready=False/Conflict` and neither evaluates: a plan an administrator could
+approve is precisely what makes two contesting policies dangerous.
+
+A point is a deletion candidate only if the catalog said `Available` **and**
+`Verified`/`VerifiedHistorical`. Everything else — `Unreadable`, `Partial`,
+`Conflict`, `UntrustedSigner`, `NotAttempted` — lands in
+`status.lastEvaluation.skipped` and can never become a candidate. **A retention
+pass that cannot read the archive proposes nothing**, which is the opposite of
+what a timestamp-driven bucket rule does. And the newest `minUsablePoints` usable
+points are kept whatever the rules say, reported as `MinUsablePoints` in
+`status.lastEvaluation.protected` so an operator can see which points the rules
+wanted and the floor saved.
+
+**A retention failure never blocks a backup.** It is a different controller, a
+different object and a different condition: an unreadable catalog view writes
+`Evaluated=False/ViewUnreadable` and touches no `Backup`, no `BackupSchedule` and
+no Job of any other kind.
+
+**Upgrade and rollback.** The kind is additive and inert: an installation that
+never creates a `RetentionPolicy` behaves exactly as before, and one that creates
+a `Report` policy deletes nothing. An older controller ignores the kind, so the
+objects sit with no status — visibly pending rather than silently wrong. **Do not
+roll back with a retention Job in flight**: the old controller does not know
+about leases, and the old restore admission does not hold on them. Set every
+policy to `mode: Report`, wait for `status.lease` to clear and for any
+enforcement Job to finish, and only then roll back. Objects already removed from
+the archive are gone; the tombstones and the record under `logweir/retention/`
+are what remains, and they are readable by any S3 client.
 ### 7g. A `RehearsalSchedule` proves recovery on a cron, under one signed authorization
 
 A backup that has never been restored is a hypothesis. PLAT-14.3's
@@ -2118,15 +2240,17 @@ delete objects under an explicitly configured archive prefix, never under
 attributable signed record.* The sentence above therefore becomes
 version-scoped: it holds wherever `RetentionPolicy.mode != Enforce`.
 
-**In this build it holds unqualified**, because the worker does not exist yet.
-`RetentionPolicy` ships as a shape: `mode` defaults to `Report`, which
-evaluates and reports exactly as `spec.retention` does, and
-`status.enforcement` reads `RecommendationOnly`. `ExternalLifecycle` is a
-DECLARATION — it records that a bucket lifecycle rule exists so a console can
-stop claiming retention is unenforced, and `status.guarantees` marks it
-`ProviderEnforcedUnverified`, because Logweir does not read the provider's rule
-and will not claim it is in force. `logweir-store` stays delete-free and the
-control plane stays delete-free in every mode.
+**The worker now exists** (`crates/logweir-retention`, decision D3 §6.5), so the
+sentence above is genuinely scoped rather than vacuously so. It is still true of
+every installation that has not created a `RetentionPolicy`, of every policy in
+`Report` — the default — and of every policy in `ExternalLifecycle`; and it is
+still true unconditionally of `logweir-store`, of the control plane, of the
+everyday `logweir` binary and of `logweir-api`, none of which links the deleting
+crate. `scripts/check-no-archive-write.sh` check 3 proves that last claim from
+`cargo metadata` rather than from source text, which is the only way to prove it.
+**§7f is what an operator turning `Enforce` on should read**, and it is deliberate
+that doing so requires an administrator to select the mode, provide a separate
+delete-capable Secret, and copy a plan digest onto the spec.
 
 The CRD's own rails, at admission rather than at 04:17 in a Job log:
 `spec.scope.prefix` may never be empty and may never name `logweir/`, the three
@@ -2154,6 +2278,30 @@ kubectl --context docker-desktop get backupschedule nightly \
 A skipped set is in neither `setsKept` nor `setsThatWouldBeRemoved`, and ranks
 are counted over the sets that were read — so a partly unreadable archive
 under-reports what would be removed and never over-reports it.
+
+#### A schedule on another bucket is now told so, instead of shown someone else's catalog
+
+The controller holds **one** archive handle, built from `LOGWEIR_ARCHIVE_URL`,
+and the report renders removal commands for the schedule's own
+`spec.archive.url`. When those are two different locations the old report listed
+one bucket's manifests under the other bucket's `aws s3 rm` lines — defect
+**RET-WRONGBUCKET**, and since `destinationRef` became editable it is reachable
+by an edit between runs, not only by creating a schedule elsewhere.
+
+The report is now **replaced**, not corrected:
+
+```bash
+kubectl --context docker-desktop get backupschedule nightly \
+  -o jsonpath='{.status.retentionReport.note}'
+# the controller's archive handle points at a different destination; this
+# schedule's retention is not evaluated here — create a RetentionPolicy
+```
+
+`setsKept`, `setsThatWouldBeRemoved`, `awsCli`, `mcCli` and `skipped` are all
+**empty**, and the empty lists are the point: "not evaluated" and "nothing to
+remove" are different claims, and only one of them is true here. The remedy is a
+`RetentionPolicy` (§7f), which reads its own destination's catalog view and
+therefore cannot make this mistake at all.
 
 The report is a union of the two rules, and it says which one applies:
 `reason` is `BeyondKeepLast` with the set's `rank`, or `OlderThanKeepDays`
