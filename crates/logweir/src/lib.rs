@@ -8,6 +8,12 @@ pub mod backup;
 /// record `logweir backup run` writes beside every receipt, and the two
 /// operator subcommands that read and backfill it.
 pub mod catalog;
+/// Decision D2 §4.2 / D-SEAMS S1: `logweir check run`, the ONE check runner.
+/// Discovery, operation readiness, restore preflight, destination access and
+/// evidence fetch are five plan KINDS of one subcommand, over one argv
+/// surface, one frame format and one closed error vocabulary — never five
+/// commands.
+pub mod check;
 pub mod cli;
 pub mod doctor;
 pub mod drill;

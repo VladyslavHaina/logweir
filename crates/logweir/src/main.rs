@@ -116,6 +116,18 @@ fn main() -> std::process::ExitCode {
             namespaces: namespace,
             input: from.map_or(logweir::trust::Input::Stdin, logweir::trust::Input::File),
         }),
+        // Decision D2 §4.2 / D-SEAMS S1. Dispatched here for the structural
+        // reason the comment at the end of this match records: the arm list is
+        // exhaustive with no catch-all, so a `check` subcommand added to
+        // `cli.rs` and not wired here is a COMPILE error rather than a runtime
+        // stub.
+        cli::Command::Check(cli::CheckCmd::Run {
+            plan,
+            check_contract_version,
+        }) => logweir::check::run(&logweir::check::CheckRunArgs {
+            plan,
+            check_contract_version,
+        }),
         cli::Command::Backup(cli::BackupCmd::Run {
             spec,
             allowed_clusters,

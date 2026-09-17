@@ -79,6 +79,20 @@ pub enum Command {
     /// Back up and migrate the cluster's explicit trust policy.
     #[command(subcommand)]
     Trust(TrustCmd),
+    // Decision D2 §4.2 / D-SEAMS S1. A SUBCOMMAND GROUP for the same
+    // structural reason `Notify` and `Catalog` are one: D2 §4.5 phase 2 turns
+    // the `KafkaCluster` probe into a sixth plan kind, and PLAT-09.2 invokes
+    // the same `check run` from a Backup-owned Job. A flat `CheckRun` would
+    // have to be renamed to make room for a sibling.
+    //
+    // This is the RUNNER's surface and not an operator's. The controller
+    // writes the argv (`weirkeeper::check::job::runner_argv`) and pins the
+    // plan digest in the pod environment; a human running it by hand needs the
+    // same three variables, which is why the leaf documents them.
+    /// Run one check plan — discovery, readiness, restore preflight,
+    /// destination access or evidence fetch.
+    #[command(subcommand)]
+    Check(CheckCmd),
     // Chain L, Task 15c, interface I14. A PURPOSE-BUILT LIVENESS PROBE, and
     // not `doctor` with fewer flags: `doctor` takes two more MANDATORY paths,
     // cannot be told which auth to use, refuses unless the cluster is in a
@@ -260,6 +274,43 @@ pub enum TrustCmd {
         // matches nothing, and is refused loudly instead of reinterpreted.
         #[arg(long)]
         namespace: Vec<String>,
+    },
+}
+
+/// D2 §4.2's runner leaf. Kept a GROUP on purpose — see the `Check` arm above.
+#[derive(Subcommand)]
+pub enum CheckCmd {
+    /// Execute the mounted check plan and relay its result as frames on
+    /// stdout.
+    ///
+    /// The plan document is READ ONCE and its SHA-256 is compared against
+    /// `$LOGWEIR_CHECK_PLAN_SHA256` before it is parsed, and its `subjectUid`
+    /// against `$LOGWEIR_CHECK_SUBJECT_UID`, before any client is built — so a
+    /// plan ConfigMap swapped under a running Job is refused rather than
+    /// executed against the wrong object. `$LOGWEIR_CHECK_CONTRACT_VERSION`
+    /// must equal `--check-contract-version`.
+    ///
+    /// Stdout carries the frames and nothing else: `logweir-check-topic=`
+    /// lines, `logweir-check-part=` lines and one final `logweir-check-end=`
+    /// line. Stderr carries JSON tracing at `warn`.
+    ///
+    /// Exits 0 whenever an end line was printed, WHATEVER the per-check states
+    /// — a check that found a problem is a result, not a failure. Exits 1 on
+    /// an operational failure before a result existed, with no end line. Exits
+    /// 3 when the plan is refused, printing `refusal-reason=` and no frame.
+    /// 2 and 4 are never returned.
+    Run {
+        /// The check plan document. In the shipped Job this is the
+        /// controller's immutable ConfigMap projected at
+        /// `/check/check-plan.json`.
+        #[arg(long)]
+        plan: PathBuf,
+        /// The check contract version this invocation asks for. A value other
+        /// than the one this build implements is a refusal, not a
+        /// negotiation: a runner that silently accepted a newer contract would
+        /// do less than the controller believes it did.
+        #[arg(long)]
+        check_contract_version: u32,
     },
 }
 

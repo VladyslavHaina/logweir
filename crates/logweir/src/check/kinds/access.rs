@@ -1,0 +1,219 @@
+//! `destinationAccess`, and the per-role destination probes that
+//! `operationReadiness` and `restorePreflight` reuse.
+//!
+//! # One probe per role, and each one answers a different question
+//!
+//! | role | probe | row |
+//! |---|---|---|
+//! | `archiveRead` | one bounded `list` under the destination's prefix | `destination.archiveListable` |
+//! | `archiveWrite` | none — a write into an adopter's archive is what a RUN does | `destination.archivePrefixWritable` (execution-only) |
+//! | `evidenceRead` | a `get` of a key nobody wrote | `destination.evidenceReadable` (advisory) |
+//! | `evidenceWrite` | the optional create-only marker | `destination.evidenceWritable` |
+//!
+//! **The `archiveWrite` row is execution-only on purpose.** D2 §4.2 permits a
+//! check exactly one write, `logweir/readiness/<uid>.json`, and that key is
+//! under the EVIDENCE root. Probing an archive-write grant would mean writing
+//! an object into the adopter's archive prefix, which Global Constraint 6
+//! forbids outright — so the honest answer is
+//! `ArchivePrefixWriteVerifiedOnlyAtExecution`, and the run's own guards stay
+//! authoritative (D2 §6.8).
+//!
+//! **An absent object is a PASSING evidence-read probe.** The `get` is of a
+//! key that does not exist, so `ObjectNotFound` means the backend evaluated
+//! the request and answered — which is the grant. A denial answers
+//! `AccessDenied` or `InvalidCredentials` before it looks for the object.
+//! Collapsing the two is the `NotFound`-versus-`Io` defect
+//! `logweir_store::StoreError` exists to prevent, and it is the distinction
+//! D2 §4.2 asks this probe for by name.
+
+use logweir_core::check_contract::{
+    CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, DestinationAccessRequest,
+    DestinationPlan, Gating,
+};
+use logweir_core::destination::DestinationRole;
+
+use super::{execution_only, from_store_failure, ready, remedy_for, Wiring};
+use crate::check::store::{self, LIST_PROBE_KEYS};
+use crate::check::{catalogue, Deadline, Emission};
+
+/// The destination half of a check, as the three kinds that have one state it.
+pub struct DestinationProbe<'a> {
+    pub destination: &'a DestinationPlan,
+    pub roles: &'a [DestinationRole],
+    /// `writeProbe: CreateOnlyMarker` on the destination — the ONLY thing that
+    /// makes `destination.evidenceWritable` a blocking, actually-probed row.
+    pub write_probe: bool,
+}
+
+/// The `BackupDestination` scope every destination row carries.
+#[must_use]
+fn scope(destination: &DestinationPlan) -> logweir_core::check_contract::CheckScope {
+    catalogue::scope(
+        "BackupDestination",
+        &destination.name,
+        Some(&destination.uid),
+    )
+}
+
+/// Append the destination rows for the requested roles.
+pub fn destination_checks(
+    probe: &DestinationProbe<'_>,
+    wiring: &dyn Wiring,
+    deadline: Deadline,
+    out: &mut Vec<CheckOutcome>,
+) {
+    let now = wiring.now();
+    let dest = probe.destination;
+    for role in probe.roles {
+        // The budget is sliced across the roles left to probe, so three roles
+        // on an unreachable endpoint cannot spend the whole check on the
+        // first.
+        let budget = deadline.slice(probe.roles.len() as u32);
+        match role {
+            DestinationRole::ArchiveRead => {
+                let row = match wiring.objects(dest, *role, budget) {
+                    Err(f) => from_store_failure(CheckId::DestinationArchiveListable, &f, now),
+                    Ok(access) => {
+                        let prefix = store::prefix_for(dest, *role);
+                        match access.list_bounded(&prefix, LIST_PROBE_KEYS) {
+                            Ok(_) => ready(
+                                CheckId::DestinationArchiveListable,
+                                CheckCode::ArchiveListable,
+                                now,
+                            )
+                            .with_message(&format!(
+                                "the archive prefix `{prefix}` on destination `{}` is listable",
+                                dest.name
+                            )),
+                            Err(e) => {
+                                let code = store::classify(&e);
+                                super::catalogue_outcome_for_store(
+                                    CheckId::DestinationArchiveListable,
+                                    code,
+                                    &format!(
+                                        "listing the archive prefix `{prefix}` on destination \
+                                         `{}` was refused",
+                                        dest.name
+                                    ),
+                                    now,
+                                )
+                            }
+                        }
+                    }
+                };
+                out.push(row.with_scope(scope(dest)));
+            }
+            DestinationRole::ArchiveWrite => {
+                out.push(
+                    execution_only(
+                        CheckId::DestinationArchivePrefixWritable,
+                        CheckCode::ArchivePrefixWriteVerifiedOnlyAtExecution,
+                        now,
+                    )
+                    .with_message(
+                        "a check writes only its own readiness marker under the evidence root, \
+                         so the archive-write grant is verified by the run itself",
+                    )
+                    .with_scope(scope(dest)),
+                );
+            }
+            DestinationRole::EvidenceRead => {
+                let row = match wiring.objects(dest, *role, budget) {
+                    Err(f) => from_store_failure(CheckId::DestinationEvidenceReadable, &f, now),
+                    Ok(access) => {
+                        let key = store::absent_probe_key(&dest.uid);
+                        match access.get(&key) {
+                            // A key nobody wrote: reading it is a SUCCESS.
+                            Err(e) if store::classify(&e) == CheckCode::ObjectNotFound => ready(
+                                CheckId::DestinationEvidenceReadable,
+                                CheckCode::EvidenceReadable,
+                                now,
+                            )
+                            .with_message(&format!(
+                                "the evidence root on destination `{}` answered a read of an \
+                                     absent key, which is the grant",
+                                dest.name
+                            )),
+                            // It should not exist; if it does, the read still
+                            // proves the grant.
+                            Ok(_) => ready(
+                                CheckId::DestinationEvidenceReadable,
+                                CheckCode::EvidenceReadable,
+                                now,
+                            )
+                            .with_message(&format!(
+                                "the evidence root on destination `{}` is readable",
+                                dest.name
+                            )),
+                            Err(e) => super::catalogue_outcome_for_store(
+                                CheckId::DestinationEvidenceReadable,
+                                store::classify(&e),
+                                &format!(
+                                    "reading `{key}` on destination `{}` was refused",
+                                    dest.name
+                                ),
+                                now,
+                            ),
+                        }
+                    }
+                };
+                out.push(row.with_scope(scope(dest)));
+            }
+            DestinationRole::EvidenceWrite => {
+                if !probe.write_probe {
+                    out.push(
+                        catalogue::outcome_gated(
+                            CheckId::DestinationEvidenceWritable,
+                            logweir_core::check_contract::CheckState::Unknown,
+                            CheckCode::WriteNotProbed,
+                            Gating::ExecutionOnly,
+                            now,
+                        )
+                        .with_message(
+                            "this destination configures no create-only write probe, so the \
+                             evidence-write grant is verified when a run executes",
+                        )
+                        .with_remedy(remedy_for(CheckCode::WriteNotProbed))
+                        .with_scope(scope(dest)),
+                    );
+                    continue;
+                }
+                let row = match wiring.evidence_writer(dest, budget) {
+                    Err(f) => from_store_failure(CheckId::DestinationEvidenceWritable, &f, now),
+                    Ok(access) => match store::put_marker(access.as_ref(), &dest.uid) {
+                        Ok(outcome) => {
+                            ready(CheckId::DestinationEvidenceWritable, outcome.code(), now)
+                                .with_message(&format!(
+                                    "the create-only readiness marker `{}` on destination `{}` is \
+                             write-authorised",
+                                    store::marker_key(&dest.uid),
+                                    dest.name
+                                ))
+                        }
+                        Err(f) => from_store_failure(CheckId::DestinationEvidenceWritable, &f, now),
+                    },
+                };
+                out.push(row.with_scope(scope(dest)));
+            }
+        }
+    }
+}
+
+/// Run one `destinationAccess`.
+#[must_use]
+pub fn run(req: &DestinationAccessRequest, wiring: &dyn Wiring, deadline: Deadline) -> Emission {
+    let now = wiring.now();
+    let mut result = CheckResult::new(CheckPlanKind::DestinationAccess);
+    result.checks.push(super::runner_contract(now));
+    destination_checks(
+        &DestinationProbe {
+            destination: &req.destination,
+            roles: &req.roles,
+            write_probe: req.write_probe,
+        },
+        wiring,
+        deadline,
+        &mut result.checks,
+    );
+    Emission::of(result)
+}
